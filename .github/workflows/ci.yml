@@ -1,0 +1,134 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CI — build & test (the foundation workflow)
+#
+# WHAT IT DOES: on every push to main / every pull request, spins up clean cloud
+# Linux machines and runs the same checks you run by hand — backend pytest,
+# frontend lint+vitest+build, and the electron unit tests — plus a schema-drift
+# gate and advisory dependency audits. No packaging or signing happens here
+# (that's the separate release workflow); this is the fast feedback loop.
+#
+# COST: free on a PUBLIC repo with GitHub-hosted runners. Until the repo is
+# public it can still run if Actions is enabled, against the private-repo minute
+# allowance.
+#
+# ✅ ACTIONS SHA-PINNED 2026-06-14. Project policy (ROADMAP "Build pipeline") requires
+# every `uses:` action pinned to a FULL COMMIT SHA, never a mutable tag like `@v4`, so a
+# compromised upstream tag can't silently alter our build. Each `uses:` below is pinned to
+# its v6 commit SHA with a trailing `# v6` for readability. When you intentionally bump a
+# major, re-resolve the SHA and update both the pin and the comment:
+#     curl -s https://api.github.com/repos/actions/checkout/commits/v6 | grep -m1 '"sha"'
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:        # lets you trigger a run manually from the Actions tab
+
+# Least privilege: this workflow only reads the repo, never writes to it.
+permissions:
+  contents: read
+
+# If you push twice quickly, cancel the older in-flight run for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Backend: pytest + schema-drift gate + production-dep audit ──────────────
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"          # matches backend/.python-version
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      # requirements-dev.txt starts with `-r requirements.txt`, so this single
+      # install pulls in production deps + pytest + pip-audit + pyinstaller.
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # The ONLY check that catches a model edit made without a chained migration:
+      # the test suite builds schema via create_all() and never runs the baseline
+      # migration, so a drift would pass all tests but break fresh installs.
+      # Must run with MM_ENCRYPTION_ENABLED unset (it is, here) — see an internal audit.
+      - name: Schema-drift gate (models ↔ baseline migration)
+        run: python scripts/schema_diff_harness.py
+
+      - name: Tests
+        run: python -m pytest tests/ -q
+
+      # Advisory here (won't block a push on a freshly-disclosed CVE); the release
+      # workflow will run this as a HARD gate before building installers. Scoped to
+      # requirements.txt so it audits production deps only, not dev/tooling transitives.
+      - name: Dependency audit (production deps)
+        run: pip-audit -r requirements.txt
+        continue-on-error: true
+
+  # ── Frontend: lint + vitest + production build + dep audit ──────────────────
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
+        with:
+          node-version: "20"              # matches frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # npm ci (not install) — strict lockfile install, per project dependency policy.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test                     # = vitest run
+
+      - name: Build
+        run: npm run build                # = tsc && vite build
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+  # ── Electron shell: headless unit tests ─────────────────────────────────────
+  electron:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: electron
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+
+      # Note: electron/ deliberately has no `ignore-scripts`, so npm ci runs
+      # electron's postinstall (downloads the runtime binary). The unit tests
+      # resolve `require('electron')`, so we keep the download rather than skip it.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test                     # = node --test (the 42 headless tests)

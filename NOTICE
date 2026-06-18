@@ -1,0 +1,9 @@
+Mixed Measures
+Copyright 2026 George Chavez
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product bundles third-party open-source components, each under its own
+license. See the dependency manifests (frontend/package.json,
+backend/requirements.txt) and the vendored license files (e.g. the SIL Open
+Font License texts in frontend/src/assets/fonts/) for those terms.

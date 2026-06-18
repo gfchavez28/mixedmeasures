@@ -1,0 +1,18 @@
+fastapi==0.136.1
+uvicorn[standard]==0.42.0
+pydantic==2.13.3
+pydantic-settings==2.14.0
+sqlalchemy==2.0.49
+alembic>=1.13.0,<2.0.0
+bcrypt==5.0.0
+python-multipart==0.0.31  # security floor: CVE-2026-53538/53539/53540 (multipart parser DoS); FastAPI form/upload parsing. Bumped from 0.0.27.
+openpyxl==3.1.5
+scipy>=1.10.0,<2.0.0
+statsmodels>=0.14.0,<1.0.0
+python-docx>=1.1.0,<2.0.0
+lxml==6.1.0  # security floor: CVE-2026-41066, transitive via python-docx (uploaded .docx parsing). Pinned to vetted 6.1.0; revisit when 6.1.x clears cooldown.
+pdfminer.six==20260107  # PDF text extraction (replaced AGPL-licensed PyMuPDF for Apache-2.0 compat, 2026-06-01). Pulls cryptography (Apache/BSD) + cffi (MIT) transitively.
+tinytag==2.2.1  # audio duration/VBR metadata (replaced GPLv2+ mutagen for Apache-2.0 compat, 2026-06-01). Zero runtime deps.
+defusedxml>=0.7.0,<1.0.0
+slowapi>=0.1.9,<1.0.0
+sqlcipher3==0.6.2  # SQLCipher 4.x at-rest DB encryption (packaging P4; default-OFF via mm_encryption_enabled — dev.db + the test suite stay plaintext). Plain `sqlcipher3`, NOT `sqlcipher3-binary` (that one is Linux-x86_64-only + SQLCipher 3.x). 0.6.2 ships prebuilt wheels for win_amd64/win32/win_arm64 + macOS + manylinux/musllinux, bundling SQLCipher 4.12.0 statically. Exact-pin keeps the bundled SQLCipher version identical across OS wheels (no cipher_compatibility juggling). PyInstaller must collect the bundled extension (Phase 7).

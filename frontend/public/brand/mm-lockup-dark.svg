@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 120" width="280" height="120">
+  <!-- Wordmark uses Plus Jakarta Sans if available to the viewer (the app bundles
+       it self-hosted), else falls back to sans-serif. No external font CDN. -->
+  <!-- Mark -->
+  <path d="M18 38 Q18 22 34 22 L86 22 Q102 22 102 38 L102 76 Q102 90 86 90 L70 90 Q64 90 60 108 Q56 90 50 90 L34 90 Q18 90 18 76 Z"
+        fill="#1e2e24" stroke="#4ec88a" stroke-width="5" stroke-linejoin="round"/>
+  <rect x="30" y="64" width="12" height="20" rx="1" fill="#f0a050"/>
+  <rect x="47" y="38" width="12" height="46" rx="1" fill="#f0a050"/>
+  <rect x="64" y="52" width="12" height="32" rx="1" fill="#f0a050"/>
+  <rect x="81" y="14" width="12" height="70" rx="1" fill="#f0a050"/>
+  <!-- Wordmark -->
+  <text x="136" y="52" font-family="'Plus Jakarta Sans', sans-serif" font-weight="600" font-size="22" letter-spacing="0.02em">
+    <tspan fill="#4ec88a">M</tspan><tspan fill="#e8e8e6">ixed</tspan>
+  </text>
+  <text x="136" y="78" font-family="'Plus Jakarta Sans', sans-serif" font-weight="400" font-size="22" letter-spacing="0.02em">
+    <tspan fill="#f0a050">M</tspan><tspan fill="#9a9a96">easures</tspan>
+  </text>
+</svg>

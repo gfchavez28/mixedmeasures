@@ -1,0 +1,187 @@
+/*
+ * Crosswalk interaction styles — Phase 3a.
+ *
+ * Scoped to `.crosswalk-*` classes to avoid leaking into other components.
+ * Animation is guarded under `prefers-reduced-motion: no-preference` so users
+ * who've requested reduced motion don't get the amber pulse animation — the
+ * amber border + background fill alone signals the conflict without movement.
+ *
+ * Mockup reference: tier3-crosswalk-mockup.html `.cell.conflict-flash` +
+ * `@keyframes amber-pulse` (state 5 — "Conflict — dropping a column already
+ * claimed elsewhere").
+ */
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes crosswalk-amber-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 rgba(217, 119, 6, 0);
+    }
+    50% {
+      box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.25);
+    }
+  }
+
+  .crosswalk-conflict-flash {
+    animation: crosswalk-amber-pulse 1.2s ease-in-out 1;
+  }
+}
+
+/* Non-animated portion applies regardless of motion preference — users
+ * still get the amber state change, just without the pulsing shadow. */
+.crosswalk-conflict-flash {
+  border-color: rgb(217, 119, 6) !important;
+  background-color: rgb(254, 243, 199) !important;
+}
+
+:root.dark .crosswalk-conflict-flash {
+  background-color: rgba(120, 53, 15, 0.35) !important;
+}
+
+/* Dragged cell — opacity halves the source cell while the DragOverlay renders
+ * the visible preview. Matches QuoteBoardView's convention. */
+.crosswalk-cell-dragging {
+  opacity: 0.5;
+}
+
+/* Post-swap success flash — applied to BOTH cells that just swapped so the
+ * eye catches the change. Cards in the crosswalk are visually near-identical
+ * (only the column code prefix differs), so the raw content change is easy
+ * to miss. Green was chosen to avoid collision with the drop-over ring
+ * (blue), the conflict flash (amber), and the search highlight (sky). */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes crosswalk-swap-glow {
+    0% {
+      box-shadow: 0 0 0 0 rgba(5, 150, 105, 0);
+    }
+    20% {
+      box-shadow: 0 0 0 4px rgba(5, 150, 105, 0.45);
+    }
+    100% {
+      box-shadow: 0 0 0 0 rgba(5, 150, 105, 0);
+    }
+  }
+
+  .crosswalk-swap-flash {
+    animation: crosswalk-swap-glow 1200ms ease-out 1;
+  }
+}
+
+/* Non-animated fallback — still a visible green border change so reduced-
+ * motion users notice the swap. */
+.crosswalk-swap-flash {
+  border-color: rgb(5, 150, 105) !important;
+  border-width: 2px !important;
+}
+
+/* Drop-target ring on a valid cell drop zone (while hovering during drag).
+ * The 2px blue ring + bg-blue-50 fill match directive §2 item 14. */
+.crosswalk-cell-drop-over {
+  border-color: rgb(37, 99, 235) !important;
+  border-width: 2px !important;
+  background-color: rgb(219, 234, 254) !important;
+}
+
+:root.dark .crosswalk-cell-drop-over {
+  background-color: rgba(30, 58, 138, 0.35) !important;
+}
+
+/* Panel drop target — dashed border signals "drop here to remove from row".
+ * Distinct from cell drops by using dashed-not-solid + no fill. Renamed
+ * from `crosswalk-drawer-drop-over` in Phase 3.5 (panel replaced drawer). */
+.crosswalk-panel-drop-over {
+  outline: 2px dashed rgb(37, 99, 235) !important;
+  outline-offset: -2px;
+}
+
+/* Empty-cell drop target — dashed on hover during drag (Phase 3b.4b). */
+.crosswalk-empty-drop-over {
+  outline: 2px dashed rgb(37, 99, 235) !important;
+  outline-offset: -2px;
+  background-color: rgba(219, 234, 254, 0.5);
+}
+
+:root.dark .crosswalk-empty-drop-over {
+  background-color: rgba(30, 58, 138, 0.25);
+}
+
+/* Transient fade-highlight for focus targets from useCrosswalkNavigation
+ * (1.5s fade-in/out per plan 3b.9c). Scoped to prefers-reduced-motion. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes crosswalk-focus-fade {
+    0% {
+      box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+    }
+    15% {
+      box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.45);
+    }
+    100% {
+      box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+    }
+  }
+  .crosswalk-focus-highlight {
+    animation: crosswalk-focus-fade 1500ms ease-out 1;
+  }
+}
+
+/* Non-animated fallback — brief solid outline for reduced-motion users. */
+.crosswalk-focus-highlight {
+  outline: 2px solid rgb(37, 99, 235);
+  outline-offset: 2px;
+}
+
+/* "+ Add variable row" button — drop-over state. Solid blue fill keyed off
+ * the existing cell-drop-over palette so the row-end target looks like a
+ * larger sibling of the empty-cell drop targets. The button stretches to
+ * full bracket width via `w-full` in JSX; this class adds the color +
+ * pulse animation. */
+.crosswalk-add-row-drop-over {
+  border-color: rgb(37, 99, 235) !important;
+  border-style: solid !important;
+  background-color: rgb(219, 234, 254) !important;
+  color: rgb(29, 78, 216) !important;
+}
+
+:root.dark .crosswalk-add-row-drop-over {
+  background-color: rgba(30, 58, 138, 0.45) !important;
+  color: rgb(147, 197, 253) !important;
+}
+
+/* "+ Add variable row" button — pulse animation set by parent click handler
+ * to draw the researcher's eye when the click lands but no drop is yet
+ * available (e.g., panel just opened, no card grabbed yet). 1.2s once. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes crosswalk-add-row-pulse-anim {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+    }
+    40% {
+      box-shadow: 0 0 0 6px rgba(37, 99, 235, 0.35);
+    }
+  }
+  .crosswalk-add-row-pulse {
+    animation: crosswalk-add-row-pulse-anim 1.2s ease-in-out 1;
+  }
+}
+
+.crosswalk-add-row-pulse {
+  border-color: rgb(37, 99, 235) !important;
+}
+
+/* Unassigned panel — subtle pulse when a drag from the panel ends back on
+ * the panel (no-op breadcrumb so the gesture feels acknowledged). 600ms. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes crosswalk-panel-pulse-anim {
+    0%,
+    100% {
+      box-shadow: inset 0 0 0 0 rgba(100, 116, 139, 0);
+    }
+    50% {
+      box-shadow: inset 0 0 0 2px rgba(100, 116, 139, 0.35);
+    }
+  }
+  .crosswalk-panel-pulse {
+    animation: crosswalk-panel-pulse-anim 600ms ease-in-out 1;
+  }
+}

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS hardened-runtime entitlements for the signed/notarized build.
+
+  WHY THIS FILE EXISTS: notarization requires the Hardened Runtime, and the app
+  embeds a PyInstaller `onedir` backend (resources/mm-backend) made of many
+  third-party .dylib/.so files (scipy, numpy, bcrypt, lxml, pydantic_core, …)
+  that are NOT signed by our Developer ID team. Under the default Hardened
+  Runtime, loading such libraries is blocked and the backend subprocess dies on
+  launch. `disable-library-validation` is the load-bearing entitlement that lets
+  the signed app load those bundled libraries. The two memory entitlements cover
+  CPython's interpreter loop / cffi trampolines.
+
+  Keep this MINIMAL — every entitlement widens the attack surface notarization is
+  meant to constrain. Re-verify the set on the first real signed mac build; trim
+  anything the backend boots fine without.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

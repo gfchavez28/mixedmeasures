@@ -1,0 +1,345 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# RELEASE — build, sign, and publish the desktop installers
+#
+# WHAT IT DOES: triggered by pushing a version tag (`v1.0.0`) or manually from the
+# Actions tab. It runs the hard pre-ship gates once, then fans out to one clean
+# cloud runner per platform/arch — each builds the frontend, freezes the backend
+# with PyInstaller, packages the Electron app with electron-builder, signs it (when
+# signing creds are present), and uploads the installer + auto-update manifest to a
+# DRAFT GitHub Release. You review the draft and click "Publish" to ship.
+#
+# RELATIONSHIP TO ci.yml: ci.yml is the fast per-push feedback loop (tests only, no
+# packaging). THIS workflow does packaging only, and gates on the same checks as
+# HARD failures (ci.yml runs the dep audits advisory; here they block the build).
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# CAN IT RUN TODAY? Yes — the unsigned path is fully functional. With NO signing
+# secrets set (the current state: Apple Developer ID cert not yet minted, Azure
+# Trusted Signing signer-role/secrets not yet wired, repo still private),
+# electron-builder builds UNSIGNED installers and this workflow goes green. The
+# moment the secrets below exist, the same file produces signed + notarized builds
+# with no edits. That is the whole point of wiring it now.
+#
+# ⚠️  THREE THINGS TO DO BEFORE THIS SHIPS A REAL SIGNED RELEASE:
+#
+#   (1) SHA-PIN EVERY ACTION. ✅ DONE 2026-06-14 — every `uses:` below is pinned to its
+#       v6 commit SHA (trailing `# v6` comment). Re-resolve when intentionally bumping:
+#         curl -s https://api.github.com/repos/actions/checkout/commits/v6 | grep -m1 '"sha"'
+#
+#   (2) ADD THE SIGNING SECRETS (repo → Settings → Secrets and variables → Actions):
+#       macOS  (Apple Developer ID Application cert + notarization):
+#         CSC_LINK                      base64 of the Developer ID Application .p12
+#         CSC_KEY_PASSWORD              password for that .p12
+#         APPLE_ID                      Apple ID email used for notarization
+#         APPLE_APP_SPECIFIC_PASSWORD   app-specific password for that Apple ID
+#         APPLE_TEAM_ID                 Developer Team ID
+#       Windows (Azure Trusted / Artifact Signing — profile `MixedMeasures`):
+#         AZURE_TENANT_ID  AZURE_CLIENT_ID  AZURE_CLIENT_SECRET   (service principal)
+#         AZURE_ENDPOINT                the Trusted Signing account endpoint URL
+#         AZURE_CODE_SIGNING_NAME       the Trusted Signing account name
+#         AZURE_CERT_PROFILE            certificate profile name (= MixedMeasures)
+#       Outstanding Azure step (cert-acquisition plan): assign the service principal
+#       the "Trusted Signing Certificate Profile Signer" role before first use.
+#
+#   (3) VERIFY THE SIGNING FLAGS ON THE FIRST REAL SIGNED RUN. The mac-notarize and
+#       win-azure config overrides below are wired from the documented mechanism but
+#       have NOT been exercised on a runner (can't be, from the dev WSL box). Treat
+#       the first signed build as the validation: confirm a downloaded installer
+#       launches on a clean Mac/Windows with no Gatekeeper/SmartScreen block.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]              # e.g. git tag v1.0.0 && git push origin v1.0.0
+  workflow_dispatch:          # manual dry-run from the Actions tab (publishes a draft)
+
+# Publishing a GitHub Release requires write access to repo contents.
+permissions:
+  contents: write
+
+# Never cancel an in-flight release mid-publish; serialize by tag instead.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ── Hard pre-ship gates (run once, before any packaging) ────────────────────
+  # A tag can land on any commit; don't trust that CI already vetted it. These are
+  # the same checks as ci.yml but as HARD failures — a freshly-disclosed CVE or a
+  # schema drift must stop a release, not just warn.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - name: Install backend deps
+        working-directory: backend
+        run: pip install -r requirements-dev.txt
+
+      # The only check that fresh installs get the right schema (suite uses
+      # create_all(), never the baseline migration). MM_ENCRYPTION_ENABLED unset.
+      - name: Schema-drift gate (models ↔ baseline migration)
+        working-directory: backend
+        run: python scripts/schema_diff_harness.py
+
+      - name: Backend tests
+        working-directory: backend
+        run: python -m pytest tests/ -q
+
+      - name: Backend dependency audit (HARD gate, production deps)
+        working-directory: backend
+        run: pip-audit -r requirements.txt
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend lint + tests + build
+        working-directory: frontend
+        run: |
+          npm run lint
+          npm test
+          npm run build
+      - name: Frontend dependency audit (HARD gate)
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+      - name: Electron unit tests
+        working-directory: electron
+        run: |
+          npm ci
+          npm test
+
+  # ── Package: one runner per platform/arch ───────────────────────────────────
+  # The backend is a NATIVE PyInstaller bundle, so each arch must build on its own
+  # native runner — there is no cross-compile. macos-14 = Apple Silicon (arm64),
+  # macos-13 = Intel (x64). All four publish to the same draft release for the tag.
+  package:
+    needs: verify
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Full release matrix. The backend is a NATIVE PyInstaller bundle, so each arch
+        # builds on its own native runner (no cross-compile): macos-14 = Apple Silicon,
+        # macos-13 = Intel. Every entry was validated individually during the 2026-06-14
+        # signing/packaging bring-up — mac sign+notarize+backend-boot-smoke, windows Azure
+        # signing, linux build. NOTE: macOS bills at 10x; if you need to debug ONE platform,
+        # temporarily trim this list rather than running all four (see the rc2 cost lesson).
+        include:
+          - os: macos-14
+            eb_target: mac
+            eb_arch: arm64
+          - os: macos-13
+            eb_target: mac
+            eb_arch: x64
+          - os: windows-latest
+            eb_target: win
+            eb_arch: x64
+          - os: ubuntu-latest
+            eb_target: linux
+            eb_arch: x64
+    runs-on: ${{ matrix.os }}
+    # bash everywhere (Windows runners ship Git bash) so the build steps are uniform.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
+        with:
+          node-version: "20"
+
+      # 1) Build the SPA first — the PyInstaller spec bundles frontend/dist into the
+      #    backend (config.dist_dir() serves it same-origin under the frozen app).
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      # 2) Freeze the backend (onedir) → backend/dist/mm-backend/. requirements-dev
+      #    carries pyinstaller. This is arch-native to the runner.
+      - name: Freeze backend (PyInstaller)
+        working-directory: backend
+        run: |
+          pip install -r requirements-dev.txt
+          pyinstaller mixedmeasures.spec
+
+      # 2b) Smoke the FROZEN backend on this OS — the one macOS-functional check we can
+      #     do without a real Mac. Boots the onedir binary against a throwaway temp DB
+      #     (so it runs Alembic migrations + app startup exactly like a first launch) and
+      #     asserts /health → 200. Gatekeeper/GUI still need a real desktop, but "does the
+      #     packaged app actually start on this OS" is the real risk, and this proves it.
+      #     Runs on mac + linux (unix); Windows is already validated by a manual install.
+      - name: Smoke — frozen backend boots + /health
+        if: matrix.eb_target != 'win'
+        working-directory: backend
+        run: |
+          PORT=8765
+          TMP="$(mktemp -d)"
+          echo "launching frozen backend on 127.0.0.1:$PORT (throwaway data → $TMP)"
+          MM_PORT="$PORT" \
+          MM_DATABASE_PATH="$TMP/smoke.db" \
+          MM_DATA_DIR="$TMP/data" \
+          MM_BACKUP_DIR="$TMP/backups" \
+          MM_PACKAGED=1 \
+          MM_ENABLE_API_DOCS=false \
+          MM_CORS_ORIGINS='' \
+          PYTHONDONTWRITEBYTECODE=1 \
+          ./dist/mm-backend/mm-backend > "$TMP/backend.log" 2>&1 &
+          BPID=$!
+          ok=0
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then ok=1; break; fi
+            kill -0 "$BPID" 2>/dev/null || { echo "backend process exited early"; break; }
+            sleep 1
+          done
+          echo "----- backend log (tail) -----"; tail -50 "$TMP/backend.log" 2>/dev/null || true
+          kill "$BPID" 2>/dev/null || true; wait "$BPID" 2>/dev/null || true
+          if [ "$ok" = "1" ]; then
+            echo "✅ frozen backend booted (migrations ran) + /health 200 on ${{ matrix.os }}"
+          else
+            echo "❌ frozen backend never became healthy on ${{ matrix.os }}"; exit 1
+          fi
+
+      # 3) Package + (conditionally) sign + publish to the draft release.
+      #    electron-builder signs macOS automatically when CSC_LINK is present and
+      #    builds unsigned otherwise; the notarize/azure config overrides are only
+      #    injected when their creds exist, so the unsigned path never errors.
+      - name: Package & publish
+        # Hard cap so a hung notarization can't burn 10x mac minutes (the rc2 lesson).
+        timeout-minutes: 20
+        working-directory: electron
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS signing + notarization
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows Azure Trusted Signing (service principal → DefaultAzureCredential)
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
+          AZURE_CODE_SIGNING_NAME: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+        run: |
+          set -euo pipefail
+          npm ci
+
+          ARGS=( "--${{ matrix.eb_target }}" "--${{ matrix.eb_arch }}" "--publish" "always" )
+
+          # Tell electron-builder WHERE to publish. It can't reliably auto-detect the repo
+          # from .git/config when run from electron/ on a CI checkout, so set owner/repo
+          # explicitly — derived from $GITHUB_REPOSITORY ("owner/name", auto-set by Actions)
+          # so the SAME config works in any repo (private test repo OR the public release
+          # repo) with zero package.json edits.
+          ARGS+=( "--config.publish.provider=github" \
+                  "--config.publish.owner=${GITHUB_REPOSITORY%%/*}" \
+                  "--config.publish.repo=${GITHUB_REPOSITORY##*/}" \
+                  "--config.publish.releaseType=draft" )
+
+          # Enable notarization only when an Apple Developer ID cert is configured.
+          # `notarize=true` makes electron-builder run notarytool, which reads
+          # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID from the env below.
+          # (The older `notarize.teamId` form was wrong — eb warned to use the env var —
+          # and left notarytool hanging without credentials; the rc2 lesson.)
+          if [ "${{ matrix.eb_target }}" = "mac" ] && [ -n "${CSC_LINK:-}" ]; then
+            ARGS+=( "--config.mac.notarize=true" )
+          fi
+
+          # Enable Azure Trusted Signing only when its service principal is configured.
+          if [ "${{ matrix.eb_target }}" = "win" ] && [ -n "${AZURE_TENANT_ID:-}" ]; then
+            ARGS+=( "--config.win.azureSignOptions.endpoint=${AZURE_ENDPOINT}" \
+                    "--config.win.azureSignOptions.codeSigningAccountName=${AZURE_CODE_SIGNING_NAME}" \
+                    "--config.win.azureSignOptions.certificateProfileName=${AZURE_CERT_PROFILE}" )
+          fi
+
+          echo "electron-builder ${ARGS[*]}"
+          npx --no-install electron-builder "${ARGS[@]}"
+
+      # 3b) Gatekeeper / signature verification (macOS) — the headless equivalent of the
+      #     "double-click on a clean Mac" smoke. `spctl --assess` IS the Gatekeeper engine,
+      #     so a green assessment here means a real Gatekeeper accept; codesign + stapler
+      #     confirm the signature is a Developer ID and the notarization ticket is stapled.
+      #     electron-builder's own `gatekeeperAssess` is off, so nothing else covers this.
+      #     HARD-fails only when signing creds are present — a signed build that won't pass
+      #     Gatekeeper must stop the release. On the credential-free unsigned path (no
+      #     CSC_LINK) it reports informationally so the unsigned build stays green and the
+      #     step flips to enforcing automatically once the secrets land.
+      - name: Verify — codesign + notarization + Gatekeeper (macOS)
+        if: matrix.eb_target == 'mac'
+        timeout-minutes: 5
+        working-directory: electron
+        env:
+          SIGNED: ${{ secrets.CSC_LINK != '' }}
+        run: |
+          set -uo pipefail   # NOT -e: run every check, aggregate, decide at the end
+          APP="$(find release -maxdepth 4 -name '*.app' -print -quit)"
+          DMG="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
+          echo "app: ${APP:-<none>}   dmg: ${DMG:-<none>}   signed=${SIGNED}"
+          if [ -z "${APP:-}" ]; then echo "❌ no .app found under release/ — nothing to verify"; exit 1; fi
+
+          fail=0
+          check() {  # check "<label>" <cmd...>; hard-fails only on the signed path
+            local label="$1"; shift
+            if "$@" >/dev/null 2>&1; then
+              echo "✅ $label"
+            elif [ "$SIGNED" = "true" ]; then
+              echo "❌ $label  (signed build MUST pass)"; fail=1
+            else
+              echo "⚠️  $label  — expected on the unsigned path (no signing creds)"
+            fi
+          }
+
+          check "codesign --verify --deep --strict"        codesign --verify --deep --strict --verbose=2 "$APP"
+          check "signature is Developer ID Application"     bash -c "codesign --display --verbose=4 '$APP' 2>&1 | grep -q 'Authority=Developer ID Application'"
+          check "spctl Gatekeeper assess (execute)"         spctl --assess --type execute --verbose "$APP"
+          check "stapler validate (.app notarization)"      xcrun stapler validate "$APP"
+          [ -n "${DMG:-}" ] && check "stapler validate (.dmg)" xcrun stapler validate "$DMG"
+
+          if [ "$fail" = "1" ]; then echo "GATEKEEPER GATE: ❌ FAIL"; exit 1; fi
+          echo "GATEKEEPER GATE: ✅ PASS ($([ "$SIGNED" = "true" ] && echo 'signed — enforced' || echo 'unsigned — informational'))"
+
+      # 3c) Real OS-keyring CROSS-LAUNCH round-trip — the piece the stubbed key-manager
+      #     unit tests can't cover: that Electron's *real* safeStorage (macOS Keychain)
+      #     persists a wrapped key a SEPARATE, LATER process can decrypt to the same bytes
+      #     (i.e. "quit the app and reopen — your encrypted DB still opens"). The harness
+      #     spawns three independent Electron processes (mint → resolve → recover) sharing
+      #     one key file and asserts the keys match.
+      #     BEST-EFFORT: a flaky/headless keyring must never block a signed release, so this
+      #     is continue-on-error with a hard timeout (each child self-times-out, so a Keychain
+      #     prompt can't hang it — it SKIPs honestly). The RESULT line is the signal; only the
+      #     first-launch permission-prompt UX + a real GUI install stay the human soft-launch check.
+      - name: Smoke — real OS keyring cross-launch round-trip (macOS, best-effort)
+        if: matrix.eb_target == 'mac'
+        continue-on-error: true
+        timeout-minutes: 5
+        working-directory: electron
+        run: |
+          set -o pipefail
+          npx --no-install electron scripts/keychain-smoke.js 2>&1 | sed 's/^/  /'

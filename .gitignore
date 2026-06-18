@@ -1,0 +1,54 @@
+# Secrets / environment
+.env
+*.env.local
+
+# Databases
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Test / export artifacts
+*.csv
+!backend/tests/reference_data/*.csv
+*.mmproject
+*.mmbackup
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / frontend build
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# PyInstaller / packaging
+backend/build/
+
+# Runtime / test output
+backend/backups/
+backend/data/
+frontend/test-results/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/

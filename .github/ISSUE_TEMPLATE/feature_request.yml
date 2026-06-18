@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest an improvement or new capability
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion! Mixed Measures is a focused, local-first
+        mixed-methods tool — proposals that fit that scope are most likely to land.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the research or workflow need, not just the feature.
+      placeholder: As a researcher doing…, I struggle to…
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like Mixed Measures to do.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or workarounds you've tried or thought about.
+    validations:
+      required: false

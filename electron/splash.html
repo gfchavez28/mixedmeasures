@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'" />
+    <title>Mixed Measures</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; box-sizing: border-box; }
+      body {
+        box-sizing: border-box;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 14px; font-family: system-ui, sans-serif; color: #1f2937;
+        background: #f7f5f0; border: 1px solid #e5e1d8; border-radius: 10px;
+        -webkit-user-select: none; user-select: none;
+      }
+      .title { font-size: 18px; font-weight: 600; letter-spacing: 0.2px; }
+      .sub { font-size: 13px; color: #6b7280; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: #0f766e; animation: pulse 1.1s ease-in-out infinite; }
+      @keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+    </style>
+  </head>
+  <body>
+    <div class="title">Mixed Measures</div>
+    <div class="dot"></div>
+    <div class="sub">Starting the local engine…</div>
+  </body>
+</html>

@@ -1,0 +1,47 @@
+{
+  "name": "mixedmeasures-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Electron desktop shell for Mixed Measures",
+  "author": "George Chavez <contact@mixedmeasures.com>",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^42.3.3",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.mixedmeasures.app",
+    "productName": "Mixed Measures",
+    "artifactName": "MixedMeasures-${version}-${os}-${arch}.${ext}",
+    "directories": { "output": "release", "buildResources": "build" },
+    "files": ["main.js", "preload.js", "backend-process.js", "key-manager.js", "splash.html"],
+    "extraResources": [
+      { "from": "../backend/dist/mm-backend", "to": "mm-backend" }
+    ],
+    "publish": { "provider": "github", "releaseType": "draft" },
+    "mac": {
+      "icon": "build/icon.png",
+      "category": "public.app-category.education",
+      "target": ["dmg"],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": ["nsis"],
+      "executableName": "MixedMeasures"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": ["AppImage"],
+      "category": "Education"
+    }
+  }
+}

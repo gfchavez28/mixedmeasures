@@ -1,0 +1,405 @@
+@import "tailwindcss";
+
+/* Self-hosted fonts (no Google CDN — privacy + offline/Electron, CLAUDE.md #3).
+ * Variable woff2, latin + latin-ext subsets, weights matching prior CDN request
+ * (Jakarta 300-700, JetBrains Mono 400-500). Vite hashes the relative URLs into
+ * the build. Other scripts (cyrillic/greek/vietnamese) fall back to system fonts.
+ * SIL OFL — see src/assets/fonts/OFL.txt. */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url('./assets/fonts/jetbrains-mono-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url('./assets/fonts/jetbrains-mono-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('./assets/fonts/plus-jakarta-sans-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('./assets/fonts/plus-jakarta-sans-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  /* Font families */
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+  /* Font size override (13px) */
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+
+  /* Border radius (references --radius from :root) */
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+
+  /* Custom shadow */
+  --shadow-mm-card: var(--mm-card-shadow);
+
+  /* ── shadcn color tokens ── */
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+
+  /* ── Mixed Measures color tokens ── */
+  --color-mm-bg: hsl(var(--mm-bg));
+  --color-mm-surface: hsl(var(--mm-surface));
+  --color-mm-surface-border: hsl(var(--mm-surface-border));
+  --color-mm-surface-hover: hsl(var(--mm-surface-hover));
+  --color-mm-chrome: hsl(var(--mm-chrome));
+  --color-mm-chrome-text: hsl(var(--mm-chrome-text));
+  --color-mm-chrome-text-muted: hsl(var(--mm-chrome-text-muted));
+  --color-mm-text: hsl(var(--mm-text));
+  --color-mm-text-secondary: hsl(var(--mm-text-secondary));
+  --color-mm-text-muted: hsl(var(--mm-text-muted));
+  --color-mm-text-faint: hsl(var(--mm-text-faint));
+  --color-mm-border-subtle: hsl(var(--mm-border-subtle));
+  --color-mm-border-medium: hsl(var(--mm-border-medium));
+  --color-mm-green: hsl(var(--mm-green));
+  --color-mm-green-text: hsl(var(--mm-green-text));
+  --color-mm-orange: hsl(var(--mm-orange));
+  --color-mm-orange-text: hsl(var(--mm-orange-text));
+  --color-mm-purple: hsl(var(--mm-purple));
+  --color-mm-purple-text: hsl(var(--mm-purple-text));
+  --color-mm-blue: hsl(var(--mm-blue));
+  --color-mm-blue-text: hsl(var(--mm-blue-text));
+  --color-mm-canvas: hsl(var(--mm-canvas));
+  --color-mm-canvas-text: hsl(var(--mm-canvas-text));
+}
+
+@layer base {
+  :root {
+    /* ── shadcn core tokens ── */
+    --background: 152 8% 92%;
+    --foreground: 200 12% 16%;
+    --card: 152 5% 99%;
+    --card-foreground: 200 12% 16%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 200 12% 16%;
+    --primary: 152 56% 32%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 148 8% 96%;
+    --secondary-foreground: 152 56% 32%;
+    --muted: 152 8% 94%;
+    --muted-foreground: 200 6% 42%;  /* #394: AA on off-white surfaces (was 44% → 4.32:1 on tab bg) */
+    --accent: 148 8% 96%;
+    --accent-foreground: 152 56% 32%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 152 7% 80%;
+    --input: 152 7% 80%;
+    --ring: 152 56% 42%;
+    --radius: 0.375rem;
+
+    /* ── Mixed Measures custom tokens ── */
+    --mm-bg: 152 8% 92%;
+    --mm-surface: 152 5% 99%;
+    --mm-surface-border: 152 7% 80%;
+    --mm-surface-hover: 152 6% 96%;
+    --mm-chrome: 172 60% 19%;
+    --mm-chrome-text: 0 0% 96%;
+    --mm-chrome-text-muted: 172 20% 80%;  /* #394: AA on the lighter nav count-badge bg (was 4.14:1) */
+    --mm-text: 200 12% 16%;
+    --mm-text-secondary: 200 8% 34%;
+    /* #394: muted/faint darkened to meet WCAG AA 4.5:1 for small text. Faint was
+       62% L (≈2.6:1 on white — failing); 45% is the lightest that clears 4.5:1.
+       Muted nudged 44%→42% so it also passes on off-white surfaces (was 4.32 on
+       the #eef1f0 tab bg). Faint stays lighter than muted (hierarchy preserved). */
+    --mm-text-muted: 200 6% 40%;  /* #434: AA on the ~6% speaker/striped-row tints (42%→4.43:1 on #e9eceb) */
+    --mm-text-faint: 200 5% 45%;
+    --mm-border-subtle: 152 6% 87%;
+    --mm-border-medium: 152 7% 80%;
+    --mm-card-shadow: 0 1px 2px 0 rgba(0,0,0,0.04), 0 1px 1px -1px rgba(0,0,0,0.03);
+    --mm-green: 152 56% 42%;
+    --mm-green-text: 148 34% 32%;
+    --mm-orange: 28 80% 56%;
+    --mm-orange-text: 24 52% 37%;
+    --mm-purple: 262 50% 58%;
+    --mm-purple-text: 261 36% 47%;
+    --mm-blue: 210 70% 52%;
+    --mm-blue-text: 204 36% 40%;  /* #394: AA on the light active-tab pill bg (was 3.84:1) */
+    --mm-teal: 174 60% 42%;
+    --mm-teal-text: 170 40% 30%;
+    --mm-canvas: 45 70% 50%;
+    --mm-canvas-text: 42 52% 40%;
+    /* Context column backgrounds */
+    --mm-ctx-demo: 174 40% 95%;
+    --mm-ctx-demo-text: 174 35% 35%;
+    --mm-ctx-comments: 28 60% 95%;
+    --mm-ctx-comments-text: 28 55% 40%;
+    --mm-ctx-responses: 230 40% 95%;
+    --mm-ctx-responses-text: 230 35% 40%;
+
+    /* Speaker colors (very subtle tint for readability — Issue 208) */
+    --mm-speaker-1: 25 25% 96%;
+    --mm-speaker-2: 340 20% 96%;
+    --mm-speaker-3: 280 18% 96%;
+    --mm-speaker-4: 200 20% 96%;
+    --mm-speaker-5: 160 18% 96%;
+    --mm-speaker-6: 50 22% 96%;
+    --mm-speaker-facilitator: 210 22% 95%;
+
+    /* Speaker hover colors (slightly intensified) */
+    --mm-speaker-1-hover: 25 30% 93%;
+    --mm-speaker-2-hover: 340 25% 93%;
+    --mm-speaker-3-hover: 280 22% 93%;
+    --mm-speaker-4-hover: 200 25% 93%;
+    --mm-speaker-5-hover: 160 22% 93%;
+    --mm-speaker-6-hover: 50 28% 93%;
+    --mm-speaker-facilitator-hover: 210 28% 92%;
+  }
+
+  .dark {
+    --background: 230 14% 9%;
+    --foreground: 40 12% 90%;
+    --card: 230 10% 14%;
+    --card-foreground: 40 12% 90%;
+    --popover: 230 10% 13%;
+    --popover-foreground: 40 12% 90%;
+    --primary: 152 52% 44%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 150 8% 14%;
+    --secondary-foreground: 152 52% 44%;
+    --muted: 200 10% 16%;
+    --muted-foreground: 200 6% 56%;
+    --accent: 150 8% 14%;
+    --accent-foreground: 152 52% 44%;
+    --destructive: 0 62% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 230 6% 20%;
+    --input: 230 6% 20%;
+    --ring: 152 52% 44%;
+
+    --mm-bg: 230 14% 9%;
+    --mm-surface: 230 10% 14%;
+    --mm-surface-border: 230 6% 20%;
+    --mm-surface-hover: 230 8% 17%;
+    --mm-card-shadow: 0 1px 3px 0 rgba(0,0,0,0.25), 0 1px 2px -1px rgba(0,0,0,0.15);
+    --mm-chrome: 180 30% 9%;
+    --mm-chrome-text: 0 0% 92%;
+    --mm-chrome-text-muted: 172 12% 52%;
+    --mm-text: 40 12% 90%;
+    --mm-text-secondary: 40 8% 72%;
+    --mm-text-muted: 200 6% 56%;
+    --mm-text-faint: 200 4% 42%;
+    --mm-border-subtle: 230 4% 16%;
+    --mm-border-medium: 200 10% 24%;
+    --mm-green: 152 52% 44%;
+    --mm-green-text: 148 36% 58%;
+    --mm-orange: 28 76% 58%;
+    --mm-orange-text: 24 72% 67%;
+    --mm-purple: 262 46% 64%;
+    --mm-purple-text: 261 58% 72%;
+    --mm-blue: 210 66% 58%;
+    --mm-blue-text: 204 54% 71%;
+    --mm-teal: 174 55% 50%;
+    --mm-teal-text: 170 50% 70%;
+    --mm-canvas: 45 66% 55%;
+    --mm-canvas-text: 42 68% 68%;
+    /* Context column backgrounds (dark mode) */
+    --mm-ctx-demo: 174 20% 14%;
+    --mm-ctx-demo-text: 174 30% 65%;
+    --mm-ctx-comments: 28 20% 14%;
+    --mm-ctx-comments-text: 28 45% 65%;
+    --mm-ctx-responses: 230 15% 14%;
+    --mm-ctx-responses-text: 230 30% 65%;
+
+    /* Speaker colors (dark mode — subtle tint, Issue 208) */
+    --mm-speaker-1: 25 15% 14%;
+    --mm-speaker-2: 340 12% 14%;
+    --mm-speaker-3: 280 10% 14%;
+    --mm-speaker-4: 200 12% 14%;
+    --mm-speaker-5: 160 10% 14%;
+    --mm-speaker-6: 50 14% 14%;
+    --mm-speaker-facilitator: 210 14% 13%;
+
+    /* Speaker hover colors (slightly more visible) */
+    --mm-speaker-1-hover: 25 20% 20%;
+    --mm-speaker-2-hover: 340 16% 20%;
+    --mm-speaker-3-hover: 280 14% 20%;
+    --mm-speaker-4-hover: 200 16% 20%;
+    --mm-speaker-5-hover: 160 14% 20%;
+    --mm-speaker-6-hover: 50 18% 20%;
+    --mm-speaker-facilitator-hover: 210 18% 18%;
+  }
+
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  /* Keep text readable during native text selection in both modes */
+  ::selection {
+    background: hsl(210 80% 65% / 0.55);
+    color: inherit;
+  }
+  .dark ::selection {
+    background: hsl(210 55% 50% / 0.45);
+    color: hsl(0 0% 95%);
+  }
+}
+
+/* ── Tiptap editor ── */
+.ProseMirror {
+  outline: none;
+}
+.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: hsl(var(--mm-text-faint));
+  pointer-events: none;
+  height: 0;
+}
+.ProseMirror:focus {
+  outline: none;
+}
+
+/* ── Color bar toggle — hide material embed left borders ─────────────── */
+/* Excerpt/chart/memo borders are on a child div (inside ContextMenuTrigger);
+   callout-stat border is directly on the NodeViewWrapper. */
+.hide-material-colors [data-type="excerpt-embed"],
+.hide-material-colors [data-type="excerpt-embed"] > :first-child,
+.hide-material-colors [data-type="chart-embed"],
+.hide-material-colors [data-type="chart-embed"] > :first-child,
+.hide-material-colors [data-type="memo-embed"],
+.hide-material-colors [data-type="memo-embed"] > :first-child,
+.hide-material-colors [data-type="image-embed"],
+.hide-material-colors [data-type="image-embed"] > :first-child,
+.hide-material-colors [data-type="callout-stat"] {
+  border-left-width: 0 !important;
+}
+
+/* ── Print styles ────────────────────────────────────────────────────── */
+
+@media print {
+  /* Hide chrome: top rail, canvas toolbar, sidebar, overlays */
+  [data-topbar],
+  [data-canvas-toolbar],
+  [data-radix-popper-content-wrapper],
+  [role="dialog"] {
+    display: none !important;
+  }
+
+  /* Hide sidebar resize handle and panel */
+  .react-resizable-panels-resize-handle {
+    display: none !important;
+  }
+
+  /* Show print-only canvas title */
+  [data-canvas-print-title] {
+    display: block !important;
+  }
+
+  /* Theme headings: avoid orphans */
+  [data-theme-heading] {
+    break-after: avoid;
+  }
+
+  /* Material node wrappers: avoid splitting across pages */
+  [data-type="excerpt-embed"],
+  [data-type="chart-embed"],
+  [data-type="memo-embed"],
+  [data-type="callout-stat"] {
+    break-inside: avoid;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Material tag labels: visible in print (always rendered, opacity-controlled on screen) */
+  .material-tag-label {
+    opacity: 1 !important;
+  }
+
+  /* Hide interactive elements on material nodes in print */
+  [data-type="excerpt-embed"] a,
+  [data-type="chart-embed"] a,
+  [data-type="memo-embed"] a,
+  [data-type="callout-stat"] [role="button"] {
+    display: none !important;
+  }
+
+  /* Hide non-print canvas panels */
+  [data-canvas-outline],
+  [data-materials-panel],
+  [data-spatial-view],
+  [data-convergence-matrix] {
+    display: none !important;
+  }
+
+  /* Canvas toolbar buttons: hide on print */
+  [data-canvas-toolbar] button,
+  [data-canvas-toolbar] .view-toggle {
+    display: none !important;
+  }
+
+  /* @Theme mention pills: print as plain text */
+  [data-type="mention"]::before {
+    content: "see ";
+  }
+  [data-type="mention"]::after {
+    content: "";
+  }
+  [data-type="mention"] {
+    background: none !important;
+    color: inherit !important;
+    padding: 0 !important;
+    font-weight: normal !important;
+    font-size: inherit !important;
+    border-radius: 0 !important;
+  }
+
+  /* Strip decorative backgrounds, keep border accents */
+  body {
+    background: white !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
