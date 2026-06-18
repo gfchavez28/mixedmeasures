@@ -133,7 +133,10 @@ jobs:
   # macos-13 = Intel (x64). All four publish to the same draft release for the tag.
   package:
     needs: verify
-    timeout-minutes: 30
+    # 45 (was 30): the mac path now does TWO notarization round-trips (app in
+    # "Package & publish", then the dmg in "Notarize + staple the DMG"), each
+    # step self-capped (20 + 15) so a notarization hang still aborts fast.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -281,6 +284,47 @@ jobs:
 
           echo "electron-builder ${ARGS[*]}"
           npx --no-install electron-builder "${ARGS[@]}"
+
+      # 3a2) Notarize + staple the DMG itself (macOS, signed path only). electron-builder
+      #      notarizes & staples the .app but NOT the .dmg container, so `stapler validate`
+      #      on the dmg fails the Gatekeeper gate below (the rc2 finding). Submit the dmg to
+      #      notarytool, staple the returned ticket, then re-upload the now-stapled dmg over
+      #      the un-stapled one electron-builder already pushed to the draft release, so the
+      #      file users download carries an offline-verifiable ticket (Apple's recommended
+      #      practice for dmg distribution). Re-upload with --clobber; the now-stale dmg hash
+      #      in latest-mac.yml is inert because NO auto-updater is wired in v1.0 (electron-
+      #      updater isn't a dependency) — nothing consumes that manifest. Revisit if/when
+      #      auto-update + a zip target land post-launch.
+      - name: Notarize + staple the DMG (macOS)
+        if: matrix.eb_target == 'mac'
+        timeout-minutes: 15
+        working-directory: electron
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # Unsigned dev path (no creds) → nothing to notarize; leave the dmg as built.
+          if [ -z "${CSC_LINK:-}" ]; then
+            echo "unsigned path (no CSC_LINK) — skipping dmg notarization"; exit 0
+          fi
+          DMG="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
+          if [ -z "${DMG:-}" ]; then echo "❌ no .dmg found under release/"; exit 1; fi
+          echo "notarizing dmg: $DMG"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          echo "✅ dmg notarized + stapled"
+          # Replace the un-stapled dmg electron-builder already pushed to the draft release
+          # (tag = v<version>, the release electron-builder publishes to).
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "re-uploading stapled dmg to draft release v${VERSION}"
+          gh release upload "v${VERSION}" "$DMG" --clobber --repo "$GITHUB_REPOSITORY"
 
       # 3b) Gatekeeper / signature verification (macOS) — the headless equivalent of the
       #     "double-click on a clean Mac" smoke. `spctl --assess` IS the Gatekeeper engine,
