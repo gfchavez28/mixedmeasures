@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-v1.0.0 is the first public release. Until it is tagged, this section tracks
-changes landing ahead of it. Signed installers for Windows and macOS are attached
-to each release on the [Releases page](https://github.com/gfchavez28/mixedmeasures/releases).
+## [1.0.0] - 2026-06-19
+
+First public release. Signed installers for Windows and macOS (Apple Silicon),
+plus a Linux AppImage, are attached to the release on the
+[Releases page](https://github.com/gfchavez28/mixedmeasures/releases).
 
 ### Added
 - Local-first desktop workspace for mixed-methods research: import datasets (CSV),
@@ -29,4 +31,5 @@ to each release on the [Releases page](https://github.com/gfchavez28/mixedmeasur
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/commits/main
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/gfchavez28/mixedmeasures/releases/tag/v1.0.0

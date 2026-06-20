@@ -276,10 +276,19 @@ jobs:
           fi
 
           # Enable Azure Trusted Signing only when its service principal is configured.
+          # The RFC-3161 TIMESTAMP is NOT optional: Azure Trusted Signing certs are short-lived
+          # (~3 days), so an un-timestamped signature silently goes invalid days after the build
+          # and Windows shows "Unknown publisher" to every user (the v1.0.0 win defect). electron-
+          # builder 25's Invoke-TrustedSigning wrapper sets NO timestamp by default; the two
+          # TimestampRfc3161/TimestampDigest keys below flow through to the cmdlet via its
+          # extraSigningArgs spread (windowsSignAzureManager.js). Ref: electron-builder#8626.
+          # The verify gate near the end of this job hard-fails if the timestamp is ever missing.
           if [ "${{ matrix.eb_target }}" = "win" ] && [ -n "${AZURE_TENANT_ID:-}" ]; then
             ARGS+=( "--config.win.azureSignOptions.endpoint=${AZURE_ENDPOINT}" \
                     "--config.win.azureSignOptions.codeSigningAccountName=${AZURE_CODE_SIGNING_NAME}" \
-                    "--config.win.azureSignOptions.certificateProfileName=${AZURE_CERT_PROFILE}" )
+                    "--config.win.azureSignOptions.certificateProfileName=${AZURE_CERT_PROFILE}" \
+                    "--config.win.azureSignOptions.TimestampRfc3161=http://timestamp.acs.microsoft.com" \
+                    "--config.win.azureSignOptions.TimestampDigest=SHA256" )
           fi
 
           echo "electron-builder ${ARGS[*]}"
@@ -387,3 +396,51 @@ jobs:
         run: |
           set -o pipefail
           npx --no-install electron scripts/keychain-smoke.js 2>&1 | sed 's/^/  /'
+
+      # 3d) Authenticode signature + TIMESTAMP verification (Windows) — the missing mirror of the
+      #     macOS Gatekeeper gate (3b), and the check that would have caught the v1.0.0 win defect.
+      #     Get-AuthenticodeSignature is the headless equivalent of the SmartScreen verdict:
+      #       - Status = Valid           → the chain is trusted RIGHT NOW (freshly-signed cert valid)
+      #       - TimeStamperCertificate ≠ null → the signature is RFC-3161 timestamp-anchored, so it
+      #                                    OUTLIVES the ~3-day Azure Trusted Signing cert. Without
+      #                                    this the sig looks fine for ~3 days then flips to
+      #                                    "Unknown publisher" for every user — invisible to a
+      #                                    same-day check, which is exactly how v1.0.0 shipped.
+      #     Both are HARD gates on the signed path (AZURE_TENANT_ID present); informational on the
+      #     credential-free unsigned path, so the step flips to enforcing automatically once the
+      #     Azure secrets exist. Runs post-publish like the mac gate — a failure stops the workflow
+      #     and you simply don't un-draft the release (delete the bad asset + re-run).
+      - name: Verify — Authenticode signature + timestamp (Windows)
+        if: matrix.eb_target == 'win'
+        timeout-minutes: 5
+        shell: pwsh
+        working-directory: electron
+        env:
+          SIGNED: ${{ secrets.AZURE_TENANT_ID != '' }}
+        run: |
+          $signed = $env:SIGNED -eq 'true'
+          $exe = Get-ChildItem -Path release -Filter *.exe -File | Select-Object -First 1
+          if (-not $exe) { Write-Host "no .exe found under release/ — nothing to verify"; exit 1 }
+          Write-Host "file: $($exe.Name)   signed=$signed"
+
+          $sig = Get-AuthenticodeSignature -FilePath $exe.FullName
+          $publisher = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '<none>' }
+          $timestamped = $null -ne $sig.TimeStamperCertificate
+          Write-Host "Status      : $($sig.Status)"
+          Write-Host "Publisher   : $publisher"
+          Write-Host "Timestamped : $timestamped"
+          if ($timestamped) { Write-Host "Timestamp CA: $($sig.TimeStamperCertificate.Subject)" }
+
+          $fail = $false
+          function Check([string]$label, [bool]$ok) {
+            if ($ok)            { Write-Host "PASS  $label" }
+            elseif ($signed)    { Write-Host "FAIL  $label  (signed build MUST pass)"; $script:fail = $true }
+            else                { Write-Host "WARN  $label  — expected on the unsigned path (no Azure creds)" }
+          }
+
+          Check "Authenticode status is Valid"            ($sig.Status -eq 'Valid')
+          Check "signature carries an RFC-3161 timestamp" ($timestamped)
+
+          if ($fail) { Write-Host "WINDOWS SIGNING GATE: FAIL"; exit 1 }
+          $mode = if ($signed) { 'signed — enforced' } else { 'unsigned — informational' }
+          Write-Host "WINDOWS SIGNING GATE: PASS ($mode)"
