@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-06-20
+
+### Fixed
+- Windows installer is now re-signed with an RFC-3161 timestamp so the
+  Authenticode signature stays valid after the short-lived signing certificate
+  rotates. The v1.0.0 Windows installer began showing "Unknown publisher" once
+  its certificate expired; this release restores the verified-publisher
+  signature. macOS (Apple Silicon) and Linux downloads are unchanged.
+
 ## [1.0.0] - 2026-06-19
 
 First public release. Signed installers for Windows and macOS (Apple Silicon),
