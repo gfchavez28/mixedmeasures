@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
-import { Plus, FolderOpen, Archive, Trash2, Pencil, Moon, Sun, Settings, FileInput, Package, ChevronDown, Copy } from 'lucide-react'
+import { Plus, FolderOpen, Archive, Trash2, Pencil, Moon, Sun, Settings, FileInput, Package, ChevronDown, Copy, UserPlus } from 'lucide-react'
 import { projectsApi, projectPortabilityApi, type Project } from '@/lib/api'
 import type { ImportValidationResult, ProjectImportMode } from '@/lib/api'
 import { setPendingMerge } from '@/lib/pending-merge'
@@ -10,6 +10,7 @@ import { useAuth } from '@/lib/auth-context'
 import { useTheme } from '@/lib/theme-context'
 import { useCoders } from '@/hooks/useCoders'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
+import { useCreateCoder } from '@/hooks/useCreateCoder'
 import { coderColor } from '@/lib/coder-color'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { Button } from '@/components/ui/button'
@@ -48,38 +49,54 @@ import {
 
 /**
  * #459 — Dashboard coder switcher. The TopRail only lives inside a project, so the
- * projects list needs its own way to switch identity. Compact dropdown; single-coder
- * installs keep the plain name. Reuses the shared switch-with-confirm flow (#460).
+ * projects list needs its own way to switch identity. Compact dropdown. #530: it
+ * renders on single-coder installs too (menu = just "New coder") — the old plain-name
+ * span left a fresh install with no way to become multi-coder from this screen.
+ * Reuses the shared switch-with-confirm flow (#460) + shared create flow (#530).
  */
 function DashboardCoderSwitcher() {
   const { user } = useAuth()
-  const { coders, multiCoder } = useCoders()
+  const { coders } = useCoders()
   const { requestSwitch, dialog, switching } = useCoderSwitch()
   const [open, setOpen] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [newName, setNewName] = useState('')
   const ref = useRef<HTMLDivElement>(null)
+
+  const closeMenu = useCallback(() => {
+    setOpen(false)
+    setCreating(false)
+    setNewName('')
+  }, [])
+
+  // #530 — shared create flow; creating switches to the new coder without a
+  // second confirm (an explicit choice already).
+  const createMutation = useCreateCoder({
+    onCreated: (coder) => {
+      closeMenu()
+      requestSwitch({ id: coder.id, username: coder.username }, { skipConfirm: true })
+    },
+  })
 
   useEffect(() => {
     if (!open) return
-    const onClick = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    const onClick = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) closeMenu() }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeMenu() }
     document.addEventListener('mousedown', onClick)
     document.addEventListener('keydown', onKey)
     return () => { document.removeEventListener('mousedown', onClick); document.removeEventListener('keydown', onKey) }
-  }, [open])
+  }, [open, closeMenu])
 
   if (!user) return null
-  if (!multiCoder) {
-    return <span className="text-sm text-[hsl(var(--mm-chrome-text-muted))]">{user.username}</span>
-  }
   const others = coders.filter(c => c.id !== user.id)
   return (
     <div ref={ref} className="relative">
       <button
-        onClick={() => setOpen(o => !o)}
+        onClick={() => (open ? closeMenu() : setOpen(true))}
         className="inline-flex items-center gap-1.5 px-2 py-1 rounded text-sm text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/10 transition-colors"
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={`${user.username} — switch coder`}
+        aria-label={`${user.username} — coder menu`}
       >
         <span
           className="w-2 h-2 rounded-full flex-none"
@@ -91,21 +108,55 @@ function DashboardCoderSwitcher() {
       </button>
       {open && (
         <div role="menu" className="absolute right-0 top-full mt-1 w-52 rounded-md border border-white/[0.1] bg-[hsl(var(--mm-chrome))] shadow-lg z-50 py-1">
-          <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-[hsl(var(--mm-chrome-text-muted))]/70">
-            Switch coder
-          </div>
-          {others.map(c => (
+          {others.length > 0 && (
+            <>
+              <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-[hsl(var(--mm-chrome-text-muted))]/70">
+                Switch coder
+              </div>
+              {others.map(c => (
+                <button
+                  key={c.id}
+                  role="menuitem"
+                  onClick={() => { closeMenu(); requestSwitch({ id: c.id, username: c.username }) }}
+                  disabled={switching}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.06] transition-colors"
+                >
+                  <span className="w-2.5 h-2.5 rounded-full flex-none" style={{ backgroundColor: coderColor(c) }} aria-hidden="true" />
+                  <span className="truncate">{c.username}</span>
+                </button>
+              ))}
+              <div role="separator" className="my-1 border-t border-white/[0.07]" />
+            </>
+          )}
+          {creating ? (
+            <form
+              onSubmit={e => {
+                e.preventDefault()
+                const n = newName.trim()
+                if (n) createMutation.mutate(n)
+              }}
+              className="px-3 py-1.5"
+            >
+              <input
+                autoFocus
+                value={newName}
+                onChange={e => setNewName(e.target.value)}
+                placeholder="New coder name…"
+                maxLength={50}
+                aria-label="New coder name"
+                className="w-full rounded bg-white/[0.06] px-2 py-1 text-xs text-[hsl(var(--mm-chrome-text))] placeholder:text-[hsl(var(--mm-chrome-text-muted))]/60 outline-none"
+              />
+            </form>
+          ) : (
             <button
-              key={c.id}
               role="menuitem"
-              onClick={() => { setOpen(false); requestSwitch({ id: c.id, username: c.username }) }}
-              disabled={switching}
+              onClick={() => setCreating(true)}
               className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.06] transition-colors"
             >
-              <span className="w-2.5 h-2.5 rounded-full flex-none" style={{ backgroundColor: coderColor(c) }} aria-hidden="true" />
-              <span className="truncate">{c.username}</span>
+              <UserPlus className="w-3 h-3" />
+              New coder
             </button>
-          ))}
+          )}
         </div>
       )}
       {dialog}

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-03
+
+### Fixed
+
+- The "Add coder" entry point now appears in Settings (Coder identity) and in
+  the projects-screen coder menu, including on single-coder installs.
+  Previously the only place to add a coder was a menu that exists only inside
+  an open project, which left the team-coding features hard to discover.
+
 ## [1.1.0] - 2026-07-03
 
 ### Added
@@ -118,7 +127,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/gfchavez28/mixedmeasures/releases/tag/v1.0.0

@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Sun, Moon, Monitor, Download, FileInput, ChevronDown, ChevronUp, LoaderCircle, ArrowLeft, Clock, Info, Lock, Unlock, Archive, ArchiveRestore } from 'lucide-react'
+import { Sun, Moon, Monitor, Download, FileInput, ChevronDown, ChevronUp, LoaderCircle, ArrowLeft, Clock, Info, Lock, Unlock, Archive, ArchiveRestore, UserPlus } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuth } from '@/lib/auth-context'
 import { useTheme, type ThemeMode } from '@/lib/theme-context'
@@ -26,6 +26,7 @@ import { ColorDotButton } from '@/components/ColorDotButton'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import { useCoders } from '@/hooks/useCoders'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
+import { useCreateCoder } from '@/hooks/useCreateCoder'
 import { coderColor, coderInitials } from '@/lib/coder-color'
 import { getContrastColor } from '@/lib/utils'
 
@@ -664,6 +665,66 @@ function CoderRosterManager({
   )
 }
 
+/**
+ * #530 — the "become multi-coder" entry point. Rendered unconditionally in the
+ * Coder identity section: the roster and switcher UIs are ≥2-coder-gated for
+ * noise reduction, which used to leave a fresh install with no discoverable way
+ * to add coder #2 (the only create affordance was the TopRail menu, which exists
+ * only inside a project). Creating switches straight to the new coder (#460's
+ * skipConfirm case) so their coding is attributed correctly from the first click.
+ */
+function AddCoderControl({
+  onCreated,
+  disabled,
+}: {
+  onCreated: (coder: { id: number; username: string }) => void
+  disabled?: boolean
+}) {
+  const [adding, setAdding] = useState(false)
+  const [name, setName] = useState('')
+  const create = useCreateCoder({
+    onCreated: coder => {
+      setAdding(false)
+      setName('')
+      onCreated(coder)
+    },
+  })
+  if (!adding) {
+    return (
+      <Button type="button" variant="outline" size="sm" onClick={() => setAdding(true)} disabled={disabled}>
+        <UserPlus className="w-3.5 h-3.5 mr-1.5" />
+        Add coder
+      </Button>
+    )
+  }
+  return (
+    <form
+      onSubmit={e => {
+        e.preventDefault()
+        const n = name.trim()
+        if (n) create.mutate(n)
+      }}
+      className="flex items-center gap-2"
+    >
+      <Input
+        autoFocus
+        value={name}
+        onChange={e => setName(e.target.value)}
+        placeholder="New coder name…"
+        maxLength={50}
+        aria-label="New coder name"
+        className="h-8 max-w-[220px]"
+      />
+      <Button type="submit" size="sm" disabled={!name.trim() || create.isPending}>
+        Add
+      </Button>
+      <Button type="button" variant="ghost" size="sm" onClick={() => { setAdding(false); setName('') }}>
+        Cancel
+      </Button>
+    </form>
+  )
+}
+
 function CoderIdentitySection() {
   const { user, refreshAuth } = useAuth()
   const { coders, multiCoder } = useCoders()
@@ -736,6 +797,18 @@ function CoderIdentitySection() {
       {multiCoder && (
         <CoderRosterManager activeId={user?.id} onRequestSwitch={requestSwitch} switching={switching} />
       )}
+      <div className="mb-4 space-y-1.5">
+        <AddCoderControl
+          disabled={switching}
+          onCreated={c => requestSwitch({ id: c.id, username: c.username }, { skipConfirm: true })}
+        />
+        {!multiCoder && (
+          <p className="text-xs text-mm-text-muted">
+            Add a second coder to code the same projects independently — attribution,
+            blind coding, agreement statistics, and reconciliation switch on automatically.
+          </p>
+        )}
+      </div>
       <form onSubmit={handleSubmit} className="space-y-3 max-w-sm">
         {multiCoder && (
           <p className="text-xs text-mm-text-muted">

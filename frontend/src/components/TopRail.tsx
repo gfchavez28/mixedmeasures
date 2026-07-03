@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, isValidElement, cloneElement } from 'react'
 import { Link, useNavigate, useLocation, matchPath } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import {
   Sun,
   Moon,
@@ -35,14 +35,14 @@ import { formatRelativeTime } from '@/lib/format'
 import { useTheme } from '@/lib/theme-context'
 import { useAuth } from '@/lib/auth-context'
 import MMLogo from '@/components/MMLogo'
-import { projectsApi, authApi } from '@/lib/api'
+import { projectsApi } from '@/lib/api'
 import type { Project, ProjectSummary } from '@/lib/api'
 import { coderColor } from '@/lib/coder-color'
 import { useCoders } from '@/hooks/useCoders'
 import { readRevealed } from '@/hooks/useBlindMode'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
-import { toast } from 'sonner'
+import { useCreateCoder } from '@/hooks/useCreateCoder'
 import type { BreadcrumbSegment } from '@/layouts/ProjectLayout'
 
 interface TopRailProps {
@@ -776,7 +776,6 @@ function UserMenu() {
   // lets you switch to (or create) another, and links to Settings. Attribution /
   // who-coded-what reads the active coder; switching re-points it server-side.
   const { user } = useAuth()
-  const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
@@ -824,17 +823,13 @@ function UserMenu() {
   // #459/#460 — shared switch-with-confirm flow (also used by Settings + Dashboard).
   const { requestSwitch, dialog: switchDialog, switching } = useCoderSwitch({ onSwitched: closeMenu })
 
-  const createMutation = useMutation({
-    mutationFn: (name: string) => authApi.createCoder(name),
-    onSuccess: (coder) => {
-      queryClient.invalidateQueries({ queryKey: ['coders'] })
+  // #530 — shared create flow (also used by Settings + the Dashboard switcher).
+  const createMutation = useCreateCoder({
+    onCreated: (coder) => {
       setNewName('')
       setCreating(false)
       // Creating a coder is already an explicit choice — skip the switch confirm.
       requestSwitch({ id: coder.id, username: coder.username }, { skipConfirm: true })
-    },
-    onError: (err: Error & { response?: { data?: { detail?: string } } }) => {
-      toast.error(err.response?.data?.detail || 'Could not create coder')
     },
   })
 

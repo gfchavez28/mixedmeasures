@@ -6,6 +6,7 @@ Mixed Measures **__VERSION__** — a local-first desktop workspace for mixed-met
 - **Excel import** — `.xlsx` workbooks import directly as datasets (sheet picker + append).
 - **Zoom/Teams transcripts** — `.vtt`/`.srt` files import directly as conversations, with speaker turns and audio-sync timestamps.
 - Plus a codebook treemap, screen-reader-navigable coding workbenches, and an accuracy audit of every displayed statistic, chart, and export. Full details in the [changelog](https://github.com/__REPO__/blob/main/CHANGELOG.md).
+- **1.1.1** — the "Add coder" entry point now appears in Settings and on the projects screen, so setting up a second coder no longer requires finding the menu inside an open project.
 
 ## Which file should I download?
 
