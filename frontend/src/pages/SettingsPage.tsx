@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Sun, Moon, Monitor, Download, FileInput, ChevronDown, ChevronUp, LoaderCircle, ArrowLeft, Clock, Info, Lock, Unlock } from 'lucide-react'
+import { Sun, Moon, Monitor, Download, FileInput, ChevronDown, ChevronUp, LoaderCircle, ArrowLeft, Clock, Info, Lock, Unlock, Archive, ArchiveRestore } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuth } from '@/lib/auth-context'
 import { useTheme, type ThemeMode } from '@/lib/theme-context'
@@ -22,6 +22,12 @@ import {
   AlertDialogCancel,
 } from '@/components/ui/alert-dialog'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
+import { ColorDotButton } from '@/components/ColorDotButton'
+import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
+import { useCoders } from '@/hooks/useCoders'
+import { useCoderSwitch } from '@/hooks/useCoderSwitch'
+import { coderColor, coderInitials } from '@/lib/coder-color'
+import { getContrastColor } from '@/lib/utils'
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
   { value: 'light', label: 'Light', icon: Sun },
@@ -527,40 +533,215 @@ function BackupSection() {
 }
 
 
+function badgeDot(c: { id: number; username: string; display_color?: string | null }) {
+  const bg = coderColor(c)
+  return (
+    <span
+      className="inline-flex items-center justify-center rounded-full font-semibold text-[9px] w-5 h-5 flex-none"
+      style={{ backgroundColor: bg, color: getContrastColor(bg) }}
+      aria-hidden="true"
+    >
+      {coderInitials(c.username)}
+    </span>
+  )
+}
+
+/**
+ * #461/#459 — roster manager. One pick-list of every coder (incl. archived). Picking
+ * a coder SWITCHES your active identity to them (with the #460 confirm) so the editor
+ * below edits them — only a coder can change their own name/color, so there's no
+ * edit-others endpoint. Archive/Unarchive sit per-row (you can't archive the coder
+ * you're being, so Archive only shows on others). Shown only when ≥2 coders exist.
+ */
+function CoderRosterManager({
+  activeId,
+  onRequestSwitch,
+  switching,
+}: {
+  activeId: number | undefined
+  onRequestSwitch: (t: { id: number; username: string }) => void
+  switching: boolean
+}) {
+  const queryClient = useQueryClient()
+  const [showArchived, setShowArchived] = useState(false)
+  // Full roster incl. archived (the editor/switcher elsewhere use the non-archived
+  // ['coders']). Archive/unarchive/switch invalidate ['coders'], which prefix-matches
+  // this key too, so the list stays fresh.
+  const { data: allCoders = [] } = useQuery({
+    queryKey: ['coders', 'all'],
+    queryFn: () => authApi.listCoders(true),
+    staleTime: 60_000,
+  })
+  const activeCoders = allCoders.filter(c => !c.archived)
+  const archivedCoders = allCoders.filter(c => c.archived)
+
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['coders'] })
+  const archiveMut = useMutation({
+    mutationFn: (id: number) => authApi.archiveCoder(id),
+    onSuccess: () => { invalidate(); toast.success('Coder archived') },
+    onError: (e: Error & { response?: { data?: { detail?: string } } }) =>
+      toast.error(e.response?.data?.detail || 'Could not archive coder'),
+  })
+  const unarchiveMut = useMutation({
+    mutationFn: (id: number) => authApi.unarchiveCoder(id),
+    onSuccess: () => { invalidate(); toast.success('Coder unarchived') },
+    onError: () => toast.error('Could not unarchive coder'),
+  })
+
+  return (
+    <div className="mb-5 space-y-2">
+      <Label className="text-xs">Coders on this install</Label>
+      <div className="rounded-md border border-mm-surface-border divide-y divide-mm-surface-border overflow-hidden">
+        {activeCoders.map(c => {
+          const isActive = c.id === activeId
+          return (
+            <div key={c.id} className="flex items-center gap-2 px-2.5 py-1.5">
+              {badgeDot(c)}
+              <button
+                type="button"
+                disabled={isActive || switching}
+                onClick={() => onRequestSwitch({ id: c.id, username: c.username })}
+                className={`flex-1 text-left text-sm truncate ${isActive ? 'text-mm-text cursor-default' : 'text-mm-text hover:text-mm-green-text'}`}
+                title={isActive ? 'You are coding as this coder' : `Code as ${c.username}`}
+              >
+                {c.username}
+                {isActive && <span className="text-mm-text-muted"> (you)</span>}
+              </button>
+              {isActive ? (
+                <span className="text-[10px] text-mm-text-faint">editing below</span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => archiveMut.mutate(c.id)}
+                  disabled={archiveMut.isPending}
+                  aria-label={`Archive ${c.username}`}
+                  title="Archive — keeps their codings, removes from the roster"
+                  className="p-1 rounded text-mm-text-muted hover:text-mm-text"
+                >
+                  <Archive className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )
+        })}
+      </div>
+      {archivedCoders.length > 0 && (
+        <div className="space-y-1.5">
+          <button
+            type="button"
+            onClick={() => setShowArchived(s => !s)}
+            aria-expanded={showArchived}
+            className="flex items-center gap-1 text-xs text-mm-text-muted hover:text-mm-text"
+          >
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showArchived ? 'rotate-180' : ''}`} />
+            Show archived ({archivedCoders.length})
+          </button>
+          {showArchived && (
+            <div className="rounded-md border border-mm-surface-border divide-y divide-mm-surface-border overflow-hidden">
+              {archivedCoders.map(c => (
+                <div key={c.id} className="flex items-center gap-2 px-2.5 py-1.5 opacity-75">
+                  {badgeDot(c)}
+                  <span className="flex-1 text-sm text-mm-text truncate">
+                    {c.username}<span className="text-mm-text-faint"> (archived)</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => unarchiveMut.mutate(c.id)}
+                    disabled={unarchiveMut.isPending}
+                    aria-label={`Unarchive ${c.username}`}
+                    className="inline-flex items-center gap-1 text-xs text-mm-green-text hover:underline"
+                  >
+                    <ArchiveRestore className="w-3.5 h-3.5" />
+                    Unarchive
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function CoderIdentitySection() {
   const { user, refreshAuth } = useAuth()
+  const { coders, multiCoder } = useCoders()
+  const queryClient = useQueryClient()
+  const { requestSwitch, dialog: switchDialog, switching } = useCoderSwitch()
+  const me = coders.find(c => c.id === user?.id)
   const [name, setName] = useState(user?.username ?? '')
+  // `undefined` = unedited → fall back to the saved color from the ['coders'] roster
+  // (the canonical store; the /auth/status user also carries display_color now, #452).
+  // Deriving avoids a state-syncing effect: the preview reacts when the roster
+  // loads, and a post-save refetch can't clobber an in-flight edit.
+  const [color, setColor] = useState<string | null | undefined>(undefined)
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [error, setError] = useState('')
 
+  // Switching coders via the roster keeps this section mounted, so the useState
+  // initializers won't re-run — re-seed the editor when the active coder changes
+  // (the React-blessed "reset state on identity change" via a key ref).
+  const lastUserId = useRef(user?.id)
+  if (lastUserId.current !== user?.id) {
+    lastUserId.current = user?.id
+    setName(user?.username ?? '')
+    setColor(undefined)
+    setError('')
+  }
+
   const mutation = useMutation({
-    mutationFn: (newName: string) => authApi.updateProfile(newName),
+    mutationFn: (vars: { username: string; display_color: string | null }) =>
+      authApi.updateProfile(vars.username, vars.display_color),
     onSuccess: async () => {
       setError('')
       await refreshAuth()
-      toast.success('Coder name updated')
+      // Refresh the roster so attribution badges / switcher / analysis lenses
+      // pick up the new color immediately.
+      queryClient.invalidateQueries({ queryKey: ['coders'] })
+      toast.success('Coder identity updated')
     },
     onError: (err: Error & { response?: { data?: { detail?: string } } }) => {
-      setError(err.response?.data?.detail || 'Could not update coder name')
+      setError(err.response?.data?.detail || 'Could not update coder identity')
     },
   })
 
   const trimmed = name.trim()
-  const dirty = trimmed.length > 0 && trimmed !== user?.username
+  const currentColor = me?.display_color ?? null
+  const effectiveColor = color === undefined ? currentColor : color
+  const nameDirty = trimmed.length > 0 && trimmed !== user?.username
+  const colorDirty = color !== undefined && color !== currentColor
+  const dirty = nameDirty || colorDirty
+
+  // Live badge preview: chosen color (or the stable palette fallback) + initials
+  // derived from the name being typed — exactly how the attribution badge renders.
+  const previewColor = effectiveColor ?? coderColor({ id: user?.id ?? 0, display_color: null })
+  const previewInitials = coderInitials(trimmed || user?.username || '?')
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!dirty) return
-    mutation.mutate(trimmed)
+    mutation.mutate({ username: trimmed.length ? trimmed : (user?.username ?? ''), display_color: effectiveColor })
   }
 
   return (
     <section className="rounded-lg border border-mm-surface-border bg-mm-surface shadow-mm-card p-4">
       <h2 className="text-base font-semibold text-mm-text mb-1">Coder identity</h2>
       <p className="text-xs text-mm-text-muted mb-4">
-        Your coding is attributed to this name. Mixed Measures is a local, single-user
-        tool — there is no account or password.
+        Your coding is attributed to this name and color.{' '}
+        {multiCoder
+          ? 'Pick a coder below to code as them — only the coder you’re currently coding as can edit their own name and color.'
+          : 'Mixed Measures is local-first — there is no account or password.'}
       </p>
+      {multiCoder && (
+        <CoderRosterManager activeId={user?.id} onRequestSwitch={requestSwitch} switching={switching} />
+      )}
       <form onSubmit={handleSubmit} className="space-y-3 max-w-sm">
+        {multiCoder && (
+          <p className="text-xs text-mm-text-muted">
+            Editing <span className="font-medium text-mm-text">{user?.username}</span>.
+          </p>
+        )}
         <div className="space-y-1.5">
           <Label htmlFor="coder-name" className="text-xs">Coder name</Label>
           <Input
@@ -571,6 +752,39 @@ function CoderIdentitySection() {
             autoComplete="off"
           />
         </div>
+        <div className="space-y-1.5">
+          <Label className="text-xs">Badge color</Label>
+          <div className="flex items-center gap-2">
+            <span
+              className="inline-flex items-center justify-center rounded-full font-semibold text-[10px] w-6 h-6 flex-none"
+              style={{ backgroundColor: previewColor, color: getContrastColor(previewColor) }}
+              aria-label={`Badge preview: ${previewInitials}`}
+            >
+              {previewInitials}
+            </span>
+            <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
+              <PopoverTrigger asChild>
+                <ColorDotButton color={previewColor} aria-label="Change badge color" title="Change badge color" />
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-3" align="start">
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-mm-text-secondary">Badge color</p>
+                  <ColorSwatchPicker value={effectiveColor ?? ''} onChange={c => { setColor(c); setPickerOpen(false) }} />
+                  {effectiveColor && (
+                    <button
+                      type="button"
+                      className="text-xs text-mm-text-muted hover:text-mm-text mt-1"
+                      onClick={() => { setColor(null); setPickerOpen(false) }}
+                    >
+                      Use default color
+                    </button>
+                  )}
+                </div>
+              </PopoverContent>
+            </Popover>
+            <span className="text-xs text-mm-text-muted">Shown on attribution badges when coding with others.</span>
+          </div>
+        </div>
         {error && (
           <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
         )}
@@ -578,6 +792,7 @@ function CoderIdentitySection() {
           {mutation.isPending ? 'Saving...' : 'Save'}
         </Button>
       </form>
+      {switchDialog}
     </section>
   )
 }

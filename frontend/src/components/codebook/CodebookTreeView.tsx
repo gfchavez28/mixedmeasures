@@ -3,10 +3,11 @@ import type { CodebookTreeResponse, CodebookCategoryNode, CodebookCodeNode } fro
 import type { CodebookSizing, CodebookFormat } from '@/hooks/useCodebookState'
 import { useChartColors, useTheme } from '@/lib/theme-context'
 import { getContrastColor } from '@/lib/utils'
-import { fitViewportToBounds } from '@/lib/codebook-utils'
+import { fitViewportToBounds, legibleDefaultViewport } from '@/lib/codebook-utils'
 import type { Viewport, LayoutBounds } from '@/lib/codebook-utils'
 import { COLOR_DEFAULT, COLOR_SELECT, COLOR_SPOTLIGHT, COLOR_UNIVERSAL, COLOR_UNIVERSAL_TEXT, SURFACE_LIGHT, SURFACE_DARK } from '@/lib/codebook-constants'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
+import { ColorDotButton } from '@/components/ColorDotButton'
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -772,24 +773,37 @@ export default function CodebookTreeView({
   const ZOOM_MAX_W = 4000
   const FIT_PAD = 30
 
-  // Fit viewport from layout bounds (no aspect enforcement — SVG meet handles fitting)
+  // Fit-everything viewport (no aspect enforcement — SVG meet handles fitting).
+  // This is what the "Fit" control returns to.
   const fitVp = useMemo<Viewport>(() => {
     return fitViewportToBounds(layout.bounds, FIT_PAD)
   }, [layout.bounds])
 
+  // Legible default view (#428b) — fit-to-width for tall codebooks, else
+  // fit-everything. The "Fit" control always returns to fitVp.
+  const defaultVp = useMemo<Viewport>(
+    () => legibleDefaultViewport(fitVp, containerSize),
+    [fitVp, containerSize],
+  )
+
   const [viewport, setViewport] = useState<Viewport | null>(null)
 
-  // Reset viewport when layout changes (data, zoom level, sizing, expand/collapse)
+  // Reset viewport to the legible default when the layout changes (data, zoom
+  // level, sizing, expand/collapse). Gated on a measured container so
+  // fit-to-width is computed against real dimensions, not the 960 fallback (#428b).
   const layoutIdRef = useRef<typeof layout | null>(null)
   useEffect(() => {
-    if (layout && layout !== layoutIdRef.current) {
+    if (
+      layout && containerSize && containerSize.width > 0 && containerSize.height > 0
+      && layout !== layoutIdRef.current
+    ) {
       layoutIdRef.current = layout
       // eslint-disable-next-line react-hooks/set-state-in-effect -- sync viewport when layout changes
-      setViewport(fitVp)
+      setViewport(defaultVp)
     }
-  }, [layout, fitVp])
+  }, [layout, containerSize, defaultVp])
 
-  const vp = viewport || fitVp
+  const vp = viewport || defaultVp
 
   const spatialZoomLevel = useMemo(() => fitVp.width / vp.width, [fitVp.width, vp.width])
   const spatialZoomPercent = Math.round(spatialZoomLevel * 100)
@@ -1833,9 +1847,9 @@ export default function CodebookTreeView({
             return (
               <>
                 <div className="flex items-center gap-1.5">
-                  <button
-                    className="w-4 h-4 rounded-full shrink-0 ring-offset-1 hover:ring-2 hover:ring-mm-border-medium transition-shadow"
-                    style={{ backgroundColor: chipColor }}
+                  <ColorDotButton
+                    color={chipColor}
+                    dotClassName="w-4 h-4 rounded-full"
                     aria-label={`Change color for ${code.name}`}
                     title="Change color"
                     onClick={() => setTooltipPickerOpen(prev => !prev)}

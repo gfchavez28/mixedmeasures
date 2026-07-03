@@ -17,7 +17,7 @@ from .database import run_migrations, SessionLocal
 from .models.user import Session as SessionModel
 from slowapi.errors import RateLimitExceeded
 from starlette.responses import JSONResponse
-from .routers import auth, projects, conversations, segments, codes, coding, notes, memos, export, search, participants, dataset, recode, equivalence, analysis_domains, crosswalk, metrics, materials, code_analysis, statistical_tests, text_coding, text_analysis, excerpts, all_notes, correlations, comparisons, scratchpad, data_quality, quote_board, codebook, documents, backup, project_portability, canvas, audio
+from .routers import auth, projects, conversations, segments, codes, coding, notes, memos, export, search, participants, dataset, recode, equivalence, code_equivalence, analysis_domains, crosswalk, metrics, materials, code_analysis, statistical_tests, text_coding, text_analysis, excerpts, all_notes, correlations, comparisons, scratchpad, data_quality, quote_board, codebook, documents, backup, project_portability, canvas, audio
 
 
 def cleanup_expired_sessions():
@@ -60,6 +60,46 @@ async def _auto_backup_loop():
                 logger.info("Auto-backup completed")
         except Exception as e:
             logger.warning("Auto-backup failed: %s", e)
+
+
+def _drain_consensus() -> int:
+    """Drain a batch of consensus staleness markers in its own session/txn.
+
+    Runs in a worker thread (its own ``SessionLocal``, never shared across
+    threads). Caps the batch so a large backlog drains over several ticks instead
+    of one long transaction.
+    """
+    from .services.consensus_staleness import sweep_stale_consensus
+    db = SessionLocal()
+    try:
+        recomputed = sweep_stale_consensus(db, limit=500)
+        db.commit()
+        return recomputed
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+async def _consensus_sweep_loop():
+    """Periodic consensus-recompute sweep (Track J · J2-3, Slab 5b).
+
+    Bulk / cascade mutations mark targets stale; this drains them off the request
+    path (DEC-C / ADJ-3: write-side, never recompute-on-read). A no-op when there
+    are no markers (the common single-coder case). Single background writer, so a
+    transient SQLite "database is locked" from a concurrent request write just
+    retries next tick — the markers persist until a sweep succeeds.
+    """
+    interval = 30  # seconds
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            recomputed = await asyncio.to_thread(_drain_consensus)
+            if recomputed:
+                logger.info("Consensus sweep recomputed %d stale target(s)", recomputed)
+        except Exception as e:
+            logger.warning("Consensus sweep failed: %s", e)
 
 
 def _shutdown_backup():
@@ -135,17 +175,20 @@ async def lifespan(app: FastAPI):
     cleanup_expired_sessions()
     _check_production_safety()
 
-    # Start periodic auto-backup
+    # Start periodic auto-backup + consensus staleness sweep
     auto_backup_task = asyncio.create_task(_auto_backup_loop())
+    consensus_sweep_task = asyncio.create_task(_consensus_sweep_loop())
 
     yield
 
-    # Shutdown: cancel loop, create final backup
+    # Shutdown: cancel loops, create final backup
     auto_backup_task.cancel()
-    try:
-        await auto_backup_task
-    except asyncio.CancelledError:
-        pass
+    consensus_sweep_task.cancel()
+    for _task in (auto_backup_task, consensus_sweep_task):
+        try:
+            await _task
+        except asyncio.CancelledError:
+            pass
     _shutdown_backup()
 
 
@@ -153,7 +196,7 @@ _startup_settings = get_settings()
 app = FastAPI(
     title="Mixed Measures",
     description="Mixed-methods research analysis platform",
-    version="1.0.1",
+    version="1.1.0",
     lifespan=lifespan,
     docs_url="/docs" if _startup_settings.enable_api_docs else None,
     redoc_url="/redoc" if _startup_settings.enable_api_docs else None,
@@ -312,6 +355,7 @@ app.include_router(participants.router)
 app.include_router(dataset.router)
 app.include_router(recode.router)
 app.include_router(equivalence.router)
+app.include_router(code_equivalence.router)
 app.include_router(analysis_domains.router)
 app.include_router(crosswalk.router)
 app.include_router(metrics.router)

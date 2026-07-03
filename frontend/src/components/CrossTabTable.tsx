@@ -44,7 +44,10 @@ export default function CrossTabTable({ data, loading }: CrossTabTableProps) {
       </div>
 
       <ScrollableTable>
-        <table className="w-full text-sm" style={{ borderCollapse: 'collapse' }}>
+        <table className="w-full text-sm" style={{ borderCollapse: 'collapse' }} aria-label={`Cross-tabulation of codes by ${cross_column_name}`}>
+          <caption className="sr-only">
+            Cross-tabulation of codes (rows) by {cross_column_name} (columns), with counts and percentages.
+          </caption>
           <thead>
             <tr className="bg-mm-bg">
               <th scope="col" className="px-3 py-2 text-left font-medium border-b border-r min-w-[140px]">Code</th>

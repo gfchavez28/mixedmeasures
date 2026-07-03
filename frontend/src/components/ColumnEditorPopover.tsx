@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Link } from 'react-router-dom'
+import { SELECTED_SEGMENT } from '@/lib/selection'
 import { Trash2, FunctionSquare, RefreshCw, Settings2 } from 'lucide-react'
 import {
   Popover,
@@ -253,7 +254,7 @@ export function ColumnEditorPopover({
 
         {/* Column name (click-to-edit) */}
         <div className="mb-1.5">
-          <label className="text-[10px] text-mm-text-muted uppercase tracking-wider">Name</label>
+          <label className="text-[10px] text-mm-text-muted uppercase tracking-wider">Short name</label>
           {editingField === 'name' ? (
             <input
               ref={nameInputRef}
@@ -261,7 +262,7 @@ export function ColumnEditorPopover({
               onChange={(e) => setEditValue(e.target.value)}
               onBlur={commitEdit}
               aria-label="Edit column name"
-              className="w-full text-xs font-medium border border-blue-300 dark:border-blue-700 rounded px-1.5 py-1 bg-mm-surface outline-none focus:ring-1 focus:ring-ring mt-0.5"
+              className="w-full text-xs font-medium border border-mm-blue/50 rounded px-1.5 py-1 bg-mm-surface outline-none focus:ring-1 focus:ring-ring mt-0.5"
               maxLength={255}
               placeholder="Short display name"
             />
@@ -272,7 +273,7 @@ export function ColumnEditorPopover({
               className="w-full text-left text-xs font-medium rounded px-1.5 py-1 mt-0.5 hover:bg-mm-surface-hover transition-colors cursor-text"
               title="Click to edit column name"
             >
-              {column.column_name || <span className="italic text-mm-text-muted">Click to add name</span>}
+              {column.column_name || <span className="italic text-mm-text-muted">Click to add short name</span>}
             </button>
           )}
         </div>
@@ -287,7 +288,7 @@ export function ColumnEditorPopover({
               onChange={(e) => setEditValue(e.target.value)}
               onBlur={commitEdit}
               aria-label="Edit column label"
-              className="w-full text-xs border border-blue-300 dark:border-blue-700 rounded px-1.5 py-1 bg-mm-surface outline-none focus:ring-1 focus:ring-ring mt-0.5 resize-none"
+              className="w-full text-xs border border-mm-blue/50 rounded px-1.5 py-1 bg-mm-surface outline-none focus:ring-1 focus:ring-ring mt-0.5 resize-none"
               maxLength={500}
               rows={3}
               placeholder="Column label or description"
@@ -354,10 +355,10 @@ export function ColumnEditorPopover({
             <button
               onClick={() => onSelectDef(null)}
               className={`w-full text-left px-2 py-1 rounded text-xs flex items-center gap-1 ${
-                !activeDef ? 'bg-blue-50 dark:bg-blue-900/50 text-blue-700 dark:text-blue-200' : 'hover:bg-mm-surface-hover text-mm-text-secondary'
+                !activeDef ? SELECTED_SEGMENT : 'hover:bg-mm-surface-hover text-mm-text-secondary'
               }`}
             >
-              {!activeDef && <span className="text-blue-500 dark:text-blue-400">*</span>}
+              {!activeDef && <span className="text-mm-blue">*</span>}
               Show raw values
             </button>
             {defs.map(d => (
@@ -365,10 +366,10 @@ export function ColumnEditorPopover({
                 key={d.id}
                 onClick={() => onSelectDef(d.id)}
                 className={`w-full text-left px-2 py-1 rounded text-xs flex items-center gap-1 ${
-                  activeDef?.id === d.id ? 'bg-blue-50 dark:bg-blue-900/50 text-blue-700 dark:text-blue-200' : 'hover:bg-mm-surface-hover text-mm-text-secondary'
+                  activeDef?.id === d.id ? SELECTED_SEGMENT : 'hover:bg-mm-surface-hover text-mm-text-secondary'
                 }`}
               >
-                {activeDef?.id === d.id && <span className="text-blue-500 dark:text-blue-400">*</span>}
+                {activeDef?.id === d.id && <span className="text-mm-blue">*</span>}
                 {d.name}
                 {d.is_primary && <span className="text-amber-500 text-[11px]">primary</span>}
                 <span className="text-[11px] text-mm-text-faint ml-auto">{d.recode_type}</span>
@@ -381,7 +382,7 @@ export function ColumnEditorPopover({
         <div className="border-t pt-2 mt-2">
           <Link
             to={`/projects/${projectId}/datasets/${datasetId}/recode?column=${column.id}`}
-            className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+            className="text-xs text-mm-blue-text hover:underline"
           >
             Edit in Recode Workbench
           </Link>

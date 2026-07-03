@@ -1,10 +1,12 @@
 import { useMemo } from 'react'
 import { type Segment } from '@/lib/api'
-import { useTheme } from '@/lib/theme-context'
 import { cn } from '@/lib/utils'
+import { isSegmentCodedVisible } from '@/lib/coding-progress'
 
 interface SegmentProgressBarProps {
   segments: Segment[]
+  /** coder ids hidden by the per-coder filter — bar/count reflect only visible coders. */
+  hiddenCoderIds?: Set<number>
   className?: string
 }
 
@@ -14,10 +16,9 @@ interface SegmentProgressBarProps {
  */
 export default function SegmentProgressBar({
   segments,
+  hiddenCoderIds,
   className,
 }: SegmentProgressBarProps) {
-  const { isDark } = useTheme()
-
   // Only count participant segments (non-facilitator) in the progress visualization
   const participantSegments = useMemo(() => {
     return segments.filter(s => !s.is_facilitator)
@@ -26,7 +27,8 @@ export default function SegmentProgressBar({
   // Calculate the gradient stops for the progress visualization
   const gradientStyle = useMemo(() => {
     if (participantSegments.length === 0) {
-      return { background: isDark ? '#374151' : '#e5e7eb' } // gray-700 / gray-200
+      // Empty bar — quiet neutral track (CSS var resolves per theme).
+      return { background: 'hsl(var(--mm-border-subtle))' }
     }
 
     // Create gradient stops for each segment
@@ -34,8 +36,11 @@ export default function SegmentProgressBar({
     const segmentWidth = 100 / participantSegments.length
 
     participantSegments.forEach((segment, index) => {
-      const isCoded = segment.applied_codes.length > 0
-      const color = isCoded ? '#22c55e' : (isDark ? '#4b5563' : '#d1d5db') // green-500 or gray-600/gray-300
+      // #400/J-A: a universal-only segment is NOT coded; filter-aware so the bar
+      // matches the gauge when a per-coder filter hides a colleague's codes.
+      const isCoded = isSegmentCodedVisible(segment.applied_code_details, hiddenCoderIds)
+      // coded = mm-green, uncoded = neutral; CSS vars rebalance per theme.
+      const color = isCoded ? 'hsl(var(--mm-green))' : 'hsl(var(--mm-border-medium))'
       const startPercent = index * segmentWidth
       const endPercent = (index + 1) * segmentWidth
 
@@ -47,10 +52,10 @@ export default function SegmentProgressBar({
     return {
       background: `linear-gradient(to right, ${stops.join(', ')})`,
     }
-  }, [participantSegments, isDark])
+  }, [participantSegments, hiddenCoderIds])
 
   // Also calculate overall stats for debugging/verification
-  const codedCount = participantSegments.filter(s => s.applied_codes.length > 0).length
+  const codedCount = participantSegments.filter(s => isSegmentCodedVisible(s.applied_code_details, hiddenCoderIds)).length
   const totalCount = participantSegments.length
 
   return (

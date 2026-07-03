@@ -15,6 +15,15 @@ export interface SegmentExcerptInfo {
   note_preview: string | null
 }
 
+// Per-application coder attribution (Track J · J1). Sibling to the bare
+// applied_codes ID array, which stays for the optimistic-patch path.
+export interface AppliedCodeDetail {
+  code_id: number
+  user_id: number | null
+  attribution: string | null
+  is_universal: boolean
+}
+
 export interface Segment {
   id: number
   conversation_id: number
@@ -30,6 +39,7 @@ export interface Segment {
   group_id: number | null
   excerpts: SegmentExcerptInfo[]
   applied_codes: number[]
+  applied_code_details: AppliedCodeDetail[]
   attached_notes: SegmentNoteInfo[]
   is_merged: boolean  // True if this segment was created by merging (can be unmerged)
   is_split: boolean  // True if this segment was created by splitting (can be rejoined)

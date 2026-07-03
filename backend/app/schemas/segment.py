@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from datetime import datetime
-from .common import UTCTimestamp
+from .common import UTCTimestamp, AppliedCodeDetail
 
 from .excerpt import SegmentExcerptInfo
 
@@ -47,6 +47,7 @@ class SegmentResponse(BaseModel):
     group_id: int | None
     excerpts: list[SegmentExcerptInfo] = []
     applied_codes: list[int] = []  # List of code IDs
+    applied_code_details: list[AppliedCodeDetail] = []  # Per-application coder attribution (Track J · J1)
     attached_notes: list[SegmentNoteInfo] = []  # Notes attached to this segment
     is_merged: bool = False  # True if this segment was created by merging others (can be unmerged)
     is_split: bool = False  # True if this segment was created by splitting another (can be rejoined)

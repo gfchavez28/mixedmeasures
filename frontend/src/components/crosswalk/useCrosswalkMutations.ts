@@ -340,6 +340,7 @@ export function useCrosswalkMutations({
             latest_computed_at: null,
             total_valid_n: null,
             result_count: 0,
+            real_group_count: 0,
             last_accessed_at: null,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),

@@ -22,7 +22,7 @@ import {
   getGroupValues,
   sortGroupValues,
   isGroupedMetrics,
-  resolveChartColors,
+  resolveFrequencyBarColors,
   resolveGroupColors,
   resolveGroupTextColors,
 } from '@/lib/chart-data'
@@ -512,9 +512,12 @@ export default function FrequencyBarChart({
     return buildUnifiedLabels(metrics, shapeOpts)
   }, [metrics, hiddenLabels, reverseScale, isGrouped])
 
-  // Resolve per-response colors from palette + custom overrides
+  // Resolve per-response colors from palette + custom overrides.
+  // #417: numeric-valued frequency bars render in a single color (distinguished
+  // by axis position, not hue) unless the user picked an explicit palette/custom
+  // colors — see resolveFrequencyBarColors.
   const responseColors = useMemo(
-    () => resolveChartColors(unifiedLabels, fmt.colorPalette, fmt.customColors),
+    () => resolveFrequencyBarColors(unifiedLabels, fmt.colorPalette, fmt.customColors ?? {}),
     [unifiedLabels, fmt.colorPalette, fmt.customColors],
   )
 

@@ -38,6 +38,11 @@ export const exportApi = {
     if (params?.conversation_ids) searchParams.append('conversation_ids', params.conversation_ids)
     if (params?.participant_ids) searchParams.append('participant_ids', params.participant_ids)
     if (params?.source) searchParams.append('source', params.source)
+    // #499: carry the active coder/layer/document scope — the CSV must show
+    // the numbers on screen, not a silently-unfiltered variant.
+    if (params?.document_ids) searchParams.append('document_ids', params.document_ids)
+    if (params?.coder_ids) searchParams.append('coder_ids', params.coder_ids)
+    if (params?.layer_scope) searchParams.append('layer_scope', params.layer_scope)
     const qs = searchParams.toString()
     return downloadFromApi(`/projects/${projectId}/export/code-frequencies${qs ? '?' + qs : ''}`, 'code-frequencies.csv')
   },
@@ -58,6 +63,11 @@ export const exportApi = {
     if (params?.conversation_ids) searchParams.append('conversation_ids', params.conversation_ids)
     if (params?.participant_ids) searchParams.append('participant_ids', params.participant_ids)
     if (params?.source) searchParams.append('source', params.source)
+    // #512 (the #499 sibling): carry the active coder/layer/document scope —
+    // the CSV must show the matrix on screen, not a silently-unfiltered variant.
+    if (params?.document_ids) searchParams.append('document_ids', params.document_ids)
+    if (params?.coder_ids) searchParams.append('coder_ids', params.coder_ids)
+    if (params?.layer_scope) searchParams.append('layer_scope', params.layer_scope)
     const qs = searchParams.toString()
     return downloadFromApi(`/projects/${projectId}/export/code-cooccurrence${qs ? '?' + qs : ''}`, 'code-cooccurrence.csv')
   },

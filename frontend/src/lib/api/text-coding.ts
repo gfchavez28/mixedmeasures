@@ -1,5 +1,6 @@
 import api from './client'
 import { downloadFromApi } from './download'
+import type { AppliedCodeDetail } from './segments'
 
 // Text Coding types
 export interface TextQueryParams {
@@ -30,6 +31,7 @@ export interface TextCodingResponse {
   is_quoted: boolean
   excerpt_id: number | null
   applied_code_ids: number[]
+  applied_code_details: AppliedCodeDetail[]
   note_count: number
 }
 
@@ -88,6 +90,8 @@ export interface CodingProgress {
   by_column: { column_id: number; column_name: string | null; coded: number; total: number }[]
   overall_texts: { coded: number; total: number }
   overall_records: { coded: number; total: number }
+  /** Track J · J1 item 3c — per-coder coverage breakdown; present in multi-coder projects. */
+  by_coder?: { user_id: number; coded_texts: number; coded_records: number }[]
 }
 
 export interface TextCodingViewConfig {
@@ -112,7 +116,7 @@ export const textCodingApi = {
     api.get<RecordsListResponse>(`/projects/${pid}/text-coding/records`, { params }).then(r => r.data),
   recordContext: (pid: number, rowId: number) =>
     api.get<RecordContext>(`/projects/${pid}/text-coding/record-context/${rowId}`).then(r => r.data),
-  progress: (pid: number, params?: { column_ids?: string }) =>
+  progress: (pid: number, params?: { column_ids?: string; coder_id?: number }) =>
     api.get<CodingProgress>(`/projects/${pid}/text-coding/coding-progress`, { params }).then(r => r.data),
 
   // Coding

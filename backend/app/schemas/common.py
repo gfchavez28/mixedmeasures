@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from typing import Annotated
 
-from pydantic import PlainSerializer
+from pydantic import BaseModel, PlainSerializer
 
 
 def utc_wire(dt: datetime) -> str:
@@ -25,3 +25,21 @@ UTCTimestamp = Annotated[
     datetime,
     PlainSerializer(utc_wire, return_type=str, when_used="json"),
 ]
+
+
+class AppliedCodeDetail(BaseModel):
+    """Per-application coder attribution for a coded segment/value (Track J · J1).
+
+    Sibling to the bare ``applied_codes`` / ``applied_code_ids`` ID arrays: carries
+    *who* applied each code so the frontend can render attribution badges and run
+    the per-coder visibility filter. ``is_universal`` lets the same payload drive
+    the coder-scoped ``isSegmentCoded`` predicate (invariant J-A) without a second
+    lookup. Deliberately ADDITIVE — the ID arrays stay, so the conversation
+    optimistic-patch path (which treats ``applied_codes`` as ``number[]``) is
+    untouched. The document workbench enriches its existing ``SegmentCodeResponse``
+    objects with ``user_id`` instead of carrying a parallel list.
+    """
+    code_id: int
+    user_id: int | None = None
+    attribution: str | None = None
+    is_universal: bool = False

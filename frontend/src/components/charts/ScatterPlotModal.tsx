@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { X } from 'lucide-react'
 import type { ScatterPair } from '@/lib/api'
-import { jitterOffset } from '@/lib/chart-data'
+import { jitterOffset, formatPValue } from '@/lib/chart-data'
 import { useFocusTrap } from '@/hooks/useFocusTrap'
 
 interface ScatterPlotModalProps {
@@ -65,7 +65,7 @@ export default function ScatterPlotModal({
             <p className="text-xs text-mm-text-muted mt-0.5">
               n = {pair.n}
               {showRegLine && pair.n >= 3 && (
-                <> &middot; r = {reg.r.toFixed(3)}, R&sup2; = {reg.r_squared.toFixed(3)}, p = {reg.p < 0.001 ? '<.001' : reg.p.toFixed(3)}</>
+                <> &middot; r = {reg.r.toFixed(3)}, R&sup2; = {reg.r_squared.toFixed(3)}, {formatPValue(reg.p)}</>
               )}
             </p>
           </div>

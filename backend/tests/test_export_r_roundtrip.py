@@ -179,6 +179,26 @@ def _seed(db):
                             origin="human", stale=False))
     db.flush()
 
+    # #432 regression: a SECOND domain whose scale-score (domain_aggregate)
+    # metric is NOT also saved as a descriptives Material, so it reaches the
+    # export only via the human_metrics supplement loop. Pre-fix that loop
+    # emitted a bare `# Metric:` comment with no computation. Same 4 items as
+    # 9300 so the shared `domain_means` R object keeps an identical value (the
+    # existing domain_agg assertion stays valid) while the new path is exercised.
+    db.add(AnalysisDomain(id=9301, project_id=PID, name="Scale dup", sequence_order=1))
+    db.flush()
+    for i, cid in enumerate(SCALE_COLS):
+        db.add(AnalysisDomainMember(domain_id=9301, member_type="column",
+                                    member_id=cid, sequence_order=i))
+    db.flush()
+    db.add(MetricDefinition(id=9106, project_id=PID, name="Scale dup score",
+                            metric_type="domain_aggregate",
+                            input_source_type="dataset_domain", input_source_id=9301,
+                            config=json.dumps({"child_metric_type": "mean",
+                                               "child_config": {}, "aggregation": "mean"}),
+                            origin="human", stale=False))
+    db.flush()
+
     # result_data must be non-null: the export only emits tests the user has
     # actually run (computed), via `StatisticalTest.result_data != None`.
     db.add(StatisticalTest(id=9201, project_id=PID, test_type="independent_t_test",
@@ -198,8 +218,9 @@ def _seed(db):
     coll = MaterialCollection(id=9400, project_id=PID, name="Materials")
     db.add(coll)
     db.flush()
-    # Pearson correlation (mpg/hp/wt/disp) — drives `cor_vars`
-    db.add(Material(id=9401, collection_id=9400, material_type="correlation",
+    # Pearson correlation (mpg/hp/wt/disp) — drives `cor_vars` AND, as a
+    # correlation_matrix chart (#12a), the ggplot2 correlation heatmap.
+    db.add(Material(id=9401, collection_id=9400, material_type="correlation_matrix",
                     config=json.dumps({"column_ids": [MPG, HP, WT, DISP],
                                        "corr_type": "pearson"}),
                     auto_name="Correlations", source_tab="correlations",
@@ -230,6 +251,21 @@ def _seed(db):
                                        "domain_ids": [9300]}),
                     auto_name="Scale score", source_tab="descriptives",
                     display_order=3))
+    # Stacked bar (#12a): frequency distribution across the 4 Likert items.
+    db.add(Material(id=9406, collection_id=9400, material_type="stacked_bar",
+                    config=json.dumps({"metric_type": "frequency_distribution",
+                                       "column_ids": SCALE_COLS,
+                                       "display": "percentage"}),
+                    auto_name="Likert stacked", source_tab="descriptives",
+                    display_order=5))
+    # Line (#12a): ungrouped mean profile across the 4 Likert items — the
+    # per-item means average to the domain aggregate, so the chart's data
+    # object round-trips against a known tool number.
+    db.add(Material(id=9407, collection_id=9400, material_type="line",
+                    config=json.dumps({"metric_type": "mean",
+                                       "column_ids": SCALE_COLS}),
+                    auto_name="Likert means", source_tab="descriptives",
+                    display_order=6))
     db.flush()
     return db.query(User).filter(User.id == 1).one()
 
@@ -360,13 +396,14 @@ emit("scor_mpg_hp", cms[1, 2]); emit("scor_mpg_wt", cms[1, 3])
 # chi-square + Cramer's V: reuse the `cross_tab` the exported script created.
 ct <- suppressWarnings(chisq.test(cross_tab))
 emit("chisq", unname(ct$statistic)); emit("chisq_df", unname(ct$parameter))
-emit("cramers_v", sqrt(unname(ct$statistic) / (nrow(data) * (min(dim(cross_tab)) - 1))))
+# #495d: the table's own N (== nrow(data) on this complete single-dataset
+# fixture, but the emitted script now uses sum(cross_tab) — mirror it).
+emit("cramers_v", sqrt(unname(ct$statistic) / (sum(cross_tab) * (min(dim(cross_tab)) - 1))))
 
-# Cronbach: re-run psych::alpha on the scale items (source() proved it runs).
-# Column vector lifted verbatim from the exported script (avoids coupling to the
-# export's r_name lowercasing).
-al <- suppressWarnings(psych::alpha(.mm_num(data[, c(__SCALE_COLS__)]),
-                                    check.keys = FALSE))
+# Cronbach: re-run psych::alpha on the item frame the exported script built
+# (#495a: items are EG-collapsed + listwise-complete; frame name lifted from
+# the script so the runner tracks the export's naming).
+al <- suppressWarnings(psych::alpha(__SCALE_FRAME__, check.keys = FALSE))
 emit("cronbach", al$total$raw_alpha)
 
 # Split-half: reuse the `sh_r` / `sh_sb` objects the exported script created.
@@ -382,6 +419,14 @@ for (nm in names(tb)) emit(paste0("freq_", nm), tb[[nm]])
 
 # domain-aggregate scale score: reuse the `domain_means` object the script created.
 emit("domain_agg", mean(domain_means))
+
+# stacked bar (#12a): reuse the `sb_long` frequency table the chart code built.
+# Total count across all variables == rows * complete columns.
+emit("sb_total_count", sum(sb_long$count))
+
+# line (#12a): reuse the `line_data` object the ungrouped line chart built; the
+# mean of its per-item means is the domain aggregate (mean of per-column means).
+emit("line_grand_mean", mean(line_data$value))
 '''
 
 
@@ -389,13 +434,16 @@ def _run_r(setup_path: Path, workdir: Path) -> dict:
     # Lift the scale-item column vector straight from the exported script so the
     # runner matches whatever r_names the export emitted.
     script_text = setup_path.read_text(encoding="utf-8")
-    mobj = re.search(r"psych::alpha\(\.mm_num\(data\[, c\((.*?)\)\]\)", script_text)
+    # #495a: the export now builds an EG-collapsed, listwise-complete item
+    # frame and runs psych::alpha on it — lift the frame name so the runner
+    # reuses the object the sourced script created.
+    mobj = re.search(r"psych::alpha\((\w+), check\.keys = FALSE\)", script_text)
     assert mobj, "exported script did not emit a psych::alpha (Cronbach) call"
-    scale_cols = mobj.group(1)
+    scale_frame = mobj.group(1)
 
     runner = workdir / "runner.R"
     runner.write_text(
-        _RUNNER.replace("__SETUP__", setup_path.name).replace("__SCALE_COLS__", scale_cols),
+        _RUNNER.replace("__SETUP__", setup_path.name).replace("__SCALE_FRAME__", scale_frame),
         encoding="utf-8",
     )
     proc = subprocess.run(
@@ -441,7 +489,8 @@ def test_exported_script_reproduces_tool_results(db_session):
     scalar_keys = ("t_stat", "t_df", "anova_F", "anova_df1", "kw_H", "kw_df",
                    "mw_stat", "mw_p", "cor_mpg_hp", "cor_mpg_wt", "scor_mpg_hp",
                    "scor_mpg_wt", "chisq", "chisq_df", "cramers_v", "cronbach",
-                   "sh_r", "sh_sb", "wt_mean", "wt_sd", "domain_agg")
+                   "sh_r", "sh_sb", "wt_mean", "wt_sd", "domain_agg",
+                   "sb_total_count", "line_grand_mean")
     for key in scalar_keys:
         assert key in actual, f"R did not emit {key}; got {sorted(actual)}"
 
@@ -474,6 +523,22 @@ def test_exported_script_reproduces_tool_results(db_session):
     assert actual["wt_sd"] == pytest.approx(expected["wt_sd"], abs=0.001)
     assert actual["domain_agg"] == pytest.approx(expected["domain_agg"], abs=0.001)
 
+    # --- #12a chart code ran under source() and reproduced known tool numbers ---
+    # Stacked bar: 32 complete rows x 4 Likert columns = 128 tallied responses.
+    assert actual["sb_total_count"] == pytest.approx(32 * 4, abs=0.5)
+    # Line: the ungrouped per-item means average to the domain aggregate.
+    assert actual["line_grand_mean"] == pytest.approx(expected["domain_agg"], abs=0.001)
+    # Correlation heatmap: emitted only for correlation_matrix materials.
+    assert "ggplot(cor_long" in script_text, \
+        "correlation_matrix material must emit a ggplot2 correlation heatmap"
+
+    # --- #432: a domain_aggregate metric not saved as a Material now emits
+    # colMeans computation, not a bare comment. Material 9105 (via the materials
+    # loop) + human-metric 9106 (via the human_metrics loop) = 2 colMeans lines;
+    # pre-fix the human_metrics path emitted none, so this was 1. ---
+    assert script_text.count("<- colMeans") >= 2, \
+        "domain_aggregate metric without a Material must emit colMeans computation"
+
     # --- Tukey HSD: per-pair |diff| and adjusted p (matched by sorted group pair) ---
     assert expected["tukey"], "tool produced no Tukey comparisons"
     for (ga, gb), exp in expected["tukey"].items():
@@ -487,3 +552,164 @@ def test_exported_script_reproduces_tool_results(db_session):
         fkey = f"freq_{label}"
         assert fkey in actual, f"R missing frequency category {label}: {sorted(actual)}"
         assert actual[fkey] == pytest.approx(count, abs=0.5)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #494 / #495 (numbers-audit fix round A) — the audit-corpus classes the
+# original fixture never exercised: a label-less TEXT nominal grouping column,
+# recognized non-response labels in the data, and a CROSS-DATASET domain
+# reliability test (EG-stacked items).
+# ═══════════════════════════════════════════════════════════════════════════
+
+PID2 = 901
+
+
+def _seed_cross_dataset(db):
+    from app.models.equivalence_group import EquivalenceGroup
+    from app.services.statistical_tests import compute_statistical_test
+
+    db.add(Project(id=PID2, name="Audit Corpus RT", user_id=1))
+    db.flush()
+    ds1 = Dataset(id=9301, project_id=PID2, name="Site A")
+    ds2 = Dataset(id=9302, project_id=PID2, name="Site B")
+    db.add_all([ds1, ds2])
+    db.flush()
+
+    cols = {}
+    specs = [
+        (9310, 9301, "Site", "nominal", 0),     # label-less TEXT nominal (#494)
+        (9311, 9301, "A1", "ordinal", 1),
+        (9312, 9301, "A2", "ordinal", 2),
+        (9321, 9302, "B1", "ordinal", 0),
+        (9322, 9302, "B2", "ordinal", 1),
+    ]
+    for cid, dsid, name, ctype, seq in specs:
+        c = DatasetColumn(id=cid, dataset_id=dsid, column_code=name,
+                          column_name=name, column_text=name, column_type=ctype,
+                          sequence_order=seq, display_order=seq)
+        db.add(c)
+        cols[name] = c
+    db.flush()
+
+    # DS1: 8 rows — sites North/South + one refusal label (#495b), A-items 1–5
+    a_rows = [
+        ("North", 4, 5), ("North", 3, 4), ("North", 5, 5), ("South", 2, 2),
+        ("South", 3, 3), ("South", 4, 4), ("North", 4, 4),
+        ("Decline to state", 3, 3),
+    ]
+    for i, (site, a1, a2) in enumerate(a_rows, 1):
+        row = DatasetRow(id=9330 + i, dataset_id=9301, row_identifier=f"A{i}")
+        db.add(row)
+        db.flush()
+        db.add_all([
+            DatasetValue(row_id=row.id, column_id=9310, value_text=site),
+            DatasetValue(row_id=row.id, column_id=9311, value_text=str(a1),
+                         value_numeric=float(a1)),
+            DatasetValue(row_id=row.id, column_id=9312, value_text=str(a2),
+                         value_numeric=float(a2)),
+        ])
+    # DS2: 5 rows, B-items
+    for i, (b1, b2) in enumerate([(4, 4), (3, 3), (5, 4), (2, 3), (4, 5)], 1):
+        row = DatasetRow(id=9350 + i, dataset_id=9302, row_identifier=f"B{i}")
+        db.add(row)
+        db.flush()
+        db.add_all([
+            DatasetValue(row_id=row.id, column_id=9321, value_text=str(b1),
+                         value_numeric=float(b1)),
+            DatasetValue(row_id=row.id, column_id=9322, value_text=str(b2),
+                         value_numeric=float(b2)),
+        ])
+    db.flush()
+
+    # EG pairs A1≡B1, A2≡B2 + cross-dataset domain over all four
+    for i, (a, b) in enumerate([("A1", "B1"), ("A2", "B2")]):
+        eg = EquivalenceGroup(id=9360 + i, project_id=PID2,
+                              label=f"item {i+1}", sequence_order=i)
+        db.add(eg)
+        db.flush()
+        cols[a].equivalence_group_id = eg.id
+        cols[b].equivalence_group_id = eg.id
+    domain = AnalysisDomain(id=9361, project_id=PID2, name="Wellbeing X",
+                            sequence_order=0)
+    db.add(domain)
+    db.flush()
+    for i, name in enumerate(["A1", "A2", "B1", "B2"]):
+        db.add(AnalysisDomainMember(domain_id=9361, member_type="column",
+                                    member_id=cols[name].id, sequence_order=i))
+    db.flush()
+
+    test = StatisticalTest(id=9370, project_id=PID2, test_type="cronbachs_alpha",
+                           target_type="analysis_domain", target_id=9361,
+                           origin="human")
+    db.add(test)
+    db.flush()
+    compute_statistical_test(db, test)
+    tool_alpha = json.loads(test.result_data)["alpha"]
+    return db.get(User, 1), tool_alpha
+
+
+_RUNNER2 = '''
+options(warn = 1)
+source("__SETUP__")
+emit <- function(key, val) cat(sprintf("RT %s %.10g\\n", key, val))
+
+# #494: the label-less nominal column must carry DATA (it exported empty).
+tb <- table(data$site_a__site)
+emit("site_n_levels_observed", sum(tb > 0))
+emit("site_total", sum(tb))
+# #495b: the refusal label must NOT be a level with data (exported as missing).
+emit("site_has_refusal", as.numeric("Decline to state" %in% names(tb[tb > 0])))
+
+# #495a: the emitted EG-stacked item frame reproduces the tool's alpha.
+al <- suppressWarnings(psych::alpha(__SCALE_FRAME__, check.keys = FALSE))
+emit("cronbach", al$total$raw_alpha)
+emit("n_complete", nrow(__SCALE_FRAME__))
+'''
+
+
+@pytest.mark.skipif(shutil.which("Rscript") is None, reason="Rscript not available")
+def test_export_r_cross_dataset_nominal_and_na(db_session):
+    db = db_session
+    user, tool_alpha = _seed_cross_dataset(db)
+
+    raw = asyncio.run(_export_zip_bytes(PID2, user, db))
+    with tempfile.TemporaryDirectory() as d:
+        workdir = Path(d)
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            zf.extractall(workdir)
+        setup_name = next(p.name for p in workdir.iterdir() if p.suffix == ".R")
+        script_text = (workdir / setup_name).read_text(encoding="utf-8")
+
+        # #495c: factor levels in canonical order, refusal label absent.
+        assert '"Decline to state"' not in script_text, \
+            "recognized-N/A label leaked into factor levels"
+
+        mobj = re.search(r"psych::alpha\((\w+), check\.keys = FALSE\)", script_text)
+        assert mobj, "no items-frame alpha emitted for the cross-dataset domain"
+
+        runner = workdir / "runner.R"
+        runner.write_text(
+            _RUNNER2.replace("__SETUP__", setup_name)
+                    .replace("__SCALE_FRAME__", mobj.group(1)),
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [shutil.which("Rscript"), runner.name],
+            cwd=str(workdir), capture_output=True, text=True, timeout=300,
+        )
+        assert proc.returncode == 0, (
+            f"exported R script failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+        actual = {}
+        for line in proc.stdout.splitlines():
+            m = re.match(r"^RT (\w+)\s+([-\d.eE+]+)\s*$", line.strip())
+            if m:
+                actual[m.group(1)] = float(m.group(2))
+
+    # #494: the nominal column carries its 7 non-refusal values (8 rows - 1).
+    assert actual["site_total"] == pytest.approx(7, abs=0.5)
+    assert actual["site_n_levels_observed"] == pytest.approx(2, abs=0.5)
+    assert actual["site_has_refusal"] == 0
+    # #495a: pooled EG-stacked alpha reproduces the tool's displayed number.
+    assert actual["n_complete"] == pytest.approx(13, abs=0.5)  # 8 + 5 rows
+    assert actual["cronbach"] == pytest.approx(tool_alpha, abs=0.001)

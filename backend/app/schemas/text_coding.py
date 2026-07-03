@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
-from .common import UTCTimestamp
+from .common import UTCTimestamp, AppliedCodeDetail
 
 
 # ── Request schemas ─────────────────────────────────────────────────────────
@@ -14,6 +14,7 @@ class TextCodeRequest(BaseModel):
 class BulkCodeRequest(BaseModel):
     dataset_value_ids: list[int] = Field(..., min_length=1, max_length=5000)
     code_id: int
+    attribution: str | None = None
 
 
 class BulkRemoveCodeRequest(BaseModel):
@@ -60,6 +61,7 @@ class TextResponse(BaseModel):
     is_quoted: bool
     excerpt_id: int | None = None
     applied_code_ids: list[int]
+    applied_code_details: list[AppliedCodeDetail] = []  # Per-application coder attribution (Track J · J1)
     note_count: int
 
 
@@ -158,10 +160,22 @@ class ColumnProgressResponse(BaseModel):
     total: int
 
 
+class CodingProgressByCoderItem(BaseModel):
+    """Track J · J1 item 4 — per-coder coverage breakdown.
+
+    `coded_texts` = non-empty text values this coder applied a non-universal
+    code to; `coded_records` = distinct DatasetRows covered by those texts.
+    """
+    user_id: int
+    coded_texts: int
+    coded_records: int
+
+
 class CodingProgressResponse(BaseModel):
     by_column: list[ColumnProgressResponse]
     overall_texts: dict
     overall_records: dict
+    by_coder: list[CodingProgressByCoderItem] = []
 
 
 class TextCodingConfigResponse(BaseModel):

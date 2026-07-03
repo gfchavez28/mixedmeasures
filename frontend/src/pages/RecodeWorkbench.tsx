@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { useParams, useSearchParams, Link } from 'react-router-dom'
+import { SELECTED_ROW, SELECTED_TINT, SELECTED_SEGMENT } from '@/lib/selection'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { Star, WandSparkles, Copy, Plus, Trash2, ArrowUpDown, ChevronDown, ChevronRight, Layers, Link2 } from 'lucide-react'
@@ -409,7 +410,7 @@ function DefinitionCard({
   }
 
   const recodeTypeBadge = {
-    scale_map: { label: 'Scale Map', cls: 'bg-blue-50 text-blue-600 dark:bg-blue-950/30 dark:text-blue-300' },
+    scale_map: { label: 'Scale Map', cls: 'bg-mm-blue/12 text-mm-blue-text' },
     category_group: { label: 'Category', cls: 'bg-purple-50 text-purple-600 dark:bg-purple-950/30 dark:text-purple-300' },
     reverse: { label: 'Reverse', cls: 'bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-300' },
   }[definition.recode_type] || { label: definition.recode_type, cls: 'bg-mm-bg text-mm-text-muted' }
@@ -610,7 +611,7 @@ function NewDefinitionForm({
               key={t}
               onClick={() => setType(t)}
               className={`px-2 py-1 rounded text-xs font-medium border ${
-                type === t ? 'bg-blue-50 border-blue-300 text-blue-700 dark:bg-blue-950/30 dark:border-blue-700 dark:text-blue-300' : 'bg-mm-surface border-mm-border-subtle text-mm-text-muted'
+                type === t ? SELECTED_SEGMENT : 'bg-mm-surface border-mm-border-subtle text-mm-text-muted'
               }`}
             >
               {t === 'scale_map' ? 'Scale Map' : t === 'category_group' ? 'Category Group' : 'Reverse'}
@@ -1008,8 +1009,8 @@ export default function RecodeWorkbench() {
 
           {/* Bulk toolbar */}
           {bulkSelected.size > 0 && (
-            <div className="px-3 py-2 border-b bg-blue-50 dark:bg-blue-950/30 flex items-center gap-2">
-              <span className="text-xs text-blue-700 dark:text-blue-300">{bulkSelected.size} selected</span>
+            <div className="px-3 py-2 border-b bg-mm-blue/12 flex items-center gap-2">
+              <span className="text-xs text-mm-blue-text">{bulkSelected.size} selected</span>
               <select
                 value={bulkType}
                 onChange={e => setBulkType(e.target.value)}
@@ -1042,8 +1043,8 @@ export default function RecodeWorkbench() {
                   aria-current={isSelected ? 'true' : undefined}
                   onClick={(e) => handleColumnClick(q.id, e)}
                   className={`px-3 py-2 border-b cursor-pointer text-sm ${
-                    isSelected ? 'bg-blue-50 dark:bg-blue-950/30 border-l-2 border-l-blue-500' :
-                    isBulk ? 'bg-blue-50/50 dark:bg-blue-950/20' :
+                    isSelected ? SELECTED_ROW :
+                    isBulk ? SELECTED_TINT :
                     'hover:bg-mm-surface-hover'
                   }`}
                 >
@@ -1100,8 +1101,8 @@ export default function RecodeWorkbench() {
                       }
                       if (e.key === 'Escape') { e.preventDefault(); cancelHeaderEdit() }
                     }}
-                    className="text-sm font-semibold text-mm-text-secondary mb-0.5 w-full border border-blue-300 dark:border-blue-700 rounded px-1.5 py-0.5 bg-mm-surface outline-none focus:ring-1 focus:ring-ring"
-                    placeholder="Short label (optional)"
+                    className="text-sm font-semibold text-mm-text-secondary mb-0.5 w-full border border-mm-blue/50 rounded px-1.5 py-0.5 bg-mm-surface outline-none focus:ring-1 focus:ring-ring"
+                    placeholder="Short name (optional)"
                     maxLength={255}
                   />
                 ) : (
@@ -1110,7 +1111,7 @@ export default function RecodeWorkbench() {
                     className="text-sm font-semibold text-mm-text-secondary mb-0.5 cursor-text hover:bg-mm-surface-hover rounded px-1.5 py-0.5 -mx-1.5 inline-block"
                     title={selectedColumn.column_name ? `${selectedColumn.column_name} (click to edit)` : 'Click to add a short label for this variable'}
                   >
-                    {selectedColumn.column_name || <span className="text-mm-text-faint font-normal italic">Short label (optional)</span>}
+                    {selectedColumn.column_name || <span className="text-mm-text-faint font-normal italic">Short name (optional)</span>}
                   </p>
                 )}
                 {headerEditing === 'text' ? (
@@ -1129,7 +1130,7 @@ export default function RecodeWorkbench() {
                       }
                       if (e.key === 'Escape') { e.preventDefault(); cancelHeaderEdit() }
                     }}
-                    className="text-lg font-semibold text-mm-text w-full border border-blue-300 dark:border-blue-700 rounded px-1.5 py-0.5 bg-mm-surface outline-none focus:ring-1 focus:ring-ring"
+                    className="text-lg font-semibold text-mm-text w-full border border-mm-blue/50 rounded px-1.5 py-0.5 bg-mm-surface outline-none focus:ring-1 focus:ring-ring"
                     maxLength={500}
                   />
                 ) : (

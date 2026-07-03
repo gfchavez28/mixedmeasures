@@ -42,8 +42,11 @@ export default function SummaryStatsTable({
   if (data.length === 0) return null
 
   return (
-    <ScrollableTable role="table" aria-label="Summary statistics table">
-      <table className="border-collapse text-xs w-full">
+    <ScrollableTable>
+      <table className="border-collapse text-xs w-full" aria-label="Summary statistics">
+        <caption className="sr-only">
+          Descriptive summary statistics for each variable (sample size and distribution measures).
+        </caption>
         <thead className="sticky top-0 bg-mm-surface z-10">
           <tr>
             <th

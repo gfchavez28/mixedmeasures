@@ -37,6 +37,21 @@ export default tseslint.config(
       'react-hooks/set-state-in-effect': 'warn',
       'react-hooks/preserve-manual-memoization': 'warn',
       'react-hooks/immutability': 'warn',
+      // #481 — DESIGN.md §11: ban raw Tailwind neutral/blue palette utilities
+      // (always mm-*/shadcn tokens or lib/selection.ts). Status & entity palettes
+      // (amber/emerald/rose/purple/teal/orange/sky/indigo) stay allowed by design.
+      // Deliberate exceptions (entity-color maps, data-viz fills) carry an inline
+      // `// eslint-disable-next-line no-restricted-syntax -- <reason>`.
+      'no-restricted-syntax': ['error',
+        {
+          selector: "Literal[value=/\\b(?:blue|gray|slate|zinc|stone)-\\d/]",
+          message: 'Raw Tailwind palette banned (DESIGN.md §11) — use mm-*/shadcn tokens or lib/selection.ts.',
+        },
+        {
+          selector: "TemplateElement[value.raw=/\\b(?:blue|gray|slate|zinc|stone)-\\d/]",
+          message: 'Raw Tailwind palette banned (DESIGN.md §11) — use mm-*/shadcn tokens or lib/selection.ts.',
+        },
+      ],
     },
   },
 )

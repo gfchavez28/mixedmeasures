@@ -122,6 +122,36 @@ class TestExportRRunnable:
         r = _build(db_session)
         assert "cor(.mm_num(data[" in r
 
+    def test_codebook_comment_labels_usage_counts(self, db_session):
+        """#511: the codebook comment reports USAGE counts (facilitator
+        applications and dataset-value/response targets count), which is NOT
+        the Codebook view's facilitator-excluded segment count — label it
+        "uses" per the #500 wording, never "seg"/"segments".
+        """
+        from app.models.conversation import Conversation
+        from app.models.segment import Segment
+        from app.models.code import Code
+        from app.models.code_application import CodeApplication
+
+        db = db_session
+        user = _seed(db)
+        db.add(Conversation(id=760, project_id=760, name="Conv")); db.flush()
+        db.add(Segment(id=76001, conversation_id=760, sequence_order=0, text="hello"))
+        db.add(Code(id=7600, project_id=760, numeric_id=2, name="Access barriers",
+                    is_universal=False, is_active=True))
+        db.flush()
+        dv = db.query(DatasetValue).first()
+        db.add(CodeApplication(segment_id=76001, code_id=7600, user_id=1))
+        db.add(CodeApplication(dataset_value_id=dv.id, code_id=7600, user_id=1))
+        db.flush()
+
+        r = asyncio.run(_export_r_text(760, user, db))
+        codebook = r[r.index("---- Codebook"):]
+        # 1 segment + 1 response target = 2 uses
+        assert "Access barriers (2 uses)" in codebook
+        assert " seg)" not in codebook
+        assert "segments)" not in codebook
+
     def test_script_parses_in_R(self, db_session):
         rscript = shutil.which("Rscript")
         if not rscript:

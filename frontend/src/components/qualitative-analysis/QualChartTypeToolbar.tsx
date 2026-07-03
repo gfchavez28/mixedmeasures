@@ -1,4 +1,5 @@
 import { useRef, useCallback, useMemo, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { SELECTED_SEGMENT } from '@/lib/selection'
 import {
   Grid3x3,
   BarChart3,
@@ -87,7 +88,7 @@ export default function QualChartTypeToolbar({
               tabIndex={isActive ? 0 : -1}
               className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md transition-colors ${
                 isActive
-                  ? 'bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 font-medium'
+                  ? SELECTED_SEGMENT
                   : 'text-mm-text-muted hover:bg-mm-surface-hover hover:text-mm-text-secondary'
               }`}
               onClick={() => onChartTypeChange(btn.type)}

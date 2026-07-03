@@ -27,8 +27,15 @@ from ..models.code_application import CodeApplication
 from ..models.code_category import CodeCategory
 from ..models.statistical_test import StatisticalTest
 from ..models.materials import MaterialCollection, Material
+from ..models.segment import Segment
+from ..services.coding_layers import (
+    code_usage_count_expr,
+    non_consensus_filter,
+    visible_target_filter,
+)
 from ..services.metrics import resolve_input_source_labels
-from ..services.grouping import load_grouping_values
+from ..services.grouping import load_grouping_values, order_value_labels
+from ..services.dataset_import import _is_na
 from ..services.computed_columns import (
     parse as parse_expression,
     validate as validate_expression,
@@ -129,7 +136,11 @@ def _get_factor_mapping(
 
 
 def _get_observed_values(db: Session, column_id: int) -> list[str]:
-    """Get distinct non-null observed value_text values for a column, sorted alphabetically."""
+    """Distinct observed value_text values for a column, in the app's canonical
+    display order (#495c: `order_value_labels` — numeric-aware, so "8" < "10";
+    the old alphabetical sort gave R factor levels the #406 ordering) and with
+    recognized non-response labels dropped (#495b: they export as missing, so
+    they must not be factor levels either)."""
     results = (
         db.query(DatasetValue.value_text)
         .filter(
@@ -140,7 +151,7 @@ def _get_observed_values(db: Session, column_id: int) -> list[str]:
         .distinct()
         .all()
     )
-    return sorted([r[0] for r in results])
+    return order_value_labels([r[0] for r in results if not _is_na(r[0])])
 
 
 # Qualifying column types for R export
@@ -232,6 +243,10 @@ def _build_r_script(
     human_metric_labels: dict,
     stat_tests: list,
     quant_materials: list,
+    irr_coder_ids: list[int] | None = None,
+    irr_per_code: dict | None = None,
+    irr_code_names: dict | None = None,
+    na_blanked_count: int = 0,
 ) -> str:
     """Build the R script content. Returns the full script string with UTF-8 BOM."""
     now_utc = datetime.now(timezone.utc)
@@ -260,6 +275,7 @@ def _build_r_script(
     needs_dplyr = False
     needs_psych = False
     needs_ggplot2 = False
+    needs_irr = False
     toc_sections.append("Packages")
     r_lines.append("# ---- Packages ----")
     # #363: set a CRAN mirror before install.packages — under non-interactive R
@@ -294,6 +310,15 @@ def _build_r_script(
     r_lines.append("  if (is.data.frame(x)) as.data.frame(lapply(x, .mm_num))")
     r_lines.append("  else if (is.factor(x)) as.numeric(x)")
     r_lines.append("  else x")
+    r_lines.append("}")
+    r_lines.append("# First non-NA across equivalent columns (one item per record —")
+    r_lines.append("# mirrors Mixed Measures' equivalence-group collapse).")
+    r_lines.append(".mm_coalesce <- function(df) {")
+    r_lines.append("  m <- as.matrix(.mm_num(as.data.frame(df)))")
+    r_lines.append('  pick <- max.col(!is.na(m), ties.method = "first")')
+    r_lines.append("  v <- m[cbind(seq_len(nrow(m)), pick)]")
+    r_lines.append("  v[rowSums(!is.na(m)) == 0] <- NA")
+    r_lines.append("  v")
     r_lines.append("}")
     r_lines.append("")
 
@@ -849,6 +874,21 @@ def _build_r_script(
             metric_lines.append(f"sd(.mm_num(data${hm_r}), na.rm = TRUE)")
         elif hm.metric_type == "frequency_distribution":
             metric_lines.append(f"table(data${hm_r})")
+        elif (
+            hm.metric_type == "domain_aggregate"
+            and hm.input_source_type == "dataset_domain"
+        ):
+            # #432: a crosswalk scale-score (domain_aggregate) metric that was
+            # never *also* saved as a descriptives Material reaches the export
+            # only here. Emit the same colMeans computation the material path
+            # uses (round-trip-tested via _emit_domain_aggregate_r_lines)
+            # instead of leaving a bare `# Metric:` comment with no code.
+            members_by_ds = all_domain_members_by_dataset_map.get(
+                hm.input_source_id
+            )
+            metric_lines.extend(
+                _emit_domain_aggregate_r_lines(members_by_ds, hm_r)
+            )
         metric_lines.append("")
 
     if metric_lines:
@@ -863,53 +903,89 @@ def _build_r_script(
     for st in stat_tests:
         try:
             if st.test_type in ("cronbachs_alpha", "split_half"):
-                # Target is analysis_domain
+                # Target is analysis_domain. #495a: mirror the app's compute
+                # (statistical_tests.build_row_item_matrix + EG collapse):
+                # equivalence-group members become ONE item per record via
+                # coalesce, items ordered by sorted column id with EGs at
+                # first appearance, then LISTWISE deletion. The old emission
+                # ran psych::alpha over the raw stacked columns — on a
+                # cross-dataset domain every row is half-NA and R errors
+                # ("no complete element pairs") while the tool shows a number.
                 dom_name = all_domain_name_map.get(st.target_id)
-                dom_members = all_domain_members_map.get(st.target_id, [])
-                if not dom_name or not dom_members:
+                member_rows = (
+                    db.query(DatasetColumn.id, DatasetColumn.equivalence_group_id)
+                    .join(
+                        AnalysisDomainMember,
+                        AnalysisDomainMember.member_id == DatasetColumn.id,
+                    )
+                    .filter(
+                        AnalysisDomainMember.domain_id == st.target_id,
+                        AnalysisDomainMember.member_type == "column",
+                    )
+                    .all()
+                )
+                items: list[list[str]] = []  # each item = r_names to coalesce
+                eg_slot: dict[int, int] = {}
+                for col_id, eg_id in sorted(member_rows, key=lambda r: r[0]):
+                    meta = col_meta.get(col_id)
+                    if not meta:
+                        continue
+                    if eg_id is not None and eg_id in eg_slot:
+                        items[eg_slot[eg_id]].append(meta["r_name"])
+                        continue
+                    if eg_id is not None:
+                        eg_slot[eg_id] = len(items)
+                    items.append([meta["r_name"]])
+                if not dom_name or len(items) < 2:
                     test_lines.append(
-                        f"# Skipped {st.test_type}: domain {st.target_id} not found"
+                        f"# Skipped {st.test_type}: domain {st.target_id} "
+                        "not found or has fewer than 2 items"
                     )
                     test_lines.append("")
                     continue
                 dom_slug = _make_r_identifier(dom_name)
-                members_str = ", ".join(f'"{m}"' for m in dom_members)
+                frame = f"{dom_slug}_items"
 
-                if st.test_type == "cronbachs_alpha":
-                    needs_psych = True
-                    test_lines.append(
-                        f"# Cronbach's alpha: {_escape_r_string(dom_name)}"
+                needs_psych = True
+                label = (
+                    "Cronbach's alpha"
+                    if st.test_type == "cronbachs_alpha"
+                    else "Split-half reliability"
+                )
+                test_lines.append(f"# {label}: {_escape_r_string(dom_name)}")
+                test_lines.append(
+                    "# Items are equivalence groups (one value per record from"
+                )
+                test_lines.append(
+                    "# whichever equivalent column was answered), listwise-complete —"
+                )
+                test_lines.append("# reproducing Mixed Measures' computation.")
+                test_lines.append(f"{frame} <- data.frame(")
+                item_exprs = []
+                for i, cols in enumerate(items, 1):
+                    cols_str = ", ".join(f'"{c}"' for c in cols)
+                    item_exprs.append(
+                        f"  item_{i} = .mm_coalesce(data[, c({cols_str}), drop = FALSE])"
                     )
+                test_lines.append(",\n".join(item_exprs))
+                test_lines.append(")")
+                test_lines.append(
+                    f"{frame} <- {frame}[stats::complete.cases({frame}), ]"
+                )
+                if st.test_type == "cronbachs_alpha":
                     test_lines.append(
-                        f'psych::alpha(.mm_num(data[, c({members_str})]), check.keys = FALSE)'
+                        f"psych::alpha({frame}, check.keys = FALSE)"
                     )
                 else:  # split_half
-                    needs_psych = True
-                    test_lines.append(
-                        f"# Split-half reliability: {_escape_r_string(dom_name)}"
-                    )
                     test_lines.append("# Odd-even split, Spearman-Brown corrected")
                     test_lines.append(
-                        f"sh_items <- c({members_str})"
+                        f"sh_h1 <- rowMeans({frame}[c(TRUE, FALSE)])"
                     )
                     test_lines.append(
-                        "sh_half1 <- sh_items[c(TRUE, FALSE)]"
+                        f"sh_h2 <- rowMeans({frame}[c(FALSE, TRUE)])"
                     )
-                    test_lines.append(
-                        "sh_half2 <- sh_items[c(FALSE, TRUE)]"
-                    )
-                    test_lines.append(
-                        "sh_h1 <- rowMeans(.mm_num(data[, sh_half1]), na.rm = FALSE)"
-                    )
-                    test_lines.append(
-                        "sh_h2 <- rowMeans(.mm_num(data[, sh_half2]), na.rm = FALSE)"
-                    )
-                    test_lines.append(
-                        'sh_r <- cor(sh_h1, sh_h2, use = "complete.obs")'
-                    )
-                    test_lines.append(
-                        "sh_sb <- (2 * sh_r) / (1 + sh_r)"
-                    )
+                    test_lines.append("sh_r <- cor(sh_h1, sh_h2)")
+                    test_lines.append("sh_sb <- (2 * sh_r) / (1 + sh_r)")
                     test_lines.append(
                         'cat("Split-half r:", sh_r, "Spearman-Brown:", sh_sb, "\\n")'
                     )
@@ -1035,6 +1111,48 @@ def _build_r_script(
                     rc_lines.append(
                         f"# Bonferroni correction: multiply p-values by {len(var_r_names) * (len(var_r_names) - 1) // 2}"
                     )
+            if pe.material_type == "correlation_matrix":
+                # #12a: ggplot2 correlation-matrix heatmap (the tile viz the
+                # app renders). Reuses cor_vars + corr_type emitted just above;
+                # uses literal gradient colors (mm_default_colors isn't defined
+                # until the later Charts section).
+                needs_ggplot2 = True
+                rc_lines.append("# Correlation heatmap")
+                rc_lines.append(
+                    f"cor_mat <- cor(.mm_num(data[, cor_vars]),"
+                    f' use = "pairwise.complete.obs", method = "{corr_type}")'
+                )
+                rc_lines.append("cor_long <- as.data.frame(as.table(cor_mat))")
+                rc_lines.append('names(cor_long) <- c("Var1", "Var2", "r")')
+                rc_lines.append(
+                    "ggplot(cor_long, aes(x = Var1, y = Var2, fill = r)) +"
+                )
+                rc_lines.append('  geom_tile(color = "white") +')
+                rc_lines.append(
+                    '  geom_text(aes(label = sprintf("%.2f", r)), size = 3) +'
+                )
+                rc_lines.append(
+                    '  scale_fill_gradient2(low = "#2563eb", mid = "white",'
+                )
+                rc_lines.append(
+                    '                       high = "#dc2626", midpoint = 0,'
+                    " limits = c(-1, 1)) +"
+                )
+                heat_labs = ["x = NULL", "y = NULL"]
+                corr_title = pe_cfg.get("title")
+                if corr_title:
+                    heat_labs.insert(
+                        0, f'title = "{_escape_r_string(corr_title)}"'
+                    )
+                rc_lines.append(f"  labs({', '.join(heat_labs)}) +")
+                rc_lines.append("  theme_minimal() +")
+                rc_lines.append(
+                    "  theme(axis.text.x = element_text(angle = 45, hjust = 1))"
+                )
+                corr_slug = _slugify(pe_name, max_len=40)
+                rc_lines.append(
+                    f'# ggsave("{corr_slug}.pdf", width = 7, height = 6)'
+                )
             rc_lines.append("")
 
         elif pe.source_tab == "comparisons":
@@ -1168,9 +1286,10 @@ def _build_r_script(
         xtab_lines.append(f"cross_tab <- table(data${row_r}, data${col_r})")
         xtab_lines.append("print(cross_tab)")
         xtab_lines.append("chisq.test(cross_tab)")
-        xtab_lines.append("# Cramer's V")
+        xtab_lines.append("# Cramer's V — denominator is the TABLE's own N (#495d:")
+        xtab_lines.append("# nrow(data) counted other datasets' rows and missing pairs)")
         xtab_lines.append(
-            "sqrt(chisq.test(cross_tab)$statistic / (nrow(data) * (min(dim(cross_tab)) - 1)))"
+            "sqrt(chisq.test(cross_tab)$statistic / (sum(cross_tab) * (min(dim(cross_tab)) - 1)))"
         )
         xtab_lines.append("")
 
@@ -1180,7 +1299,10 @@ def _build_r_script(
         r_lines.extend(xtab_lines)
 
     # Charts section (ggplot2)
-    _VISUAL_CHART_TYPES = {"horizontal_bar", "vertical_bar", "heatmap", "dumbbell"}
+    _VISUAL_CHART_TYPES = {
+        "horizontal_bar", "vertical_bar", "heatmap", "dumbbell",
+        "stacked_bar", "line",
+    }
     _HEATMAP_GRADIENT_HIGH = {
         "green": "#16a34a", "blue": "#2563eb", "red": "#dc2626",
         "purple": "#7c3aed", "amber": "#d97706",
@@ -1243,6 +1365,7 @@ def _build_r_script(
         custom_order = pe_cfg.get("custom_order")
         hidden_responses = pe_cfg.get("hiddenResponseOptions") or []
         exclude_vals = pe_cfg.get("exclude_values") or []
+        display = pe_cfg.get("display", "percentage")
         heatmap_preset = fmt.get("heatmapPreset", "green")
         base_size = fmt.get("axisFontSize", 12)
         title_size = fmt.get("titleFontSize", 16)
@@ -1601,6 +1724,161 @@ def _build_r_script(
                 )
                 chart_lines.append("")
 
+            # ---------- STACKED BAR (#12a) ----------
+            elif chart_type == "stacked_bar" and mt == "frequency_distribution":
+                col_r_list = [t[1] for t in targets if t[0] == "column"]
+                if not col_r_list:
+                    chart_lines.append("# Skipped: no columns resolved")
+                    chart_lines.append("")
+                    continue
+                cols_str = ", ".join(f'"{c}"' for c in col_r_list)
+                chart_lines.append(f"sb_cols <- c({cols_str})")
+                chart_lines.append(
+                    "sb_long <- do.call(rbind, lapply(sb_cols, function(col) {"
+                )
+                chart_lines.append("  tbl <- table(data[[col]])")
+                chart_lines.append("  data.frame(variable = col, value = names(tbl),")
+                chart_lines.append("             count = as.numeric(tbl),")
+                chart_lines.append(
+                    "             pct = as.numeric(prop.table(tbl)) * 100,"
+                )
+                chart_lines.append("             stringsAsFactors = FALSE)")
+                chart_lines.append("}))")
+                if hidden_responses:
+                    hr_str = ", ".join(
+                        f'"{_escape_r_string(v)}"' for v in hidden_responses
+                    )
+                    chart_lines.append(
+                        f"sb_long <- sb_long[!(sb_long$value %in% c({hr_str})), ]"
+                    )
+                if exclude_vals:
+                    ev_str = ", ".join(
+                        f'"{_escape_r_string(v)}"' for v in exclude_vals
+                    )
+                    chart_lines.append(
+                        f"sb_long <- sb_long[!(sb_long$value %in% c({ev_str})), ]"
+                    )
+                if sort_order == "custom" and custom_order:
+                    co_str = ", ".join(
+                        f'"{_escape_r_string(v)}"' for v in custom_order
+                    )
+                    chart_lines.append(
+                        f"sb_long$value <- factor(sb_long$value,"
+                        f" levels = c({co_str}))"
+                    )
+                y_field = "count" if display == "count" else "pct"
+                y_label = '"Count"' if display == "count" else '"Percentage"'
+                chart_lines.append("")
+                chart_lines.append(
+                    f"ggplot(sb_long, aes(x = variable, y = {y_field},"
+                    " fill = value)) +"
+                )
+                chart_lines.append("  geom_col() +")
+                chart_lines.append("  coord_flip() +")
+                labs_parts = ["x = NULL", f"y = {y_label}", 'fill = "Response"']
+                if title:
+                    labs_parts.insert(0, f'title = "{_escape_r_string(title)}"')
+                if subtitle:
+                    labs_parts.append(f'subtitle = "{_escape_r_string(subtitle)}"')
+                if footnote:
+                    labs_parts.append(f'caption = "{_escape_r_string(footnote)}"')
+                chart_lines.append(f"  labs({', '.join(labs_parts)}) +")
+                chart_lines.append(f"  theme_minimal(base_size = {base_size})")
+                slug = _slugify(pe_name, max_len=40)
+                chart_lines.append(
+                    f'# ggsave("{slug}.pdf", width = 8, height = 6)'
+                )
+                chart_lines.append("")
+
+            # ---------- LINE CHART (#12a) ----------
+            elif chart_type == "line":
+                col_r_list = [t[1] for t in targets if t[0] == "column"]
+                if mt != "mean" or not col_r_list:
+                    # Proportion/frequency line and domain-only targets fall back
+                    # to the values already emitted in the metric section.
+                    chart_lines.append(
+                        f"# Line chart for metric_type '{mt}' not plotted;"
+                        " see the metric computation section for the values"
+                    )
+                    chart_lines.append("")
+                    continue
+                cols_str = ", ".join(f'"{c}"' for c in col_r_list)
+                chart_lines.append(f"line_cols <- c({cols_str})")
+                if grp_r:
+                    chart_lines.append(
+                        "line_data <- do.call(rbind, lapply(line_cols,"
+                        " function(col) {"
+                    )
+                    chart_lines.append("  agg <- aggregate(.mm_num(data[[col]]),")
+                    chart_lines.append(
+                        f"                   by = list(group = data${grp_r}),"
+                    )
+                    chart_lines.append(
+                        "                   FUN = mean, na.rm = TRUE)"
+                    )
+                    chart_lines.append(
+                        "  data.frame(variable = col, group = agg$group,"
+                        " value = agg$x, stringsAsFactors = FALSE)"
+                    )
+                    chart_lines.append("}))")
+                    chart_lines.append(
+                        "line_data$variable <- factor(line_data$variable,"
+                        " levels = line_cols)"
+                    )
+                    chart_lines.append("")
+                    chart_lines.append(
+                        "ggplot(line_data, aes(x = variable, y = value,"
+                    )
+                    chart_lines.append(
+                        "                      color = factor(group),"
+                        " group = group)) +"
+                    )
+                    chart_lines.append("  geom_line() +")
+                    chart_lines.append(f"  geom_point(size = {point_size}) +")
+                else:
+                    chart_lines.append("line_data <- data.frame(")
+                    chart_lines.append(
+                        "  variable = factor(line_cols, levels = line_cols),"
+                    )
+                    chart_lines.append(
+                        "  value = sapply(line_cols, function(col)"
+                    )
+                    chart_lines.append(
+                        "    mean(.mm_num(data[[col]]), na.rm = TRUE))"
+                    )
+                    chart_lines.append(")")
+                    chart_lines.append("")
+                    chart_lines.append(
+                        "ggplot(line_data, aes(x = variable, y = value,"
+                        " group = 1)) +"
+                    )
+                    chart_lines.append(
+                        "  geom_line(color = mm_default_colors[1]) +"
+                    )
+                    chart_lines.append(
+                        f"  geom_point(size = {point_size},"
+                        " color = mm_default_colors[1]) +"
+                    )
+                if ref_line is not None:
+                    chart_lines.append(
+                        f"  geom_hline(yintercept = {ref_line},"
+                        ' linetype = "dashed", color = "#9ca3af") +'
+                    )
+                labs_parts = ["x = NULL", 'y = "Mean"']
+                if title:
+                    labs_parts.insert(0, f'title = "{_escape_r_string(title)}"')
+                if subtitle:
+                    labs_parts.append(f'subtitle = "{_escape_r_string(subtitle)}"')
+                if footnote:
+                    labs_parts.append(f'caption = "{_escape_r_string(footnote)}"')
+                chart_lines.append(f"  labs({', '.join(labs_parts)}) +")
+                chart_lines.append(f"  theme_minimal(base_size = {base_size})")
+                slug = _slugify(pe_name, max_len=40)
+                chart_lines.append(
+                    f'# ggsave("{slug}.pdf", width = 8, height = 6)'
+                )
+                chart_lines.append("")
+
             else:
                 chart_lines.append(
                     f"# Chart type '{chart_type}' with metric_type '{mt}'"
@@ -1659,6 +1937,39 @@ def _build_r_script(
             )
         r_lines.append("")
 
+    # Inter-rater reliability (Track J · J2-5, M-4). The FIRST inferential coding
+    # statistic in the R export: per code, re-derive the tool's κ/α/% from a
+    # coder×unit matrix CSV via the `irr` package, so the export reproduces the
+    # numbers rather than restating them. Self-gated on the SAME condition as
+    # compute_irr.available (≥2 roster coders with shared coding). Must precede the
+    # package finalization below so `needs_irr` can pull in `irr`.
+    if irr_coder_ids and len(irr_coder_ids) >= 2 and irr_per_code:
+        needs_irr = True
+        coder_cols_r = ", ".join(f'"coder_{cid}"' for cid in irr_coder_ids)
+        toc_sections.append("Inter-rater reliability")
+        r_lines.append("# ---- Inter-rater reliability (intercoder agreement) ----")
+        r_lines.append("# Per code, over the human coder roster (Option B source-level")
+        r_lines.append("# engagement). Krippendorff's alpha (any n), plus Cohen's kappa +")
+        r_lines.append("# percent agreement when exactly 2 coders. Reproduces the tool's IRR.")
+        r_lines.append(f'irr_raw <- read_csv("{project_slug}_irr.csv", na = c("", "NA"))')
+        r_lines.append(f"irr_coder_cols <- c({coder_cols_r})")
+        r_lines.append("for (cid in unique(irr_raw$code_id)) {")
+        r_lines.append("  rows_c <- irr_raw[irr_raw$code_id == cid, , drop = FALSE]")
+        r_lines.append("  cname <- as.character(rows_c$code_name[1])")
+        r_lines.append("  m <- as.matrix(rows_c[, irr_coder_cols, drop = FALSE])")
+        r_lines.append('  storage.mode(m) <- "numeric"')
+        r_lines.append('  a <- kripp.alpha(t(m), method = "nominal")$value')
+        r_lines.append("  k <- NA; ag <- NA")
+        r_lines.append("  if (ncol(m) == 2) {")
+        r_lines.append("    dc <- m[stats::complete.cases(m), , drop = FALSE]")
+        r_lines.append("    if (nrow(dc) > 0) { k <- kappa2(dc)$value; ag <- agree(dc)$value / 100 }")
+        r_lines.append("  }")
+        r_lines.append('  cat(sprintf("IRR\\tcode=%s\\talpha=%.6f\\tkappa=%s\\tagree=%s\\tname=%s\\n",')
+        r_lines.append('              cid, a, ifelse(is.na(k), "NA", sprintf("%.6f", k)),')
+        r_lines.append('              ifelse(is.na(ag), "NA", sprintf("%.6f", ag)), cname))')
+        r_lines.append("}")
+        r_lines.append("")
+
     # Update required_packages based on analysis section flags
     if needs_dplyr:
         required_packages.append("dplyr")
@@ -1666,6 +1977,8 @@ def _build_r_script(
         required_packages.append("psych")
     if needs_ggplot2:
         required_packages.append("ggplot2")
+    if needs_irr:
+        required_packages.append("irr")
     pkgs_str = ", ".join(f'"{p}"' for p in required_packages)
     r_lines[pkg_line_index] = f"required_packages <- c({pkgs_str})"
 
@@ -1676,6 +1989,12 @@ def _build_r_script(
             f"# Dataset '{_escape_r_string(ds_name)}' skipped: no qualifying columns"
         )
     all_notes.extend(script_notes)
+    if na_blanked_count:
+        all_notes.append(
+            f"# {na_blanked_count} recognized non-response value(s) "
+            '("N/A", "Don\'t know", refusal labels) exported as missing — '
+            "matching how the app's analyses treat them (#381/#384)"
+        )
 
     if all_notes:
         toc_sections.append("Notes")
@@ -1692,9 +2011,13 @@ def _build_r_script(
         code_seg_counts: dict[int, int] = {}
         if qual_codes:
             seg_count_rows = db.query(
-                CodeApplication.code_id, func.count(CodeApplication.id)
+                CodeApplication.code_id, code_usage_count_expr()
+            ).outerjoin(
+                Segment, CodeApplication.segment_id == Segment.id
             ).filter(
-                CodeApplication.code_id.in_([c.id for c in qual_codes])
+                CodeApplication.code_id.in_([c.id for c in qual_codes]),
+                non_consensus_filter(),
+                visible_target_filter(),  # #500
             ).group_by(CodeApplication.code_id).all()
             code_seg_counts = dict(seg_count_rows)
 
@@ -1720,10 +2043,14 @@ def _build_r_script(
                         code_seg_counts.get(c.id, 0)
                         for c in cat_codes_map.get(cat.id, [])
                     )
-                    r_lines.append(f"{indent}{cat.name} ({cat_total} segments)")
+                    # #511: these are USAGE counts (facilitator-included, and
+                    # dataset-value/response targets count) — label them per
+                    # the #500 wording, never "seg"/"segments", which is the
+                    # Codebook view's different (facilitator-excluded) figure.
+                    r_lines.append(f"{indent}{cat.name} ({cat_total} uses)")
                     for code in cat_codes_map.get(cat.id, []):
-                        seg = code_seg_counts.get(code.id, 0)
-                        r_lines.append(f"{indent}    - {code.name} ({seg} seg)")
+                        uses = code_seg_counts.get(code.id, 0)
+                        r_lines.append(f"{indent}    - {code.name} ({uses} uses)")
                     write_category_tree(cat.id, indent_level + 1)
 
             write_category_tree(None, 0)
@@ -1733,16 +2060,16 @@ def _build_r_script(
         if universals:
             r_lines.append("#   Universal Codes:")
             for code in universals:
-                seg = code_seg_counts.get(code.id, 0)
-                r_lines.append(f"#       - {code.name} ({seg} seg)")
+                uses = code_seg_counts.get(code.id, 0)
+                r_lines.append(f"#       - {code.name} ({uses} uses)")
 
         # Uncategorized codes
         uncategorized = [c for c in qual_codes if not c.is_universal and c.category_id is None]
         if uncategorized:
             r_lines.append("#   Uncategorized:")
             for code in uncategorized:
-                seg = code_seg_counts.get(code.id, 0)
-                r_lines.append(f"#       - {code.name} ({seg} seg)")
+                uses = code_seg_counts.get(code.id, 0)
+                r_lines.append(f"#       - {code.name} ({uses} uses)")
 
         r_lines.append("")
 
@@ -2077,6 +2404,12 @@ async def export_r_data(
         m for m in r_materials if not m.material_type.startswith("qual_")
     ]
 
+    # Inter-rater reliability matrices (Track J · J2-5, M-4) — all-roster (no
+    # coder_ids filter); the exported R re-derives κ/α/% from these. Gated below
+    # on the same condition as compute_irr.available.
+    from ..services.irr import build_irr_matrices
+    irr_coder_ids, irr_code_names, irr_per_code = build_irr_matrices(db, project_id)
+
     # ── Step 8: Assemble CSV ─────────────────────────────────────────────
     csv_output = io.StringIO()
     csv_output.write("\ufeff")  # UTF-8 BOM
@@ -2095,7 +2428,21 @@ async def export_r_data(
     writer.writerow(header)
 
     n_records = 0
+    na_blanked_count = 0
     fallback_counters: dict[int, int] = defaultdict(int)
+
+    def _text_cell(vals):
+        """Text emission with #495b semantics: recognized non-response labels
+        ("N/A", "Don't know", refusals) are missing EVERYWHERE in the app
+        (#381/#384), so they export as empty cells — otherwise R would keep
+        them as factor groups the tool's analyses exclude."""
+        nonlocal na_blanked_count
+        if not vals or vals[0] is None:
+            return ""
+        if _is_na(vals[0]):
+            na_blanked_count += 1
+            return ""
+        return csv_safe(vals[0])
 
     for row_obj, p_identifier, p_role in row_data:
         n_records += 1
@@ -2114,14 +2461,20 @@ async def export_r_data(
             csv_row += [csv_safe(p_identifier or ""), csv_safe(p_role or "")]
 
         row_values = value_pivot.get(row_obj.id, {})
+
         for m in demo_cols:
-            vals = row_values.get(m["col"].id)
             # Demographic value_text is free-form respondent input; defang.
-            csv_row.append(csv_safe(vals[0]) if vals and vals[0] is not None else "")
+            csv_row.append(_text_cell(row_values.get(m["col"].id)))
 
         for m in item_cols:
             vals = row_values.get(m["col"].id)
-            if vals and vals[1] is not None:
+            if m["col"].column_type == ColumnType.NOMINAL:
+                # #494: nominal columns are TEXT-valued (value_numeric is None)
+                # — the numeric-only emission wrote an all-empty column while
+                # the script defined its text factor levels, so every R
+                # analysis on the column errored or silently lost it.
+                csv_row.append(_text_cell(vals))
+            elif vals and vals[1] is not None:
                 csv_row.append(vals[1])
             else:
                 csv_row.append("")
@@ -2135,6 +2488,21 @@ async def export_r_data(
                 csv_row.append("")
 
         writer.writerow(csv_row)
+
+    # IRR matrices CSV (Track J · J2-5, M-4) — long format the R block loops over:
+    # one row per (code, in-play unit); coder columns hold 0/1, blank = NA. Gated
+    # identically to the R section emission so the file and the read_csv agree.
+    irr_csv_content = None
+    if len(irr_coder_ids) >= 2 and irr_per_code:
+        irr_io = io.StringIO()
+        irr_io.write("\ufeff")  # UTF-8 BOM (readr strips it)
+        irr_writer = csv.writer(irr_io, lineterminator="\n")
+        irr_writer.writerow(["code_id", "code_name"] + [f"coder_{cid}" for cid in irr_coder_ids])
+        for code_id, rows in irr_per_code.items():
+            cname = irr_code_names.get(code_id, str(code_id))
+            for row in rows:
+                irr_writer.writerow([code_id, csv_safe(cname)] + ["" if v is None else v for v in row])
+        irr_csv_content = irr_io.getvalue()
 
     # ── Step 9: Generate R script ────────────────────────────────────────
     project_slug = _slugify(project.name, max_len=40)
@@ -2162,6 +2530,10 @@ async def export_r_data(
         human_metric_labels=human_metric_labels,
         stat_tests=stat_tests,
         quant_materials=quant_materials,
+        irr_coder_ids=irr_coder_ids,
+        irr_per_code=irr_per_code,
+        irr_code_names=irr_code_names,
+        na_blanked_count=na_blanked_count,
     )
 
     # ── Step 10: ZIP & stream ────────────────────────────────────────────
@@ -2169,6 +2541,8 @@ async def export_r_data(
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"{project_slug}_data.csv", csv_output.getvalue())
         zf.writestr(f"{project_slug}_setup.R", r_script)
+        if irr_csv_content is not None:
+            zf.writestr(f"{project_slug}_irr.csv", irr_csv_content)
     zip_buffer.seek(0)
 
     date_str = datetime.now(timezone.utc).strftime("%Y%m%d")

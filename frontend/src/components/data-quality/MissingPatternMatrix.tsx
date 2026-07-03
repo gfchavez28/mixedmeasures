@@ -43,7 +43,7 @@ export default function MissingPatternMatrix({ data }: MissingPatternMatrixProps
   return (
     <div>
       {truncated && (
-        <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-md bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 text-xs">
+        <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-md bg-mm-blue/12 border border-mm-blue/30 text-mm-blue-text text-xs">
           <Info className="w-3.5 h-3.5 flex-shrink-0" />
           <span>Showing top {patterns.length} of {n_unique_patterns} unique patterns.</span>
         </div>
@@ -86,7 +86,7 @@ export default function MissingPatternMatrix({ data }: MissingPatternMatrixProps
                     className={`px-1 py-1 border border-mm-border-subtle ${
                       isMissing
                         ? 'bg-red-400/70 dark:bg-red-500/50'
-                        : 'bg-blue-50 dark:bg-blue-950/20'
+                        : 'bg-mm-blue/10'
                     }`}
                     title={`${column_labels[j]}: ${isMissing ? 'Missing' : 'Observed'}`}
                     aria-label={`${column_labels[j]}: ${isMissing ? 'Missing' : 'Observed'}`}
@@ -141,7 +141,7 @@ export default function MissingPatternMatrix({ data }: MissingPatternMatrixProps
           <span>Missing</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded-sm bg-blue-50 dark:bg-blue-950/20 border border-mm-border-subtle" />
+          <div className="w-3 h-3 rounded-sm bg-mm-blue/10 border border-mm-border-subtle" />
           <span>Observed</span>
         </div>
       </div>

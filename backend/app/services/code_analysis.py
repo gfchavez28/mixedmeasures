@@ -21,6 +21,8 @@ from ..models.speaker import Speaker
 from ..models.participant import Participant
 from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, ColumnType
 from ..models.excerpt import Excerpt
+from .coding_layers import LAYER_CONSENSUS, layer_origin_filter, non_consensus_filter
+from .grouping import order_value_labels
 
 # ── Rounding precision constants ─────────────────────────────────────────────
 DISPLAY_PERCENTAGE_PRECISION = 1  # round(x, 1) for display percentages (e.g. 42.9%)
@@ -34,6 +36,33 @@ def _get_universal_code_ids(db: Session, project_id: int) -> set[int]:
     )
 
 
+def _coder_filter(query, coder_ids: list[int] | None, layer_scope: str | None = None):
+    """Track J · J1/J2 — scope a `CodeApplication` analysis query to a coder layer.
+
+    Two responsibilities, both on `CodeApplication`, single-sourced HERE so every
+    count/frequency/co-occurrence surface in this module is layer-correct:
+      - **Layer selection (J2-C, Slab 7):** `layer_origin_filter(layer_scope)` —
+        `layer_scope='consensus'` selects ONLY the derived consensus layer;
+        otherwise (the `'human'` default) excludes consensus (the J2-B guard). The
+        consensus layer is a single synthetic coder, so a `coder_ids` restriction
+        is meaningless there and is skipped.
+      - **J1 coder scope (human layer only):** `coder_ids` None/empty → all
+        (non-consensus) coders; otherwise restrict to the selected coders.
+
+    Apply ONLY to queries that count/join `CodeApplication` (frequency numerators,
+    coded denominators, co-occurrence) — NEVER to the segment/participant-universe
+    denominators (e.g. total participants who spoke) or the display "what codes are
+    on this unit" queries (codes_by_seg / codes_by_dv), which must stay all-coder.
+    The `~code_id.in_(universal_ids)` exclusion is orthogonal and stays put.
+    """
+    query = query.filter(layer_origin_filter(layer_scope))
+    if layer_scope == LAYER_CONSENSUS:
+        return query  # consensus is one synthetic coder — coder_ids is moot
+    if coder_ids:
+        return query.filter(CodeApplication.user_id.in_(coder_ids))
+    return query
+
+
 # ── Internal: conversation-based frequencies ─────────────────────────────────
 
 def _get_conversation_frequencies(
@@ -43,6 +72,8 @@ def _get_conversation_frequencies(
     exclude_facilitator: bool = True,
     conversation_ids: list[int] | None = None,
     participant_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> dict:
     """Compute code frequency stats from conversation segments only."""
     base = (
@@ -73,6 +104,7 @@ def _get_conversation_frequencies(
         base = base.filter(Speaker.participant_id.in_(participant_ids))
     if code_ids:
         base = base.filter(CodeApplication.code_id.in_(code_ids))
+    base = _coder_filter(base, coder_ids, layer_scope)
 
     freq_rows = base.group_by(CodeApplication.code_id).all()
     freq_map = {row[0]: (row[1], row[2], row[3]) for row in freq_rows}
@@ -100,6 +132,7 @@ def _get_conversation_frequencies(
         coded_seg_query = coded_seg_query.filter(Segment.conversation_id.in_(conversation_ids))
     if participant_ids:
         coded_seg_query = coded_seg_query.filter(Speaker.participant_id.in_(participant_ids))
+    coded_seg_query = _coder_filter(coded_seg_query, coder_ids, layer_scope)
     total_coded_segments = coded_seg_query.scalar() or 0
 
     total_conv_query = (
@@ -120,6 +153,7 @@ def _get_conversation_frequencies(
         total_conv_query = total_conv_query.filter(Segment.conversation_id.in_(conversation_ids))
     if participant_ids:
         total_conv_query = total_conv_query.filter(Speaker.participant_id.in_(participant_ids))
+    total_conv_query = _coder_filter(total_conv_query, coder_ids, layer_scope)
     total_conversations = total_conv_query.scalar() or 0
 
     part_query = (
@@ -156,6 +190,7 @@ def _get_conversation_frequencies(
     )
     if conversation_ids:
         unlinked_query = unlinked_query.filter(Segment.conversation_id.in_(conversation_ids))
+    unlinked_query = _coder_filter(unlinked_query, coder_ids, layer_scope)
     if participant_ids:
         unlinked_speaker_count = 0
     else:
@@ -177,6 +212,8 @@ def _get_comment_frequencies(
     project_id: int,
     code_ids: list[int] | None = None,
     participant_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> dict:
     """Compute code frequency stats from comment coding only."""
     base = (
@@ -201,6 +238,7 @@ def _get_comment_frequencies(
 
     if code_ids:
         base = base.filter(CodeApplication.code_id.in_(code_ids))
+    base = _coder_filter(base, coder_ids, layer_scope)
 
     freq_rows = base.group_by(CodeApplication.code_id).all()
     freq_map = {row[0]: (row[1], row[2]) for row in freq_rows}
@@ -223,6 +261,7 @@ def _get_comment_frequencies(
             .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
             .filter(DatasetRow.participant_id.in_(participant_ids))
         )
+    total_comment_query = _coder_filter(total_comment_query, coder_ids, layer_scope)
     total_coded_texts = total_comment_query.scalar() or 0
 
     total_records_query = (
@@ -242,6 +281,7 @@ def _get_comment_frequencies(
             .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
             .filter(DatasetRow.participant_id.in_(participant_ids))
         )
+    total_records_query = _coder_filter(total_records_query, coder_ids, layer_scope)
     total_records = total_records_query.scalar() or 0
 
     return {
@@ -258,6 +298,8 @@ def _get_document_frequencies(
     project_id: int,
     code_ids: list[int] | None = None,
     document_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> dict:
     """Compute code frequency stats from document segments only."""
     base = (
@@ -280,6 +322,7 @@ def _get_document_frequencies(
         base = base.filter(Segment.document_id.in_(document_ids))
     if code_ids:
         base = base.filter(CodeApplication.code_id.in_(code_ids))
+    base = _coder_filter(base, coder_ids, layer_scope)
 
     freq_rows = base.group_by(CodeApplication.code_id).all()
     freq_map = {row[0]: (row[1], row[2]) for row in freq_rows}
@@ -302,6 +345,7 @@ def _get_document_frequencies(
         coded_seg_query = coded_seg_query.filter(~CodeApplication.code_id.in_(universal_ids))
     if document_ids:
         coded_seg_query = coded_seg_query.filter(Segment.document_id.in_(document_ids))
+    coded_seg_query = _coder_filter(coded_seg_query, coder_ids, layer_scope)
     total_coded_doc_segments = coded_seg_query.scalar() or 0
 
     total_doc_query = (
@@ -317,6 +361,7 @@ def _get_document_frequencies(
     )
     if document_ids:
         total_doc_query = total_doc_query.filter(Segment.document_id.in_(document_ids))
+    total_doc_query = _coder_filter(total_doc_query, coder_ids, layer_scope)
     total_documents = total_doc_query.scalar() or 0
 
     return {
@@ -337,6 +382,8 @@ def get_code_frequencies(
     participant_ids: list[int] | None = None,
     source: str = "conversations",
     document_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> dict:
     """Compute code frequency statistics.
 
@@ -370,11 +417,15 @@ def get_code_frequencies(
             exclude_facilitator=exclude_facilitator,
             conversation_ids=conversation_ids,
             participant_ids=participant_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
         )
         doc_data = _get_document_frequencies(
             db, project_id,
             code_ids=code_ids,
             document_ids=document_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
         )
 
     if source in ("text", "all"):
@@ -382,6 +433,8 @@ def get_code_frequencies(
             db, project_id,
             code_ids=code_ids,
             participant_ids=participant_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
         )
 
     # Build frequencies
@@ -468,6 +521,8 @@ def get_segments_with_context(
     limit: int = 200,
     offset: int = 0,
     document_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> dict:
     """Get coded segments with surrounding context, grouped by conversation and document.
 
@@ -505,9 +560,19 @@ def get_segments_with_context(
         app_query = app_query.filter(Segment.conversation_id.in_(conversation_ids))
     if participant_ids:
         app_query = app_query.filter(Speaker.participant_id.in_(participant_ids))
+    app_query = _coder_filter(app_query, coder_ids, layer_scope)
 
     app_query = app_query.order_by(Segment.conversation_id, Segment.sequence_order)
-    all_apps = app_query.all()
+    # #491: application grain → distinct-segment grain. A segment coded by two
+    # coders is ONE reading unit — the raw rows listed (and counted) it once per
+    # coder, so multi-coder segments rendered as duplicate cards and the header
+    # total exceeded the rendered list. Dedup in Python (order-preserving) —
+    # SQL DISTINCT would reject the ORDER BY on the unselected sequence_order.
+    seen_seg_ids: set[int] = set()
+    all_apps = [
+        (sid, cid) for sid, cid in app_query.all()
+        if not (sid in seen_seg_ids or seen_seg_ids.add(sid))
+    ]
 
     total_segments = len(all_apps)
     paged_apps = all_apps[offset:offset + limit]
@@ -561,9 +626,16 @@ def get_segments_with_context(
         part_rows = db.query(Participant).filter(Participant.id.in_(speaker_participant_ids)).all()
         participants = {p.id: p for p in part_rows}
 
+    # Per-segment code chips: honor the selected layer (J2-C) and de-dup per
+    # coder — without distinct, a code applied by N coders yields N entries
+    # (consensus inflation + the #441 duplicate-key collision downstream).
     focal_codes = (
         db.query(CodeApplication.segment_id, CodeApplication.code_id)
-        .filter(CodeApplication.segment_id.in_(focal_seg_ids))
+        .filter(
+            CodeApplication.segment_id.in_(focal_seg_ids),
+            layer_origin_filter(layer_scope),
+        )
+        .distinct()
         .all()
     )
     codes_by_seg: dict[int, list[int]] = defaultdict(list)
@@ -678,8 +750,14 @@ def get_segments_with_context(
     )
     if document_ids:
         doc_app_query = doc_app_query.filter(Segment.document_id.in_(document_ids))
+    doc_app_query = _coder_filter(doc_app_query, coder_ids, layer_scope)
     doc_app_query = doc_app_query.order_by(Segment.document_id, Segment.sequence_order)
-    all_doc_apps = doc_app_query.all()
+    # #491: distinct-segment grain (see the conversation branch above).
+    seen_doc_seg_ids: set[int] = set()
+    all_doc_apps = [
+        (sid, did) for sid, did in doc_app_query.all()
+        if not (sid in seen_doc_seg_ids or seen_doc_seg_ids.add(sid))
+    ]
 
     doc_total_segments = len(all_doc_apps)
     # Apply offset/limit across all sources — document segments come after conversation segments
@@ -713,7 +791,11 @@ def get_segments_with_context(
 
         doc_focal_codes = (
             db.query(CodeApplication.segment_id, CodeApplication.code_id)
-            .filter(CodeApplication.segment_id.in_(doc_focal_seg_ids))
+            .filter(
+                CodeApplication.segment_id.in_(doc_focal_seg_ids),
+                layer_origin_filter(layer_scope),
+            )
+            .distinct()
             .all()
         )
         doc_codes_by_seg: dict[int, list[int]] = defaultdict(list)
@@ -897,7 +979,8 @@ def get_demographic_filter_options(
     for subtype in subtype_order:
         value_map = subtype_map[subtype]
         values_list = []
-        for val in sorted(value_map.keys()):
+        # #496 / AC-4: filter dropdown values in numeric-aware order too.
+        for val in order_value_labels(value_map.keys()):
             pids = sorted(value_map[val])
             values_list.append({
                 "value": val,
@@ -932,6 +1015,8 @@ def _build_conversation_cooccurrence(
     exclude_facilitator: bool = True,
     conversation_ids: list[int] | None = None,
     participant_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> tuple[dict, int]:
     """Build co-occurrence matrix from conversation segments."""
     query = (
@@ -955,6 +1040,7 @@ def _build_conversation_cooccurrence(
         query = query.filter(Speaker.participant_id.in_(participant_ids))
     if code_ids:
         query = query.filter(CodeApplication.code_id.in_(code_ids))
+    query = _coder_filter(query, coder_ids, layer_scope)
 
     apps = query.all()
 
@@ -979,6 +1065,8 @@ def _build_comment_cooccurrence(
     code_ids: list[int] | None = None,
     participant_ids: list[int] | None = None,
     text_column_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> tuple[dict, int]:
     """Build co-occurrence matrix from coded comments."""
     query = (
@@ -1000,6 +1088,7 @@ def _build_comment_cooccurrence(
         query = query.filter(DatasetRow.participant_id.in_(participant_ids))
     if code_ids:
         query = query.filter(CodeApplication.code_id.in_(code_ids))
+    query = _coder_filter(query, coder_ids, layer_scope)
 
     apps = query.all()
 
@@ -1023,6 +1112,8 @@ def _build_document_cooccurrence(
     project_id: int,
     code_ids: list[int] | None = None,
     document_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> tuple[dict, int]:
     """Build co-occurrence matrix from document segments."""
     query = (
@@ -1041,6 +1132,7 @@ def _build_document_cooccurrence(
         query = query.filter(Segment.document_id.in_(document_ids))
     if code_ids:
         query = query.filter(CodeApplication.code_id.in_(code_ids))
+    query = _coder_filter(query, coder_ids, layer_scope)
 
     apps = query.all()
 
@@ -1069,6 +1161,8 @@ def build_code_cooccurrence_matrix(
     source: str = "conversations",
     text_column_ids: list[int] | None = None,
     document_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> tuple[dict, int, int, int, int]:
     """Returns (cooccur_dict, total_units, conv_total, text_total, doc_total).
 
@@ -1088,10 +1182,14 @@ def build_code_cooccurrence_matrix(
             exclude_facilitator=exclude_facilitator,
             conversation_ids=conversation_ids,
             participant_ids=participant_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
         )
         doc_cooccur, doc_total = _build_document_cooccurrence(
             db, project_id, code_ids=code_ids,
             document_ids=document_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
         )
         # Merge conversation + document
         merged = defaultdict(int)
@@ -1105,6 +1203,8 @@ def build_code_cooccurrence_matrix(
             db, project_id, code_ids=code_ids,
             participant_ids=participant_ids,
             text_column_ids=text_column_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
         )
         return cooccur, total, 0, total, 0
     else:  # "all"
@@ -1113,15 +1213,21 @@ def build_code_cooccurrence_matrix(
             exclude_facilitator=exclude_facilitator,
             conversation_ids=conversation_ids,
             participant_ids=participant_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
         )
         comment_cooccur, comment_total = _build_comment_cooccurrence(
             db, project_id, code_ids=code_ids,
             participant_ids=participant_ids,
             text_column_ids=text_column_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
         )
         doc_cooccur, doc_total = _build_document_cooccurrence(
             db, project_id, code_ids=code_ids,
             document_ids=document_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
         )
         # Merge
         merged = defaultdict(int)
@@ -1142,6 +1248,8 @@ def get_coded_comments_with_context(
     text_column_ids: list[int] | None = None,
     limit: int = 200,
     offset: int = 0,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> dict | None:
     """Get coded texts for a specific code, grouped by dataset.
 
@@ -1183,8 +1291,16 @@ def get_coded_comments_with_context(
             .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
             .filter(DatasetRow.participant_id.in_(participant_ids))
         )
+    app_query = _coder_filter(app_query, coder_ids, layer_scope)
 
-    all_dv_ids = [row[0] for row in app_query.order_by(CodeApplication.dataset_value_id).all()]
+    # #491: application grain → distinct-value grain. The rendered list already
+    # deduped, so the header total ("N comments") and the Load-more arithmetic
+    # overcounted multi-coder values.
+    seen_dv_ids: set[int] = set()
+    all_dv_ids = [
+        row[0] for row in app_query.order_by(CodeApplication.dataset_value_id).all()
+        if not (row[0] in seen_dv_ids or seen_dv_ids.add(row[0]))
+    ]
     total_texts = len(all_dv_ids)
     paged_dv_ids = all_dv_ids[offset:offset + limit]
     has_more = (offset + limit) < total_texts
@@ -1231,12 +1347,15 @@ def get_coded_comments_with_context(
         for r_id, row_ident, p_ident, dname in rows:
             row_map[r_id] = dname or p_ident or row_ident
 
-    # Get all code applications for these dataset_values
+    # Get all code applications for these dataset_values — layer-scoped + per-coder
+    # de-duped (see the conversation focal_codes note; #447 / #441 class).
     all_apps = (
         db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
         .filter(
             CodeApplication.dataset_value_id.in_(paged_dv_ids),
+            layer_origin_filter(layer_scope),
         )
+        .distinct()
         .all()
     )
     codes_by_dv: dict[int, list[int]] = defaultdict(list)
@@ -1352,6 +1471,8 @@ def get_code_cooccurrence(
     participant_ids: list[int] | None = None,
     source: str = "conversations",
     document_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> dict:
     """Build a structured co-occurrence matrix with code metadata."""
     cooccur, _total, total_coded_segments, total_coded_texts, _doc_total = build_code_cooccurrence_matrix(
@@ -1362,6 +1483,8 @@ def get_code_cooccurrence(
         participant_ids=participant_ids,
         source=source,
         document_ids=document_ids,
+        coder_ids=coder_ids,
+        layer_scope=layer_scope,
     )
 
     all_codes = _get_ordered_codes(db, project_id, code_ids)
@@ -1454,6 +1577,213 @@ def _build_participant_group_map(
 
 # ── Source Frequencies ────────────────────────────────────────────────────
 
+def _compute_source_groups(
+    db: Session,
+    project_id: int,
+    part_group_map: dict[int, str],
+    effective_id_expr,
+    universal_ids: set[int],
+    exclude_facilitator: bool,
+    conv_ids_filter: set[int] | None,
+    text_column_ids: list[int] | None,
+    participant_ids: list[int] | None,
+    code_ids: list[int] | None,
+    coder_ids: list[int] | None,
+    layer_scope: str | None,
+) -> tuple[dict, dict]:
+    """Per-(source, demographic group) breakdowns for the Compare-By grouped
+    bar chart (#498 — `sources[].groups` was hard-coded None while the UI
+    offered the control, so a grouping request silently rendered ungrouped).
+
+    A unit joins a group through its participant (conversation segments via
+    Speaker.participant_id, text responses via DatasetRow.participant_id);
+    units without a mapped participant belong to no group, and documents have
+    no participant spine so document sources keep groups=None. Semantics
+    mirror the flat per-source queries: totals = visible (non-empty) units,
+    coded = distinct units with ≥1 non-universal application (human layer),
+    code_counts = distinct units per code (or per effective category).
+    """
+    pids = list(part_group_map.keys())
+
+    def _bucket():
+        return {
+            "code_counts": defaultdict(lambda: [0, 0]),
+            "total_segments": 0,
+            "total_word_count": 0,
+            "coded_segments": 0,
+        }
+
+    conv_groups: dict[int, dict[str, dict]] = defaultdict(lambda: defaultdict(_bucket))
+    col_groups: dict[int, dict[str, dict]] = defaultdict(lambda: defaultdict(_bucket))
+
+    # ── conversation totals per (conversation, group) ──
+    q = (
+        db.query(
+            Segment.conversation_id,
+            Speaker.participant_id,
+            func.count(Segment.id),
+            func.coalesce(func.sum(Segment.word_count), 0),
+        )
+        .join(Conversation, Segment.conversation_id == Conversation.id)
+        .join(Speaker, Segment.speaker_id == Speaker.id)
+        .filter(
+            Conversation.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+            Speaker.participant_id.in_(pids),
+        )
+    )
+    if exclude_facilitator:
+        q = q.filter(Speaker.is_facilitator == 0)
+    if conv_ids_filter is not None:
+        q = q.filter(Segment.conversation_id.in_(conv_ids_filter))
+    if participant_ids:
+        q = q.filter(Speaker.participant_id.in_(participant_ids))
+    for conv_id, pid, cnt, wc in q.group_by(
+        Segment.conversation_id, Speaker.participant_id
+    ).all():
+        b = conv_groups[conv_id][part_group_map[pid]]
+        b["total_segments"] += cnt
+        b["total_word_count"] += int(wc)
+
+    # ── conversation application rows (distinct) → code_counts + coded ──
+    # DISTINCT drops the per-coder duplication AND same-category sibling codes
+    # (code_id is deliberately NOT selected — the category branch's rule).
+    app_q = (
+        db.query(
+            Segment.conversation_id,
+            Speaker.participant_id,
+            effective_id_expr.label("eff_id"),
+            Segment.id,
+            Segment.word_count,
+            Code.is_universal,
+        )
+        .select_from(CodeApplication)
+        .filter(CodeApplication.segment_id.isnot(None))
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .join(Code, Code.id == CodeApplication.code_id)
+        .join(Conversation, Segment.conversation_id == Conversation.id)
+        .join(Speaker, Segment.speaker_id == Speaker.id)
+        .filter(
+            Conversation.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+            Speaker.participant_id.in_(pids),
+        )
+    )
+    if exclude_facilitator:
+        app_q = app_q.filter(Speaker.is_facilitator == 0)
+    if conv_ids_filter is not None:
+        app_q = app_q.filter(Segment.conversation_id.in_(conv_ids_filter))
+    if participant_ids:
+        app_q = app_q.filter(Speaker.participant_id.in_(participant_ids))
+    if code_ids is not None:
+        app_q = app_q.filter(CodeApplication.code_id.in_(code_ids))
+    app_q = _coder_filter(app_q, coder_ids, layer_scope)  # + J2-B consensus exclusion
+    coded_seen: set[tuple] = set()
+    for conv_id, pid, eff_id, seg_id, wc, is_universal in app_q.distinct().all():
+        group = part_group_map[pid]
+        b = conv_groups[conv_id][group]
+        cc = b["code_counts"][eff_id]
+        cc[0] += 1
+        cc[1] += int(wc or 0)
+        if not is_universal and (conv_id, group, seg_id) not in coded_seen:
+            coded_seen.add((conv_id, group, seg_id))
+            b["coded_segments"] += 1
+
+    # ── text-column totals per (column, group) ──
+    col_q = (
+        db.query(
+            DatasetValue.column_id,
+            DatasetRow.participant_id,
+            func.count(DatasetValue.id),
+            func.coalesce(func.sum(DatasetValue.word_count), 0),
+        )
+        .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+        .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
+        .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+        .filter(
+            Dataset.project_id == project_id,
+            DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
+            DatasetValue.value_text != None,
+            DatasetValue.value_text != "",
+            DatasetRow.participant_id.in_(pids),
+        )
+    )
+    if text_column_ids is not None:
+        col_q = col_q.filter(DatasetValue.column_id.in_(text_column_ids))
+    if participant_ids:
+        col_q = col_q.filter(DatasetRow.participant_id.in_(participant_ids))
+    for col_id, pid, cnt, wc in col_q.group_by(
+        DatasetValue.column_id, DatasetRow.participant_id
+    ).all():
+        b = col_groups[col_id][part_group_map[pid]]
+        b["total_segments"] += cnt
+        b["total_word_count"] += int(wc)
+
+    # ── text-column application rows (distinct) → code_counts + coded ──
+    col_app_q = (
+        db.query(
+            DatasetValue.column_id,
+            DatasetRow.participant_id,
+            effective_id_expr.label("eff_id"),
+            DatasetValue.id,
+            DatasetValue.word_count,
+            Code.is_universal,
+        )
+        .select_from(CodeApplication)
+        .filter(CodeApplication.dataset_value_id.isnot(None))
+        .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
+        .join(Code, Code.id == CodeApplication.code_id)
+        .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+        .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
+        .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+        .filter(
+            Dataset.project_id == project_id,
+            DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
+            DatasetRow.participant_id.in_(pids),
+        )
+    )
+    if text_column_ids is not None:
+        col_app_q = col_app_q.filter(DatasetValue.column_id.in_(text_column_ids))
+    if participant_ids:
+        col_app_q = col_app_q.filter(DatasetRow.participant_id.in_(participant_ids))
+    if code_ids is not None:
+        col_app_q = col_app_q.filter(CodeApplication.code_id.in_(code_ids))
+    col_app_q = _coder_filter(col_app_q, coder_ids, layer_scope)
+    col_coded_seen: set[tuple] = set()
+    for col_id, pid, eff_id, dv_id, wc, is_universal in col_app_q.distinct().all():
+        group = part_group_map[pid]
+        b = col_groups[col_id][group]
+        cc = b["code_counts"][eff_id]
+        cc[0] += 1
+        cc[1] += int(wc or 0)
+        if not is_universal and (col_id, group, dv_id) not in col_coded_seen:
+            col_coded_seen.add((col_id, group, dv_id))
+            b["coded_segments"] += 1
+
+    return conv_groups, col_groups
+
+
+def _shape_groups(group_data: dict[str, dict] | None) -> dict | None:
+    """Serialize a _compute_source_groups bucket into the SourceGroupData wire
+    shape (code_counts keyed by str id, matching the flat code_counts)."""
+    if not group_data:
+        return None
+    return {
+        group: {
+            "total_segments": b["total_segments"],
+            "total_word_count": b["total_word_count"],
+            "coded_segments": b["coded_segments"],
+            "code_counts": {
+                str(eff): {"count": v[0], "word_count": v[1]}
+                for eff, v in b["code_counts"].items()
+            },
+        }
+        for group, b in group_data.items()
+    }
+
+
 def get_source_frequencies(
     db: Session,
     project_id: int,
@@ -1465,6 +1795,8 @@ def get_source_frequencies(
     group_by_subtype: str | None = None,
     aggregation: str = "code",
     document_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> dict:
     """Compute per-source, per-code frequencies with word counts."""
 
@@ -1550,6 +1882,7 @@ def get_source_frequencies(
         conv_coded_q = conv_coded_q.filter(Segment.conversation_id.in_(conv_ids_filter))
     if participant_ids:
         conv_coded_q = conv_coded_q.filter(Speaker.participant_id.in_(participant_ids))
+    conv_coded_q = _coder_filter(conv_coded_q, coder_ids, layer_scope)
     conv_coded_q = conv_coded_q.group_by(Segment.conversation_id)
     conv_coded = {r[0]: r[1] for r in conv_coded_q.all()}
 
@@ -1615,6 +1948,7 @@ def get_source_frequencies(
             conv_cat_subq = conv_cat_subq.filter(Speaker.participant_id.in_(participant_ids))
         if code_ids is not None:
             conv_cat_subq = conv_cat_subq.filter(CodeApplication.code_id.in_(code_ids))
+        conv_cat_subq = _coder_filter(conv_cat_subq, coder_ids, layer_scope)
         conv_cat_subq = conv_cat_subq.distinct().subquery()
 
         conv_cat_agg = (
@@ -1656,6 +1990,7 @@ def get_source_frequencies(
             col_cat_subq = col_cat_subq.filter(DatasetRow.participant_id.in_(participant_ids))
         if code_ids is not None:
             col_cat_subq = col_cat_subq.filter(CodeApplication.code_id.in_(code_ids))
+        col_cat_subq = _coder_filter(col_cat_subq, coder_ids, layer_scope)
         col_cat_subq = col_cat_subq.distinct().subquery()
 
         col_cat_agg = (
@@ -1689,13 +2024,18 @@ def get_source_frequencies(
             for c in all_codes
         ]
 
-        # Per-conversation, per-code counts + word_count
-        conv_code_q = (
+        # Per-conversation, per-code counts + word_count. Track J · J2: dedupe to
+        # DISTINCT (conv, code, segment) in a subquery BEFORE counting/summing —
+        # under per-coder layers two coders on one segment are two rows, which
+        # would otherwise inflate BOTH the count AND the word_count sum. Mirrors
+        # the category-mode subquery above. (_coder_filter applies the J2-B
+        # consensus exclusion.)
+        conv_code_subq = (
             db.query(
-                Segment.conversation_id,
-                CodeApplication.code_id,
-                func.count(CodeApplication.id),
-                func.coalesce(func.sum(Segment.word_count), 0),
+                Segment.conversation_id.label("conv_id"),
+                CodeApplication.code_id.label("code_id"),
+                Segment.id.label("seg_id"),
+                Segment.word_count.label("wc"),
             )
             .filter(CodeApplication.segment_id.isnot(None))
             .join(Segment, CodeApplication.segment_id == Segment.id)
@@ -1708,29 +2048,42 @@ def get_source_frequencies(
             )
         )
         if exclude_facilitator:
-            conv_code_q = conv_code_q.filter(
+            conv_code_subq = conv_code_subq.filter(
                 (Speaker.is_facilitator == 0) | (Speaker.id == None)
             )
         if conv_ids_filter is not None:
-            conv_code_q = conv_code_q.filter(Segment.conversation_id.in_(conv_ids_filter))
+            conv_code_subq = conv_code_subq.filter(Segment.conversation_id.in_(conv_ids_filter))
         if participant_ids:
-            conv_code_q = conv_code_q.filter(Speaker.participant_id.in_(participant_ids))
+            conv_code_subq = conv_code_subq.filter(Speaker.participant_id.in_(participant_ids))
         if code_ids is not None:
-            conv_code_q = conv_code_q.filter(CodeApplication.code_id.in_(code_ids))
-        conv_code_q = conv_code_q.group_by(Segment.conversation_id, CodeApplication.code_id)
-        conv_code_rows = conv_code_q.all()
+            conv_code_subq = conv_code_subq.filter(CodeApplication.code_id.in_(code_ids))
+        conv_code_subq = _coder_filter(conv_code_subq, coder_ids, layer_scope)  # + J2-B consensus exclusion
+        conv_code_subq = conv_code_subq.distinct().subquery()
+
+        conv_code_agg = (
+            db.query(
+                conv_code_subq.c.conv_id,
+                conv_code_subq.c.code_id,
+                func.count(conv_code_subq.c.seg_id),
+                func.coalesce(func.sum(conv_code_subq.c.wc), 0),
+            )
+            .group_by(conv_code_subq.c.conv_id, conv_code_subq.c.code_id)
+            .all()
+        )
 
         conv_code_counts: dict[int, dict[int, tuple[int, int]]] = defaultdict(dict)
-        for conv_id, code_id, cnt, wc in conv_code_rows:
+        for conv_id, code_id, cnt, wc in conv_code_agg:
             conv_code_counts[conv_id][code_id] = (cnt, int(wc))
 
-        # Per-column, per-code counts
-        col_code_q = (
+        # Per-column, per-code counts + word_count. Track J · J2: DISTINCT
+        # (column, code, dataset_value) before count/sum — see the conversation
+        # block above. Mirrors the category-mode column subquery.
+        col_code_subq = (
             db.query(
-                DatasetValue.column_id,
-                CodeApplication.code_id,
-                func.count(CodeApplication.id),
-                func.coalesce(func.sum(DatasetValue.word_count), 0),
+                DatasetValue.column_id.label("col_id"),
+                CodeApplication.code_id.label("code_id"),
+                DatasetValue.id.label("dv_id"),
+                DatasetValue.word_count.label("wc"),
             )
             .filter(CodeApplication.dataset_value_id.isnot(None))
             .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
@@ -1742,17 +2095,28 @@ def get_source_frequencies(
             )
         )
         if text_column_ids is not None:
-            col_code_q = col_code_q.filter(DatasetValue.column_id.in_(text_column_ids))
+            col_code_subq = col_code_subq.filter(DatasetValue.column_id.in_(text_column_ids))
         if participant_ids:
-            col_code_q = col_code_q.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-            col_code_q = col_code_q.filter(DatasetRow.participant_id.in_(participant_ids))
+            col_code_subq = col_code_subq.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+            col_code_subq = col_code_subq.filter(DatasetRow.participant_id.in_(participant_ids))
         if code_ids is not None:
-            col_code_q = col_code_q.filter(CodeApplication.code_id.in_(code_ids))
-        col_code_q = col_code_q.group_by(DatasetValue.column_id, CodeApplication.code_id)
-        col_code_rows = col_code_q.all()
+            col_code_subq = col_code_subq.filter(CodeApplication.code_id.in_(code_ids))
+        col_code_subq = _coder_filter(col_code_subq, coder_ids, layer_scope)  # + J2-B consensus exclusion
+        col_code_subq = col_code_subq.distinct().subquery()
+
+        col_code_agg = (
+            db.query(
+                col_code_subq.c.col_id,
+                col_code_subq.c.code_id,
+                func.count(col_code_subq.c.dv_id),
+                func.coalesce(func.sum(col_code_subq.c.wc), 0),
+            )
+            .group_by(col_code_subq.c.col_id, col_code_subq.c.code_id)
+            .all()
+        )
 
         col_code_counts: dict[int, dict[int, tuple[int, int]]] = defaultdict(dict)
-        for col_id, code_id, cnt, wc in col_code_rows:
+        for col_id, code_id, cnt, wc in col_code_agg:
             col_code_counts[col_id][code_id] = (cnt, int(wc))
 
     # ── Documents ──
@@ -1804,6 +2168,7 @@ def get_source_frequencies(
         doc_coded_q = doc_coded_q.filter(~CodeApplication.code_id.in_(universal_ids))
     if doc_ids_filter is not None:
         doc_coded_q = doc_coded_q.filter(Segment.document_id.in_(doc_ids_filter))
+    doc_coded_q = _coder_filter(doc_coded_q, coder_ids, layer_scope)
     doc_coded_q = doc_coded_q.group_by(Segment.document_id)
     doc_coded = {r[0]: r[1] for r in doc_coded_q.all()}
 
@@ -1829,6 +2194,7 @@ def get_source_frequencies(
             doc_cat_subq = doc_cat_subq.filter(Segment.document_id.in_(doc_ids_filter))
         if code_ids is not None:
             doc_cat_subq = doc_cat_subq.filter(CodeApplication.code_id.in_(code_ids))
+        doc_cat_subq = _coder_filter(doc_cat_subq, coder_ids, layer_scope)
         doc_cat_subq = doc_cat_subq.distinct().subquery()
 
         doc_cat_agg = (
@@ -1846,12 +2212,14 @@ def get_source_frequencies(
         for doc_id, cat_id, cnt, wc in doc_cat_agg:
             doc_code_counts[doc_id][cat_id] = (cnt, int(wc))
     else:
-        doc_code_q = (
+        # Track J · J2: DISTINCT (document, code, segment) before count/sum — see
+        # the conversation block above. Mirrors the category-mode document subquery.
+        doc_code_subq = (
             db.query(
-                Segment.document_id,
-                CodeApplication.code_id,
-                func.count(CodeApplication.id),
-                func.coalesce(func.sum(Segment.word_count), 0),
+                Segment.document_id.label("doc_id"),
+                CodeApplication.code_id.label("code_id"),
+                Segment.id.label("seg_id"),
+                Segment.word_count.label("wc"),
             )
             .filter(CodeApplication.segment_id.isnot(None))
             .join(Segment, CodeApplication.segment_id == Segment.id)
@@ -1863,14 +2231,25 @@ def get_source_frequencies(
             )
         )
         if doc_ids_filter is not None:
-            doc_code_q = doc_code_q.filter(Segment.document_id.in_(doc_ids_filter))
+            doc_code_subq = doc_code_subq.filter(Segment.document_id.in_(doc_ids_filter))
         if code_ids is not None:
-            doc_code_q = doc_code_q.filter(CodeApplication.code_id.in_(code_ids))
-        doc_code_q = doc_code_q.group_by(Segment.document_id, CodeApplication.code_id)
-        doc_code_rows = doc_code_q.all()
+            doc_code_subq = doc_code_subq.filter(CodeApplication.code_id.in_(code_ids))
+        doc_code_subq = _coder_filter(doc_code_subq, coder_ids, layer_scope)  # + J2-B consensus exclusion
+        doc_code_subq = doc_code_subq.distinct().subquery()
+
+        doc_code_agg = (
+            db.query(
+                doc_code_subq.c.doc_id,
+                doc_code_subq.c.code_id,
+                func.count(doc_code_subq.c.seg_id),
+                func.coalesce(func.sum(doc_code_subq.c.wc), 0),
+            )
+            .group_by(doc_code_subq.c.doc_id, doc_code_subq.c.code_id)
+            .all()
+        )
 
         doc_code_counts: dict[int, dict[int, tuple[int, int]]] = defaultdict(dict)
-        for doc_id, code_id, cnt, wc in doc_code_rows:
+        for doc_id, code_id, cnt, wc in doc_code_agg:
             doc_code_counts[doc_id][code_id] = (cnt, int(wc))
 
     # Per-column totals
@@ -1919,6 +2298,7 @@ def get_source_frequencies(
     if participant_ids:
         col_coded_q = col_coded_q.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
         col_coded_q = col_coded_q.filter(DatasetRow.participant_id.in_(participant_ids))
+    col_coded_q = _coder_filter(col_coded_q, coder_ids, layer_scope)
     col_coded_q = col_coded_q.group_by(DatasetValue.column_id)
     col_coded = {r[0]: r[1] for r in col_coded_q.all()}
 
@@ -1935,6 +2315,33 @@ def get_source_frequencies(
     col_meta = {c.id: c for c in comment_cols}
 
     # ── Assemble sources ──
+    # ── Per-group breakdowns (#498) — only when a demographic mapping exists ──
+    conv_groups: dict = {}
+    col_groups: dict = {}
+    if part_group_map:
+        effective_id_expr = (
+            sa_case(
+                (Code.category_id.isnot(None), Code.category_id),
+                else_=(-1 * Code.id),
+            )
+            if aggregation == "category"
+            else Code.id
+        )
+        conv_groups, col_groups = _compute_source_groups(
+            db,
+            project_id,
+            part_group_map,
+            effective_id_expr,
+            set(universal_ids),
+            exclude_facilitator,
+            conv_ids_filter,
+            text_column_ids,
+            participant_ids,
+            code_ids,
+            coder_ids,
+            layer_scope,
+        )
+
     sources = []
     total_segs = 0
     total_wc = 0
@@ -1966,8 +2373,10 @@ def get_source_frequencies(
             "total_word_count": t_wc,
             "coded_segments": coded,
             "import_order": import_order,
-            "code_counts": cc if not group_by_subtype else None,
-            "groups": None,
+            # Flat counts stay populated even under grouping (#498): they are
+            # the chart's fallback when no participants map to any group.
+            "code_counts": cc,
+            "groups": _shape_groups(conv_groups.get(conv_id)),
         })
         total_segs += t_segs
         total_wc += t_wc
@@ -1997,7 +2406,8 @@ def get_source_frequencies(
             "total_word_count": t_wc,
             "coded_segments": coded,
             "import_order": import_order,
-            "code_counts": cc if not group_by_subtype else None,
+            "code_counts": cc,
+            # Documents have no participant spine — no demographic grouping.
             "groups": None,
         })
         total_segs += t_segs
@@ -2029,8 +2439,8 @@ def get_source_frequencies(
             "total_word_count": t_wc,
             "coded_segments": coded,
             "import_order": None,
-            "code_counts": cc if not group_by_subtype else None,
-            "groups": None,
+            "code_counts": cc,
+            "groups": _shape_groups(col_groups.get(col_id)),
         })
         total_segs += t_segs
         total_wc += t_wc
@@ -2065,6 +2475,8 @@ def get_source_level_cooccurrence(
     participant_ids: list[int] | None = None,
     source: str = "all",
     document_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> tuple[dict, int]:
     """Build binary co-occurrence at source level (conversation, document, or column).
 
@@ -2102,6 +2514,7 @@ def get_source_level_cooccurrence(
             conv_q = conv_q.filter(Speaker.participant_id.in_(participant_ids))
         if code_ids:
             conv_q = conv_q.filter(CodeApplication.code_id.in_(code_ids))
+        conv_q = _coder_filter(conv_q, coder_ids, layer_scope)
         for _, sid, cid in conv_q.all():
             source_codes[f"conv_{sid}"].add(cid)
 
@@ -2125,6 +2538,7 @@ def get_source_level_cooccurrence(
             doc_q = doc_q.filter(Segment.document_id.in_(document_ids))
         if code_ids:
             doc_q = doc_q.filter(CodeApplication.code_id.in_(code_ids))
+        doc_q = _coder_filter(doc_q, coder_ids, layer_scope)
         for _, sid, cid in doc_q.all():
             source_codes[f"doc_{sid}"].add(cid)
 
@@ -2152,6 +2566,7 @@ def get_source_level_cooccurrence(
             col_q = col_q.filter(DatasetRow.participant_id.in_(participant_ids))
         if code_ids:
             col_q = col_q.filter(CodeApplication.code_id.in_(code_ids))
+        col_q = _coder_filter(col_q, coder_ids, layer_scope)
         for _, sid, cid in col_q.all():
             source_codes[f"col_{sid}"].add(cid)
 
@@ -2177,6 +2592,8 @@ def get_demographic_comparison(
     text_column_ids: list[int] | None = None,
     exclude_facilitator: bool = True,
     participant_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> dict:
     """Compare code frequencies across demographic groups."""
 
@@ -2188,7 +2605,9 @@ def get_demographic_comparison(
     if participant_ids:
         part_group = {pid: g for pid, g in part_group.items() if pid in set(participant_ids)}
 
-    groups = sorted(set(part_group.values()))
+    # #496 / AC-4: numeric-aware label ordering — a plain sorted() put "10"
+    # before "8" (the #406 class) in the comparison columns.
+    groups = order_value_labels(set(part_group.values()))
     if len(groups) < 2:
         return {"groups": groups, "group_totals": {g: {"total_segments": 0, "total_word_count": 0} for g in groups}, "codes": []}
 
@@ -2231,7 +2650,10 @@ def get_demographic_comparison(
     for group, pids in group_pids.items():
         pid_list = list(pids)
         q = (
-            db.query(CodeApplication.code_id, func.count(CodeApplication.id))
+            # Track J · J2: distinct coded segments per code, not raw rows (a
+            # segment coded by two coders is two rows). _coder_filter applies the
+            # J2-B consensus exclusion.
+            db.query(CodeApplication.code_id, func.count(func.distinct(CodeApplication.segment_id)))
             .filter(CodeApplication.segment_id.isnot(None))
             .join(Segment, CodeApplication.segment_id == Segment.id)
             .join(Conversation, Segment.conversation_id == Conversation.id)
@@ -2249,6 +2671,7 @@ def get_demographic_comparison(
             q = q.filter(Segment.conversation_id.in_(conversation_ids))
         if code_ids:
             q = q.filter(CodeApplication.code_id.in_(code_ids))
+        q = _coder_filter(q, coder_ids, layer_scope)  # + J2-B consensus exclusion
         q = q.group_by(CodeApplication.code_id)
 
         for cid, cnt in q.all():
@@ -2380,6 +2803,8 @@ def get_saturation_data(
     category_level: bool = False,
     conversation_ids: list[int] | None = None,
     document_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
 ) -> dict:
     """Compute code saturation curve across conversations and documents in chronological order."""
 
@@ -2416,6 +2841,7 @@ def get_saturation_data(
         conv_q = conv_q.filter((Speaker.is_facilitator == 0) | (Speaker.id == None))
     if conversation_ids:
         conv_q = conv_q.filter(Segment.conversation_id.in_(conversation_ids))
+    conv_q = _coder_filter(conv_q, coder_ids, layer_scope)
     conv_code_pairs = conv_q.all()
 
     # Get all (document_id, code_id) pairs
@@ -2432,6 +2858,7 @@ def get_saturation_data(
     )
     if document_ids:
         doc_q = doc_q.filter(Segment.document_id.in_(document_ids))
+    doc_q = _coder_filter(doc_q, coder_ids, layer_scope)
     doc_code_pairs = doc_q.all()
 
     # Build source → set of code_ids (or category_ids)
@@ -2459,9 +2886,12 @@ def get_saturation_data(
 
         item_names = cat_names
     else:
+        # #508: no is_active filter — the pair queries above (correctly) count
+        # inactive codes' applications, so the name map must cover them too or
+        # the tooltip falls to the "Unknown (id)" placeholder.
         code_names = dict(
             db.query(Code.id, Code.name)
-            .filter(Code.project_id == project_id, Code.is_active == True)
+            .filter(Code.project_id == project_id)
             .all()
         )
         for conv_id, code_id in conv_code_pairs:
@@ -2517,13 +2947,19 @@ def get_text_columns_with_coding(
 ) -> list[dict]:
     """Get open-ended columns with their coded value counts (including 0)."""
 
-    # Subquery: count distinct code applications per column
+    # Subquery: count distinct CODED VALUES per column. Track J · J2: distinct
+    # dataset values (not application rows — two coders on one value are two
+    # rows), excluding the consensus layer (J2-B) AND universal-only values
+    # (#492 / invariant J-A — a lone "Unclear" must not make a value "coded";
+    # this badge previously disagreed with the coding-progress gauge).
     coded_sub = (
         db.query(
             DatasetValue.column_id,
-            func.count(func.distinct(CodeApplication.id)).label("coded_count"),
+            func.count(func.distinct(CodeApplication.dataset_value_id)).label("coded_count"),
         )
         .join(CodeApplication, CodeApplication.dataset_value_id == DatasetValue.id)
+        .join(Code, Code.id == CodeApplication.code_id)
+        .filter(Code.is_universal == False, non_consensus_filter())
         .group_by(DatasetValue.column_id)
         .subquery()
     )

@@ -109,7 +109,7 @@ export default function TextNotesPanel({ projectId, focalColumnIds, selectedValu
   }, [onDeleteNote, deleteMutation, projectId, invalidateNotes])
 
   const renderNote = (note: TextCodingNote, highlight: boolean) => (
-    <div key={note.id} className={`px-2 py-1.5 text-sm group ${highlight ? 'bg-blue-50/50 dark:bg-blue-950/20 rounded' : ''}`}>
+    <div key={note.id} className={`px-2 py-1.5 text-sm group ${highlight ? 'bg-mm-blue/10 rounded' : ''}`}>
       {editingId === note.id ? (
         <div className="flex flex-col gap-1">
           <textarea

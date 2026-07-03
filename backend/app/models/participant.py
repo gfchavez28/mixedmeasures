@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from uuid import uuid4
 from ..database import Base
 
 
@@ -16,6 +17,8 @@ class Participant(Base):
     role = Column(String(100), nullable=True)  # e.g. "board", "staff", "eo", "self"
     demographics = Column(Text, nullable=True)  # JSON string for flexible demographic data
     role_auto_filled_from = Column(String(255), nullable=True)  # e.g. "Board Survey · R0003"
+    # Track J · J3-2-0: stable cross-instance identity for merge matching
+    uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 

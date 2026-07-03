@@ -29,6 +29,12 @@ from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
 from ..models.equivalence_group import EquivalenceGroup
 from ..services.recode import compute_value
 from ..services.metrics import resolve_input_source_labels
+from ..services.coding_layers import (
+    CONSENSUS_ORIGIN,
+    code_usage_count_expr,
+    non_consensus_filter,
+    visible_target_filter,
+)
 from ..auth import get_current_user
 from .helpers import _get_project_or_404, sanitize_content_disposition
 from .export_helpers import (
@@ -131,7 +137,12 @@ async def export_study_excel(
             segments = segments_by_conv.get(conversation.id, [])
 
             for segment in segments:
-                applied_code_ids = set(ca.code_id for ca in segment.code_applications)
+                # J2-B: human layer only (#490 latent site — an "X" can't flip
+                # today since consensus ⊆ agreed codes, but keep the layer rule).
+                applied_code_ids = set(
+                    ca.code_id for ca in segment.code_applications
+                    if ca.origin != CONSENSUS_ORIGIN
+                )
 
                 speaker_name = ""
                 is_facilitator = ""
@@ -196,8 +207,12 @@ async def export_study_excel(
 
         cooccur_data = build_code_cooccurrence_matrix(db, project_id)
 
-        # Header row: blank + code names
-        cooccur_headers = [""] + [f"{c.numeric_id} - {c.name}" for c in codes]
+        # Header row: scope label in the corner + code names. The corner cell
+        # states the facilitator scope so the sheet's numbers carry their claim
+        # (#493) without shifting the matrix layout.
+        cooccur_headers = ["Participant segments only"] + [
+            f"{c.numeric_id} - {c.name}" for c in codes
+        ]
         for col, header in enumerate(cooccur_headers, 1):
             cell = ws_cooccur.cell(row=1, column=col)
             excel_set_safe(cell, header)
@@ -224,13 +239,20 @@ async def export_study_excel(
             cell.fill = header_fill
             cell.font = header_font
 
-        # Batch usage counts (avoid N+1)
+        # Batch usage counts (avoid N+1). Track J · J2: distinct targets, not raw
+        # rows, excluding the consensus layer (single-sourced with the codes list).
         code_ids = [c.id for c in codes]
         usage_counts = {}
         if code_ids:
             usage_rows = db.query(
-                CodeApplication.code_id, func.count(CodeApplication.id)
-            ).filter(CodeApplication.code_id.in_(code_ids)).group_by(CodeApplication.code_id).all()
+                CodeApplication.code_id, code_usage_count_expr()
+            ).outerjoin(
+                Segment, CodeApplication.segment_id == Segment.id
+            ).filter(
+                CodeApplication.code_id.in_(code_ids),
+                non_consensus_filter(),
+                visible_target_filter(),  # #500
+            ).group_by(CodeApplication.code_id).all()
             usage_counts = dict(usage_rows)
 
         # Category chain lookup
@@ -317,8 +339,9 @@ async def export_study_excel(
             excel_set_safe(ws_notes.cell(row=row_num, column=3), conversation_name)
             ws_notes.cell(row=row_num, column=4, value=segment_num)
             excel_set_safe(ws_notes.cell(row=row_num, column=5), segment_text)
-            ws_notes.cell(row=row_num, column=6, value=note.created_at.strftime("%Y-%m-%d %H:%M"))
-            ws_notes.cell(row=row_num, column=7, value=note.updated_at.strftime("%Y-%m-%d %H:%M"))
+            # #513: localize like the Codebook/Memos sheets — raw strftime emits UTC
+            ws_notes.cell(row=row_num, column=6, value=local_wall_time(note.created_at))
+            ws_notes.cell(row=row_num, column=7, value=local_wall_time(note.updated_at))
 
     # ==================== Sheet 7: Summaries ====================
     if include_summaries:
@@ -354,7 +377,8 @@ async def export_study_excel(
         ).order_by(AuditEntry.timestamp.desc()).limit(1000).all()
 
         for row_num, entry in enumerate(audit_entries, 2):
-            ws_audit.cell(row=row_num, column=1, value=entry.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+            # #513: localized; keeps second precision for the audit trail
+            ws_audit.cell(row=row_num, column=1, value=local_wall_time(entry.timestamp, "%Y-%m-%d %H:%M:%S"))
             excel_set_safe(ws_audit.cell(row=row_num, column=2), entry.action)
             excel_set_safe(ws_audit.cell(row=row_num, column=3), entry.entity_type)
             ws_audit.cell(row=row_num, column=4, value=entry.entity_id)
@@ -740,7 +764,7 @@ async def export_datasets_excel(
                 ws_summary.cell(row=row_idx, column=9, value="Yes" if metric.stale else "No")
                 ws_summary.cell(
                     row=row_idx, column=10,
-                    value=result.computed_at.strftime("%Y-%m-%d %H:%M") if result.computed_at else ""
+                    value=local_wall_time(result.computed_at) if result.computed_at else ""  # #513
                 )
 
                 if metric.stale:
@@ -926,8 +950,14 @@ async def export_datasets_excel(
                     excel_set_safe(ws_grouped.cell(row=group_row, column=5), domain_name)
                     excel_set_safe(ws_grouped.cell(row=group_row, column=6), grp_label)
                     # group_value is the partition key, often a user-typed
-                    # column-value label (e.g., a treatment-arm name).
-                    excel_set_safe(ws_grouped.cell(row=group_row, column=7), result.group_value or "")
+                    # column-value label (e.g., a treatment-arm name). A NULL
+                    # group_value is the None listwise-deletion bucket (rows
+                    # whose grouping value was missing) — label it explicitly
+                    # rather than emitting a blank-looking group (#506).
+                    excel_set_safe(
+                        ws_grouped.cell(row=group_row, column=7),
+                        "(Missing)" if result.group_value is None else result.group_value,
+                    )
                     if value is not None:
                         ws_grouped.cell(row=group_row, column=8, value=round(value, EXPORT_VALUE_PRECISION))
                     ws_grouped.cell(row=group_row, column=9, value=result.valid_n)

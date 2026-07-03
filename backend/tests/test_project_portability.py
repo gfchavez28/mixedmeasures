@@ -1407,3 +1407,190 @@ class TestCodebookImport:
         counts = import_codebook_qdc(db_session, project.id, xml)
         assert counts["categories_created"] == 1  # parent defaults to category
         assert counts["codes_created"] == 1        # leaf defaults to code
+
+
+def test_coder_attribution_survives_roundtrip(db_session: Session):
+    """Track J · J1: a code application by a non-default coder round-trips with its
+    attribution remapped through the coders section (matched by name on import),
+    instead of being nulled (the pre-J1 behavior)."""
+    from app.models.user import User
+
+    db = db_session
+    coder = User(username="Dr. Alvarez", password_hash=None, coder_type="human", display_color="#3b82f6")
+    db.add(coder)
+    db.flush()
+
+    project = Project(name="Attribution Study", status="active", user_id=1)
+    db.add(project)
+    db.flush()
+    conv = Conversation(project_id=project.id, name="Interview 1", status="completed")
+    db.add(conv)
+    db.flush()
+    seg = Segment(conversation_id=conv.id, sequence_order=0, text="hello world", word_count=2)
+    db.add(seg)
+    db.flush()
+    code = Code(project_id=project.id, numeric_id=1, name="Positive", color="#10b981")
+    db.add(code)
+    db.flush()
+    db.add(CodeApplication(segment_id=seg.id, code_id=code.id, user_id=coder.id, attribution="Dr. Alvarez"))
+    db.commit()
+
+    buf = export_project(db, project.id, Path("/nonexistent"))
+    with tempfile.NamedTemporaryFile(suffix=".mmproject", delete=False) as tmp:
+        tmp.write(buf.getvalue())
+        tmp_path = Path(tmp.name)
+    try:
+        new_id, _ = import_project(db, tmp_path, Path("/tmp/docs_test"), user_id=1)
+    finally:
+        os.unlink(tmp_path)
+
+    new_conv = db.query(Conversation).filter(Conversation.project_id == new_id).first()
+    new_cas = (
+        db.query(CodeApplication)
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .filter(Segment.conversation_id == new_conv.id)
+        .all()
+    )
+    assert len(new_cas) == 1
+    # remapped to the SAME coder (matched by name) — NOT nulled
+    assert new_cas[0].user_id == coder.id
+    assert new_cas[0].attribution == "Dr. Alvarez"
+    # matched by name → no duplicate coder created on import
+    assert db.query(User).filter(User.username == "Dr. Alvarez").count() == 1
+
+
+def test_code_equivalence_group_roundtrip(db_session: Session):
+    """Track J · J2-3 Slab 6: a CodeEquivalenceGroup round-trips with its members'
+    FK remapped AND its plain-int canonical_code_id remapped (the ADJ-4 trap), and
+    the derived consensus layer is EXCLUDED from export then REGENERATED on import
+    (§8 decision 4 / C2-C3) — never double-imported, and the global consensus user
+    is not exported as a roster coder."""
+    from app.models.user import User
+    from app.models.code_equivalence_group import CodeEquivalenceGroup
+    from app.services.consensus import materialize_consensus_for_project
+
+    db = db_session
+    coder_b = User(username="Coder B", password_hash=None, coder_type="human")
+    db.add(coder_b)
+    db.flush()
+
+    project = Project(name="CEG Study", status="active", user_id=1)
+    db.add(project)
+    db.flush()
+    conv = Conversation(project_id=project.id, name="Int", status="completed")
+    db.add(conv)
+    db.flush()
+    seg = Segment(conversation_id=conv.id, sequence_order=0, text="x", word_count=1)
+    db.add(seg)
+    db.flush()
+    pos = Code(project_id=project.id, numeric_id=1, name="Positive", color="#10b981")
+    pos2 = Code(project_id=project.id, numeric_id=2, name="POSITIVE", color="#10b981")
+    db.add_all([pos, pos2])
+    db.flush()
+    grp = CodeEquivalenceGroup(project_id=project.id, label="positive-ish", canonical_code_id=pos.id)
+    db.add(grp)
+    db.flush()
+    pos.code_equivalence_group_id = grp.id
+    pos2.code_equivalence_group_id = grp.id
+    db.flush()
+
+    # Two coders agree via the group → consensus materializes in the SOURCE.
+    db.add_all([
+        CodeApplication(segment_id=seg.id, code_id=pos.id, user_id=1),
+        CodeApplication(segment_id=seg.id, code_id=pos2.id, user_id=coder_b.id),
+    ])
+    db.flush()
+    materialize_consensus_for_project(db, project.id)
+    db.commit()
+    src_consensus = db.query(CodeApplication).filter(
+        CodeApplication.origin == "consensus", CodeApplication.segment_id == seg.id
+    ).all()
+    assert len(src_consensus) == 1, "source has a consensus row to (wrongly) export"
+
+    buf = export_project(db, project.id, Path("/nonexistent"))
+    with tempfile.NamedTemporaryFile(suffix=".mmproject", delete=False) as tmp:
+        tmp.write(buf.getvalue())
+        tmp_path = Path(tmp.name)
+    try:
+        new_id, _ = import_project(db, tmp_path, Path("/tmp/docs_test"), user_id=1)
+        db.commit()
+    finally:
+        os.unlink(tmp_path)
+
+    # Group recreated with both members + canonical remapped to a NEW member id.
+    new_grp = db.query(CodeEquivalenceGroup).filter(
+        CodeEquivalenceGroup.project_id == new_id
+    ).one()
+    new_members = db.query(Code).filter(
+        Code.project_id == new_id, Code.code_equivalence_group_id == new_grp.id
+    ).all()
+    member_ids = {c.id for c in new_members}
+    assert {c.name for c in new_members} == {"Positive", "POSITIVE"}
+    assert new_grp.canonical_code_id in member_ids, "canonical remapped to a live new member (not stale source id)"
+    assert db.get(Code, new_grp.canonical_code_id).name == "Positive"
+
+    # Consensus REGENERATED on import (not the verbatim source row): exactly one,
+    # on the new segment, pointing at the (remapped) canonical effective code.
+    new_seg = db.query(Segment).join(Conversation).filter(
+        Conversation.project_id == new_id
+    ).one()
+    new_consensus = db.query(CodeApplication).filter(
+        CodeApplication.origin == "consensus", CodeApplication.segment_id == new_seg.id
+    ).all()
+    assert len(new_consensus) == 1
+    assert new_consensus[0].code_id in member_ids
+
+    # The GLOBAL consensus user is shared, never exported/duplicated as a coder.
+    assert db.query(User).filter(User.coder_type == "consensus").count() == 1
+
+
+def test_duplicate_project_endpoint(db_session, populated_project, tmp_path, monkeypatch):
+    """#464: the duplicate endpoint deep-copies a project as a fresh, independent copy.
+
+    Exercises the endpoint (not just the service) so the export → temp-spill →
+    import_mode="new" wiring + the "(copy)" rename + the audit/commit are covered.
+    """
+    import asyncio
+    from app.routers import project_portability as pp
+    from app.models.user import User
+
+    orig = populated_project["project"]
+    pid = orig.id
+    orig_uuid = orig.project_uuid
+    orig_name = orig.name
+    orig_code_count = db_session.query(Code).filter(Code.project_id == pid).count()
+
+    docs = tmp_path / "docs"
+    media = tmp_path / "media"
+    docs.mkdir()
+    media.mkdir()
+    monkeypatch.setattr(pp, "_get_data_dirs", lambda: (docs, media))
+
+    user = db_session.query(User).filter(User.id == 1).first()
+    result = asyncio.run(pp.duplicate_project_endpoint(pid, db=db_session, user=user))
+
+    assert result.project_id != pid
+    assert result.project_name == f"{orig_name} (copy)"
+    assert result.merge_report is None
+
+    copy = db_session.query(Project).filter(Project.id == result.project_id).first()
+    assert copy is not None
+    # Fresh identity (import_mode="new") so the copy can itself be exported/merged.
+    assert copy.project_uuid is not None
+    assert copy.project_uuid != orig_uuid
+    # Codes deep-copied.
+    assert (
+        db_session.query(Code).filter(Code.project_id == result.project_id).count()
+        == orig_code_count
+    )
+
+    # Duplicating again must NOT collide on the name — the second copy gets
+    # "(copy 2)" so no two projects in the list ever share a name.
+    result2 = asyncio.run(pp.duplicate_project_endpoint(pid, db=db_session, user=user))
+    assert result2.project_id not in (pid, result.project_id)
+    assert result2.project_name == f"{orig_name} (copy 2)"
+    names = [
+        p.name
+        for p in db_session.query(Project).filter(Project.user_id == 1).all()
+    ]
+    assert len(names) == len(set(names)), f"duplicate project names: {names}"

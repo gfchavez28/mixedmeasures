@@ -40,9 +40,17 @@ import {
   SelectTrigger,
 } from '@/components/ui/select'
 import SegmentProgressBar from '@/components/SegmentProgressBar'
+import BlindModeToggle from '@/components/BlindModeToggle'
+import CoderCountBadge from '@/components/CoderCountBadge'
+import { useBlindMode } from '@/hooks/useBlindMode'
 import TranscriptPanel from '@/components/TranscriptPanel'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
+import { useCoders } from '@/hooks/useCoders'
+import { useCoderCoverage } from '@/hooks/useCoderCoverage'
+import { isSegmentCodedVisible, computeCoverage, isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
+import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { useAuth } from '@/lib/auth-context'
 import CodePanel, { type CodePanelHandle } from '@/components/CodePanel'
 import CollapsiblePanel from '@/components/CollapsiblePanel'
 import ResizeHandle from '@/components/ResizeHandle'
@@ -53,7 +61,7 @@ import { PageErrorBoundary } from '@/components/PageErrorBoundary'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import FloatingCreateCode, { type FloatingCoords } from '@/components/FloatingCreateCode'
 import FloatingCreateNote from '@/components/FloatingCreateNote'
-import { coordsFromElement } from '@/lib/floating-utils'
+import { coordsFromElement, selectionPrefill } from '@/lib/floating-utils'
 import { getCodeColor } from '@/lib/utils'
 
 type DragItemData =
@@ -75,6 +83,22 @@ export default function CodingWorkbench() {
   const pid = parseInt(projectId || '0')
   const cid = parseInt(conversationId || '0')
 
+  // Coder roster lens (Track J · J1) — attribution badges + visibility filter only in multi-coder mode.
+  const { coders, coderMap, multiCoder } = useCoders()
+  const { user } = useAuth()
+  const [hiddenCoders, setHiddenCoders] = useState<Set<number>>(new Set())
+  // #451: archived coders' chips are hidden by default; "view all coders" reveals them.
+  const [showArchivedCoders, setShowArchivedCoders] = useState(false)
+  // Blind mode (Track J · J2-5, DEC-G): while blind, force the per-coder lens to
+  // all-but-self so colleagues' codes/coverage are hidden. effectiveHidden feeds
+  // every consumer; the manual filter (hiddenCoders) is suppressed while blind.
+  const { blind, blindHiddenSet, toggleReveal } = useBlindMode(pid)
+  const effectiveHidden = blind ? blindHiddenSet : hiddenCoders
+  // Group A (#457): who coded THIS conversation — drives the picklist "active here" markers.
+  const coderCoverage = useCoderCoverage(
+    pid, { conversationId: cid }, { enabled: multiCoder, rosterCoderIds: coders.map(c => c.id) },
+  )
+
   const [selectedSegments, setSelectedSegments] = useState<number[]>([])
   const [savedIndicator, setSavedIndicator] = useState(false)
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -85,7 +109,7 @@ export default function CodingWorkbench() {
   const [showRemoveAudioConfirm, setShowRemoveAudioConfirm] = useState(false)
 
   // Floating dialog state
-  const [createCodeDialog, setCreateCodeDialog] = useState<{ position: FloatingCoords; segmentIds: number[] } | null>(null)
+  const [createCodeDialog, setCreateCodeDialog] = useState<{ position: FloatingCoords; segmentIds: number[]; initialName?: string } | null>(null)
   const [createNoteDialog, setCreateNoteDialog] = useState<{ position: FloatingCoords; segmentId: number } | null>(null)
   const [createNotePending, setCreateNotePending] = useState(false)
 
@@ -247,12 +271,6 @@ export default function CodingWorkbench() {
   })
   const categories = categoriesData?.categories || []
 
-  const { data: progressData } = useQuery({
-    queryKey: ['progress', cid],
-    queryFn: () => codingApi.getProgress(cid),
-    enabled: !!cid,
-  })
-
   const { data: conversationsData } = useQuery({
     queryKey: ['conversations', pid],
     queryFn: () => conversationsApi.list(pid),
@@ -276,18 +294,39 @@ export default function CodingWorkbench() {
   const speakers = speakersData || []
 
   const allSegments = useMemo(() => segmentsData?.segments ?? [], [segmentsData?.segments])
+
+  // Whether this conversation carries per-segment timestamps. Drives the Time
+  // column default (#453): an imported transcript with no times shows no empty
+  // column, and the (no-op) Time toggle is hidden. Independent of audio — playback
+  // is driven by `has_audio`, so an audio conversation lacking per-segment times
+  // correctly hides the blank column without affecting the player/scrubber.
+  const hasTimestamps = useMemo(() => allSegments.some(s => s.start_time != null), [allSegments])
   const codes = useMemo(() => codesData?.codes ?? [], [codesData?.codes])
   const codeMap = useMemo(() => {
     const m = new Map<number, Code>()
     for (const c of codes) m.set(c.id, c)
     return m
   }, [codes])
+  // Coverage is computed client-side from the in-memory segment list (Track J · J1
+  // item 3c): the segments query already holds every segment, so this lets the
+  // gauge reflect the per-coder visibility filter and break coverage down by coder
+  // without a server round-trip. Participant segments only (facilitator excluded),
+  // matching the prior server gauge. `codedVisible` collapses to the all-coder
+  // total when no coder is hidden.
+  const participantSegments = useMemo(() => allSegments.filter(s => !s.is_facilitator), [allSegments])
+  const coverage = useMemo(
+    () => computeCoverage(participantSegments, s => s.applied_code_details, effectiveHidden),
+    [participantSegments, effectiveHidden],
+  )
   const handleInlineCodeChange = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['segments', cid] })
-    queryClient.invalidateQueries({ queryKey: ['progress', cid] })
     queryClient.invalidateQueries({ queryKey: ['codes', pid] })
   }, [queryClient, cid, pid])
-  const progress = progressData?.progress_percent || 0
+  // Clicking an applied-code chip on a segment pivots to that code in the codes panel (#422a).
+  const handleFocusCode = useCallback((codeId: number) => {
+    codePanelRef.current?.focusCode(codeId)
+  }, [])
+  const progress = coverage.total > 0 ? Math.round((coverage.codedVisible / coverage.total) * 100) : 0
   const conversations = useMemo(() => conversationsData?.conversations ?? [], [conversationsData?.conversations])
 
   // Handle search navigation params: ?segment=ID&q=term (Issue 115)
@@ -445,14 +484,13 @@ export default function CodingWorkbench() {
           const result = await segmentsApi.merge(cid, segmentIds)
           mergedSegmentId = result.merged_segment.id
           queryClient.invalidateQueries({ queryKey: ['segments', cid] })
-          queryClient.invalidateQueries({ queryKey: ['progress', cid] })
+          invalidateDerivedCounts(queryClient, pid)  // #450: merge changes coverage counts
           setSelectedSegments([result.merged_segment.id])
         },
         undo: async () => {
           if (mergedSegmentId) {
             const result = await segmentsApi.unmerge(cid, mergedSegmentId)
             queryClient.invalidateQueries({ queryKey: ['segments', cid] })
-            queryClient.invalidateQueries({ queryKey: ['progress', cid] })
             queryClient.invalidateQueries({ queryKey: ['codes', pid] })
             if (result.restored_segments.length > 0) {
               setSelectedSegments([result.restored_segments[0].id])
@@ -476,8 +514,8 @@ export default function CodingWorkbench() {
           const result = await segmentsApi.unmerge(cid, segmentId)
           restoredSegmentIds = result.restored_segments.map(s => s.id)
           queryClient.invalidateQueries({ queryKey: ['segments', cid] })
-          queryClient.invalidateQueries({ queryKey: ['progress', cid] })
           queryClient.invalidateQueries({ queryKey: ['codes', pid] })
+          invalidateDerivedCounts(queryClient, pid)  // #450: unmerge changes coverage counts
           if (result.restored_segments.length > 0) {
             setSelectedSegments([result.restored_segments[0].id])
           }
@@ -486,7 +524,6 @@ export default function CodingWorkbench() {
           if (restoredSegmentIds.length > 0) {
             const result = await segmentsApi.merge(cid, restoredSegmentIds)
             queryClient.invalidateQueries({ queryKey: ['segments', cid] })
-            queryClient.invalidateQueries({ queryKey: ['progress', cid] })
             setSelectedSegments([result.merged_segment.id])
           }
         },
@@ -542,22 +579,32 @@ export default function CodingWorkbench() {
 
   const invalidateAfterCodeChange = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['segments', cid] })
-    queryClient.invalidateQueries({ queryKey: ['progress', cid] })
     queryClient.invalidateQueries({ queryKey: ['codes', pid] })
+    invalidateDerivedCounts(queryClient, pid)  // #450: cross-surface counts
   }, [queryClient, cid, pid])
 
-  // #367: lightweight settle for the optimistic-code path — refresh the progress gauge
-  // and code counts WITHOUT the expensive full-conversation segment refetch (that refetch
-  // eager-loads speaker+applications+notes+excerpts per segment and was the ~1s badge lag).
+  // #367: lightweight settle for the optimistic-code path — refresh code counts
+  // WITHOUT the expensive full-conversation segment refetch (that refetch eager-loads
+  // speaker+applications+notes+excerpts per segment and was the ~1s badge lag). The
+  // progress gauge no longer needs a settle: it's computed client-side from the
+  // optimistically-patched segment cache (Track J · J1 item 3c).
   const settleAfterCodeChange = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['progress', cid] })
     queryClient.invalidateQueries({ queryKey: ['codes', pid] })
-  }, [queryClient, cid, pid])
+    invalidateDerivedCounts(queryClient, pid)  // #450: cross-surface counts
+  }, [queryClient, pid])
 
   // Optimistically patch applied_codes on the cached segment list so the badge paints
   // immediately. Mirrors the backend exactly: single applyCode/removeCode fan out to all
   // visible segments sharing a group_id (coding.py:85,162); bulkCode touches only the
   // listed ids. `fanOutGroups` selects which behavior to replicate.
+  //
+  // Track J · J1 item 3c: also patch applied_code_details (the per-application coder
+  // shape) so the client-side coverage gauge + per-coder breakdown move with the
+  // optimistic apply instead of lagging until the server refetch. The apply is
+  // server-stamped to the ACTIVE coder, so the optimistic detail uses user?.id.
+  // Post-J2-0 the unique index is per (segment, code, coder) — a code can carry one
+  // detail PER coder, so apply/remove below scope to the active coder's own detail
+  // (INV-6/#446); they never touch a colleague's application.
   const patchSegmentCodes = useCallback(
     (segmentIds: number[], codeId: number, action: 'apply' | 'remove', fanOutGroups: boolean) => {
       queryClient.setQueryData<{ segments: Segment[] } & Record<string, unknown>>(
@@ -576,18 +623,44 @@ export default function CodingWorkbench() {
               }
             }
           }
+          const selfId = user?.id ?? null
+          const detail = {
+            code_id: codeId,
+            user_id: selfId,
+            attribution: null,
+            is_universal: codeMap.get(codeId)?.is_universal ?? false,
+          }
           const segments = old.segments.map((s) => {
             if (!targetIds.has(s.id)) return s
-            const has = s.applied_codes.includes(codeId)
-            if (action === 'apply' && !has) return { ...s, applied_codes: [...s.applied_codes, codeId] }
-            if (action === 'remove' && has) return { ...s, applied_codes: s.applied_codes.filter((c) => c !== codeId) }
+            // Scope to the active coder's own application (INV-6/#446): toggling a
+            // code a colleague already applied adds/keeps MY application without
+            // disturbing theirs. applied_codes is per-application, so remove drops
+            // exactly ONE entry (mine), never every coder's.
+            const hasMine = s.applied_code_details.some((d) => d.code_id === codeId && d.user_id === selfId)
+            if (action === 'apply' && !hasMine) return {
+              ...s,
+              applied_codes: [...s.applied_codes, codeId],
+              applied_code_details: [...s.applied_code_details, detail],
+            }
+            if (action === 'remove' && hasMine) {
+              const idx = s.applied_codes.indexOf(codeId)
+              return {
+                ...s,
+                applied_codes: idx >= 0
+                  ? [...s.applied_codes.slice(0, idx), ...s.applied_codes.slice(idx + 1)]
+                  : s.applied_codes,
+                applied_code_details: s.applied_code_details.filter(
+                  (d) => !(d.code_id === codeId && d.user_id === selfId),
+                ),
+              }
+            }
             return s
           })
           return { ...old, segments }
         }
       )
     },
-    [queryClient, cid]
+    [queryClient, cid, user?.id, codeMap]
   )
 
   // Run an atomic single-POST code change with an optimistic patch + snapshot rollback.
@@ -623,7 +696,9 @@ export default function CodingWorkbench() {
       const allHaveCode = selectedSegments.every((segId) => {
         const seg = segmentMap.get(segId)
         if (!seg) return false
-        return seg.applied_codes?.includes(code.id) ?? false
+        // INV-6 (#446): "do I have it?", not "does anyone?" — so the toggle applies
+        // my code when only a colleague has it, instead of taking the remove branch.
+        return isCodeAppliedByActiveCoder(seg.applied_code_details, seg.applied_codes ?? [], code.id, user?.id ?? null)
       })
 
       const segmentIds = [...selectedSegments]
@@ -660,7 +735,7 @@ export default function CodingWorkbench() {
       }
       showSaved()
     },
-    [selectedSegments, segmentMap, history, runOptimisticCode, showSaved]
+    [selectedSegments, segmentMap, history, runOptimisticCode, showSaved, user?.id]
   )
 
   // Handle toggling multiple codes at once (Item 47)
@@ -922,7 +997,9 @@ export default function CodingWorkbench() {
       const allHaveCode = targetIds.every(id => {
         const seg = segmentMap.get(id)
         if (!seg) return false
-        return seg.applied_codes?.includes(code.id) ?? false
+        // INV-6 (#446): "do I have it?", not "does anyone?" — so the toggle applies
+        // my code when only a colleague has it, instead of taking the remove branch.
+        return isCodeAppliedByActiveCoder(seg.applied_code_details, seg.applied_codes ?? [], code.id, user?.id ?? null)
       })
       if (allHaveCode) return
 
@@ -954,7 +1031,7 @@ export default function CodingWorkbench() {
         showSaved()
       })
     }
-  }, [selectedSegments, segmentMap, history, runOptimisticCode, showSaved, cid, queryClient, pid])
+  }, [selectedSegments, segmentMap, history, runOptimisticCode, showSaved, cid, queryClient, pid, user?.id])
 
   const handleDragCancel = useCallback(() => {
     setActiveDragItem(null)
@@ -1004,16 +1081,28 @@ export default function CodingWorkbench() {
     setEditingSegmentId(null)
   }, [])
 
-  const handleJumpToNextUncoded = useCallback(async () => {
-    const result = await codingApi.getNextUncoded(
-      cid,
-      selectedSegmentsRef.current.length > 0 ? selectedSegmentsRef.current[0] : undefined
-    )
-    if (result.segment_id) {
-      // Setting selection triggers auto-scroll in TranscriptPanel
-      setSelectedSegments([result.segment_id])
+  // Jump to the next uncoded participant segment, client-side (Track J · J1 item 3c).
+  // Coder-aware: a segment coded only by a HIDDEN coder counts as uncoded-for-me, so
+  // `j` walks to it. Iterates the displayed (filtered) list so the selection-driven
+  // auto-scroll always lands; skips facilitator segments (participants only) and uses
+  // the non-universal definition (the prior server endpoint treated universal-only as
+  // coded, disagreeing with the gauge — this also closes that gap). Refs keep the
+  // keyboard closure fresh.
+  const handleJumpToNextUncoded = useCallback(() => {
+    const pool = segmentsRef.current
+    if (pool.length === 0) return
+    const currentId = selectedSegmentsRef.current.length > 0 ? selectedSegmentsRef.current[0] : null
+    const currentIdx = currentId != null ? pool.findIndex(s => s.id === currentId) : -1
+    for (let offset = 1; offset <= pool.length; offset++) {
+      const seg = pool[(currentIdx + offset) % pool.length]
+      if (!seg.is_facilitator && !isSegmentCodedVisible(seg.applied_code_details, effectiveHidden)) {
+        // Setting selection triggers auto-scroll in TranscriptPanel
+        setSelectedSegments([seg.id])
+        return
+      }
     }
-  }, [cid])
+    toast('All participant segments are coded')
+  }, [effectiveHidden])
 
   // Get codes applied to selected segments (memoized for performance)
   const selectedCodesMap = useMemo(() => {
@@ -1027,7 +1116,9 @@ export default function CodingWorkbench() {
     const selectedSegs = selectedSegments.map(id => segmentMap.get(id)).filter(Boolean) as Segment[]
 
     codes.forEach((code) => {
-      const appliedCount = selectedSegs.filter(seg => seg.applied_codes.includes(code.id)).length
+      // INV-6 (#446): count segments the ACTIVE coder applied this code to, so the
+      // tri-state checkbox reflects my own coding, not any coder's.
+      const appliedCount = selectedSegs.filter(seg => isCodeAppliedByActiveCoder(seg.applied_code_details, seg.applied_codes ?? [], code.id, user?.id ?? null)).length
 
       if (appliedCount === 0) {
         map.set(code.id, 'none')
@@ -1038,7 +1129,7 @@ export default function CodingWorkbench() {
       }
     })
     return map
-  }, [codes, selectedSegments, segmentMap])
+  }, [codes, selectedSegments, segmentMap, user?.id])
 
   // Panel toggle helpers
   const togglePanel = useCallback((panel: keyof typeof panelStates) => {
@@ -1092,9 +1183,9 @@ export default function CodingWorkbench() {
       let newSegmentIds: number[] = []
       const invalidateAfterSplitChange = () => {
         queryClient.invalidateQueries({ queryKey: ['segments', cid] })
-        queryClient.invalidateQueries({ queryKey: ['progress', cid] })
         queryClient.invalidateQueries({ queryKey: ['codes', pid] })
         queryClient.invalidateQueries({ queryKey: ['notes', cid] })
+        invalidateDerivedCounts(queryClient, pid)  // #450: split/unsplit changes coverage counts
       }
       history.execute({
         type: 'segment_split',
@@ -1129,9 +1220,9 @@ export default function CodingWorkbench() {
     async (segmentId: number) => {
       const result = await segmentsApi.unsplit(cid, segmentId)
       queryClient.invalidateQueries({ queryKey: ['segments', cid] })
-      queryClient.invalidateQueries({ queryKey: ['progress', cid] })
       queryClient.invalidateQueries({ queryKey: ['codes', pid] })
       queryClient.invalidateQueries({ queryKey: ['notes', cid] })
+      invalidateDerivedCounts(queryClient, pid)  // #450: unsplit changes coverage counts
       setSelectedSegments([result.restored_segment.id])
       showSaved()
     },
@@ -1151,7 +1242,8 @@ export default function CodingWorkbench() {
       const seg = segmentMap.get(segmentId) || allSegmentsMap.get(segmentId)
       if (!seg) return
 
-      const hasCode = seg.applied_codes?.includes(codeId) ?? false
+      // INV-6 (#446): apply vs remove keys off the ACTIVE coder's own application.
+      const hasCode = isCodeAppliedByActiveCoder(seg.applied_code_details, seg.applied_codes ?? [], codeId, user?.id ?? null)
       const code = codes.find(c => c.id === codeId)
       const codeName = code?.name || 'code'
 
@@ -1172,12 +1264,12 @@ export default function CodingWorkbench() {
       }
       showSaved()
     },
-    [segmentMap, allSegmentsMap, codes, history, runOptimisticCode, showSaved]
+    [segmentMap, allSegmentsMap, codes, history, runOptimisticCode, showSaved, user?.id]
   )
 
   // Context menu: open floating create code dialog
   const handleContextCreateCode = useCallback((coords: FloatingCoords) => {
-    setCreateCodeDialog({ position: coords, segmentIds: [...selectedSegmentsRef.current] })
+    setCreateCodeDialog({ position: coords, segmentIds: [...selectedSegmentsRef.current], initialName: selectionPrefill() })
   }, [])
 
   // Context menu: open floating create note dialog
@@ -1236,7 +1328,7 @@ export default function CodingWorkbench() {
       const sel = selectedSegmentsRef.current
       if (sel.length === 0) return
       const coords = coordsFromElement(`segment-${sel[0]}`)
-      setCreateCodeDialog({ position: coords, segmentIds: [...sel] })
+      setCreateCodeDialog({ position: coords, segmentIds: [...sel], initialName: selectionPrefill() })
     },
     onCreateNote: () => {
       const sel = selectedSegmentsRef.current
@@ -1318,7 +1410,10 @@ export default function CodingWorkbench() {
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Toolbar */}
-      <div className="flex items-center gap-2 px-4 py-2 border-b bg-mm-surface flex-shrink-0">
+      {/* #516: flex-wrap + the ml-auto tail group below — the toolbar previously
+        * clipped its tail (Codebook at 1440, the blind pill at the 1280 minimum)
+        * with no wrap/overflow strategy. */}
+      <div className="flex items-center gap-2 px-4 py-2 border-b bg-mm-surface flex-shrink-0 flex-wrap">
         {/* Conversation Navigation */}
         {conversations.length > 1 && (
           <div className="flex items-center gap-1 shrink-0">
@@ -1425,22 +1520,26 @@ export default function CodingWorkbench() {
 
         {/* Column visibility toggles */}
         <div className="flex items-center gap-1 border-l border-mm-border-subtle pl-3">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => toggleColumn('timestamps')}
-            aria-pressed={columnVisibility.timestamps}
-            className={`text-xs gap-1 ${columnVisibility.timestamps ? COLUMN_TOGGLE_COLORS.timestamps : 'text-mm-text-faint'}`}
-          >
-            {columnVisibility.timestamps ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-            Time
-          </Button>
+          {hasTimestamps && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => toggleColumn('timestamps')}
+              aria-pressed={columnVisibility.timestamps}
+              className={`text-xs gap-1 ${columnVisibility.timestamps ? COLUMN_TOGGLE_COLORS.timestamps : 'text-mm-text-faint'}`}
+              title={columnVisibility.timestamps ? 'Hide the timestamp column' : "Show each segment's timestamp"}
+            >
+              {columnVisibility.timestamps ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+              Time
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"
             onClick={() => toggleColumn('notes')}
             aria-pressed={columnVisibility.notes}
             className={`text-xs gap-1 ${columnVisibility.notes ? COLUMN_TOGGLE_COLORS.notes : 'text-mm-text-faint'}`}
+            title={columnVisibility.notes ? 'Hide the notes column' : "Show each segment's notes"}
           >
             {columnVisibility.notes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
             Notes
@@ -1451,6 +1550,7 @@ export default function CodingWorkbench() {
             onClick={() => toggleColumn('codes')}
             aria-pressed={columnVisibility.codes}
             className={`text-xs gap-1 ${columnVisibility.codes ? COLUMN_TOGGLE_COLORS.codes : 'text-mm-text-faint'}`}
+            title={columnVisibility.codes ? 'Hide the applied-codes column' : "Show each segment's applied codes"}
           >
             {columnVisibility.codes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
             Codes
@@ -1571,7 +1671,9 @@ export default function CodingWorkbench() {
         {/* Scrubber slot — populated via portal from TranscriptPanel */}
         <div ref={scrubberSlotRef} className="flex items-center gap-2 border-l border-mm-border-subtle pl-3 min-w-56 overflow-visible [&:empty]:hidden" />
 
-        <div className="flex-1" />
+        {/* Tail group (#516): one ml-auto unit so at narrow widths it wraps to its
+          * own right-aligned row instead of individual controls clipping off-screen. */}
+        <div className="flex items-center gap-2 ml-auto">
 
         {savedIndicator && (
           <span className="text-sm text-green-600 flex items-center gap-1">
@@ -1581,32 +1683,50 @@ export default function CodingWorkbench() {
         )}
 
         {/* Progress (#351: explicit "participant" qualifier so facilitator
-          * segments not counting is no surprise to the analyst) */}
+          * segments not counting is no surprise to the analyst). Computed
+          * client-side (Track J · J1 item 3c) so it reflects the per-coder
+          * filter; the count/bar/% all read `codedVisible`. */}
         <div
           className="flex items-center gap-2"
           role="progressbar"
           aria-label="Coding progress"
-          aria-valuenow={progressData?.participant_coded ?? 0}
+          aria-valuenow={coverage.codedVisible}
           aria-valuemin={0}
-          aria-valuemax={progressData?.participant_segments ?? 0}
+          aria-valuemax={coverage.total}
           aria-valuetext={
-            `${progressData?.participant_coded ?? 0} of ${progressData?.participant_segments ?? 0} participant segments coded`
+            blind
+              // #503: not "by you" — archived colleagues' codings still count
+              // in gauges under blind (#451 CHIPS-ONLY rule + DEC-G roster-
+              // derived hidden set), so the value can exceed your own work.
+              ? `${coverage.codedVisible} of ${coverage.total} participant segments coded (colleagues hidden)`
+              : effectiveHidden.size > 0
+                ? `${coverage.codedVisible} of ${coverage.total} participant segments coded by visible coders`
+                : `${coverage.codedVisible} of ${coverage.total} participant segments coded`
           }
         >
           <span
             className="text-sm text-mm-text-secondary font-mono tabular-nums"
-            title="Facilitator segments are excluded from coding progress."
+            title={blind
+              // #517: the conversations list shows ALL-coder coverage, so while
+              // blind the two numbers legitimately disagree — say so at the gauge.
+              ? "Colleagues' coding is hidden (blind coding) — this count reflects only coding visible to you. The conversations list and Overview show all coders' coverage. Facilitator segments are excluded."
+              : 'Facilitator segments are excluded from coding progress.'}
           >
-            {progressData?.participant_coded || 0}/{progressData?.participant_segments || 0} participant segments coded
+            {coverage.codedVisible}/{coverage.total} participant segments coded
           </span>
-          <SegmentProgressBar segments={allSegments} className="w-32" />
+          <SegmentProgressBar segments={allSegments} hiddenCoderIds={effectiveHidden} className="w-32" />
           <span className="text-sm font-medium font-mono tabular-nums">{progress}%</span>
         </div>
 
+        {multiCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="workbench" />}
+        <CoderCountBadge projectId={pid} conversationId={cid} enabled={multiCoder} />
+
         {/* Codebook */}
-        <Button variant="ghost" size="icon" onClick={openCodebook} title="Codebook">
+        <Button variant="ghost" size="icon" onClick={openCodebook} title="Codebook" aria-label="Codebook">
           <BookOpen className="w-4 h-4" />
         </Button>
+
+        </div>{/* end tail group (#516) */}
       </div>
 
       {/* Remove audio confirmation */}
@@ -1681,13 +1801,24 @@ export default function CodingWorkbench() {
             onContextCreateNote={handleContextCreateNote}
             onSplitSegment={handleSplitSegment}
             onUnsplitSegment={handleUnsplitSegment}
-            showTimestamps={columnVisibility.timestamps}
+            showTimestamps={columnVisibility.timestamps && hasTimestamps}
             showNotes={columnVisibility.notes}
             showCodes={columnVisibility.codes}
             projectId={pid}
             allCodes={codes}
             codeMap={codeMap}
             onCodeChange={handleInlineCodeChange}
+            onFocusCode={handleFocusCode}
+            coderMap={multiCoder ? coderMap : undefined}
+            coders={coders}
+            activeCoderId={user?.id ?? null}
+            coderFilterHidden={effectiveHidden}
+            onCoderFilterChange={setHiddenCoders}
+            coderActiveIds={coderCoverage.isLoaded ? coderCoverage.activeCoderIds : undefined}
+            coderExtra={coderCoverage.extraCoders}
+            coderShowArchived={showArchivedCoders}
+            onCoderShowArchivedChange={setShowArchivedCoders}
+            hideCoderFilter={blind}
             scrubberPortalRef={scrubberSlotRef}
             conversation={conversation}
             playbackRef={playbackRef}
@@ -1838,6 +1969,7 @@ export default function CodingWorkbench() {
         <FloatingCreateCode
           position={createCodeDialog.position}
           projectId={pid}
+          initialName={createCodeDialog.initialName}
           categories={categories}
           onCreated={async (code) => {
             const segmentIds = createCodeDialog.segmentIds

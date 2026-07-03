@@ -11,18 +11,21 @@ from ..models.segment import Segment
 from ..models.code_application import CodeApplication
 from ..models.code_category import CodeCategory
 from ..services.code_analysis import build_code_cooccurrence_matrix as _build_cooccurrence
+from ..services.coding_layers import non_consensus_filter
 
 # ── Rounding precision constants ─────────────────────────────────────────────
 EXPORT_VALUE_PRECISION = 2  # round(x, 2) for metric values in Excel export
 
 
-def local_wall_time(dt: datetime) -> str:
+def local_wall_time(dt: datetime, fmt: str = "%Y-%m-%d %H:%M") -> str:
     """Naive-UTC ORM datetime → local wall-clock 'YYYY-MM-DD HH:MM' (#408).
 
     Human-facing export cells should show the reader's clock, not UTC; in the
     local-first desktop posture the server's zone IS the user's zone.
+    Every human-facing timestamp cell must route through this — a bare
+    ``.strftime`` on the naive ORM datetime silently emits UTC (#513).
     """
-    return dt.replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    return dt.replace(tzinfo=timezone.utc).astimezone().strftime(fmt)
 
 
 # ── Formula-injection defang (ROADMAP 12d (i)) ───────────────────────────────
@@ -124,23 +127,32 @@ def _build_category_tree_and_chains(db: Session, project_id: int):
 
 
 def build_code_conversation_matrix(db: Session, project_id: int):
-    """Returns dict: (conversation_id, code_id) -> count (excludes soft-deleted segments)"""
+    """Returns dict: (conversation_id, code_id) -> count (excludes soft-deleted segments).
+
+    Track J · J2: distinct coded segments per (conversation, code), not raw
+    application rows (two coders on one segment are two rows), excluding the
+    consensus layer (J2-B)."""
     results = db.query(
         Segment.conversation_id,
         CodeApplication.code_id,
-        func.count(CodeApplication.id)
+        func.count(func.distinct(CodeApplication.segment_id))
     ).join(CodeApplication).join(Conversation).filter(
         Conversation.project_id == project_id,
         Segment.merged_into_id == None,  # Exclude soft-deleted
-        Segment.split_into_id == None
+        Segment.split_into_id == None,
+        non_consensus_filter(),
     ).group_by(Segment.conversation_id, CodeApplication.code_id).all()
 
     return {(r[0], r[1]): r[2] for r in results}
 
 
 def build_code_cooccurrence_matrix(db: Session, project_id: int):
-    """Delegate to service layer (includes all codes, no facilitator filter)."""
+    """Delegate to service layer. Facilitator segments are EXCLUDED (#493):
+    the co-occurrence CSV endpoint and the screen heatmap both default to
+    participant-only, and the Excel sheet must carry the same numbers — the
+    old hard-coded ``exclude_facilitator=False`` made the same matrix differ
+    across the two export artifacts."""
     cooccur, _total, _conv, _comment, _doc = _build_cooccurrence(
-        db, project_id, exclude_facilitator=False,
+        db, project_id, exclude_facilitator=True,
     )
     return cooccur

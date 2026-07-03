@@ -59,7 +59,7 @@ export default function FrequencyComparisonChart({
                 <div className="flex items-center gap-2">
                   <div className="flex-1 bg-mm-bg rounded-full h-4 overflow-hidden">
                     <div
-                      className="h-full bg-blue-500 rounded-full transition-all"
+                      className="h-full bg-mm-blue rounded-full transition-all"
                       style={{ width: `${(f.percentage / maxPct) * 100}%` }}
                     />
                   </div>
@@ -70,7 +70,7 @@ export default function FrequencyComparisonChart({
                   <div className="flex items-center gap-2">
                     <div className="flex-1 bg-mm-bg rounded-full h-2 overflow-hidden">
                       <div
-                        className="h-full bg-gray-300 dark:bg-gray-600 rounded-full transition-all"
+                        className="h-full bg-mm-border-medium rounded-full transition-all"
                         style={{ width: `${(overallPct / maxPct) * 100}%` }}
                       />
                     </div>
@@ -94,10 +94,10 @@ export default function FrequencyComparisonChart({
       {overall && (
         <div className="flex items-center gap-4 mt-3 pt-2 border-t text-xs text-mm-text-muted">
           <span className="flex items-center gap-1">
-            <span className="w-3 h-1.5 bg-blue-500 rounded-full" /> Filtered
+            <span className="w-3 h-1.5 bg-mm-blue rounded-full" /> Filtered
           </span>
           <span className="flex items-center gap-1">
-            <span className="w-3 h-1.5 bg-gray-300 dark:bg-gray-600 rounded-full" /> Overall
+            <span className="w-3 h-1.5 bg-mm-border-medium rounded-full" /> Overall
           </span>
         </div>
       )}

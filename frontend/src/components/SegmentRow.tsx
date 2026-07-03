@@ -1,13 +1,15 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { SELECTED_TINT } from '@/lib/selection'
 import { Quote, Paperclip, Check } from 'lucide-react'
-import { type Segment, type SegmentExcerptInfo, type Code, type Speaker, segmentsApi, speakersApi } from '@/lib/api'
+import { type Segment, type SegmentExcerptInfo, type Code, type Coder, type Speaker, segmentsApi, speakersApi } from '@/lib/api'
 import InlineCodeActions from '@/components/qualitative-analysis/InlineCodeActions'
 import { highlightText } from '@/components/qualitative-analysis/highlight-text'
 import { getSpeakerInitials, getInitialsBadgeColors } from '@/lib/conversation-import-utils'
 import { formatTimestamp, cn, getCodeColor, getContrastColor, hexToRowBg, hexToRowHoverBg } from '@/lib/utils'
 import { useTheme } from '@/lib/theme-context'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
+import { isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
 import type { FloatingCoords } from '@/lib/floating-utils'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import {
@@ -140,6 +142,14 @@ interface SegmentRowProps {
   allCodes?: Code[]
   codeMap?: Map<number, Code>
   onCodeChange?: () => void
+  /** Clicking an applied-code chip pivots to that code in the codes panel (#422a). */
+  onFocusCode?: (codeId: number) => void
+  /** Track J · J1: user_id → Coder lens for attribution badges (only set in multi-coder mode). */
+  coderMap?: Map<number, Coder>
+  /** Track J · J1: coder ids hidden by the visibility filter (chips by these coders are hidden). */
+  hiddenCoderIds?: Set<number>
+  /** Track J · J1: the active coder, so the context-menu "applied" check is per-me (#446). */
+  activeCoderId?: number | null
 }
 
 function SegmentRow({
@@ -189,6 +199,10 @@ function SegmentRow({
   allCodes,
   codeMap,
   onCodeChange,
+  onFocusCode,
+  coderMap,
+  hiddenCoderIds,
+  activeCoderId,
 }: SegmentRowProps) {
   const queryClient = useQueryClient()
   const { isDark } = useTheme()
@@ -319,8 +333,8 @@ function SegmentRow({
   // Visual treatment based on speaker role and coding status
   const hasCustomColor = !!segment.speaker_color
   const getBackgroundClass = () => {
-    if (isSelected) return 'bg-blue-100 dark:bg-blue-900/40'
-    if (isDragOver) return 'bg-blue-100 dark:bg-blue-900/40'
+    if (isSelected) return SELECTED_TINT
+    if (isDragOver) return SELECTED_TINT
     // Custom hex color → use inline style instead of Tailwind token
     if (hasCustomColor) {
       const uncoded = !segment.is_facilitator && segment.applied_codes.length === 0
@@ -366,13 +380,13 @@ function SegmentRow({
             className={cn(
               'px-4 py-2 h-full cursor-pointer transition-colors group/row relative',
               isSelected || isDragOver
-                ? 'hover:bg-blue-200 dark:hover:bg-blue-800/40'
+                ? 'hover:bg-mm-blue/20'
                 : hasCustomColor
                   ? ''
                   : getSpeakerHoverColor(segment.speaker_color_index || 0, segment.is_facilitator),
               getBackgroundClass(),
               groupPosition && 'border-l-[3px] border-teal-400 dark:border-teal-600',
-              (isSelected || isDragOver) && 'border-l-[3px] border-blue-500 dark:border-blue-400',
+              (isSelected || isDragOver) && 'border-l-[3px] border-[hsl(var(--mm-blue)/0.7)]',
             )}
             style={customRowStyle}
             onMouseEnter={hasCustomColor && !isSelected && !isDragOver ? (e) => {
@@ -381,6 +395,10 @@ function SegmentRow({
             onMouseLeave={hasCustomColor && !isSelected && !isDragOver ? (e) => {
               (e.currentTarget as HTMLElement).style.backgroundColor = hexToRowBg(segment.speaker_color!, isDark)
             } : undefined}
+            // #436: option role makes aria-selected valid (the listbox is the
+            // Virtuoso List in TranscriptPanel; Item wrappers are role=presentation
+            // so the listbox→option ownership survives the virtualization layer).
+            role="option"
             aria-selected={isSelected}
             aria-description={groupAriaLabel}
             onContextMenu={(e) => {
@@ -564,7 +582,7 @@ function SegmentRow({
                   {textSelection && textSelection.start < textSelection.end && searchHighlight
                     ? <>
                         {highlightText(segment.text.slice(0, textSelection.start), searchHighlight)}
-                        <mark className="bg-blue-200 dark:bg-blue-700/50 text-foreground rounded-sm px-px">
+                        <mark className="bg-mm-blue/30 text-foreground rounded-sm px-px">
                           {highlightText(segment.text.slice(textSelection.start, textSelection.end), searchHighlight)}
                         </mark>
                         {highlightText(segment.text.slice(textSelection.end), searchHighlight)}
@@ -574,7 +592,7 @@ function SegmentRow({
                       : textSelection && textSelection.start < textSelection.end
                         ? <>
                             {segment.text.slice(0, textSelection.start)}
-                            <mark className="bg-blue-200 dark:bg-blue-700/50 text-foreground rounded-sm px-px">{segment.text.slice(textSelection.start, textSelection.end)}</mark>
+                            <mark className="bg-mm-blue/30 text-foreground rounded-sm px-px">{segment.text.slice(textSelection.start, textSelection.end)}</mark>
                             {segment.text.slice(textSelection.end)}
                           </>
                         : renderTextWithExcerpts(segment.text, segment.excerpts)}
@@ -615,10 +633,16 @@ function SegmentRow({
                     codeMap={codeMap}
                     allCodes={allCodes}
                     onCodeChange={onCodeChange}
+                    onFocusCode={onFocusCode}
+                    coderMap={coderMap}
+                    appliedCodeDetails={segment.applied_code_details}
+                    hiddenCoderIds={hiddenCoderIds}
                   />
                 ) : (
                   <div className="flex flex-wrap gap-1">
-                    {segment.applied_codes.map((codeId) => {
+                    {/* Read-only fallback: distinct codes only (the bare array is
+                        per-coder; dedupe to avoid duplicate keys/chips — #441). */}
+                    {[...new Set(segment.applied_codes)].map((codeId) => {
                       const codeInfo = getCodeInfo(codeId)
                       return (
                         <span
@@ -652,7 +676,7 @@ function SegmentRow({
                   </>
                 )}
                 {codes.filter(c => c.is_active).map(code => {
-                  const isApplied = segment.applied_codes.includes(code.id)
+                  const isApplied = isCodeAppliedByActiveCoder(segment.applied_code_details, segment.applied_codes, code.id, activeCoderId ?? null)
                   const label = codeIdToShortcutLabel.get(code.id) ?? ''
                   return (
                     <ContextMenuItem
@@ -856,7 +880,7 @@ function SegmentRow({
               <p>This will restore the original segments from before the merge.</p>
               {segment.applied_codes.length > 0 && (
                 <p className="font-medium text-amber-600">
-                  Warning: This segment has {segment.applied_codes.length} code(s) applied.
+                  Warning: This segment has {new Set(segment.applied_codes).size} code(s) applied.
                   Any codes, notes, or memos added to this merged segment will be lost.
                 </p>
               )}
@@ -958,6 +982,10 @@ export default React.memo(SegmentRow, (prevProps, nextProps) => {
     prevProps.allCodes === nextProps.allCodes &&
     prevProps.codeMap === nextProps.codeMap &&
     prevProps.onCodeChange === nextProps.onCodeChange &&
+    prevProps.onFocusCode === nextProps.onFocusCode &&
+    prevProps.coderMap === nextProps.coderMap &&
+    prevProps.hiddenCoderIds === nextProps.hiddenCoderIds &&
+    prevProps.activeCoderId === nextProps.activeCoderId &&
     prevProps.projectId === nextProps.projectId
   )
 })

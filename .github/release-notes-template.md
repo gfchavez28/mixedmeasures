@@ -1,6 +1,11 @@
 Mixed Measures **__VERSION__** — a local-first desktop workspace for mixed-methods research: qualitative and quantitative data in one project, with shared participants, codes, and memos. Everything stays on your own computer — no account, no uploads, no telemetry.
 
-See the [changelog](https://github.com/__REPO__/blob/main/CHANGELOG.md) for what changed in this version.
+**What's new in this release**
+
+- **Team coding** — multiple coders on one project: attribution, blind coding, a consensus layer, side-by-side reconciliation, and inter-rater reliability (Cohen's κ / Krippendorff's α, validated against R). Share a copy with co-coders and merge their work back.
+- **Excel import** — `.xlsx` workbooks import directly as datasets (sheet picker + append).
+- **Zoom/Teams transcripts** — `.vtt`/`.srt` files import directly as conversations, with speaker turns and audio-sync timestamps.
+- Plus a codebook treemap, screen-reader-navigable coding workbenches, and an accuracy audit of every displayed statistic, chart, and export. Full details in the [changelog](https://github.com/__REPO__/blob/main/CHANGELOG.md).
 
 ## Which file should I download?
 

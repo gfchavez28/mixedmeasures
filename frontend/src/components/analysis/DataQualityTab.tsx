@@ -58,7 +58,7 @@ export function DataQualitySidebar(props: DataQualitySidebarProps) {
             type="checkbox"
             checked={dqIncludeEmpty}
             onChange={() => setUrlParam('dqIncludeEmpty', dqIncludeEmpty ? '0' : '')}
-            className="rounded border-mm-border-medium accent-[hsl(var(--mm-accent))]"
+            className="rounded border-mm-border-medium accent-mm-blue"
           />
           Count blank/empty as missing
         </label>
@@ -67,7 +67,7 @@ export function DataQualitySidebar(props: DataQualitySidebarProps) {
             type="checkbox"
             checked={dqIncludeNA}
             onChange={() => setUrlParam('dqIncludeNA', dqIncludeNA ? '0' : '')}
-            className="rounded border-mm-border-medium accent-[hsl(var(--mm-accent))]"
+            className="rounded border-mm-border-medium accent-mm-blue"
           />
           Count &ldquo;Don&apos;t know&rdquo; / &ldquo;N/A&rdquo; as missing
         </label>
@@ -278,7 +278,7 @@ export function DataQualityContent(props: DataQualityContentProps) {
       {dqView === 'patterns' && (
         <>
           {dqIsMultiDataset ? (
-            <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded text-xs text-blue-700 dark:text-blue-300">
+            <div className="flex items-center gap-2 px-3 py-2 bg-mm-blue/12 border border-mm-blue/30 rounded text-xs text-mm-blue-text">
               <Info className="w-3.5 h-3.5 flex-shrink-0" />
               Pattern analysis shows co-occurrence of missing values across variables. Select variables from a single dataset to view patterns.
             </div>

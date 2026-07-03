@@ -91,7 +91,7 @@ export default function McarTestPanel({
 
           {/* Warning (non-blocking) */}
           {result.eligibility.eligible && result.eligibility.warning && (
-            <div className="flex items-start gap-1.5 px-2 py-1.5 rounded bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 text-[10px] text-blue-700 dark:text-blue-300" role="status">
+            <div className="flex items-start gap-1.5 px-2 py-1.5 rounded bg-mm-blue/12 border border-mm-blue/30 text-[10px] text-mm-blue-text" role="status">
               <Info className="w-3 h-3 mt-0.5 flex-shrink-0" />
               <span>{result.eligibility.warning}</span>
             </div>

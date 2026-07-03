@@ -174,7 +174,7 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
                 onKeyDown={handleToolbarKeyDown}
               >
                 <button
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 transition-colors"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium bg-mm-blue/12 text-mm-blue-text transition-colors"
                   aria-pressed="true"
                   tabIndex={0}
                   title="Correlation Matrix"
@@ -185,7 +185,7 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
                 <button
                   className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs transition-colors ${
                     showScatter
-                      ? 'bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 font-medium'
+                      ? 'bg-mm-blue/12 text-mm-blue-text font-medium'
                       : 'text-mm-text-muted hover:bg-mm-surface-hover hover:text-mm-text-secondary'
                   }`}
                   onClick={() => setUrlParam('showScatter', showScatter ? '' : '1')}
@@ -255,7 +255,7 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
           {showScatter && hasRcSelection && (
             <>
               {(rcColumnIds.length > 10 || rcDomainIds.length > 10) && (
-                <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 text-blue-800 dark:text-blue-300 text-xs">
+                <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-mm-blue/12 border border-mm-blue/30 text-mm-blue-text text-xs">
                   <TriangleAlert className="w-3.5 h-3.5 flex-shrink-0" />
                   Scatter matrix limited to 10 variables. The correlation matrix above shows all.
                 </div>
@@ -299,7 +299,7 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
                     key={type}
                     className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs transition-colors ${
                       rcChartType === type
-                        ? 'bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 font-medium'
+                        ? 'bg-mm-blue/12 text-mm-blue-text font-medium'
                         : 'text-mm-text-muted hover:bg-mm-surface-hover hover:text-mm-text-secondary'
                     }`}
                     onClick={() => setUrlParam('rcChartType', type)}
@@ -330,7 +330,7 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
             <div className="flex flex-col items-center justify-center py-20 text-mm-text-faint">
               <FlaskConical className="w-10 h-10 mb-3 opacity-40" />
               <p className="text-base font-medium text-mm-text-secondary mb-1">Group Comparisons</p>
-              <p className="text-sm">Select a demographic in the sidebar to compare groups.</p>
+              <p className="text-sm">Select a grouping column in the sidebar to compare groups.</p>
             </div>
           ) : !hasComparisonSelection ? (
             <div className="flex flex-col items-center justify-center py-20 text-mm-text-faint">

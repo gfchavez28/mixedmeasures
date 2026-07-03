@@ -18,6 +18,12 @@ from ..models.speaker import Speaker
 from ..models.excerpt import Excerpt
 from ..models.participant import Participant
 from ..services.code_analysis import get_code_frequencies, get_code_cooccurrence
+from ..services.coding_layers import (
+    CONSENSUS_ORIGIN,
+    code_usage_count_expr,
+    non_consensus_filter,
+    visible_target_filter,
+)
 from ..auth import get_current_user
 from ..schemas.common import utc_wire
 from .helpers import _get_project_or_404, parse_int_list, sanitize_content_disposition
@@ -81,7 +87,14 @@ async def export_study_csv(
         segments = segments_by_conv.get(conversation.id, [])
 
         for segment in segments:
-            applied_code_ids = set(ca.code_id for ca in segment.code_applications)
+            # J2-B: human layer only. Consensus is a derived duplicate of codes
+            # the coders already agreed on, so today it cannot flip a 1/0 cell —
+            # but the filter keeps that true if the indicator ever becomes a
+            # count or per-coder breakdown (#490 latent site).
+            applied_code_ids = set(
+                ca.code_id for ca in segment.code_applications
+                if ca.origin != CONSENSUS_ORIGIN
+            )
 
             speaker_name = segment.speaker.name if segment.speaker else ""
             is_facilitator = 1 if segment.speaker and segment.speaker.is_facilitator else 0
@@ -134,13 +147,20 @@ async def export_codebook(
         "codes": []
     }
 
-    # Batch usage counts (avoid N+1)
+    # Batch usage counts (avoid N+1). Track J · J2: distinct targets, not raw
+    # rows, excluding the consensus layer (single-sourced with the codes list).
     code_ids = [c.id for c in codes]
     usage_counts = {}
     if code_ids:
         usage_rows = db.query(
-            CodeApplication.code_id, func.count(CodeApplication.id)
-        ).filter(CodeApplication.code_id.in_(code_ids)).group_by(CodeApplication.code_id).all()
+            CodeApplication.code_id, code_usage_count_expr()
+        ).outerjoin(
+            Segment, CodeApplication.segment_id == Segment.id
+        ).filter(
+            CodeApplication.code_id.in_(code_ids),
+            non_consensus_filter(),
+            visible_target_filter(),  # #500
+        ).group_by(CodeApplication.code_id).all()
         usage_counts = dict(usage_rows)
 
     for code in codes:
@@ -170,22 +190,54 @@ async def export_code_frequencies_csv(
     exclude_facilitator: bool = True,
     conversation_ids: str | None = None,
     participant_ids: str | None = None,
+    # #499: the screen endpoint takes source/document_ids/coder_ids/layer_scope
+    # (J2-5), so its "Export CSV" must accept and honor the SAME scope — the
+    # old signature silently exported all-coder conversation numbers under an
+    # active filter. Bare defaults (not Query(...)) so direct-call tests get
+    # real None; appended after the existing params (positional stability).
+    source: str = "conversations",
+    document_ids: str | None = None,
+    coder_ids: str | None = None,
+    layer_scope: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Export code frequency table as CSV."""
     project = _get_project_or_404(db, project_id, user.id)
 
+    parsed_coder_ids = parse_int_list(coder_ids)
     result = get_code_frequencies(
         db, project_id,
         code_ids=parse_int_list(code_ids),
         exclude_facilitator=exclude_facilitator,
         conversation_ids=parse_int_list(conversation_ids),
         participant_ids=parse_int_list(participant_ids),
+        source=source,
+        document_ids=parse_int_list(document_ids),
+        coder_ids=parsed_coder_ids,
+        layer_scope=layer_scope,
     )
 
     output = io.StringIO()
     writer = csv.writer(output)
+    # Scope claim: when a coder/layer filter narrows the numbers, say so in
+    # the file itself — otherwise the CSV reads as project-wide.
+    if parsed_coder_ids or layer_scope == "consensus":
+        scope_bits = []
+        if layer_scope == "consensus":
+            scope_bits.append("consensus layer")
+        if parsed_coder_ids:
+            names = dict(
+                db.query(User.id, User.username)
+                .filter(User.id.in_(parsed_coder_ids))
+                .all()
+            )
+            scope_bits.append(
+                "coders: " + ", ".join(
+                    names.get(cid, str(cid)) for cid in parsed_coder_ids
+                )
+            )
+        writer.writerow([csv_safe(f"Scope: {'; '.join(scope_bits)}")])
     writer.writerow([
         "Code", "Category", "Segments", "% of Coded Segments",
         "Conversations", "% of Conversations", "Participants", "% of Participants",
@@ -244,6 +296,10 @@ async def export_coded_segments_csv(
             Segment.merged_into_id == None,
             Segment.split_into_id == None,
             Code.is_active == True,
+            # J2-B (#490): human layer only — consensus rows are derived
+            # duplicates of the coders' agreed codes and exported rows must be
+            # attributable to a real coder.
+            non_consensus_filter(),
         )
     )
 
@@ -275,17 +331,33 @@ async def export_coded_segments_csv(
             ).all()
         )
 
-    # Batch-load other codes per segment for "Other Codes" column
+    # Batch-load other codes per segment for "Other Codes" column — distinct
+    # names, human layer only (#490: the unfiltered application-grain list
+    # repeated a name once per coder and could include consensus rows).
     other_codes_map: dict[int, list[str]] = defaultdict(list)
     if seg_ids:
         other_apps = (
             db.query(CodeApplication.segment_id, Code.name)
             .join(Code, CodeApplication.code_id == Code.id)
-            .filter(CodeApplication.segment_id.in_(seg_ids), Code.is_active == True)
+            .filter(
+                CodeApplication.segment_id.in_(seg_ids),
+                Code.is_active == True,
+                non_consensus_filter(),
+            )
+            .distinct()
             .all()
         )
         for sid, cname in other_apps:
             other_codes_map[sid].append(cname)
+
+    # Batch-load coder usernames for the "Coder" column (#490: one row per
+    # application is only a usable grain when the row says WHOSE application).
+    coder_names: dict[int, str] = {}
+    app_user_ids = set(a.user_id for a in apps if a.user_id is not None)
+    if app_user_ids:
+        coder_names = dict(
+            db.query(User.id, User.username).filter(User.id.in_(app_user_ids)).all()
+        )
 
     # Batch participant lookup via speaker
     from ..models.participant import Participant
@@ -306,7 +378,7 @@ async def export_coded_segments_csv(
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "Code", "Category", "Conversation", "Speaker", "Participant",
+        "Code", "Category", "Coder", "Conversation", "Speaker", "Participant",
         "Participant Role", "Segment Text", "Other Codes", "Is Quoted", "Timestamp",
     ])
 
@@ -326,6 +398,7 @@ async def export_coded_segments_csv(
         writer.writerow([
             csv_safe(code.name),
             csv_safe(code.category.name if code.category else ""),
+            csv_safe(coder_names.get(app.user_id, "")),
             csv_safe(seg.conversation.name if seg.conversation else ""),
             csv_safe(speaker_name),
             csv_safe(p_name),
@@ -353,22 +426,57 @@ async def export_code_cooccurrence_csv(
     exclude_facilitator: bool = True,
     conversation_ids: str | None = None,
     participant_ids: str | None = None,
+    # #512 (the #499 sibling this fix missed): the on-screen matrix takes
+    # source/document_ids/coder_ids/layer_scope, so its "Export CSV" must
+    # accept and honor the SAME scope — the old signature silently exported
+    # an all-coder conv+doc matrix under blind mode, a coder filter, the
+    # consensus layer, or a text-source selection. Bare defaults (not
+    # Query(...)) so direct-call tests get real None; appended after the
+    # existing params (positional stability).
+    source: str = "conversations",
+    document_ids: str | None = None,
+    coder_ids: str | None = None,
+    layer_scope: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Export code co-occurrence matrix as CSV."""
     project = _get_project_or_404(db, project_id, user.id)
 
+    parsed_coder_ids = parse_int_list(coder_ids)
     result = get_code_cooccurrence(
         db, project_id,
         code_ids=parse_int_list(code_ids),
         exclude_facilitator=exclude_facilitator,
         conversation_ids=parse_int_list(conversation_ids),
         participant_ids=parse_int_list(participant_ids),
+        source=source,
+        document_ids=parse_int_list(document_ids),
+        coder_ids=parsed_coder_ids,
+        layer_scope=layer_scope,
     )
 
     output = io.StringIO()
     writer = csv.writer(output)
+
+    # Scope claim: when a coder/layer filter narrows the numbers, say so in
+    # the file itself — otherwise the CSV reads as project-wide (#499/#512).
+    if parsed_coder_ids or layer_scope == "consensus":
+        scope_bits = []
+        if layer_scope == "consensus":
+            scope_bits.append("consensus layer")
+        if parsed_coder_ids:
+            names = dict(
+                db.query(User.id, User.username)
+                .filter(User.id.in_(parsed_coder_ids))
+                .all()
+            )
+            scope_bits.append(
+                "coders: " + ", ".join(
+                    names.get(cid, str(cid)) for cid in parsed_coder_ids
+                )
+            )
+        writer.writerow([csv_safe(f"Scope: {'; '.join(scope_bits)}")])
 
     # Header row: empty cell + code names
     header = [""] + [csv_safe(c["name"]) for c in result["codes"]]

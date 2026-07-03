@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback } from 'react'
 import type { SetURLSearchParams } from 'react-router-dom'
+import { SELECTED_ROW } from '@/lib/selection'
 import {
   ChevronDown,
   Trash2,
@@ -70,6 +71,7 @@ import {
 import { OptionsAccordion, AccordionSection, useAccordionState } from '@/components/analysis/OptionsAccordion'
 import SegmentedControl from '@/components/ui/segmented-control'
 import SendToCanvasMenu from '@/components/canvas/SendToCanvasMenu'
+import { comparisonGroupChips } from '@/lib/comparison-chips'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -107,7 +109,7 @@ function SortableMaterialRow({
           ref={setNodeRef}
           style={style}
           className={`group/mat flex items-center rounded ${
-            isActive ? 'bg-blue-50 dark:bg-blue-950/30' : 'hover:bg-mm-surface-hover'
+            isActive ? SELECTED_ROW : 'hover:bg-mm-surface-hover'
           }`}
         >
           {/* Drag handle — listeners only here so the row's click still loads the material */}
@@ -122,7 +124,7 @@ function SortableMaterialRow({
           </button>
           <button
             className={`flex-1 min-w-0 text-left pr-2 py-1.5 text-sm flex items-center gap-1.5 ${
-              isActive ? 'text-blue-700 dark:text-blue-300 font-medium' : 'text-mm-text'
+              isActive ? 'text-mm-blue-text font-medium' : 'text-mm-text'
             }`}
             onClick={() => onLoad(material)}
           >
@@ -927,7 +929,7 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                         type="checkbox"
                         checked={showRegLine}
                         onChange={() => setUrlParam('showRegLine', showRegLine ? '0' : '1')}
-                        className="accent-[hsl(var(--mm-accent))]"
+                        className="accent-mm-blue"
                       />
                       Regression line
                     </label>
@@ -936,7 +938,7 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                         type="checkbox"
                         checked={showJitter}
                         onChange={() => setUrlParam('showJitter', showJitter ? '' : '1')}
-                        className="accent-[hsl(var(--mm-accent))]"
+                        className="accent-mm-blue"
                       />
                       Jitter
                     </label>
@@ -1001,20 +1003,24 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                   </div>
                 )}
 
-                {/* Group info display */}
-                {compareBy && comparisonData && comparisonData.groups.length > 0 && (
-                  <div className="text-[10px] text-mm-text-muted">
-                    {comparisonData.groups.map((g, i) => {
-                      const totalN = comparisonData.rows[0]?.group_stats.find(s => s.group === g)?.n
-                      return (
-                        <span key={g}>
+                {/* Group info display — #510: with 2+ variables the per-group n
+                    differs by variable; attribute it to the variable it reflects */}
+                {compareBy && comparisonData && comparisonData.groups.length > 0 && (() => {
+                  const { chips, nVariableLabel } = comparisonGroupChips(comparisonData.groups, comparisonData.rows)
+                  return (
+                    <div className="text-[10px] text-mm-text-muted">
+                      {chips.map((c, i) => (
+                        <span key={c.group}>
                           {i > 0 && ' · '}
-                          {g}{totalN != null && ` (n=${totalN})`}
+                          {c.group}{c.n != null && ` (n=${c.n})`}
                         </span>
-                      )
-                    })}
-                  </div>
-                )}
+                      ))}
+                      {nVariableLabel && (
+                        <span className="text-mm-text-faint"> — n from {nVariableLabel}</span>
+                      )}
+                    </div>
+                  )
+                })()}
 
                 {/* Exclude Groups */}
                 {compareBy && allComparisonGroups.length > 0 && (
@@ -1063,7 +1069,7 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                         checked={!nonparametric && testType === opt.value}
                         onChange={() => setUrlParam('testType', opt.value)}
                         disabled={nonparametric}
-                        className="accent-[hsl(var(--mm-accent))]"
+                        className="accent-mm-blue"
                       />
                       <span title={nonparametric ? 'Disabled when non-parametric is active' : undefined}>{opt.label}</span>
                     </label>
@@ -1074,7 +1080,7 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                         type="checkbox"
                         checked={nonparametric}
                         onChange={() => setUrlParam('nonparametric', nonparametric ? '' : '1')}
-                        className="rounded border-mm-border-medium accent-[hsl(var(--mm-accent))]"
+                        className="rounded border-mm-border-medium accent-mm-blue"
                       />
                       Use non-parametric test
                     </label>
@@ -1159,7 +1165,7 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
           {rcView === 'comparisons' && (
             <div className="px-3 py-2 text-[10px] text-mm-text-faint border-b border-mm-border-subtle">
               {!compareBy
-                ? 'Select a demographic to compare groups.'
+                ? 'Select a grouping column to compare groups.'
                 : hasComparisonSelection
                   ? `${rcColumnIds.length + rcDomainIds.length} variable${(rcColumnIds.length + rcDomainIds.length) !== 1 ? 's' : ''} selected`
                   : 'Select variables to compare across groups.'}

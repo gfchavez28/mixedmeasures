@@ -26,7 +26,7 @@ export function computeDisplayValue(
   answer: DatasetValueCell | undefined,
   _column: DatasetColumn,
   activeDef: RecodeDefinitionSummary | null,
-): { display: string | null; isNumeric: boolean; numericValue: number | null; isExcluded: boolean; maxValue: number } {
+): { display: string | null; isNumeric: boolean; numericValue: number | null; isExcluded: boolean; maxValue: number; titleText?: string } {
   if (!answer || (answer.value_text === null && answer.value_numeric === null)) {
     return { display: null, isNumeric: false, numericValue: null, isExcluded: false, maxValue: 0 }
   }
@@ -70,6 +70,9 @@ export function computeDisplayValue(
       numericValue: numVal,
       isExcluded: false,
       maxValue: maxVal,
+      // #528: the compact "2 (4)" gives no cue which number is which — spell it
+      // out where there's room (the hover tooltip).
+      titleText: `raw ${valueText} → recoded ${numVal}${activeDef.recode_type === 'reverse' ? ' (reversed)' : ''}`,
     }
   }
 
@@ -241,7 +244,7 @@ export default function EditableCell({
   }
 
   // ── Display mode ───────────────────────────────────────────────────────────
-  const { display, isNumeric, numericValue, isExcluded, maxValue } = computeDisplayValue(answer, column, activeDef)
+  const { display, isNumeric, numericValue, isExcluded, maxValue, titleText } = computeDisplayValue(answer, column, activeDef)
 
   // Click handler: select cell, and for manual/editable cells also start edit
   const handleClick = (editAction?: () => void) => {
@@ -293,7 +296,7 @@ export default function EditableCell({
         className={`px-3 py-2 text-sm text-center font-mono tabular-nums overflow-hidden text-ellipsis whitespace-nowrap${computedTint}${selectionRing} ${isManual ? 'cursor-pointer hover:brightness-95' : ''}`}
         style={ordinalBgStyle(numericValue, maxValue, isDark)}
         onClick={() => handleClick(isManual ? onStartEdit : undefined)}
-        title={display || undefined}
+        title={titleText ?? (display || undefined)}
       >
         {display}
       </td>

@@ -1218,6 +1218,131 @@ def _detect_column_type(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Excel (.xlsx) adapter (#523)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# .xlsx support is a format ADAPTER: the workbook is converted to CSV text at the
+# router boundary and everything downstream (type inference, N/A handling, import)
+# runs the existing CSV pipeline unchanged. Keep it that way — new formats should
+# adapt into CSV text here, never fork the inference/import code paths.
+
+# Structural caps: a .xlsx is a ZIP, so a small upload can inflate enormously.
+# These bound the parse work independently of the 50 MB upload cap.
+MAX_XLSX_ROWS = 100_000
+MAX_XLSX_COLS = 500
+
+XLSX_MAGIC = b"PK\x03\x04"  # xlsx files are ZIP containers
+
+
+class XlsxImportError(ValueError):
+    """User-facing .xlsx parse/validation failure (surfaced as HTTP 400)."""
+
+
+def is_xlsx_upload(filename: str | None, content: bytes) -> bool:
+    """True when the upload should take the .xlsx adapter path.
+
+    Requires BOTH the extension and the ZIP magic — a mis-renamed CSV falls
+    through to the text path (where it may still parse), and a renamed
+    non-zip binary fails fast instead of confusing openpyxl.
+    """
+    return bool(filename) and filename.lower().endswith(".xlsx") and content[:4] == XLSX_MAGIC
+
+
+def _xlsx_cell_to_str(value) -> str:
+    """Stringify a cell the way Excel's own save-as-CSV would (CSV parity).
+
+    Order matters: bool is a subclass of int, so it must be checked first.
+    """
+    import datetime as _dt
+
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, float):
+        # openpyxl yields 3.0 for a typed 3 — trim so value_text matches the CSV twin.
+        if value.is_integer() and abs(value) < 1e15:
+            return str(int(value))
+        return str(value)
+    if isinstance(value, _dt.datetime):
+        if value.hour == 0 and value.minute == 0 and value.second == 0 and value.microsecond == 0:
+            return value.date().isoformat()
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, (_dt.date, _dt.time)):
+        return value.isoformat()
+    return str(value)
+
+
+def xlsx_to_csv_text(content: bytes, sheet_name: str | None = None) -> tuple[str, list[str]]:
+    """Convert one worksheet of a .xlsx upload into CSV text.
+
+    Returns (csv_text, sheet_names). ``sheet_name`` None selects the first sheet.
+    Formula cells carry the file's cached computed value (``data_only=True``); a
+    workbook saved without computed caches yields blanks for them.
+
+    Raises XlsxImportError for anything the user should fix (bad zip, unknown
+    sheet, empty sheet, over-cap dimensions).
+    """
+    import io as _io
+    import zipfile
+
+    from openpyxl import load_workbook
+    from openpyxl.utils.exceptions import InvalidFileException
+
+    try:
+        wb = load_workbook(_io.BytesIO(content), read_only=True, data_only=True)
+    except (InvalidFileException, zipfile.BadZipFile, KeyError, ValueError, OSError) as e:
+        raise XlsxImportError(f"Unable to read the Excel file: {e}") from e
+
+    try:
+        sheet_names = list(wb.sheetnames)
+        if not sheet_names:
+            raise XlsxImportError("The Excel workbook contains no worksheets.")
+        target = sheet_name or sheet_names[0]
+        if target not in sheet_names:
+            raise XlsxImportError(f'Worksheet "{target}" was not found in the workbook.')
+        ws = wb[target]
+
+        rows: list[list[str]] = []
+        for i, row in enumerate(ws.iter_rows(values_only=True)):
+            if i >= MAX_XLSX_ROWS:
+                raise XlsxImportError(
+                    f"The worksheet has more than {MAX_XLSX_ROWS:,} rows. "
+                    "Split the data into smaller files and import them separately."
+                )
+            if len(row) > MAX_XLSX_COLS:
+                raise XlsxImportError(
+                    f"The worksheet has more than {MAX_XLSX_COLS} columns."
+                )
+            rows.append([_xlsx_cell_to_str(v) for v in row])
+    finally:
+        wb.close()
+
+    # Excel sheets often report phantom trailing rows/columns (formatting residue).
+    # Trim fully-empty trailing rows, then size every row to the header's width.
+    while rows and all(v == "" for v in rows[-1]):
+        rows.pop()
+    if not rows:
+        raise XlsxImportError(f'Worksheet "{target}" has no data.')
+
+    header = rows[0]
+    while header and header[-1] == "":
+        header.pop()
+    if not header:
+        raise XlsxImportError(f'Worksheet "{target}" has no header row.')
+    width = len(header)
+
+    out = _io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(header)
+    for row in rows[1:]:
+        sized = row[:width] + [""] * (width - len(row[:width]))
+        writer.writerow(sized)
+
+    return out.getvalue(), sheet_names
+
+
 def preview_dataset_csv(file_contents: str) -> dict:
     """
     Parse a survey CSV and return per-column analysis with auto-detected types.
@@ -1478,6 +1603,10 @@ def import_dataset_csv(
 
     # -- 3. Process data rows -> rows + values ----------------------------------
     values_created = 0
+    # #415: track values recognized as missing (N/A / refusal labels) so the
+    # import results screen can disclose the silent missing-handling (#381/#384).
+    recognized_missing_count = 0
+    recognized_missing_labels: set[str] = set()
 
     for row_idx, data_row in enumerate(data_rows):
         # System-generated record identifier
@@ -1500,6 +1629,15 @@ def import_dataset_csv(
             cell = data_row[col_idx].strip()
             if not cell:
                 continue
+
+            # #415: recognized-missing accounting. Mirrors the per-column
+            # na_count in preview_dataset_csv and the value-keyed compute rule
+            # (_is_na == missing everywhere). value_text still stores the raw
+            # label; value_numeric is set to None by _compute_value_numeric.
+            if _is_na(cell):
+                recognized_missing_count += 1
+                if len(recognized_missing_labels) < 25:
+                    recognized_missing_labels.add(cell)
 
             cfg = cfg_by_idx.get(col_idx, {})
             value_numeric = _compute_value_numeric(
@@ -1525,4 +1663,6 @@ def import_dataset_csv(
         "columns_created": len(columns),
         "rows_created": len(data_rows),
         "values_created": values_created,
+        "recognized_missing_count": recognized_missing_count,
+        "recognized_missing_labels": sorted(recognized_missing_labels),
     }

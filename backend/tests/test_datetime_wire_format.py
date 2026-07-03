@@ -176,3 +176,50 @@ def test_document_note_raw_dict_carries_offset(client):
     assert len(payload) == 1
     assert UTC_OFFSET_RE.search(payload[0]["created_at"]), payload[0]["created_at"]
     assert UTC_OFFSET_RE.search(payload[0]["updated_at"]), payload[0]["updated_at"]
+
+
+# ── #513: human-facing Excel timestamp cells must localize ───────────────────
+
+def test_excel_export_has_no_unwrapped_strftime():
+    """#513 fail-closed source scan: every ``.strftime(`` in export_excel.py
+    must be wrapped in ``local_wall_time`` (localized #408 wall time) or be one
+    of the two legitimate exceptions — ``datetime.now()`` (already local, used
+    in filenames) and ``conversation_date`` (the #408 naive-calendar carve-out).
+    Notes/Audit-Trail/Metrics "Computed At" previously emitted raw naive UTC,
+    disagreeing with the localized Codebook/Memos cells in the same workbook.
+    """
+    from pathlib import Path
+    import app.routers.export_excel as mod
+
+    src = Path(mod.__file__).read_text(encoding="utf-8")
+    offenders = []
+    for lineno, line in enumerate(src.splitlines(), start=1):
+        if ".strftime(" not in line:
+            continue
+        if "local_wall_time" in line:
+            continue
+        if "datetime.now()" in line or "conversation_date" in line:
+            continue
+        offenders.append(f"export_excel.py:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "unlocalized .strftime( on a (naive-UTC) datetime in a human-facing "
+        "Excel cell — route through local_wall_time (#408/#513):\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_local_wall_time_localizes_and_keeps_format():
+    """local_wall_time converts naive UTC to the local wall clock; the optional
+    fmt arg (audit trail keeps seconds) must not bypass the conversion."""
+    from datetime import timezone as _tz
+    from app.routers.export_helpers import local_wall_time
+
+    naive_utc = datetime(2026, 7, 3, 5, 12, 34)
+    expected_minute = (
+        naive_utc.replace(tzinfo=_tz.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    )
+    expected_second = (
+        naive_utc.replace(tzinfo=_tz.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    )
+    assert local_wall_time(naive_utc) == expected_minute
+    assert local_wall_time(naive_utc, "%Y-%m-%d %H:%M:%S") == expected_second

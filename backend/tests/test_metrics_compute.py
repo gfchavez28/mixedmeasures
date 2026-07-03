@@ -174,6 +174,39 @@ def test_grouped_mean(db_session):
     assert none_result.valid_n >= 2
 
 
+def test_summary_real_group_count_excludes_none_bucket(db_session):
+    """#506: the metrics-list summary must report REAL groups (non-null
+    group_value) separately from result_count, which also counts the None
+    listwise-deletion bucket. Gender here has exactly 2 real groups
+    (Female, Male) + a None bucket — the t-vs-ANOVA boundary the bug broke.
+    """
+    import asyncio
+    from app.models.user import User
+    from app.routers.metrics import list_metrics
+
+    db = db_session
+    cols = _setup_board(db)
+
+    metric = MetricDefinition(
+        project_id=1, name="Col 9 by Gender",
+        metric_type="mean",
+        input_source_type="dataset_column",
+        input_source_id=cols["col9"].id,
+        grouping_column_id=cols["gender"].id,
+        config="{}",
+    )
+    db.add(metric)
+    db.flush()
+    compute_metric(db, metric)
+
+    user = db.get(User, 1)
+    resp = asyncio.run(list_metrics(1, user=user, db=db))
+    summary = next(m for m in resp.metrics if m.id == metric.id)
+
+    assert summary.result_count == 3  # Female, Male, None bucket
+    assert summary.real_group_count == 2  # the count test pickers must use
+
+
 # ── #384: recognized N/A excluded from all grouping paths ────────────────────
 
 def test_load_grouping_values_excludes_na(db_session):

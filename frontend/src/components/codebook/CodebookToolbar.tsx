@@ -1,15 +1,17 @@
-import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from 'react'
-import { Search, EyeOff, X, Table2, Plus, FileOutput, FileInput, BookOpen, Pencil, SlidersHorizontal } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
+import { Link } from 'react-router-dom'
+import { Search, EyeOff, X, Plus, FileOutput, FileInput, BookOpen, SlidersHorizontal, ArrowUpRight } from 'lucide-react'
 import type { CodebookState } from '@/hooks/useCodebookState'
-import type { CodebookTreeResponse, CodebookCooccurrenceResponse } from '@/lib/api'
+import type { CodebookTreeResponse } from '@/lib/api'
 import type { Diagnostics } from '@/lib/codebook-utils'
 import SegmentedControl from '@/components/ui/segmented-control'
+import FreezeCodebookButton from '@/components/codebook/FreezeCodebookButton'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MODE_OPTIONS = [
   { value: 'tree' as const, label: 'Tree' },
-  { value: 'network' as const, label: 'Network' },
+  { value: 'overview' as const, label: 'Overview' },
 ]
 
 const SIZING_OPTIONS = [
@@ -28,23 +30,20 @@ const FORMAT_OPTIONS = [
 interface CodebookToolbarProps {
   cb: CodebookState
   searchMatchCount: number
-  availableLevels: { value: number; label: string }[]
   diagnostics: Diagnostics
   totalCodes: number
   totalCategories: number
   treeData: CodebookTreeResponse | undefined
-  cooccurrenceData: CodebookCooccurrenceResponse | undefined
   isEmpty: boolean
   hidePanelOpen: boolean
   onToggleHidePanel: () => void
   hiddenCount: number
   hiddenTooltip: string
-  categoryLevelNames: Record<string, string> | null
-  onRenameLevelConfirm: (depth: number, newName: string | null) => void
+  projectId: number
   onCreateCode: () => void
   onCreateCategory: () => void
   onTreeExport: () => void
-  onNetworkExport: () => void
+  onOverviewExport: () => void
   onExportCodebook?: (format: 'native' | 'qdc') => void
   onImportCodebook?: (file: File) => void
   isExportingCodebook?: boolean
@@ -52,201 +51,25 @@ interface CodebookToolbarProps {
   dataSegMax: number
 }
 
-// ── Hierarchy Level Selector with Rename ─────────────────────────────────────
-
-function HierarchyLevelSelector({
-  levels,
-  value,
-  onChange,
-  categoryLevelNames,
-  onRenameLevelConfirm,
-}: {
-  levels: { value: number; label: string }[]
-  value: number
-  onChange: (v: number) => void
-  categoryLevelNames: Record<string, string> | null
-  onRenameLevelConfirm: (depth: number, newName: string | null) => void
-}) {
-  const [editingLevel, setEditingLevel] = useState<number | null>(null)
-  const [editValue, setEditValue] = useState('')
-  const buttonRefs = useRef<Map<number, HTMLButtonElement>>(new Map())
-  const inputRef = useRef<HTMLInputElement>(null)
-  const popoverRef = useRef<HTMLDivElement>(null)
-
-  const activeIndex = levels.findIndex(l => l.value === value)
-
-  const openEditor = useCallback((depth: number) => {
-    const current = categoryLevelNames?.[String(depth)]
-    setEditValue(current ?? '')
-    setEditingLevel(depth)
-  }, [categoryLevelNames])
-
-  const closeEditor = useCallback(() => {
-    const depth = editingLevel
-    setEditingLevel(null)
-    if (depth != null) {
-      const btn = buttonRefs.current.get(depth)
-      requestAnimationFrame(() => btn?.focus())
-    }
-  }, [editingLevel])
-
-  const confirmEdit = useCallback(() => {
-    if (editingLevel == null) return
-    const trimmed = editValue.trim()
-    onRenameLevelConfirm(editingLevel, trimmed || null)
-    closeEditor()
-  }, [editingLevel, editValue, onRenameLevelConfirm, closeEditor])
-
-  // Auto-focus + select input when popover opens
-  useEffect(() => {
-    if (editingLevel != null) {
-      requestAnimationFrame(() => {
-        inputRef.current?.focus()
-        inputRef.current?.select()
-      })
-    }
-  }, [editingLevel])
-
-  // Click-outside to close
-  useEffect(() => {
-    if (editingLevel == null) return
-    const handler = (e: MouseEvent) => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
-        closeEditor()
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [editingLevel, closeEditor])
-
-  const handleKeyDown = useCallback((e: KeyboardEvent<HTMLDivElement>) => {
-    // Arrow key navigation within the tablist
-    const idx = levels.findIndex(l => l.value === value)
-    let next: number | undefined
-    if (e.key === 'ArrowRight') next = (idx + 1) % levels.length
-    else if (e.key === 'ArrowLeft') next = (idx - 1 + levels.length) % levels.length
-    else if (e.key === 'Home') next = 0
-    else if (e.key === 'End') next = levels.length - 1
-    if (next != null) {
-      e.preventDefault()
-      onChange(levels[next].value)
-      requestAnimationFrame(() => buttonRefs.current.get(levels[next!].value)?.focus())
-    }
-  }, [levels, value, onChange])
-
-  const hasCustomName = (depth: number) => !!(categoryLevelNames?.[String(depth)])
-
-  return (
-    <div
-      className="inline-flex rounded-md border bg-mm-bg p-0.5 relative"
-      role="tablist"
-      aria-label="Hierarchy level"
-      onKeyDown={handleKeyDown}
-      style={{ display: 'inline-grid', gridTemplateColumns: `repeat(${levels.length}, 1fr)` }}
-    >
-      {/* Sliding indicator */}
-      <div
-        className="absolute top-0.5 bottom-0.5 rounded-[calc(var(--radius)-2px)] bg-mm-surface shadow-xs transition-transform duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]"
-        style={{
-          width: `calc((100% - 4px) / ${levels.length})`,
-          left: '2px',
-          transform: `translateX(${activeIndex * 100}%)`,
-        }}
-      />
-      {levels.map(level => {
-        const isActive = level.value === value
-        const isRenameable = level.value >= 0
-        return (
-          <div key={level.value} className="relative w-full">
-            <button
-              ref={(el) => { if (el) buttonRefs.current.set(level.value, el); }}
-              role="tab"
-              id={`cb-level-${level.value}`}
-              aria-selected={isActive}
-              tabIndex={isActive ? 0 : -1}
-              className={`group relative z-[1] w-full text-center px-3 py-1 text-xs font-medium rounded-[calc(var(--radius)-2px)] transition-colors whitespace-nowrap ${
-                isActive ? 'text-mm-text' : 'text-mm-text-muted hover:text-mm-text-secondary'
-              }`}
-              title={isRenameable ? 'Double-click or F2 to rename' : undefined}
-              onClick={() => onChange(level.value)}
-              onDoubleClick={() => { if (isRenameable) openEditor(level.value) }}
-              onKeyDown={(e) => {
-                if (e.key === 'F2' && isRenameable) {
-                  e.preventDefault()
-                  openEditor(level.value)
-                }
-              }}
-            >
-              {level.label}
-              {isRenameable && (
-                <Pencil className="inline-block ml-1 w-[10px] h-[10px] opacity-0 group-hover:opacity-40 group-focus-visible:opacity-40 transition-opacity align-[-1px]" />
-              )}
-            </button>
-            {/* Rename popover */}
-            {editingLevel === level.value && (
-              <div
-                ref={popoverRef}
-                className="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 bg-mm-surface border border-mm-border-subtle rounded-lg shadow-lg p-2 z-50 w-48"
-                role="dialog"
-                aria-label="Rename hierarchy level"
-              >
-                <input
-                  ref={inputRef}
-                  type="text"
-                  value={editValue}
-                  onChange={e => setEditValue(e.target.value)}
-                  maxLength={50}
-                  className="w-full px-2 py-1 text-xs rounded border border-mm-border-subtle bg-mm-bg text-mm-text focus:outline-none focus:ring-1 focus:ring-mm-blue/50"
-                  aria-label="Level name"
-                  placeholder="Custom name..."
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') { e.preventDefault(); confirmEdit() }
-                    if (e.key === 'Escape') { e.preventDefault(); closeEditor() }
-                    e.stopPropagation() // prevent tablist arrow-key handler
-                  }}
-                />
-                {hasCustomName(level.value) && (
-                  <button
-                    className="mt-1.5 text-[10px] text-mm-text-faint hover:text-mm-text-muted transition-colors"
-                    onClick={() => {
-                      onRenameLevelConfirm(level.value, null)
-                      closeEditor()
-                    }}
-                  >
-                    Reset to default
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function CodebookToolbar({
   cb,
   searchMatchCount,
-  availableLevels,
   isEmpty,
   hidePanelOpen,
   onToggleHidePanel,
   hiddenCount,
   hiddenTooltip,
-  categoryLevelNames,
-  onRenameLevelConfirm,
+  projectId,
   onCreateCode,
   onCreateCategory,
   onTreeExport,
-  onNetworkExport,
+  onOverviewExport,
   onExportCodebook,
   onImportCodebook,
   isExportingCodebook,
   treeData,
-  cooccurrenceData,
   dataSegMax,
 }: CodebookToolbarProps) {
   const importFileRef = useRef<HTMLInputElement>(null)
@@ -287,16 +110,6 @@ export default function CodebookToolbar({
           idPrefix="cb-mode"
         />
 
-        {cb.mode === 'network' && availableLevels.length > 1 && (
-          <HierarchyLevelSelector
-            levels={availableLevels}
-            value={cb.netLevel}
-            onChange={cb.setNetLevel}
-            categoryLevelNames={categoryLevelNames}
-            onRenameLevelConfirm={onRenameLevelConfirm}
-          />
-        )}
-
         {/* Center: Search */}
         <div className="relative flex-1 min-w-[140px] max-w-sm">
           <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-mm-text-faint" />
@@ -323,7 +136,8 @@ export default function CodebookToolbar({
           )}
         </div>
 
-        {/* Right: Create + Export + Sources */}
+        {/* Right: Freeze + Create + Export + Sources */}
+        <FreezeCodebookButton projectId={projectId} />
         <button
           onClick={onCreateCode}
           className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium bg-mm-green/8 text-mm-green-text border border-mm-green/20 hover:bg-mm-green/15 transition-colors"
@@ -341,12 +155,12 @@ export default function CodebookToolbar({
           Category
         </button>
 
-        {(cb.mode === 'tree' || (cb.mode === 'network' && !cb.netTable && cooccurrenceData)) && treeData && !isEmpty && (
+        {treeData && !isEmpty && (
           <button
-            onClick={cb.mode === 'tree' ? onTreeExport : onNetworkExport}
+            onClick={cb.mode === 'tree' ? onTreeExport : onOverviewExport}
             className="p-1.5 rounded-md text-mm-text-muted hover:text-mm-text-secondary hover:bg-mm-surface transition-colors"
-            title={cb.mode === 'tree' ? 'Export tree as PNG' : 'Export network as PNG'}
-            aria-label={cb.mode === 'tree' ? 'Export tree as PNG' : 'Export network as PNG'}
+            title={`Export ${cb.mode} as PNG`}
+            aria-label={`Export ${cb.mode} as PNG`}
           >
             <FileOutput className="w-4 h-4" />
           </button>
@@ -412,7 +226,7 @@ export default function CodebookToolbar({
 
       {/* ── Row 2: Secondary controls ────────────────────────────────── */}
       <div className="flex items-center gap-3 px-4 py-1.5 border-b border-mm-border-subtle bg-mm-surface flex-wrap">
-        {/* Left: Format controls (tree) or Table toggle (network) */}
+        {/* Left: Format controls (tree) */}
         {cb.mode === 'tree' && (
           <>
             <div className="flex items-center gap-1.5">
@@ -436,23 +250,6 @@ export default function CodebookToolbar({
               />
             </div>
           </>
-        )}
-
-        {cb.mode === 'network' && (
-          <button
-            onClick={() => cb.setNetTable(!cb.netTable)}
-            className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-colors ${
-              cb.netTable
-                ? 'bg-mm-blue/10 text-mm-blue-text'
-                : 'text-mm-text-muted hover:text-mm-text-secondary hover:bg-mm-surface'
-            }`}
-            title={cb.netTable ? 'Show network graph' : 'Show data table'}
-            aria-pressed={cb.netTable}
-            aria-label={cb.netTable ? 'Switch to network graph' : 'Switch to data table'}
-          >
-            <Table2 className="w-3.5 h-3.5" />
-            Table
-          </button>
         )}
 
         {/* Center: Size by */}
@@ -590,6 +387,16 @@ export default function CodebookToolbar({
           />
           Inactive
         </label>
+
+        {/* Cross-link to where code co-occurrence now lives (#483) */}
+        <Link
+          to={`/projects/${projectId}/analysis/qualitative?tab=relationships`}
+          className="ml-auto flex items-center gap-1 text-xs text-mm-text-muted hover:text-mm-text-secondary transition-colors"
+          title="View how codes co-occur, in Analysis → Relationships"
+        >
+          Code co-occurrence
+          <ArrowUpRight className="w-3.5 h-3.5" />
+        </Link>
       </div>
     </div>
   )

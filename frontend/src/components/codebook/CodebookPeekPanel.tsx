@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { X, ChevronRight, ChevronDown, ExternalLink, Power, PowerOff, FolderInput, Trash2, StickyNote, Merge, FolderPlus } from 'lucide-react'
 import { toast } from 'sonner'
 import { codesApi, categoriesApi, codeAnalysisApi, memosApi } from '@/lib/api'
+import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import type { CodebookTreeResponse, CodebookCategoryNode, CodebookCodeNode } from '@/lib/api'
 import type { SelectionAnalysis } from './codebook-selection'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
@@ -19,6 +20,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
+import { ColorDotButton } from '@/components/ColorDotButton'
 import CategoryTreePicker from './CategoryTreePicker'
 import { COLOR_DEFAULT } from '@/lib/codebook-constants'
 
@@ -269,8 +271,8 @@ export default function CodebookPeekPanel({
     queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
     queryClient.invalidateQueries({ queryKey: ['categories', projectId] })
     queryClient.invalidateQueries({ queryKey: ['codebook-tree', projectId] })
-    queryClient.invalidateQueries({ queryKey: ['codebook-cooccurrence', projectId] })
     queryClient.invalidateQueries({ queryKey: ['project-summary', projectId] })
+    invalidateDerivedCounts(queryClient, projectId, { metrics: true })  // #450: cross-surface counts
   }, [queryClient, projectId])
 
   // ── Mutations ─────────────────────────────────────────────────────────
@@ -433,7 +435,13 @@ export default function CodebookPeekPanel({
   if (isMultiSelectMode && selectionAnalysis) {
     const { codes, categories } = selectionAnalysis
     const totalSegments = codes.reduce((s, c) => s + c.segmentCount, 0)
-    const totalSources = codes.reduce((s, c) => s + c.sourceCount, 0)
+    // #501: UNION of sources — a plain Σ double-counts sources shared between
+    // the selected codes (it exceeded the project's source universe). Falls
+    // back to Σ only if a stale cache lacks source_keys.
+    const sourceUnion = new Set(codes.flatMap(c => c.sourceKeys))
+    const totalSources = codes.some(c => c.sourceKeys.length !== c.sourceCount)
+      ? codes.reduce((s, c) => s + c.sourceCount, 0)
+      : sourceUnion.size
 
     // Group codes by category for breakdown
     const catGroups = new Map<string, typeof codes>()
@@ -569,13 +577,12 @@ export default function CodebookPeekPanel({
         <div className="flex items-start gap-2">
           <Popover open={colorPickerOpen} onOpenChange={setColorPickerOpen}>
             <PopoverTrigger asChild>
-              <button
-                className="w-5 h-5 rounded-full shrink-0 mt-0.5 ring-offset-1 hover:ring-2 hover:ring-mm-border-medium transition-shadow flex items-center justify-center"
+              <ColorDotButton
+                className="mt-0.5"
+                color={color}
                 aria-label={`Change color for ${code.name}`}
                 title="Change color"
-              >
-                <span className="w-3 h-3 rounded-full" style={{ backgroundColor: color }} />
-              </button>
+              />
             </PopoverTrigger>
             <PopoverContent className="w-auto p-3" align="start" side="left" collisionPadding={16}>
               <div className="space-y-2">

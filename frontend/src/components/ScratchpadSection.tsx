@@ -170,12 +170,12 @@ export default function ScratchpadSection({ projectId, search, onExpandedChange 
   if (count === 0) {
     // Neutral persistent header when empty — blends with background
     return (
-      <div className="border-b border-mm-border-subtle bg-stone-50 dark:bg-mm-surface flex-shrink-0">
+      <div className="border-b border-mm-border-subtle bg-mm-bg dark:bg-mm-surface flex-shrink-0">
         <div className="flex items-center gap-2 px-4 py-2">
-          <span className="text-xs font-semibold text-stone-400 dark:text-stone-500">
+          <span className="text-xs font-semibold text-mm-text-faint">
             Scratchpad
           </span>
-          <span className="text-[10px] text-stone-400 dark:text-stone-500 italic">
+          <span className="text-[10px] text-mm-text-faint italic">
             Use Jot to capture thoughts
           </span>
         </div>
@@ -184,7 +184,7 @@ export default function ScratchpadSection({ projectId, search, onExpandedChange 
   }
 
   return (
-    <div className="border-b border-mm-border-subtle bg-stone-50 dark:bg-mm-surface flex-shrink-0">
+    <div className="border-b border-mm-border-subtle bg-mm-bg dark:bg-mm-surface flex-shrink-0">
       {/* Scratchpad header */}
       <button
         onClick={() => setIsExpanded(!expanded)}

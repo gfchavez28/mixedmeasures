@@ -344,8 +344,12 @@ export function RelationshipsContent(props: RelationshipsContentProps) {
     if (qa.selectedTextColumnIds.size > 0) params.text_column_ids = Array.from(qa.selectedTextColumnIds).join(',')
     if (qa.excludeFacilitator) params.exclude_facilitator = 'true'
     if (qa.participantIds.length > 0) params.participant_ids = qa.participantIds.join(',')
+    // #499: carry the EFFECTIVE coder/layer scope (blind-forced — filterParams
+    // already holds it) so the CSV matches the on-screen numbers.
+    if (filterParams.coder_ids) params.coder_ids = filterParams.coder_ids
+    if (filterParams.layer_scope) params.layer_scope = filterParams.layer_scope
     exportApi.demographicComparisonCsv(pid, params)
-  }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.excludeFacilitator, qa.participantIds])
+  }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.excludeFacilitator, qa.participantIds, filterParams.coder_ids, filterParams.layer_scope])
 
   return (
     <div>

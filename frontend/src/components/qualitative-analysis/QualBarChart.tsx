@@ -16,8 +16,9 @@ import { useChartColors } from '@/lib/theme-context'
 import type { SourceFrequenciesResponse } from '@/lib/api'
 import type { QualValueMode, QualDenominatorMode, QualSortOrder } from '@/lib/qual-analysis-types'
 import type { DataLabelPosition } from '@/lib/chart-data'
+import { compareValueLabels } from '@/lib/chart-data'
 import type { ChartDataRow } from '@/lib/chart-types'
-import { shapeQualBarData, computeCellValue, QUAL_GROUP_COLORS } from './qual-chart-data'
+import { shapeQualBarData, computeCellValue, resolveRenderedBarEntry, QUAL_GROUP_COLORS } from './qual-chart-data'
 
 interface QualBarChartProps {
   data: SourceFrequenciesResponse
@@ -92,7 +93,9 @@ export default function QualBarChart({
         for (const gn of Object.keys(src.groups)) groupNameSet.add(gn)
       }
     }
-    const groupNames = Array.from(groupNameSet).sort()
+    // #496 / AC-4: numeric-aware label order — a plain .sort() puts "10"
+    // before "8" (the #406 class).
+    const groupNames = Array.from(groupNameSet).sort(compareValueLabels)
     if (groupNames.length === 0) return null
 
     const chartData = data.codes.map(code => {
@@ -224,10 +227,12 @@ export default function QualBarChart({
                   barSize={18}
                   isAnimationActive={false}
                   cursor={onCodeClick ? 'pointer' : undefined}
-                  onClick={(_data: unknown, index: number) => {
-                    if (onCodeClick && chartData[index]) {
-                      onCodeClick(chartData[index]._codeId as number)
-                    }
+                  onClick={(data: unknown, index: number) => {
+                    if (!onCodeClick) return
+                    // #504: index enumerates rendered rects (a 0-value group omits its rect)
+                    const payload = (data as { payload?: { _codeId?: number } } | null)?.payload
+                    const codeId = payload?._codeId ?? (chartData[index]?._codeId as number | undefined)
+                    if (codeId != null) onCodeClick(codeId)
                   }}
                 >
                   {dataLabels === 'inside' && (
@@ -264,15 +269,18 @@ export default function QualBarChart({
               barSize={20}
               isAnimationActive={false}
               cursor={onCodeClick ? 'pointer' : undefined}
-              onClick={(_data: unknown, index: number) => {
-                if (onCodeClick && simpleChartData[index]) {
-                  onCodeClick(simpleChartData[index]._codeId)
-                }
+              onClick={(data: unknown, index: number) => {
+                if (!onCodeClick) return
+                // #504: index enumerates rendered rects; prefer the clicked rect's own payload
+                const payload = (data as { payload?: { _codeId?: number } } | null)?.payload
+                const codeId = payload?._codeId
+                  ?? resolveRenderedBarEntry(simpleChartData, index, (data as { value?: number } | null)?.value ?? NaN)?._codeId
+                if (codeId != null) onCodeClick(codeId)
               }}
               label={(props: LabelProps) => {
-                const { x, y, width, height, index } = props as unknown as { x: number; y: number; width: number; height: number; index: number }
+                const { x, y, width, height, value, index } = props as unknown as { x: number; y: number; width: number; height: number; value: number; index: number }
                 if (dataLabels === 'none') return null
-                const entry = simpleChartData[index]
+                const entry = resolveRenderedBarEntry(simpleChartData, index, value)
                 if (!entry || entry.value === 0) return null
 
                 const barEnd = x + width

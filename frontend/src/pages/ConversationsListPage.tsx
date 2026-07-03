@@ -463,7 +463,10 @@ function ConversationCard({
                   ? `Not started, 0 of ${conversation.segment_count} participant segments coded`
                   : `${conversation.coded_segment_count} of ${conversation.segment_count} participant segments coded`
               }
-              title="Facilitator segments are excluded from coding progress."
+              // #517: this count is ALL coders' coverage (the blind workbench gauge
+              // shows only coding visible to you) — label the scope so the two
+              // surfaces' different numbers read as scopes, not a bug.
+              title="All coders' coverage. Facilitator segments are excluded from coding progress."
             >
               <div className="w-[80px] h-1.5 rounded-sm bg-mm-border-subtle shrink-0 overflow-hidden">
                 <div

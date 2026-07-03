@@ -32,7 +32,7 @@ export class ChartErrorBoundary extends React.Component<Props, State> {
             {this.state.error?.message}
           </span>
           <button
-            className="text-xs text-blue-500 hover:text-blue-700 underline focus:outline-none focus:ring-2 focus:ring-ring rounded"
+            className="text-xs text-mm-blue-text hover:text-mm-blue underline focus:outline-none focus:ring-2 focus:ring-ring rounded"
             onClick={() => this.setState({ hasError: false, error: null })}
           >
             Try again

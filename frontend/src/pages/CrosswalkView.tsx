@@ -26,6 +26,10 @@ import {
   type DomainMemberInput,
 } from '@/lib/api'
 import { CrosswalkHeader } from '@/components/crosswalk/CrosswalkHeader'
+import { useProjectLayout } from '@/layouts/ProjectLayout'
+import { downloadBlob } from '@/lib/api/download'
+import { buildCrosswalkCsv } from '@/lib/crosswalk-csv'
+import { UTF8_BOM } from '@/lib/csv'
 import { CrosswalkColumnHeaders } from '@/components/crosswalk/CrosswalkColumnHeaders'
 import { CrosswalkGrid } from '@/components/crosswalk/CrosswalkGrid'
 import { UnassignedPanel } from '@/components/crosswalk/UnassignedPanel'
@@ -74,6 +78,7 @@ import '@/components/crosswalk/crosswalk.css'
 export default function CrosswalkView() {
   const { projectId } = useParams<{ projectId: string }>()
   const pid = Number(projectId)
+  const { project } = useProjectLayout()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
@@ -270,6 +275,20 @@ export default function CrosswalkView() {
     () => activeDatasets.map((ds) => ds.dataset_id),
     [activeDatasets],
   )
+
+  // #12d-a — export the crosswalk as a CSV harmonization table (consulting
+  // deliverable). Columns follow the on-screen active-dataset order; a UTF-8
+  // BOM keeps non-ASCII item wording intact when opened in Excel.
+  const handleExportCsv = useCallback(() => {
+    const csv = buildCrosswalkCsv(grid, activeDatasets)
+    const blob = new Blob([UTF8_BOM + csv], { type: 'text/csv;charset=utf-8;' })
+    const slug =
+      (project?.name ?? 'project')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'project'
+    downloadBlob(blob, `${slug}-crosswalk.csv`)
+  }, [grid, activeDatasets, project])
 
   const crosswalkColsStyle = useMemo<React.CSSProperties>(
     () => ({
@@ -950,6 +969,7 @@ export default function CrosswalkView() {
           onExpandAll={expandAll}
           allDotsHidden={datasetDots.allMuted}
           onToggleAllDots={datasetDots.toggleAllMuted}
+          onExportCsv={handleExportCsv}
         />
 
         {/* Body row: main grid (scrolls) + optional panel (scrolls

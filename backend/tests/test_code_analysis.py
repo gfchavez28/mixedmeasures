@@ -330,3 +330,27 @@ def test_saturation_curve(db_session):
         "Interview - Chakra Z", "Interview - Merry Y",
         "Interview - Gandalf X", "Board Retreat Notes",
     ]
+
+
+def test_saturation_names_inactive_code(db_session):
+    """#508: the pair queries (correctly) count inactive codes' applications,
+    so the name map must include inactive codes — the tooltip previously fell
+    to the "Unknown (id)" placeholder for them.
+    """
+    db = db_session
+    _setup_coded_data(db)
+
+    retired = Code(id=9, numeric_id=8, name="Retired code", project_id=1,
+                   is_universal=False, is_active=False)
+    db.add(retired)
+    db.flush()
+    db.add(CodeApplication(id=100, segment_id=2, code_id=9))
+    db.flush()
+
+    result = get_saturation_data(db, project_id=1, exclude_facilitator=True)
+
+    all_new_names = [n for p in result["points"] for n in p["new_code_names"]]
+    assert "Retired code" in all_new_names
+    assert not any(n.startswith("Unknown (") for n in all_new_names)
+    # The inactive application still counts (the #489 standard): 6 active + 1
+    assert result["total_unique_codes"] == 7

@@ -29,9 +29,9 @@ function getMetricDescription(
   let desc: string
   switch (valueMode) {
     case 'count':
-      desc = source === 'text' ? 'Comment count per source'
+      desc = source === 'text' ? 'Text count per source'
         : source === 'conversations' ? 'Segment count per source'
-        : 'Segment + comment count per source'
+        : 'Segment + text count per source'
       break
     case 'segment_proportion':
       desc = denominatorMode === 'coded'

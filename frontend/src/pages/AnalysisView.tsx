@@ -29,12 +29,15 @@ import { extractApiError } from '@/lib/api/error-utils'
 import { toast } from 'sonner'
 import {
   DEFAULT_FORMATTING,
+  formatPValue,
   type ChartType,
   type MetricType,
   type ChartFormatting,
   type LabelMode,
   type GroupOrganization,
 } from '@/lib/chart-data'
+import { computeInvalidAnalysisParams } from '@/lib/analysis-url-params'
+import { pickGroupDifferenceTest, groupDifferenceTestLabel } from '@/lib/group-test-pick'
 import { ChartErrorBoundary } from '@/components/ChartErrorBoundary'
 import ChartTypeToolbar from '@/components/charts/ChartTypeToolbar'
 import AnalysisChartRenderer from '@/components/analysis/AnalysisChartRenderer'
@@ -46,6 +49,7 @@ import { useAnalysisUrlState } from '@/hooks/useAnalysisUrlState'
 import { useAnalysisDerived } from '@/hooks/useAnalysisDerived'
 import { useQuickCompute } from '@/hooks/useQuickCompute'
 import { useChartAnnouncements } from '@/hooks/useChartAnnouncements'
+import { useEnsureMaterialCollection } from '@/hooks/useEnsureMaterialCollection'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -93,13 +97,11 @@ function formatTestResult(test: StatisticalTestResponse): string {
     return `Cronbach's \u03B1 = ${rd.alpha} (${rd.interpretation}), k = ${rd.k}, n = ${rd.n}`
   }
   if (test.test_type === 'independent_t_test') {
-    const p = rd.p_value < 0.001 ? '< .001' : `= ${rd.p_value.toFixed(3).replace(/^0/, '')}`
-    return `t(${typeof rd.df === 'number' ? rd.df.toFixed(1) : rd.df}) = ${rd.t_statistic}, p ${p}, d = ${rd.cohens_d} (${rd.effect_size_label}) \u2014 ${rd.group1_label} (M = ${rd.group1_mean}) vs ${rd.group2_label} (M = ${rd.group2_mean})`
+    return `t(${typeof rd.df === 'number' ? rd.df.toFixed(1) : rd.df}) = ${rd.t_statistic}, ${formatPValue(rd.p_value)}, d = ${rd.cohens_d} (${rd.effect_size_label}) \u2014 ${rd.group1_label} (M = ${rd.group1_mean}) vs ${rd.group2_label} (M = ${rd.group2_mean})`
   }
   if (test.test_type === 'one_way_anova') {
-    const p = rd.p_value < 0.001 ? '< .001' : `= ${rd.p_value.toFixed(3).replace(/^0/, '')}`
     const omegaStr = rd.omega_squared != null ? `, \u03C9\u00B2 = ${rd.omega_squared}` : ''
-    return `F(${rd.df_between}, ${rd.df_within}) = ${rd.f_statistic}, p ${p}, \u03B7\u00B2 = ${rd.eta_squared}${omegaStr} (${rd.effect_size_label})`
+    return `F(${rd.df_between}, ${rd.df_within}) = ${rd.f_statistic}, ${formatPValue(rd.p_value)}, \u03B7\u00B2 = ${rd.eta_squared}${omegaStr} (${rd.effect_size_label})`
   }
   if (test.test_type === 'split_half') {
     const negNote = rd.negative_half_correlation ? ' — negative half-correlation, scale may lack internal consistency' : ''
@@ -261,6 +263,9 @@ export default function AnalysisView() {
 
   const defaultPalette = collectionsData?.collections?.[0] ?? null
   const defaultCollectionId = defaultPalette?.id ?? null
+  // Lazily creates the default "Materials" collection on first save for a
+  // collection-less project so "Add to Materials" is never a dead-end (#469b).
+  const ensureCollectionId = useEnsureMaterialCollection(pid, defaultCollectionId)
 
   const { data: collectionDetail } = useQuery({
     queryKey: ['material-collection-detail', pid, defaultCollectionId],
@@ -499,6 +504,10 @@ export default function AnalysisView() {
   // Merging these would lose the dependency chain — B must observe A's output.
   /* eslint-disable react-hooks/set-state-in-effect -- auto-clear invalid grouping from URL params */
   useEffect(() => {
+    // #505: chartType is null while quick-compute metrics hydrate — grouping
+    // validity is indeterminate then, and clearing groupBy/groupMode here would
+    // strip a deep-link's or saved material's grouping before it can render.
+    if (chartType == null) return
     if (!canGroupBy) {
       // Clear both demographic and dataset grouping
       if (groupingColumnId != null || groupingMode !== 'column') {
@@ -539,7 +548,7 @@ export default function AnalysisView() {
     } else {
       setGroupByClearedNotice(false)
     }
-  }, [canGroupBy, groupByAvailability.datasetGroupingAvailable, groupingColumnId, groupingMode, sharedDemographics, setSearchParams])
+  }, [chartType, canGroupBy, groupByAvailability.datasetGroupingAvailable, groupingColumnId, groupingMode, sharedDemographics, setSearchParams])
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Auto-clear second dimension when first dimension is cleared
@@ -562,34 +571,17 @@ export default function AnalysisView() {
   // ── Auto-clear independent URL params when they become invalid ──
   // These 4 validations are independent (no cascading dependencies)
   // so they're safe in one effect with a single setSearchParams call.
+  // Decision logic lives in computeInvalidAnalysisParams (#505): while metrics
+  // hydrate chartType is null = indeterminate, and chart-dependent params survive.
   useEffect(() => {
     setSearchParams(prev => {
+      const invalid = computeInvalidAnalysisParams({
+        decompose, canDecompose, divergingMode, chartType, axisTransform, metricType, crossTabColumnId,
+      })
+      if (invalid.length === 0) return prev
       const next = new URLSearchParams(prev)
-      let changed = false
-
-      // Decompose: invalid when no domains selected or domain_aggregate
-      if (decompose && !canDecompose) {
-        next.delete('decompose'); changed = true
-      }
-
-      // Diverging: only valid for stacked_bar chart type
-      if (divergingMode && chartType !== 'stacked_bar') {
-        next.delete('diverging'); next.delete('divergingCenter'); changed = true
-      }
-
-      // Axis transform: log only valid for scalar bar/line/dumbbell + non-frequency
-      if (axisTransform !== 'linear' && chartType) {
-        const scalarBarTypes: ChartType[] = ['horizontal_bar', 'vertical_bar', 'line', 'dumbbell']
-        const supportsLog = scalarBarTypes.includes(chartType) && metricType !== 'frequency_distribution'
-        if (!supportsLog) { next.delete('axisTransform'); changed = true }
-      }
-
-      // Cross-tab: only valid for cross_tab chart type
-      if (crossTabColumnId && chartType !== 'cross_tab') {
-        next.delete('crossTabCol'); next.delete('crossTabDisplay'); changed = true
-      }
-
-      return changed ? next : prev
+      invalid.forEach(k => next.delete(k))
+      return next
     }, { replace: true })
   }, [decompose, canDecompose, divergingMode, chartType, axisTransform, metricType, crossTabColumnId, setSearchParams])
 
@@ -770,10 +762,12 @@ export default function AnalysisView() {
 
   // Material mutations
   const addToMaterialsMutation = useMutation({
-    mutationFn: (data: { material_type: string; config: Record<string, unknown>; auto_name: string; source_tab?: string }) =>
-      materialsApi.createMaterial(pid, defaultCollectionId!, data),
+    mutationFn: ({ collectionId, ...data }: { collectionId: number; material_type: string; config: Record<string, unknown>; auto_name: string; source_tab?: string }) =>
+      materialsApi.createMaterial(pid, collectionId, data),
     onSuccess: (created) => {
-      queryClient.invalidateQueries({ queryKey: ['material-collection-detail', pid, defaultCollectionId] })
+      // Scope to the project (not a specific collectionId) so this still invalidates
+      // the right detail query when the collection was lazily created this save (#469b).
+      queryClient.invalidateQueries({ queryKey: ['material-collection-detail', pid] })
       queryClient.invalidateQueries({ queryKey: ['material-collections', pid] })
       // Set as active material (for memos and re-load).
       setSearchParams(prev => {
@@ -1071,8 +1065,9 @@ export default function AnalysisView() {
     })
   }, [activeTab, metricType, selectedMetrics, rcView, rcChartType, showScatter, compareBy, compareBy2, columnsData])
 
-  const handleAddToMaterials = useCallback(() => {
-    if (!defaultCollectionId || !hasAnySelection) return
+  const handleAddToMaterials = useCallback(async () => {
+    if (!hasAnySelection) return
+    const collectionId = await ensureCollectionId()
     const config = buildCurrentChartConfig()
     // Transform to material config shape: selected_columns → column_ids, etc.
     const { selected_columns, selected_domains, ...rest } = config
@@ -1092,14 +1087,19 @@ export default function AnalysisView() {
       materialType = chartTypeParam || chartType || 'horizontal_bar'
     }
     addToMaterialsMutation.mutate({
+      collectionId,
       material_type: materialType,
       config: materialConfig,
       auto_name: generateAutoName(),
       source_tab: activeTab === 'rc' ? (rcView === 'comparisons' ? 'comparisons' : 'correlations') : 'descriptives',
     })
-  }, [defaultCollectionId, hasAnySelection, buildCurrentChartConfig, chartTypeParam, chartType, addToMaterialsMutation, generateAutoName, activeTab, rcView, rcChartType, showScatter])
+  }, [ensureCollectionId, hasAnySelection, buildCurrentChartConfig, chartTypeParam, chartType, addToMaterialsMutation, generateAutoName, activeTab, rcView, rcChartType, showScatter])
 
   const handleChartTypeSelect = useCallback((type: ChartType) => {
+    // #509: no requiresMetricTypeChange entry = type not applicable to the
+    // current selection — activeChartType would reject it, leaving a dead
+    // chartType param that suddenly activates when the selection changes.
+    if (!(type in chartTypeInfo.requiresMetricTypeChange)) return
     const req = chartTypeInfo.requiresMetricTypeChange[type]
     if (req === null || req === undefined) {
       // Compatible — just switch chart type
@@ -1159,7 +1159,7 @@ export default function AnalysisView() {
             <Download className="w-3 h-3 mr-1" /> Export Matrix
           </Button>
         )}
-        {hasAnySelection && defaultCollectionId && (
+        {hasAnySelection && (
           <Button size="sm" onClick={handleAddToMaterials} disabled={addToMaterialsMutation.isPending}>
             <SwatchBook className="w-3 h-3 mr-1" />
             Add to Materials
@@ -1357,7 +1357,7 @@ export default function AnalysisView() {
         </Panel>
 
         {/* Resize handle */}
-        <PanelResizeHandle className="w-1.5 bg-mm-bg hover:bg-blue-200 dark:hover:bg-blue-800/40 active:bg-blue-300 dark:active:bg-blue-700/50 transition-colors cursor-col-resize flex items-center justify-center">
+        <PanelResizeHandle className="w-1.5 bg-mm-bg hover:bg-mm-blue/20 active:bg-mm-blue/30 transition-colors cursor-col-resize flex items-center justify-center">
           <div className="w-0.5 h-8 rounded-full bg-mm-border-medium" />
         </PanelResizeHandle>
 
@@ -1433,21 +1433,21 @@ export default function AnalysisView() {
 
                 {/* Metric type switch prompt */}
                 {metricTypePrompt && (
-                  <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded text-xs text-blue-700 dark:text-blue-300">
+                  <div className="flex items-center gap-2 px-3 py-2 bg-mm-blue/12 border border-mm-blue/30 rounded text-xs text-mm-blue-text">
                     <span>Show as:</span>
                     {metricTypePrompt.options.map(mt => (
                       <label key={mt} className="flex items-center gap-1 cursor-pointer">
                         <input
                           type="radio"
                           name="metric-type-switch"
-                          className="w-3 h-3 text-blue-600 dark:text-blue-400"
+                          className="w-3 h-3 accent-mm-blue"
                           onChange={() => handleMetricTypePromptSelect(mt)}
                         />
                         {METRIC_TYPE_OPTIONS.find(o => o.value === mt)?.label || mt}
                       </label>
                     ))}
                     <button
-                      className="ml-auto text-blue-400 hover:text-blue-600 dark:hover:text-blue-300 text-xs"
+                      className="ml-auto text-mm-blue hover:text-mm-blue-text text-xs"
                       onClick={() => setMetricTypePrompt(null)}
                     >
                       Cancel
@@ -1727,7 +1727,7 @@ export default function AnalysisView() {
                             {scaleScores.map(m => (
                               <SelectItem key={m.id} value={String(m.id)}>
                                 {metricDisplayLabel(m)}
-                                {m.result_count > 0 && <span className="text-mm-text-faint ml-1">({m.result_count} groups)</span>}
+                                {m.real_group_count > 0 && <span className="text-mm-text-faint ml-1">({m.real_group_count} groups)</span>}
                               </SelectItem>
                             ))}
                           </SelectGroup>
@@ -1738,7 +1738,7 @@ export default function AnalysisView() {
                             {custom.map(m => (
                               <SelectItem key={m.id} value={String(m.id)}>
                                 {metricDisplayLabel(m)}
-                                {m.result_count > 0 && <span className="text-mm-text-faint ml-1">({m.result_count} groups)</span>}
+                                {m.real_group_count > 0 && <span className="text-mm-text-faint ml-1">({m.real_group_count} groups)</span>}
                               </SelectItem>
                             ))}
                           </SelectGroup>
@@ -1753,9 +1753,7 @@ export default function AnalysisView() {
                 if (m && m.result_count > 0) {
                   return (
                     <p className="text-xs text-mm-text-muted">
-                      {m.result_count === 2 ? 'Will use independent t-test (2 groups)' :
-                       m.result_count >= 3 ? `Will use one-way ANOVA (${m.result_count} groups)` :
-                       'Need at least 2 groups with computed results'}
+                      {groupDifferenceTestLabel(m.real_group_count)}
                     </p>
                   )
                 }
@@ -1780,7 +1778,7 @@ export default function AnalysisView() {
                   submitTest('split_half', 'analysis_domain', testDialog.targetId)
                 } else if (testDialog.type === 'group_difference') {
                   const m = allMetrics.find(mm => mm.id === testDialog.targetId)
-                  const testType = m && m.result_count === 2 ? 'independent_t_test' : 'one_way_anova'
+                  const testType = pickGroupDifferenceTest(m?.real_group_count ?? 0)
                   submitTest(testType, 'metric_definition', testDialog.targetId)
                 }
               }}

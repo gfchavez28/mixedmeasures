@@ -269,8 +269,8 @@ export default function DocumentImport() {
                       <span className={cn(
                         'inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase',
                         getFormat(f.name) === 'pdf' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
-                        : getFormat(f.name) === 'docx' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
-                        : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+                        : getFormat(f.name) === 'docx' ? 'bg-mm-blue/12 text-mm-blue-text'
+                        : 'bg-mm-surface-hover text-mm-text-secondary'
                       )}>
                         {FORMAT_LABELS[getFormat(f.name)] || 'TXT'}
                       </span>
@@ -396,8 +396,8 @@ export default function DocumentImport() {
                     <span className={cn(
                       'inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase shrink-0',
                       getFormat(f.name) === 'pdf' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
-                      : getFormat(f.name) === 'docx' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
-                      : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+                      : getFormat(f.name) === 'docx' ? 'bg-mm-blue/12 text-mm-blue-text'
+                      : 'bg-mm-surface-hover text-mm-text-secondary'
                     )}>
                       {FORMAT_LABELS[getFormat(f.name)] || 'TXT'}
                     </span>

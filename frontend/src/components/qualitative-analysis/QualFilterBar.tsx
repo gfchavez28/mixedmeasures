@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { X, Check, ChevronDown } from 'lucide-react'
+import { SELECTED_SEGMENT } from '@/lib/selection'
 import { useQuery } from '@tanstack/react-query'
 import { codeAnalysisApi, type DemographicFilter } from '@/lib/api'
 
@@ -38,13 +39,13 @@ function FilterDropdown({
     <div className="relative" ref={ref}>
       <button
         className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs border rounded-md hover:bg-mm-surface-hover transition-colors ${
-          activeCount > 0 ? 'border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' : 'border-mm-border-medium text-mm-text-secondary'
+          activeCount > 0 ? SELECTED_SEGMENT : 'border-mm-border-medium text-mm-text-secondary'
         }`}
         onClick={() => setOpen(o => !o)}
       >
         {label}
         {activeCount > 0 && (
-          <span className="bg-blue-200 dark:bg-blue-800/50 text-blue-800 dark:text-blue-200 text-[11px] rounded-full px-1.5 py-0.5 leading-none">
+          <span className="bg-mm-blue/20 text-mm-blue-text text-[11px] rounded-full px-1.5 py-0.5 leading-none">
             {activeCount}
           </span>
         )}
@@ -66,7 +67,7 @@ function FilterDropdown({
                 }}
               >
                 <span className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${
-                  selected ? 'bg-blue-500 border-blue-500' : 'border-mm-border-medium'
+                  selected ? 'bg-mm-blue border-mm-blue' : 'border-mm-border-medium'
                 }`}>
                   {selected && <Check className="w-3 h-3 text-white" />}
                 </span>

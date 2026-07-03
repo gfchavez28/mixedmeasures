@@ -3,11 +3,18 @@ from datetime import datetime
 from .common import UTCTimestamp
 
 
+class LinkedConversationRef(BaseModel):
+    id: int
+    name: str
+
+
 class LinkedSpeakerInfo(BaseModel):
     speaker_id: int
     speaker_name: str
     is_facilitator: bool
-    conversation_names: list[str]
+    # #422b: structured (id + name) so the participant detail panel can link
+    # each conversation; was a bare list[str] of names.
+    conversations: list[LinkedConversationRef]
     color_index: int = 0
     color: str | None = None
 

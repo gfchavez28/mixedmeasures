@@ -35,14 +35,18 @@ async def read_upload_with_limit(file: UploadFile, max_size: int = MAX_UPLOAD_SI
 
 
 def _get_project_or_404(db: Session, project_id: int, user_id: int) -> Project:
-    """Load project by ID and verify ownership.
+    """Load project by ID, enforcing ownership only in multi-tenant (cloud) mode.
 
-    All project access MUST go through this helper for ownership enforcement.
+    Local-roster mode (``MM_MULTIUSER_AUTH_ENABLED`` off, the default) shares all
+    projects across the coder roster — ``user_id`` is ``created_by`` metadata, not
+    an access gate (Track J · J1). Cloud/multi-tenant mode (flag on) keeps per-user
+    isolation. All project access MUST still go through this helper.
     """
-    project = db.query(Project).filter(
-        Project.id == project_id,
-        Project.user_id == user_id,
-    ).first()
+    from ..config import get_settings
+    query = db.query(Project).filter(Project.id == project_id)
+    if get_settings().mm_multiuser_auth_enabled:
+        query = query.filter(Project.user_id == user_id)
+    project = query.first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project

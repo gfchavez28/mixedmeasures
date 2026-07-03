@@ -129,6 +129,70 @@ def test_mcar_not_significant(db_session):
     assert ", p ." not in mcar["apa_string"]
 
 
+def test_mcar_negative_chi2_clamps_to_zero(db_session):
+    """#514: the pooled pairwise covariance matrix is not guaranteed
+    positive-semidefinite, so pattern quadratic forms — and their sum — can go
+    negative (the audit corpus hit χ² = −2.13 on an ordinary 4-column
+    selection; the complete-cases pattern alone contributed −3.12). A χ²
+    statistic is non-negative by definition: clamp to 0 for display (p is
+    unchanged — sf of any negative statistic is already 1.0), flag the clamp
+    in the warning, and never emit a minus sign in the APA string.
+
+    Data = the numbers-audit corpus's Hours/Delta/Satisfaction/MissingMix
+    columns verbatim ("DK" = the recognized-N/A "Don't know").
+    """
+    db = db_session
+    COLS = {
+        "Hours": [10, 5, 20, 0, 12, 8, 15, 25, 2, 6, 12, 3, 30, 6, 18, 9, 4, 14, 120, 9, None, None, 7, 11],
+        "Delta": [-3, 2, 0, -1, 4, -2, 1, 3, -4, 0, 2, -1, 5, -2, 2, 0, -5, 1, 6, -1, 0, 2, -2, 1],
+        "Satisfaction": [7, 5, 9, 3, 7, 6, 8, 9, 2, 5, 7, 4, 10, 5, 8, 6, 3, 7, 9, 6, 5, None, 5, 7],
+        "MissingMix": [12, "DK", 15, 8, 11, "DK", 9, 14, 6, 10, 13, None, 16, 7, 12, "DK", 5, 10, 18, "DK", 9, None, 8, 12],
+    }
+
+    db.add(Project(id=1, name="Clamp", user_id=1))
+    db.add(Dataset(id=1, project_id=1, name="Clamp"))
+    col_ids = []
+    for i, name in enumerate(COLS.keys()):
+        db.add(DatasetColumn(
+            id=i + 1, dataset_id=1, column_code=name,
+            column_text=name, column_type="numeric",
+            sequence_order=i, display_order=i,
+        ))
+        col_ids.append(i + 1)
+    db.flush()
+
+    val_id = 0
+    for row_idx in range(24):
+        db.add(DatasetRow(id=row_idx + 1, dataset_id=1))
+        for col_idx, values in enumerate(COLS.values()):
+            v = values[row_idx]
+            val_id += 1
+            if v == "DK":
+                text, numeric = "Don't know", None
+            elif v is None:
+                text, numeric = None, None
+            else:
+                text, numeric = str(v), float(v)
+            db.add(DatasetValue(
+                id=val_id, row_id=row_idx + 1, column_id=col_idx + 1,
+                value_text=text, value_numeric=numeric,
+            ))
+    db.flush()
+
+    result = compute_littles_mcar(db, project_id=1, column_ids=col_ids)
+    assert result["eligibility"]["eligible"] is True
+    mcar = result["result"]
+    assert mcar["chi2"] == 0.0
+    assert mcar["p"] == 1.0
+    assert mcar["df"] == 3
+    assert "-" not in mcar["apa_string"], mcar["apa_string"]
+    warning = result["eligibility"]["warning"] or ""
+    assert "clamped" in warning, (
+        "fixture must actually trip the negative-χ² path; if this fails the "
+        "data no longer produces a non-PSD pairwise covariance"
+    )
+
+
 def test_mcar_subset(bfi_session):
     """BFI Agreeableness subset (A1-A5): verify values."""
     db = bfi_session

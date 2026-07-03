@@ -49,7 +49,7 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
     >
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <div className="bg-white dark:bg-mm-surface shadow-sm rounded-md px-4 py-3 border-l-4 border-l-blue-500">
+          <div className="bg-white dark:bg-mm-surface shadow-sm rounded-md px-4 py-3 border-l-4 border-l-mm-blue">
             <div className="absolute top-2 right-2 flex items-center gap-1" onMouseDown={e => e.stopPropagation()}>
               <button
                 type="button"

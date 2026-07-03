@@ -69,7 +69,7 @@ export function ResizeHandle({
     <div
       onMouseDown={handleMouseDown}
       onDoubleClick={(e) => { e.stopPropagation(); onDoubleClick() }}
-      className="absolute right-0 top-0 bottom-0 w-[5px] cursor-col-resize hover:bg-blue-300 dark:hover:bg-blue-700/40 transition-colors z-10"
+      className="absolute right-0 top-0 bottom-0 w-[5px] cursor-col-resize hover:bg-mm-blue/40 transition-colors z-10"
       style={{ touchAction: 'none' }}
     />
   )
@@ -124,15 +124,17 @@ export function ColumnHeaderContent({
           {groupLabel}
         </span>
       )}
-      {/* Row 1: Column name */}
-      <span
-        className={`text-xs truncate max-w-full rounded px-1 py-0.5 ${
-          hasName ? 'font-medium text-mm-text' : 'italic text-mm-text-muted'
-        }`}
-        title={hasName ? column.column_name! : 'Click header to add name'}
-      >
-        {column.column_name || 'name'}
-      </span>
+      {/* Row 1: Column short name — hidden when unset (#527: a full header row of
+          italic "name" placeholders on every fresh import read as a rendering bug;
+          the short name is added via the header editor, which keeps its own hint). */}
+      {hasName && (
+        <span
+          className="text-xs truncate max-w-full rounded px-1 py-0.5 font-medium text-mm-text"
+          title={column.column_name!}
+        >
+          {column.column_name}
+        </span>
+      )}
       {/* Row 2: Question text */}
       <span
         className="text-[11px] text-mm-text-secondary truncate max-w-full rounded px-0.5"
@@ -193,7 +195,7 @@ export function ColumnHeaderContent({
           )
         )}
         {activeDef && (
-          <Settings2 className="w-3 h-3 text-blue-500" />
+          <Settings2 className="w-3 h-3 text-mm-blue" />
         )}
       </div>
       {domainPills && domainPills.length > 0 && (
@@ -554,7 +556,7 @@ export function ParticipantCell({
         <PopoverTrigger asChild>
           {isLinked ? (
             <div className="relative group/cell cursor-pointer">
-              <span className="text-sm font-medium text-mm-text hover:text-blue-600">
+              <span className="text-sm font-medium text-mm-text hover:text-mm-blue-text">
                 {row.participant_display_name}
               </span>
               <button
@@ -566,7 +568,7 @@ export function ParticipantCell({
               </button>
             </div>
           ) : (
-            <button className="flex items-center gap-1 text-sm text-mm-text-faint hover:text-blue-600">
+            <button className="flex items-center gap-1 text-sm text-mm-text-faint hover:text-mm-blue-text">
               <Link2 className="w-3 h-3" />
               <span>Link...</span>
             </button>
@@ -620,7 +622,7 @@ export function ParticipantCell({
                     onMouseEnter={itemProps.onMouseEnter}
                     className={`w-full text-left px-3 py-2 text-sm border-b last:border-b-0 ${
                       isCurrentRow
-                        ? 'bg-blue-50 dark:bg-blue-900/50 text-blue-700 dark:text-blue-200'
+                        ? 'bg-mm-blue/12 text-mm-blue-text'
                         : isDisabled
                           ? 'opacity-50 cursor-not-allowed bg-mm-bg'
                           : focusedIndex === i

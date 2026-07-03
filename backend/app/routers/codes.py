@@ -32,6 +32,14 @@ from ..schemas.code import (
 from ..models.memo import Memo
 from ..auth import get_current_user
 from ..services.audit import log_action
+from ..services.coding_layers import (
+    non_consensus_filter,
+    code_usage_count_expr,
+    layer_origin_filter,
+    visible_target_filter,
+)
+from ..services.consensus import consensus_enabled
+from ..services.consensus_staleness import mark_consensus_stale
 from .helpers import _get_project_or_404
 
 router = APIRouter(prefix="/api/projects/{project_id}/codes", tags=["codes"])
@@ -40,8 +48,12 @@ router = APIRouter(prefix="/api/projects/{project_id}/codes", tags=["codes"])
 def code_to_response(code: Code, db: Session, usage_count: int | None = None) -> CodeResponse:
     """Convert Code model to response."""
     if usage_count is None:
-        usage_count = db.query(func.count(CodeApplication.id)).filter(
-            CodeApplication.code_id == code.id
+        usage_count = db.query(code_usage_count_expr()).outerjoin(
+            Segment, CodeApplication.segment_id == Segment.id
+        ).filter(
+            CodeApplication.code_id == code.id,
+            non_consensus_filter(),
+            visible_target_filter(),  # #500: hidden originals' codings don't count
         ).scalar() or 0
 
     return CodeResponse(
@@ -68,6 +80,7 @@ async def list_codes(
     project_id: int,
     include_inactive: bool = Query(False),
     category_id: int | None = Query(None),
+    layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default) or 'consensus'"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -106,8 +119,13 @@ async def list_codes(
     # B2: Batch count usage instead of N+1
     code_ids = [c.id for c in codes]
     usage_counts = dict(
-        db.query(CodeApplication.code_id, func.count(CodeApplication.id))
-        .filter(CodeApplication.code_id.in_(code_ids))
+        db.query(CodeApplication.code_id, code_usage_count_expr())
+        .outerjoin(Segment, CodeApplication.segment_id == Segment.id)
+        .filter(
+            CodeApplication.code_id.in_(code_ids),
+            layer_origin_filter(layer_scope),
+            visible_target_filter(),  # #500
+        )
         .group_by(CodeApplication.code_id)
         .all()
     )
@@ -429,30 +447,41 @@ async def merge_codes(
     if source.is_universal or target.is_universal:
         raise HTTPException(status_code=400, detail="Cannot merge universal codes")
 
+    # Consensus on any target carrying the source OR target code can change once
+    # the codes merge — mark those targets stale BEFORE reassignment (while the
+    # source applications still carry code_id=source). Drained by the background
+    # sweep (Track J · J2-3, Slab 5b).
+    if consensus_enabled(db):
+        mark_consensus_stale(db, project_id, code_ids=[source_code_id, target_code_id])
+
     # Get all applications on the source code
     source_apps = db.query(CodeApplication).filter(
         CodeApplication.code_id == source_code_id
     ).all()
 
-    # Build sets of existing target applications for fast dedup lookup
-    target_seg_ids = set()
-    target_dv_ids = set()
+    # Build sets of existing target applications for fast dedup lookup.
+    # Per-coder layers (#J2-1b): key by (target, CODER) so a source app is only
+    # a duplicate when the SAME coder already holds the target code on that
+    # segment/value. Without user_id in the key, the merge would delete a
+    # DIFFERENT coder's application as a phantom "duplicate".
+    target_seg_keys = set()
+    target_dv_keys = set()
     for app in db.query(CodeApplication).filter(
         CodeApplication.code_id == target_code_id
     ).all():
         if app.segment_id is not None:
-            target_seg_ids.add(app.segment_id)
+            target_seg_keys.add((app.segment_id, app.user_id))
         if app.dataset_value_id is not None:
-            target_dv_ids.add(app.dataset_value_id)
+            target_dv_keys.add((app.dataset_value_id, app.user_id))
 
     merged = 0
     skipped = 0
 
     for app in source_apps:
         is_duplicate = False
-        if app.segment_id is not None and app.segment_id in target_seg_ids:
+        if app.segment_id is not None and (app.segment_id, app.user_id) in target_seg_keys:
             is_duplicate = True
-        if app.dataset_value_id is not None and app.dataset_value_id in target_dv_ids:
+        if app.dataset_value_id is not None and (app.dataset_value_id, app.user_id) in target_dv_keys:
             is_duplicate = True
 
         if is_duplicate:
@@ -461,6 +490,14 @@ async def merge_codes(
         else:
             app.code_id = target_code_id
             merged += 1
+
+    # Flush the reassignment (and dup deletes) BEFORE deleting the source code.
+    # Without this, the source-Code delete fires `Code.applications`'
+    # cascade="all, delete-orphan" (+ the DB ON DELETE CASCADE on code_id) against
+    # rows whose reassigning UPDATE is still pending — sweeping the just-reassigned
+    # applications. Flushing first writes code_id=target, so the source then owns
+    # no applications and the cascade is a no-op. (Data-loss bug, fixed 2026-06-22.)
+    db.flush()
 
     # Deactivate or delete source
     if delete_source:
@@ -499,6 +536,7 @@ category_router = APIRouter(prefix="/api/projects/{project_id}/categories", tags
 async def list_categories(
     project_id: int,
     include_codes: bool = Query(False),
+    layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default) or 'consensus' — applies to embedded code usage counts"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -521,8 +559,13 @@ async def list_categories(
         usage_counts = {}
         if code_ids:
             usage_counts = dict(
-                db.query(CodeApplication.code_id, func.count(CodeApplication.id))
-                .filter(CodeApplication.code_id.in_(code_ids))
+                db.query(CodeApplication.code_id, code_usage_count_expr())
+                .outerjoin(Segment, CodeApplication.segment_id == Segment.id)
+                .filter(
+                    CodeApplication.code_id.in_(code_ids),
+                    layer_origin_filter(layer_scope),
+                    visible_target_filter(),  # #500
+                )
                 .group_by(CodeApplication.code_id)
                 .all()
             )
@@ -956,8 +999,25 @@ async def merge_categories(
         ).update({"entity_id": data.target_id}, synchronize_session="fetch")
         total_memos += memo_count
 
-        # Delete source category
-        db.query(CodeCategory).filter(CodeCategory.id == sid).delete(synchronize_session="fetch")
+        # Flush this source's code-moves + child-reparents BEFORE any source row
+        # is deleted. With autoflush=False (production AND tests — database.py:183),
+        # those reassignments are otherwise still pending when the source category
+        # is deleted, so the DB-level cascades fire against the STALE links:
+        # CodeCategory.parent_id is ON DELETE CASCADE, so a non-source child still
+        # pointing at this source gets cascade-deleted, and the pending reparent
+        # UPDATE then matches 0 rows → StaleDataError (500). (Code.category_id is
+        # ON DELETE SET NULL, so codes survive, but flushing keeps that path tidy
+        # too.) Same flush-first family as the merge_codes #439 fix; also makes the
+        # next iteration's max(category_order/display_order) see prior moves.
+        db.flush()
+
+    # Delete the source categories only AFTER every reassignment is flushed, so no
+    # cascade/SET NULL touches a row that was just moved to the target. Deleting
+    # them together also covers the parent+child-both-source case (a source child
+    # was skipped during reparenting; it is deleted here alongside its parent).
+    db.query(CodeCategory).filter(
+        CodeCategory.id.in_(data.source_ids)
+    ).delete(synchronize_session="fetch")
 
     log_action(
         db,

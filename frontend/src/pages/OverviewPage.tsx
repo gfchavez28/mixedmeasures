@@ -242,9 +242,26 @@ export default function OverviewPage() {
               * (facilitator turns + universal-only-coded segments excluded).
               * Sub-label clarifies the new scope so users don't read the
               * post-fix drop as data loss. */}
-            <StatCell label={plural(s.coded_segments, 'Coded Segment', 'Coded Segments')} value={s.coded_segments} sub="participants only" />
-            <StatCell label={plural(s.materials, 'Analysis', 'Analyses')} value={s.materials} accent="blue" sub={s.statistical_tests > 0 ? `${s.statistical_tests} stat ${plural(s.statistical_tests, 'test', 'tests')}` : undefined} />
-            <StatCell label={plural(s.canvas_count, 'Canvas', 'Canvases')} value={s.canvas_count} accent="purple" />
+            <StatCell
+              label={plural(s.coded_segments, 'Coded Segment', 'Coded Segments')}
+              value={s.coded_segments}
+              sub="excludes facilitator"
+              title="Non-facilitator segments with at least one substantive code. Facilitator turns and universal-only codes are excluded — this is separate from the Participants count above."
+            />
+            <StatCell
+              label={plural(s.materials, 'Analysis', 'Analyses')}
+              value={s.materials}
+              accent="blue"
+              sub={s.statistical_tests > 0 ? `${s.statistical_tests} stat ${plural(s.statistical_tests, 'test', 'tests')}` : 'saved'}
+              title="Saved analyses — charts and tables you added to Materials."
+            />
+            <StatCell
+              label={plural(s.canvas_count, 'Canvas', 'Canvases')}
+              value={s.canvas_count}
+              accent="purple"
+              sub="saved"
+              title="Saved canvases."
+            />
           </div>
         </div>
       )}
@@ -446,14 +463,17 @@ function StatCell({
   value,
   accent,
   sub,
+  title,
 }: {
   label: string
   value: number
   accent?: keyof typeof ACCENT
   sub?: string
+  /** Optional hover/explanation text — clarifies how a stat is scoped (#468). */
+  title?: string
 }) {
   return (
-    <div className="px-1.5 py-2 text-center">
+    <div className="px-1.5 py-2 text-center" title={title}>
       <div className={`text-lg font-bold font-mono tabular-nums leading-tight ${accent ? ACCENT[accent].text : 'text-mm-text'}`}>
         {value}
       </div>

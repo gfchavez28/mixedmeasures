@@ -12,6 +12,37 @@ from ..models.note import Note
 from ..models.excerpt import Excerpt
 from .audit import log_action
 from .staleness import mark_metrics_stale
+from .consensus import consensus_enabled
+from .consensus_staleness import mark_consensus_stale
+
+
+def _mark_consensus_stale_for_parent(db: Session, project_id: int, parent_type: str, parent_id: int) -> None:
+    """Mark every coded segment of this conversation/document for consensus
+    recompute after a structural change (merge/split/unmerge/unsplit).
+
+    Such an operation changes which segments exist and which carry the
+    forward-carried applications, so any coded segment's consensus may shift; the
+    sweep clears soft-deleted segments (visibility guard) and rebuilds survivors.
+    Marks only CODED segments (the join requires an application) — bounded, and a
+    no-op for single-coder projects (Track J · J2-3, Slab 5b).
+    """
+    if not consensus_enabled(db):
+        return
+    # Flush first so this query sees the operation's just-written rows (the new
+    # merged/split segments and their forward-carried applications) regardless of
+    # the session's autoflush setting.
+    db.flush()
+    seg_ids = [
+        r[0]
+        for r in db.query(CodeApplication.segment_id)
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .filter(_parent_filter(parent_type, parent_id))
+        .distinct()
+        .all()
+        if r[0] is not None
+    ]
+    if seg_ids:
+        mark_consensus_stale(db, project_id, segment_ids=seg_ids)
 
 
 def _parent_filter(parent_type: str, parent_id: int):
@@ -33,7 +64,7 @@ def _eager_load_options():
     """Standard eager loading for segment responses."""
     return [
         joinedload(Segment.speaker),
-        selectinload(Segment.code_applications),
+        selectinload(Segment.code_applications).joinedload(CodeApplication.code),
         selectinload(Segment.attached_notes),
         selectinload(Segment.excerpts).joinedload(Excerpt.note),
     ]
@@ -97,6 +128,25 @@ def _make_segment_fields(parent_type: str, parent_id: int, **kwargs) -> dict:
     return fields
 
 
+def _carried_app_fields(ca: CodeApplication) -> dict:
+    """The fields that constitute a coder's code-application *layer*.
+
+    Track J · J2-0: structural ops (merge/split, and their reversals) must
+    carry these forward verbatim rather than re-stamping every application to
+    the operator. Re-stamping collapses every coder into one and loses the
+    attribution/provenance — benign under a single shared layer, data loss the
+    instant per-coder layers exist (the widened ``(target, code, user_id)``
+    index). The per-coder uniqueness key is ``(code_id, user_id)``.
+    """
+    return {
+        "code_id": ca.code_id,
+        "user_id": ca.user_id,
+        "attribution": ca.attribution,
+        "origin": ca.origin,
+        "origin_context": ca.origin_context,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Merge
 # ---------------------------------------------------------------------------
@@ -122,7 +172,7 @@ def merge_segments(
         *_visible(),
     ).options(
         joinedload(Segment.speaker),
-        selectinload(Segment.code_applications),
+        selectinload(Segment.code_applications).joinedload(CodeApplication.code),
     ).order_by(Segment.sequence_order).all()
 
     if len(segments) != len(segment_ids):
@@ -164,13 +214,20 @@ def merge_segments(
     db.add(merged_segment)
     db.flush()
 
-    # Union all codes
-    all_code_ids: set[int] = set()
+    # Carry every coder's layer onto the merged segment (Track J · J2-0):
+    # distinct (code, coder, attribution, origin, origin_context) tuples — NOT a
+    # bare code_id union re-stamped to the operator. Dedup on the per-coder key
+    # (code_id, user_id); first occurrence wins when two originals carry the same
+    # coder's same code (their attribution notes may differ — only one row fits
+    # the widened unique index).
+    seen_apps: set[tuple[int, int | None]] = set()
     for seg in segments:
         for ca in seg.code_applications:
-            all_code_ids.add(ca.code_id)
-    for code_id in all_code_ids:
-        db.add(CodeApplication(segment_id=merged_segment.id, code_id=code_id, user_id=user_id))
+            key = (ca.code_id, ca.user_id)
+            if key in seen_apps:
+                continue
+            seen_apps.add(key)
+            db.add(CodeApplication(segment_id=merged_segment.id, **_carried_app_fields(ca)))
 
     # Soft-delete originals
     deleted_count = len(segments)
@@ -192,6 +249,7 @@ def merge_segments(
         user_id=user_id, project_id=project_id,
         details={"merged_segment_ids": segment_ids, "soft_deleted_count": deleted_count},
     )
+    _mark_consensus_stale_for_parent(db, project_id, parent_type, parent_id)
     mark_metrics_stale(db, project_id)
     db.commit()
 
@@ -228,6 +286,8 @@ def unmerge_segment(
 
     originals = db.query(Segment).filter(
         Segment.merged_into_id == segment_id,
+    ).options(
+        selectinload(Segment.code_applications),
     ).order_by(Segment.sequence_order).all()
 
     if not originals:
@@ -239,10 +299,37 @@ def unmerge_segment(
     for orig in originals:
         orig.merged_into_id = None
 
-    # Delete merged segment's codes/notes, then the segment itself
-    db.query(CodeApplication).filter(CodeApplication.segment_id == segment_id).delete()
+    # Project-back recovery (Track J · J2-0): the merged segment may carry
+    # applications added AFTER the merge (any coder's layer). The originals' own
+    # pre-merge applications were never deleted and come back with them, so
+    # re-home only the merged-segment-only tuples — onto the FIRST restored
+    # original (it inherits the merged segment's position). Dedup against EVERY
+    # original so a forward-carried copy isn't duplicated or mis-attributed to a
+    # sibling that never had it. Capture as plain data BEFORE the cascade so the
+    # fresh inserts (after the merged segment is gone) can't be swept by it.
+    existing_keys: set[tuple[int, int | None]] = {
+        (ca.code_id, ca.user_id) for orig in originals for ca in orig.code_applications
+    }
+    first_original = originals[0]
+    carried_back: list[dict] = []
+    for ca in db.query(CodeApplication).filter(CodeApplication.segment_id == segment_id).all():
+        key = (ca.code_id, ca.user_id)
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        carried_back.append(_carried_app_fields(ca))
+
+    # Delete the merged segment's notes, then the segment itself — its
+    # code_applications (loaded above) go via the relationship's
+    # delete-orphan cascade, so no explicit bulk delete is needed.
     db.query(Note).filter(Note.segment_id == segment_id).delete()
     db.delete(segment)
+    db.flush()
+
+    # Re-home the post-merge coding onto the first restored original (now that
+    # the merged segment — and its cascade — is gone).
+    for fields in carried_back:
+        db.add(CodeApplication(segment_id=first_original.id, **fields))
 
     # Resequence
     num_originals = len(originals)
@@ -266,6 +353,7 @@ def unmerge_segment(
         user_id=user_id, project_id=project_id,
         details={"restored_segment_ids": original_ids, "restored_count": num_originals},
     )
+    _mark_consensus_stale_for_parent(db, project_id, parent_type, parent_id)
     mark_metrics_stale(db, project_id)
     db.commit()
 
@@ -302,7 +390,7 @@ def _split_single(db, r, parent_type, parent_id, project_id, user_id):
         *_visible(),
     ).options(
         joinedload(Segment.speaker),
-        selectinload(Segment.code_applications),
+        selectinload(Segment.code_applications).joinedload(CodeApplication.code),
         selectinload(Segment.attached_notes),
         selectinload(Segment.excerpts).joinedload(Excerpt.note),
     ).first()
@@ -325,8 +413,10 @@ def _split_single(db, r, parent_type, parent_id, project_id, user_id):
     if not before_text and not after_text:
         raise HTTPException(status_code=400, detail="Selection covers entire segment text")
 
-    # Save properties from original before mutations
-    original_code_ids = [ca.code_id for ca in segment.code_applications]
+    # Save properties from original before mutations. Capture the full
+    # per-coder application layers (Track J · J2-0), not just code_ids, so each
+    # child inherits every coder's coding with attribution/provenance intact.
+    original_apps = [_carried_app_fields(ca) for ca in segment.code_applications]
     original_order = segment.sequence_order
     original_id = segment.id
     had_whole_excerpt = any(e.start_offset is None for e in (segment.excerpts or []))
@@ -386,8 +476,8 @@ def _split_single(db, r, parent_type, parent_id, project_id, user_id):
         db.add(new_seg)
         db.flush()
 
-        for code_id in original_code_ids:
-            db.add(CodeApplication(segment_id=new_seg.id, code_id=code_id, user_id=user_id))
+        for fields in original_apps:
+            db.add(CodeApplication(segment_id=new_seg.id, **fields))
 
         if part_type == 'selected' and had_whole_excerpt:
             db.add(Excerpt(project_id=project_id, segment_id=new_seg.id))
@@ -414,6 +504,7 @@ def _split_single(db, r, parent_type, parent_id, project_id, user_id):
             "part_count": num_new,
         },
     )
+    _mark_consensus_stale_for_parent(db, project_id, parent_type, parent_id)
     mark_metrics_stale(db, project_id)
     db.commit()
 
@@ -433,7 +524,7 @@ def _split_multi(db, ranges, parent_type, parent_id, project_id, user_id):
         *_visible(),
     ).options(
         joinedload(Segment.speaker),
-        selectinload(Segment.code_applications),
+        selectinload(Segment.code_applications).joinedload(CodeApplication.code),
         selectinload(Segment.attached_notes),
         selectinload(Segment.excerpts).joinedload(Excerpt.note),
     ).order_by(Segment.sequence_order).all()
@@ -480,12 +571,18 @@ def _split_multi(db, ranges, parent_type, parent_id, project_id, user_id):
     if not selected_text:
         raise HTTPException(status_code=400, detail="Selected text is empty")
 
-    # Collect codes and notes
-    all_code_ids: set[int] = set()
+    # Collect codes and notes. Carry full per-coder layers (Track J · J2-0),
+    # deduped on (code_id, user_id) across all source segments.
+    carried_apps: list[dict] = []
+    seen_apps: set[tuple[int, int | None]] = set()
     all_note_ids: list[int] = []
     for seg in segments:
         for ca in seg.code_applications:
-            all_code_ids.add(ca.code_id)
+            key = (ca.code_id, ca.user_id)
+            if key in seen_apps:
+                continue
+            seen_apps.add(key)
+            carried_apps.append(_carried_app_fields(ca))
         for n in seg.attached_notes:
             if not n.is_archived:
                 all_note_ids.append(n.id)
@@ -551,8 +648,8 @@ def _split_multi(db, ranges, parent_type, parent_id, project_id, user_id):
         db.add(new_seg)
         db.flush()
 
-        for code_id in all_code_ids:
-            db.add(CodeApplication(segment_id=new_seg.id, code_id=code_id, user_id=user_id))
+        for fields in carried_apps:
+            db.add(CodeApplication(segment_id=new_seg.id, **fields))
 
         if part_type == 'selected' and had_whole_excerpt:
             db.add(Excerpt(project_id=project_id, segment_id=new_seg.id))
@@ -580,6 +677,7 @@ def _split_multi(db, ranges, parent_type, parent_id, project_id, user_id):
             "type": "multi",
         },
     )
+    _mark_consensus_stale_for_parent(db, project_id, parent_type, parent_id)
     mark_metrics_stale(db, project_id)
     db.commit()
 
@@ -694,14 +792,34 @@ def unsplit_segment(
         {Note.segment_id: original.id}, synchronize_session='fetch',
     )
 
-    # Delete code applications on split segments
-    db.query(CodeApplication).filter(
-        CodeApplication.segment_id.in_(split_ids),
-    ).delete(synchronize_session='fetch')
+    # Project-back recovery (Track J · J2-0): re-home applications added to the
+    # split children (any coder's layer) onto the restored original, deduping
+    # against the original's own surviving applications so forward-carried copies
+    # aren't duplicated (the widened (segment, code, user_id) index would reject
+    # them). Capture as plain data BEFORE deleting the children so the fresh
+    # inserts can't be swept by the children's delete-orphan cascade.
+    existing_keys: set[tuple[int, int | None]] = {
+        (ca.code_id, ca.user_id) for ca in original.code_applications
+    }
+    carried_back: list[dict] = []
+    for ca in db.query(CodeApplication).filter(CodeApplication.segment_id.in_(split_ids)).all():
+        key = (ca.code_id, ca.user_id)
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        carried_back.append(_carried_app_fields(ca))
 
-    # Delete split-result segments
+    # Delete the split children — their code_applications (loaded above) go via
+    # the relationship's delete-orphan cascade, so no explicit bulk delete is
+    # needed.
     for seg in split_segments:
         db.delete(seg)
+    db.flush()
+
+    # Re-home the post-split coding onto the restored original (now that the
+    # children — and their cascade — are gone).
+    for fields in carried_back:
+        db.add(CodeApplication(segment_id=original.id, **fields))
 
     # Resequence
     shift = num_split - 1
@@ -721,6 +839,7 @@ def unsplit_segment(
         user_id=user_id, project_id=project_id,
         details={"restored_segment_id": original.id, "deleted_split_ids": split_ids},
     )
+    _mark_consensus_stale_for_parent(db, project_id, parent_type, parent_id)
     mark_metrics_stale(db, project_id)
     db.commit()
 

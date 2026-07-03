@@ -85,6 +85,7 @@ from app.models.segment import Segment
 from app.models.speaker import Speaker
 from app.models.code import Code
 from app.models.code_application import CodeApplication
+from app.models.consensus_stale_target import ConsensusStaleTarget
 from app.models.code_category import CodeCategory
 from app.models.metric import MetricDefinition, ComputedResult
 from app.models.statistical_test import StatisticalTest

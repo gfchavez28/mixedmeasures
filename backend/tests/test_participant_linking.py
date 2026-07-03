@@ -5,6 +5,10 @@ import pytest
 from app.models.project import Project
 from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, ColumnType
 from app.models.participant import Participant
+from app.models.conversation import Conversation
+from app.models.speaker import Speaker
+from app.models.segment import Segment
+from app.routers.participants import participant_to_response
 from app.services.participant_linking import auto_fill_role_from_linked_row
 
 
@@ -165,3 +169,37 @@ def test_linkable_rows_display_values_capped_at_three(db_session):
     r = result["rows"][0]
     assert r["display_values"] == ["v0", "v1", "v2"]
     assert all(f"v{i}" in r["search_text"] for i in range(5))
+
+
+def test_linked_speaker_conversations_carry_id_and_name(db_session):
+    """#422b: participant_to_response surfaces a speaker's conversations as
+    structured {id, name} refs (so the detail panel can link each), deduped by
+    conversation id even when the speaker spans many segments of one conversation.
+    """
+    db = db_session
+    db.add(Project(id=1, name="Conv Link Test", user_id=1))
+    db.add(Participant(id=1, project_id=1, identifier="P-01"))
+    db.add(Conversation(id=1, project_id=1, name="Interview – Anderson"))
+    db.add(Conversation(id=2, project_id=1, name="Focus Group A"))
+    db.add(Conversation(id=3, project_id=1, name="Hidden-only Conv"))
+    db.add(Speaker(id=1, project_id=1, name="Anderson", participant_id=1))
+    db.flush()
+    # Two segments in conv 1 (must dedup to one ref) + one in conv 2.
+    db.add(Segment(id=1, conversation_id=1, speaker_id=1, sequence_order=0, text="a"))
+    db.add(Segment(id=2, conversation_id=1, speaker_id=1, sequence_order=1, text="b"))
+    db.add(Segment(id=3, conversation_id=2, speaker_id=1, sequence_order=0, text="c"))
+    # Conv 3 is reachable ONLY via a hidden (split) segment → must NOT surface.
+    db.add(Segment(id=4, conversation_id=3, speaker_id=1, sequence_order=0, text="d",
+                   split_into_id=1))
+    db.flush()
+
+    resp = participant_to_response(db.get(Participant, 1), db)
+
+    assert len(resp.linked_speakers) == 1
+    convs = resp.linked_speakers[0].conversations
+    assert {(c.id, c.name) for c in convs} == {
+        (1, "Interview – Anderson"),
+        (2, "Focus Group A"),
+    }
+    # Conv 1 deduped to a single ref despite two visible segments.
+    assert sum(1 for c in convs if c.id == 1) == 1

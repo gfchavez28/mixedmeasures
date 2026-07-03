@@ -1,7 +1,7 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, type CSSProperties, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
+import { Virtuoso, type VirtuosoHandle, type Components } from 'react-virtuoso'
 import {
   Search, X, Undo2, Redo2, Eye, EyeOff, Pencil, ChevronLeft, ChevronRight, FileText, Download,
   Check, Image, ImageOff, Trash2, ArrowUp, ArrowDown, Quote, BookOpen,
@@ -20,16 +20,20 @@ import {
   categoriesApi,
   excerptsApi,
   type Code,
+  type Coder,
   type DocumentSegmentResponse,
 } from '@/lib/api'
 import { useHistory } from '@/hooks/useHistory'
 import { PageErrorBoundary } from '@/components/PageErrorBoundary'
 import FloatingCreateCode, { type FloatingCoords } from '@/components/FloatingCreateCode'
 import FloatingCreateNote from '@/components/FloatingCreateNote'
-import { coordsFromElement } from '@/lib/floating-utils'
-import { isSegmentCoded } from '@/lib/coding-progress'
+import { coordsFromElement, selectionPrefill } from '@/lib/floating-utils'
+import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { isSegmentCodedVisible, computeCoverage } from '@/lib/coding-progress'
+import BlindModeToggle from '@/components/BlindModeToggle'
+import CoderCountBadge from '@/components/CoderCountBadge'
+import { useBlindMode } from '@/hooks/useBlindMode'
 import { getCodeColor, cn } from '@/lib/utils'
-import { useTheme } from '@/lib/theme-context'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
@@ -44,6 +48,11 @@ import ResizeHandle from '@/components/ResizeHandle'
 import CodePanel, { type CodePanelHandle } from '@/components/CodePanel'
 import MemoPanel, { type MemoPanelHandle } from '@/components/MemoPanel'
 import InlineCodeActions from '@/components/qualitative-analysis/InlineCodeActions'
+import { useCoders } from '@/hooks/useCoders'
+import { useCoderCoverage } from '@/hooks/useCoderCoverage'
+import { useAuth } from '@/lib/auth-context'
+import CoderFilterPopover from '@/components/CoderFilterPopover'
+import { mergeArchivedIntoCoderMap, chipHiddenWithArchived } from '@/lib/coder-color'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -75,16 +84,80 @@ type ListItem =
   | { type: 'segment'; segment: VisibleSegment }
   | { type: 'image'; imageIndex: number; afterSeqOrder: number }
 
+// #436: ARIA listbox semantics for the virtualized document. The List is the `listbox`
+// owning the segment rows (each DocumentSegmentRow root is role="option" with aria-selected);
+// the per-item wrapper is role="presentation" so the listbox→option ownership survives the
+// Virtuoso wrapper. Interspersed image rows are non-selectable content rendered inside their
+// own presentation wrapper (kept out of the option set). Module scope = stable identity so
+// Virtuoso doesn't remount the list each render. Keyboard nav/selection is the workbench's
+// own keyboard layer, not roving tabindex.
+// #484: focusable listbox + aria-activedescendant so a screen reader can follow the
+// workbench's arrow-nav (see the matching note in TranscriptPanel.tsx). aria-activedescendant
+// over roving tabindex because the list is virtualized — real focus stays on the
+// never-unmounting List and survives row recycling. Active id threaded via Virtuoso `context`.
+interface DocumentListContext {
+  activeDescendantId?: string
+}
+
+const documentComponents: Components<ListItem, DocumentListContext> = {
+  List: forwardRef<HTMLDivElement, { style?: CSSProperties; children?: ReactNode; context?: DocumentListContext }>(
+    function DocumentList({ style, children, context }, ref) {
+      return (
+        <div
+          ref={ref}
+          style={style}
+          role="listbox"
+          aria-multiselectable="true"
+          aria-label="Document segments"
+          tabIndex={0}
+          aria-activedescendant={context?.activeDescendantId}
+        >
+          {children}
+        </div>
+      )
+    },
+  ),
+  Item: function DocumentItem({ children, item: _item, context: _context, ...props }) {
+    return <div {...props} role="presentation">{children}</div>
+  },
+}
+
 // ── Component ──
 
 export default function DocumentCodingWorkbench() {
   const { projectId, setBreadcrumbLabel, openCodebook } = useProjectLayout()
-  const { isDark } = useTheme()
   const { documentId: documentIdStr } = useParams()
   const documentId = Number(documentIdStr)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const history = useHistory()
+  // Coder roster lens (Track J · J1) — attribution badges + visibility filter, multi-coder only.
+  const { coders, coderMap, multiCoder } = useCoders()
+  const { user } = useAuth()
+  // Active coder: apply/remove + "applied" checks act on MY own layer, never any
+  // coder's (#446). `selfId == null` (coder unknown) falls back to any-coder.
+  const selfId = user?.id ?? null
+  const [hiddenCoders, setHiddenCoders] = useState<Set<number>>(new Set())
+  // #451: archived coders' chips hidden by default; "view all coders" reveals them.
+  const [showArchivedCoders, setShowArchivedCoders] = useState(false)
+  // Blind mode (Track J · J2-5, DEC-G): effectiveHidden = all-but-self while blind.
+  const { blind, blindHiddenSet, toggleReveal } = useBlindMode(projectId)
+  const effectiveHidden = blind ? blindHiddenSet : hiddenCoders
+  // Group A (#457): who coded THIS document — drives the picklist "active here" markers.
+  const coderCoverage = useCoderCoverage(
+    projectId, { documentId }, { enabled: multiCoder, rosterCoderIds: coders.map(c => c.id) },
+  )
+  // #451: fold archived-who-coded into the CHIP map (so they render attributed) and
+  // force them hidden unless revealed — chips only; the gauges keep effectiveHidden.
+  const archivedCoderIds = useMemo(() => new Set(coderCoverage.extraCoders.map(c => c.id)), [coderCoverage.extraCoders])
+  const chipCoderMap = useMemo(
+    () => (multiCoder && coderMap ? mergeArchivedIntoCoderMap(coderMap, coderCoverage.extraCoders) : undefined),
+    [multiCoder, coderMap, coderCoverage.extraCoders],
+  )
+  const chipHidden = useMemo(
+    () => chipHiddenWithArchived(effectiveHidden, archivedCoderIds, showArchivedCoders),
+    [effectiveHidden, archivedCoderIds, showArchivedCoders],
+  )
 
   // ── Data queries ──
 
@@ -160,6 +233,17 @@ export default function DocumentCodingWorkbench() {
 
   const selectedSet = useMemo(() => new Set(selectedSegments), [selectedSegments])
 
+  // #484: aria-activedescendant target = the last-selected segment (see TranscriptPanel.tsx).
+  // Its DOM id is `segment-${id}` on the role="option" root (DocumentSegmentRow).
+  const documentListContext = useMemo<DocumentListContext>(
+    () => ({
+      activeDescendantId: selectedSegments.length > 0
+        ? `segment-${selectedSegments[selectedSegments.length - 1]}`
+        : undefined,
+    }),
+    [selectedSegments],
+  )
+
 
   // ── Lookup maps ──
 
@@ -186,14 +270,14 @@ export default function DocumentCodingWorkbench() {
     codes.forEach(code => {
       const statuses = selectedSegments.map(segId => {
         const seg = segmentMap.get(segId)
-        return seg?.codes?.some(c => c.id === code.id) ?? false
+        return seg?.codes?.some(c => c.id === code.id && (selfId == null || c.user_id === selfId)) ?? false
       })
       const allHave = statuses.every(Boolean)
       const someHave = statuses.some(Boolean)
       map.set(code.id, allHave ? 'all' : someHave ? 'some' : 'none')
     })
     return map
-  }, [selectedSegments, segmentMap, codes])
+  }, [selectedSegments, segmentMap, codes, selfId])
 
   // ── Filter & search ──
 
@@ -314,7 +398,7 @@ export default function DocumentCodingWorkbench() {
 
   // ── Floating dialog state ──
 
-  const [createCodeDialog, setCreateCodeDialog] = useState<{ position: FloatingCoords; segmentIds: number[] } | null>(null)
+  const [createCodeDialog, setCreateCodeDialog] = useState<{ position: FloatingCoords; segmentIds: number[]; initialName?: string } | null>(null)
   const [createNoteDialog, setCreateNoteDialog] = useState<{ position: FloatingCoords; segmentId: number } | null>(null)
   const [createNotePending, setCreateNotePending] = useState(false)
 
@@ -352,7 +436,13 @@ export default function DocumentCodingWorkbench() {
     queryClient.invalidateQueries({ queryKey: ['document', projectId, documentId] })
     queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
     queryClient.invalidateQueries({ queryKey: ['project-summary', projectId] })
+    invalidateDerivedCounts(queryClient, projectId)  // #450: cross-surface counts
   }, [queryClient, projectId, documentId])
+
+  // Clicking an applied-code chip on a segment pivots to that code in the codes panel (#422a).
+  const handleFocusCode = useCallback((codeId: number) => {
+    codePanelRef.current?.focusCode(codeId)
+  }, [])
 
   const invalidateNotes = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['document-notes', projectId, documentId] })
@@ -377,7 +467,7 @@ export default function DocumentCodingWorkbench() {
 
     const allHaveCode = selectedSegments.every(segId => {
       const seg = segmentMap.get(segId)
-      return seg?.codes?.some(c => c.id === code.id) ?? false
+      return seg?.codes?.some(c => c.id === code.id && (selfId == null || c.user_id === selfId)) ?? false
     })
 
     const segmentIds = [...selectedSegments]
@@ -411,7 +501,7 @@ export default function DocumentCodingWorkbench() {
       })
     }
     showSaved()
-  }, [selectedSegments, segmentMap, history, invalidateAfterCodeChange, showSaved])
+  }, [selectedSegments, segmentMap, history, invalidateAfterCodeChange, showSaved, selfId])
 
   const handleMultiCodeToggle = useCallback((codesToToggle: Code[]) => {
     if (selectedSegments.length === 0 || codesToToggle.length === 0) return
@@ -606,7 +696,7 @@ export default function DocumentCodingWorkbench() {
     for (let offset = 1; offset <= filteredSegments.length; offset++) {
       const idx = (currentIdx + offset) % filteredSegments.length
       const seg = filteredSegments[idx]
-      if (!isSegmentCoded(seg.codes)) {
+      if (!isSegmentCodedVisible(seg.codes, effectiveHidden)) {
         setSelectedSegments([seg.id])
         const listIdx = segIdToListIndex.get(seg.id)
         if (listIdx != null) virtuosoRef.current?.scrollToIndex({ index: listIdx, align: 'center', behavior: 'smooth' })
@@ -614,7 +704,7 @@ export default function DocumentCodingWorkbench() {
       }
     }
     toast('All segments are coded')
-  }, [selectedSegments, filteredSegments, segIdToListIndex])
+  }, [selectedSegments, filteredSegments, segIdToListIndex, effectiveHidden])
 
   // ── Selection helpers ──
 
@@ -713,7 +803,7 @@ export default function DocumentCodingWorkbench() {
       const selected = selectedSegmentsRef.current
       if (selected.length === 0) return
       const coords = coordsFromElement(`segment-${selected[0]}`)
-      setCreateCodeDialog({ position: coords, segmentIds: [...selected] })
+      setCreateCodeDialog({ position: coords, segmentIds: [...selected], initialName: selectionPrefill() })
     },
     onCreateNote: () => {
       const selected = selectedSegmentsRef.current
@@ -874,25 +964,29 @@ export default function DocumentCodingWorkbench() {
   }, [selectedSegments, segmentMap])
 
   // ── Progress stats ──
+  // Coverage is filter-aware (Track J · J1): the count/bar/% reflect only codes from
+  // visible coders. Documents have no facilitator, so visible segments are the denominator.
 
   const codedCount = useMemo(() =>
-    visibleSegments.filter(s => isSegmentCoded(s.codes)).length
-  , [visibleSegments])
+    computeCoverage(visibleSegments, s => s.codes, effectiveHidden).codedVisible
+  , [visibleSegments, effectiveHidden])
 
   const progressPercent = visibleSegments.length > 0
     ? Math.round((codedCount / visibleSegments.length) * 100)
     : 0
 
   const progressGradient = useMemo(() => {
-    if (visibleSegments.length === 0) return { background: isDark ? '#374151' : '#e5e7eb' }
+    // Empty bar — quiet neutral track (CSS var resolves per theme).
+    if (visibleSegments.length === 0) return { background: 'hsl(var(--mm-border-subtle))' }
     const stops: string[] = []
     const w = 100 / visibleSegments.length
     visibleSegments.forEach((seg, i) => {
-      const color = isSegmentCoded(seg.codes) ? '#a855f7' : (isDark ? '#4b5563' : '#d1d5db') // purple-500 or gray-600/gray-300
+      // coded = mm-purple (document codes), uncoded = neutral; CSS vars rebalance per theme.
+      const color = isSegmentCodedVisible(seg.codes, effectiveHidden) ? 'hsl(var(--mm-purple))' : 'hsl(var(--mm-border-medium))'
       stops.push(`${color} ${i * w}%`, `${color} ${(i + 1) * w}%`)
     })
     return { background: `linear-gradient(to right, ${stops.join(', ')})` }
-  }, [visibleSegments, isDark])
+  }, [visibleSegments, effectiveHidden])
 
   // ── Context menu code apply (from right-click) ──
 
@@ -905,7 +999,7 @@ export default function DocumentCodingWorkbench() {
     }
     // Then toggle via normal path — but since selection updates async, call directly
     const seg = segmentMap.get(segmentId)
-    const has = seg?.codes?.some(c => c.id === codeId) ?? false
+    const has = seg?.codes?.some(c => c.id === codeId && (selfId == null || c.user_id === selfId)) ?? false
     history.execute({
       type: has ? 'code_remove' : 'code_apply',
       description: `${has ? 'Remove' : 'Apply'} code "${code.name}"`,
@@ -921,7 +1015,7 @@ export default function DocumentCodingWorkbench() {
       },
     })
     showSaved()
-  }, [codeMap, selectedSegments, segmentMap, history, invalidateAfterCodeChange, showSaved])
+  }, [codeMap, selectedSegments, segmentMap, history, invalidateAfterCodeChange, showSaved, selfId])
 
   // ── Render ──
 
@@ -938,7 +1032,9 @@ export default function DocumentCodingWorkbench() {
   return (
     <div className="flex flex-col h-full" ref={containerRef} tabIndex={-1}>
       {/* ── Toolbar ── */}
-      <div className="flex items-center gap-2 px-4 py-2 border-b bg-mm-surface shrink-0">
+      {/* #516: flex-wrap + the ml-auto tail group below — the toolbar previously
+        * clipped its tail (Codebook button, blind pill) at narrow widths. */}
+      <div className="flex items-center gap-2 px-4 py-2 border-b bg-mm-surface shrink-0 flex-wrap">
         {/* Document navigation */}
         {documents.length > 1 && (
           <div className="flex items-center gap-1 shrink-0">
@@ -1046,6 +1142,7 @@ export default function DocumentCodingWorkbench() {
             onClick={() => setColumnVisibility(v => ({ ...v, codes: !v.codes }))}
             aria-pressed={showCodes}
             className={`text-xs gap-1 ${showCodes ? 'bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300' : 'text-mm-text-faint'}`}
+            title={showCodes ? 'Hide the applied-codes column' : "Show each segment's applied codes"}
           >
             {showCodes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
             Codes
@@ -1056,6 +1153,7 @@ export default function DocumentCodingWorkbench() {
             onClick={() => setColumnVisibility(v => ({ ...v, notes: !v.notes }))}
             aria-pressed={showNotes}
             className={`text-xs gap-1 ${showNotes ? 'bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300' : 'text-mm-text-faint'}`}
+            title={showNotes ? 'Hide the notes column' : "Show each segment's notes"}
           >
             {showNotes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
             Notes
@@ -1067,6 +1165,7 @@ export default function DocumentCodingWorkbench() {
               onClick={() => setColumnVisibility(v => ({ ...v, images: !v.images }))}
               aria-pressed={showImages}
               className={`text-xs gap-1 ${showImages ? 'bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300' : 'text-mm-text-faint'}`}
+              title={showImages ? 'Hide inline document images' : 'Show inline document images'}
             >
               {showImages ? <Image className="w-3.5 h-3.5" /> : <ImageOff className="w-3.5 h-3.5" />}
               Images
@@ -1081,12 +1180,15 @@ export default function DocumentCodingWorkbench() {
           onClick={() => setShowOriginal(v => !v)}
           aria-pressed={showOriginal}
           className={`text-xs gap-1 border-l border-mm-border-subtle pl-3 ${showOriginal ? 'bg-purple-50 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300' : 'text-mm-text-faint'}`}
+          title={showOriginal ? 'Close the original document view' : 'View the imported source document side-by-side'}
         >
           <FileText className="w-3.5 h-3.5" />
           Original
         </Button>
 
-        <div className="flex-1" />
+        {/* Tail group (#516): one ml-auto unit so at narrow widths it wraps to its
+          * own right-aligned row instead of individual controls clipping off-screen. */}
+        <div className="flex items-center gap-2 ml-auto">
 
         {savedIndicator && (
           <span className="text-sm text-green-600 flex items-center gap-1">
@@ -1095,23 +1197,53 @@ export default function DocumentCodingWorkbench() {
           </span>
         )}
 
-        {/* Progress */}
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-mm-text-secondary font-mono tabular-nums">
+        {/* Progress — explicit progressbar semantics (Track J · J1 item 3c a11y;
+          * the gauge previously had only a sighted-only title). Filter-aware count;
+          * per-coder breakdown in multi-coder mode. */}
+        <div
+          className="flex items-center gap-2"
+          role="progressbar"
+          aria-label="Coding progress"
+          aria-valuenow={codedCount}
+          aria-valuemin={0}
+          aria-valuemax={visibleSegments.length}
+          aria-valuetext={
+            blind
+              // #503: not "by you" — archived colleagues' codings still count
+              // in gauges under blind (#451 CHIPS-ONLY rule).
+              ? `${codedCount} of ${visibleSegments.length} segments coded (colleagues hidden) (${progressPercent}%)`
+              : effectiveHidden.size > 0
+                ? `${codedCount} of ${visibleSegments.length} segments coded by visible coders (${progressPercent}%)`
+                : `${codedCount} of ${visibleSegments.length} segments coded (${progressPercent}%)`
+          }
+        >
+          <span
+            className="text-sm text-mm-text-secondary font-mono tabular-nums"
+            // #517: while blind this gauge shows only coding visible to you; the
+            // documents list shows all-coder coverage — reconcile at the gauge.
+            title={blind
+              ? "Colleagues' coding is hidden (blind coding) — this count reflects only coding visible to you. The documents list and Overview show all coders' coverage."
+              : undefined}
+          >
             {codedCount}/{visibleSegments.length} coded
           </span>
           <div
             className="w-32 h-2 rounded overflow-hidden"
             style={progressGradient}
-            title={`${codedCount} of ${visibleSegments.length} segments coded (${progressPercent}%)`}
+            title={`${codedCount} of ${visibleSegments.length} segments coded (${progressPercent}%)${blind ? ' — colleagues hidden (blind coding)' : ''}`}
           />
           <span className="text-sm font-medium">{progressPercent}%</span>
         </div>
 
+        {multiCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="document_workbench" />}
+        <CoderCountBadge projectId={projectId} documentId={documentId} enabled={multiCoder} />
+
         {/* Codebook */}
-        <Button variant="ghost" size="icon" onClick={openCodebook} title="Codebook">
+        <Button variant="ghost" size="icon" onClick={openCodebook} title="Codebook" aria-label="Codebook">
           <BookOpen className="w-4 h-4" />
         </Button>
+
+        </div>{/* end tail group (#516) */}
       </div>
 
       {/* ── Main content ── */}
@@ -1214,12 +1346,12 @@ export default function DocumentCodingWorkbench() {
             {/* Quote filter toggle */}
             <button
               className={`w-5 flex-shrink-0 transition-colors ${
-                quotedFilter ? 'text-blue-500' : 'text-purple-400 hover:text-blue-500'
+                quotedFilter ? 'text-mm-blue' : 'text-purple-400 hover:text-mm-blue'
               }`}
               onClick={() => setQuotedFilter(!quotedFilter)}
               title={quotedFilter ? 'Show all segments' : 'Show quoted segments only'}
             >
-              <Quote className={`w-4 h-4 ${quotedFilter ? 'fill-blue-500' : ''}`} />
+              <Quote className={`w-4 h-4 ${quotedFilter ? 'fill-mm-blue' : ''}`} />
             </button>
 
             {/* Search */}
@@ -1249,8 +1381,20 @@ export default function DocumentCodingWorkbench() {
 
             {/* Codes pill */}
             {showCodes && (
-              <div className="w-[160px] flex-shrink-0">
+              <div className="w-[160px] flex-shrink-0 flex items-center gap-1.5">
                 <span className="bg-purple-50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 rounded-full px-2.5 py-0.5 text-xs font-medium">Codes</span>
+                {coders.length > 1 && !blind && (
+                  <CoderFilterPopover
+                    coders={coders}
+                    activeCoderId={user?.id ?? null}
+                    hidden={hiddenCoders}
+                    onChange={setHiddenCoders}
+                    activeCoderIds={coderCoverage.isLoaded ? coderCoverage.activeCoderIds : undefined}
+                    extraCoders={coderCoverage.extraCoders}
+                    showArchived={showArchivedCoders}
+                    onShowArchivedChange={setShowArchivedCoders}
+                  />
+                )}
               </div>
             )}
           </div>
@@ -1261,12 +1405,15 @@ export default function DocumentCodingWorkbench() {
               ref={virtuosoRef}
               data={listItems}
               overscan={200}
+              components={documentComponents}
+              context={documentListContext}
               itemContent={(_index, item) => {
                 if (item.type === 'image') {
                   return (
                     <ContextMenu>
                       <ContextMenuTrigger asChild>
-                        <div className="px-3 py-2 flex justify-center border-b border-mm-border-subtle bg-mm-bg/50">
+                        {/* #436: non-selectable image content — presentation keeps it out of the listbox's option set. */}
+                        <div role="presentation" className="px-3 py-2 flex justify-center border-b border-mm-border-subtle bg-mm-bg/50">
                           <img
                             src={documentsApi.getImageUrl(projectId, documentId, item.imageIndex)}
                             alt="Embedded image from document"
@@ -1327,10 +1474,14 @@ export default function DocumentCodingWorkbench() {
                     allCodes={codes}
                     projectId={projectId}
                     onCodeChange={invalidateAfterCodeChange}
+                    onFocusCode={handleFocusCode}
+                    coderMap={chipCoderMap}
+                    hiddenCoderIds={chipHidden}
+                    activeCoderId={selfId}
                     onToggleQuote={handleToggleQuote}
                     onContextCodeApply={handleContextCodeApply}
                     onContextCreateCode={(coords) => {
-                      setCreateCodeDialog({ position: coords, segmentIds: [...selectedSegments] })
+                      setCreateCodeDialog({ position: coords, segmentIds: [...selectedSegments], initialName: selectionPrefill() })
                     }}
                     onContextCreateNote={(segmentId, coords) => {
                       setCreateNoteDialog({ position: coords, segmentId })
@@ -1491,6 +1642,7 @@ export default function DocumentCodingWorkbench() {
         <FloatingCreateCode
           position={createCodeDialog.position}
           projectId={projectId}
+          initialName={createCodeDialog.initialName}
           categories={categories}
           onCreated={async (code) => {
             const segmentIds = createCodeDialog.segmentIds
@@ -1582,6 +1734,10 @@ function DocumentSegmentRow({
   allCodes,
   projectId,
   onCodeChange,
+  onFocusCode,
+  coderMap,
+  hiddenCoderIds,
+  activeCoderId,
   onToggleQuote,
   onContextCodeApply,
   onContextCreateCode,
@@ -1613,6 +1769,10 @@ function DocumentSegmentRow({
   allCodes: Code[]
   projectId: number
   onCodeChange: () => void
+  onFocusCode?: (codeId: number) => void
+  coderMap?: Map<number, Coder>
+  hiddenCoderIds?: Set<number>
+  activeCoderId?: number | null
   onToggleQuote: (segmentId: number) => void
   onContextCodeApply: (segmentId: number, codeId: number) => void
   onContextCreateCode?: (coords: FloatingCoords) => void
@@ -1668,7 +1828,9 @@ function DocumentSegmentRow({
   return (
     <>
     <ContextMenu>
-      <ContextMenuTrigger>
+      {/* #436: asChild so the trigger merges onto the option div instead of inserting a
+          generic <span> between the listbox's presentation wrapper and the option. */}
+      <ContextMenuTrigger asChild>
         <div
           id={`segment-${segment.id}`}
           className={cn(
@@ -1677,6 +1839,8 @@ function DocumentSegmentRow({
               ? 'bg-purple-50 dark:bg-purple-900/20 border-l-[3px] border-l-purple-500'
               : 'hover:bg-mm-surface-hover border-l-[3px] border-l-transparent',
           )}
+          // #436: option role makes aria-selected valid (listbox = the Virtuoso List).
+          role="option"
           aria-selected={isSelected}
           onContextMenu={(e) => {
             const rect = e.currentTarget.getBoundingClientRect()
@@ -1757,7 +1921,7 @@ function DocumentSegmentRow({
                 {textSelection && textSelection.start < textSelection.end
                   ? <>
                       {segment.text.slice(0, textSelection.start)}
-                      <mark className="bg-blue-200 dark:bg-blue-700/50 text-foreground rounded-sm px-px">{segment.text.slice(textSelection.start, textSelection.end)}</mark>
+                      <mark className="bg-mm-blue/30 text-foreground rounded-sm px-px">{segment.text.slice(textSelection.start, textSelection.end)}</mark>
                       {segment.text.slice(textSelection.end)}
                     </>
                   : segment.text}
@@ -1796,6 +1960,10 @@ function DocumentSegmentRow({
                   codeMap={codeMap}
                   allCodes={allCodes}
                   onCodeChange={onCodeChange}
+                  onFocusCode={onFocusCode}
+                  coderMap={coderMap}
+                  appliedCodeDetails={segment.codes.map(c => ({ code_id: c.id, user_id: c.user_id }))}
+                  hiddenCoderIds={hiddenCoderIds}
                 />
               )}
             </div>
@@ -1817,7 +1985,7 @@ function DocumentSegmentRow({
               </>
             )}
             {codes.filter(c => c.is_active).map(code => {
-              const applied = segment.codes.some(c => c.id === code.id)
+              const applied = segment.codes.some(c => c.id === code.id && (activeCoderId == null || c.user_id === activeCoderId))
               const label = codeIdToShortcutLabel.get(code.id) ?? ''
               return (
                 <ContextMenuItem

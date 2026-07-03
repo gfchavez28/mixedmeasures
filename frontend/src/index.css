@@ -100,6 +100,7 @@
   --color-mm-purple-text: hsl(var(--mm-purple-text));
   --color-mm-blue: hsl(var(--mm-blue));
   --color-mm-blue-text: hsl(var(--mm-blue-text));
+  --color-mm-blue-cell: hsl(var(--mm-blue-cell));
   --color-mm-canvas: hsl(var(--mm-canvas));
   --color-mm-canvas-text: hsl(var(--mm-canvas-text));
 }
@@ -155,6 +156,7 @@
     --mm-purple-text: 261 36% 47%;
     --mm-blue: 210 70% 52%;
     --mm-blue-text: 204 36% 40%;  /* #394: AA on the light active-tab pill bg (was 3.84:1) */
+    --mm-blue-cell: 210 60% 93%;  /* #480: OPAQUE selected-cell bg (sticky cells can't use the alpha tint) */
     --mm-teal: 174 60% 42%;
     --mm-teal-text: 170 40% 30%;
     --mm-canvas: 45 70% 50%;
@@ -229,6 +231,7 @@
     --mm-purple-text: 261 58% 72%;
     --mm-blue: 210 66% 58%;
     --mm-blue-text: 204 54% 71%;
+    --mm-blue-cell: 212 28% 24%;  /* #480: OPAQUE selected-cell bg (dark) */
     --mm-teal: 174 55% 50%;
     --mm-teal-text: 170 50% 70%;
     --mm-canvas: 45 66% 55%;

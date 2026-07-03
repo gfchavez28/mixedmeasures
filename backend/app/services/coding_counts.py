@@ -46,6 +46,7 @@ from ..models.document import Document
 from ..models.segment import Segment
 from ..models.speaker import Speaker
 from ..routers.helpers import visible_segment_filter
+from .coding_layers import layer_origin_filter
 
 
 def _participant_predicate():
@@ -71,12 +72,17 @@ def coded_segment_counts(
     parent_ids: Iterable[int],
     *,
     participant_only: bool = True,
+    layer_scope: str | None = None,
 ) -> dict[int, int]:
     """Map ``{parent_id: coded-segment count}`` grouped by ``parent_col``.
 
     ``parent_col`` is ``Segment.conversation_id`` or ``Segment.document_id``.
     Parents with zero coded segments are omitted from the dict (callers use
     ``.get(id, 0)``). Pass ``participant_only=False`` for document sources.
+
+    ``layer_scope`` (J2 Slab 7) is resolver-ready: ``None``/``'human'`` keeps the
+    current all-non-consensus default; ``'consensus'`` counts the consensus layer.
+    Gauge callers don't pass it yet — the frontend election lands in J2-5.
     """
     ids = list(parent_ids)
     if not ids:
@@ -90,6 +96,7 @@ def coded_segment_counts(
             parent_col.in_(ids),
             *visible_segment_filter(),
             Code.is_universal == False,  # noqa: E712
+            layer_origin_filter(layer_scope),
         )
     )
     query = _apply_participant_join(query, participant_only=participant_only)
@@ -102,10 +109,12 @@ def coded_segment_count(
     parent_id: int,
     *,
     participant_only: bool = True,
+    layer_scope: str | None = None,
 ) -> int:
     """Scalar coded-segment count for a single conversation/document."""
     return coded_segment_counts(
-        db, parent_col, [parent_id], participant_only=participant_only
+        db, parent_col, [parent_id],
+        participant_only=participant_only, layer_scope=layer_scope,
     ).get(parent_id, 0)
 
 
@@ -114,6 +123,7 @@ def coded_segment_count_for_project(
     project_id: int,
     *,
     source: str,
+    layer_scope: str | None = None,
 ) -> int:
     """Project-wide coded participant-segment count for one source type.
 
@@ -134,6 +144,7 @@ def coded_segment_count_for_project(
             Conversation.project_id == project_id,
             *visible_segment_filter(),
             Code.is_universal == False,  # noqa: E712
+            layer_origin_filter(layer_scope),
         )
         query = _apply_participant_join(query, participant_only=True)
     elif source == "document":
@@ -141,6 +152,7 @@ def coded_segment_count_for_project(
             Document.project_id == project_id,
             *visible_segment_filter(),
             Code.is_universal == False,  # noqa: E712
+            layer_origin_filter(layer_scope),
         )
     else:
         raise ValueError(f"source must be 'conversation' or 'document', got {source!r}")

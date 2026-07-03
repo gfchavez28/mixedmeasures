@@ -154,7 +154,7 @@ export default function QualHeatmap({
                 {row.cells.map((cell, j) => (
                   <td
                     key={columnIds[j]}
-                    className="px-1 py-1 text-center tabular-nums cursor-pointer hover:ring-1 hover:ring-blue-400 hover:ring-inset"
+                    className="px-1 py-1 text-center tabular-nums cursor-pointer hover:ring-1 hover:ring-mm-blue hover:ring-inset"
                     style={getHeatmapCellStyle(cell.displayValue, maxValue, isDark, heatmapPreset)}
                     title={`${row.label} \u00D7 ${cell.columnLabel}: ${cell.rawCount} segment${cell.rawCount !== 1 ? 's' : ''}${cell.wordCount > 0 ? `, ${cell.wordCount} words` : ''}`}
                     tabIndex={0}

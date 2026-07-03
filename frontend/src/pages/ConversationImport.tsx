@@ -29,6 +29,7 @@ import {
 import { cn, getContrastColor, hexToRowBg } from '@/lib/utils'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
+import { ColorDotButton } from '@/components/ColorDotButton'
 import { consumePendingImportFiles } from '@/lib/pending-import-files'
 import {
   type PreviewData,
@@ -246,8 +247,8 @@ export default function ConversationImport() {
   const handleFilesSelected = useCallback(async (selectedFiles: File[]) => {
     setError('')
 
-    // Filter to .csv only
-    const csvFiles = selectedFiles.filter(f => f.name.toLowerCase().endsWith('.csv'))
+    // Transcript formats: CSV + VTT/SRT subtitles (#524 — Zoom/Teams exports)
+    const csvFiles = selectedFiles.filter(f => /\.(csv|vtt|srt)$/.test(f.name.toLowerCase()))
     if (csvFiles.length === 0) return
 
     // Enforce max
@@ -696,11 +697,11 @@ export default function ConversationImport() {
             <div className="flex items-center gap-2">
               <Popover>
                 <PopoverTrigger asChild>
-                  <button
-                    type="button"
-                    className="w-5 h-5 rounded-full border-2 border-mm-border-medium hover:border-mm-text transition-colors flex-shrink-0"
-                    style={{ backgroundColor: mapping.color || undefined }}
+                  <ColorDotButton
+                    color={mapping.color || 'transparent'}
+                    dotClassName="w-5 h-5 rounded-full border-2 border-mm-border-medium"
                     title="Set speaker color"
+                    aria-label="Set speaker color"
                   />
                 </PopoverTrigger>
                 <PopoverContent className="w-auto p-3" align="end">
@@ -752,14 +753,14 @@ export default function ConversationImport() {
             if (!match) return null
             const orphaned = isOrphanedParticipant(match)
             const sources = [
-              ...new Set(match.linked_speakers.flatMap(s => s.conversation_names)),
+              ...new Set(match.linked_speakers.flatMap(s => s.conversations.map(c => c.name))),
               ...new Set(match.dataset_rows.map(d => d.dataset_name)),
             ]
             const matchName = match.display_name || match.identifier
             return (
               <div className={`flex items-center gap-2 ml-12 p-2 border rounded text-sm ${
                 orphaned
-                  ? 'bg-slate-50 dark:bg-slate-900/40 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                  ? 'bg-mm-surface-hover border-mm-border-subtle text-mm-text-secondary'
                   : 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300'
               }`}>
                 <CircleAlert className="w-4 h-4 flex-shrink-0" />
@@ -828,9 +829,9 @@ export default function ConversationImport() {
         {step === 'upload' && (
           <Card>
             <CardHeader>
-              <CardTitle>Upload CSV Files</CardTitle>
+              <CardTitle>Upload Transcripts</CardTitle>
               <CardDescription>
-                Upload one or more transcript CSVs exported from Fireflies.ai or similar tools.
+                Upload transcript CSVs, or VTT/SRT subtitle files exported from Zoom or Teams.
                 Multiple files will share the same column mapping.
                 {/* #412: the most common real-world transcript is a Word/PDF file —
                     point that path at Documents instead of dead-ending here. */}
@@ -857,11 +858,11 @@ export default function ConversationImport() {
               >
                 <FileInput className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />
                 <p className="text-mm-text-secondary mb-4">
-                  Drag and drop your CSV file(s) here, or click to browse
+                  Drag and drop transcript file(s) here, or click to browse
                 </p>
                 <input
                   type="file"
-                  accept=".csv"
+                  accept=".csv,.vtt,.srt"
                   multiple
                   onChange={(e) => {
                     const selected = e.target.files
@@ -912,7 +913,7 @@ export default function ConversationImport() {
                     <label htmlFor="file-input-add" className="cursor-pointer">
                       <input
                         type="file"
-                        accept=".csv"
+                        accept=".csv,.vtt,.srt"
                         multiple
                         onChange={(e) => {
                           const selected = e.target.files
@@ -977,7 +978,7 @@ export default function ConversationImport() {
             </CardHeader>
             <CardContent className="space-y-4">
               {isMultiFile && (
-                <div className="p-3 bg-blue-50 dark:bg-blue-950/40 text-blue-800 dark:text-blue-300 rounded-lg text-sm flex items-center gap-2">
+                <div className="p-3 bg-mm-blue/12 text-mm-blue-text rounded-lg text-sm flex items-center gap-2">
                   <CircleAlert className="w-4 h-4 flex-shrink-0" />
                   This column mapping will apply to all {files.length} files.
                   Files will be checked for compatibility when you continue.
@@ -1193,7 +1194,7 @@ export default function ConversationImport() {
                 {/* #407: surface the participant spine at import time */}
                 {' '}Speakers become participants — if you also have survey or
                 assessment data, you can link them to their records on the{' '}
-                <Link to={`/projects/${id}/participants`} className="text-blue-500 hover:underline">
+                <Link to={`/projects/${id}/participants`} className="text-mm-blue-text hover:underline">
                   Participants page
                 </Link>.
               </CardDescription>
@@ -1201,7 +1202,7 @@ export default function ConversationImport() {
             <CardContent className="space-y-4">
               {/* Shared speakers info banner (multi-file only) */}
               {isMultiFile && sharedSpeakers.length > 0 && (
-                <div className="p-3 bg-blue-50 dark:bg-blue-950/40 text-blue-800 dark:text-blue-300 rounded-lg text-sm flex items-start gap-2">
+                <div className="p-3 bg-mm-blue/12 text-mm-blue-text rounded-lg text-sm flex items-start gap-2">
                   <CircleAlert className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <div>
                     <span className="font-medium">Shared speakers detected: </span>
@@ -1211,7 +1212,7 @@ export default function ConversationImport() {
                         {s.name} ({s.fileCount} files)
                       </span>
                     ))}
-                    <span className="block mt-1 text-blue-700 dark:text-blue-400">
+                    <span className="block mt-1 text-mm-blue-text">
                       Speakers with the same name across files will be treated as the same person.
                       If they are different people, give them distinct names below.
                     </span>

@@ -212,8 +212,8 @@ export default function QualSummaryTable({
                 )}
                 {showComment && (
                   <>
-                    <Th field="commentCount" label="Comments" sortField={sortField} sortDir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right" />
-                    <Th field="commentPercentage" label="% Comments" sortField={sortField} sortDir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right" />
+                    <Th field="commentCount" label="Texts" sortField={sortField} sortDir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right" />
+                    <Th field="commentPercentage" label="% Texts" sortField={sortField} sortDir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right" />
                     <Th field="recordCount" label="Records" sortField={sortField} sortDir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right" />
                     <Th field="recordPercentage" label="% Rec." sortField={sortField} sortDir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right" />
                   </>

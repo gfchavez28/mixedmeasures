@@ -47,6 +47,7 @@ from ..services.document_import import (
     preview_segmentation,
 )
 from ..services.coding_counts import coded_segment_count, coded_segment_counts
+from ..services.coding_layers import CONSENSUS_ORIGIN
 from .helpers import (
     _get_project_or_404,
     read_upload_with_limit,
@@ -369,9 +370,16 @@ async def get_document(
                 name=ca.code.name,
                 color=ca.code.color,
                 is_universal=ca.code.is_universal,
+                user_id=ca.user_id,
             )
             for ca in seg.code_applications
-            if ca.code and ca.code.is_active
+            # J2-B / P-1: human/working layer only; consensus is shown by the
+            # reconciliation view, never the document workbench. Inactive codes
+            # stay visible (#489): the coding is a historical fact the coder must
+            # be able to see and remove, and the conversation payload keeps them
+            # — filtering here made the gauge disagree with this response's own
+            # coded_segment_count.
+            if ca.code and ca.origin != CONSENSUS_ORIGIN
         ]
 
         active_notes = sorted(
@@ -828,9 +836,10 @@ async def list_document_notes(
 def _segment_to_doc_response(seg: Segment) -> DocumentSegmentResponse:
     """Convert an eagerly-loaded Segment model to DocumentSegmentResponse."""
     codes = [
-        SegmentCodeResponse(id=ca.code.id, name=ca.code.name, color=ca.code.color, is_universal=ca.code.is_universal)
+        SegmentCodeResponse(id=ca.code.id, name=ca.code.name, color=ca.code.color, is_universal=ca.code.is_universal, user_id=ca.user_id)
         for ca in seg.code_applications
-        if ca.code and ca.code.is_active
+        # J2-B / P-1: human/working layer only (consensus → reconciliation view).
+        if ca.code and ca.code.is_active and ca.origin != CONSENSUS_ORIGIN
     ]
     active_notes = sorted(
         [n for n in seg.attached_notes if not n.is_archived],

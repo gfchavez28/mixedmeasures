@@ -163,6 +163,10 @@ export interface CodeAnalysisFilterParams {
   document_ids?: string
   source?: 'conversations' | 'text' | 'all'
   level?: 'segment' | 'source'
+  /** Track J · J1 item 4 — comma-separated coder (user) IDs; omit = all coders. */
+  coder_ids?: string
+  /** Track J · J2-5 — analysis coding layer: 'human' (default) or 'consensus'. */
+  layer_scope?: 'human' | 'consensus'
 }
 
 // Source Frequencies
@@ -175,6 +179,10 @@ export interface SourceFrequenciesRequest {
   participant_ids?: number[] | null
   group_by_subtype?: string | null
   aggregation?: 'code' | 'category'
+  /** Track J · J1 item 4 — coder (user) IDs to include; null/omit = all coders. */
+  coder_ids?: number[] | null
+  /** Track J · J2-5 — analysis coding layer: 'human' (default) or 'consensus'. */
+  layer_scope?: 'human' | 'consensus' | null
 }
 
 export interface CodeCountEntry {
@@ -239,6 +247,10 @@ export interface DemographicComparisonRequest {
   text_column_ids?: number[] | null
   exclude_facilitator?: boolean
   participant_ids?: number[] | null
+  /** Track J · J1 item 4 — coder (user) IDs to include; null/omit = all coders. */
+  coder_ids?: number[] | null
+  /** Track J · J2-5 — analysis coding layer: 'human' (default) or 'consensus'. */
+  layer_scope?: 'human' | 'consensus' | null
 }
 
 export interface GroupTotal {
@@ -292,6 +304,118 @@ export interface SaturationResponse {
   category_level: boolean
 }
 
+// Reconciliation grid (Track J · J2-5 M-1)
+export interface ReconciliationCoder {
+  id: number
+  name: string
+}
+
+export interface ReconciliationCodeInfo {
+  id: number
+  name: string
+  color: string | null
+}
+
+export interface ReconciliationConsensusContext {
+  rule: string // "unanimous" | "majority"
+  agree: number
+  voters: number
+}
+
+export interface ReconciliationUnit {
+  unit_type: 'segment' | 'dataset_value'
+  unit_id: number
+  source_type: 'conversation' | 'document' | 'column'
+  source_id: number
+  source_label: string
+  text: string
+  /** coderId → effective code ids they applied here (an engaged coder who left it blank → []). */
+  by_coder: Record<string, number[]>
+  /** source-engaged coder ids (Option B: reviewed the source). */
+  engaged: number[]
+  /** effective code ids in the derived consensus. */
+  consensus: number[]
+  /** effective code id → {rule, agree, voters}. */
+  consensus_context: Record<string, ReconciliationConsensusContext>
+  has_disagreement: boolean
+}
+
+export interface ReconciliationResponse {
+  available: boolean
+  reason: string | null
+  n_coders: number
+  coders: ReconciliationCoder[]
+  codes: ReconciliationCodeInfo[]
+  units: ReconciliationUnit[]
+  total: number
+  has_more: boolean
+}
+
+export interface ReconciliationParams {
+  source_type?: 'conversation' | 'document' | 'column'
+  source_id?: number
+  disagreements_only?: boolean
+  coder_ids?: string
+  limit?: number
+  offset?: number
+}
+
+export interface RecomputeConsensusResponse {
+  recomputed: number
+  remaining: number
+}
+
+// Consensus-layer status (Track J · J2-5 M-2)
+export interface ConsensusStatus {
+  /** GLOBAL roster gate — the instance has >=2 selectable coders. */
+  enabled: boolean
+  /** This project has materialized consensus rows (offer the consensus view only when true). */
+  exists: boolean
+  /** Pending ConsensusStaleTarget markers for this project (>0 = consensus may be out of date). */
+  stale_count: number
+}
+
+// Inter-rater reliability (Track J · J2-4 / J2-5 display)
+export interface IrrCoderInfo {
+  id: number
+  name: string
+}
+
+export interface IrrCodeResult {
+  code_id: number
+  code_name: string
+  n_units: number
+  percent_agreement: number | null
+  prevalence: number | null
+  cohens_kappa: number | null
+  kappa_interpretation: string | null
+  krippendorff_alpha: number | null
+  alpha_interpretation: string | null
+}
+
+export interface IrrThresholds {
+  kappa?: Record<string, number>
+  alpha?: Record<string, number>
+}
+
+export interface IrrResponse {
+  available: boolean
+  reason: string | null
+  n_coders: number
+  coders: IrrCoderInfo[]
+  /** "kappa+alpha" (exactly 2 coders) | "alpha" (n coders). */
+  metric_label: string | null
+  per_code: IrrCodeResult[]
+  overall_alpha: number | null
+  overall_alpha_interpretation: string | null
+  interpretation_thresholds: IrrThresholds
+}
+
+export interface IrrParams {
+  /** Comma-separated coder IDs; omit = all roster coders (the display always omits). */
+  coder_ids?: string
+}
+
 // Text columns
 export interface TextColumnInfo {
   column_id: number
@@ -300,6 +424,19 @@ export interface TextColumnInfo {
   dataset_id: number
   dataset_name: string
   coded_count: number
+}
+
+/** Track J · Group A (#3/#13): a coder who has real codings in scope. */
+export interface CoderCoverageItem {
+  user_id: number
+  username: string
+  display_color: string | null
+  archived: boolean
+}
+
+export interface CoderCoverageResponse {
+  coders: CoderCoverageItem[]
+  count: number
 }
 
 // API functions - Code Analysis
@@ -319,9 +456,25 @@ export const codeAnalysisApi = {
   demographicFilters: (projectId: number) =>
     api.get<DemographicFilterOptionsResponse>(`/projects/${projectId}/code-analysis/demographic-filters`).then(r => r.data),
 
+  /** Track J · Group A (#3/#13): distinct coders who coded a source — or, with no
+   *  source selector, anywhere in the project. Derived from codings (not the
+   *  roster); includes archived coders (flagged), excludes system coders. */
+  coderCoverage: (projectId: number, params?: {
+    conversation_id?: number
+    document_id?: number
+    text_column_ids?: string
+  }) =>
+    api.get<CoderCoverageResponse>(
+      `/projects/${projectId}/code-analysis/coder-coverage`, { params }
+    ).then(r => r.data),
+
   textsWithContext: (projectId: number, codeId: number, params?: {
     participant_ids?: string
     text_column_ids?: string
+    /** Track J · J1 item 4 — comma-separated coder (user) IDs; omit = all coders. */
+    coder_ids?: string
+    /** Track J · J2-5 — analysis coding layer: 'human' (default) or 'consensus'. */
+    layer_scope?: 'human' | 'consensus'
     limit?: number
     offset?: number
   }) =>
@@ -340,11 +493,31 @@ export const codeAnalysisApi = {
     api.post<DemographicComparisonResponse>(`/projects/${projectId}/code-analysis/demographic-comparison`, data)
       .then(r => r.data),
 
-  saturation: (projectId: number, params?: { exclude_facilitator?: boolean; category_level?: boolean; conversation_ids?: string; document_ids?: string }) =>
+  saturation: (projectId: number, params?: { exclude_facilitator?: boolean; category_level?: boolean; conversation_ids?: string; document_ids?: string; coder_ids?: string; layer_scope?: 'human' | 'consensus' }) =>
     api.get<SaturationResponse>(`/projects/${projectId}/code-analysis/saturation`, { params })
       .then(r => r.data),
 
   textColumnsWithCoding: (projectId: number) =>
     api.get<TextColumnInfo[]>(`/projects/${projectId}/code-analysis/text-columns`)
       .then(r => r.data),
+
+  // Track J · J2-5 M-2 — drives the layer selector's "offer consensus only when it exists".
+  consensusStatus: (projectId: number) =>
+    api.get<ConsensusStatus>(`/projects/${projectId}/code-analysis/consensus-status`).then(r => r.data),
+
+  // Track J · J2-5 M-1 — reconciliation grid: per-unit coder pivot + live-derived consensus.
+  reconciliation: (projectId: number, params?: ReconciliationParams) =>
+    api.get<ReconciliationResponse>(`/projects/${projectId}/code-analysis/reconciliation`, { params }).then(r => r.data),
+
+  // Track J · J2-5 M-3 — sync the stored consensus layer on demand (bounded sweep).
+  recomputeConsensus: (projectId: number) =>
+    api.post<RecomputeConsensusResponse>(`/projects/${projectId}/code-analysis/recompute-consensus`, {}).then(r => r.data),
+
+  // Track J · J2-4/J2-5 — inter-rater reliability (κ / α / % agreement) over the human roster.
+  irr: (projectId: number, params?: IrrParams) =>
+    api.get<IrrResponse>(`/projects/${projectId}/code-analysis/irr`, { params }).then(r => r.data),
+
+  // Track J · J2-5 blind mode (DEC-G) — log that a coder broke blindness (audit trail).
+  revealBlindMode: (projectId: number, body: { surface?: string }) =>
+    api.post<{ logged: boolean }>(`/projects/${projectId}/code-analysis/reveal`, body).then(r => r.data),
 }

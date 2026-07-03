@@ -125,7 +125,7 @@ export default function QuoteBoardFilters({
     <div className="space-y-3 text-xs">
       {hasActiveFilters && (
         <button
-          className="text-blue-600 dark:text-blue-400 hover:underline text-xs"
+          className="text-mm-blue-text hover:underline text-xs"
           onClick={onClearAll}
         >
           Clear all filters

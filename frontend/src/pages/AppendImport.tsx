@@ -50,6 +50,8 @@ export default function AppendImport() {
   const [step, setStep] = useState<Step>('upload')
   const [file, setFile] = useState<File | null>(null)
   const [encoding, setEncoding] = useState('utf-8')
+  // .xlsx only (#523): selected worksheet; null = first sheet.
+  const [sheetName, setSheetName] = useState<string | null>(null)
   const [preview, setPreview] = useState<DatasetAppendPreviewResponse | null>(null)
   const [importResult, setImportResult] = useState<DatasetAppendResponse | null>(null)
   const [error, setError] = useState('')
@@ -57,18 +59,19 @@ export default function AppendImport() {
   const [skipDuplicates, setSkipDuplicates] = useState(true)
   const [showAllRows, setShowAllRows] = useState(false)
 
-  const handleFileSelect = useCallback(async (selectedFile: File) => {
+  const handleFileSelect = useCallback(async (selectedFile: File, sheet?: string) => {
     setFile(selectedFile)
     setError('')
     setIsLoading(true)
 
     try {
-      const result = await datasetsApi.appendPreview(pid, did, selectedFile, encoding)
+      const result = await datasetsApi.appendPreview(pid, did, selectedFile, encoding, sheet)
       setPreview(result)
+      setSheetName(sheet ?? null)
       setStep('review')
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
-      setError(typeof detail === 'string' ? detail : (err instanceof Error ? err.message : 'Failed to preview CSV'))
+      setError(typeof detail === 'string' ? detail : (err instanceof Error ? err.message : 'Failed to preview file'))
     } finally {
       setIsLoading(false)
     }
@@ -78,7 +81,7 @@ export default function AppendImport() {
     (e: React.DragEvent) => {
       e.preventDefault()
       const droppedFile = e.dataTransfer.files[0]
-      if (droppedFile && droppedFile.name.endsWith('.csv')) {
+      if (droppedFile && /\.(csv|xlsx)$/.test(droppedFile.name.toLowerCase())) {
         handleFileSelect(droppedFile)
       }
     },
@@ -95,6 +98,7 @@ export default function AppendImport() {
         })),
         skip_duplicates: skipDuplicates,
         row_start_id: preview.next_row_id,
+        sheet_name: sheetName,
       }, encoding)
     },
     onSuccess: (result) => {
@@ -197,11 +201,11 @@ export default function AppendImport() {
                 >
                   <FileInput className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />
                   <p className="text-mm-text-secondary mb-4">
-                    Drag and drop your CSV file here, or click to browse
+                    Drag and drop a CSV or Excel (.xlsx) file here, or click to browse
                   </p>
                   <input
                     type="file"
-                    accept=".csv"
+                    accept=".csv,.xlsx"
                     onChange={(e) => {
                       const selectedFile = e.target.files?.[0]
                       if (selectedFile) handleFileSelect(selectedFile)
@@ -223,6 +227,25 @@ export default function AppendImport() {
         {/* Step 2: Review */}
         {step === 'review' && preview && (
           <div className="space-y-6">
+            {/* Worksheet picker (#523, .xlsx with multiple sheets only) */}
+            {preview.sheet_names && preview.sheet_names.length > 1 && file && (
+              <div className="bg-mm-surface border rounded-lg px-4 py-3 flex items-center gap-3 text-sm">
+                <label htmlFor="append-sheet-picker" className="font-medium">Worksheet</label>
+                <select
+                  id="append-sheet-picker"
+                  value={sheetName ?? preview.sheet_names[0]}
+                  onChange={(e) => handleFileSelect(file, e.target.value)}
+                  disabled={isLoading}
+                  className="text-sm px-2 py-1 rounded border bg-mm-bg cursor-pointer"
+                >
+                  {preview.sheet_names.map(name => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
+                <span className="text-mm-text-muted">Only the selected worksheet is appended.</span>
+              </div>
+            )}
+
             {/* Column match summary */}
             <div className="bg-mm-surface border rounded-lg px-4 py-3 flex flex-wrap gap-3 text-sm">
               <span className="flex items-center gap-1.5">
@@ -474,7 +497,7 @@ function MatchedColumnRow({ col }: { col: AppendMatchedColumn }) {
       </span>
       <span className={cn(
         'text-xs px-2 py-0.5 rounded flex-shrink-0',
-        col.match_method === 'code' ? 'bg-blue-50 text-blue-600 dark:bg-blue-950/30 dark:text-blue-300' : 'bg-purple-50 text-purple-600 dark:bg-purple-950/30 dark:text-purple-300',
+        col.match_method === 'code' ? 'bg-mm-blue/12 text-mm-blue-text' : 'bg-purple-50 text-purple-600 dark:bg-purple-950/30 dark:text-purple-300',
       )}>
         by {col.match_method}
       </span>

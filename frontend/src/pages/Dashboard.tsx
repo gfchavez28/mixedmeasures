@@ -1,12 +1,16 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
-import { Plus, FolderOpen, Archive, Trash2, Pencil, Moon, Sun, Settings, FileInput, Package } from 'lucide-react'
+import { Plus, FolderOpen, Archive, Trash2, Pencil, Moon, Sun, Settings, FileInput, Package, ChevronDown, Copy } from 'lucide-react'
 import { projectsApi, projectPortabilityApi, type Project } from '@/lib/api'
-import type { ImportValidationResult } from '@/lib/api'
+import type { ImportValidationResult, ProjectImportMode } from '@/lib/api'
+import { setPendingMerge } from '@/lib/pending-merge'
 import { toast } from 'sonner'
 import { useAuth } from '@/lib/auth-context'
 import { useTheme } from '@/lib/theme-context'
+import { useCoders } from '@/hooks/useCoders'
+import { useCoderSwitch } from '@/hooks/useCoderSwitch'
+import { coderColor } from '@/lib/coder-color'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -42,8 +46,74 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 
-export default function Dashboard() {
+/**
+ * #459 — Dashboard coder switcher. The TopRail only lives inside a project, so the
+ * projects list needs its own way to switch identity. Compact dropdown; single-coder
+ * installs keep the plain name. Reuses the shared switch-with-confirm flow (#460).
+ */
+function DashboardCoderSwitcher() {
   const { user } = useAuth()
+  const { coders, multiCoder } = useCoders()
+  const { requestSwitch, dialog, switching } = useCoderSwitch()
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onClick = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onClick)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('mousedown', onClick); document.removeEventListener('keydown', onKey) }
+  }, [open])
+
+  if (!user) return null
+  if (!multiCoder) {
+    return <span className="text-sm text-[hsl(var(--mm-chrome-text-muted))]">{user.username}</span>
+  }
+  const others = coders.filter(c => c.id !== user.id)
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="inline-flex items-center gap-1.5 px-2 py-1 rounded text-sm text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/10 transition-colors"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`${user.username} — switch coder`}
+      >
+        <span
+          className="w-2 h-2 rounded-full flex-none"
+          style={{ backgroundColor: coderColor({ id: user.id, display_color: user.display_color }) }}
+          aria-hidden="true"
+        />
+        <span className="max-w-[120px] truncate">{user.username}</span>
+        <ChevronDown className="w-3 h-3" />
+      </button>
+      {open && (
+        <div role="menu" className="absolute right-0 top-full mt-1 w-52 rounded-md border border-white/[0.1] bg-[hsl(var(--mm-chrome))] shadow-lg z-50 py-1">
+          <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-[hsl(var(--mm-chrome-text-muted))]/70">
+            Switch coder
+          </div>
+          {others.map(c => (
+            <button
+              key={c.id}
+              role="menuitem"
+              onClick={() => { setOpen(false); requestSwitch({ id: c.id, username: c.username }) }}
+              disabled={switching}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.06] transition-colors"
+            >
+              <span className="w-2.5 h-2.5 rounded-full flex-none" style={{ backgroundColor: coderColor(c) }} aria-hidden="true" />
+              <span className="truncate">{c.username}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {dialog}
+    </div>
+  )
+}
+
+export default function Dashboard() {
   const { isDark, toggleTheme } = useTheme()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -51,6 +121,9 @@ export default function Dashboard() {
   const [newProjectName, setNewProjectName] = useState('')
   const [newProjectDescription, setNewProjectDescription] = useState('')
   const [deleteProjectId, setDeleteProjectId] = useState<number | null>(null)
+  // #482: confirm before duplicating — a duplicate is an INDEPENDENT copy (fresh
+  // identity) and can't be merged back into the original; the confirm says so.
+  const [duplicateProjectId, setDuplicateProjectId] = useState<number | null>(null)
   const [editingProject, setEditingProject] = useState<{ id: number; field: 'name' | 'description' } | null>(null)
 
   // Import project state
@@ -74,13 +147,21 @@ export default function Dashboard() {
     }
   }, [])
 
-  const handleImportConfirm = useCallback(async () => {
+  const handleImportConfirm = useCallback(async (mode: ProjectImportMode = 'new') => {
     if (!importFile) return
     setImportLoading(true)
     try {
-      const result = await projectPortabilityApi.importProject(importFile)
+      const targetProjectId = importPreview?.existing_project?.id
+      const result = await projectPortabilityApi.importProject(importFile, {
+        mode,
+        targetProjectId: mode === 'overwrite' ? targetProjectId : undefined,
+      })
       queryClient.invalidateQueries({ queryKey: ['projects'] })
-      toast.success(`Imported "${result.project_name}"`)
+      toast.success(
+        mode === 'overwrite'
+          ? `Updated "${result.project_name}" from the imported file`
+          : `Imported "${result.project_name}"`,
+      )
       setImportFile(null)
       setImportPreview(null)
       navigate(`/projects/${result.project_id}/overview`)
@@ -89,7 +170,19 @@ export default function Dashboard() {
     } finally {
       setImportLoading(false)
     }
-  }, [importFile, queryClient, navigate])
+  }, [importFile, importPreview, queryClient, navigate])
+
+  // Track J · J3-2: merge is a multi-step flow, so hand the file + validate result
+  // off to the full-page merge page (a File can't ride a route param) and navigate.
+  const handleMergeStart = useCallback(() => {
+    if (!importFile || !importPreview?.existing_project) return
+    const targetId = importPreview.existing_project.id
+    setPendingMerge(importFile, importPreview, targetId)
+    setImportFile(null)
+    setImportPreview(null)
+    if (importFileRef.current) importFileRef.current.value = ''
+    navigate(`/projects/${targetId}/merge`)
+  }, [importFile, importPreview, navigate])
 
   const handleImportCancel = useCallback(() => {
     setImportFile(null)
@@ -139,6 +232,16 @@ export default function Dashboard() {
     },
   })
 
+  const duplicateMutation = useMutation({
+    mutationFn: (projectId: number) => projectPortabilityApi.duplicateProject(projectId),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+      setDuplicateProjectId(null)
+      toast.success(`Duplicated as "${result.project_name}"`)
+    },
+    onError: () => { toast.error('Could not duplicate project') },
+  })
+
   const handleCreateProject = (e: React.FormEvent) => {
     e.preventDefault()
     createMutation.mutate({
@@ -176,7 +279,7 @@ export default function Dashboard() {
             >
               <Settings className="w-4 h-4" />
             </Link>
-            <span className="text-sm text-[hsl(var(--mm-chrome-text-muted))]">{user?.username}</span>
+            <DashboardCoderSwitcher />
           </div>
         </div>
       </header>
@@ -255,12 +358,37 @@ export default function Dashboard() {
 
         {/* Import Preview AlertDialog */}
         <AlertDialog open={importPreview !== null} onOpenChange={(open) => { if (!open) handleImportCancel() }}>
-          <AlertDialogContent>
+          <AlertDialogContent className="max-w-xl">
             <AlertDialogHeader>
               <AlertDialogTitle>Import Project</AlertDialogTitle>
               <AlertDialogDescription asChild>
                 <div className="space-y-3">
-                  <p>Import <strong>{importPreview?.manifest?.project_name}</strong> as a new project?</p>
+                  {importPreview?.existing_project ? (
+                    <>
+                      <p>
+                        A copy of <strong>{importPreview.manifest.project_name}</strong> already
+                        exists here as <strong>{importPreview.existing_project.name}</strong>.
+                        <strong> Merge</strong> a colleague's codings into it, <strong>overwrite</strong> your
+                        copy (replaced — a safety backup is saved first), or import a separate <strong>new</strong> copy?
+                      </p>
+                      {/* #482: refusal-end clarity — merge/overwrite are identity-scoped. */}
+                      <p className="text-xs text-mm-text-muted">
+                        Merge and overwrite apply to <strong>{importPreview.existing_project.name}</strong> only —
+                        the project that shares this file's identity. A duplicated project has its own identity, so it
+                        can't receive this merge.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p>Import <strong>{importPreview?.manifest?.project_name}</strong> as a new project?</p>
+                      {/* #482: explain why only "new" is available so a duplicate→merge attempt isn't a silent dead-end. */}
+                      <p className="text-xs text-mm-text-muted">
+                        Merge and overwrite aren't offered: this file isn't a copy of any project already here. They're
+                        available only for a file exported from an existing project (which carries that project's identity).
+                        A project made with <strong>Duplicate</strong> has a separate identity and can't be merged back.
+                      </p>
+                    </>
+                  )}
                   {importPreview?.manifest?.project_summary && (
                     <div className="text-xs text-mm-text-muted grid grid-cols-2 gap-1 bg-mm-bg rounded-md p-3">
                       <span>{importPreview.manifest.project_summary.conversation_count} conversations</span>
@@ -279,11 +407,37 @@ export default function Dashboard() {
                 </div>
               </AlertDialogDescription>
             </AlertDialogHeader>
-            <AlertDialogFooter>
+            <AlertDialogFooter className="flex-wrap gap-2 sm:space-x-0">
               <AlertDialogCancel disabled={importLoading}>Cancel</AlertDialogCancel>
-              <AlertDialogAction onClick={handleImportConfirm} disabled={importLoading}>
-                {importLoading ? 'Importing...' : 'Import'}
-              </AlertDialogAction>
+              {importPreview?.existing_project ? (
+                <>
+                  <Button
+                    variant="outline"
+                    onClick={() => handleImportConfirm('new')}
+                    disabled={importLoading}
+                  >
+                    Import as new copy
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    onClick={() => handleImportConfirm('overwrite')}
+                    disabled={importLoading}
+                  >
+                    {importLoading ? 'Working…' : 'Overwrite my copy'}
+                  </Button>
+                  <Button
+                    variant="default"
+                    onClick={handleMergeStart}
+                    disabled={importLoading}
+                  >
+                    Merge coding in…
+                  </Button>
+                </>
+              ) : (
+                <AlertDialogAction onClick={() => handleImportConfirm('new')} disabled={importLoading}>
+                  {importLoading ? 'Importing...' : 'Import'}
+                </AlertDialogAction>
+              )}
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
@@ -329,6 +483,8 @@ export default function Dashboard() {
                   project={project}
                   onArchive={() => archiveMutation.mutate(project)}
                   onDelete={() => setDeleteProjectId(project.id)}
+                  onDuplicate={() => setDuplicateProjectId(project.id)}
+                  duplicating={duplicateMutation.isPending && duplicateProjectId === project.id}
                   editingProject={editingProject}
                   onRename={(id, field) => setEditingProject({ id, field })}
                   onUpdate={(id, data) => updateProjectMutation.mutate({ id, data })}
@@ -347,6 +503,8 @@ export default function Dashboard() {
                       project={project}
                       onArchive={() => archiveMutation.mutate(project)}
                       onDelete={() => setDeleteProjectId(project.id)}
+                      onDuplicate={() => duplicateMutation.mutate(project.id)}
+                      duplicating={duplicateMutation.isPending}
                       editingProject={editingProject}
                       onRename={(id, field) => setEditingProject({ id, field })}
                       onUpdate={(id, data) => updateProjectMutation.mutate({ id, data })}
@@ -373,6 +531,25 @@ export default function Dashboard() {
           }
         }}
       />
+
+      {/* #482: duplicate is an INDEPENDENT copy — set expectations up front so no one
+          codes a duplicate for hours expecting to merge it back (it can't be; a duplicate
+          gets a fresh identity). The merge-later workflow is Export Project, named here. */}
+      <ConfirmDialog
+        open={duplicateProjectId !== null}
+        onOpenChange={(open) => { if (!open) setDuplicateProjectId(null) }}
+        title="Duplicate this project?"
+        description="This creates an independent copy with its own identity — it can't be merged back into the original. To code a copy elsewhere and merge it in later, use Export Project instead."
+        destructive={false}
+        confirmLabel="Duplicate"
+        loading={duplicateMutation.isPending}
+        loadingLabel="Duplicating…"
+        onConfirm={() => {
+          if (duplicateProjectId !== null) {
+            duplicateMutation.mutate(duplicateProjectId)
+          }
+        }}
+      />
     </div>
   )
 }
@@ -381,6 +558,8 @@ function ProjectCard({
   project,
   onArchive,
   onDelete,
+  onDuplicate,
+  duplicating,
   editingProject,
   onRename,
   onUpdate,
@@ -389,6 +568,8 @@ function ProjectCard({
   project: Project
   onArchive: () => void
   onDelete: () => void
+  onDuplicate: () => void
+  duplicating: boolean
   editingProject: { id: number; field: 'name' | 'description' } | null
   onRename: (id: number, field: 'name' | 'description') => void
   onUpdate: (id: number, data: Partial<Pick<Project, 'name' | 'description'>>) => void
@@ -419,8 +600,8 @@ function ProjectCard({
                     Archived
                   </span>
                 )}
-                <span className="text-[11px] text-mm-text-faint">
-                  {formatRelativeTime(project.updated_at)}
+                <span className="text-[11px] text-mm-text-faint" title="Last activity">
+                  {formatRelativeTime(project.last_activity_at ?? project.updated_at)}
                 </span>
               </div>
             </div>
@@ -442,6 +623,11 @@ function ProjectCard({
               {project.participant_count > 0 && (
                 <span><strong className="text-mm-text">{project.participant_count}</strong> {project.participant_count === 1 ? 'participant' : 'participants'}</span>
               )}
+              {/* Track J · Group A (#1): only surfaces on multi-coder projects — a
+                  solo "1 coder" on every project would just be noise. */}
+              {project.coder_count > 1 && (
+                <span><strong className="text-mm-text">{project.coder_count}</strong> coders</span>
+              )}
             </div>
           </div>
         </Link>
@@ -461,6 +647,10 @@ function ProjectCard({
         }}>
           <Package className="w-4 h-4 mr-2" />
           Export Project
+        </ContextMenuItem>
+        <ContextMenuItem onClick={onDuplicate} disabled={duplicating}>
+          <Copy className="w-4 h-4 mr-2" />
+          {duplicating ? 'Duplicating…' : 'Duplicate'}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onClick={onArchive}>

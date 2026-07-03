@@ -25,9 +25,11 @@ from ..schemas.segment import (
     SegmentUnsplitResponse,
 )
 from ..schemas.excerpt import SegmentExcerptInfo
+from ..schemas.common import AppliedCodeDetail
 from ..auth import get_current_user
 from ..services.audit import log_action
 from ..services.staleness import mark_metrics_stale
+from ..services.coding_layers import CONSENSUS_ORIGIN
 from .helpers import visible_segment_filter as _visible_segment_filter, _verify_conversation_ownership
 
 router = APIRouter(prefix="/api/conversations/{conversation_id}/segments", tags=["segments"])
@@ -50,8 +52,24 @@ def segment_to_response(segment: Segment) -> SegmentResponse:
         speaker_color_index = segment.speaker.color_index or 0
         speaker_color = segment.speaker.color
 
-    # Get applied codes (pre-loaded)
-    applied_codes = [ca.code_id for ca in segment.code_applications]
+    # Get applied codes (pre-loaded). The bare ID list stays for the optimistic
+    # patch path; applied_code_details carries per-coder attribution (Track J · J1).
+    # is_universal reads ca.code, so callers MUST joinedload(CodeApplication.code).
+    # Exclude the derived consensus layer (J2-B / P-1): the workbench shows the
+    # human/working layer only — the reconciliation view reads consensus separately.
+    # Without this, a consensus row inflates the client coded gauge the instant the
+    # Slab-5 sweep materializes it on a multi-coder project.
+    human_apps = [ca for ca in segment.code_applications if ca.origin != CONSENSUS_ORIGIN]
+    applied_codes = [ca.code_id for ca in human_apps]
+    applied_code_details = [
+        AppliedCodeDetail(
+            code_id=ca.code_id,
+            user_id=ca.user_id,
+            attribution=ca.attribution,
+            is_universal=bool(ca.code.is_universal) if ca.code else False,
+        )
+        for ca in human_apps
+    ]
 
     # Get attached notes (pre-loaded, filter archived in Python)
     active_notes = [n for n in segment.attached_notes if not n.is_archived]
@@ -90,6 +108,7 @@ def segment_to_response(segment: Segment) -> SegmentResponse:
         group_id=segment.group_id,
         excerpts=excerpt_infos,
         applied_codes=applied_codes,
+        applied_code_details=applied_code_details,
         attached_notes=attached_note_infos,
         is_merged=bool(segment.is_merge_result),
         is_split=bool(segment.is_split_result),
@@ -132,7 +151,8 @@ async def list_segments(
 
     for seg in segments:
         has_code = any(
-            ca.code is not None and not ca.code.is_universal
+            ca.origin != CONSENSUS_ORIGIN
+            and ca.code is not None and not ca.code.is_universal
             for ca in seg.code_applications
         )
         if has_code:
@@ -168,7 +188,7 @@ async def get_segment(
         *_visible_segment_filter()
     ).options(
         joinedload(Segment.speaker),
-        selectinload(Segment.code_applications),
+        selectinload(Segment.code_applications).joinedload(CodeApplication.code),
         selectinload(Segment.attached_notes),
         selectinload(Segment.excerpts).joinedload(Excerpt.note)
     ).first()
@@ -195,7 +215,7 @@ async def update_segment(
         *_visible_segment_filter()
     ).options(
         joinedload(Segment.speaker),
-        selectinload(Segment.code_applications),
+        selectinload(Segment.code_applications).joinedload(CodeApplication.code),
         selectinload(Segment.attached_notes),
         selectinload(Segment.excerpts).joinedload(Excerpt.note)
     ).first()
@@ -243,7 +263,7 @@ async def update_segment(
         Segment.id == segment_id
     ).options(
         joinedload(Segment.speaker),
-        selectinload(Segment.code_applications),
+        selectinload(Segment.code_applications).joinedload(CodeApplication.code),
         selectinload(Segment.attached_notes),
         selectinload(Segment.excerpts).joinedload(Excerpt.note)
     ).first()
@@ -266,7 +286,7 @@ async def update_segment_speaker_role(
         Segment.conversation_id == conversation_id
     ).options(
         joinedload(Segment.speaker),
-        selectinload(Segment.code_applications),
+        selectinload(Segment.code_applications).joinedload(CodeApplication.code),
         selectinload(Segment.attached_notes),
         selectinload(Segment.excerpts).joinedload(Excerpt.note)
     ).first()

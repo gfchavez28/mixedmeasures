@@ -38,6 +38,8 @@ class DatasetColumnPreview(BaseModel):
 class DatasetPreviewResponse(BaseModel):
     total_rows: int
     columns: list[DatasetColumnPreview]
+    # .xlsx uploads only (#523): workbook sheet names for the wizard's sheet picker.
+    sheet_names: list[str] | None = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -63,6 +65,8 @@ class DatasetImportRequest(BaseModel):
     description: str | None = None
     source: str | None = Field(None, max_length=100)
     column_configs: list[DatasetColumnConfig]
+    # .xlsx uploads only (#523): which worksheet to import (None = first sheet).
+    sheet_name: str | None = None
 
 
 class DatasetImportResponse(BaseModel):
@@ -70,6 +74,13 @@ class DatasetImportResponse(BaseModel):
     columns_created: int
     rows_created: int
     values_created: int
+    # #415: how many stored values were recognized as missing (N/A / refusal
+    # labels), i.e. treated as missing everywhere downstream per #381/#384.
+    # Empty cells are not counted (they are skipped at import, never stored).
+    recognized_missing_count: int = 0
+    # Distinct recognized labels (e.g. "N/A", "Prefer not to say"), capped for
+    # a bounded response; the frontend shows a few as examples.
+    recognized_missing_labels: list[str] = Field(default_factory=list)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -403,12 +414,16 @@ class DatasetAppendPreviewResponse(BaseModel):
     preview_rows: list[AppendPreviewRow]
     next_row_id: str
     row_pad_width: int
+    # .xlsx uploads only (#523): workbook sheet names for the append sheet picker.
+    sheet_names: list[str] | None = None
 
 
 class DatasetAppendRequest(BaseModel):
     column_mapping: list[dict]  # [{csv_column_index, column_id}]
     skip_duplicates: bool = True
     row_start_id: str | None = None
+    # .xlsx uploads only (#523): which worksheet to append from (None = first sheet).
+    sheet_name: str | None = None
 
 
 class DatasetAppendResponse(BaseModel):

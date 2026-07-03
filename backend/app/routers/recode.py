@@ -603,7 +603,10 @@ async def bulk_type_update(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid column_type: {data.column_type}")
 
-    # Guard: prevent reclassifying coded comment columns away from open_text
+    # Guard: prevent reclassifying coded comment columns away from open_text.
+    # Intentionally any-layer (no non_consensus_filter): this is an existence
+    # guard — a column with ANY coding, including consensus-derived, must not be
+    # silently reclassified. Origin-filtering here would only weaken the guard.
     comment_types = {ColumnType.OPEN_TEXT}
     if new_type not in comment_types:
         coded_col_ids = (

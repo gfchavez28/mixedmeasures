@@ -1,5 +1,6 @@
 import logging
 import shutil
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -16,6 +17,7 @@ from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, C
 from ..models.participant import Participant
 from ..models.memo import Memo
 from ..models.materials import MaterialCollection, Material
+from ..models.audit import AuditEntry
 from ..models.statistical_test import StatisticalTest
 from ..models.code_category import CodeCategory
 from ..models.note import Note
@@ -27,6 +29,7 @@ from ..schemas.project import (
     ProjectResponse,
     ProjectListResponse,
     ProjectSummaryResponse,
+    CodebookFreezeRequest,
     RecentConversation,
     RecentDataset,
     RecentDocument,
@@ -40,6 +43,7 @@ from ..services.coding_counts import (
     coded_segment_count_for_project,
     participant_segment_counts,
 )
+from ..services.coding_coverage import project_coder_counts
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +73,8 @@ def project_to_response(project: Project, db: Session) -> ProjectResponse:
         Document.project_id == project.id
     ).scalar() or 0
 
+    coder_count = project_coder_counts(db, [project.id]).get(project.id, 0)
+
     return ProjectResponse(
         id=project.id,
         user_id=project.user_id,
@@ -82,7 +88,9 @@ def project_to_response(project: Project, db: Session) -> ProjectResponse:
         dataset_count=dataset_count,
         document_count=document_count,
         participant_count=participant_count,
+        coder_count=coder_count,
         category_level_names=project.category_level_names,
+        codebook_frozen_at=project.codebook_frozen_at,
     )
 
 
@@ -91,8 +99,12 @@ async def list_projects(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """List all projects."""
-    projects = db.query(Project).filter(Project.user_id == user.id).order_by(Project.updated_at.desc()).all()
+    """List all projects (shared across the local coder roster unless multi-tenant)."""
+    from ..config import get_settings
+    query = db.query(Project)
+    if get_settings().mm_multiuser_auth_enabled:
+        query = query.filter(Project.user_id == user.id)
+    projects = query.order_by(Project.updated_at.desc()).all()
 
     if not projects:
         return ProjectListResponse(projects=[], total=0)
@@ -135,6 +147,28 @@ async def list_projects(
         .all()
     )
 
+    coder_counts = project_coder_counts(db, project_ids)
+
+    # #422(c): "last activity" = most-recent audit entry per project. Audit is written
+    # across ~all mutation paths (coding, datasets, canvas, memos, notes, segments…),
+    # so this reflects real recent WORK — unlike updated_at, which only bumps on
+    # Project-row edits. No new column/migration needed.
+    audit_max = dict(
+        db.query(AuditEntry.project_id, func.max(AuditEntry.timestamp))
+        .filter(AuditEntry.project_id.in_(project_ids))
+        .group_by(AuditEntry.project_id)
+        .all()
+    )
+
+    def _last_activity(p: Project):
+        # Floor by updated_at/created_at so it never regresses below the row's own
+        # timestamps; the created_at floor also discards any orphaned audit rows from a
+        # since-deleted project that reused this id (AuditEntry has no project FK).
+        return max(t for t in (audit_max.get(p.id), p.updated_at, p.created_at) if t is not None)
+
+    # Most-recently-active first (stable: ties keep the SQL updated_at.desc() order).
+    projects.sort(key=_last_activity, reverse=True)
+
     return ProjectListResponse(
         projects=[
             ProjectResponse(
@@ -150,7 +184,10 @@ async def list_projects(
                 dataset_count=dataset_counts.get(p.id, 0),
                 document_count=document_counts.get(p.id, 0),
                 participant_count=participant_counts.get(p.id, 0),
+                coder_count=coder_counts.get(p.id, 0),
                 category_level_names=p.category_level_names,
+                codebook_frozen_at=p.codebook_frozen_at,
+                last_activity_at=_last_activity(p),
             )
             for p in projects
         ],
@@ -223,9 +260,14 @@ async def get_project_summary(
         Participant.project_id == project_id
     ).scalar() or 0
 
+    # Substantive codes only (#468): exclude the 2 built-in universal codes so a
+    # project with no real coding doesn't read "2 codes". Consistent with the
+    # "Coded Segments" stat (which already excludes universal) and shared by the
+    # Overview banner + AnalysisHub, both of which render this field.
     codes = db.query(func.count(Code.id)).filter(
         Code.project_id == project_id,
-        Code.is_active == True
+        Code.is_active == True,
+        Code.is_universal == False,
     ).scalar() or 0
 
     categories = db.query(func.count(CodeCategory.id)).filter(
@@ -459,6 +501,50 @@ async def update_project(
         user_id=user.id,
         project_id=project.id,
         details=update_data
+    )
+    db.commit()
+    db.refresh(project)
+
+    return project_to_response(project, db)
+
+
+@router.post("/{project_id}/codebook/freeze", response_model=ProjectResponse)
+async def set_codebook_freeze(
+    project_id: int,
+    data: CodebookFreezeRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Track J · J3-1: toggle the codebook "freeze" soft-lock.
+
+    Freeze stamps `codebook_frozen_at` (preserving an existing freeze time on a
+    re-freeze, so the original anchor survives); unfreeze clears it. Every toggle is
+    written to the audit log so a researcher can later reconstruct when the codebook
+    drifted (the freeze/unfreeze timestamps + `Code.created_at` answer "what was the
+    first code after the unfreeze, and where applied"). Soft-lock only — the actual
+    add/rename/delete warning is a frontend affordance; the backend just records state.
+    """
+    project = _get_project_or_404(db, project_id, user.id)
+
+    already_frozen = project.codebook_frozen_at is not None
+    if data.frozen:
+        # Preserve the original freeze instant on an idempotent re-freeze.
+        # Naive UTC to match the ORM DateTime storage convention (see CLAUDE.md wire-format).
+        if not already_frozen:
+            project.codebook_frozen_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        action = "codebook_froze"
+    else:
+        project.codebook_frozen_at = None
+        action = "codebook_unfroze"
+
+    log_action(
+        db,
+        action=action,
+        entity_type="codebook",
+        entity_id=project.id,
+        user_id=user.id,
+        project_id=project.id,
+        details={"frozen": data.frozen},
     )
     db.commit()
     db.refresh(project)

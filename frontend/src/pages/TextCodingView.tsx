@@ -24,6 +24,15 @@ import TextCodingColumnPicker from '@/components/TextColumnPicker'
 import ByTextTable from '@/components/ByTextTable'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
 import ByRecordPanel from '@/components/ByRecordPanel'
+import { useCoders } from '@/hooks/useCoders'
+import { useCoderCoverage } from '@/hooks/useCoderCoverage'
+import { isSegmentCodedVisible, isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
+import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { useAuth } from '@/lib/auth-context'
+import CoderFilterPopover from '@/components/CoderFilterPopover'
+import BlindModeToggle from '@/components/BlindModeToggle'
+import CoderCountBadge from '@/components/CoderCountBadge'
+import { useBlindMode } from '@/hooks/useBlindMode'
 import TextCodePanel from '@/components/TextCodePanel'
 import TextNotesPanel from '@/components/TextNotesPanel'
 import CollapsiblePanel from '@/components/CollapsiblePanel'
@@ -31,10 +40,11 @@ import ResizeHandle from '@/components/ResizeHandle'
 import MemoPanel from '@/components/MemoPanel'
 import CrossAnalysisPanel from '@/components/CrossAnalysisPanel'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
+import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { PageErrorBoundary } from '@/components/PageErrorBoundary'
 import FloatingCreateCode, { type FloatingCoords } from '@/components/FloatingCreateCode'
 import FloatingCreateNote from '@/components/FloatingCreateNote'
-import { coordsFromElement } from '@/lib/floating-utils'
+import { coordsFromElement, selectionPrefill } from '@/lib/floating-utils'
 
 type ViewMode = 'by_text' | 'by_record'
 type ActiveTab = 'coding' | 'analysis'
@@ -51,6 +61,20 @@ export default function TextCodingView() {
   const [focalColumnIds, setFocalColumnIds] = useState<number[]>([])
   const [datasetFilterIds, setDatasetFilterIds] = useState<number[] | null>(null)
   const [randomSeed, setRandomSeed] = useState<number | null>(null)
+  // Coder roster lens (Track J · J1) — visibility filter, multi-coder only.
+  const { coders, multiCoder } = useCoders()
+  const { user } = useAuth()
+  const [hiddenCoders, setHiddenCoders] = useState<Set<number>>(new Set())
+  // #451: archived coders' chips hidden by default; "view all coders" reveals them.
+  const [showArchivedCoders, setShowArchivedCoders] = useState(false)
+  // Blind mode (Track J · J2-5, DEC-G): effectiveHidden = all-but-self while blind.
+  const { blind, blindHiddenSet, toggleReveal } = useBlindMode(projectId)
+  const effectiveHidden = blind ? blindHiddenSet : hiddenCoders
+  // Group A (#457): who coded THESE columns — drives the picklist "active here" markers.
+  const coderCoverage = useCoderCoverage(
+    projectId, { textColumnIds: focalColumnIds }, { enabled: multiCoder, rosterCoderIds: coders.map(c => c.id) },
+  )
+  const self = user?.id ?? null
   const [hideEmpty, setHideEmpty] = useState(true)
   const [contextVisible, setContextVisible] = useState({
     demographics: false,
@@ -64,6 +88,9 @@ export default function TextCodingView() {
   const [searchText, setSearchText] = useState('')
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [quotedOnly, setQuotedOnly] = useState(false)
+  // Seed popover (#486): draft is a string so the input can be cleared while typing.
+  const [seedPopoverOpen, setSeedPopoverOpen] = useState(false)
+  const [seedDraft, setSeedDraft] = useState('')
   const [selectedValueIds, setSelectedValueIds] = useState<number[]>([])
   const [selectedRecordId, setSelectedRecordId] = useState<number | null>(null)
   const [focusedPanel, setFocusedPanel] = useState<'main' | 'codes' | 'notes'>('main')
@@ -240,9 +267,13 @@ export default function TextCodingView() {
   // ── Progress query ────────────────────────────────────────────────────
 
   const { data: progressData } = useQuery({
-    queryKey: ['text-progress', projectId, columnIdsStr],
+    // Blind mode (DEC-G): the gauge is SERVER all-coder coverage, so scope it to self
+    // via coder_id (the client hidden-set can't touch it). Key on blind self-id so it
+    // refetches self-only when blind and all-coder when revealed.
+    queryKey: ['text-progress', projectId, columnIdsStr, blind ? self : null],
     queryFn: () => textCodingApi.progress(projectId, {
       column_ids: columnIdsStr || undefined,
+      coder_id: blind && self != null ? self : undefined,
     }),
     enabled: focalColumnIds.length > 0,
   })
@@ -314,10 +345,11 @@ export default function TextCodingView() {
     if (selectedValueIds.length === 0) return
     const targets = selectedValueIds
 
-    // Check if all selected already have the code
+    // Check if the ACTIVE coder already applied the code to all selected (INV-6/#446):
+    // toggling a code only a colleague applied must apply mine, not take remove.
     const allHave = targets.every(dvId => {
       const c = comments.find(cm => cm.dataset_value_id === dvId)
-      return c?.applied_code_ids.includes(codeId)
+      return isCodeAppliedByActiveCoder(c?.applied_code_details, c?.applied_code_ids ?? [], codeId, self)
     })
 
     if (allHave) {
@@ -333,6 +365,7 @@ export default function TextCodingView() {
           }
           queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
           queryClient.invalidateQueries({ queryKey: ['text-progress', projectId] })
+          invalidateDerivedCounts(queryClient, projectId, { metrics: true })  // #450: cross-surface + text-coding metrics
         },
         undo: async () => {
           if (targets.length === 1) {
@@ -342,6 +375,7 @@ export default function TextCodingView() {
           }
           queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
           queryClient.invalidateQueries({ queryKey: ['text-progress', projectId] })
+          invalidateDerivedCounts(queryClient, projectId, { metrics: true })  // #450: cross-surface + text-coding metrics
         },
       })
     } else {
@@ -357,6 +391,7 @@ export default function TextCodingView() {
           }
           queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
           queryClient.invalidateQueries({ queryKey: ['text-progress', projectId] })
+          invalidateDerivedCounts(queryClient, projectId, { metrics: true })  // #450: cross-surface + text-coding metrics
         },
         undo: async () => {
           if (targets.length === 1) {
@@ -366,6 +401,7 @@ export default function TextCodingView() {
           }
           queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
           queryClient.invalidateQueries({ queryKey: ['text-progress', projectId] })
+          invalidateDerivedCounts(queryClient, projectId, { metrics: true })  // #450: cross-surface + text-coding metrics
         },
       })
     }
@@ -373,7 +409,7 @@ export default function TextCodingView() {
     setAnnouncement(allHave ? 'Code removed' : 'Code applied')
     setSavedIndicator(true)
     setTimeout(() => setSavedIndicator(false), 1500)
-  }, [selectedValueIds, comments, projectId, history, queryClient])
+  }, [selectedValueIds, comments, projectId, history, queryClient, self])
 
   // ── Quote toggle ───────────────────────────────────────────────────────
 
@@ -387,12 +423,12 @@ export default function TextCodingView() {
       let lastExcerptId: number = currentExcerptId
       await history.execute({
         type: 'quote_delete',
-        description: 'Unquote comment',
+        description: 'Unquote text',
         redo: async () => {
           await excerptsApi.delete(projectId, lastExcerptId)
           queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
           queryClient.invalidateQueries({ queryKey: ['excerpts-quoted', projectId] })
-          setAnnouncement('Comment unquoted')
+          setAnnouncement('Text unquoted')
         },
         undo: async () => {
           const excerpt = await excerptsApi.create(projectId, { dataset_value_id: dvId })
@@ -406,13 +442,13 @@ export default function TextCodingView() {
       let createdExcerptId: number | null = null
       await history.execute({
         type: 'quote_create',
-        description: 'Quote comment',
+        description: 'Quote text',
         redo: async () => {
           const excerpt = await excerptsApi.create(projectId, { dataset_value_id: dvId })
           createdExcerptId = excerpt.id
           queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
           queryClient.invalidateQueries({ queryKey: ['excerpts-quoted', projectId] })
-          setAnnouncement('Comment quoted')
+          setAnnouncement('Text quoted')
         },
         undo: async () => {
           if (createdExcerptId) {
@@ -445,7 +481,7 @@ export default function TextCodingView() {
       }
       await history.execute({
         type: 'quote_delete',
-        description: `Unquote ${valueIds.length} comments`,
+        description: `Unquote ${valueIds.length} texts`,
         redo: async () => {
           for (const eid of excerptIds) {
             await excerptsApi.delete(projectId, eid)
@@ -463,7 +499,7 @@ export default function TextCodingView() {
       // Quote all
       await history.execute({
         type: 'quote_create',
-        description: `Quote ${valueIds.length} comments`,
+        description: `Quote ${valueIds.length} texts`,
         redo: async () => {
           await excerptsApi.bulkCreate(projectId, valueIds.map(dvId => ({ dataset_value_id: dvId })))
           queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
@@ -483,7 +519,7 @@ export default function TextCodingView() {
         },
       })
     }
-    setAnnouncement(allQuoted ? 'Comments unquoted' : 'Comments quoted')
+    setAnnouncement(allQuoted ? 'Texts unquoted' : 'Texts quoted')
     setSavedIndicator(true)
     setTimeout(() => setSavedIndicator(false), 1500)
   }, [selectedValueIds, comments, projectId, history, queryClient])
@@ -517,17 +553,19 @@ export default function TextCodingView() {
     const currentIdx = selectedValueIds.length > 0
       ? searchPool.findIndex(c => c.dataset_value_id === selectedValueIds[selectedValueIds.length - 1])
       : -1
-    // Search forward, wrapping around
+    // Search forward, wrapping around. Coder-aware (Track J · J1 item 3c): a comment
+    // coded only by a hidden coder counts as uncoded-for-me; also uses the
+    // non-universal definition (was bare applied_code_ids.length).
     for (let offset = 1; offset <= searchPool.length; offset++) {
       const idx = (currentIdx + offset) % searchPool.length
-      if (searchPool[idx].applied_code_ids.length === 0) {
+      if (!isSegmentCodedVisible(searchPool[idx].applied_code_details, effectiveHidden)) {
         setSelectedValueIds([searchPool[idx].dataset_value_id])
-        setAnnouncement(`Jumped to uncoded comment ${idx + 1}`)
+        setAnnouncement(`Jumped to uncoded text ${idx + 1}`)
         return
       }
     }
-    toast('All comments are coded')
-  }, [viewMode, filteredComments, comments, selectedValueIds])
+    toast('All texts are coded')
+  }, [viewMode, filteredComments, comments, selectedValueIds, effectiveHidden])
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────
 
@@ -535,7 +573,7 @@ export default function TextCodingView() {
   const [savedIndicator, setSavedIndicator] = useState(false)
 
   // Floating dialog state
-  const [createCodeDialog, setCreateCodeDialog] = useState<{ position: FloatingCoords; valueIds: number[] } | null>(null)
+  const [createCodeDialog, setCreateCodeDialog] = useState<{ position: FloatingCoords; valueIds: number[]; initialName?: string } | null>(null)
   const [createNoteDialog, setCreateNoteDialog] = useState<{ position: FloatingCoords; valueId: number } | null>(null)
   const [createNotePending, setCreateNotePending] = useState(false)
 
@@ -554,7 +592,7 @@ export default function TextCodingView() {
     onCreateCode: () => {
       if (selectedValueIds.length === 0) return
       const coords = coordsFromElement(`text-${selectedValueIds[0]}`)
-      setCreateCodeDialog({ position: coords, valueIds: [...selectedValueIds] })
+      setCreateCodeDialog({ position: coords, valueIds: [...selectedValueIds], initialName: selectionPrefill() })
     },
     onCreateNote: () => {
       if (selectedValueIds.length === 0) return
@@ -604,16 +642,27 @@ export default function TextCodingView() {
   }, [])
 
   // ── Randomize ─────────────────────────────────────────────────────────
+  // The seed persists in TextCodingConfig, so an order survives reload/re-open.
+  // The pill opens a popover (enter / re-mint / clear a seed) instead of
+  // click-to-clear, so a documented seed can be re-entered later (#486).
 
-  const handleRandomize = () => {
-    if (randomSeed !== null) {
-      setRandomSeed(null)
-      setAnnouncement('Original order restored')
-    } else {
-      const seed = Math.floor(Math.random() * 99998) + 2  // Avoid 0 and 1 (degenerate sort)
-      setRandomSeed(seed)
-      setAnnouncement(`Randomized with seed ${seed}`)
-    }
+  const mintSeed = () => {
+    const seed = Math.floor(Math.random() * 99998) + 2
+    setRandomSeed(seed)
+    setAnnouncement(`Randomized with seed ${seed}`)
+  }
+
+  const clearSeed = () => {
+    setRandomSeed(null)
+    setAnnouncement('Original order restored')
+  }
+
+  const applySeedDraft = () => {
+    const parsed = Math.floor(Number(seedDraft))
+    if (!Number.isFinite(parsed) || parsed < 1) return
+    setRandomSeed(parsed)
+    setAnnouncement(`Randomized with seed ${parsed}`)
+    setSeedPopoverOpen(false)
   }
 
   // ── Derived ───────────────────────────────────────────────────────────
@@ -664,7 +713,9 @@ export default function TextCodingView() {
       <div aria-live="polite" className="sr-only">{announcement}</div>
 
       {/* Header */}
-      <div className="flex items-center gap-2 px-4 py-2 border-b bg-mm-surface shrink-0">
+      {/* #516: flex-wrap + the ml-auto tail group below — the toolbar previously
+        * clipped its tail (Codebook button) at the 1280 minimum width. */}
+      <div className="flex items-center gap-2 px-4 py-2 border-b bg-mm-surface shrink-0 flex-wrap">
 
         {/* ── Stable tab toggles (always at left edge) ── */}
 
@@ -735,6 +786,7 @@ export default function TextCodingView() {
               onClick={() => goToColumn(-1)}
               disabled={activeColumnIndex <= 0}
               aria-label="Previous column"
+              title="Previous column"
               className="h-8 w-8 p-0"
             >
               <ChevronLeft className="w-4 h-4" />
@@ -767,6 +819,7 @@ export default function TextCodingView() {
               onClick={() => goToColumn(1)}
               disabled={activeColumnIndex >= focalColumnIds.length - 1}
               aria-label="Next column"
+              title="Next column"
               className="h-8 w-8 p-0"
             >
               <ChevronRight className="w-4 h-4" />
@@ -787,6 +840,7 @@ export default function TextCodingView() {
               onClick={() => goToRecord(-1)}
               disabled={currentRecordIndex <= 0}
               aria-label="Previous record"
+              title="Previous record"
               className="h-8 w-8 p-0"
             >
               <ChevronLeft className="w-4 h-4" />
@@ -818,6 +872,7 @@ export default function TextCodingView() {
               onClick={() => goToRecord(1)}
               disabled={currentRecordIndex >= records.length - 1}
               aria-label="Next record"
+              title="Next record"
               className="h-8 w-8 p-0"
             >
               <ChevronRight className="w-4 h-4" />
@@ -888,7 +943,9 @@ export default function TextCodingView() {
           </div>
         )}
 
-        <div className="flex-1" />
+        {/* Tail group (#516): one ml-auto unit so at narrow widths it wraps to its
+          * own right-aligned row instead of individual controls clipping off-screen. */}
+        <div className="flex items-center gap-2 ml-auto">
 
         {savedIndicator && (
           <span className="text-sm text-green-600 flex items-center gap-1">
@@ -900,27 +957,31 @@ export default function TextCodingView() {
         {/* Progress gauges */}
         {progressData && (
           <div className="flex items-center gap-4 text-xs">
-            <div className="flex items-center gap-2" title={`${overallComments.coded} of ${overallComments.total} comments coded`}>
-              <span className="text-muted-foreground">Comments:</span>
+            <div className="flex items-center gap-2" title={`${overallComments.coded} of ${overallComments.total} texts coded${blind ? ' — colleagues hidden (blind coding); other surfaces show all coders' : ''}`}>
+              <span className="text-muted-foreground">Texts:</span>
               <span className="font-medium">{overallComments.coded}/{overallComments.total}</span>
-              <div className="w-16 h-1.5 bg-mm-border-subtle rounded-full overflow-hidden" role="progressbar" aria-valuenow={commentPct} aria-valuemin={0} aria-valuemax={100} aria-label={`Comments coded: ${commentPct}%`}>
+              <div className="w-16 h-1.5 bg-mm-border-subtle rounded-full overflow-hidden" role="progressbar" aria-valuenow={commentPct} aria-valuemin={0} aria-valuemax={100} aria-label={`Texts coded: ${commentPct}%`}>
                 <div className="h-full bg-emerald-500 rounded-full transition-all" style={{ width: `${commentPct}%` }} />
               </div>
             </div>
-            <div className="flex items-center gap-2" title={`${overallRecords.coded} of ${overallRecords.total} records coded`}>
+            <div className="flex items-center gap-2" title={`${overallRecords.coded} of ${overallRecords.total} records coded${blind ? ' — colleagues hidden (blind coding); other surfaces show all coders' : ''}`}>
               <span className="text-muted-foreground">Records:</span>
               <span className="font-medium">{overallRecords.coded}/{overallRecords.total}</span>
               <div className="w-16 h-1.5 bg-mm-border-subtle rounded-full overflow-hidden" role="progressbar" aria-valuenow={recordPct} aria-valuemin={0} aria-valuemax={100} aria-label={`Records coded: ${recordPct}%`}>
-                <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${recordPct}%` }} />
+                <div className="h-full bg-mm-blue rounded-full transition-all" style={{ width: `${recordPct}%` }} />
               </div>
             </div>
+            {multiCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="text_workbench" />}
+            <CoderCountBadge projectId={projectId} textColumnIds={focalColumnIds} enabled={multiCoder} />
           </div>
         )}
 
         {/* Codebook */}
-        <Button variant="ghost" size="icon" onClick={openCodebook} title="Codebook">
+        <Button variant="ghost" size="icon" onClick={openCodebook} title="Codebook" aria-label="Codebook">
           <BookOpen className="w-4 h-4" />
         </Button>
+
+        </div>{/* end tail group (#516) */}
       </div>
 
       {/* Toolbar — adapts to active tab */}
@@ -943,9 +1004,12 @@ export default function TextCodingView() {
                   className={`text-xs gap-1 ${contextVisible.demographics ? 'bg-[hsl(var(--mm-ctx-demo))] text-[hsl(var(--mm-ctx-demo-text))]' : ''}`}
                   onClick={() => setContextVisible(p => ({ ...p, demographics: !p.demographics }))}
                   aria-pressed={contextVisible.demographics}
+                  title={contextVisible.demographics
+                    ? "Hide the record's demographic columns"
+                    : "Show each record's demographic columns alongside its response"}
                 >
                   {contextVisible.demographics ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-                  Demo
+                  Demographics
                 </Button>
                 <Button
                   variant="ghost"
@@ -953,9 +1017,12 @@ export default function TextCodingView() {
                   className={`text-xs gap-1 ${contextVisible.otherComments ? 'bg-[hsl(var(--mm-ctx-comments))] text-[hsl(var(--mm-ctx-comments-text))]' : ''}`}
                   onClick={() => setContextVisible(p => ({ ...p, otherComments: !p.otherComments }))}
                   aria-pressed={contextVisible.otherComments}
+                  title={contextVisible.otherComments
+                    ? "Hide the record's other open-text answers"
+                    : "Show the record's other open-text answers (text columns besides the one you're coding)"}
                 >
                   {contextVisible.otherComments ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-                  Comments
+                  Other texts
                 </Button>
                 <Button
                   variant="ghost"
@@ -963,6 +1030,9 @@ export default function TextCodingView() {
                   className={`text-xs gap-1 ${contextVisible.nonComments ? 'bg-[hsl(var(--mm-ctx-responses))] text-[hsl(var(--mm-ctx-responses-text))]' : ''}`}
                   onClick={() => setContextVisible(p => ({ ...p, nonComments: !p.nonComments }))}
                   aria-pressed={contextVisible.nonComments}
+                  title={contextVisible.nonComments
+                    ? "Hide the record's closed-ended answers"
+                    : "Show the record's closed-ended answers (choices, numbers, scales)"}
                 >
                   {contextVisible.nonComments ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
                   Responses
@@ -982,19 +1052,85 @@ export default function TextCodingView() {
               onChange={e => handleSearchInput(e.target.value)}
               className="h-8 w-40 pl-8 text-sm border-orange-200 dark:border-orange-800 focus-visible:ring-orange-500"
               aria-label="Search comments"
+              title="Search within the displayed responses"
             />
           </div>
 
-          {/* Randomize */}
-          <Button
-            variant={randomSeed !== null ? 'secondary' : 'ghost'}
-            size="sm"
-            className="text-xs gap-1"
-            onClick={handleRandomize}
-          >
-            <Shuffle className="w-3.5 h-3.5" />
-            {randomSeed !== null ? `Seed ${randomSeed}` : 'Randomize'}
-          </Button>
+          {/* Randomize (By Text only — the record list has no seeded order) */}
+          {viewMode === 'by_text' && (
+            randomSeed === null ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-xs gap-1"
+                onClick={mintSeed}
+                title="Shuffle response order to reduce order effects while coding — the seed is saved so the order can be reproduced"
+              >
+                <Shuffle className="w-3.5 h-3.5" />
+                Randomize
+              </Button>
+            ) : (
+              <Popover
+                open={seedPopoverOpen}
+                onOpenChange={open => {
+                  if (open) setSeedDraft(String(randomSeed))
+                  setSeedPopoverOpen(open)
+                }}
+              >
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="text-xs gap-1"
+                    title={`Responses are shuffled with seed ${randomSeed} — click to change, enter, or clear the seed`}
+                  >
+                    <Shuffle className="w-3.5 h-3.5" />
+                    Seed {randomSeed}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-64 p-3" align="start">
+                  <p className="text-sm font-medium text-mm-text mb-1">Randomization seed</p>
+                  <p className="text-xs text-mm-text-muted mb-2">
+                    The same seed always reproduces the same order — enter one to
+                    match a documented or colleague's order.
+                  </p>
+                  <div className="flex items-center gap-1.5">
+                    <Input
+                      type="number"
+                      min={1}
+                      value={seedDraft}
+                      onChange={e => setSeedDraft(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); applySeedDraft() } }}
+                      className="h-8 text-sm"
+                      aria-label="Randomization seed"
+                    />
+                    <Button size="sm" className="h-8 text-xs" onClick={applySeedDraft}>
+                      Apply
+                    </Button>
+                  </div>
+                  <div className="flex items-center gap-1.5 mt-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs gap-1"
+                      onClick={() => { mintSeed(); setSeedPopoverOpen(false) }}
+                    >
+                      <Shuffle className="w-3 h-3" />
+                      New seed
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => { clearSeed(); setSeedPopoverOpen(false) }}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+            )
+          )}
 
           {/* Hide empty */}
           <Button
@@ -1002,8 +1138,12 @@ export default function TextCodingView() {
             size="sm"
             className="text-xs"
             onClick={() => setHideEmpty(!hideEmpty)}
+            aria-pressed={hideEmpty}
+            title={hideEmpty
+              ? 'Empty responses are hidden — click to show them too'
+              : 'Hide responses with no text'}
           >
-            {hideEmpty ? 'Hide empty' : 'Show all'}
+            Hide empty
           </Button>
 
           {/* Quoted only */}
@@ -1012,11 +1152,29 @@ export default function TextCodingView() {
             size="sm"
             className="text-xs gap-1"
             onClick={() => setQuotedOnly(!quotedOnly)}
-            aria-label={quotedOnly ? 'Show all comments' : 'Show quoted only'}
+            aria-label={quotedOnly ? 'Show all responses' : 'Show only quoted responses'}
             aria-pressed={quotedOnly}
+            title={quotedOnly
+              ? 'Showing only responses with quoted excerpts — click to show all'
+              : 'Show only responses with quoted excerpts'}
           >
             <Quote className={`w-3.5 h-3.5 ${quotedOnly ? 'fill-amber-400 text-amber-400' : ''}`} />
           </Button>
+
+          {/* Per-coder visibility filter (Track J · J1, multi-coder only). Hidden while
+              blind (DEC-G) — the reveal toggle subsumes it. */}
+          {coders.length > 1 && !blind && (
+            <CoderFilterPopover
+              coders={coders}
+              activeCoderId={user?.id ?? null}
+              hidden={hiddenCoders}
+              onChange={setHiddenCoders}
+              activeCoderIds={coderCoverage.isLoaded ? coderCoverage.activeCoderIds : undefined}
+              extraCoders={coderCoverage.extraCoders}
+              showArchived={showArchivedCoders}
+              onShowArchivedChange={setShowArchivedCoders}
+            />
+          )}
 
           <div className="flex-1" />
 
@@ -1028,6 +1186,7 @@ export default function TextCodingView() {
             onClick={() => textCodingApi.exportCoded(projectId, {
               column_ids: columnIdsStr || undefined,
             })}
+            title="Download the selected columns' responses and codes as CSV"
           >
             <Download className="w-3.5 h-3.5" />
             Export
@@ -1085,7 +1244,7 @@ export default function TextCodingView() {
                         handleCodeToggle(codeId)
                       }}
                       onContextCreateCode={(coords) => {
-                        setCreateCodeDialog({ position: coords, valueIds: [...selectedValueIds] })
+                        setCreateCodeDialog({ position: coords, valueIds: [...selectedValueIds], initialName: selectionPrefill() })
                       }}
                       onContextCreateNote={(dvId, coords) => {
                         setCreateNoteDialog({ position: coords, valueId: dvId })
@@ -1094,6 +1253,10 @@ export default function TextCodingView() {
                       focalColumnIds={activeColumnId ? [activeColumnId] : focalColumnIds}
                       projectId={projectId}
                       codes={codes}
+                      hiddenCoderIds={effectiveHidden}
+                      activeCoderId={self}
+                      extraCoders={coderCoverage.extraCoders}
+                      showArchived={showArchivedCoders}
                       searchText={searchText}
                       onClearSearch={() => { setSearchInput(''); setSearchText('') }}
                     />
@@ -1106,6 +1269,10 @@ export default function TextCodingView() {
                   focalColumnIds={focalColumnIds}
                   selectedRecordId={selectedRecordId}
                   codes={codes}
+                  hiddenCoderIds={effectiveHidden}
+                  activeCoderId={self}
+                  extraCoders={coderCoverage.extraCoders}
+                  showArchived={showArchivedCoders}
                   selectedValueIds={selectedValueIds}
                   onSelectComment={(dvId) => setSelectedValueIds([dvId])}
                   onQuoteToggle={handleQuoteToggle}
@@ -1114,7 +1281,7 @@ export default function TextCodingView() {
                     handleCodeToggle(codeId)
                   }}
                   onContextCreateCode={(coords) => {
-                    setCreateCodeDialog({ position: coords, valueIds: [...selectedValueIds] })
+                    setCreateCodeDialog({ position: coords, valueIds: [...selectedValueIds], initialName: selectionPrefill() })
                   }}
                   onContextCreateNote={(dvId, coords) => {
                     setCreateNoteDialog({ position: coords, valueId: dvId })
@@ -1202,6 +1369,7 @@ export default function TextCodingView() {
         <FloatingCreateCode
           position={createCodeDialog.position}
           projectId={projectId}
+          initialName={createCodeDialog.initialName}
           categories={categories}
           onCreated={async (code) => {
             const valueIds = createCodeDialog.valueIds
@@ -1283,7 +1451,7 @@ export default function TextCodingView() {
         {activeTab === 'coding' && selectedValueIds.length > 0 && <span>{selectedValueIds.length} selected</span>}
         <div className="flex-1" />
         {activeTab === 'coding' && (
-          <span className="opacity-60">0-9: code · s: quote · j: next uncoded · []: {viewMode === 'by_text' ? 'prev/next column' : 'prev/next record'} · Ctrl+Z/Y: undo/redo</span>
+          <span className="opacity-60">0-9: code · s: quote · c: create code · n: note · j: next uncoded · []: {viewMode === 'by_text' ? 'prev/next column' : 'prev/next record'} · Ctrl+Z/Y: undo/redo</span>
         )}
       </div>
     </div>

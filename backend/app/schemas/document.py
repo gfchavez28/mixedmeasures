@@ -39,6 +39,7 @@ class SegmentCodeResponse(BaseModel):
     name: str
     color: str | None = None
     is_universal: bool = False  # lets the coding workbench exclude universal-only segments from "coded" (#398 / invariant J-A)
+    user_id: int | None = None  # coder who applied this code (Track J · J1)
 
 
 class ExcerptInfo(BaseModel):

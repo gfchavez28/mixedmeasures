@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, memo } from 'react'
-import { getDivergingCellStyle, jitterOffset } from '@/lib/chart-data'
+import { getDivergingCellStyle, jitterOffset, formatPValue } from '@/lib/chart-data'
 import { useTheme } from '@/lib/theme-context'
 import type { ScatterPair, CorrelationCell } from '@/lib/api'
 import ScatterPlotModal from './ScatterPlotModal'
@@ -122,7 +122,7 @@ function UpperTriangleCell({
     <div
       style={{ width: size, height: size, ...style }}
       className="flex items-center justify-center text-sm font-mono tabular-nums rounded-sm"
-      title={`r = ${cell.r.toFixed(2)}, p = ${cell.p < 0.001 ? '<.001' : cell.p.toFixed(3)}, n = ${cell.n}`}
+      title={`r = ${cell.r.toFixed(2)}, ${formatPValue(cell.p)}, n = ${cell.n}`}
     >
       {rStr}
     </div>

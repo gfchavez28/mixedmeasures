@@ -99,7 +99,7 @@ export default function MemosSlideOut({ projectId, onClose, defaultEntityType, d
     >
       {/* Resize handle */}
       <div
-        className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-400/30 active:bg-blue-400/50 transition-colors z-10"
+        className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-mm-blue/30 active:bg-mm-blue/50 transition-colors z-10"
         onMouseDown={handleMouseDown}
         role="separator"
         aria-orientation="vertical"

@@ -22,6 +22,7 @@ from ..schemas.participant import (
     ParticipantDetailResponse,
     ParticipantListResponse,
     LinkedSpeakerInfo,
+    LinkedConversationRef,
     DatasetRowInfo,
     LinkedDemographicValue,
     LinkDatasetRowRequest,
@@ -43,20 +44,26 @@ def participant_to_response(
     linked_speakers = []
     speaker_ids = [s.id for s in participant.speakers]
 
-    # Batch query: conversation names per speaker (avoids N+1)
-    conv_names_by_speaker: dict[int, list[str]] = {sid: [] for sid in speaker_ids}
+    # Batch query: conversations (id + name) per speaker (avoids N+1).
+    # #422b: carry the id so the frontend can link each conversation; dedup by
+    # conversation id (a speaker spans a conversation via many segments).
+    convs_by_speaker: dict[int, list[LinkedConversationRef]] = {sid: [] for sid in speaker_ids}
     if speaker_ids:
         rows = db.execute(
-            select(Segment.speaker_id, Conversation.name)
+            select(Segment.speaker_id, Conversation.id, Conversation.name)
             .join(Conversation, Segment.conversation_id == Conversation.id)
             .where(Segment.speaker_id.in_(speaker_ids))
             .where(Segment.merged_into_id.is_(None))
             .where(Segment.split_into_id.is_(None))
             .distinct()
         ).all()
-        for speaker_id, conv_name in rows:
-            if conv_name not in conv_names_by_speaker[speaker_id]:
-                conv_names_by_speaker[speaker_id].append(conv_name)
+        seen_conv_ids: dict[int, set[int]] = {sid: set() for sid in speaker_ids}
+        for speaker_id, conv_id, conv_name in rows:
+            if conv_id not in seen_conv_ids[speaker_id]:
+                seen_conv_ids[speaker_id].add(conv_id)
+                convs_by_speaker[speaker_id].append(
+                    LinkedConversationRef(id=conv_id, name=conv_name)
+                )
 
     for speaker in participant.speakers:
         linked_speakers.append(
@@ -64,7 +71,7 @@ def participant_to_response(
                 speaker_id=speaker.id,
                 speaker_name=speaker.name,
                 is_facilitator=bool(speaker.is_facilitator),
-                conversation_names=conv_names_by_speaker.get(speaker.id, []),
+                conversations=convs_by_speaker.get(speaker.id, []),
                 color_index=speaker.color_index or 0,
                 color=speaker.color,
             )

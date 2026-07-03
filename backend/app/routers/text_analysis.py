@@ -18,6 +18,12 @@ from ..models.code import Code
 from ..models.recode import RecodeDefinition
 from ..services.grouping import order_value_labels, value_label_sort_key
 from ..services.recode import _parse_mapping
+from ..services.text_analysis import (
+    compute_comment_frequencies,
+    get_non_empty_comment_values,
+    treat_as_empty_for_project,
+)
+from ..services.coding_layers import LAYER_CONSENSUS, layer_origin_filter
 from ..auth import get_current_user
 from .helpers import _get_project_or_404, parse_int_list, sanitize_content_disposition, TEXT_TYPES
 from .export_helpers import csv_safe
@@ -60,19 +66,6 @@ def _validate_text_columns(db: Session, project_id: int, column_ids: list[int]) 
     return columns
 
 
-def _get_non_empty_comment_values(db: Session, column_ids: list[int], row_ids: list[int] | None = None):
-    """Get DatasetValues for comment columns, optionally filtered by row IDs."""
-    q = (
-        db.query(DatasetValue)
-        .filter(
-            DatasetValue.column_id.in_(column_ids),
-            DatasetValue.value_text.isnot(None),
-            DatasetValue.value_text != "",
-        )
-    )
-    if row_ids is not None:
-        q = q.filter(DatasetValue.row_id.in_(row_ids))
-    return q.all()
 
 
 def _apply_filters(db: Session, project_id: int, filters, focal_column_ids: list[int]):
@@ -232,47 +225,19 @@ def _resolve_filter_rows(db: Session, filt, col: DatasetColumn) -> set[int]:
         raise HTTPException(status_code=400, detail=f"Unknown operator: {filt.operator}")
 
 
-def _build_frequency_set(
-    db: Session, comment_values: list[DatasetValue], codes: list[Code],
-) -> FrequencySet:
-    """Build a FrequencySet from a list of DatasetValues."""
-    value_ids = [v.id for v in comment_values]
-    if not value_ids:
-        return FrequencySet(
-            row_count=0,
-            text_count=0,
-            frequencies=[CodeFrequencyBrief(
-                code_id=c.id, code_name=c.name, code_color=c.color,
-                count=0, percentage=0.0,
-            ) for c in codes],
-        )
+def _to_frequency_set(result: dict) -> FrequencySet:
+    """Adapt a `compute_comment_frequencies` result dict to the `FrequencySet` schema.
 
-    # Count code applications
-    code_counts = (
-        db.query(CodeApplication.code_id, func.count(CodeApplication.id))
-        .filter(CodeApplication.dataset_value_id.in_(value_ids))
-        .group_by(CodeApplication.code_id)
-        .all()
-    )
-    count_map = dict(code_counts)
-
-    # Count unique rows
-    row_ids = {v.row_id for v in comment_values}
-    comment_count = len(comment_values)
-
-    freqs = []
-    for c in codes:
-        cnt = count_map.get(c.id, 0)
-        pct = round(cnt / comment_count * 100, 1) if comment_count else 0.0
-        freqs.append(CodeFrequencyBrief(
-            code_id=c.id, code_name=c.name, code_color=c.color,
-            count=cnt, percentage=pct,
-        ))
-
+    Track J · J2 slab 3b — the `filtered-frequencies` endpoint + the CSV export now
+    delegate their counting to `services/text_analysis.compute_comment_frequencies`
+    (DISTINCT dataset-value + consensus-layer exclusion, single-sourced AND tested)
+    instead of a parallel inline count that silently inflated per coder AND counted
+    the derived consensus layer once it materialized.
+    """
     return FrequencySet(
-        row_count=len(row_ids),
-        text_count=comment_count,
-        frequencies=freqs,
+        row_count=result["row_count"],
+        text_count=result["text_count"],
+        frequencies=[CodeFrequencyBrief(**f) for f in result["frequencies"]],
     )
 
 
@@ -290,32 +255,24 @@ async def filtered_frequencies(
     columns = _validate_text_columns(db, project_id, body.column_ids)
     column_ids = [c.id for c in columns]
 
-    # Load active codes
-    codes = (
-        db.query(Code)
-        .filter(Code.project_id == project_id, Code.is_active == True)
-        .order_by(Code.is_universal.desc(), Code.numeric_id)
-        .all()
-    )
-
     # Apply filters
     filtered_row_ids, filter_desc, filter_scope = _apply_filters(
         db, project_id, body.filters, column_ids,
     )
 
-    # Get filtered comment values
-    filtered_values = _get_non_empty_comment_values(
-        db, column_ids,
-        list(filtered_row_ids) if filtered_row_ids is not None else None,
-    )
-
-    filtered_set = _build_frequency_set(db, filtered_values, codes)
+    filtered_set = _to_frequency_set(compute_comment_frequencies(
+        db, project_id, column_ids,
+        row_ids=list(filtered_row_ids) if filtered_row_ids is not None else None,
+        coder_ids=body.coder_ids, layer_scope=body.layer_scope,
+    ))
 
     # Overall (unfiltered)
     overall_set = None
     if body.include_overall and body.filters:
-        all_values = _get_non_empty_comment_values(db, column_ids)
-        overall_set = _build_frequency_set(db, all_values, codes)
+        overall_set = _to_frequency_set(compute_comment_frequencies(
+            db, project_id, column_ids,
+            coder_ids=body.coder_ids, layer_scope=body.layer_scope,
+        ))
 
     return FilteredFrequenciesResponse(
         filtered=filtered_set,
@@ -424,7 +381,8 @@ async def cross_tabulation(
     cross_dataset_row_ids = set(row_to_cross_value.keys())
 
     # Get comment values from the same dataset (or linked via participant)
-    comment_values = _get_non_empty_comment_values(db, comment_col_ids)
+    treat_as_empty = treat_as_empty_for_project(db, project_id)
+    comment_values = get_non_empty_comment_values(db, comment_col_ids, treat_as_empty)
 
     # Build: for each comment value, find its cross-tab value
     # Direct: same dataset
@@ -452,11 +410,13 @@ async def cross_tabulation(
             total_coded_texts=0,
         )
 
-    code_apps = (
+    code_apps_q = (
         db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
-        .filter(CodeApplication.dataset_value_id.in_(value_ids))
-        .all()
+        .filter(CodeApplication.dataset_value_id.in_(value_ids), layer_origin_filter(body.layer_scope))
     )
+    if body.coder_ids and body.layer_scope != LAYER_CONSENSUS:
+        code_apps_q = code_apps_q.filter(CodeApplication.user_id.in_(body.coder_ids))
+    code_apps = code_apps_q.all()
     # Map value_id -> set of code_ids
     value_code_map: dict[int, set[int]] = defaultdict(set)
     for ca in code_apps:
@@ -560,6 +520,9 @@ async def code_density(
     project_id: int,
     column_ids: str = Query(..., description="Comma-separated focal column IDs"),
     group_by_column_id: int | None = Query(None, description="Column to group by"),
+    coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
+    # Bare default (not Query(None)) so direct-call tests don't bind the sentinel — see backend/tests/CLAUDE.md.
+    layer_scope: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -569,19 +532,27 @@ async def code_density(
     if not col_id_list:
         raise HTTPException(status_code=400, detail="column_ids required")
 
+    parsed_coder_ids = parse_int_list(coder_ids)
+
     _validate_text_columns(db, project_id, col_id_list)
 
-    # Get non-empty comment values
-    comment_values = _get_non_empty_comment_values(db, col_id_list)
+    # Get substantive (non-empty, non-N/A) text values — must match the gauge (#519)
+    comment_values = get_non_empty_comment_values(
+        db, col_id_list, treat_as_empty_for_project(db, project_id))
     value_ids = [v.id for v in comment_values]
 
-    # Count codes per value
-    code_counts_q = (
-        db.query(CodeApplication.dataset_value_id, func.count(CodeApplication.id))
-        .filter(CodeApplication.dataset_value_id.in_(value_ids))
-        .group_by(CodeApplication.dataset_value_id)
-        .all()
-    ) if value_ids else []
+    # Count DISTINCT codes per value (Track J · J2: two coders applying the same
+    # code to one value are two rows but ONE code; exclude the consensus layer).
+    if value_ids:
+        code_counts_query = (
+            db.query(CodeApplication.dataset_value_id, func.count(func.distinct(CodeApplication.code_id)))
+            .filter(CodeApplication.dataset_value_id.in_(value_ids), layer_origin_filter(layer_scope))
+        )
+        if parsed_coder_ids and layer_scope != LAYER_CONSENSUS:
+            code_counts_query = code_counts_query.filter(CodeApplication.user_id.in_(parsed_coder_ids))
+        code_counts_q = code_counts_query.group_by(CodeApplication.dataset_value_id).all()
+    else:
+        code_counts_q = []
     codes_per_value = dict(code_counts_q)
 
     # Overall
@@ -644,6 +615,9 @@ async def code_density(
 async def response_length_by_code(
     project_id: int,
     column_ids: str = Query(..., description="Comma-separated focal column IDs"),
+    coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
+    # Bare default (not Query(None)) so direct-call tests don't bind the sentinel — see backend/tests/CLAUDE.md.
+    layer_scope: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -653,10 +627,13 @@ async def response_length_by_code(
     if not col_id_list:
         raise HTTPException(status_code=400, detail="column_ids required")
 
+    parsed_coder_ids = parse_int_list(coder_ids)
+
     _validate_text_columns(db, project_id, col_id_list)
 
-    # Get non-empty comment values
-    comment_values = _get_non_empty_comment_values(db, col_id_list)
+    # Get substantive (non-empty, non-N/A) text values — must match the gauge (#519)
+    comment_values = get_non_empty_comment_values(
+        db, col_id_list, treat_as_empty_for_project(db, project_id))
     value_ids = [v.id for v in comment_values]
 
     # Compute word counts
@@ -664,12 +641,17 @@ async def response_length_by_code(
     for dv in comment_values:
         word_counts[dv.id] = len(dv.value_text.split()) if dv.value_text else 0
 
-    # Load code applications
-    code_apps = (
-        db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
-        .filter(CodeApplication.dataset_value_id.in_(value_ids))
-        .all()
-    ) if value_ids else []
+    # Load code applications (exclude the consensus layer by default).
+    if value_ids:
+        code_apps_query = (
+            db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
+            .filter(CodeApplication.dataset_value_id.in_(value_ids), layer_origin_filter(layer_scope))
+        )
+        if parsed_coder_ids and layer_scope != LAYER_CONSENSUS:
+            code_apps_query = code_apps_query.filter(CodeApplication.user_id.in_(parsed_coder_ids))
+        code_apps = code_apps_query.all()
+    else:
+        code_apps = []
 
     # Map value_id -> set of code_ids
     value_codes: dict[int, set[int]] = defaultdict(set)
@@ -721,6 +703,9 @@ async def export_cross_analysis(
     column_ids: str = Query(..., description="Comma-separated focal column IDs"),
     filters_json: str = Query("[]", description="JSON-encoded filters"),
     cross_column_id: int | None = Query(None),
+    coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
+    # Bare default (not Query(None)) so direct-call tests don't bind the sentinel — see backend/tests/CLAUDE.md.
+    layer_scope: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -731,6 +716,7 @@ async def export_cross_analysis(
     col_id_list = parse_int_list(column_ids) or []
     if not col_id_list:
         raise HTTPException(status_code=400, detail="column_ids required")
+    parsed_coder_ids = parse_int_list(coder_ids)
 
     columns = _validate_text_columns(db, project_id, col_id_list)
 
@@ -772,42 +758,50 @@ async def export_cross_analysis(
     writer.writerow(["Code Frequencies"])
     if filters:
         writer.writerow(["Code", "Filtered Count", "Filtered %", "Overall Count", "Overall %", "Difference (pp)"])
-        all_values = _get_non_empty_comment_values(db, col_id_list)
-        overall_set = _build_frequency_set(db, all_values, codes)
-        filtered_values = _get_non_empty_comment_values(
-            db, col_id_list,
-            list(filtered_row_ids) if filtered_row_ids is not None else None,
+        overall = compute_comment_frequencies(
+            db, project_id, col_id_list, coder_ids=parsed_coder_ids, layer_scope=layer_scope,
         )
-        filtered_set = _build_frequency_set(db, filtered_values, codes)
-        overall_map = {f.code_id: f for f in overall_set.frequencies}
-        for f in filtered_set.frequencies:
-            o = overall_map.get(f.code_id)
-            diff = round(f.percentage - (o.percentage if o else 0), 1)
+        filtered = compute_comment_frequencies(
+            db, project_id, col_id_list,
+            row_ids=list(filtered_row_ids) if filtered_row_ids is not None else None,
+            coder_ids=parsed_coder_ids, layer_scope=layer_scope,
+        )
+        overall_map = {f["code_id"]: f for f in overall["frequencies"]}
+        for f in filtered["frequencies"]:
+            o = overall_map.get(f["code_id"])
+            diff = round(f["percentage"] - (o["percentage"] if o else 0), 1)
             writer.writerow([
-                csv_safe(f.code_name), f.count, f"{f.percentage}%",
-                o.count if o else 0, f"{o.percentage if o else 0}%",
+                csv_safe(f["code_name"]), f["count"], f"{f['percentage']}%",
+                o["count"] if o else 0, f"{o['percentage'] if o else 0}%",
                 f"{'+' if diff > 0 else ''}{diff}pp",
             ])
     else:
         writer.writerow(["Code", "Count", "%"])
-        all_values = _get_non_empty_comment_values(db, col_id_list)
-        freq_set = _build_frequency_set(db, all_values, codes)
-        for f in freq_set.frequencies:
-            writer.writerow([csv_safe(f.code_name), f.count, f"{f.percentage}%"])
+        freq = compute_comment_frequencies(
+            db, project_id, col_id_list, coder_ids=parsed_coder_ids, layer_scope=layer_scope,
+        )
+        for f in freq["frequencies"]:
+            writer.writerow([csv_safe(f["code_name"]), f["count"], f"{f['percentage']}%"])
 
     writer.writerow([])
 
     # Section 3: Response length
     writer.writerow(["Response Length by Code"])
-    writer.writerow(["Code", "Avg Words", "Comment Count"])
-    comment_values = _get_non_empty_comment_values(db, col_id_list)
+    writer.writerow(["Code", "Avg Words", "Text Count"])
+    comment_values = get_non_empty_comment_values(
+        db, col_id_list, treat_as_empty_for_project(db, project_id))
     value_ids = [v.id for v in comment_values]
     word_counts_map = {v.id: len(v.value_text.split()) if v.value_text else 0 for v in comment_values}
-    code_apps_all = (
-        db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
-        .filter(CodeApplication.dataset_value_id.in_(value_ids))
-        .all()
-    ) if value_ids else []
+    if value_ids:
+        code_apps_all_q = (
+            db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
+            .filter(CodeApplication.dataset_value_id.in_(value_ids), layer_origin_filter(layer_scope))
+        )
+        if parsed_coder_ids and layer_scope != LAYER_CONSENSUS:
+            code_apps_all_q = code_apps_all_q.filter(CodeApplication.user_id.in_(parsed_coder_ids))
+        code_apps_all = code_apps_all_q.all()
+    else:
+        code_apps_all = []
     val_codes: dict[int, set[int]] = defaultdict(set)
     for ca in code_apps_all:
         val_codes[ca.dataset_value_id].add(ca.code_id)

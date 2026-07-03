@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session, joinedload
 
@@ -72,6 +73,9 @@ from ..services.dataset_import import (
     _is_na,
     _strip_bom,
     _compute_value_numeric,
+    is_xlsx_upload,
+    xlsx_to_csv_text,
+    XlsxImportError,
 )
 from ..models.equivalence_group import EquivalenceGroup
 from ..schemas.equivalence import ProjectColumnInfo, ProjectColumnListResponse
@@ -158,19 +162,15 @@ async def preview_dataset(
     project_id: int,
     file: UploadFile = File(...),
     encoding: str = Form("utf-8"),
+    sheet_name: str | None = Form(None),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Preview a dataset CSV file before importing."""
+    """Preview a dataset file (CSV or .xlsx, #523) before importing."""
     _get_project_or_404(db, project_id, user.id)
     validate_encoding(encoding)
 
-    content = await read_upload_with_limit(file)
-    try:
-        text = content.decode(encoding)
-    except (UnicodeDecodeError, LookupError) as e:
-        logger.warning("File decode failed: %s", e)
-        raise HTTPException(status_code=400, detail="Unable to decode file. Ensure it uses UTF-8 or the specified encoding.")
+    text, sheet_names = await _upload_to_csv_text(file, encoding, sheet_name)
 
     try:
         result = preview_dataset_csv(text)
@@ -181,6 +181,7 @@ async def preview_dataset(
     return DatasetPreviewResponse(
         total_rows=result["total_rows"],
         columns=[DatasetColumnPreview(**col) for col in result["columns"]],
+        sheet_names=sheet_names,
     )
 
 
@@ -205,12 +206,7 @@ async def import_dataset(
             status_code=400, detail=f"Invalid import config: {e}",
         )
 
-    content = await read_upload_with_limit(file)
-    try:
-        text = content.decode(encoding)
-    except (UnicodeDecodeError, LookupError) as e:
-        logger.warning("File decode failed: %s", e)
-        raise HTTPException(status_code=400, detail="Unable to decode file. Ensure it uses UTF-8 or the specified encoding.")
+    text, _sheet_names = await _upload_to_csv_text(file, encoding, config.sheet_name)
 
     # Convert Pydantic models to dicts for the service
     column_configs = [cfg.model_dump() for cfg in config.column_configs]
@@ -2444,6 +2440,26 @@ async def update_value(
 # ── Append import endpoints ─────────────────────────────────────────────────
 
 
+async def _upload_to_csv_text(
+    file: UploadFile, encoding: str, sheet_name: str | None = None,
+) -> tuple[str, list[str] | None]:
+    """Read a dataset upload (CSV or .xlsx) as CSV text (#523).
+
+    The single format seam for ALL dataset upload endpoints (preview / import /
+    append preview / append import): .xlsx converts through the openpyxl adapter
+    (in a threadpool — untrusted zip parse), everything else takes the existing
+    text-decode path. Returns (csv_text, sheet_names) — sheet_names only for xlsx.
+    """
+    content = await read_upload_with_limit(file)
+    if is_xlsx_upload(file.filename, content):
+        try:
+            return await run_in_threadpool(xlsx_to_csv_text, content, sheet_name)
+        except XlsxImportError as e:
+            logger.warning("xlsx parse failed: %s", e)
+            raise HTTPException(status_code=400, detail=str(e))
+    return _decode_csv(content, encoding), None
+
+
 def _decode_csv(content: bytes, encoding: str) -> str:
     """Decode CSV bytes with encoding and strip BOM."""
     try:
@@ -2471,16 +2487,16 @@ async def append_preview(
     dataset_id: int,
     file: UploadFile = File(...),
     encoding: str = Form("utf-8"),
+    sheet_name: str | None = Form(None),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Preview a CSV file for appending rows to an existing dataset."""
+    """Preview a file (CSV or .xlsx, #523) for appending rows to an existing dataset."""
     _get_project_or_404(db, project_id, user.id)
     ds = _get_dataset_or_404(db, project_id, dataset_id)
     validate_encoding(encoding)
 
-    content = await read_upload_with_limit(file)
-    text = _decode_csv(content, encoding)
+    text, sheet_names = await _upload_to_csv_text(file, encoding, sheet_name)
 
     try:
         reader = csv.reader(io.StringIO(text))
@@ -2647,6 +2663,7 @@ async def append_preview(
         preview_rows=preview_rows[:10],  # preview first 10 rows only
         next_row_id=next_rid,
         row_pad_width=pad_width,
+        sheet_names=sheet_names,
     )
 
 
@@ -2675,8 +2692,7 @@ async def append_import(
         logger.warning("Invalid import config: %s", e)
         raise HTTPException(status_code=400, detail="Invalid import configuration.")
 
-    content = await read_upload_with_limit(file)
-    text = _decode_csv(content, encoding)
+    text, _sheet_names = await _upload_to_csv_text(file, encoding, config.sheet_name)
 
     try:
         reader = csv.reader(io.StringIO(text))

@@ -184,8 +184,9 @@ def _build_summary_response(
     latest_computed_at = None
     total_valid_n = None
     result_count = 0
+    real_group_count = 0
     if stats_tuple:
-        latest_computed_at, total_valid_n, result_count = stats_tuple
+        latest_computed_at, total_valid_n, result_count, real_group_count = stats_tuple
 
     # Use decompose_label as input_source_label when present
     decompose_label = config.get("decompose_label")
@@ -215,6 +216,7 @@ def _build_summary_response(
         latest_computed_at=latest_computed_at,
         total_valid_n=int(total_valid_n) if total_valid_n is not None else None,
         result_count=result_count or 0,
+        real_group_count=real_group_count or 0,
         last_accessed_at=metric.last_accessed_at,
         created_at=metric.created_at,
         updated_at=metric.updated_at,
@@ -326,6 +328,10 @@ async def list_metrics(
             sa_func.max(ComputedResult.computed_at).label("latest_computed_at"),
             sa_func.sum(ComputedResult.valid_n).label("total_valid_n"),
             sa_func.count(ComputedResult.id).label("result_count"),
+            # #506: COUNT(group_value) skips NULLs — the None listwise-deletion
+            # bucket is a result row but not a real group; test pickers and
+            # "(N groups)" displays must use this, not result_count.
+            sa_func.count(ComputedResult.group_value).label("real_group_count"),
         )
         .group_by(ComputedResult.metric_definition_id)
         .subquery()
@@ -352,8 +358,8 @@ async def list_metrics(
     responses = []
     for row in rows:
         metric = row[0]
-        # row layout: (MetricDefinition, metric_definition_id, latest_computed_at, total_valid_n, result_count)
-        stats = (row[2], row[3], row[4]) if row[2] is not None else None
+        # row layout: (MetricDefinition, metric_definition_id, latest_computed_at, total_valid_n, result_count, real_group_count)
+        stats = (row[2], row[3], row[4], row[5]) if row[2] is not None else None
         responses.append(_build_summary_response(metric, stats, label_map))
 
     return MetricListResponse(metrics=responses, total=len(responses))

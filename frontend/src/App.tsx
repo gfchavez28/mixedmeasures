@@ -31,6 +31,7 @@ const QualitativeAnalysisView = lazy(() => import('./pages/QualitativeAnalysisVi
 const CanvasView = lazy(() => import('./pages/CanvasView'))
 const CanvasCompareView = lazy(() => import('./pages/CanvasCompareView'))
 const CodebookView = lazy(() => import('./pages/CodebookView'))
+const MergeProject = lazy(() => import('./pages/MergeProject'))
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   // Local-first: there is no login. AuthProvider auto-authenticates via /status
@@ -84,6 +85,7 @@ function AppRoutes() {
       >
         <Route index element={<Navigate to="overview" replace />} />
         <Route path="overview" element={<OverviewPage />} />
+        <Route path="merge" element={<MergeProject />} />{/* Track J · J3-2 */}
         <Route path="conversations" element={<ConversationsListPage />} />
         <Route path="conversations/import" element={<ConversationImport />} />
         <Route path="conversations/:conversationId" element={<CodingWorkbench />} />

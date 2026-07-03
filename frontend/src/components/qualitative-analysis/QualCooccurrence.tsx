@@ -41,6 +41,8 @@ export default function QualCooccurrence({
       filterParams.source,
       cooccurrenceLevel,
       filterParams.text_column_ids,
+      filterParams.coder_ids,
+      filterParams.layer_scope,
     ],
     queryFn: () => codeAnalysisApi.cooccurrence(projectId, params),
     enabled: !!projectId,
@@ -48,7 +50,7 @@ export default function QualCooccurrence({
 
   const unitLabel = useMemo(() => {
     if (cooccurrenceLevel === 'source') return 'source'
-    if (filterParams.source === 'text') return 'comment'
+    if (filterParams.source === 'text') return 'text'
     if (filterParams.source === 'all') return 'unit'
     return 'segment'
   }, [cooccurrenceLevel, filterParams.source])
@@ -112,7 +114,7 @@ export default function QualCooccurrence({
                   scope="col"
                   key={c.id}
                   className="px-1 py-1.5 border-b border-r font-medium text-center"
-                  style={{ writingMode: 'vertical-lr', transform: 'rotate(180deg)', minWidth: 32, maxWidth: 32, height: 120 }}
+                  style={{ writingMode: 'vertical-lr', transform: 'rotate(180deg)', minWidth: 32, maxWidth: 32, height: 120, overflow: 'hidden' }}
                   title={c.name}
                 >
                   <span className={c.is_universal ? 'opacity-60' : ''}>
@@ -193,9 +195,9 @@ export default function QualCooccurrence({
           : showProportion
             ? `Proportion view: each cell shows what percentage of the row code's occurrences co-occur with the column code.`
             : data.source === 'text'
-              ? 'Diagonal shows total comments per code. Off-diagonal shows how often two codes co-occur on the same comment.'
+              ? 'Diagonal shows total texts per code. Off-diagonal shows how often two codes co-occur on the same text.'
               : data.source === 'all'
-                ? 'Diagonal shows total coded units (segments + comments) per code. Off-diagonal shows how often two codes co-occur on the same unit.'
+                ? 'Diagonal shows total coded units (segments + texts) per code. Off-diagonal shows how often two codes co-occur on the same unit.'
                 : 'Diagonal shows total segments per code. Off-diagonal shows how often two codes co-occur on the same segment.'
         }
         {!showProportion && max_cooccurrence > 0 && ` Max co-occurrence: ${max_cooccurrence}.`}

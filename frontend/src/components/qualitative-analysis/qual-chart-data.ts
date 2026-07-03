@@ -210,6 +210,29 @@ export function shapeQualBarData(
   return sortBarData(bars, sortOrder)
 }
 
+/**
+ * Resolve the data entry behind a recharts Bar label/click callback (#504).
+ *
+ * recharts compacts zero-dimension rects out of its rendered list
+ * (`computeBarRectangles` → `.filter(Boolean)`), so the `index` it passes to
+ * label renderers and click handlers enumerates RENDERED bars — indexing the
+ * full data array with it shifts every entry after a zero-value bar. Resolve
+ * against the rendered (non-zero) order first, cross-checked with the
+ * callback's own `value`; fall back to the data order if a future recharts
+ * stops compacting. Returns null when no entry matches (no label drawn).
+ */
+export function resolveRenderedBarEntry<T extends { value: number }>(
+  entries: T[],
+  renderedIndex: number,
+  renderedValue: number,
+): T | null {
+  const rendered = entries.filter(e => e.value !== 0)
+  let entry: T | undefined = rendered[renderedIndex]
+  if (!entry || entry.value !== renderedValue) entry = entries[renderedIndex]
+  if (!entry || entry.value !== renderedValue || entry.value === 0) return null
+  return entry
+}
+
 function sortBarData(bars: QualBarDatum[], sortOrder: QualSortOrder): QualBarDatum[] {
   const sorted = [...bars]
   switch (sortOrder) {

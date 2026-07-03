@@ -54,3 +54,13 @@ export function computeFloatingPosition(
 
   return { top, left }
 }
+
+/** In-vivo prefill (#526): the current text selection as a code-name candidate.
+ * Whitespace-collapsed and capped; returns undefined when nothing useful is
+ * selected. Capture at OPEN time — the selection may clear before submit. */
+export function selectionPrefill(maxLen = 60): string | undefined {
+  const raw = window.getSelection()?.toString() ?? ''
+  const collapsed = raw.replace(/\s+/g, ' ').trim()
+  if (!collapsed) return undefined
+  return collapsed.length > maxLen ? `${collapsed.slice(0, maxLen).trimEnd()}…` : collapsed
+}

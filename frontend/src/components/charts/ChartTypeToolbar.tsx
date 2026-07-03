@@ -1,4 +1,5 @@
 import { useRef, useCallback } from 'react'
+import { SELECTED_SEGMENT } from '@/lib/selection'
 import {
   Grid3X3,
   Grid2X2,
@@ -89,10 +90,17 @@ export default function ChartTypeToolbar({
         const needsSwitch = Array.isArray(requiresMetricTypeChange[type])
         const isDisabledDumbbell = type === 'dumbbell' && !hasGrouping
         const scaleDisabledReason = disabledReasons[type]
+        // #509: a type with NO requiresMetricTypeChange entry isn't applicable
+        // to the current selection at all (e.g. vertical bar / cross-tab with
+        // 2+ variables) — clicking it was a silent no-op that wrote a dead URL
+        // param. Render it actually disabled, with a reason.
+        const notApplicable = !isActive && !scaleDisabledReason && !(type in requiresMetricTypeChange)
 
-        const disabled = isDisabledDumbbell || !!scaleDisabledReason
+        const disabled = isDisabledDumbbell || !!scaleDisabledReason || notApplicable
         const title = isDisabledDumbbell
           ? 'Add a group-by variable to enable dumbbell chart'
+          : notApplicable
+          ? `${label} isn't available for the current selection`
           : needsSwitch && !isActive
           ? `${label} (will switch metric type)`
           : label
@@ -110,7 +118,7 @@ export default function ChartTypeToolbar({
         const btnClassName = [
           'relative inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md transition-colors',
           isActive
-            ? 'bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 font-medium'
+            ? SELECTED_SEGMENT
             : disabled
             ? 'text-mm-text-faint cursor-not-allowed'
             : isAvailable

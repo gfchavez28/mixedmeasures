@@ -12,17 +12,19 @@ import {
 import { useTheme } from '@/lib/theme-context'
 import { getUnfocusedStyle } from '@/lib/utils'
 
-type SourceFilter = 'all' | 'conversations' | 'text'
+type SourceFilter = 'all' | 'conversations' | 'documents' | 'text'
 
 const SOURCE_FILTER_COLORS: Record<SourceFilter, { active: string; inactive: string }> = {
-  all:           { active: 'bg-gray-700 text-white dark:bg-gray-300 dark:text-gray-900', inactive: 'bg-mm-bg text-mm-text-muted hover:bg-mm-surface-hover' },
+  all:           { active: 'bg-mm-text text-mm-bg', inactive: 'bg-mm-bg text-mm-text-muted hover:bg-mm-surface-hover' },
   conversations: { active: 'bg-teal-600 text-white dark:bg-teal-500 dark:text-white', inactive: 'bg-teal-50 text-teal-700 hover:bg-teal-100 dark:bg-teal-900/20 dark:text-teal-300 dark:hover:bg-teal-900/30' },
+  documents:     { active: 'bg-indigo-600 text-white dark:bg-indigo-500 dark:text-white', inactive: 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-900/20 dark:text-indigo-300 dark:hover:bg-indigo-900/30' },
   text:          { active: 'bg-sky-600 text-white dark:bg-sky-500 dark:text-white', inactive: 'bg-sky-50 text-sky-700 hover:bg-sky-100 dark:bg-sky-900/20 dark:text-sky-300 dark:hover:bg-sky-900/30' },
 }
 
 const SOURCE_FILTERS: { value: SourceFilter; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'conversations', label: 'Conversations' },
+  { value: 'documents', label: 'Documents' },
   { value: 'text', label: 'Text' },
 ]
 
@@ -33,7 +35,7 @@ interface FlatNote {
   content: string
   sequenceNumber: number
   createdAt: string
-  sourceType: 'conversation' | 'comment'
+  sourceType: 'conversation' | 'document' | 'comment'
   sourceId: number
   sourceName: string
   speakerName?: string
@@ -45,7 +47,7 @@ interface FlatNote {
 interface SourceGroup {
   key: string
   label: string
-  sourceType: 'conversation' | 'comment'
+  sourceType: 'conversation' | 'document' | 'comment'
   sourceId: number
   notes: FlatNote[]
 }
@@ -81,14 +83,19 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
 
   const conversations = useMemo(() => data?.conversations ?? [], [data?.conversations])
   const comments = useMemo(() => data?.texts ?? [], [data?.texts])
+  const documents = useMemo(() => data?.documents ?? [], [data?.documents])
 
   // Filter by source type
   const filteredConversations = useMemo(
-    () => sourceFilter === 'text' ? [] : conversations,
+    () => sourceFilter === 'all' || sourceFilter === 'conversations' ? conversations : [],
     [sourceFilter, conversations],
   )
+  const filteredDocuments = useMemo(
+    () => sourceFilter === 'all' || sourceFilter === 'documents' ? documents : [],
+    [sourceFilter, documents],
+  )
   const filteredComments = useMemo(
-    () => sourceFilter === 'conversations' ? [] : comments,
+    () => sourceFilter === 'all' || sourceFilter === 'text' ? comments : [],
     [sourceFilter, comments],
   )
 
@@ -140,6 +147,29 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
       }
     }
 
+    for (const doc of filteredDocuments) {
+      const notes: FlatNote[] = doc.notes.map(note => ({
+        id: note.id,
+        content: note.content,
+        sequenceNumber: note.sequence_number,
+        createdAt: note.created_at,
+        sourceType: 'document' as const,
+        sourceId: doc.document_id,
+        sourceName: doc.document_name,
+        contextText: note.segment_text ?? undefined,
+        segmentId: note.segment_id,
+      }))
+      if (notes.length > 0) {
+        groups.push({
+          key: `doc-${doc.document_id}`,
+          label: doc.document_name,
+          sourceType: 'document',
+          sourceId: doc.document_id,
+          notes,
+        })
+      }
+    }
+
     for (const col of filteredComments) {
       const notes: FlatNote[] = []
       for (const r of col.rows) {
@@ -169,7 +199,7 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
     }
 
     return groups
-  }, [filteredConversations, filteredComments])
+  }, [filteredConversations, filteredDocuments, filteredComments])
 
   const totalCount = useMemo(() => sourceGroups.reduce((s, g) => s + g.notes.length, 0), [sourceGroups])
 
@@ -258,7 +288,7 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
               {debouncedSearch ? 'No notes match your search' : 'No notes yet'}
             </p>
             <p className="text-xs text-mm-text-muted/70 mt-1">
-              Notes are created in conversations and the Text Coding tab
+              Notes are created in conversations, documents, and the Text Coding tab
             </p>
           </div>
         ) : (
@@ -306,10 +336,14 @@ function NoteSourceGroup({
   onFocus?: (type: string, entityId: number | null, label: string, color: string) => void
 }) {
   const { isDark } = useTheme()
-  const Icon = group.sourceType === 'conversation' ? MessageSquare : TableProperties
+  const Icon = group.sourceType === 'conversation' ? MessageSquare
+    : group.sourceType === 'document' ? FileText
+    : TableProperties
   const sourceColor = group.sourceType === 'conversation'
     ? (isDark ? '#14b8a6' : '#0d9488')
-    : (isDark ? '#38bdf8' : '#0284c7')
+    : group.sourceType === 'document'
+      ? (isDark ? '#818cf8' : '#4f46e5')
+      : (isDark ? '#38bdf8' : '#0284c7')
 
   return (
     <div>
@@ -373,11 +407,15 @@ function NoteCard({
   focusedEntityId?: number | null
   onFocus?: (type: string, entityId: number | null, label: string, color: string) => void
 }) {
-  const typeLabel = note.sourceType === 'conversation' ? 'Conversation' : 'Comment'
+  const typeLabel = note.sourceType === 'conversation' ? 'Conversation'
+    : note.sourceType === 'document' ? 'Document'
+    : 'Text'
   const colors = ENTITY_TYPE_COLORS[note.sourceType] ?? ENTITY_TYPE_COLORS.project
   const url = note.sourceType === 'conversation'
     ? `/projects/${projectId}/conversations/${note.conversationId}${note.segmentId ? `?segment=${note.segmentId}` : ''}`
-    : `/projects/${projectId}/datasets/text-coding`
+    : note.sourceType === 'document'
+      ? `/projects/${projectId}/documents/${note.sourceId}`
+      : `/projects/${projectId}/datasets/text-coding`
 
   const isFocusMatch = !focusedType || (
     focusedEntityId != null
@@ -447,7 +485,7 @@ function NoteCard({
 
       {/* Context block — associated segment/comment */}
       {note.contextText && (
-        <div className={`mt-1.5 pl-2 border-l-2 ${note.sourceType === 'conversation' ? 'border-teal-300 dark:border-teal-700' : 'border-sky-300 dark:border-sky-700'}`}>
+        <div className={`mt-1.5 pl-2 border-l-2 ${note.sourceType === 'conversation' ? 'border-teal-300 dark:border-teal-700' : note.sourceType === 'document' ? 'border-indigo-300 dark:border-indigo-700' : 'border-sky-300 dark:border-sky-700'}`}>
           <p className="text-[11px] text-mm-text-secondary italic line-clamp-2">
             {note.contextText}
           </p>
@@ -461,7 +499,7 @@ function NoteCard({
           target="_blank"
           rel="noopener noreferrer"
           className="opacity-0 group-hover:opacity-100 transition-opacity"
-          title={`Open in ${note.sourceType === 'conversation' ? 'conversation' : 'text coding'}`}
+          title={`Open in ${note.sourceType === 'conversation' ? 'conversation' : note.sourceType === 'document' ? 'document' : 'text coding'}`}
         >
           <ExternalLink className="h-3 w-3 text-mm-text-muted hover:text-mm-accent" />
         </a>

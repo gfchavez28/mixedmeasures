@@ -4,19 +4,20 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { CircleCheck } from 'lucide-react'
 import { toast } from 'sonner'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
-import { codebookApi, codesApi, categoriesApi, conversationsApi, textCodingApi, projectsApi, projectPortabilityApi } from '@/lib/api'
-import type { Project } from '@/lib/api'
+import { codebookApi, codesApi, categoriesApi, conversationsApi, textCodingApi, projectPortabilityApi } from '@/lib/api'
+import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import type { CodebookTreeResponse, CodebookCategoryNode } from '@/lib/api'
 import { useCodebookState } from '@/hooks/useCodebookState'
 import { analyzeSelection, collectCategoryCodeIds, collectDescendantCodeNumericIds, parseCodeNodeId } from '@/components/codebook/codebook-selection'
-import { buildHierarchyLevels, computeCodebookDiagnostics } from '@/lib/codebook-utils'
+import { computeCodebookDiagnostics } from '@/lib/codebook-utils'
 import CodebookToolbar from '@/components/codebook/CodebookToolbar'
+import CodebookFrozenWarningDialog from '@/components/codebook/CodebookFrozenWarningDialog'
+import { useFreezeGuard } from '@/hooks/useFreezeGuard'
 import CodebookHidePanel from '@/components/codebook/CodebookHidePanel'
 import CodebookTreeView from '@/components/codebook/CodebookTreeView'
 import CodebookPeekPanel from '@/components/codebook/CodebookPeekPanel'
 import type { UndoEntry } from '@/components/codebook/CodebookPeekPanel'
-import CodebookNetworkView from '@/components/codebook/CodebookNetworkView'
-import CodebookNetworkTable from '@/components/codebook/CodebookNetworkTable'
+import CodebookOverviewView from '@/components/codebook/CodebookOverviewView'
 import CodebookActionBar from '@/components/codebook/CodebookActionBar'
 import CodebookNodeMenu from '@/components/codebook/CodebookNodeMenu'
 import CreateCodePanel from '@/components/codebook/CreateCodePanel'
@@ -24,7 +25,6 @@ import CreateCategoryPanel from '@/components/codebook/CreateCategoryPanel'
 import MergeCodesDialog from '@/components/codebook/MergeCodesDialog'
 import MergeCategoriesDialog from '@/components/codebook/MergeCategoriesDialog'
 import GroupIntoCategoryDialog from '@/components/codebook/GroupIntoCategoryDialog'
-import CategoryTreePicker from '@/components/codebook/CategoryTreePicker'
 import { exportAsPng } from '@/lib/chart-export'
 
 const MAX_UNDO_STACK = 10
@@ -157,26 +157,6 @@ export default function CodebookView() {
     return max
   }, [hasSegFilter, baselineTreeData, treeData])
 
-  // Cooccurrence query (network mode only)
-  const cooccurrenceParams = useMemo(() => {
-    const params: Record<string, string | boolean | number> = {
-      hierarchy_level: cb.netLevel,
-    }
-    if (visibleConvIds) params.conversation_ids = visibleConvIds.join(',')
-    if (visibleColIds) params.text_column_ids = visibleColIds.join(',')
-    if (cb.inactive) params.include_inactive = true
-    if (cb.minSeg > 0) params.min_segments = cb.minSeg
-    if (cb.maxSeg !== null) params.max_segments = cb.maxSeg
-    return params
-  }, [cb.netLevel, visibleConvIds, visibleColIds, cb.inactive, cb.minSeg, cb.maxSeg])
-
-  const { data: cooccurrenceData, isLoading: isCooccurrenceLoading } = useQuery({
-    queryKey: ['codebook-cooccurrence', projectId, ...Object.entries(cooccurrenceParams).flat()],
-    queryFn: () => codebookApi.cooccurrence(projectId, cooccurrenceParams),
-    enabled: !isNaN(projectId) && cb.mode === 'network',
-    staleTime: 30_000,
-  })
-
   // Derived counts
   const totalCodes = useMemo(() => {
     if (!treeData) return 0
@@ -208,65 +188,6 @@ export default function CodebookView() {
 
   const isEmpty = treeData && totalCodes === 0 && treeData.universal_codes.length === 0
 
-  // Available hierarchy levels for network mode level selector (bottom-up labels)
-  const availableLevels = useMemo(
-    () => buildHierarchyLevels(treeData, project?.category_level_names),
-    [treeData, project?.category_level_names],
-  )
-
-  // Clamp netLevel to valid range (stale URL param may reference a removed depth)
-  useEffect(() => {
-    if (availableLevels.length > 0 && !availableLevels.some(l => l.value === cb.netLevel)) {
-      cb.setNetLevel(-1)
-    }
-  }, [availableLevels, cb.netLevel, cb.setNetLevel]) // eslint-disable-line react-hooks/exhaustive-deps -- cb is destructured; setNetLevel is stable
-
-  // ── Rename level mutation (optimistic) ────────────────────────────────
-  const renameLevelMutation = useMutation({
-    mutationFn: (params: { depth: number; name: string | null }) => {
-      const current = project?.category_level_names ?? {}
-      let next: Record<string, string> | null
-      if (params.name) {
-        next = { ...current, [String(params.depth)]: params.name }
-      } else {
-        const { [String(params.depth)]: _, ...rest } = current
-        next = Object.keys(rest).length > 0 ? rest : null
-      }
-      return projectsApi.update(projectId, { category_level_names: next } as Partial<Project>)
-    },
-    onMutate: async (params) => {
-      await queryClient.cancelQueries({ queryKey: ['project', projectId] })
-      const prev = queryClient.getQueryData<Project>(['project', projectId])
-      queryClient.setQueryData<Project>(['project', projectId], (old) => {
-        if (!old) return old
-        const current = old.category_level_names ?? {}
-        let next: Record<string, string> | null
-        if (params.name) {
-          next = { ...current, [String(params.depth)]: params.name }
-        } else {
-          const { [String(params.depth)]: _, ...rest } = current
-          next = Object.keys(rest).length > 0 ? rest : null
-        }
-        return { ...old, category_level_names: next }
-      })
-      return { prev }
-    },
-    onError: (_err, _params, context) => {
-      if (context?.prev) {
-        queryClient.setQueryData(['project', projectId], context.prev)
-      }
-      toast.error('Failed to rename level')
-    },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['project', projectId] })
-    },
-  })
-
-  const handleRenameLevelConfirm = useCallback((depth: number, newName: string | null) => {
-    renameLevelMutation.mutate({ depth, name: newName })
-    announce(newName ? `Level renamed to ${newName}` : 'Level name reset to default')
-  }, [renameLevelMutation, announce])
-
   // Diagnostics for health badges
   const diagnostics = useMemo(() => {
     if (!treeData) return { unused: 0, uncategorized: 0, emptyCategories: 0, lowCoverage: 0 }
@@ -295,42 +216,6 @@ export default function CodebookView() {
       uncategorized_codes: filterCodes(treeData.uncategorized_codes),
     }
   }, [treeData, cb.hiddenCodeIds])
-
-  // ── Client-side code hiding (network cooccurrence) ──────────────────────
-  const filteredCooccurrenceData = useMemo(() => {
-    if (!cooccurrenceData || cb.hiddenCodeIds.size === 0) return cooccurrenceData
-    // Only filter at code level (hierarchy_level = -1)
-    if (cooccurrenceData.hierarchy_level !== -1) return cooccurrenceData
-    const hidden = cb.hiddenCodeIds
-    const visibleNodes = cooccurrenceData.nodes.filter(n => !hidden.has(n.id))
-    const visibleNodeIds = new Set(visibleNodes.map(n => n.id))
-    const visibleEdges = cooccurrenceData.edges.filter(
-      e => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target)
-    )
-    const maxWeight = visibleEdges.reduce((max, e) => Math.max(max, e.weight), 0)
-    return {
-      ...cooccurrenceData,
-      nodes: visibleNodes,
-      edges: visibleEdges,
-      max_weight: maxWeight,
-    }
-  }, [cooccurrenceData, cb.hiddenCodeIds])
-
-  // #354: announce the "Showing N of M codes" count when the network is in
-  // codes-level view and the data changes. Screen readers don't otherwise
-  // see the status-bar update because it's outside any aria-live region.
-  useEffect(() => {
-    if (cb.mode !== 'network' || cb.netLevel !== -1 || !filteredCooccurrenceData) return
-    const shown = filteredCooccurrenceData.nodes.length
-    const total = filteredCooccurrenceData.total_codes_in_project
-    announce(`Showing ${shown} of ${total} codes in the codebook network.`)
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- deps intentionally list primitive fields (nodes.length, total_codes_in_project) not the filteredCooccurrenceData object, to avoid identity churn re-announcing on every recompute
-  }, [
-    cb.mode, cb.netLevel,
-    filteredCooccurrenceData?.nodes.length,
-    filteredCooccurrenceData?.total_codes_in_project,
-    announce,
-  ])
 
   // Filtered counts (use filteredTreeData for display, original for diagnostics)
   const filteredTotalCodes = useMemo(() => {
@@ -412,7 +297,6 @@ export default function CodebookView() {
     setMultiSelect(new Set())
     setTargetingMode(false)
     setMenuState(null)
-    setShowNetworkMovePicker(false)
   }, [cb.mode])
 
   // Announce multi-select count changes
@@ -432,8 +316,8 @@ export default function CodebookView() {
     queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
     queryClient.invalidateQueries({ queryKey: ['categories', projectId] })
     queryClient.invalidateQueries({ queryKey: ['codebook-tree', projectId] })
-    queryClient.invalidateQueries({ queryKey: ['codebook-cooccurrence', projectId] })
     queryClient.invalidateQueries({ queryKey: ['project-summary', projectId] })
+    invalidateDerivedCounts(queryClient, projectId, { metrics: true })  // #450: cross-surface counts
   }, [queryClient, projectId])
 
   // ── Color change handlers (shared by tree tooltip + peek panel) ──────
@@ -626,17 +510,10 @@ export default function CodebookView() {
     setMenuState(null)
   }, [selectionAnalysis, treeData, projectId, handleRecordUndo, bulkMoveMut, invalidateAll, announce])
 
-  const [showNetworkMovePicker, setShowNetworkMovePicker] = useState(false)
-  const networkMovePickerRef = useRef<HTMLDivElement>(null)
-
   const handleEnterTargeting = useCallback(() => {
-    if (cb.mode === 'network') {
-      setShowNetworkMovePicker(true)
-    } else {
-      setTargetingMode(true)
-    }
+    setTargetingMode(true)
     setMenuState(null)
-  }, [cb.mode])
+  }, [])
 
   const handleExitTargeting = useCallback(() => {
     setTargetingMode(false)
@@ -893,30 +770,7 @@ export default function CodebookView() {
     setMultiSelect(new Set())
     setTargetingMode(false)
     setMenuState(null)
-    setShowNetworkMovePicker(false)
   }, [])
-
-  // Outside click + Escape for network move picker
-  useEffect(() => {
-    if (!showNetworkMovePicker) return
-    const handleClick = (e: MouseEvent) => {
-      if (networkMovePickerRef.current && !networkMovePickerRef.current.contains(e.target as Node)) {
-        setShowNetworkMovePicker(false)
-      }
-    }
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        setShowNetworkMovePicker(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    document.addEventListener('keydown', handleKey)
-    return () => {
-      document.removeEventListener('mousedown', handleClick)
-      document.removeEventListener('keydown', handleKey)
-    }
-  }, [showNetworkMovePicker])
 
   // ── Document-level keyboard shortcuts (M, G, Shift+G, Delete) ─────────
 
@@ -986,6 +840,9 @@ export default function CodebookView() {
     clearSpotlight()
   }, [clearSpotlight])
 
+  // Track J · J3-1: warn before adding codes/categories to a frozen codebook (soft).
+  const freezeGuard = useFreezeGuard(!!project?.codebook_frozen_at)
+
   // Toggle: open one panel, close the other
   const handleToggleCreateCode = useCallback(() => {
     setShowCreateCategory(false)
@@ -1001,21 +858,6 @@ export default function CodebookView() {
 
   // Spotlight type derived from which panel is open
   const spotlightType = showCreateCode ? 'code' as const : showCreateCategory ? 'category' as const : null
-
-  // Network spotlight: find the root zone name for the spotlighted category
-  const spotlightZoneName = useMemo(() => {
-    if (!spotlightCatId || !treeData) return null
-    function findRootName(cats: CodebookCategoryNode[], rootName: string | null): string | null {
-      for (const cat of cats) {
-        const thisRoot = rootName ?? cat.name
-        if (cat.id === spotlightCatId) return thisRoot
-        const found = findRootName(cat.children, thisRoot)
-        if (found) return found
-      }
-      return null
-    }
-    return findRootName(treeData.tree, null)
-  }, [spotlightCatId, treeData])
 
   // ── PNG export ──────────────────────────────────────────────────────────
 
@@ -1033,7 +875,7 @@ export default function CodebookView() {
 
     try {
       await exportAsPng(el, filename)
-      toast.success(`${filename === 'codebook-tree' ? 'Tree' : 'Network'} exported as PNG`)
+      toast.success(`${filename === 'codebook-tree' ? 'Tree' : 'Overview'} exported as PNG`)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Export failed')
     } finally {
@@ -1112,7 +954,6 @@ export default function CodebookView() {
       queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
       queryClient.invalidateQueries({ queryKey: ['categories', projectId] })
       queryClient.invalidateQueries({ queryKey: ['codebook-tree', projectId] })
-      queryClient.invalidateQueries({ queryKey: ['codebook-cooccurrence', projectId] })
     } catch {
       toast.error('Codebook import failed')
     }
@@ -1124,27 +965,30 @@ export default function CodebookView() {
       <CodebookToolbar
         cb={cb}
         searchMatchCount={searchMatchCount}
-        availableLevels={availableLevels}
         diagnostics={diagnostics}
         totalCodes={filteredTotalCodes}
         totalCategories={totalCategories}
         treeData={filteredTreeData}
-        cooccurrenceData={filteredCooccurrenceData}
         isEmpty={!!filteredIsEmpty}
         hidePanelOpen={hidePanelOpen}
         onToggleHidePanel={() => setHidePanelOpen(prev => !prev)}
         hiddenCount={cb.hiddenCodeIds.size + cb.hiddenConvIds.size + cb.hiddenColIds.size}
         hiddenTooltip={hiddenTooltip}
-        categoryLevelNames={project?.category_level_names ?? null}
-        onRenameLevelConfirm={handleRenameLevelConfirm}
-        onCreateCode={handleToggleCreateCode}
-        onCreateCategory={handleToggleCreateCategory}
+        projectId={projectId}
+        onCreateCode={() => (showCreateCode ? handleToggleCreateCode() : freezeGuard.guard(handleToggleCreateCode))}
+        onCreateCategory={() => (showCreateCategory ? handleToggleCreateCategory() : freezeGuard.guard(handleToggleCreateCategory))}
         onTreeExport={() => handleExport('codebook-tree')}
-        onNetworkExport={() => handleExport('codebook-network')}
+        onOverviewExport={() => handleExport('codebook-overview')}
         onExportCodebook={handleExportCodebook}
         onImportCodebook={handleImportCodebook}
         isExportingCodebook={isExportingCodebook}
         dataSegMax={dataSegMax}
+      />
+
+      <CodebookFrozenWarningDialog
+        open={freezeGuard.warnOpen}
+        onProceed={freezeGuard.onProceed}
+        onCancel={freezeGuard.onCancel}
       />
 
       {/* Content area: 3-panel layout */}
@@ -1173,9 +1017,7 @@ export default function CodebookView() {
 
         {/* Center: Main visualization (wrapper for action bar positioning) */}
         <div className="flex-1 relative overflow-hidden">
-          <div ref={treeContainerRef} className={`h-full p-4 ${
-            cb.mode === 'network' && cb.netTable ? 'overflow-auto' : 'overflow-hidden'
-          }`}>
+          <div ref={treeContainerRef} className="h-full p-4 overflow-hidden">
             {isLoading && (
               <div className="space-y-3 animate-pulse">
                 <div className="h-4 w-48 bg-mm-border-subtle rounded" />
@@ -1234,39 +1076,14 @@ export default function CodebookView() {
               </div>
             )}
 
-            {!isLoading && filteredTreeData && !filteredIsEmpty && cb.mode === 'network' && (
-              <>
-                {isCooccurrenceLoading && (
-                  <div className="flex items-center justify-center h-full gap-2">
-                    <div className="w-4 h-4 border-2 border-mm-blue border-t-transparent rounded-full animate-spin" />
-                    <span className="text-sm text-mm-text-muted">Loading co-occurrence data…</span>
-                  </div>
-                )}
-                {!isCooccurrenceLoading && filteredCooccurrenceData && !cb.netTable && (
-                  <div className="h-full bg-mm-surface rounded-lg border border-mm-border-subtle overflow-hidden">
-                    <CodebookNetworkView
-                      data={filteredCooccurrenceData}
-                      sizing={cb.sizing}
-                      search={cb.search}
-                      selection={cb.selection}
-                      onSelect={cb.setSelection}
-                      onSearchMatchCount={handleSearchMatchCount}
-                      announce={announce}
-                      multiSelect={multiSelect}
-                      onMultiSelectChange={setMultiSelect}
-                      onContextMenu={handleContextMenu}
-                      lastSelectedRef={lastSelectedRef}
-                      availableLevels={availableLevels}
-                      onCodeColorChange={handleCodeColorChange}
-                      onCategoryColorChange={handleCategoryColorChange}
-                      spotlightZoneName={spotlightZoneName}
-                    />
-                  </div>
-                )}
-                {!isCooccurrenceLoading && filteredCooccurrenceData && cb.netTable && (
-                  <CodebookNetworkTable data={filteredCooccurrenceData} />
-                )}
-              </>
+            {!isLoading && filteredTreeData && !filteredIsEmpty && cb.mode === 'overview' && (
+              <CodebookOverviewView
+                treeData={filteredTreeData}
+                sizing={cb.sizing}
+                selection={cb.selection}
+                onSelect={cb.setSelection}
+                announce={announce}
+              />
             )}
           </div>
 
@@ -1285,28 +1102,6 @@ export default function CodebookView() {
               onHide={handleHideCodes}
               onClear={handleClearMultiSelect}
             />
-          )}
-
-          {/* Network move picker (replaces visual targeting for network mode) */}
-          {showNetworkMovePicker && treeData && (
-            <div
-              ref={networkMovePickerRef}
-              data-exclude-export
-              className="absolute bottom-16 left-1/2 -translate-x-1/2 z-30 w-56 bg-mm-surface rounded-lg border border-mm-border-subtle shadow-lg overflow-hidden"
-            >
-              <div className="px-2.5 py-1.5 text-xs font-medium text-mm-text-muted border-b border-mm-border-subtle">
-                Move {selectionAnalysis.movableCodes.length + selectionAnalysis.movableCategories.length} item{selectionAnalysis.movableCodes.length + selectionAnalysis.movableCategories.length !== 1 ? 's' : ''} to:
-              </div>
-              <CategoryTreePicker
-                treeData={treeData}
-                value={null}
-                onChange={(catId) => {
-                  if (catId !== null) handleBulkMove(catId)
-                  setShowNetworkMovePicker(false)
-                }}
-                noneLabel="Uncategorized"
-              />
-            </div>
           )}
 
           {/* Context menu */}
@@ -1452,31 +1247,6 @@ export default function CodebookView() {
 
         <span className="text-mm-border-medium">{'\u00b7'}</span>
         {cb.mode === 'tree' && <span>Cat: {cb.catFormat} · Codes: {cb.codeFormat}</span>}
-        {cb.mode === 'network' && filteredCooccurrenceData && (
-          <>
-            {/* #354: the network silently drops codes with zero applications
-              * (after exclude_facilitator=True). When N < M, surface the
-              * discrepancy with a tooltip explaining the filter \u2014 instead of
-              * leaving the user wondering why "tree shows 25, network shows 11".
-              * `total_codes_in_project` matches the network's universe
-              * (non-universal codes, respects include_inactive). */}
-            {cb.netLevel === -1 ? (
-              <span
-                title={
-                  filteredCooccurrenceData.nodes.length < filteredCooccurrenceData.total_codes_in_project
-                    ? 'Codes only appear here when applied to at least one non-facilitator segment. Hidden codes have facilitator-only applications or no applications yet.'
-                    : 'All codes have at least one participant-segment application.'
-                }
-              >
-                Showing {filteredCooccurrenceData.nodes.length} of {filteredCooccurrenceData.total_codes_in_project} codes
-              </span>
-            ) : (
-              <span>{filteredCooccurrenceData.nodes.length} nodes</span>
-            )}
-            <span className="text-mm-border-medium">{'\u00b7'}</span>
-            <span>{filteredCooccurrenceData.edges.length} edges</span>
-          </>
-        )}
         {multiSelect.size > 0 && (
           <>
             <span className="text-mm-border-medium">{'\u00b7'}</span>

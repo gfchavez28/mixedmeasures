@@ -46,8 +46,9 @@ export default function SplitToolbar({ position, onSplit, onCancel }: SplitToolb
         ref={buttonRef}
         size="sm"
         variant="default"
-        className="h-8 px-3 shadow-lg bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-zinc-200 gap-1.5"
+        className="h-8 px-3 shadow-lg bg-mm-text text-mm-bg hover:bg-mm-text/90 gap-1.5"
         aria-label="Split segment at selection"
+        title="Split this segment in two at the selected point"
         onMouseDown={(e) => {
           // Prevent clearing the text selection
           e.preventDefault()

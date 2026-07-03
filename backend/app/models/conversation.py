@@ -1,6 +1,7 @@
 from sqlalchemy import Boolean, Column, Float, Integer, String, DateTime, Enum, Text, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from uuid import uuid4
 import enum
 from ..database import Base
 
@@ -21,6 +22,8 @@ class Conversation(Base):
     conversation_date = Column(DateTime, nullable=True)  # Date the conversation took place (any type: interview, focus group, meeting)
     status = Column(Enum(ConversationStatus, values_callable=lambda x: [e.value for e in x]), default=ConversationStatus.IMPORTED, nullable=False)
     summary = Column(Text, nullable=True)
+    # Track J · J3-2-0: stable cross-instance identity for merge matching
+    uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 

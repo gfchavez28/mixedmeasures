@@ -29,6 +29,8 @@ export interface DatasetColumnPreview {
 export interface DatasetPreviewResponse {
   total_rows: number
   columns: DatasetColumnPreview[]
+  /** .xlsx uploads only (#523): workbook sheet names for the sheet picker. */
+  sheet_names?: string[] | null
 }
 
 export interface DatasetColumnConfig {
@@ -49,6 +51,8 @@ export interface DatasetImportConfig {
   description: string | null
   source: string | null
   column_configs: DatasetColumnConfig[]
+  /** .xlsx uploads only (#523): which worksheet to import (omit = first sheet). */
+  sheet_name?: string | null
 }
 
 export interface DatasetImportResponse {
@@ -56,6 +60,10 @@ export interface DatasetImportResponse {
   columns_created: number
   rows_created: number
   values_created: number
+  // #415: values recognized as missing (N/A / refusal labels), excluded from
+  // analysis per #381/#384. Disclosed on the import results screen.
+  recognized_missing_count: number
+  recognized_missing_labels: string[]
 }
 
 export interface Dataset {
@@ -321,6 +329,8 @@ export interface DatasetAppendPreviewResponse {
   preview_rows: AppendPreviewRow[]
   next_row_id: string
   row_pad_width: number
+  /** .xlsx uploads only (#523). */
+  sheet_names?: string[] | null
 }
 
 export interface DatasetAppendResponse {
@@ -363,10 +373,11 @@ export interface ProjectColumnListResponse {
 
 // API functions - Datasets
 export const datasetsApi = {
-  preview: (projectId: number, file: File, encoding = 'utf-8') => {
+  preview: (projectId: number, file: File, encoding = 'utf-8', sheetName?: string) => {
     const formData = new FormData()
     formData.append('file', file)
     formData.append('encoding', encoding)
+    if (sheetName) formData.append('sheet_name', sheetName)
     return api.post<DatasetPreviewResponse>(
       `/projects/${projectId}/datasets/preview`, formData,
       { headers: { 'Content-Type': 'multipart/form-data' } },
@@ -447,10 +458,11 @@ export const datasetsApi = {
       `/projects/${projectId}/datasets/${datasetId}/values/${valueId}`,
       data
     ).then(res => res.data),
-  appendPreview: (projectId: number, datasetId: number, file: File, encoding = 'utf-8') => {
+  appendPreview: (projectId: number, datasetId: number, file: File, encoding = 'utf-8', sheetName?: string) => {
     const formData = new FormData()
     formData.append('file', file)
     formData.append('encoding', encoding)
+    if (sheetName) formData.append('sheet_name', sheetName)
     return api.post<DatasetAppendPreviewResponse>(
       `/projects/${projectId}/datasets/${datasetId}/append-preview`, formData,
       { headers: { 'Content-Type': 'multipart/form-data' } },
@@ -460,6 +472,7 @@ export const datasetsApi = {
     column_mapping: Array<{ csv_column_index: number; column_id: number }>
     skip_duplicates: boolean
     row_start_id?: string | null
+    sheet_name?: string | null
   }, encoding = 'utf-8') => {
     const formData = new FormData()
     formData.append('file', file)

@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { SELECTED_ROW } from '@/lib/selection'
 import { Link } from 'react-router-dom'
 import {
   ChevronDown,
@@ -13,6 +14,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import BlindScopeNotice from './BlindScopeNotice'
 import {
   codeAnalysisApi,
   type Code,
@@ -43,6 +45,12 @@ interface ContentByCodeProps {
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
+  /** Blind mode active (multi-coder, colleagues hidden). Drives the self-only
+   *  notice on the selected-code detail so the all-coder codebook/search counts
+   *  don't look broken when the drill-through shows fewer/no segments (#454). */
+  blind?: boolean
+  /** Flip blindness (reveal flow is confirmed + logged by BlindModeToggle). */
+  onReveal?: (surface?: string) => void
 }
 
 export default function ContentByCode({
@@ -60,6 +68,8 @@ export default function ContentByCode({
   focusedCodeId,
   onFocusCode,
   onCodeChange,
+  blind = false,
+  onReveal,
 }: ContentByCodeProps) {
   const [search, setSearch] = useState('')
   // eslint-disable-next-line react-hooks/set-state-in-effect -- reset search when selected code changes
@@ -169,7 +179,7 @@ export default function ContentByCode({
   // Build count summary for header
   const countParts: string[] = []
   if (showSegments && segCount > 0) countParts.push(`${segCount} segment${segCount !== 1 ? 's' : ''}`)
-  if (showComments && commentCount > 0) countParts.push(`${commentCount} comment${commentCount !== 1 ? 's' : ''}`)
+  if (showComments && commentCount > 0) countParts.push(`${commentCount} text${commentCount !== 1 ? 's' : ''}`)
 
   return (
     <div className="space-y-4">
@@ -187,7 +197,7 @@ export default function ContentByCode({
           <Input
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Search segments and comments…"
+            placeholder="Search segments and texts…"
             className="pl-8 h-8 text-sm w-56"
           />
           {search && (
@@ -225,6 +235,15 @@ export default function ContentByCode({
         </div>
       )}
 
+      {/* Blind-mode self-only notice (#454, single-sourced via #517). The
+          codebook/search counts are project-wide (all coders); while blind this
+          view shows only YOUR coding, so without this the drill-through looks
+          broken ("3 segments" → none). */}
+      <BlindScopeNotice blind={blind} onReveal={onReveal}>
+        Blind mode is on — showing only your own coding for this code. Project
+        counts (codebook, search) include every coder.
+      </BlindScopeNotice>
+
       {/* Conversation Segments section */}
       {showSegments && (
         <div>
@@ -253,7 +272,7 @@ export default function ContentByCode({
         <div>
           {source === 'all' && showSegments && (
             <div className="flex items-center gap-3 mb-3 mt-2">
-              <span className="text-xs font-medium text-mm-text-muted uppercase tracking-wide">Coded Comments</span>
+              <span className="text-xs font-medium text-mm-text-muted uppercase tracking-wide">Coded Texts</span>
               <div className="flex-1 border-b border-mm-border-subtle" />
             </div>
           )}
@@ -264,6 +283,8 @@ export default function ContentByCode({
             allCodes={chipCodes}
             participantIds={filterParams.participant_ids}
             textColumnIds={filterParams.text_column_ids}
+            coderIds={filterParams.coder_ids}
+            layerScope={filterParams.layer_scope}
             search={search}
             focusedCodeId={focusedCodeId}
             onFocusCode={onFocusCode}
@@ -322,12 +343,12 @@ function CodeListItem({
   onClick: () => void
   source: 'all' | 'conversations' | 'text'
 }) {
-  const unitLabel = source === 'text' ? 'comment' : source === 'conversations' ? 'segment' : 'instance'
+  const unitLabel = source === 'text' ? 'text' : source === 'conversations' ? 'segment' : 'instance'
 
   return (
     <button
       className={`w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-mm-surface-hover transition-colors ${
-        isSelected ? 'bg-blue-50 dark:bg-blue-950/30' : ''
+        isSelected ? SELECTED_ROW : ''
       }`}
       onClick={onClick}
     >
@@ -387,6 +408,8 @@ function SegmentsSection({
       filterParams.participant_ids,
       filterParams.text_column_ids,
       filterParams.document_ids,
+      filterParams.coder_ids,
+      filterParams.layer_scope,
       loadedLimit, 0,
     ],
     queryFn: () => codeAnalysisApi.segmentsWithContext(projectId, codeId, {
@@ -519,7 +542,7 @@ function SegmentsSection({
                           )}
                           <Link
                             to={`/projects/${projectId}/conversations/${conv.conversation_id}?segment=${seg.id}`}
-                            className="text-[11px] text-blue-500 hover:underline opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center gap-0.5"
+                            className="text-[11px] text-mm-blue-text hover:underline opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center gap-0.5"
                           >
                             <ExternalLink className="w-3 h-3" />
                             View in conversation
@@ -583,7 +606,7 @@ function ContextLine({
       <p className="text-xs text-mm-text-faint flex-1">{segment.text}</p>
       <Link
         to={`/projects/${projectId}/conversations/${conversationId}?segment=${segment.id}`}
-        className="text-[11px] text-blue-400 hover:underline opacity-0 group-hover/ctx:opacity-100 focus:opacity-100 transition-opacity flex-shrink-0"
+        className="text-[11px] text-mm-blue-text hover:underline opacity-0 group-hover/ctx:opacity-100 focus:opacity-100 transition-opacity flex-shrink-0"
       >
         <ExternalLink className="w-3 h-3" />
       </Link>
@@ -601,6 +624,8 @@ function CommentsSection({
   allCodes,
   participantIds,
   textColumnIds,
+  coderIds,
+  layerScope,
   search,
   focusedCodeId,
   onFocusCode,
@@ -612,6 +637,8 @@ function CommentsSection({
   allCodes: Code[]
   participantIds?: string
   textColumnIds?: string
+  coderIds?: string
+  layerScope?: 'human' | 'consensus'
   search?: string
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
@@ -628,10 +655,12 @@ function CommentsSection({
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const { data, isLoading } = useQuery({
-    queryKey: ['code-texts-context', projectId, codeId, participantIds, textColumnIds, loadedLimit, 0],
+    queryKey: ['code-texts-context', projectId, codeId, participantIds, textColumnIds, coderIds, layerScope, loadedLimit, 0],
     queryFn: () => codeAnalysisApi.textsWithContext(projectId, codeId, {
       participant_ids: participantIds,
       text_column_ids: textColumnIds,
+      coder_ids: coderIds,
+      layer_scope: layerScope,
       limit: loadedLimit,
       offset: 0,
     }),
@@ -668,7 +697,7 @@ function CommentsSection({
 
   if (sortedDatasets.length === 0) {
     return <div className="text-center py-8 text-mm-text-muted">
-      {searchLower ? 'No comments match your search.' : 'No coded comments found for this code with current filters.'}
+      {searchLower ? 'No texts match your search.' : 'No coded texts found for this code with current filters.'}
     </div>
   }
 
@@ -676,7 +705,7 @@ function CommentsSection({
     <div className="space-y-2">
       {matchCount != null && (
         <p className="text-sm text-mm-text-faint">
-          {matchCount} match{matchCount !== 1 ? 'es' : ''} of {data.total_texts} comment{data.total_texts !== 1 ? 's' : ''}
+          {matchCount} match{matchCount !== 1 ? 'es' : ''} of {data.total_texts} text{data.total_texts !== 1 ? 's' : ''}
         </p>
       )}
 
@@ -746,7 +775,7 @@ function CommentsSection({
                           </span>
                           <Link
                             to={`/projects/${projectId}/datasets/text-coding`}
-                            className="text-[11px] text-blue-500 hover:underline opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center gap-0.5"
+                            className="text-[11px] text-mm-blue-text hover:underline opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center gap-0.5"
                           >
                             <ExternalLink className="w-3 h-3" />
                             View in Text Coding
@@ -814,6 +843,8 @@ function DocumentSegmentsSection({
       filterParams.participant_ids,
       filterParams.text_column_ids,
       filterParams.document_ids,
+      filterParams.coder_ids,
+      filterParams.layer_scope,
       200, 0,
     ],
     queryFn: () => codeAnalysisApi.segmentsWithContext(projectId, codeId, {
@@ -923,7 +954,7 @@ function DocumentSegmentsSection({
                             )}
                             <Link
                               to={`/projects/${projectId}/documents/${doc.document_id}`}
-                              className="text-[11px] text-blue-500 hover:underline opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center gap-0.5"
+                              className="text-[11px] text-mm-blue-text hover:underline opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center gap-0.5"
                             >
                               <ExternalLink className="w-3 h-3" />
                               View in document

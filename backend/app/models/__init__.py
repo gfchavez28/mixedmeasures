@@ -9,12 +9,14 @@ from .segment_group import SegmentGroup
 from .code import Code
 from .code_category import CodeCategory, CodeCategoryMembership
 from .code_application import CodeApplication
+from .consensus_stale_target import ConsensusStaleTarget
 from .note import Note
 from .memo import Memo
 from .participant import Participant
 from .dataset import Dataset, DatasetColumn, ColumnType, DatasetRow, DatasetValue
 from .recode import RecodeDefinition, RecodeType, OutputType
 from .equivalence_group import EquivalenceGroup
+from .code_equivalence_group import CodeEquivalenceGroup
 from .analysis_domain import AnalysisDomain, AnalysisDomainMember
 from .metric import MetricDefinition, ComputedResult
 from .materials import MaterialCollection, Material
@@ -41,6 +43,7 @@ __all__ = [
     "CodeCategory",
     "CodeCategoryMembership",
     "CodeApplication",
+    "ConsensusStaleTarget",
     "Note",
     "Memo",
     "Participant",
@@ -53,6 +56,7 @@ __all__ = [
     "RecodeType",
     "OutputType",
     "EquivalenceGroup",
+    "CodeEquivalenceGroup",
     "AnalysisDomain",
     "AnalysisDomainMember",
     "MetricDefinition",

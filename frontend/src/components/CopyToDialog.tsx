@@ -80,9 +80,9 @@ export function CopyToDialog({
           <DialogTitle>Copy "{definitionName}" to other columns</DialogTitle>
         </DialogHeader>
         <div className="flex items-center gap-2 text-xs text-mm-text-muted">
-          <button onClick={selectAll} className="hover:text-blue-600 underline">Select all</button>
+          <button onClick={selectAll} className="hover:text-mm-blue-text underline">Select all</button>
           <span>/</span>
-          <button onClick={deselectAll} className="hover:text-blue-600 underline">Deselect all</button>
+          <button onClick={deselectAll} className="hover:text-mm-blue-text underline">Deselect all</button>
           <span className="ml-auto">{selected.size} of {selectableColumns.length} selected</span>
         </div>
         <div className="space-y-1 mt-1 overflow-y-auto flex-1 min-h-0">

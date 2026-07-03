@@ -272,6 +272,32 @@ export function resolveChartColors(
   return result
 }
 
+/**
+ * Frequency-bar color resolution (#417). A numeric column's frequency bars are
+ * distinguished by their axis position, not by hue — a different rainbow color
+ * per numeric value implies a categorical meaning that isn't there. When the
+ * labels are all numeric AND the user hasn't picked a specific palette
+ * ('default') or any custom colors, every bar gets a single color. Explicit
+ * palette / custom-color choices and any non-numeric (categorical) labelling
+ * fall through to the normal per-label palette mapping.
+ */
+export function resolveFrequencyBarColors(
+  responseLabels: string[],
+  paletteName: string,
+  customColors: Record<string, string>,
+): Record<string, string> {
+  const allNumeric =
+    responseLabels.length > 0 &&
+    responseLabels.every(l => l.trim() !== '' && Number.isFinite(Number(l)))
+  if (allNumeric && paletteName === 'default' && Object.keys(customColors).length === 0) {
+    const single = resolveColorPalette('default')[0]
+    const result: Record<string, string> = {}
+    for (const label of responseLabels) result[label] = single
+    return result
+  }
+  return resolveChartColors(responseLabels, paletteName, customColors)
+}
+
 export function resolveGroupColors(
   groupValues: string[],
   paletteName: string,
@@ -628,6 +654,83 @@ export interface DumbbellRow {
 export interface DumbbellData {
   rows: DumbbellRow[]
   groupValues: string[]
+}
+
+export interface DumbbellAxis {
+  xMin: number
+  xMax: number
+}
+
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0
+  const s = [...xs].sort((a, b) => a - b)
+  const mid = Math.floor(s.length / 2)
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2
+}
+
+/**
+ * Compute the dumbbell/dot-plot x-axis range (#431), using the meta-analysis
+ * forest-plot principle: fit the axis to the point estimates (dots) and the
+ * *typical* CIs, so a single pathologically wide CI (e.g. an n=2 group whose
+ * normal-approx interval runs past the data bounds) can't dominate the scale
+ * and squish all the means. CIs that fall outside the resulting range are meant
+ * to be clipped + arrowed by the renderer (the exact bounds stay in the
+ * tooltip) — the Cochrane "show estimates and most CIs" convention.
+ *
+ * Algorithm: base the range on the dots ± 8% of their span; when CIs are shown,
+ * let the range grow to include CIs but only up to ~1.5× the MEDIAN CI
+ * half-width beyond the dots (median = robust to one huge outlier). A 0 baseline
+ * is kept for non-negative data; explicit xAxisMin/xAxisMax always win. Log mode
+ * is handled by the caller, not here.
+ */
+export function computeDumbbellAxis(
+  rows: DumbbellRow[],
+  opts: { showCI: boolean; xAxisMin?: number | null; xAxisMax?: number | null },
+): DumbbellAxis {
+  const dots: number[] = []
+  const lowers: number[] = []
+  const uppers: number[] = []
+  const halfWidths: number[] = []
+  for (const row of rows) {
+    for (const d of row.dots) {
+      dots.push(d.value)
+      if (opts.showCI && d.ciLower != null && d.ciUpper != null) {
+        lowers.push(d.ciLower)
+        uppers.push(d.ciUpper)
+        halfWidths.push((d.ciUpper - d.ciLower) / 2)
+      }
+    }
+  }
+
+  let xMin: number
+  let xMax: number
+  if (dots.length === 0) {
+    xMin = 0
+    xMax = 100
+  } else {
+    const dotMin = Math.min(...dots)
+    const dotMax = Math.max(...dots)
+    const dotSpan = Math.max(dotMax - dotMin, 1)
+    let lo = dotMin - 0.08 * dotSpan
+    let hi = dotMax + 0.08 * dotSpan
+    if (halfWidths.length > 0) {
+      // Allow the axis to grow for CIs, but cap the growth at ~1.5× the typical
+      // (median) CI half-width beyond the dots so an outlier CI clips instead of
+      // dictating the whole scale.
+      const cap = Math.max(1.5 * median(halfWidths), 0.1 * dotSpan)
+      lo = Math.max(Math.min(lo, Math.min(...lowers)), dotMin - cap)
+      hi = Math.min(Math.max(hi, Math.max(...uppers)), dotMax + cap)
+    }
+    xMin = Math.floor(lo / 10) * 10
+    xMax = Math.ceil(hi / 10) * 10
+    // Keep a 0 baseline for non-negative data (scores/percentages can't go below 0).
+    if (dotMin >= 0 && xMin < 0) xMin = 0
+  }
+
+  if (opts.xAxisMin != null) xMin = opts.xAxisMin
+  if (opts.xAxisMax != null) xMax = opts.xAxisMax
+  if (xMax <= xMin) xMax = xMin + 10 // guard against a degenerate range
+  return { xMin, xMax }
 }
 
 export interface GroupedFrequencySection {
@@ -1773,7 +1876,11 @@ export function shapeFrequencyTable(
     if (options?.reverseScale) scaleOrder = [...scaleOrder].reverse()
 
     const rawValidN: number = result.valid_n
-    const rawTotalN: number = rd.total_n ?? rawValidN
+    // #497: total_n lives at the RESULT level — the backend never puts it
+    // inside result_data, so the old `rd.total_n` read made missingN
+    // permanently 0: the Missing/Total table rows were dead UI and
+    // "% of total" silently equaled "% of valid".
+    const rawTotalN: number = result.total_n ?? rawValidN
     const validN = rawValidN - hiddenCount
     const totalN = rawTotalN - hiddenCount
     const missingN = rawTotalN - rawValidN

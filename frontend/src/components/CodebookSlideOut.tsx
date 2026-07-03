@@ -40,7 +40,11 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { toast } from 'sonner'
-import { type Code, type CodeCategory, codesApi, categoriesApi } from '@/lib/api'
+import { type Code, type CodeCategory, codesApi, categoriesApi, projectsApi } from '@/lib/api'
+import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import FreezeCodebookButton from '@/components/codebook/FreezeCodebookButton'
+import CodebookFrozenWarningDialog from '@/components/codebook/CodebookFrozenWarningDialog'
+import { useFreezeGuard } from '@/hooks/useFreezeGuard'
 import { getCodeColor } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -58,6 +62,7 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog'
 import { CATEGORY_COLORS, ColorSwatchPicker } from '@/components/ColorSwatchPicker'
+import { ColorDotButton } from '@/components/ColorDotButton'
 
 // ---- DnD helper components ----
 
@@ -68,7 +73,7 @@ function EmptyCategoryDropZone({ id }: { id: string }) {
     <div
       ref={setNodeRef}
       className={`px-3 py-2 text-xs text-mm-text-muted italic transition-colors ${
-        isOver ? 'bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400' : ''
+        isOver ? 'bg-mm-blue/12 text-mm-blue-text' : ''
       }`}
     >
       {isOver ? 'Drop here' : 'Drop codes here or use arrows'}
@@ -114,7 +119,7 @@ function SortableCodeRow({
       }}
     >
       {showInsertLine && (
-        <div className="absolute top-0 left-3 right-3 h-0.5 bg-blue-500 dark:bg-blue-400 rounded-full z-10 -translate-y-1/2" />
+        <div className="absolute top-0 left-3 right-3 h-0.5 bg-mm-blue rounded-full z-10 -translate-y-1/2" />
       )}
       {children({
         ref: setActivatorNodeRef,
@@ -201,6 +206,15 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
     queryFn: () => categoriesApi.list(projectId),
   })
 
+  // Track J · J3-1: warn before adding to a frozen codebook (soft lock). Shares the
+  // ['project'] cache with ProjectLayout + the FreezeCodebookButton.
+  const { data: project } = useQuery({
+    queryKey: ['project', projectId],
+    queryFn: () => projectsApi.get(projectId),
+  })
+  const { guard: guardCodebook, warnOpen, onProceed: onFreezeProceed, onCancel: onFreezeCancel } =
+    useFreezeGuard(!!project?.codebook_frozen_at)
+
   const codes = useMemo(() => codesData?.codes ?? [], [codesData?.codes])
   const categories = useMemo(() => categoriesData?.categories ?? [], [categoriesData?.categories])
 
@@ -211,6 +225,7 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
     queryClient.invalidateQueries({ queryKey: ['categories', projectId] })
+    invalidateDerivedCounts(queryClient, projectId, { metrics: true })  // #450: cross-surface counts
   }, [queryClient, projectId])
 
   const updateCodeMut = useMutation({
@@ -664,23 +679,27 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
   const handleCreateCode = useCallback(() => {
     const trimmed = newCodeName.trim()
     if (!trimmed) return
-    createCodeMut.mutate({
-      name: trimmed,
-      ...(newCodeCategoryId != null ? { category_id: newCodeCategoryId } : {}),
+    guardCodebook(() => {
+      createCodeMut.mutate({
+        name: trimmed,
+        ...(newCodeCategoryId != null ? { category_id: newCodeCategoryId } : {}),
+      })
+      setNewCodeName('')
+      setNewCodeCategoryId(null)
     })
-    setNewCodeName('')
-    setNewCodeCategoryId(null)
-  }, [newCodeName, newCodeCategoryId, createCodeMut])
+  }, [newCodeName, newCodeCategoryId, createCodeMut, guardCodebook])
 
   // ---- Create category ----
   const handleCreateCategory = useCallback(() => {
     const trimmed = newCategoryName.trim()
     if (!trimmed) return
-    createCategoryMut.mutate({ name: trimmed, color: newCategoryColor })
-    setNewCategoryName('')
-    setNewCategoryColor(CATEGORY_COLORS[0])
-    setShowCreateCategory(false)
-  }, [newCategoryName, newCategoryColor, createCategoryMut])
+    guardCodebook(() => {
+      createCategoryMut.mutate({ name: trimmed, color: newCategoryColor })
+      setNewCategoryName('')
+      setNewCategoryColor(CATEGORY_COLORS[0])
+      setShowCreateCategory(false)
+    })
+  }, [newCategoryName, newCategoryColor, createCategoryMut, guardCodebook])
 
   // ---- Delete category ----
   const handleDeleteCategory = useCallback(() => {
@@ -736,16 +755,12 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
           onOpenChange={(open) => setColorPickerOpen(open ? `code-${code.id}` : null)}
         >
           <PopoverTrigger asChild>
-            <button
-              className="w-5 h-5 rounded-full mt-0.5 flex-shrink-0 ring-offset-1 hover:ring-2 hover:ring-mm-border-medium transition-shadow flex items-center justify-center"
+            <ColorDotButton
+              className="mt-0.5"
+              color={getCodeColor(code)}
               aria-label={`Change color for ${code.name}`}
               title="Change code color"
-            >
-              <span
-                className="w-3 h-3 rounded-full"
-                style={{ backgroundColor: getCodeColor(code) }}
-              />
-            </button>
+            />
           </PopoverTrigger>
           <PopoverContent className="w-auto p-3 z-[200]" align="start" side="left" collisionPadding={16}>
             <div className="space-y-2">
@@ -1074,7 +1089,7 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
       >
         {/* Resize handle */}
         <div
-          className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-400/30 active:bg-blue-400/50 transition-colors z-10"
+          className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-mm-blue/30 active:bg-mm-blue/50 transition-colors z-10"
           onMouseDown={handleResizeMouseDown}
           role="separator"
           aria-orientation="vertical"
@@ -1091,17 +1106,26 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
               )}
             </span>
           </div>
-          <Button
-            ref={closeButtonRef}
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8"
-            onClick={onClose}
-            aria-label="Close codebook"
-          >
-            <X className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center gap-1.5">
+            <FreezeCodebookButton projectId={projectId} />
+            <Button
+              ref={closeButtonRef}
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={onClose}
+              aria-label="Close codebook"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
+
+        <CodebookFrozenWarningDialog
+          open={warnOpen}
+          onProceed={onFreezeProceed}
+          onCancel={onFreezeCancel}
+        />
 
         {/* ---- Search ---- */}
         <div className="px-3 py-2 border-b border-mm-border-subtle flex-shrink-0">

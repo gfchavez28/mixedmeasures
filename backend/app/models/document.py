@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, Enum, Text, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from uuid import uuid4
 import enum
 from ..database import Base
 
@@ -29,6 +30,8 @@ class Document(Base):
     )
     page_count = Column(Integer, nullable=True)
     summary = Column(Text, nullable=True)
+    # Track J · J3-2-0: stable cross-instance identity for merge matching
+    uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 

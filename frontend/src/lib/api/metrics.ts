@@ -62,6 +62,8 @@ export interface MetricDefinitionSummaryResponse {
   latest_computed_at: string | null
   total_valid_n: number | null
   result_count: number
+  /** #506: non-null-group results only (excludes the None/missing bucket) */
+  real_group_count: number
   last_accessed_at: string | null
   created_at: string
   updated_at: string

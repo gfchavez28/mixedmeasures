@@ -10,6 +10,7 @@ import MemosSlideOut from '@/components/MemosSlideOut'
 import ScratchpadPopover from '@/components/ScratchpadPopover'
 import ExportDialog from '@/components/ExportDialog'
 import KeyboardHelpDialog from '@/components/KeyboardHelpDialog'
+import { detectWorkspace } from './workspace'
 // Toaster moved to App.tsx
 
 export interface BreadcrumbSegment {
@@ -34,16 +35,6 @@ export interface ProjectLayoutContext {
 // eslint-disable-next-line react-refresh/only-export-components
 export function useProjectLayout() {
   return useOutletContext<ProjectLayoutContext>()
-}
-
-type Workspace = 'overview' | 'conversations' | 'datasets' | 'documents' | 'analysis'
-
-function detectWorkspace(pathname: string): Workspace {
-  if (pathname.includes('/conversations')) return 'conversations'
-  if (pathname.includes('/datasets')) return 'datasets'
-  if (pathname.includes('/documents')) return 'documents'
-  if (pathname.includes('/analysis')) return 'analysis'
-  return 'overview'
 }
 
 function detectCompact(pathname: string): boolean {

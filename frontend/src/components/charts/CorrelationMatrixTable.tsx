@@ -35,7 +35,7 @@ function formatCellContent(cell: CorrelationCell, format: CellFormat, sigLevels:
 
   switch (format) {
     case 'r_p':
-      return <>{rStr} <span className="text-[0.7em] opacity-70">({cell.p < 0.001 ? '<.001' : cell.p.toFixed(3).replace(/^0/, '')})</span></>
+      return <>{rStr} <span className="text-[0.7em] opacity-70">({formatP(cell.p)})</span></>
     case 'r_only':
       return <>{rStr}</>
     case 'r_stars':
@@ -105,7 +105,10 @@ export default function CorrelationMatrixTable({
 
       {/* Matrix table */}
       <ScrollableTable>
-        <table className="border-collapse" style={{ fontSize: cellFontSize }}>
+        <table className="border-collapse" style={{ fontSize: cellFontSize }} aria-label="Correlation matrix">
+          <caption className="sr-only">
+            Correlation matrix: the correlation coefficient r for each pair of variables, with significance and per-pair sample size. The lower triangle is shown and the diagonal is 1.
+          </caption>
           <thead>
             <tr>
               <th className="p-0" />

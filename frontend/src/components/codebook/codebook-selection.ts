@@ -19,7 +19,7 @@ export function parseCatNodeId(nodeId: string): number | null {
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export interface SelectionAnalysis {
-  codes: { id: number; name: string; isUniversal: boolean; segmentCount: number; sourceCount: number; categoryId: number | null }[]
+  codes: { id: number; name: string; isUniversal: boolean; segmentCount: number; sourceCount: number; sourceKeys: string[]; categoryId: number | null }[]
   categories: { id: number; name: string }[]
   movableCodes: number[]
   movableCategories: number[]
@@ -89,6 +89,7 @@ export function analyzeSelection(
           isUniversal: c.is_universal,
           segmentCount: c.segment_count,
           sourceCount: c.source_count,
+          sourceKeys: c.source_keys ?? [],
           categoryId: c.categoryId,
         })
       }

@@ -1,11 +1,16 @@
 import api from './client'
 
 // Participant types
+export interface LinkedConversationRef {
+  id: number
+  name: string
+}
+
 export interface LinkedSpeakerInfo {
   speaker_id: number
   speaker_name: string
   is_facilitator: boolean
-  conversation_names: string[]
+  conversations: LinkedConversationRef[]
   color_index: number
   color: string | null
 }

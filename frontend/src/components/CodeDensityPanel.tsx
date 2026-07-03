@@ -24,8 +24,8 @@ export default function CodeDensityPanel({ data, loading }: CodeDensityPanelProp
       <div className="flex items-center gap-3 mb-4">
         <span className="text-2xl font-bold tabular-nums">{data.overall.avg_codes_per_text.toFixed(1)}</span>
         <div className="text-xs text-mm-text-muted">
-          <div>avg codes per comment</div>
-          <div>{data.overall.text_count} comment{data.overall.text_count !== 1 ? 's' : ''}</div>
+          <div>avg codes per text</div>
+          <div>{data.overall.text_count} text{data.overall.text_count !== 1 ? 's' : ''}</div>
         </div>
       </div>
 

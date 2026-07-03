@@ -16,6 +16,11 @@ class CodebookCodeNode(BaseModel):
     source_count: int = 0
     excerpt_count: int = 0
     category_id: int | None = None
+    # #501: typed source identities ("conv:1", "col:13", "doc:2") so the peek
+    # panel's multi-select can UNION sources across codes — Σ of per-code
+    # source_counts double-counts shared sources (it exceeded the project's
+    # source universe on the audit corpus).
+    source_keys: list[str] = []
 
 
 class CodebookCategoryNode(BaseModel):
@@ -38,35 +43,3 @@ class CodebookTreeResponse(BaseModel):
     universal_codes: list[CodebookCodeNode] = []
     tree: list[CodebookCategoryNode] = []
     uncategorized_codes: list[CodebookCodeNode] = []
-
-
-class CodebookCooccurrenceNode(BaseModel):
-    id: int
-    name: str
-    color: str | None = None
-    segment_count: int = 0
-    source_count: int = 0
-    category_path: list[str] = []
-
-
-class CodebookCooccurrenceEdge(BaseModel):
-    source: int
-    target: int
-    weight: int
-
-
-class CodebookCooccurrenceResponse(BaseModel):
-    nodes: list[CodebookCooccurrenceNode] = []
-    edges: list[CodebookCooccurrenceEdge] = []
-    max_weight: int = 0
-    hierarchy_level: int = -1
-    # #354: total non-universal codes in the codebook regardless of filters.
-    # The network endpoint silently drops codes with `seg_count == 0` (after
-    # the `exclude_facilitator=True` default), so `len(nodes)` can be much
-    # smaller than the tree's code count. Surface the total here so the
-    # frontend can render a "Showing N of M" affordance instead of leaving
-    # the discrepancy unexplained. Universal codes (numeric_id 0/1) are
-    # excluded from the network anyway, so they're excluded from this count
-    # too — making M directly comparable to N. Respects the `include_inactive`
-    # query param so the denominator matches the eligible-codes universe.
-    total_codes_in_project: int = 0

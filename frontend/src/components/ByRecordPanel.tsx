@@ -1,14 +1,18 @@
 import { useMemo, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { SELECTED_CARD } from '@/lib/selection'
 import { useNavigate } from 'react-router-dom'
 import { ExternalLink, MapPin, Quote } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
-import { textCodingApi, type TextCodingResponse, type RecordContext } from '@/lib/api'
+import { textCodingApi, type TextCodingResponse, type RecordContext, type Coder } from '@/lib/api'
 import TextCodingContextMenu from '@/components/TextCodingContextMenu'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import type { FloatingCoords } from '@/lib/floating-utils'
 import CodeChip from '@/components/qualitative-analysis/CodeChip'
+import { useCoders } from '@/hooks/useCoders'
+import { mergeArchivedIntoCoderMap, chipHiddenWithArchived } from '@/lib/coder-color'
+import { visibleCodeChipRows } from '@/lib/coding-progress'
 
 interface ByRecordPanelProps {
   projectId: number
@@ -22,6 +26,10 @@ interface ByRecordPanelProps {
   onContextCodeApply?: (dvId: number, codeId: number) => void
   onContextCreateCode?: (coords: FloatingCoords) => void
   onContextCreateNote?: (dvId: number, coords: FloatingCoords) => void
+  hiddenCoderIds?: Set<number>  // Track J · J1 visibility filter
+  activeCoderId?: number | null  // Track J · J1 active coder (#446 context-menu check)
+  extraCoders?: Coder[]  // #451 archived-who-coded — folded into the chip map
+  showArchived?: boolean  // #451 "view all coders" — reveal archived chips
 }
 
 export default function ByRecordPanel({
@@ -36,6 +44,10 @@ export default function ByRecordPanel({
   onContextCodeApply,
   onContextCreateCode,
   onContextCreateNote,
+  hiddenCoderIds,
+  activeCoderId,
+  extraCoders,
+  showArchived,
 }: ByRecordPanelProps) {
   const navigate = useNavigate()
 
@@ -65,6 +77,13 @@ export default function ByRecordPanel({
   }, [comments, currentRecordId])
 
   const codeMap = useMemo(() => Object.fromEntries(codes.map(c => [c.id, c])), [codes])
+  const { coderMap, multiCoder } = useCoders()  // attribution badges (Track J · J1, multi-coder only)
+  // #451: fold archived-who-coded into the chip map + hide them unless "view all".
+  const effectiveCoderMap = useMemo(() => mergeArchivedIntoCoderMap(coderMap, extraCoders ?? []), [coderMap, extraCoders])
+  const chipHidden = useMemo(
+    () => chipHiddenWithArchived(hiddenCoderIds ?? new Set(), new Set((extraCoders ?? []).map(c => c.id)), !!showArchived),
+    [hiddenCoderIds, extraCoders, showArchived],
+  )
   const activeCodes = useMemo(() => codes.filter(c => c.is_active !== false), [codes])
   const codeIdToShortcutLabel = useCodeShortcutLabels(codes)
   const lastCoordsRef = useRef<FloatingCoords | null>(null)
@@ -128,7 +147,7 @@ export default function ByRecordPanel({
                     role="option"
                     aria-selected={isSelected}
                     className={`border rounded-lg p-3 bg-mm-surface cursor-pointer transition-colors group ${
-                      isSelected ? 'ring-2 ring-blue-400 bg-blue-50/50 dark:bg-blue-950/20' : 'hover:bg-mm-surface-hover'
+                      isSelected ? SELECTED_CARD : 'hover:bg-mm-surface-hover'
                     }`}
                     onClick={() => onSelectComment?.(comment.dataset_value_id)}
                     onContextMenu={(e) => {
@@ -171,11 +190,11 @@ export default function ByRecordPanel({
 
                     {comment.applied_code_ids.length > 0 && (
                       <div className="flex flex-wrap gap-1 mb-1">
-                        {comment.applied_code_ids.map(cid => {
-                          const code = codeMap[cid]
-                          return code ? (
-                            <CodeChip key={cid} code={code} size="xs" />
-                          ) : null
+                        {visibleCodeChipRows(comment.applied_code_details ?? [], chipHidden).map(row => {
+                          const code = codeMap[row.codeId]
+                          if (!code) return null
+                          const coder = (multiCoder && row.userId != null) ? effectiveCoderMap.get(row.userId) ?? null : null
+                          return <CodeChip key={row.key} code={code} size="xs" coder={coder} />
                         })}
                       </div>
                     )}
@@ -197,6 +216,7 @@ export default function ByRecordPanel({
                     onContextCreateCode={onContextCreateCode}
                     onContextCreateNote={onContextCreateNote}
                     lastCoordsRef={lastCoordsRef}
+                    activeCoderId={activeCoderId}
                   />
                 )}
               </ContextMenu>

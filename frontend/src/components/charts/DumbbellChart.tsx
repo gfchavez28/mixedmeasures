@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import type { DumbbellData, ChartFormatting, VariableNMode } from '@/lib/chart-data'
-import { DISPLAY_PRECISION, mergeFormatting, resolveGroupColors, resolveGroupTextColors, computeLogDomain } from '@/lib/chart-data'
+import { DISPLAY_PRECISION, mergeFormatting, resolveGroupColors, resolveGroupTextColors, computeLogDomain, computeDumbbellAxis } from '@/lib/chart-data'
 import { useChartColors } from '@/lib/theme-context'
 
 interface DumbbellChartProps {
@@ -77,6 +77,8 @@ function computeJitterOffsets(
   return offsets
 }
 
+const MAX_LABELED_JITTER_DOTS = 5
+
 export default function DumbbellChart({
   data,
   xAxisMax: xAxisMaxProp,
@@ -141,21 +143,18 @@ export default function DumbbellChart({
     return rows.filter(r => r.dots.some(d => d.value > 0))
   }, [isLog, rows])
 
-  const xMin = isLog && logDomain ? logDomain[0] : (fmt.xAxisMin ?? 0)
-
-  const xMax = useMemo(() => {
-    if (isLog && logDomain) return logDomain[1]
-    if (fmt.xAxisMax != null) return fmt.xAxisMax
-    if (xAxisMaxProp != null) return xAxisMaxProp
-    let max = 0
-    for (const row of rows) {
-      for (const dot of row.dots) {
-        if (dot.value > max) max = dot.value
-        if (showCI && dot.ciUpper != null && dot.ciUpper > max) max = dot.ciUpper
-      }
-    }
-    return Math.ceil(max / 10) * 10 || 100
-  }, [rows, xAxisMaxProp, showCI, fmt.xAxisMax, isLog, logDomain])
+  // #431: fit the axis to the means + typical CIs (forest-plot convention);
+  // pathologically wide CIs are clipped + arrowed in the whisker rendering
+  // below rather than allowed to dominate the scale. Log mode keeps its own
+  // positive-value domain; explicit fmt.xAxisMin/Max (or xAxisMaxProp) win.
+  const { xMin, xMax } = useMemo(() => {
+    if (isLog && logDomain) return { xMin: logDomain[0], xMax: logDomain[1] }
+    return computeDumbbellAxis(rows, {
+      showCI,
+      xAxisMin: fmt.xAxisMin,
+      xAxisMax: fmt.xAxisMax ?? xAxisMaxProp,
+    })
+  }, [isLog, logDomain, rows, showCI, fmt.xAxisMin, fmt.xAxisMax, xAxisMaxProp])
 
   const chartWidth = 700
   const plotWidth = chartWidth - LEFT_MARGIN - RIGHT_MARGIN
@@ -417,39 +416,73 @@ export default function DumbbellChart({
                   }
                 }
 
+                // #428c: with many clustered groups the jittered value labels
+                // pile up illegibly (and overflow the row). The axis fit (#431)
+                // spreads most cases out so they don't jitter at all; for the
+                // genuinely-clustered residual, drop the inline labels — dots,
+                // the connecting line, and tooltips still carry the values, and
+                // the comparison table is the precise read.
+                const showValueLabel = !(isJittered && row.dots.length > MAX_LABELED_JITTER_DOTS)
+
                 return (
                   <g key={dot.groupValue}>
                     <title>{ciTitle}</title>
-                    {/* CI whisker lines — follow jittered y */}
-                    {hasCI && (
-                      <g aria-label={`95% confidence interval: ${dot.ciLower!.toFixed(DISPLAY_PRECISION)} to ${dot.ciUpper!.toFixed(DISPLAY_PRECISION)}`}>
-                        <line
-                          x1={xScale(dot.ciLower!)} y1={dy}
-                          x2={xScale(dot.ciUpper!)} y2={dy}
-                          stroke={colors.reference} strokeWidth={1.5} strokeDasharray="3,2"
-                        />
-                        <line
-                          x1={xScale(dot.ciLower!)} y1={dy - 3}
-                          x2={xScale(dot.ciLower!)} y2={dy + 3}
-                          stroke={colors.reference} strokeWidth={1.5}
-                        />
-                        <line
-                          x1={xScale(dot.ciUpper!)} y1={dy - 3}
-                          x2={xScale(dot.ciUpper!)} y2={dy + 3}
-                          stroke={colors.reference} strokeWidth={1.5}
-                        />
-                      </g>
-                    )}
+                    {/* CI whisker lines — follow jittered y. #431: a CI that
+                        extends past the fitted axis is clipped at the edge and
+                        capped with an arrowhead (forest-plot convention) so one
+                        wide CI can't dominate the scale; the exact bounds stay
+                        in the tooltip + aria-label. */}
+                    {hasCI && (() => {
+                      const ciLo = dot.ciLower!
+                      const ciHi = dot.ciUpper!
+                      const loClipped = ciLo < xMin
+                      const hiClipped = ciHi > xMax
+                      const xLo = xScale(Math.max(ciLo, xMin))
+                      const xHi = xScale(Math.min(ciHi, xMax))
+                      const ARROW = 5
+                      return (
+                        <g aria-label={`95% confidence interval: ${ciLo.toFixed(DISPLAY_PRECISION)} to ${ciHi.toFixed(DISPLAY_PRECISION)}`}>
+                          <line
+                            x1={xLo} y1={dy} x2={xHi} y2={dy}
+                            stroke={colors.reference} strokeWidth={1.5} strokeDasharray="3,2"
+                          />
+                          {loClipped ? (
+                            <polygon
+                              points={`${xLo},${dy} ${xLo + ARROW},${dy - ARROW} ${xLo + ARROW},${dy + ARROW}`}
+                              fill={colors.reference}
+                            />
+                          ) : (
+                            <line
+                              x1={xLo} y1={dy - 3} x2={xLo} y2={dy + 3}
+                              stroke={colors.reference} strokeWidth={1.5}
+                            />
+                          )}
+                          {hiClipped ? (
+                            <polygon
+                              points={`${xHi},${dy} ${xHi - ARROW},${dy - ARROW} ${xHi - ARROW},${dy + ARROW}`}
+                              fill={colors.reference}
+                            />
+                          ) : (
+                            <line
+                              x1={xHi} y1={dy - 3} x2={xHi} y2={dy + 3}
+                              stroke={colors.reference} strokeWidth={1.5}
+                            />
+                          )}
+                        </g>
+                      )
+                    })()}
                     <DotShape shape={gi} cx={cx} cy={dy} r={DOT_RADIUS} fill={color} />
-                    <text
-                      x={labelX}
-                      y={labelY}
-                      textAnchor={labelAnchor}
-                      fill={colors.textDark}
-                      style={{ fontSize: fmt.dataLabelFontSize, fontWeight: 600 }}
-                    >
-                      {dot.value.toFixed(DISPLAY_PRECISION)}{suffix}
-                    </text>
+                    {showValueLabel && (
+                      <text
+                        x={labelX}
+                        y={labelY}
+                        textAnchor={labelAnchor}
+                        fill={colors.textDark}
+                        style={{ fontSize: fmt.dataLabelFontSize, fontWeight: 600 }}
+                      >
+                        {dot.value.toFixed(DISPLAY_PRECISION)}{suffix}
+                      </text>
+                    )}
                     {showN && (
                       <text
                         x={cx}

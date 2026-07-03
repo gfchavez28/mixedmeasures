@@ -11,6 +11,7 @@ import {
   Pencil,
   Filter,
   Focus,
+  Clock,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -31,6 +32,7 @@ import {
   type MaterialResponse,
 } from '@/lib/api'
 import type { DataLabelPosition } from '@/lib/chart-data'
+import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import type { QualTab, QualContentMode } from '@/lib/qual-analysis-types'
 import { useQualitativeAnalysis } from '@/hooks/useQualitativeAnalysis'
 import { Button } from '@/components/ui/button'
@@ -48,6 +50,7 @@ import QualFilterBar from '@/components/qualitative-analysis/QualFilterBar'
 import { RelationshipsSidebar, RelationshipsContent } from '@/components/qualitative-analysis/RelationshipsPanel'
 import { QuoteBoardSidebar } from '@/components/qualitative-analysis/QuoteBoardPanel'
 import { DescriptivesSidebar, DescriptivesContent } from '@/components/qualitative-analysis/DescriptivesPanel'
+import BlindScopeNotice from '@/components/qualitative-analysis/BlindScopeNotice'
 import ContentByCode from '@/components/qualitative-analysis/ContentByCode'
 import ContentBySource from '@/components/qualitative-analysis/ContentBySource'
 import QuoteBoardView from '@/components/qualitative-analysis/QuoteBoardView'
@@ -55,6 +58,18 @@ import FocusPill from '@/components/qualitative-analysis/FocusPill'
 import SendToCanvasMenu from '@/components/canvas/SendToCanvasMenu'
 import { getCodeColor } from '@/lib/utils'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
+import { useCoders } from '@/hooks/useCoders'
+import { useAuth } from '@/lib/auth-context'
+import CoderFilterPopover from '@/components/CoderFilterPopover'
+import SegmentedControl from '@/components/ui/segmented-control'
+import { useConsensusStatus } from '@/hooks/useConsensusStatus'
+import { useEnsureMaterialCollection } from '@/hooks/useEnsureMaterialCollection'
+import ReconciliationGrid from '@/components/qualitative-analysis/ReconciliationGrid'
+import IrrMatrix from '@/components/qualitative-analysis/IrrMatrix'
+import { isReconciliationTabVisible, isIrrTabVisible } from '@/lib/qual-analysis-types'
+import { SELECTED_SEGMENT, SELECTED_ROW } from '@/lib/selection'
+import BlindModeToggle from '@/components/BlindModeToggle'
+import { useBlindMode } from '@/hooks/useBlindMode'
 
 
 // ── Constants (hoisted out of component to avoid re-creation per render) ────
@@ -63,6 +78,8 @@ const QUAL_TABS: { id: QualTab; label: string }[] = [
   { id: 'content', label: 'Content' },
   { id: 'descriptives', label: 'Descriptives' },
   { id: 'relationships', label: 'Relationships' },
+  { id: 'reconciliation', label: 'Reconciliation' },
+  { id: 'irr', label: 'Reliability' },
   { id: 'quoteboard', label: 'Quote Board' },
 ]
 
@@ -88,7 +105,84 @@ export default function QualitativeAnalysisView() {
 
   const qa = useQualitativeAnalysis()
   const { openCodebook } = useProjectLayout()
+  const { coders, multiCoder } = useCoders()
+  const { user } = useAuth()
+  const { blind, toggleReveal } = useBlindMode(pid)
+  const self = user?.id ?? null
   const [srAnnouncement, setSrAnnouncement] = useState('')
+
+  // Track J · J1 item 4 — hook stores the INCLUDE list (empty = all); the popover
+  // works in HIDE-set terms. Convert at this boundary.
+  const coderInclude = qa.coderIds
+  const coderIncludeCsv = coderInclude.length ? coderInclude.join(',') : undefined
+  // Blind mode (DEC-G): analysis surfaces show self-only while blind (the coder filter
+  // is forced to just-me + hidden, and the comparison tabs are gated off below).
+  // Memoized so the [self] array keeps a stable ref (else downstream useMemo deps churn).
+  const effectiveCoderInclude = useMemo(
+    () => (blind && self != null ? [self] : coderInclude),
+    [blind, self, coderInclude],
+  )
+  const effectiveCoderIncludeCsv = blind && self != null ? String(self) : coderIncludeCsv
+  const hiddenCoders = useMemo(
+    () => coderInclude.length
+      ? new Set(coders.filter(c => !coderInclude.includes(c.id)).map(c => c.id))
+      : new Set<number>(),
+    [coders, coderInclude],
+  )
+  const handleCoderFilterChange = useCallback((hidden: Set<number>) => {
+    qa.setCoderIds(hidden.size === 0 ? [] : coders.filter(c => !hidden.has(c.id)).map(c => c.id))
+  }, [coders, qa])
+
+  // Track J · J2-5 — consensus-layer status drives the layer selector.
+  const { data: consensusStatus } = useConsensusStatus(pid)
+  const consensusAvailable = !!consensusStatus?.exists
+  // If consensus stops existing (e.g. a coder was removed), fall back to the human
+  // layer so the analysis never silently renders an empty consensus view.
+  useEffect(() => {
+    if (qa.layerScope === 'consensus' && !consensusAvailable) qa.setLayerScope('human')
+  }, [consensusAvailable, qa.layerScope, qa.setLayerScope]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Track J · J2-5 M-1 — the Reconciliation tab is gated on multi-coder + an existing
+  // consensus layer. QUAL_TABS is a module const, so the visible set is derived here.
+  const reconciliationVisible = isReconciliationTabVisible(multiCoder, consensusAvailable, blind)
+  const irrVisible = isIrrTabVisible(multiCoder, blind)
+  const visibleTabs = useMemo(
+    () => QUAL_TABS.filter(t =>
+      (t.id !== 'reconciliation' || reconciliationVisible) &&
+      (t.id !== 'irr' || irrVisible),
+    ),
+    [reconciliationVisible, irrVisible],
+  )
+  // Reveal-requiring tabs (Reconciliation/IRR) bounce to Content when they go invisible,
+  // gated so a legitimate deep link isn't kicked on the first unsettled frame
+  // (reconciliation: consensus-status SETTLED; irr: coders roster loaded — coders.length>0,
+  // always ≥1 once settled).
+  //
+  // #476 — EXCEPT when the tab went invisible because the active coder just SWITCHED while
+  // you were revealed. A coder switch is about whose layer you edit, not a request to
+  // re-blind, so carry the reveal to the new coder (logged as a session carry-over per
+  // DEC-G) instead of bouncing. The per-coder blind default is preserved for every OTHER
+  // entry into these tabs.
+  const prevSelfRef = useRef(self)
+  const wasRevealedRef = useRef(!blind)
+  useEffect(() => {
+    const switched = prevSelfRef.current !== self
+    prevSelfRef.current = self
+    const onReconcile = qa.tab === 'reconciliation' && consensusStatus !== undefined && !reconciliationVisible
+    const onIrr = qa.tab === 'irr' && coders.length > 0 && !irrVisible
+    if (onReconcile || onIrr) {
+      // Carry only when the invisibility is a blind re-entry FROM the switch (for
+      // reconciliation, consensus must still exist — revealing can't resurrect a missing
+      // consensus layer, so bounce in that case).
+      const carry = switched && wasRevealedRef.current && blind && multiCoder &&
+        (qa.tab === 'irr' || consensusAvailable)
+      if (carry) toggleReveal('coder-switch')
+      else qa.setTab('content')
+    }
+    // Track reveal state for the NEXT switch — skip the switch frame so the carry check
+    // above reads the PRE-switch value.
+    if (!switched) wasRevealedRef.current = !blind
+  }, [self, qa.tab, consensusStatus, coders.length, reconciliationVisible, irrVisible, blind, multiCoder, consensusAvailable, toggleReveal, qa.setTab]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sidebar section independent collapse
   const [materialsOpen, setMaterialsOpen] = useState(false)
@@ -176,6 +270,9 @@ export default function QualitativeAnalysisView() {
 
   const defaultPalette = collectionsData?.collections?.[0] ?? null
   const defaultCollectionId = defaultPalette?.id ?? null
+  // Lazily creates the default "Materials" collection on first save for a
+  // collection-less project so "Add to Materials" is never a dead-end (#469b).
+  const ensureCollectionId = useEnsureMaterialCollection(pid, defaultCollectionId)
 
   const { data: collectionDetail } = useQuery({
     queryKey: ['material-collection-detail', pid, defaultCollectionId],
@@ -207,7 +304,9 @@ export default function QualitativeAnalysisView() {
     document_ids: qa.selectedDocumentIds.size > 0 ? Array.from(qa.selectedDocumentIds).join(',') : undefined,
     source: qa.source,
     level: qa.tab === 'relationships' ? qa.cooccurrenceLevel : undefined,
-  }), [qa.excludeFacilitator, qa.selectedConversationIds, qa.participantIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.source, qa.tab, qa.cooccurrenceLevel])
+    coder_ids: effectiveCoderIncludeCsv,
+    layer_scope: qa.layerScope,
+  }), [qa.excludeFacilitator, qa.selectedConversationIds, qa.participantIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.source, qa.tab, qa.cooccurrenceLevel, effectiveCoderIncludeCsv, qa.layerScope])
 
   const quoteFilterParams = useMemo(() => ({
     participant_ids: qa.participantIds.length > 0 ? qa.participantIds.join(',') : undefined,
@@ -221,7 +320,7 @@ export default function QualitativeAnalysisView() {
   })
 
   const { data: freqData } = useQuery({
-    queryKey: ['code-frequencies', pid, qa.excludeFacilitator, Array.from(qa.selectedConversationIds).join(','), qa.participantIds.join(','), qa.source, Array.from(qa.selectedTextColumnIds).join(','), Array.from(qa.selectedDocumentIds).join(',')],
+    queryKey: ['code-frequencies', pid, qa.excludeFacilitator, Array.from(qa.selectedConversationIds).join(','), qa.participantIds.join(','), qa.source, Array.from(qa.selectedTextColumnIds).join(','), Array.from(qa.selectedDocumentIds).join(','), effectiveCoderIncludeCsv ?? '', qa.layerScope],
     queryFn: () => codeAnalysisApi.frequencies(pid, filterParams),
     enabled: !!pid,
   })
@@ -236,7 +335,9 @@ export default function QualitativeAnalysisView() {
     participant_ids: qa.participantIds.length > 0 ? qa.participantIds : undefined,
     group_by_subtype: qa.chartType === 'bar' && qa.groupBy ? qa.groupBy : undefined,
     aggregation: qa.codeMode === 'categories' ? 'category' : undefined,
-  }), [qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.excludeFacilitator, qa.participantIds, qa.chartType, qa.groupBy, qa.codeMode])
+    coder_ids: effectiveCoderInclude.length ? effectiveCoderInclude : null,
+    layer_scope: qa.layerScope,
+  }), [qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.excludeFacilitator, qa.participantIds, qa.chartType, qa.groupBy, qa.codeMode, effectiveCoderInclude, qa.layerScope])
 
   const { data: sourceFreqData, isLoading: sourceFreqLoading } = useQuery({
     queryKey: ['qual-source-frequencies', pid,
@@ -248,6 +349,8 @@ export default function QualitativeAnalysisView() {
       qa.participantIds.join(','),
       qa.chartType === 'bar' ? qa.groupBy : null,
       qa.codeMode,
+      effectiveCoderIncludeCsv ?? '',
+      qa.layerScope,
     ],
     queryFn: () => codeAnalysisApi.sourceFrequencies(pid, sourceFreqRequest),
     enabled: !!pid && qa.tab === 'descriptives' && qa.chartType !== 'saturation'
@@ -260,12 +363,16 @@ export default function QualitativeAnalysisView() {
     queryKey: ['qual-saturation', pid, qa.excludeFacilitator, qa.codeMode === 'categories',
       Array.from(qa.selectedConversationIds).sort().join(','),
       Array.from(qa.selectedDocumentIds).sort().join(','),
+      effectiveCoderIncludeCsv ?? '',
+      qa.layerScope,
     ],
     queryFn: () => codeAnalysisApi.saturation(pid, {
       exclude_facilitator: qa.excludeFacilitator,
       category_level: qa.codeMode === 'categories',
       conversation_ids: qa.selectedConversationIds.size > 0 ? Array.from(qa.selectedConversationIds).join(',') : undefined,
       document_ids: qa.selectedDocumentIds.size > 0 ? Array.from(qa.selectedDocumentIds).join(',') : undefined,
+      coder_ids: effectiveCoderIncludeCsv,
+      layer_scope: qa.layerScope,
     }),
     enabled: !!pid && qa.tab === 'descriptives' && qa.chartType === 'saturation',
   })
@@ -289,8 +396,10 @@ export default function QualitativeAnalysisView() {
       text_column_ids: qa.selectedTextColumnIds.size > 0 ? Array.from(qa.selectedTextColumnIds) : undefined,
       exclude_facilitator: qa.excludeFacilitator,
       participant_ids: qa.participantIds.length > 0 ? qa.participantIds : undefined,
+      coder_ids: effectiveCoderInclude.length ? effectiveCoderInclude : null,
+      layer_scope: qa.layerScope,
     }
-  }, [qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.excludeFacilitator, qa.participantIds])
+  }, [qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderInclude, qa.layerScope])
 
   const { data: comparisonData, isLoading: comparisonLoading } = useQuery({
     queryKey: [
@@ -301,6 +410,8 @@ export default function QualitativeAnalysisView() {
       Array.from(qa.selectedTextColumnIds).sort().join(','),
       qa.excludeFacilitator,
       qa.participantIds.join(','),
+      effectiveCoderIncludeCsv ?? '',
+      qa.layerScope,
     ],
     queryFn: () => codeAnalysisApi.demographicComparison(pid, comparisonRequest!),
     enabled: !!pid && qa.tab === 'relationships' && qa.relView === 'comparisons' && !!comparisonRequest,
@@ -459,10 +570,12 @@ export default function QualitativeAnalysisView() {
   // ── Material mutations ────────────────────────────────────────────────
 
   const addToMaterialsMutation = useMutation({
-    mutationFn: (data: { material_type: string; config: Record<string, unknown>; auto_name: string; source_tab?: string }) =>
-      materialsApi.createMaterial(pid, defaultCollectionId!, data),
+    mutationFn: ({ collectionId, ...data }: { collectionId: number; material_type: string; config: Record<string, unknown>; auto_name: string; source_tab?: string }) =>
+      materialsApi.createMaterial(pid, collectionId, data),
     onSuccess: (created) => {
-      queryClient.invalidateQueries({ queryKey: ['material-collection-detail', pid, defaultCollectionId] })
+      // Scope to the project (not a specific collectionId) so this still invalidates
+      // the right detail query when the collection was lazily created this save (#469b).
+      queryClient.invalidateQueries({ queryKey: ['material-collection-detail', pid] })
       queryClient.invalidateQueries({ queryKey: ['material-collections', pid] })
       qa.setUrlParam('element', '')  // clear any legacy alias
       qa.setUrlParam('material', String(created.id))
@@ -569,16 +682,17 @@ export default function QualitativeAnalysisView() {
   }, [qa.tab, qa.relView])
 
   // eslint-disable-next-line react-hooks/preserve-manual-memoization -- qa.buildCurrentConfig is stable but compiler infers full qa object
-  const handleAddToMaterials = useCallback(() => {
-    if (!defaultCollectionId) return
+  const handleAddToMaterials = useCallback(async () => {
+    const collectionId = await ensureCollectionId()
     const config = qa.buildCurrentConfig()
     addToMaterialsMutation.mutate({
+      collectionId,
       material_type: getMaterialType(),
       config,
       auto_name: generateAutoName(),
       source_tab: getSourceTab(),
     })
-  }, [defaultCollectionId, qa.buildCurrentConfig, addToMaterialsMutation, getMaterialType, generateAutoName, getSourceTab]) // eslint-disable-line react-hooks/exhaustive-deps -- qa destructured access; individual properties listed
+  }, [ensureCollectionId, qa.buildCurrentConfig, addToMaterialsMutation, getMaterialType, generateAutoName, getSourceTab]) // eslint-disable-line react-hooks/exhaustive-deps -- qa destructured access; individual properties listed
 
   const handleDescriptivesExport = useCallback(() => {
     const params: Record<string, string> = {}
@@ -588,8 +702,12 @@ export default function QualitativeAnalysisView() {
     if (qa.selectedDocumentIds.size > 0) params.document_ids = Array.from(qa.selectedDocumentIds).join(',')
     if (qa.excludeFacilitator) params.exclude_facilitator = 'true'
     if (qa.participantIds.length > 0) params.participant_ids = qa.participantIds.join(',')
+    // #499: carry the EFFECTIVE (blind-forced) coder/layer scope so the CSV
+    // matches the on-screen numbers.
+    if (effectiveCoderIncludeCsv) params.coder_ids = effectiveCoderIncludeCsv
+    if (qa.layerScope) params.layer_scope = qa.layerScope
     exportApi.sourceFrequenciesCsv(pid, params)
-  }, [pid, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.excludeFacilitator, qa.participantIds])
+  }, [pid, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderIncludeCsv, qa.layerScope])
 
   const conversationSourceCount = useMemo(
     () => conversations.filter(c => qa.selectedConversationIds.size === 0 || qa.selectedConversationIds.has(c.id)).length,
@@ -616,6 +734,7 @@ export default function QualitativeAnalysisView() {
     queryClient.invalidateQueries({ queryKey: ['code-texts-context', pid] })
     queryClient.invalidateQueries({ queryKey: ['conversation-segments-readonly', pid] })
     queryClient.invalidateQueries({ queryKey: ['text-column-readonly', pid] })
+    invalidateDerivedCounts(queryClient, pid, { metrics: true })  // #450: cross-surface counts (Content tab codes text + segments)
   }, [queryClient, pid])
 
   const hasActiveQbFilters = qa.qbHiddenCodeIds.size > 0 || qa.qbHideUncoded || qa.qbHiddenConversationIds.size > 0 || qa.qbHiddenTextColumnIds.size > 0 || qa.qbHiddenDocumentIds.size > 0
@@ -625,20 +744,20 @@ export default function QualitativeAnalysisView() {
 
   // eslint-disable-next-line react-hooks/preserve-manual-memoization -- qa.tab/qa.setTab are stable but compiler infers full qa object
   const handleTabKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
-    const idx = QUAL_TABS.findIndex(t => t.id === qa.tab)
-    let next: typeof QUAL_TABS[number] | undefined
+    const idx = visibleTabs.findIndex(t => t.id === qa.tab)
+    let next: typeof visibleTabs[number] | undefined
     switch (e.key) {
       case 'ArrowRight':
-        next = QUAL_TABS[(idx + 1) % QUAL_TABS.length]
+        next = visibleTabs[(idx + 1) % visibleTabs.length]
         break
       case 'ArrowLeft':
-        next = QUAL_TABS[(idx - 1 + QUAL_TABS.length) % QUAL_TABS.length]
+        next = visibleTabs[(idx - 1 + visibleTabs.length) % visibleTabs.length]
         break
       case 'Home':
-        next = QUAL_TABS[0]
+        next = visibleTabs[0]
         break
       case 'End':
-        next = QUAL_TABS[QUAL_TABS.length - 1]
+        next = visibleTabs[visibleTabs.length - 1]
         break
       default:
         return
@@ -648,7 +767,7 @@ export default function QualitativeAnalysisView() {
     setSrAnnouncement(`${next.label} tab selected`)
     const target = (e.currentTarget as HTMLDivElement).querySelector(`[data-tab="${next.id}"]`) as HTMLButtonElement | null
     target?.focus()
-  }, [qa.tab, qa.setTab]) // eslint-disable-line react-hooks/exhaustive-deps -- qa destructured access; individual properties listed
+  }, [qa.tab, qa.setTab, visibleTabs]) // eslint-disable-line react-hooks/exhaustive-deps -- qa destructured access; individual properties listed
 
   // Source mode keyboard nav (for sidebar segmented control)
   // eslint-disable-next-line react-hooks/preserve-manual-memoization -- qa.source/qa.setSource are stable but compiler infers full qa object
@@ -687,8 +806,12 @@ export default function QualitativeAnalysisView() {
     if (qa.selectedTextColumnIds.size > 0) params.text_column_ids = Array.from(qa.selectedTextColumnIds).join(',')
     if (qa.excludeFacilitator) params.exclude_facilitator = 'true'
     if (qa.participantIds.length > 0) params.participant_ids = qa.participantIds.join(',')
+    // #499: carry the EFFECTIVE (blind-forced) coder/layer scope so the CSV
+    // matches the on-screen numbers.
+    if (effectiveCoderIncludeCsv) params.coder_ids = effectiveCoderIncludeCsv
+    if (qa.layerScope) params.layer_scope = qa.layerScope
     exportApi.demographicComparisonCsv(pid, params)
-  }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.excludeFacilitator, qa.participantIds])
+  }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderIncludeCsv, qa.layerScope])
 
   // Content mode keyboard nav
   // eslint-disable-next-line react-hooks/preserve-manual-memoization -- qa.contentMode/qa.setContentMode are stable but compiler infers full qa object
@@ -804,16 +927,54 @@ export default function QualitativeAnalysisView() {
           }
         </h1>
         <div className="flex-1" />
+        {/* Coding-layer selector (Track J · J2-5) — offered only when a consensus
+            layer exists for this project (DEC-A); it also surfaces which layer is active. */}
+        {multiCoder && consensusAvailable && qa.tab !== 'reconciliation' && qa.tab !== 'irr' && (
+          <div className="flex items-center gap-2">
+            <SegmentedControl
+              options={([
+                { value: 'human', label: 'Coders' },
+                { value: 'consensus', label: 'Consensus' },
+              ] as { value: 'human' | 'consensus'; label: string }[])}
+              value={qa.layerScope}
+              onChange={qa.setLayerScope}
+              ariaLabel="Coding layer"
+              idPrefix="layer"
+            />
+            {qa.layerScope === 'consensus' && (consensusStatus?.stale_count ?? 0) > 0 && (
+              <span
+                className="inline-flex items-center gap-1 text-xs text-mm-text-muted"
+                title="Recent coding changed; the consensus layer is recomputing in the background."
+              >
+                <Clock className="w-3.5 h-3.5" aria-hidden="true" />
+                Consensus may be out of date
+              </span>
+            )}
+          </div>
+        )}
+        {/* Per-coder visibility filter (Track J · J1) — moot on the single consensus layer (UX-2)
+            and on Reconciliation (which shows every coder + consensus side-by-side). */}
+        {multiCoder && !blind && qa.layerScope !== 'consensus' && qa.tab !== 'reconciliation' && qa.tab !== 'irr' && (
+          <CoderFilterPopover
+            coders={coders}
+            activeCoderId={user?.id ?? null}
+            hidden={hiddenCoders}
+            onChange={handleCoderFilterChange}
+          />
+        )}
+        {/* Blind-mode toggle (DEC-G): while blind, analysis shows self-only + the
+            comparison tabs are hidden; revealing here un-blinds everywhere + logs. */}
+        {multiCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="analysis" />}
         <Button variant="ghost" size="sm" className="text-mm-text-muted" onClick={openCodebook}>
           <BookOpen className="w-4 h-4 mr-1" />
           Codebook
         </Button>
-        {qa.tab !== 'quoteboard' && (
+        {qa.tab !== 'quoteboard' && qa.tab !== 'reconciliation' && qa.tab !== 'irr' && (
           <Button variant="outline" size="sm" onClick={() => exportApi.codeFrequencies(pid, filterParams)} title="Export code frequencies as CSV">
             <Download className="w-3 h-3 mr-1" /> Export CSV
           </Button>
         )}
-        {defaultCollectionId && qa.tab !== 'content' && qa.tab !== 'quoteboard' && (
+        {qa.tab !== 'content' && qa.tab !== 'quoteboard' && qa.tab !== 'reconciliation' && qa.tab !== 'irr' && (
           <Button size="sm" onClick={handleAddToMaterials} disabled={addToMaterialsMutation.isPending}>
             <SwatchBook className="w-3 h-3 mr-1" />
             Add to Materials
@@ -828,7 +989,7 @@ export default function QualitativeAnalysisView() {
         aria-label="Analysis view"
         onKeyDown={handleTabKeyDown}
       >
-        {QUAL_TABS.map(t => {
+        {visibleTabs.map(t => {
           const isActive = qa.tab === t.id
           return (
             <button
@@ -855,7 +1016,27 @@ export default function QualitativeAnalysisView() {
       {/* Screen reader announcements */}
       <div aria-live="polite" className="sr-only">{srAnnouncement}</div>
 
-      {/* Body */}
+      {/* Body — Reconciliation/Reliability hide every sidebar section, so bypass the
+          PanelGroup entirely on those tabs and use the full width instead of reserving
+          an empty ~22% gutter (#442). Bypassing (vs conditionally dropping the sidebar
+          Panel) keeps react-resizable-panels' persisted layout intact for the other tabs. */}
+      {qa.tab === 'reconciliation' || qa.tab === 'irr' ? (
+        <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex-1 overflow-y-auto p-4" role="tabpanel" id="qual-tabpanel" aria-labelledby={`tab-${qa.tab}`}>
+            {qa.tab === 'reconciliation' ? (
+              <ReconciliationGrid
+                projectId={pid}
+                codes={codes}
+                currentUserId={user?.id ?? null}
+                staleCount={consensusStatus?.stale_count ?? 0}
+                setSrAnnouncement={setSrAnnouncement}
+              />
+            ) : (
+              <IrrMatrix projectId={pid} codes={codes} />
+            )}
+          </div>
+        </div>
+      ) : (
       <PanelGroup
         orientation="horizontal"
         defaultLayout={defaultLayout}
@@ -868,7 +1049,7 @@ export default function QualitativeAnalysisView() {
             {/* Section 1: Palette (hidden on Quote Board) */}
             {qa.tab !== 'quoteboard' && <div className={`border-b shrink-0 ${materialsOpen ? 'max-h-[200px]' : ''}`}>
               <button
-                className="w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium text-mm-text transition-colors shrink-0"
+                className={`w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium transition-colors shrink-0 ${materialsOpen ? 'text-mm-blue-text' : 'text-mm-text'}`}
                 onClick={() => setMaterialsOpen(prev => !prev)}
                 aria-expanded={materialsOpen}
               >
@@ -891,7 +1072,7 @@ export default function QualitativeAnalysisView() {
                             <button
                               className={`w-full text-left px-2 py-1.5 text-sm rounded flex items-center gap-1.5 ${
                                 el.id === qa.activeMaterialId
-                                  ? 'bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 font-medium'
+                                  ? `${SELECTED_ROW} font-medium`
                                   : 'hover:bg-mm-surface-hover text-mm-text'
                               }`}
                               onClick={() => qa.loadMaterial(el)}
@@ -940,7 +1121,7 @@ export default function QualitativeAnalysisView() {
             {/* Section 2: Codes (hidden on Quote Board) */}
             {qa.tab !== 'quoteboard' && <div className={`flex flex-col ${!codesOpen ? 'shrink-0' : 'flex-1 min-h-0'}`}>
               <button
-                className="w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium text-mm-text transition-colors shrink-0"
+                className={`w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium transition-colors shrink-0 ${codesOpen ? 'text-mm-blue-text' : 'text-mm-text'}`}
                 onClick={() => setCodesOpen(prev => !prev)}
                 aria-expanded={codesOpen}
               >
@@ -971,7 +1152,7 @@ export default function QualitativeAnalysisView() {
             {/* Section 3: Sources (hidden on Quote Board) */}
             {qa.tab !== 'quoteboard' && <div className={`border-t ${!sourcesOpen ? 'shrink-0' : 'flex-1 min-h-0 flex flex-col'}`}>
               <button
-                className="w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium text-mm-text transition-colors shrink-0"
+                className={`w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium transition-colors shrink-0 ${sourcesOpen ? 'text-mm-blue-text' : 'text-mm-text'}`}
                 onClick={() => setSourcesOpen(prev => !prev)}
                 aria-expanded={sourcesOpen}
               >
@@ -993,7 +1174,15 @@ export default function QualitativeAnalysisView() {
                     >
                       {SOURCE_MODES.map(s => {
                         const isActive = qa.source === s
-                        const label = s === 'all' ? 'All' : s === 'conversations' ? 'Conv.' : 'Comments'
+                        // #521/#520: 'conversations' mode has ALWAYS included document
+                        // segments (backend source semantics) — the old "Conv." label hid
+                        // documents entirely, and "Comments" was Comment→Text residue.
+                        const label = s === 'all' ? 'All' : s === 'conversations' ? 'Conv. + Docs' : 'Texts'
+                        const description = s === 'all'
+                          ? 'All sources'
+                          : s === 'conversations'
+                            ? 'Conversation and document segments'
+                            : 'Open-text dataset responses'
                         return (
                           <button
                             key={s}
@@ -1001,12 +1190,13 @@ export default function QualitativeAnalysisView() {
                             data-source={s}
                             aria-selected={isActive}
                             tabIndex={isActive ? 0 : -1}
+                            title={description}
                             className={`flex-1 px-2 py-1.5 text-xs rounded-sm transition-colors ${
                               isActive
                                 ? 'bg-mm-surface shadow-xs text-mm-text font-medium'
                                 : 'text-mm-text-muted hover:text-mm-text-secondary'
                             }`}
-                            onClick={() => { qa.setSource(s); setSrAnnouncement(`Showing ${s === 'all' ? 'all sources' : s}`) }}
+                            onClick={() => { qa.setSource(s); setSrAnnouncement(`Showing ${description.toLowerCase()}`) }}
                           >
                             {label}
                           </button>
@@ -1042,7 +1232,7 @@ export default function QualitativeAnalysisView() {
             {hasDemographicFilters && (
             <div className="border-t shrink-0">
               <button
-                className="w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium text-mm-text transition-colors shrink-0"
+                className={`w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium transition-colors shrink-0 ${filtersOpen ? 'text-mm-blue-text' : 'text-mm-text'}`}
                 onClick={() => setFiltersOpen(prev => !prev)}
                 aria-expanded={filtersOpen}
               >
@@ -1050,7 +1240,7 @@ export default function QualitativeAnalysisView() {
                 <Filter className="w-4 h-4 text-mm-text-muted" />
                 Filters
                 {qa.participantIds.length > 0 && (
-                  <span className="text-xs bg-blue-200 dark:bg-blue-800/50 text-blue-800 dark:text-blue-200 rounded-full px-1.5 py-0.5 leading-none ml-auto">
+                  <span className="text-xs bg-mm-blue/20 text-mm-blue-text rounded-full px-1.5 py-0.5 leading-none ml-auto">
                     {qa.participantIds.length}
                   </span>
                 )}
@@ -1112,7 +1302,7 @@ export default function QualitativeAnalysisView() {
             {/* Section 6: Exports (hidden on Quote Board) */}
             {qa.tab !== 'quoteboard' && <div className="border-t shrink-0">
               <button
-                className="w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium text-mm-text transition-colors shrink-0"
+                className={`w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium transition-colors shrink-0 ${exportsOpen ? 'text-mm-blue-text' : 'text-mm-text'}`}
                 onClick={() => setExportsOpen(prev => !prev)}
                 aria-expanded={exportsOpen}
               >
@@ -1144,7 +1334,7 @@ export default function QualitativeAnalysisView() {
         </Panel>
 
         {/* Resize handle */}
-        <PanelResizeHandle className="w-1.5 bg-mm-bg hover:bg-blue-200 dark:hover:bg-blue-800/40 active:bg-blue-300 dark:active:bg-blue-700/50 transition-colors cursor-col-resize flex items-center justify-center">
+        <PanelResizeHandle className="w-1.5 bg-mm-bg hover:bg-mm-blue/20 active:bg-mm-blue/30 transition-colors cursor-col-resize flex items-center justify-center">
           <div className="w-0.5 h-8 rounded-full bg-mm-border-medium" />
         </PanelResizeHandle>
 
@@ -1153,14 +1343,24 @@ export default function QualitativeAnalysisView() {
           <div className="h-full flex flex-col">
             {/* Tab content */}
             <div className="flex-1 overflow-y-auto p-4" role="tabpanel" id="qual-tabpanel" aria-labelledby={`tab-${qa.tab}`}>
+              {/* Reconciliation/Reliability render full-width above (outside this
+                  PanelGroup), so this switch only handles the sidebar-bearing tabs. */}
               {!hasCoding ? (
                 <div className="text-center py-16">
+                  {/* #517: while blind this emptiness only means YOUR coding is empty —
+                      "nothing has been coded yet" would misread as lost colleague work. */}
+                  <BlindScopeNotice blind={blind} onReveal={toggleReveal} className="max-w-xl mx-auto mb-6 text-left">
+                    Blind mode is on — these charts count only your own coding.
+                    Colleagues' work is hidden and doesn't appear in these numbers.
+                  </BlindScopeNotice>
                   <p className="text-mm-text-muted">
-                    {qa.source === 'text'
-                      ? 'No text has been coded yet.'
-                      : qa.source === 'all'
-                        ? 'No segments or text has been coded yet.'
-                        : 'No segments have been coded yet.'}
+                    {blind
+                      ? 'No coding visible to you matches this selection yet.'
+                      : qa.source === 'text'
+                        ? 'No text has been coded yet.'
+                        : qa.source === 'all'
+                          ? 'No segments or text has been coded yet.'
+                          : 'No segments have been coded yet.'}
                   </p>
                   <p className="text-sm text-mm-text-faint mt-1">
                     {qa.source === 'text'
@@ -1172,6 +1372,16 @@ export default function QualitativeAnalysisView() {
                 </div>
               ) : (
                 <>
+                  {/* Blind-scope notice (#517): while blind these charts count only
+                      the viewer's own coding — without this the heatmap/co-occurrence
+                      render as an unexplained near-empty grid while source lists show
+                      all-coder coverage. Content-by-code carries its own notice. */}
+                  {(qa.tab === 'descriptives' || qa.tab === 'relationships') && (
+                    <BlindScopeNotice blind={blind} onReveal={toggleReveal} className="mx-3 mt-3">
+                      Blind mode is on — these charts count only your own coding.
+                      Source lists and the codebook include every coder.
+                    </BlindScopeNotice>
+                  )}
                   {/* Descriptives tab */}
                   {qa.tab === 'descriptives' && (
                     <DescriptivesContent
@@ -1214,7 +1424,7 @@ export default function QualitativeAnalysisView() {
                                 tabIndex={isActive ? 0 : -1}
                                 className={`px-3 py-1.5 text-xs rounded-sm transition-colors ${
                                   isActive
-                                    ? 'bg-mm-surface shadow-xs text-mm-text font-medium'
+                                    ? `${SELECTED_SEGMENT} shadow-xs`
                                     : 'text-mm-text-muted hover:text-mm-text-secondary'
                                 }`}
                                 onClick={() => {
@@ -1254,6 +1464,8 @@ export default function QualitativeAnalysisView() {
                           focusedCodeId={focusedCodeId}
                           onFocusCode={handleFocusCode}
                           onCodeChange={handleCodeChange}
+                          blind={blind && multiCoder && qa.layerScope !== 'consensus'}
+                          onReveal={toggleReveal}
                         />
                       ) : (
                         <ContentBySource
@@ -1328,6 +1540,7 @@ export default function QualitativeAnalysisView() {
           </div>
         </Panel>
       </PanelGroup>
+      )}
     </div>
   )
 }

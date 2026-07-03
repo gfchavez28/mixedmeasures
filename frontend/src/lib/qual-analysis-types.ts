@@ -3,7 +3,26 @@ export type AnalysisSource =
   | { type: 'text_column'; id: number; label: string; datasetId: number; datasetName: string; columnName: string }
   | { type: 'document'; id: number; label: string }
 
-export type QualTab = 'content' | 'descriptives' | 'relationships' | 'quoteboard'
+export type QualTab = 'content' | 'descriptives' | 'relationships' | 'reconciliation' | 'irr' | 'quoteboard'
+
+/**
+ * Track J · J2-5 M-1 — the Reconciliation tab/grid is offered only when the project
+ * is multi-coder AND a consensus layer exists. Hidden while BLIND (DEC-G — the
+ * reconciliation grid reveals every coder side-by-side; you must Reveal first). Pure.
+ */
+export function isReconciliationTabVisible(multiCoder: boolean, consensusAvailable: boolean, blind = false): boolean {
+  return multiCoder && consensusAvailable && !blind
+}
+
+/**
+ * Track J · J2-5 — the Reliability (IRR) tab is offered whenever the project is
+ * multi-coder. Unlike Reconciliation it does NOT require a consensus layer (IRR is
+ * human-roster agreement, independent of consensus). Hidden while BLIND (DEC-G — it
+ * names coders + shows agreement). Pure (unit-tested).
+ */
+export function isIrrTabVisible(multiCoder: boolean, blind = false): boolean {
+  return multiCoder && !blind
+}
 export type QualCodeMode = 'codes' | 'categories'
 export type QualChartType = 'heatmap' | 'bar' | 'stacked_bar' | 'summary' | 'saturation'
 export type QualValueMode = 'count' | 'segment_proportion' | 'text_coverage'

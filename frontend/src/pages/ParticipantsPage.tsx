@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from 'react'
 import { Link } from 'react-router-dom'
+import { SELECTED_ROW } from '@/lib/selection'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
@@ -204,7 +205,7 @@ export default function ParticipantsPage() {
                 p => (p.display_name || p.identifier).toLowerCase() === trimmed
               )
               if (match && !duplicateConfirmed) {
-                const convNames = match.linked_speakers.flatMap(s => s.conversation_names)
+                const convNames = match.linked_speakers.flatMap(s => s.conversations.map(c => c.name))
                 const uniqueConvs = [...new Set(convNames)]
                 return (
                   <div className="flex items-center gap-3 p-3 bg-amber-50 border border-amber-200 rounded-lg dark:bg-amber-950/30 dark:border-amber-800">
@@ -271,7 +272,7 @@ export default function ParticipantsPage() {
             <Users className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />
             <h3 className="text-lg font-medium text-mm-text mb-2">No participants yet</h3>
             <p className="text-mm-text-muted mb-4">
-              Participants are auto-created when you import conversations, or you can add them manually.
+              When you import a conversation, a participant is created for each non-facilitator speaker. You can also add participants manually.
             </p>
             <Button onClick={() => setIsAddingParticipant(true)}>
               <Plus className="w-4 h-4 mr-2" />
@@ -481,7 +482,7 @@ function ParticipantRow({
     else if (e.key === 'Escape') handleCancel()
   }
 
-  const linkedConversations = participant.linked_speakers.flatMap(s => s.conversation_names)
+  const linkedConversations = participant.linked_speakers.flatMap(s => s.conversations.map(c => c.name))
   const uniqueConversations = [...new Set(linkedConversations)]
 
   // #353: keyboard activation for the (now-expandable) row. Enter/Space
@@ -500,7 +501,7 @@ function ParticipantRow({
 
   return (
     <tr
-      className={`hover:bg-mm-surface-hover cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset ${isSelected ? 'bg-blue-50 dark:bg-blue-950/30' : ''}`}
+      className={`hover:bg-mm-surface-hover cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset ${isSelected ? SELECTED_ROW : ''}`}
       onClick={() => onSelect?.()}
       // #353 — keyboard + screen-reader affordance for row expansion
       tabIndex={0}
@@ -545,7 +546,7 @@ function ParticipantRow({
           )}
           {isOrphan && (
             <span
-              className="px-1.5 py-0.5 text-[10px] rounded bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 shrink-0"
+              className="px-1.5 py-0.5 text-[10px] rounded bg-mm-surface-hover text-mm-text-muted shrink-0"
               title="No conversations or datasets reference this participant — its sources were deleted"
             >
               No linked sources
@@ -568,7 +569,7 @@ function ParticipantRow({
       </td>
       <td className="px-4 py-3 text-sm text-right">
         {participant.dataset_rows.length > 0
-          ? <span className="text-blue-600 dark:text-blue-400">{participant.dataset_rows.length}</span>
+          ? <span className="text-mm-blue-text">{participant.dataset_rows.length}</span>
           : <span className="text-mm-text-faint">0</span>
         }
       </td>
@@ -744,8 +745,23 @@ function ParticipantDetailPanel({
                 </Popover>
                 <div className="min-w-0">
                   <p className="text-xs text-mm-text">{s.speaker_name}</p>
-                  {s.conversation_names.length > 0 && (
-                    <p className="text-[10px] text-mm-text-faint truncate" title={s.conversation_names.join(', ')}>{s.conversation_names.join(', ')}</p>
+                  {s.conversations.length > 0 && (
+                    <p className="text-[10px] text-mm-text-faint truncate" title={s.conversations.map(c => c.name).join(', ')}>
+                      {s.conversations.map((c, i) => (
+                        <span key={c.id}>
+                          {i > 0 && ', '}
+                          <a
+                            href={`/projects/${projectId}/conversations/${c.id}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="hover:text-mm-blue-text hover:underline"
+                            title={`Open conversation "${c.name}" in new tab`}
+                          >
+                            {c.name}
+                          </a>
+                        </span>
+                      ))}
+                    </p>
                   )}
                 </div>
               </div>
@@ -767,7 +783,16 @@ function ParticipantDetailPanel({
                 <div key={dr.id} className="bg-mm-bg rounded p-2">
                   <div className="flex items-center justify-between">
                     <div className="min-w-0">
-                      <p className="text-xs font-medium text-mm-text truncate" title={dr.dataset_name}>{dr.dataset_name}</p>
+                      <a
+                        href={`/projects/${projectId}/datasets/${dr.dataset_id}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="group/dslink flex items-center gap-1 min-w-0 text-xs font-medium text-mm-text hover:text-mm-blue-text"
+                        title={`Open dataset "${dr.dataset_name}" in new tab`}
+                      >
+                        <span className="truncate group-hover/dslink:underline">{dr.dataset_name}</span>
+                        <ExternalLink className="w-2.5 h-2.5 flex-shrink-0 opacity-0 group-hover/dslink:opacity-60" aria-hidden="true" />
+                      </a>
                       <p className="text-[11px] text-mm-text-faint" title={dr.row_identifier ?? undefined}>{dr.row_identifier}</p>
                     </div>
                     <button
@@ -839,7 +864,7 @@ function ParticipantDetailPanel({
                 href={`/projects/${projectId}/datasets/${linkingDatasetId}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-mm-text-faint hover:text-blue-500 flex-shrink-0"
+                className="text-mm-text-faint hover:text-mm-blue-text flex-shrink-0"
                 title="Open dataset in new tab"
                 onClick={(e) => e.stopPropagation()}
               >

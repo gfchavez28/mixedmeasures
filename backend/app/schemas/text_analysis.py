@@ -17,12 +17,20 @@ class FilteredFrequenciesRequest(BaseModel):
     column_ids: list[int]
     filters: list[SubgroupFilter] = []
     include_overall: bool = True
+    # Track J · J1 item 4 — scope analysis output to selected coders (None/empty = all coders)
+    coder_ids: list[int] | None = None
+    # Track J · J2 slab 3b — coder layer: None/'human' (default) or 'consensus'
+    layer_scope: str | None = None
 
 
 class CrossTabulationRequest(BaseModel):
     text_column_ids: list[int]
     cross_column_id: int
     code_ids: list[int] | None = None
+    # Track J · J1 item 4 — scope analysis output to selected coders (None/empty = all coders)
+    coder_ids: list[int] | None = None
+    # Track J · J2 slab 3b — coder layer: None/'human' (default) or 'consensus'
+    layer_scope: str | None = None
 
 
 # ── Response schemas ─────────────────────────────────────────────────────────

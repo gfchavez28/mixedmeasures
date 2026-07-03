@@ -60,6 +60,9 @@ export default function PostHocTable({
           className="mt-1.5 border-collapse text-[11px] w-full"
           aria-label={`Tukey HSD post-hoc comparisons for ${variableName}`}
         >
+          <caption className="sr-only">
+            Tukey HSD post-hoc pairwise comparisons for {variableName}: group A, group B, mean difference, p-value, and 95% confidence interval for each pair of groups.
+          </caption>
           <thead>
             <tr>
               <th scope="col" className="px-2 py-1 text-left font-normal text-mm-text-faint">Group A</th>

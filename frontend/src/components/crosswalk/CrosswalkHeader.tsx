@@ -28,6 +28,7 @@ import {
   HelpCircle,
   Eye,
   EyeOff,
+  Download,
 } from 'lucide-react'
 // ChevronsDownUp = "collapse all" icon (chevrons pointing inward at center)
 // ChevronsUpDown = "expand all"   icon (chevrons pointing outward from center)
@@ -67,6 +68,9 @@ interface CrosswalkHeaderProps {
    * (not destroyed) so flipping back restores prior visibility. */
   allDotsHidden?: boolean
   onToggleAllDots?: () => void
+  /** #12d-a — export the crosswalk as a CSV harmonization table. Disabled
+   * when there are no variable groups to export. */
+  onExportCsv?: () => void
 }
 
 export function CrosswalkHeader({
@@ -87,6 +91,7 @@ export function CrosswalkHeader({
   onExpandAll,
   allDotsHidden = false,
   onToggleAllDots,
+  onExportCsv,
 }: CrosswalkHeaderProps) {
   const effectiveDatasetCount = datasetCount ?? datasets.length
   const suggestEnabled = !!onSuggestGroups && effectiveDatasetCount >= 2 && !isSuggestLoading
@@ -191,6 +196,23 @@ export function CrosswalkHeader({
           <Plus className="w-4 h-4 mr-1.5" />
           New variable group
         </Button>
+        {onExportCsv && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onExportCsv}
+            disabled={bracketCount === 0}
+            title={
+              bracketCount === 0
+                ? 'Create a variable group to export'
+                : 'Export the crosswalk as a CSV harmonization table'
+            }
+            data-testid="crosswalk-export-csv"
+          >
+            <Download className="w-4 h-4 mr-1.5" />
+            Export CSV
+          </Button>
+        )}
         {showCollapseControls && (
           // Single-button toggle: when anything is expanded the action is
           // "Collapse all"; when everything is already collapsed the action

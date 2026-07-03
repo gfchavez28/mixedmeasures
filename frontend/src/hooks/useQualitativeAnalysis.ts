@@ -25,6 +25,7 @@ function getDefaultForKey(key: string): string {
   switch (key) {
     case 'tab': return 'descriptives'
     case 'codeMode': return 'codes'
+    case 'layer': return 'human'
     case 'excl': return '1'
     case 'chart': return 'heatmap'
     case 'val': return 'count'
@@ -72,6 +73,10 @@ export interface QualitativeAnalysisState {
   // Filters
   excludeFacilitator: boolean
   participantIds: number[]
+  /** Track J · J1 item 4 — coder (user) IDs to INCLUDE; empty = all coders. */
+  coderIds: number[]
+  /** Track J · J2-5 — analysis coding layer: 'human' (default) or the derived 'consensus' layer. */
+  layerScope: 'human' | 'consensus'
 
   // Descriptives
   chartType: QualChartType
@@ -142,6 +147,8 @@ export interface QualitativeAnalysisActions {
   setAllSourceIds: (convIds: Set<number>, ccolIds: Set<number>, docIds: Set<number>) => void
   setExcludeFacilitator: (exclude: boolean) => void
   setParticipantIds: (ids: number[]) => void
+  setCoderIds: (ids: number[]) => void
+  setLayerScope: (scope: 'human' | 'consensus') => void
   setChartType: (type: QualChartType) => void
   setValueMode: (mode: QualValueMode) => void
   setDenominatorMode: (mode: QualDenominatorMode) => void
@@ -219,6 +226,8 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
   const docsRaw = searchParams.get('docs') ?? ''
   const exclRaw = searchParams.get('excl')
   const pidsRaw = searchParams.get('pids') ?? ''
+  const codersRaw = searchParams.get('coders') ?? ''
+  const layerRaw = searchParams.get('layer') || 'human'
   const chartRaw = searchParams.get('chart') || 'heatmap'
   const valRaw = searchParams.get('val') || 'count'
   const denomRaw = searchParams.get('denom') || 'total'
@@ -266,6 +275,11 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     if (!pidsRaw) return [] as number[]
     return pidsRaw.split(',').map(Number).filter(n => !isNaN(n))
   }, [pidsRaw])
+  const coderIds = useMemo(() => {
+    if (!codersRaw) return [] as number[]
+    return codersRaw.split(',').map(Number).filter(n => !isNaN(n))
+  }, [codersRaw])
+  const layerScope = (layerRaw === 'consensus' ? 'consensus' : 'human') as 'human' | 'consensus'
   const chartType = chartRaw as QualChartType
   const valueMode = valRaw as QualValueMode
   const denominatorMode = denomRaw as QualDenominatorMode
@@ -400,6 +414,17 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     }, { replace: true })
   }, [setSearchParams])
 
+  const setCoderIds = useCallback((ids: number[]) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      if (ids.length === 0) next.delete('coders')
+      else next.set('coders', ids.join(','))
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+
+  const setLayerScope = useCallback((v: 'human' | 'consensus') => setUrlParam('layer', v), [setUrlParam])
+
   const setChartType = useCallback((v: QualChartType) => setUrlParam('chart', v), [setUrlParam])
   const setValueMode = useCallback((v: QualValueMode) => setUrlParam('val', v), [setUrlParam])
   const setDenominatorMode = useCallback((v: QualDenominatorMode) => setUrlParam('denom', v), [setUrlParam])
@@ -523,6 +548,8 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
       document_ids: Array.from(selectedDocumentIds),
       exclude_facilitator: excludeFacilitator,
       participant_ids: participantIds,
+      coder_ids: coderIds,
+      layer_scope: layerScope,
       chart_type: chartType,
       value_mode: valueMode,
       denominator_mode: denominatorMode,
@@ -565,7 +592,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     return config
   }, [
     tab, source, codeMode, selectedCodeIds, selectedConversationIds,
-    selectedTextColumnIds, selectedDocumentIds, excludeFacilitator, participantIds,
+    selectedTextColumnIds, selectedDocumentIds, excludeFacilitator, participantIds, coderIds, layerScope,
     chartType, valueMode, denominatorMode, sortOrder, orientRaw,
     relView, cooccurrenceLevel, showProportion, cooccurrencePreset, comparisonChartMode, comparisonPalette, showEffectSize, showSummaryRow, showRowN, showChartN, groupBy, contentMode, contentCodeId, contentSource,
     descTitle, descSubtitle, descFootnote, relTitle, relSubtitle, relFootnote,
@@ -611,6 +638,12 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
 
       if (config.participant_ids?.length > 0) next.set('pids', config.participant_ids.join(','))
       else next.delete('pids')
+
+      if (config.coder_ids?.length > 0) next.set('coders', config.coder_ids.join(','))
+      else next.delete('coders')
+
+      if (config.layer_scope === 'consensus') next.set('layer', 'consensus')
+      else next.delete('layer')
 
       // Descriptives
       if (config.chart_type && config.chart_type !== 'heatmap') next.set('chart', config.chart_type)
@@ -724,6 +757,8 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     selectedDocumentIds,
     excludeFacilitator,
     participantIds,
+    coderIds,
+    layerScope,
     chartType,
     valueMode,
     denominatorMode,
@@ -772,6 +807,8 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     setAllSourceIds,
     setExcludeFacilitator,
     setParticipantIds,
+    setCoderIds,
+    setLayerScope,
     setChartType,
     setValueMode,
     setDenominatorMode,

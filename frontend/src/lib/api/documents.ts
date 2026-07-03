@@ -18,6 +18,7 @@ export interface SegmentCodeResponse {
   name: string
   color: string | null
   is_universal: boolean
+  user_id: number | null  // coder who applied this code (Track J · J1)
 }
 
 export interface ExcerptInfo {

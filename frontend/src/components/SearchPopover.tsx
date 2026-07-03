@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Search, FileText, Tag, Users, StickyNote, MessageSquare, MessageCircle, Layers, X, LoaderCircle, ChevronDown, Quote } from 'lucide-react'
+import { Search, FileText, Tag, Users, StickyNote, MessageSquare, MessageCircle, Layers, X, LoaderCircle, ChevronDown, Quote, ArrowUpRight } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
@@ -24,6 +24,7 @@ import {
   type CanvasSearchResult,
 } from '@/lib/api'
 import { getSpeakerInitials, getInitialsBadgeColors } from '@/lib/conversation-import-utils'
+import { displayCountAfterLocalFilter } from '@/lib/search-display'
 
 interface SearchPopoverProps {
   open: boolean
@@ -204,25 +205,35 @@ export default function SearchPopover({
   }
 
   // ── Display-filtered results ──
-  // Segments: filter by source_type to match checked source checkboxes
+  // Segments: filter by source_type to match checked source checkboxes.
+  // #507: keep the backend's honest total when the filter removed nothing —
+  // items is CAPPED, so items.length is the cap, not the match count.
   const displaySegments = useMemo(() => {
     if (!searchResults?.segments) return null
-    const items = searchResults.segments.items.filter(s => {
+    const fetched = searchResults.segments.items
+    const items = fetched.filter(s => {
       if (s.source_type === 'conversation' && showConvSegments) return true
       if (s.source_type === 'document' && showDocSegments) return true
       return false
     })
     if (items.length === 0) return null
-    return { count: items.length, items }
+    return {
+      count: displayCountAfterLocalFilter(searchResults.segments.count, fetched.length, items.length),
+      items,
+    }
   }, [searchResults?.segments, showConvSegments, showDocSegments])
 
   // Comments: filter by is_quoted when quotedOnly is on
   const displayTexts = useMemo(() => {
     if (!searchResults?.text) return null
     if (!quotedOnly) return searchResults.text
-    const items = searchResults.text.items.filter(c => c.is_quoted)
+    const fetched = searchResults.text.items
+    const items = fetched.filter(c => c.is_quoted)
     if (items.length === 0) return null
-    return { count: items.length, items }
+    return {
+      count: displayCountAfterLocalFilter(searchResults.text.count, fetched.length, items.length),
+      items,
+    }
   }, [searchResults?.text, quotedOnly])
 
   // Conversations/Documents name matches: suppress when quotedOnly (name matches aren't "quoted")
@@ -317,6 +328,15 @@ export default function SearchPopover({
   const handleCodeClick = (_code: CodeSearchResult) => {
     onClose()
     onOpenCodebook?.()
+  }
+
+  // Secondary action on a code result: jump to the coded-content view in
+  // Qualitative Analysis, filtered to this code. Same deep-link the codebook
+  // "View all N segments" uses, so it lands on ContentByCode — which carries
+  // the #454 blind-mode notice (an all-coder "N uses" can resolve to a
+  // self-only view while blind, explained there rather than a silent empty).
+  const handleViewCodeInAnalysis = (code: CodeSearchResult) => {
+    closeAndNavigate(`/projects/${projectId}/analysis/qualitative?tab=content&contentMode=by-code&codes=${code.id}`)
   }
 
   const handleConversationClick = (conversation: ConversationSearchResult) => {
@@ -506,7 +526,14 @@ export default function SearchPopover({
     }
     if (e.key === 'Enter' && focusedIndex >= 0 && flatItems[focusedIndex]) {
       e.preventDefault()
-      activateItem(flatItems[focusedIndex])
+      const focused = flatItems[focusedIndex]
+      // Shift+Enter on a code jumps to its coded content in Qualitative Analysis
+      // (plain Enter still opens the codebook). Mirrors the "Analysis" button.
+      if (e.shiftKey && focused.type === 'code') {
+        handleViewCodeInAnalysis(focused.data as CodeSearchResult)
+      } else {
+        activateItem(focused)
+      }
       return
     }
     if (e.key === 'Home' && flatItems.length > 0) {
@@ -580,13 +607,49 @@ export default function SearchPopover({
 
   const renderCode = (code: CodeSearchResult, item: FlatResultItem) => {
     const idx = globalIdx++
-    return renderResultButton(item, idx, <>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm"><span className="font-mono text-muted-foreground mr-2">{code.numeric_id}</span>{highlightMatch(code.name, debouncedQuery)}</p>
-        {code.description && <p className="text-xs text-muted-foreground line-clamp-1">{highlightMatch(code.description, debouncedQuery)}</p>}
+    const isFocused = focusedIndex === idx
+    const id = getItemId(item)
+    // The option button (codebook on click) + a sibling "Analysis" action.
+    // Kept as siblings, NOT nested, so the listbox option stays a real button
+    // and we don't nest interactives (invalid HTML / the #437 lesson).
+    return (
+      <div key={id} className="flex items-stretch">
+        <button
+          id={id}
+          role="option"
+          aria-selected={isFocused}
+          tabIndex={-1}
+          className={`flex-1 min-w-0 text-left px-3 py-2 flex items-start gap-2 transition-colors outline-none ${
+            isFocused ? 'bg-[hsl(var(--mm-green)/0.14)]' : 'hover:bg-[hsl(var(--mm-green)/0.08)]'
+          }`}
+          onClick={() => activateItem(item)}
+          onMouseEnter={() => setFocusedIndex(idx)}
+        >
+          <div className="flex-1 min-w-0">
+            <p className="text-sm">{highlightMatch(code.name, debouncedQuery)}</p>
+            {code.description && <p className="text-xs text-muted-foreground line-clamp-1">{highlightMatch(code.description, debouncedQuery)}</p>}
+          </div>
+          <span
+            className="text-xs text-muted-foreground whitespace-nowrap"
+            title="Times this code is applied — across segments and dataset responses, counting every coder"
+          >
+            {code.usage_count} use{code.usage_count === 1 ? '' : 's'}
+          </span>
+        </button>
+        <button
+          type="button"
+          tabIndex={-1}
+          onClick={() => handleViewCodeInAnalysis(code)}
+          onMouseEnter={() => setFocusedIndex(idx)}
+          title="View coded content in Qualitative Analysis"
+          aria-label={`View "${code.name}" in Qualitative Analysis`}
+          className="shrink-0 px-2.5 flex items-center gap-1 text-[11px] font-medium text-mm-green-text border-l border-border/50 hover:bg-[hsl(var(--mm-green)/0.12)] transition-colors outline-none"
+        >
+          <ArrowUpRight className="w-3.5 h-3.5" />
+          Analysis
+        </button>
       </div>
-      <span className="text-xs text-muted-foreground">{code.usage_count} uses</span>
-    </>)
+    )
   }
 
   const renderConversation = (conv: ConversationSearchResult, item: FlatResultItem) => {
@@ -664,7 +727,7 @@ export default function SearchPopover({
           <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium ${
             result.match_type === 'theme'
               ? 'bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400'
-              : 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
+              : 'bg-mm-blue/12 text-mm-blue-text'
           }`}>
             {result.match_type === 'theme' ? 'Theme' : 'Content'}
           </span>
@@ -1008,8 +1071,16 @@ export default function SearchPopover({
 
         {/* Result count footer */}
         {showResults && hasResults && (
-          <div className="px-3 py-2 border-t text-xs text-mm-text-faint" role="status">
-            {totalResultCount} result{totalResultCount !== 1 ? 's' : ''} across {activeTypeCount} type{activeTypeCount !== 1 ? 's' : ''}
+          <div className="px-3 py-2 border-t text-xs text-mm-text-faint flex items-center justify-between gap-2">
+            <span role="status">
+              {totalResultCount} result{totalResultCount !== 1 ? 's' : ''} across {activeTypeCount} type{activeTypeCount !== 1 ? 's' : ''}
+            </span>
+            {focusedIndex >= 0 && flatItems[focusedIndex]?.type === 'code' && (
+              <span aria-hidden="true" className="flex items-center gap-1 whitespace-nowrap">
+                <kbd className="inline-flex items-center justify-center h-5 px-1 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">&#8679;&crarr;</kbd>
+                Go to Qualitative
+              </span>
+            )}
           </div>
         )}
       </DialogContent>

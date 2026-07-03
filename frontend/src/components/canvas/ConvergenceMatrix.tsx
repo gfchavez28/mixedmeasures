@@ -7,6 +7,7 @@ const REL_COLORS: Record<string, string> = {
   confirms: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400',
   contradicts: 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400',
   extends: 'bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400',
+  // eslint-disable-next-line no-restricted-syntax -- categorical relationship-type color map hue (DESIGN.md §5 carve-out; siblings raw, not the mm-blue "selected" token)
   influences: 'bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400',
 }
 
@@ -58,7 +59,7 @@ export default function ConvergenceMatrix({
     const rel = relMap.get(key) ?? relMap.get(reverseKey)
 
     if (rel) {
-      const colorClass = REL_COLORS[rel.relationship_type] ?? 'bg-gray-50 text-gray-600 dark:bg-gray-800/30'
+      const colorClass = REL_COLORS[rel.relationship_type] ?? 'bg-mm-surface-hover text-mm-text-secondary'
       return (
         <td
           key={colTheme.id}

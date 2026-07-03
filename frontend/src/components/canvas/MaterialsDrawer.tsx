@@ -291,7 +291,7 @@ export default function MaterialsDrawer({
                             className={`text-[10px] font-medium shrink-0 rounded px-1 py-0.5 ${
                               isQual
                                 ? 'text-emerald-700 bg-emerald-50 dark:text-emerald-400 dark:bg-emerald-900/30'
-                                : 'text-blue-700 bg-blue-50 dark:text-blue-400 dark:bg-blue-900/30'
+                                : 'text-mm-blue-text bg-mm-blue/12'
                             }`}
                           >
                             {isQual ? 'Q' : 'N'}

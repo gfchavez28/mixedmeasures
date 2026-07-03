@@ -10,13 +10,16 @@ import json
 import logging
 import os
 import re
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import inspect as sa_inspect, func
 from sqlalchemy.orm import Session
+
+from .text_similarity import similarity_ratio
 
 from ..models import (
     AnalysisDomain,
@@ -28,6 +31,7 @@ from ..models import (
     Code,
     CodeApplication,
     CodeCategory,
+    CodeEquivalenceGroup,
     TextCodingConfig,
     ComputedResult,
     Conversation,
@@ -54,7 +58,11 @@ from ..models import (
     Speaker,
     StatisticalTest,
 )
+from ..models.user import User
+from ..auth import unique_username
+from ..config import get_backup_dir
 from ..services.backup import APP_VERSION
+from ..services.coding_layers import CONSENSUS_ORIGIN, code_usage_count_expr, non_consensus_filter
 from ..services.canvas import (
     EMBED_NODE_TYPES,
     EMBED_TYPE_MAP,
@@ -66,6 +74,22 @@ logger = logging.getLogger(__name__)
 
 CURRENT_FORMAT_VERSION = 1
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
+
+
+class MergeDivergenceError(ValueError):
+    """Track J · J3-2c: a merge was refused because the colleague's copy diverged
+    from the target (re-segmentation or a code not in the shared codebook).
+
+    Subclasses ``ValueError`` so the service's existing ``except ValueError`` paths
+    (and the direct-call tests that ``pytest.raises(ValueError)``) still catch it,
+    while the endpoint can catch it FIRST and surface ``.payload`` as a structured
+    409 the UI can render as a per-source diff (the machine-readable half of the
+    scope §7 gate; the full visualization is J3-3).
+    """
+
+    def __init__(self, message: str, payload: dict):
+        super().__init__(message)
+        self.payload = payload
 
 
 # ── Serialization helpers ───────────────────────────────────────────────
@@ -113,7 +137,8 @@ def export_project(db: Session, project_id: int, docs_dir: Path, media_dir: Path
         m: _get_columns(m)
         for m in [
             Project, Participant, Speaker, Conversation, Document,
-            SegmentGroup, Segment, CodeCategory, Code, CodeApplication,
+            SegmentGroup, Segment, CodeCategory, Code, CodeEquivalenceGroup,
+            CodeApplication,
             Note, Memo, Excerpt, Dataset, DatasetColumn, DatasetRow,
             DatasetValue, RecodeDefinition, EquivalenceGroup,
             AnalysisDomain, AnalysisDomainMember, MetricDefinition,
@@ -124,6 +149,8 @@ def export_project(db: Session, project_id: int, docs_dir: Path, media_dir: Path
             CanvasThemeRelationship, CanvasPendingItem,
         ]
     }
+    # Coders are global Users (Track J · J1); export name/color/type only — NEVER password_hash.
+    cols[User] = [c for c in _get_columns(User) if c != "password_hash"]
 
     # ── Query all entities ──────────────────────────────────────────
 
@@ -168,6 +195,10 @@ def export_project(db: Session, project_id: int, docs_dir: Path, media_dir: Path
         Code.project_id == project_id
     ).all()
 
+    code_equivalence_groups = db.query(CodeEquivalenceGroup).filter(
+        CodeEquivalenceGroup.project_id == project_id
+    ).all()
+
     # CodeApplications: via segments or dataset values
     datasets = db.query(Dataset).filter(
         Dataset.project_id == project_id
@@ -189,19 +220,29 @@ def export_project(db: Session, project_id: int, docs_dir: Path, media_dir: Path
     ).all() if row_ids else []
     value_ids = [v.id for v in dataset_values]
 
+    # Exclude the derived consensus layer from export — it is regenerated on
+    # import via materialize_consensus_for_project (§8 decision 4 / C2). This also
+    # keeps the GLOBAL consensus user out of the coder_ids derived below, so it is
+    # never exported/recreated as a roster coder.
     code_applications = []
     if segment_ids:
         code_applications.extend(
             db.query(CodeApplication).filter(
-                CodeApplication.segment_id.in_(segment_ids)
+                CodeApplication.segment_id.in_(segment_ids),
+                CodeApplication.origin != CONSENSUS_ORIGIN,
             ).all()
         )
     if value_ids:
         code_applications.extend(
             db.query(CodeApplication).filter(
-                CodeApplication.dataset_value_id.in_(value_ids)
+                CodeApplication.dataset_value_id.in_(value_ids),
+                CodeApplication.origin != CONSENSUS_ORIGIN,
             ).all()
         )
+
+    # Coders referenced by this project's code applications (Track J · J1).
+    coder_ids = {ca.user_id for ca in code_applications if ca.user_id is not None}
+    coders = db.query(User).filter(User.id.in_(coder_ids)).all() if coder_ids else []
 
     notes = []
     if conv_ids:
@@ -310,6 +351,8 @@ def export_project(db: Session, project_id: int, docs_dir: Path, media_dir: Path
         "segments": _serialize_all(segments, cols[Segment]),
         "code_categories": _serialize_all(code_categories, cols[CodeCategory]),
         "codes": _serialize_all(codes, cols[Code]),
+        "code_equivalence_groups": _serialize_all(code_equivalence_groups, cols[CodeEquivalenceGroup]),
+        "coders": _serialize_all(coders, cols[User]),
         "code_applications": _serialize_all(code_applications, cols[CodeApplication]),
         "notes": _serialize_all(notes, cols[Note]),
         "memos": _serialize_all(memos, cols[Memo]),
@@ -351,6 +394,11 @@ def export_project(db: Session, project_id: int, docs_dir: Path, media_dir: Path
         "app_version": APP_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "project_name": project.name,
+        # Stable cross-instance identity surfaced in the manifest (Track J · J3-1) so
+        # /validate-import can detect "this project already exists here" without
+        # parsing project.json. Also present in project.json; the manifest copy is the
+        # cheap lookup. Backward-compatible — older files lack it (treated as no-match).
+        "project_uuid": project.project_uuid,
         "project_summary": {
             "conversation_count": len(conversations),
             "dataset_count": len(datasets),
@@ -514,13 +562,15 @@ MATERIAL_CONFIG_REMAP = {
 }
 
 
-def _build_entity(model, item: dict, overrides: dict | None = None) -> object:
+def _build_entity(model, item: dict, overrides: dict | None = None, fresh_uuid: bool = False) -> object:
     """Construct an ORM entity from an export dict.
 
     Only sets fields that exist as columns on the model.
     DateTime columns are parsed from ISO strings.
     The _original_id key is skipped.
     ``overrides`` takes precedence over ``item`` values.
+    ``fresh_uuid``: when True and the model has a J3-2-0 ``uuid`` column, stamp a FRESH
+    uuid instead of copying the source's (import-as-new — see note below).
     """
     columns = sa_inspect(model).columns
     valid_cols = set(columns.keys()) - {"id"}
@@ -538,7 +588,26 @@ def _build_entity(model, item: dict, overrides: dict | None = None) -> object:
                 kwargs[col] = _parse_datetime(val)
             else:
                 kwargs[col] = val
+    # Track J · J3-2-0: import-as-new gets a FRESH per-entity uuid — never copy the
+    # source's (it would collide on the unique index when re-importing into the same
+    # instance, exactly like project_uuid). The J3 merge/round-trip path (which MATCHES
+    # on uuid) imports with fresh_uuid=False to PRESERVE cross-copy identity.
+    if fresh_uuid and "uuid" in valid_cols and not (overrides and "uuid" in overrides):
+        kwargs["uuid"] = str(uuid.uuid4())
     return model(**kwargs)
+
+
+def _merge_uuid_match(db: Session, model, incoming_uuid: str, project_id: int):
+    """Track J · J3-2 / #449(c): build the merge match query for an entity uuid, scoped to
+    the target project when the model carries a ``project_id`` column. Defense-in-depth so a
+    file entity can never match (and re-point children onto) a row in an UNRELATED local
+    project. Models reached only through a parent FK (Segment, DatasetColumn, …) lack a
+    ``project_id`` and rely on the global unique uuid index, which already guarantees a
+    single match. Returns a Query; the caller does ``.first()``."""
+    q = db.query(model).filter(model.uuid == incoming_uuid)
+    if "project_id" in sa_inspect(model).columns.keys():
+        q = q.filter(model.project_id == project_id)
+    return q
 
 
 def _is_datetime_column(column) -> bool:
@@ -727,12 +796,384 @@ def _parse_datetime(val) -> datetime | None:
     return datetime.fromisoformat(val)
 
 
-def import_project(db: Session, file_path: Path, docs_dir: Path, media_dir: Path | None = None, user_id: int | None = None) -> tuple[int, str]:
-    """Import an .mmproject ZIP, creating a new project.
+def _safety_export_before_overwrite(
+    db: Session, target: Project, docs_dir: Path, media_dir: Path | None,
+) -> Path:
+    """Write a recovery .mmproject of a project about to be overwritten (Track J · J3-1).
+
+    Overwrite is the first IN-PLACE destructive import — it deletes an existing
+    populated project. Mirror the pre-restore safety-backup discipline: snapshot the
+    target to the backup dir BEFORE the delete. A failure here ABORTS the overwrite
+    (we refuse to destroy data we couldn't back up). Returns the backup file path.
+    """
+    try:
+        buf = export_project(db, target.id, docs_dir, media_dir)
+        backup_dir = get_backup_dir()
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        path = backup_dir / f"pre-overwrite_{target.id}_{ts}.mmproject"
+        path.write_bytes(buf.getvalue())
+        return path
+    except Exception as e:
+        raise ValueError(
+            "Could not create a safety backup before overwrite; aborting to protect "
+            f"your data ({e})."
+        )
+
+
+def _validate_merge_code_decisions(
+    db: Session, divergent_codes: list[dict], code_mapping: dict, target_project_id: int | None,
+) -> None:
+    """Track J · J3-2b: validate the reconcile decisions for divergent codes before any
+    write. Raises ValueError (→ 400) on a malformed/illegal decision. Decisions for
+    non-divergent or unknown codes are ignored (harmless no-ops in the apply loop)."""
+    divergent_by_uuid = {c["uuid"]: c for c in divergent_codes}
+    for uuid, decision in code_mapping.items():
+        file_code = divergent_by_uuid.get(uuid)
+        if file_code is None:
+            continue  # a decision for an already-local / unknown code — ignore
+        if not isinstance(decision, dict):
+            raise ValueError(f"Invalid reconcile decision for code '{file_code.get('name', '?')}'.")
+        action = decision.get("action")
+        if action not in ("collapse", "link", "new"):
+            raise ValueError(
+                f"Unknown reconcile action '{action}' for code '{file_code.get('name', '?')}'."
+            )
+        if action in ("collapse", "link"):
+            tid = decision.get("target_code_id")
+            target = (
+                db.query(Code)
+                .filter(Code.id == tid, Code.project_id == target_project_id)
+                .first()
+                if tid is not None else None
+            )
+            if target is None:
+                raise ValueError(
+                    f"Reconcile target code {tid} for '{file_code.get('name', '?')}' is not "
+                    "a code in your project."
+                )
+            if not target.is_active:
+                raise ValueError(f"Cannot reconcile onto the deleted code '{target.name}'.")
+            if target.is_universal:
+                raise ValueError(f"Cannot reconcile onto the universal code '{target.name}'.")
+            if action == "link" and file_code.get("is_universal"):
+                raise ValueError(
+                    f"Cannot link the universal code '{file_code.get('name', '?')}' — "
+                    "collapse it or add it as new instead."
+                )
+
+
+def _assert_merge_compatible(
+    db: Session, data: dict, code_mapping: dict | None = None,
+    target_project_id: int | None = None,
+) -> None:
+    """Track J · J3-2c gate (+ J3-2b reconcile): refuse a merge whose source diverged
+    from the target, EXCEPT for divergent codes the caller has supplied a reconcile
+    decision for.
+
+    A merge matches shared sources by their J3-2-0 uuid, so it requires the colleague's
+    copy to be FROZEN against the target:
+      - Segmentation: within each shared conversation/document, the VISIBLE segments must
+        match 1:1 by uuid. A re-split/merge creates new segment uuids that wouldn't match,
+        so the codings would land on overlapping/duplicate segments — refuse instead.
+      - Codebook: every code in the file must either exist locally by uuid OR carry a
+        J3-2b reconcile decision (collapse/link/new) in ``code_mapping`` (keyed by file
+        code uuid). An UNDECIDED divergent code refuses — the gate never assumes the
+        reconcile UI ran (scripts/direct calls skip it).
+    Raises MergeDivergenceError (segmentation/undecided-codebook) or ValueError (bad
+    decision). Runs BEFORE any writes (incl. the safety export), so a refused merge
+    changes nothing.
+    """
+    code_mapping = code_mapping or {}
+
+    # ── #449(d): pre-spine file guard ───────────────────────────────
+    # A merge matches shared sources by their J3-2-0 entity uuid. A file exported BEFORE the
+    # uuid spine (project_uuid present, entity uuids absent — format_version did NOT bump, so
+    # the version gate can't catch it) would skip every match and fall to the insert path,
+    # colliding on e.g. ix_codes_project_numeric mid-write AFTER the safety export. Refuse
+    # early (before any write) with an actionable message instead.
+    for _spine_key in ("codes", "segments", "conversations", "documents"):
+        if any(not _item.get("uuid") for _item in data.get(_spine_key, [])):
+            raise ValueError(
+                "This file was exported by a version of Mixed Measures that predates merge "
+                "support, so its sources can't be matched for merging. Ask your colleague to "
+                "re-export the project from an updated copy, then merge that file."
+            )
+
+    # ── Codebook gate (DJ3-1a frozen shared codebook + J3-2b reconcile) ──
+    file_codes = [c for c in data.get("codes", []) if c.get("uuid")]
+    file_code_uuids = {c["uuid"] for c in file_codes}
+    if file_code_uuids:
+        local_code_uuids = {
+            u for (u,) in db.query(Code.uuid).filter(Code.uuid.in_(file_code_uuids)).all()
+        }
+        divergent = [c for c in file_codes if c["uuid"] not in local_code_uuids]
+        undecided = [c.get("name", "?") for c in divergent if c["uuid"] not in code_mapping]
+        if undecided:
+            shown = ", ".join(f"'{n}'" for n in undecided[:5])
+            raise MergeDivergenceError(
+                f"This file has {len(undecided)} code(s) not in your codebook ({shown}"
+                f"{'…' if len(undecided) > 5 else ''}). Reconcile each divergent code "
+                "(collapse / link / add as new) before merging.",
+                {
+                    "error": "merge_divergence",
+                    "kind": "codebook",
+                    "diverged_codes": undecided,
+                },
+            )
+        if code_mapping:
+            _validate_merge_code_decisions(db, divergent, code_mapping, target_project_id)
+
+    # ── Segmentation gate (§10.2: frozen segmentation) ──────────────
+    conv_uuid_by_oldid = {c["_original_id"]: c.get("uuid") for c in data.get("conversations", [])}
+    doc_uuid_by_oldid = {d["_original_id"]: d.get("uuid") for d in data.get("documents", [])}
+    # File: parent uuid -> set of VISIBLE (non-soft-deleted) segment uuids.
+    file_segs: dict[str, set] = {}
+    for s in data.get("segments", []):
+        if s.get("merged_into_id") is not None or s.get("split_into_id") is not None:
+            continue
+        if not s.get("uuid"):
+            continue
+        parent_uuid = (
+            conv_uuid_by_oldid.get(s.get("conversation_id"))
+            or doc_uuid_by_oldid.get(s.get("document_id"))
+        )
+        if parent_uuid:
+            file_segs.setdefault(parent_uuid, set()).add(s["uuid"])
+
+    diverged = []
+    for parent_uuid, file_set in file_segs.items():
+        local_conv = db.query(Conversation).filter(Conversation.uuid == parent_uuid).first()
+        local_parent = local_conv or db.query(Document).filter(Document.uuid == parent_uuid).first()
+        if local_parent is None:
+            continue  # a NEW source the colleague added — additive, not divergence
+        seg_q = db.query(Segment.uuid).filter(
+            Segment.merged_into_id.is_(None), Segment.split_into_id.is_(None)
+        )
+        seg_q = (
+            seg_q.filter(Segment.conversation_id == local_parent.id)
+            if local_conv is not None
+            else seg_q.filter(Segment.document_id == local_parent.id)
+        )
+        local_set = {u for (u,) in seg_q.all() if u}
+        if file_set != local_set:
+            diverged.append((getattr(local_parent, "name", "?"), len(file_set), len(local_set)))
+
+    if diverged:
+        detail = "; ".join(f"'{n}' (file {fc} vs local {lc} segments)" for n, fc, lc in diverged[:5])
+        raise MergeDivergenceError(
+            f"Segmentation diverged in {len(diverged)} source(s): {detail}"
+            f"{'…' if len(diverged) > 5 else ''}. Merging requires frozen segmentation so "
+            "codings line up; re-segment to match before merging, or divide the work without "
+            "re-segmenting.",
+            {
+                "error": "merge_divergence",
+                "kind": "segmentation",
+                "diverged_sources": [
+                    {"name": n, "file_segments": fc, "local_segments": lc}
+                    for n, fc, lc in diverged
+                ],
+            },
+        )
+
+
+def build_merge_coder_preview(db: Session, file_path: Path) -> list[dict]:
+    """Track J · J3-2 (D8): read-only preview of an incoming merge file's coders, each
+    with its local name-match candidate + application counts, so the confirm UI can
+    map/override before committing. System coders (Unattributed/Consensus) are excluded —
+    they own data but aren't selectable people. ``local_app_count`` is the local coder's
+    total applications (global; on the common single-project install that equals the
+    project's count). Returns rows shaped for ``MergeCoderPreview``."""
+    from ..auth import SYSTEM_CODER_TYPES
+    with zipfile.ZipFile(str(file_path), "r") as zf:
+        data = json.loads(zf.read("project.json"))
+
+    # File-side application count per coder (the exported user_id == the coder's
+    # _original_id in the same file).
+    file_counts: dict[int, int] = {}
+    for app in data.get("code_applications", []):
+        uid = app.get("user_id")
+        if uid is not None:
+            file_counts[uid] = file_counts.get(uid, 0) + 1
+
+    previews: list[dict] = []
+    for c in data.get("coders", []):
+        if c.get("coder_type") in SYSTEM_CODER_TYPES:
+            continue
+        name = c.get("username")
+        local = db.query(User).filter(User.username == name).first() if name else None
+        local_match = None
+        if local is not None:
+            local_match = {
+                "id": local.id,
+                "username": local.username,
+                "archived": bool(local.archived),
+                "local_app_count": db.query(CodeApplication)
+                .filter(CodeApplication.user_id == local.id)
+                .count(),
+            }
+        previews.append({
+            "original_id": c["_original_id"],
+            "username": name,
+            "coder_type": c.get("coder_type", "human"),
+            "archived": bool(c.get("archived", False)),
+            "file_app_count": file_counts.get(c["_original_id"], 0),
+            "local_match": local_match,
+        })
+    return previews
+
+
+# Reconcile triage: how many ranked local candidates to surface per divergent code,
+# and the similarity at/above which a candidate is flagged "confident" (the crosswalk
+# Suggest auto-pair threshold — the internal design notes).
+_MERGE_CODE_CANDIDATE_LIMIT = 5
+_MERGE_CODE_CONFIDENT_SIMILARITY = 0.70
+
+
+def build_merge_code_preview(
+    db: Session, file_path: Path, target_project_id: int,
+) -> list[dict]:
+    """Track J · J3-2b: read-only preview of an incoming merge file's DIVERGENT codes
+    (uuid not present in the local codebook — the same set `_assert_merge_compatible`
+    would refuse), each with file-side usage + the target project's local codes ranked
+    by name similarity, so the reconcile UI can map each to collapse / link / new.
+
+    Returns rows shaped for ``MergeCodePreview`` (empty when the codebook is
+    shared-frozen — no divergence — which is the common case). Categories are shown
+    for context only; they are never matched on (R5). Read-only — no DB writes."""
+    with zipfile.ZipFile(str(file_path), "r") as zf:
+        data = json.loads(zf.read("project.json"))
+
+    file_codes = data.get("codes", [])
+    file_code_uuids = {c["uuid"] for c in file_codes if c.get("uuid")}
+    if not file_code_uuids:
+        return []
+    # Divergent == file code whose uuid is not local. Mirrors the gate's check exactly
+    # (global; uuid is globally unique, so == "not in the matched target project").
+    local_uuids = {
+        u for (u,) in db.query(Code.uuid).filter(Code.uuid.in_(file_code_uuids)).all()
+    }
+    divergent = [c for c in file_codes if c.get("uuid") and c["uuid"] not in local_uuids]
+    if not divergent:
+        return []
+
+    # File-side application count per code (exported code_id == the code's _original_id).
+    file_counts: dict[int, int] = {}
+    for app in data.get("code_applications", []):
+        cid = app.get("code_id")
+        if cid is not None:
+            file_counts[cid] = file_counts.get(cid, 0) + 1
+
+    # File category names by id (context only — R5).
+    file_cat_names = {
+        cat["_original_id"]: cat.get("name") for cat in data.get("code_categories", [])
+    }
+
+    # Local candidate codes (target project, real codes — not universal, not inactive)
+    # + their usage, in one grouped query.
+    local_codes = (
+        db.query(Code)
+        .filter(
+            Code.project_id == target_project_id,
+            Code.is_universal == False,  # noqa: E712 (SQLAlchemy column comparison)
+            Code.is_active == True,       # noqa: E712
+        )
+        .all()
+    )
+    usage_map: dict[int, int] = {}
+    if local_codes:
+        local_ids = [lc.id for lc in local_codes]
+        for cid, n in (
+            db.query(CodeApplication.code_id, code_usage_count_expr())
+            .filter(CodeApplication.code_id.in_(local_ids), non_consensus_filter())
+            .group_by(CodeApplication.code_id)
+            .all()
+        ):
+            usage_map[cid] = n
+
+    previews: list[dict] = []
+    for c in divergent:
+        name = c.get("name") or ""
+        scored = sorted(
+            ((similarity_ratio(name, lc.name or ""), lc) for lc in local_codes),
+            key=lambda t: t[0],
+            reverse=True,
+        )
+        candidates = [
+            {
+                "code_id": lc.id,
+                "name": lc.name,
+                "description": lc.description,
+                "usage": usage_map.get(lc.id, 0),
+                "similarity": round(sim, 4),
+                "confident": sim >= _MERGE_CODE_CONFIDENT_SIMILARITY,
+            }
+            for sim, lc in scored[:_MERGE_CODE_CANDIDATE_LIMIT]
+        ]
+        previews.append({
+            "uuid": c["uuid"],
+            "name": c.get("name"),
+            "description": c.get("description"),
+            "color": c.get("color"),
+            "category_name": file_cat_names.get(c.get("category_id")),
+            "file_app_count": file_counts.get(c["_original_id"], 0),
+            "candidates": candidates,
+        })
+    return previews
+
+
+def import_project(
+    db: Session,
+    file_path: Path,
+    docs_dir: Path,
+    media_dir: Path | None = None,
+    user_id: int | None = None,
+    import_mode: str = "new",
+    target_project_id: int | None = None,
+    coder_mapping: dict | None = None,
+    code_mapping: dict | None = None,
+    report: dict | None = None,
+) -> tuple[int, str]:
+    """Import an .mmproject ZIP.
+
+    import_mode="new" (default): always create a NEW project with a fresh project_uuid
+    (and fresh J3-2-0 entity uuids).
+    import_mode="overwrite" (Track J · J3-1): replace `target_project_id` — an existing
+    local project that shares the file's stable project_uuid — preserving that uuid so
+    the project keeps its identity across the round-trip. Takes a safety export first,
+    then deletes the target (freeing the unique uuid) before re-inserting.
+    import_mode="copy_for_coding" (Track J · J3-2): import a co-coder's working copy that
+    PRESERVES identity (project_uuid + entity uuids) so it can be merged back later.
+    Creates a new project; refuses if that identity already exists locally (merge instead).
+    import_mode="merge" (Track J · J3-2): merge a colleague's codings/annotations on SHARED
+    sources INTO `target_project_id` (matched by project_uuid). Refuses divergent
+    segmentation/codebook (raises MergeDivergenceError BEFORE any write).
+
+    `coder_mapping` (merge only): {file_coder_original_id(str) -> {"action": "match"|"create",
+    "target_user_id"?: int, "new_username"?: str, "unarchive"?: bool}}. Decides how each
+    incoming coder maps to a local roster coder (D8 confirm). When omitted/absent for a
+    coder, falls back to the legacy silent name-match.
+    `code_mapping` (merge only, J3-2b): {file_code_uuid(str) -> {"action": "collapse"|"link"|
+    "new", "target_code_id"?: int, "combined_label"?: str}}. Reconciles each DIVERGENT code
+    (uuid not local): collapse → remap its codings onto an existing local code (no new code);
+    link → insert it + group it with a local code (one effective code); new → insert it
+    standalone. Every divergent code MUST have a decision or the merge is refused.
+    `report` (merge only): a dict the caller passes in; populated in-place with the merge
+    counts (sources_matched / applications_added / duplicates_skipped / coders_created /
+    coders_matched).
 
     Returns (new_project_id, project_name).
     Wraps everything in the caller's transaction — caller commits or rolls back.
     """
+    if report is not None:
+        report.setdefault("sources_matched", 0)
+        report.setdefault("applications_added", 0)
+        report.setdefault("duplicates_skipped", 0)
+        report.setdefault("coders_created", 0)
+        report.setdefault("coders_matched", 0)
+        report.setdefault("codes_collapsed", 0)
+        report.setdefault("codes_linked", 0)
+        report.setdefault("codes_created", 0)
     with zipfile.ZipFile(str(file_path), "r") as zf:
         # Zip-slip prevention (matches validate_project_file check)
         for name in zf.namelist():
@@ -744,22 +1185,60 @@ def import_project(db: Session, file_path: Path, docs_dir: Path, media_dir: Path
 
         data = json.loads(zf.read("project.json"))
 
+        if import_mode == "merge":
+            # Track J · J3-2: a merge imports a colleague's CODINGS + annotations on
+            # SHARED sources only. The frozen dataset/codebook structure the target
+            # already owns, and the colleague's analysis + workspace artifacts, are NOT
+            # merged — blank those sections so their import loops are no-ops (no per-loop
+            # guards). DatasetValue + CodeApplication are handled specially below
+            # (transitive-match / dedup); equivalence-group reconciliation is J3-2b.
+            for _k in (
+                "code_equivalence_groups", "equivalence_groups", "recode_definitions",
+                "analysis_domains", "analysis_domain_members", "metric_definitions",
+                "computed_results", "row_scores", "statistical_tests",
+                "material_collections", "materials", "canvases", "canvas_themes",
+                "canvas_theme_relationships", "canvas_pending_items", "scratchpad_entries",
+            ):
+                data[_k] = []
+            data["text_coding_config"] = None
+            data["quote_board_config"] = None
+
         remap: dict[str, dict[int, int]] = {
             "projects": {}, "participants": {}, "speakers": {},
             "conversations": {}, "documents": {}, "segment_groups": {},
             "segments": {}, "code_categories": {}, "codes": {},
+            "code_equivalence_groups": {},
             "datasets": {}, "equivalence_groups": {}, "dataset_columns": {},
             "dataset_rows": {}, "dataset_values": {}, "recode_definitions": {},
             "excerpts": {}, "notes": {}, "memos": {}, "analysis_domains": {},
             "metric_definitions": {}, "material_collections": {},
             "materials": {}, "scratchpad_entries": {},
             "canvases": {}, "canvas_themes": {},
-            "canvas_pending_items": {},
+            "canvas_pending_items": {}, "coders": {},
         }
 
         def _add(model, item, overrides=None, remap_key=None):
-            """Build entity from export dict, add to session, track in remap."""
-            obj = _build_entity(model, item, overrides)
+            """Build entity from export dict, add to session, track in remap.
+
+            Track J · J3-2 merge: when import_mode == "merge", first try to MATCH an
+            existing local entity by its stable J3-2-0 uuid (it already lives in the
+            target) and record the remap to it instead of inserting a duplicate —
+            children re-point at the matched row transparently through `remap`. Matched
+            entities keep the TARGET's field values (a frozen merge never overwrites the
+            shared sources with the colleague's copy).
+            """
+            if import_mode == "merge" and remap_key:
+                incoming_uuid = item.get("uuid")
+                if incoming_uuid and "uuid" in sa_inspect(model).columns.keys():
+                    # #449(c): scope the match to the target project (defense-in-depth) so a
+                    # file entity can never match a row in an UNRELATED local project.
+                    existing = _merge_uuid_match(db, model, incoming_uuid, pid).first()
+                    if existing is not None:
+                        remap[remap_key][item["_original_id"]] = existing.id
+                        if report is not None and remap_key in ("conversations", "documents"):
+                            report["sources_matched"] += 1
+                        return existing
+            obj = _build_entity(model, item, overrides, fresh_uuid=(import_mode == "new"))
             db.add(obj)
             db.flush()
             if remap_key:
@@ -768,16 +1247,149 @@ def import_project(db: Session, file_path: Path, docs_dir: Path, media_dir: Path
 
         # ── a. Project ──────────────────────────────────────────────
         pdata = data["project"]
-        project_name = pdata["name"]
-        existing = db.query(Project).filter(Project.name == project_name).first()
-        if existing:
-            project_name = f"{project_name} (imported)"
+        incoming_uuid = pdata.get("project_uuid")
 
-        project_overrides = {"name": project_name}
-        if user_id is not None:
-            project_overrides["user_id"] = user_id
-        new_project = _add(Project, pdata, project_overrides, "projects")
-        pid = new_project.id
+        if import_mode == "merge":
+            # Track J · J3-2: merge a colleague's copy INTO an existing project. Match the
+            # target by project_uuid (never create one); the entity loop below matches
+            # shared sources by their J3-2-0 uuid and only inserts new codings/annotations.
+            # Safety-export the target first (pre-merge backup, §10.1; reuses the J3-1 helper).
+            if target_project_id is None or not incoming_uuid:
+                raise ValueError(
+                    "Merge requires a target project and a file that carries a project_uuid."
+                )
+            target = db.query(Project).filter(Project.id == target_project_id).first()
+            if target is None:
+                raise ValueError("Target project for merge not found.")
+            if target.project_uuid != incoming_uuid:
+                raise ValueError(
+                    "Target project identity does not match the file. Re-validate the "
+                    "import before merging."
+                )
+            # J3-2c gate (+ J3-2b reconcile): refuse a divergent merge BEFORE any writes
+            # (no safety backup is written for a merge that's going to be refused) —
+            # EXCEPT divergent codes the caller reconciled via code_mapping.
+            _assert_merge_compatible(
+                db, data, code_mapping=code_mapping, target_project_id=target.id,
+            )
+            _safety_export_before_overwrite(db, target, docs_dir, media_dir)
+            new_project = target
+            pid = target.id
+            project_name = target.name
+            remap["projects"][pdata["_original_id"]] = pid
+        elif import_mode == "overwrite":
+            # Track J · J3-1 round-trip: replace an existing local project that shares
+            # this file's stable identity, PRESERVING its project_uuid. Validate the
+            # target matches the incoming uuid (never overwrite a different project),
+            # safety-export it (recovery net), then delete it so the preserved uuid is
+            # free before re-insert (flush so the cascade + unique-index release apply
+            # within this txn — autoflush is OFF, see database.py).
+            if target_project_id is None or not incoming_uuid:
+                raise ValueError(
+                    "Overwrite import requires a target project and a file that carries "
+                    "a project_uuid."
+                )
+            target = db.query(Project).filter(Project.id == target_project_id).first()
+            if target is None:
+                raise ValueError("Target project for overwrite not found.")
+            # Ownership is gated by the caller (the endpoint mirrors list_projects'
+            # multiuser-aware visibility). The identity check below is the service's
+            # own safety: never overwrite a project whose uuid doesn't match the file.
+            if target.project_uuid != incoming_uuid:
+                raise ValueError(
+                    "Target project identity does not match the file. Re-validate the "
+                    "import before overwriting."
+                )
+            _safety_export_before_overwrite(db, target, docs_dir, media_dir)
+            db.delete(target)
+            db.flush()
+            project_name = pdata["name"]
+            project_uuid_override = incoming_uuid
+        elif import_mode == "copy_for_coding":
+            # Track J · J3-2: import a co-coder's WORKING COPY that PRESERVES identity
+            # (project_uuid + the J3-2-0 entity uuids, via fresh_uuid=False below) so it
+            # can be merged back later. Creates a new project; refuse if this identity
+            # already exists locally — you should MERGE the file into it, not import a
+            # second copy.
+            if not incoming_uuid:
+                raise ValueError(
+                    "This file has no stable identity; import it as a new project instead."
+                )
+            clash = db.query(Project).filter(Project.project_uuid == incoming_uuid).first()
+            if clash is not None:
+                raise ValueError(
+                    "You already have this project here — merge the file into it instead "
+                    "of importing another coding copy."
+                )
+            project_name = pdata["name"]
+            existing = db.query(Project).filter(Project.name == project_name).first()
+            if existing:
+                project_name = f"{project_name} (coding copy)"
+            project_uuid_override = incoming_uuid
+        else:
+            # import_mode == "new": always a NEW project with a FRESH stable identity —
+            # never copy the source's project_uuid (it would collide on the unique
+            # index when re-importing into the same instance).
+            project_name = pdata["name"]
+            existing = db.query(Project).filter(Project.name == project_name).first()
+            if existing:
+                project_name = f"{project_name} (imported)"
+            project_uuid_override = str(uuid.uuid4())
+
+        if import_mode != "merge":
+            # merge matched the target above; every other mode creates the project here.
+            project_overrides = {"name": project_name, "project_uuid": project_uuid_override}
+            if user_id is not None:
+                project_overrides["user_id"] = user_id
+            new_project = _add(Project, pdata, project_overrides, "projects")
+            pid = new_project.id
+
+        # ── a2. Coders (Track J · J1/J3-2): map each incoming coder to a local roster
+        #     coder so the code_applications user_id remap below preserves attribution.
+        #     A merge can carry an explicit `coder_mapping` (the D8 confirm UI's
+        #     decisions): "match" onto a chosen local coder, or "create" a new one
+        #     (suffix-on-collision). With no decision for a coder — and for every
+        #     non-merge import — fall back to the legacy silent name-match.
+        for item in data.get("coders", []):
+            oid = item["_original_id"]
+            name = item.get("username")
+            decision = (coder_mapping or {}).get(str(oid)) if coder_mapping else None
+
+            if decision and decision.get("action") == "match" and decision.get("target_user_id"):
+                target_coder = (
+                    db.query(User).filter(User.id == decision["target_user_id"]).first()
+                )
+                if target_coder is None:
+                    raise ValueError(
+                        f"Coder mapping points at a local coder (id {decision['target_user_id']}) "
+                        "that no longer exists. Re-validate the import before merging."
+                    )
+                remap["coders"][oid] = target_coder.id
+                if decision.get("unarchive") and target_coder.archived:
+                    target_coder.archived = False  # DEC-F: bring a colleague back into voting
+                if report is not None:
+                    report["coders_matched"] += 1
+            elif decision and decision.get("action") == "create":
+                base = (decision.get("new_username") or name or "Coder").strip() or "Coder"
+                _add(
+                    User, item,
+                    {"username": unique_username(db, base), "password_hash": None, "is_admin": False},
+                    "coders",
+                )
+                if report is not None:
+                    report["coders_created"] += 1
+            else:
+                existing_coder = (
+                    db.query(User).filter(User.username == name).first() if name else None
+                )
+                if existing_coder:
+                    remap["coders"][oid] = existing_coder.id
+                    if report is not None:
+                        report["coders_matched"] += 1
+                else:
+                    _add(User, item, {"password_hash": None, "is_admin": False}, "coders")
+                    if report is not None:
+                        report["coders_created"] += 1
 
         # ── b–e. Simple FK-to-project entities ─────────────────────
         for item in data.get("participants", []):
@@ -802,6 +1414,19 @@ def import_project(db: Session, file_path: Path, docs_dir: Path, media_dir: Path
             }, "segment_groups")
 
         # ── g. Segments (two-pass for self-refs) ───────────────────
+        # #449(b): a merge matches existing local segments by uuid. Capture which file
+        # segments ALREADY exist locally (snapshot BEFORE the insert loop) so the self-ref
+        # pass below never rewrites a matched segment — the target owns the frozen structure
+        # and already carries the correct merged_into_id/split_into_id.
+        pre_existing_seg_uuids: set = set()
+        if import_mode == "merge":
+            _file_seg_uuids = {s["uuid"] for s in data.get("segments", []) if s.get("uuid")}
+            if _file_seg_uuids:
+                pre_existing_seg_uuids = {
+                    u for (u,) in db.query(Segment.uuid)
+                    .filter(Segment.uuid.in_(_file_seg_uuids)).all()
+                }
+
         segment_self_refs = []
         for item in data.get("segments", []):
             _add(Segment, item, {
@@ -816,25 +1441,114 @@ def import_project(db: Session, file_path: Path, docs_dir: Path, media_dir: Path
                 segment_self_refs.append(item)
 
         for item in segment_self_refs:
+            # #449(b): never touch a segment that matched an existing local row — it already
+            # carries correct self-refs; rewriting it could un-soft-delete a target segment.
+            if import_mode == "merge" and item.get("uuid") in pre_existing_seg_uuids:
+                continue
             new_id = remap["segments"][item["_original_id"]]
             updates = {}
+            # #449(b): only set a self-ref when its target actually remapped. A malformed or
+            # hand-edited file whose merged_into_id/split_into_id points at a non-exported
+            # segment would otherwise NULL the ref (un-soft-deleting the segment) — skip it.
+            # (Hardens every import mode, not just merge.)
             if item.get("merged_into_id"):
-                updates["merged_into_id"] = remap["segments"].get(item["merged_into_id"])
+                tgt = remap["segments"].get(item["merged_into_id"])
+                if tgt is not None:
+                    updates["merged_into_id"] = tgt
+                else:
+                    logger.warning(
+                        "Segment %s merged_into_id target not in import; leaving unset",
+                        item["_original_id"],
+                    )
             if item.get("split_into_id"):
-                updates["split_into_id"] = remap["segments"].get(item["split_into_id"])
+                tgt = remap["segments"].get(item["split_into_id"])
+                if tgt is not None:
+                    updates["split_into_id"] = tgt
+                else:
+                    logger.warning(
+                        "Segment %s split_into_id target not in import; leaving unset",
+                        item["_original_id"],
+                    )
             if updates:
                 db.query(Segment).filter(Segment.id == new_id).update(updates)
         if segment_self_refs:
             db.flush()
 
         # ── h. CodeCategories (topological order) ──────────────────
-        _import_categories_topological(db, data.get("code_categories", []), pid, remap)
+        _import_categories_topological(
+            db, data.get("code_categories", []), pid, remap,
+            import_mode=import_mode,
+        )
+
+        # ── h.5. CodeEquivalenceGroups (BEFORE codes — codes carry the
+        # code_equivalence_group_id FK; opposite order from dataset EGs, which
+        # import after their columns). canonical_code_id is a PLAIN int (not a
+        # FK), so _build_entity would copy the stale source id — null it here and
+        # remap it in a post-pass once remap["codes"] is populated (ADJ-4/C1).
+        for item in data.get("code_equivalence_groups", []):
+            _add(CodeEquivalenceGroup, item, {
+                "project_id": pid,
+                "canonical_code_id": None,
+            }, "code_equivalence_groups")
 
         # ── i. Codes ───────────────────────────────────────────────
+        # Track J · J3-2b: in a merge, a code either MATCHES locally by uuid (handled by
+        # _add, keeps the target's copy) or is DIVERGENT and carries a reconcile decision
+        # (the gate guaranteed every divergent code is decided). Apply the decision here:
+        #   collapse → seed remap["codes"] onto the chosen local code, skip the insert
+        #              (its codings re-point + dedup downstream — no new code, no merge_codes);
+        #   link/new → insert with a FRESH numeric_id (a verbatim copy collides on
+        #              ix_codes_project_numeric, untested in frozen merge), link → queue a
+        #              CodeEquivalenceGroup so both resolve to one effective code.
+        merge_link_requests: list[tuple[int, int, str | None]] = []  # (new_id, target_id, label)
+        local_code_uuids_for_merge: set = set()
+        merge_next_numeric = [0]
+        if import_mode == "merge":
+            _file_uuids = {c["uuid"] for c in data.get("codes", []) if c.get("uuid")}
+            if _file_uuids:
+                local_code_uuids_for_merge = {
+                    u for (u,) in db.query(Code.uuid).filter(Code.uuid.in_(_file_uuids)).all()
+                }
+            # NOT `(max or -1)` — a legitimate max of 0 (a project with one code) is falsy
+            # and would wrap back to 0, colliding on ix_codes_project_numeric.
+            _max_numeric = db.query(func.max(Code.numeric_id)).filter(Code.project_id == pid).scalar()
+            merge_next_numeric[0] = (_max_numeric + 1) if _max_numeric is not None else 0
+
         for item in data.get("codes", []):
+            if import_mode == "merge":
+                _uuid = item.get("uuid")
+                decision = (code_mapping or {}).get(_uuid) if _uuid else None
+                is_divergent = bool(_uuid) and _uuid not in local_code_uuids_for_merge
+                if is_divergent and decision:
+                    action = decision.get("action")
+                    if action == "collapse":
+                        remap["codes"][item["_original_id"]] = decision["target_code_id"]
+                        if report is not None:
+                            report["codes_collapsed"] += 1
+                        continue
+                    # link / new: insert with a fresh numeric_id (not the file's).
+                    obj = _add(Code, item, {
+                        "project_id": pid,
+                        "numeric_id": merge_next_numeric[0],
+                        "category_id": _remap_id(remap, "code_categories", item.get("category_id")),
+                        "code_equivalence_group_id": None,
+                    }, "codes")
+                    merge_next_numeric[0] += 1
+                    if action == "link":
+                        merge_link_requests.append(
+                            (obj.id, decision["target_code_id"], decision.get("combined_label"))
+                        )
+                        if report is not None:
+                            report["codes_linked"] += 1
+                    elif report is not None:
+                        report["codes_created"] += 1
+                    continue
             _add(Code, item, {
                 "project_id": pid,
                 "category_id": _remap_id(remap, "code_categories", item.get("category_id")),
+                "code_equivalence_group_id": _remap_id(
+                    remap, "code_equivalence_groups", item.get("code_equivalence_group_id")
+                ),
             }, "codes")
 
         # ── j–k. Datasets & EquivalenceGroups ─────────────────────
@@ -900,13 +1614,28 @@ def import_project(db: Session, file_path: Path, docs_dir: Path, media_dir: Path
 
         # ── n. DatasetValues ───────────────────────────────────────
         for item in data.get("dataset_values", []):
+            row_id = _remap_id(remap, "dataset_rows", item.get("row_id"))
+            column_id = _remap_id(remap, "dataset_columns", item.get("column_id"))
+            if import_mode == "merge" and row_id is not None and column_id is not None:
+                # DatasetValue has no uuid — match transitively on (row, column) (unique).
+                # The value already exists in the target (frozen dataset); re-point at it.
+                existing_val = (
+                    db.query(DatasetValue)
+                    .filter(DatasetValue.row_id == row_id, DatasetValue.column_id == column_id)
+                    .first()
+                )
+                if existing_val is not None:
+                    remap["dataset_values"][item["_original_id"]] = existing_val.id
+                    continue
             _add(DatasetValue, item, {
-                "row_id": _remap_id(remap, "dataset_rows", item.get("row_id")),
-                "column_id": _remap_id(remap, "dataset_columns", item.get("column_id")),
+                "row_id": row_id,
+                "column_id": column_id,
             }, "dataset_values")
 
         # ── o. RecodeDefinitions (topological) ─────────────────────
-        _import_recodes_topological(db, data.get("recode_definitions", []), remap)
+        _import_recodes_topological(
+            db, data.get("recode_definitions", []), remap, import_mode=import_mode
+        )
 
         # ── p. Excerpts ────────────────────────────────────────────
         for item in data.get("excerpts", []):
@@ -918,12 +1647,43 @@ def import_project(db: Session, file_path: Path, docs_dir: Path, media_dir: Path
 
         # ── q. CodeApplications ────────────────────────────────────
         for item in data.get("code_applications", []):
+            seg_id = _remap_id(remap, "segments", item.get("segment_id"))
+            dv_id = _remap_id(remap, "dataset_values", item.get("dataset_value_id"))
+            code_id = _remap_id(remap, "codes", item.get("code_id"))
+            # Track J · J1: remap through the coders table so attribution survives (raw
+            # user IDs are meaningless across instances; the coders section maps old->new).
+            app_user_id = _remap_id(remap, "coders", item.get("user_id"))
+            if import_mode == "merge":
+                # Skip applications whose target/code didn't resolve — a divergent source
+                # (the J3-2c gate refuses these up front; here we never mis-attach).
+                if code_id is None or (seg_id is None and dv_id is None):
+                    continue
+                # DEDUP on the effective (target, code, coder): a colleague may share
+                # codings already present (re-merge, or both coded a unit identically).
+                # The J2-0 per-coder unique indexes would IntegrityError on a duplicate,
+                # and under autoflush=False that fires mid-loop — so PRE-CHECK (this also
+                # catches NULL-user_id legacy rows, which the unique index does not).
+                dup_q = db.query(CodeApplication).filter(
+                    CodeApplication.code_id == code_id,
+                    CodeApplication.user_id == app_user_id,
+                )
+                dup_q = (
+                    dup_q.filter(CodeApplication.segment_id == seg_id)
+                    if seg_id is not None
+                    else dup_q.filter(CodeApplication.dataset_value_id == dv_id)
+                )
+                if dup_q.first() is not None:
+                    if report is not None:
+                        report["duplicates_skipped"] += 1
+                    continue
             _add(CodeApplication, item, {
-                "segment_id": _remap_id(remap, "segments", item.get("segment_id")),
-                "dataset_value_id": _remap_id(remap, "dataset_values", item.get("dataset_value_id")),
-                "code_id": _remap_id(remap, "codes", item.get("code_id")),
-                "user_id": None,
+                "segment_id": seg_id,
+                "dataset_value_id": dv_id,
+                "code_id": code_id,
+                "user_id": app_user_id,
             })
+            if import_mode == "merge" and report is not None:
+                report["applications_added"] += 1
 
         # ── r. Notes ───────────────────────────────────────────────
         for item in data.get("notes", []):
@@ -1197,7 +1957,10 @@ def import_project(db: Session, file_path: Path, docs_dir: Path, media_dir: Path
             }, "canvas_pending_items")
 
         # ── Deferred memos (analysis → materials, canvas → canvases)
-        for item in deferred_memos:
+        # In merge mode the analysis/canvas targets are NOT imported (blanked above), so
+        # these memos have no target — skip them (their sources are the colleague's
+        # workspace, not shared coding).
+        for item in (deferred_memos if import_mode != "merge" else []):
             entity_type = item.get("entity_type", "project")
             remap_table = MEMO_ENTITY_REMAP.get(entity_type)
             entity_id = _remap_id(
@@ -1278,6 +2041,56 @@ def import_project(db: Session, file_path: Path, docs_dir: Path, media_dir: Path
                 "custom_orders": _remap_quote_board_orders(qbc.get("custom_orders"), remap),
             })
 
+        # ── Code-equivalence post-passes (Track J · J2-3, Slab 6) ──
+        # (1) canonical_code_id is a PLAIN int (not a FK) so the relational pass
+        # left it pointing at the SOURCE-db code id — remap it through the new
+        # code ids now that remap["codes"] is populated (ADJ-4/C1). A stale value
+        # is harmless (the resolver re-validates + falls back to lowest member),
+        # but remap for fidelity.
+        ceg_remap = remap["code_equivalence_groups"]
+        if ceg_remap:
+            for item in data.get("code_equivalence_groups", []):
+                new_group_id = ceg_remap.get(item["_original_id"])
+                if new_group_id is None:
+                    continue
+                new_canonical = _remap_id(remap, "codes", item.get("canonical_code_id"))
+                if new_canonical is not None:
+                    db.query(CodeEquivalenceGroup).filter(
+                        CodeEquivalenceGroup.id == new_group_id
+                    ).update({"canonical_code_id": new_canonical})
+            db.flush()
+
+        # Track J · J3-2b: realize "link" reconcile decisions — group each newly-inserted
+        # divergent code with its chosen local code so they resolve to ONE effective code
+        # (consensus/IRR treat them as one, via build_effective_code_map). Runs BEFORE the
+        # consensus rebuild below so it picks up the links. If the local twin is already in
+        # a group (prior J2 work or an earlier link this merge), add to THAT group and keep
+        # its label (D-4); else create a new group. Validated in the gate (target active,
+        # non-universal; file code non-universal), so this trusts the inputs.
+        for new_code_id, target_code_id, combined_label in merge_link_requests:
+            target_code = db.get(Code, target_code_id)
+            new_code = db.get(Code, new_code_id)
+            if target_code is None or new_code is None:
+                continue
+            if target_code.code_equivalence_group_id is not None:
+                new_code.code_equivalence_group_id = target_code.code_equivalence_group_id
+            else:
+                label = (combined_label or f"{new_code.name} / {target_code.name}")[:255]
+                group = CodeEquivalenceGroup(project_id=pid, label=label)
+                db.add(group)
+                db.flush()
+                target_code.code_equivalence_group_id = group.id
+                new_code.code_equivalence_group_id = group.id
+            db.flush()
+
+        # (2) Regenerate the derived consensus layer from the imported human/AI
+        # layers + code-equivalence groups (consensus rows were excluded from
+        # export — §8 decision 4 / C3). Gated on ≥2 roster coders; flush-only, so
+        # the caller's single commit covers it.
+        from .consensus import consensus_enabled, materialize_consensus_for_project
+        if consensus_enabled(db):
+            materialize_consensus_for_project(db, pid)
+
         # ── Copy document files ────────────────────────────────────
         doc_members = [m for m in zf.namelist() if m.startswith("documents/")]
         if doc_members:
@@ -1351,8 +2164,13 @@ def _import_categories_topological(
     cat_items: list[dict],
     project_id: int,
     remap: dict,
+    import_mode: str = "new",
 ) -> None:
-    """Insert CodeCategories in topological order (roots first)."""
+    """Insert CodeCategories in topological order (roots first).
+
+    CodeCategory is the one J3-2-0 uuid'd entity that bypasses `_add`, so the
+    import-as-new fresh-uuid stamp AND the merge match-by-uuid are threaded here.
+    """
     pending = list(cat_items)
     inserted = set()
 
@@ -1364,10 +2182,21 @@ def _import_categories_topological(
         for item in pending:
             parent_old_id = item.get("parent_id")
             if parent_old_id is None or parent_old_id in inserted:
+                # J3-2 merge: match an existing category by uuid instead of duplicating.
+                incoming_uuid = item.get("uuid")
+                if import_mode == "merge" and incoming_uuid:
+                    # #449(c): scope the uuid match to the target project (defense-in-depth).
+                    existing_cat = _merge_uuid_match(
+                        db, CodeCategory, incoming_uuid, project_id
+                    ).first()
+                    if existing_cat is not None:
+                        remap["code_categories"][item["_original_id"]] = existing_cat.id
+                        inserted.add(item["_original_id"])
+                        continue
                 obj = _build_entity(CodeCategory, item, {
                     "project_id": project_id,
                     "parent_id": _remap_id(remap, "code_categories", parent_old_id),
-                })
+                }, fresh_uuid=(import_mode == "new"))
                 db.add(obj)
                 db.flush()
                 remap["code_categories"][item["_original_id"]] = obj.id
@@ -1386,8 +2215,16 @@ def _import_recodes_topological(
     db: Session,
     recode_items: list[dict],
     remap: dict,
+    import_mode: str = "new",
 ) -> None:
-    """Insert RecodeDefinitions in topological order (parents first)."""
+    """Insert RecodeDefinitions in topological order (parents first).
+
+    #449(a): threads ``import_mode`` so ``fresh_uuid`` is set consistently with the other
+    import helpers. RecodeDefinition has no J3-2-0 ``uuid`` column today (so this is a
+    no-op), and a merge blanks ``recode_definitions`` entirely — but if a uuid is ever added
+    to a model routed through here, import-as-new must fresh-stamp it or a re-import collides
+    on the unique uuid index (the trap-class the invariant warns about).
+    """
     pending = list(recode_items)
     inserted = set()
 
@@ -1402,7 +2239,7 @@ def _import_recodes_topological(
                 obj = _build_entity(RecodeDefinition, item, {
                     "column_id": _remap_id(remap, "dataset_columns", item.get("column_id")),
                     "source_definition_id": _remap_id(remap, "recode_definitions", source_old_id),
-                })
+                }, fresh_uuid=(import_mode == "new"))
                 db.add(obj)
                 db.flush()
                 remap["recode_definitions"][item["_original_id"]] = obj.id

@@ -1,8 +1,9 @@
 import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Search, Plus, Ellipsis, Pencil, Check, X, Power, PowerOff, StickyNote } from 'lucide-react'
+import { SELECTED_TINT } from '@/lib/selection'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Search, Plus, Ellipsis, Pencil, Check, X, Power, PowerOff, StickyNote, FolderInput, ChevronLeft } from 'lucide-react'
 import { useDraggable } from '@dnd-kit/core'
-import { type Code, codesApi } from '@/lib/api'
+import { type Code, codesApi, categoriesApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -19,7 +20,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { cn, getCodeColor } from '@/lib/utils'
-import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
+import { ColorSwatchPicker, CATEGORY_COLORS } from '@/components/ColorSwatchPicker'
+import { ColorDotButton } from '@/components/ColorDotButton'
+import { CreatableComboList } from '@/components/ui/creatable-combobox'
+import { buildCategoryOptions } from '@/lib/category-options'
 
 export interface CodePanelHandle {
   focus: () => void
@@ -456,7 +460,7 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
             />
           </div>
           {selectedCodeIndices.size > 1 && (
-            <span className="text-[10px] bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-1.5 py-0.5 rounded self-center shrink-0">
+            <span className="text-[10px] bg-mm-blue/12 text-mm-blue-text px-1.5 py-0.5 rounded self-center shrink-0">
               {selectedCodeIndices.size} sel
             </span>
           )}
@@ -465,14 +469,17 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
             variant="ghost"
             disabled={exactMatchExists || !searchQuery.trim()}
             onClick={handleCreateCode}
-            title={exactMatchExists ? "Code already exists" : "Add new code (Tab or Enter)"}
+            aria-label="Add code"
+            // #518: an empty query must not read "Code already exists" — the empty-string
+            // short-circuit in exactMatchExists is a can't-create guard, not a name match.
+            title={!searchQuery.trim() ? "Type a name to add a code" : exactMatchExists ? "Code already exists" : "Add new code (Tab or Enter)"}
           >
-            <Plus className={cn("w-4 h-4", !exactMatchExists && searchQuery.trim() && "text-blue-600")} />
+            <Plus className={cn("w-4 h-4", !exactMatchExists && searchQuery.trim() && "text-mm-blue")} />
           </Button>
         </div>
         <div aria-live="polite">
           {searchQuery.trim() && !exactMatchExists && (
-            <p className="text-xs text-blue-600 mt-1">
+            <p className="text-xs text-mm-blue-text mt-1">
               <kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Tab</kbd>
               {' or '}
               <kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Enter</kbd>
@@ -480,7 +487,7 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
             </p>
           )}
           {pendingApplyCodeId !== null && (
-            <p className="text-xs text-blue-600 dark:text-blue-400 mt-1 bg-blue-50 dark:bg-blue-950/30 p-1 rounded">
+            <p className="text-xs text-mm-blue-text mt-1 bg-mm-blue/12 p-1 rounded">
               <kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Enter</kbd>
               {' to apply · '}
               <kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Esc</kbd>
@@ -521,7 +528,7 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
               {/* Universal Codes */}
               {universalCodes.length > 0 && (
                 <div className="border-b">
-                  <div className="px-4 py-1.5 bg-blue-50 dark:bg-blue-950/30 text-xs font-medium text-blue-700 dark:text-blue-400">
+                  <div className="px-4 py-1.5 bg-mm-blue/12 text-xs font-medium text-mm-blue-text">
                     Universal Codes
                   </div>
                   {universalCodes.map(code => renderCodeItem(code, String(code.numeric_id)))}
@@ -627,10 +634,23 @@ function CodeItem({
 }) {
   const queryClient = useQueryClient()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [menuView, setMenuView] = useState<'main' | 'category'>('main')
   const [colorPickerOpen, setColorPickerOpen] = useState(false)
   const [isEditingDescription, setIsEditingDescription] = useState(false)
   const [descriptionValue, setDescriptionValue] = useState(code.description || '')
   const [showDeactivateDialog, setShowDeactivateDialog] = useState(false)
+
+  // #462: categories for the "Move to category" picker. Only fetched once the
+  // user opens that view (React Query dedupes the shared key across rows).
+  const { data: categoriesData } = useQuery({
+    queryKey: ['categories', projectId],
+    queryFn: () => categoriesApi.list(projectId),
+    enabled: menuView === 'category',
+  })
+  const categoryOptions = useMemo(
+    () => buildCategoryOptions(categoriesData?.categories ?? []),
+    [categoriesData],
+  )
 
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `code-${code.id}`,
@@ -663,6 +683,35 @@ function CodeItem({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
       setColorPickerOpen(false)
+    },
+  })
+
+  // #462: recategorize this code (null = uncategorized).
+  const moveCategoryMutation = useMutation({
+    mutationFn: (categoryId: number | null) =>
+      codesApi.update(projectId, code.id, { category_id: categoryId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
+      setMenuOpen(false)
+      setMenuView('main')
+    },
+  })
+
+  // #462: create a new category inline and move this code into it.
+  const createCategoryAndAssignMutation = useMutation({
+    mutationFn: async (name: string) => {
+      const cat = await categoriesApi.create(projectId, {
+        name,
+        color: CATEGORY_COLORS[(categoriesData?.categories.length ?? 0) % CATEGORY_COLORS.length],
+      })
+      await codesApi.update(projectId, code.id, { category_id: cat.id })
+      return cat
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['categories', projectId] })
+      setMenuOpen(false)
+      setMenuView('main')
     },
   })
 
@@ -743,18 +792,21 @@ function CodeItem({
         'px-4 py-2 flex items-center gap-3 hover:bg-mm-surface-hover cursor-pointer border-b border-mm-border-subtle group',
         disabled && 'opacity-50',
         !code.is_active && 'opacity-50',
-        isSelected && 'bg-blue-50 dark:bg-blue-900/30',
-        isFocused && 'ring-2 ring-inset ring-blue-400 bg-blue-50 dark:bg-blue-950/30',
-        isPendingApply && 'border-l-4 border-l-blue-500 bg-blue-50 dark:bg-blue-950/30',
+        isSelected && SELECTED_TINT,
+        isFocused && `ring-2 ring-inset ring-[hsl(var(--mm-blue)/0.6)] ${SELECTED_TINT}`,
+        isPendingApply && `shadow-[inset_4px_0_0_0_hsl(var(--mm-blue)/0.7)] ${SELECTED_TINT}`,
         isDragging && 'opacity-40'
       )}
+      // #434: the dimmed (opacity-50) no-segment-selected / inactive-code state
+      // is faux-disabled — convey it to AT so the low-contrast text falls under
+      // WCAG 1.4.3's disabled-component exemption instead of failing contrast.
+      aria-disabled={disabled || !code.is_active}
       onClick={() => !disabled && code.is_active && onToggle()}
     >
       <Popover open={colorPickerOpen} onOpenChange={setColorPickerOpen}>
         <PopoverTrigger asChild>
-          <button
-            className="w-3 h-3 rounded-full flex-shrink-0 hover:ring-2 hover:ring-mm-border-medium transition-shadow"
-            style={{ backgroundColor: getCodeColor(code) }}
+          <ColorDotButton
+            color={getCodeColor(code)}
             onClick={(e) => { e.stopPropagation(); setColorPickerOpen(true) }}
             title="Change color"
             aria-label={`Change color for ${code.name}`}
@@ -774,12 +826,12 @@ function CodeItem({
       {state !== 'none' && (
         <span className={cn(
           "w-1.5 h-1.5 rounded-full shrink-0",
-          state === 'all' ? 'bg-blue-500' : 'bg-blue-300'
+          state === 'all' ? 'bg-mm-blue' : 'bg-mm-blue/50'
         )} />
       )}
 
       {/* More options menu */}
-      <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+      <Popover open={menuOpen} onOpenChange={(o) => { setMenuOpen(o); if (!o) setMenuView('main') }}>
         <PopoverTrigger asChild>
           <button
             className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1 hover:bg-mm-surface-hover rounded transition-opacity"
@@ -792,61 +844,102 @@ function CodeItem({
             <Ellipsis className="w-4 h-4 text-mm-text-muted" />
           </button>
         </PopoverTrigger>
-        <PopoverContent className="w-48 p-1" align="end">
-          <button
-            className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-mm-surface-hover rounded"
-            onClick={(e) => {
-              e.stopPropagation()
-              setDescriptionValue(code.description || '')
-              setIsEditingDescription(true)
-              setMenuOpen(false)
-            }}
-          >
-            <Pencil className="w-4 h-4" />
-            {code.description ? 'Edit Description' : 'Add Description'}
-          </button>
-          <button
-            className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-mm-surface-hover rounded"
-            onClick={(e) => {
-              e.stopPropagation()
-              setMenuOpen(false)
-              onAddMemo?.()
-            }}
-          >
-            <StickyNote className="w-4 h-4" />
-            Add Memo
-          </button>
-          {/* Don't show deactivate for universal codes */}
-          {!code.is_universal && (
-            <button
-              className={cn(
-                "w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-mm-surface-hover rounded",
-                code.is_active ? "text-orange-600" : "text-green-600"
-              )}
-              onClick={(e) => {
-                e.stopPropagation()
-                if (code.is_active && code.usage_count > 0) {
-                  // Show confirmation dialog for codes with associations
-                  setShowDeactivateDialog(true)
+        <PopoverContent className={cn(menuView === 'category' ? 'w-64' : 'w-48', 'p-1')} align="end">
+          {menuView === 'category' ? (
+            <>
+              <button
+                type="button"
+                className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-mm-text-muted hover:bg-mm-surface-hover rounded mb-1"
+                onClick={(e) => { e.stopPropagation(); setMenuView('main') }}
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+                Move to category
+              </button>
+              <div onClick={(e) => e.stopPropagation()}>
+                <CreatableComboList
+                  options={categoryOptions}
+                  value={code.category_id}
+                  onSelect={(catId) => moveCategoryMutation.mutate(catId)}
+                  onCreate={(label) => createCategoryAndAssignMutation.mutate(label)}
+                  creating={createCategoryAndAssignMutation.isPending}
+                  allowClear
+                  clearLabel="No category"
+                  createPrefix="New category"
+                  searchPlaceholder="Search or create category…"
+                  emptyText="No categories yet"
+                  autoFocus
+                  onDismiss={() => { setMenuOpen(false); setMenuView('main') }}
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <button
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-mm-surface-hover rounded"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setDescriptionValue(code.description || '')
+                  setIsEditingDescription(true)
                   setMenuOpen(false)
-                } else {
-                  // Toggle directly for inactive codes or codes with no associations
-                  toggleActiveMutation.mutate(!code.is_active)
-                }
-              }}
-            >
-              {code.is_active ? (
-                <>
-                  <PowerOff className="w-4 h-4" />
-                  Deactivate Code
-                </>
-              ) : (
-                <>
-                  <Power className="w-4 h-4" />
-                  Reactivate Code
-                </>
+                }}
+              >
+                <Pencil className="w-4 h-4" />
+                {code.description ? 'Edit Description' : 'Add Description'}
+              </button>
+              <button
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-mm-surface-hover rounded"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setMenuOpen(false)
+                  onAddMemo?.()
+                }}
+              >
+                <StickyNote className="w-4 h-4" />
+                Add Memo
+              </button>
+              {/* #462: recategorize. Universal codes live in their own group, so skip them. */}
+              {!code.is_universal && (
+                <button
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-mm-surface-hover rounded"
+                  onClick={(e) => { e.stopPropagation(); setMenuView('category') }}
+                >
+                  <FolderInput className="w-4 h-4" />
+                  Move to category
+                </button>
               )}
-            </button>
+              {/* Don't show deactivate for universal codes */}
+              {!code.is_universal && (
+                <button
+                  className={cn(
+                    "w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-mm-surface-hover rounded",
+                    code.is_active ? "text-orange-600" : "text-green-600"
+                  )}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    if (code.is_active && code.usage_count > 0) {
+                      // Show confirmation dialog for codes with associations
+                      setShowDeactivateDialog(true)
+                      setMenuOpen(false)
+                    } else {
+                      // Toggle directly for inactive codes or codes with no associations
+                      toggleActiveMutation.mutate(!code.is_active)
+                    }
+                  }}
+                >
+                  {code.is_active ? (
+                    <>
+                      <PowerOff className="w-4 h-4" />
+                      Deactivate Code
+                    </>
+                  ) : (
+                    <>
+                      <Power className="w-4 h-4" />
+                      Reactivate Code
+                    </>
+                  )}
+                </button>
+              )}
+            </>
           )}
         </PopoverContent>
       </Popover>
@@ -857,7 +950,7 @@ function CodeItem({
           <DialogHeader>
             <DialogTitle>Deactivate "{code.name}"?</DialogTitle>
             <DialogDescription>
-              This code is applied to {code.usage_count} segment{code.usage_count !== 1 ? 's' : ''}.
+              This code is applied in {code.usage_count} place{code.usage_count !== 1 ? 's' : ''} (segments or responses).
               Deactivating it will hide it from the code list, but existing associations will be preserved.
               You can reactivate it later from the codebook.
             </DialogDescription>

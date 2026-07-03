@@ -36,7 +36,7 @@ export default function ResponseLengthPanel({ data, loading }: ResponseLengthPan
               </span>
               <div className="flex-1 bg-mm-bg rounded-full h-3 overflow-hidden" role="meter" aria-valuenow={c.avg_words} aria-valuemin={0} aria-valuemax={maxWords} aria-label={`${c.code_name}: ${c.avg_words.toFixed(0)} avg words`}>
                 <div
-                  className={`h-full rounded-full transition-all ${c.isUncoded ? 'bg-gray-300 dark:bg-gray-600' : 'bg-teal-400'}`}
+                  className={`h-full rounded-full transition-all ${c.isUncoded ? 'bg-mm-border-medium' : 'bg-teal-400'}`}
                   style={{ width: `${(c.avg_words / maxWords) * 100}%` }}
                 />
               </div>
@@ -53,7 +53,7 @@ export default function ResponseLengthPanel({ data, loading }: ResponseLengthPan
             const totalCoded = data.codes.reduce((s, c) => s + c.text_count, 0)
             return totalCoded > 0 ? (
               <>
-                Coded comments avg {Math.round(data.codes.reduce((s, c) => s + c.avg_words * c.text_count, 0) / totalCoded)} words
+                Coded texts avg {Math.round(data.codes.reduce((s, c) => s + c.avg_words * c.text_count, 0) / totalCoded)} words
                 vs. uncoded avg {Math.round(data.uncoded.avg_words)} words.
               </>
             ) : null

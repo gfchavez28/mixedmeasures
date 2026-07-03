@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Boolean, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from uuid import uuid4
 from ..database import Base
 
 
@@ -23,10 +24,21 @@ class Code(Base):
     category_id = Column(Integer, ForeignKey("code_categories.id", ondelete="SET NULL"), nullable=True, index=True)
     category_order = Column(Integer, nullable=True)
 
+    # Effective-code grouping for agreement/consensus (Track J · J2-3), mirrors
+    # category_id: a code belongs to at most one equivalence group.
+    code_equivalence_group_id = Column(
+        Integer, ForeignKey("code_equivalence_groups.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+
+    # Track J · J3-2-0: stable cross-instance identity for merge matching
+    uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
+
     # Relationships
     project = relationship("Project", back_populates="codes")
     applications = relationship("CodeApplication", back_populates="code", cascade="all, delete-orphan")
     category = relationship("CodeCategory", back_populates="codes")
+    code_equivalence_group = relationship("CodeEquivalenceGroup", back_populates="codes")
 
     __table_args__ = (
         Index("ix_codes_project_numeric", "project_id", "numeric_id", unique=True),

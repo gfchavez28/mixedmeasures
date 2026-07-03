@@ -14,6 +14,11 @@ from ..models.memo import Memo
 from ..models.code_category import CodeCategory
 from ..models.materials import Material
 from ..models.excerpt import Excerpt
+from ..services.coding_layers import (
+    code_usage_count_expr,
+    non_consensus_filter,
+    visible_target_filter,
+)
 from ..schemas.search import (
     SearchResponse,
     SegmentSearchResult,
@@ -227,8 +232,13 @@ async def search_study(
         if codes:
             code_ids = [c.id for c in codes]
             counts = (
-                db.query(CodeApplication.code_id, func.count(CodeApplication.id))
-                .filter(CodeApplication.code_id.in_(code_ids))
+                db.query(CodeApplication.code_id, code_usage_count_expr())
+                .outerjoin(Segment, CodeApplication.segment_id == Segment.id)
+                .filter(
+                    CodeApplication.code_id.in_(code_ids),
+                    non_consensus_filter(),
+                    visible_target_filter(),  # #500
+                )
                 .group_by(CodeApplication.code_id)
                 .all()
             )
@@ -511,8 +521,11 @@ async def search_study(
                 ).all()
             )
             code_counts = (
-                db.query(CodeApplication.dataset_value_id, func.count(CodeApplication.id))
-                .filter(CodeApplication.dataset_value_id.in_(dv_ids))
+                db.query(
+                    CodeApplication.dataset_value_id,
+                    func.count(func.distinct(CodeApplication.code_id)),
+                )
+                .filter(CodeApplication.dataset_value_id.in_(dv_ids), non_consensus_filter())
                 .group_by(CodeApplication.dataset_value_id)
                 .all()
             )

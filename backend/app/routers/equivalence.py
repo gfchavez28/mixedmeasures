@@ -1,8 +1,6 @@
 """Equivalence group endpoints for cross-dataset column equivalence."""
 
 import json
-import re
-import unicodedata
 from collections import defaultdict
 from difflib import SequenceMatcher
 
@@ -49,6 +47,9 @@ from ..services.equivalence_validators import (
 from ..services.metrics import compute_metric
 from ..services.staleness import mark_metrics_stale
 from ..services.audit import log_action
+# Single-sourced text normalizer (extracted to services so J3-2b's code-merge
+# triage shares the exact same fuzzy-match behavior — see text_similarity.py).
+from ..services.text_similarity import normalize_text as _normalize_text
 
 from .helpers import _get_project_or_404
 
@@ -198,23 +199,6 @@ def _assert_columns_unique_per_dataset(
                 "conflicts": conflicts,
             },
         )
-
-
-def _normalize_text(text: str) -> str:
-    """Normalize text for fuzzy matching: lowercase, strip accents, collapse whitespace, remove punctuation."""
-    text = text.strip().lower()
-    # Strip accents
-    text = "".join(
-        c for c in unicodedata.normalize("NFD", text)
-        if unicodedata.category(c) != "Mn"
-    )
-    # Remove common prefixes like column codes in brackets
-    text = re.sub(r"^\[.*?\]\s*", "", text)
-    # Collapse whitespace
-    text = re.sub(r"\s+", " ", text)
-    # Remove punctuation at edges
-    text = text.strip(".,;:!?-–—")
-    return text
 
 
 # ── CRUD endpoints ───────────────────────────────────────────────────────────

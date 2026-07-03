@@ -5,8 +5,9 @@ import { toast } from 'sonner'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import CodeChip from './CodeChip'
-import { codingApi, textCodingApi, codesApi, type Code } from '@/lib/api'
+import { codingApi, textCodingApi, codesApi, type Code, type Coder } from '@/lib/api'
 import { getCodeColor } from '@/lib/utils'
+import { visibleCodeChipRows, distinctVisibleCodeIds, type AppliedCodeDetailLike, type CodeChipRow } from '@/lib/coding-progress'
 
 interface InlineCodeActionsProps {
   projectId: number
@@ -18,6 +19,21 @@ interface InlineCodeActionsProps {
   onCodeChange: () => void
   excludeCodeId?: number
   onFocusCode?: (codeId: number) => void
+  // Track J · J1 attribution badges (only supplied in multi-coder mode).
+  // Prefer per-application details (one chip per (code, coder) — #441/INV-3);
+  // codeCoderIds is the legacy single-coder fallback (code_id → user_id).
+  appliedCodeDetails?: AppliedCodeDetailLike[]
+  codeCoderIds?: Map<number, number | null>
+  coderMap?: Map<number, Coder>
+  /** Track J · J1 visibility filter — coder ids whose chips are hidden (empty = show all). */
+  hiddenCoderIds?: Set<number>
+  /**
+   * #475: keep the add-code popover open when focus leaves it. Needed inside the
+   * reconciliation grid, whose roving-tabindex focus churn otherwise triggers a
+   * Radix focus-outside dismiss the instant the popover opens (open→close loop).
+   * Pointer-down-outside + Escape still dismiss, so behaviour is unchanged elsewhere.
+   */
+  keepOpenOnFocusOutside?: boolean
 }
 
 export default function InlineCodeActions({
@@ -30,6 +46,11 @@ export default function InlineCodeActions({
   onCodeChange,
   excludeCodeId,
   onFocusCode,
+  appliedCodeDetails,
+  codeCoderIds,
+  coderMap,
+  hiddenCoderIds,
+  keepOpenOnFocusOutside,
 }: InlineCodeActionsProps) {
   const queryClient = useQueryClient()
   const [addCodeOpen, setAddCodeOpen] = useState(false)
@@ -106,21 +127,33 @@ export default function InlineCodeActions({
     c.is_active && c.name.toLowerCase() === searchLower
   )
 
-  const visibleCodeIds = excludeCodeId
-    ? appliedCodeIds.filter(cid => cid !== excludeCodeId)
-    : appliedCodeIds
+  // Render one chip per (code, coder) via the single INV-3 chokepoint (#441) when
+  // we have per-application details. Otherwise (no attribution to show) collapse
+  // to distinct codes, so a per-coder bare array doesn't render the same code N
+  // times — codeCoderIds still supplies the single-coder badge where present.
+  const chipRows: CodeChipRow[] = (appliedCodeDetails
+    ? visibleCodeChipRows(appliedCodeDetails, hiddenCoderIds)
+    : distinctVisibleCodeIds(
+        appliedCodeIds.map(id => ({ code_id: id, user_id: codeCoderIds?.get(id) ?? null })),
+        hiddenCoderIds,
+      ).map(id => {
+        const userId = codeCoderIds?.get(id) ?? null
+        return { key: `${id}-${userId ?? 'na'}`, codeId: id, userId }
+      })
+  ).filter(r => !(excludeCodeId && r.codeId === excludeCodeId))
 
   return (
     <div className="group/actions flex flex-wrap items-center gap-1">
-      {visibleCodeIds.map(cid => {
-        const c = codeMap.get(cid)
+      {chipRows.map(row => {
+        const c = codeMap.get(row.codeId)
         if (!c) return null
+        const coder = (coderMap && row.userId != null) ? coderMap.get(row.userId) ?? null : null
         return (
-          <span key={cid} className="group/chip relative inline-flex">
-            <CodeChip code={c} size="xs" onClick={onFocusCode} />
+          <span key={row.key} className="group/chip relative inline-flex min-w-0 max-w-full">
+            <CodeChip code={c} size="xs" onClick={onFocusCode} coder={coder} truncate />
             <button
               className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-mm-surface border border-mm-border-subtle flex items-center justify-center opacity-0 group-hover/chip:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity hover:bg-red-100 dark:hover:bg-red-900/30"
-              onClick={e => { e.stopPropagation(); removeCodeMutation.mutate(cid) }}
+              onClick={e => { e.stopPropagation(); removeCodeMutation.mutate(row.codeId) }}
               title={`Remove ${c.name}`}
               aria-label={`Remove code ${c.name}`}
             >
@@ -139,7 +172,11 @@ export default function InlineCodeActions({
             <Plus className="w-3 h-3" />
           </button>
         </PopoverTrigger>
-        <PopoverContent className="w-56 p-2" align="start">
+        <PopoverContent
+          className="w-56 p-2"
+          align="start"
+          onFocusOutside={keepOpenOnFocusOutside ? (e) => e.preventDefault() : undefined}
+        >
           <Input
             value={codeSearch}
             onChange={e => setCodeSearch(e.target.value)}

@@ -6,7 +6,7 @@ export { extractApiError } from './error-utils'
 
 // Auth
 export { authApi } from './auth'
-export type { User, AuthStatus } from './auth'
+export type { User, AuthStatus, Coder } from './auth'
 
 // Projects
 export { projectsApi } from './projects'
@@ -22,7 +22,7 @@ export type { AudioUploadResponse } from './audio'
 
 // Segments
 export { segmentsApi } from './segments'
-export type { Segment, SegmentNoteInfo, SegmentExcerptInfo } from './segments'
+export type { Segment, SegmentNoteInfo, SegmentExcerptInfo, AppliedCodeDetail } from './segments'
 
 // Codes & Categories
 export { codesApi, categoriesApi } from './codes'
@@ -253,6 +253,19 @@ export type {
   SaturationPoint,
   SaturationResponse,
   TextColumnInfo,
+  ConsensusStatus,
+  ReconciliationCoder,
+  ReconciliationCodeInfo,
+  ReconciliationConsensusContext,
+  ReconciliationUnit,
+  ReconciliationResponse,
+  ReconciliationParams,
+  RecomputeConsensusResponse,
+  IrrCoderInfo,
+  IrrCodeResult,
+  IrrThresholds,
+  IrrResponse,
+  IrrParams,
 } from './code-analysis'
 
 // Text Coding
@@ -343,9 +356,6 @@ export type {
   CodebookTreeResponse,
   CodebookCategoryNode,
   CodebookCodeNode,
-  CodebookCooccurrenceResponse,
-  CodebookCooccurrenceNode,
-  CodebookCooccurrenceEdge,
 } from './codebook'
 
 // Backup
@@ -381,4 +391,16 @@ export type {
   ImportValidationResult,
   ProjectImportResult,
   CodebookImportResult,
+  ExistingProjectInfo,
+  ProjectImportMode,
+  MergeCoderMatch,
+  MergeCoderPreview,
+  MergeReport,
+  MergeDivergenceDetail,
+  CoderMapping,
+  CoderMappingDecision,
+  MergeCodeCandidate,
+  MergeCodePreview,
+  CodeMapping,
+  CodeMappingDecision,
 } from './project-portability'

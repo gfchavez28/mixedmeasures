@@ -1,6 +1,6 @@
 import { useState, useMemo, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Download } from 'lucide-react'
+import { Download, Clock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -16,6 +16,11 @@ import {
   type SubgroupFilter,
 } from '@/lib/api'
 import { CATEGORICAL_GROUPING_TYPES } from '@/lib/dataset-constants'
+import { useCoders } from '@/hooks/useCoders'
+import { useConsensusStatus } from '@/hooks/useConsensusStatus'
+import { useAuth } from '@/lib/auth-context'
+import CoderFilterPopover from './CoderFilterPopover'
+import SegmentedControl from '@/components/ui/segmented-control'
 import SubgroupFilterPanel from './SubgroupFilterPanel'
 import FrequencyComparisonChart from './FrequencyComparisonChart'
 import CrossTabTable from './CrossTabTable'
@@ -37,6 +42,29 @@ export default function CrossAnalysisPanel({
   const [crossColumnId, setCrossColumnId] = useState<number | null>(null)
   const [densityGroupColumnId, setDensityGroupColumnId] = useState<number | null>(null)
   const [srAnnouncement, setSrAnnouncement] = useState('')
+
+  // Per-coder visibility lens (Track J · J1, multi-coder only). In-memory hide-set;
+  // map hide→include so default (nothing hidden) sends NOTHING (= all coders incl.
+  // unattributed) and only an active filter restricts.
+  const { coders, multiCoder } = useCoders()
+  const { user } = useAuth()
+  const [hiddenCoders, setHiddenCoders] = useState<Set<number>>(new Set())
+
+  // Track J · J2 slab 3b — coding-layer selector (human coders vs derived consensus).
+  // Offered only when a consensus layer exists for this project (DEC-A).
+  const { data: consensusStatus } = useConsensusStatus(projectId)
+  const consensusAvailable = !!consensusStatus?.exists
+  const [layerScopePref, setLayerScopePref] = useState<'human' | 'consensus'>('human')
+  // Derived so the consensus layer is honored ONLY while it exists (e.g. it's hidden
+  // again if a coder is archived away from the ≥2 roster) — no setState-in-effect.
+  const layerScope: 'human' | 'consensus' =
+    layerScopePref === 'consensus' && consensusAvailable ? 'consensus' : 'human'
+  const coderInclude = useMemo(
+    () => hiddenCoders.size === 0 ? undefined : coders.filter(c => !hiddenCoders.has(c.id)).map(c => c.id),
+    [coders, hiddenCoders],
+  )
+  const coderIncludeArr = coderInclude ?? null
+  const coderIncludeCsv = coderInclude ? coderInclude.join(',') : undefined
 
   const columnIdsStr = focalColumnIds.join(',')
 
@@ -64,40 +92,48 @@ export default function CrossAnalysisPanel({
 
   // Filtered frequencies query
   const { data: freqData } = useQuery({
-    queryKey: ['text-filtered-freq', projectId, columnIdsStr, filtersJSON],
+    queryKey: ['text-filtered-freq', projectId, columnIdsStr, filtersJSON, coderIncludeCsv, layerScope],
     queryFn: () => textAnalysisApi.filteredFrequencies(projectId, {
       column_ids: focalColumnIds,
       filters: debouncedFilters,
       include_overall: true,
+      coder_ids: coderIncludeArr,
+      layer_scope: layerScope,
     }),
     enabled: filtersReady,
   })
 
   // Cross-tabulation query
   const { data: crossTabData, isLoading: crossTabLoading } = useQuery({
-    queryKey: ['text-crosstab', projectId, columnIdsStr, crossColumnId],
+    queryKey: ['text-crosstab', projectId, columnIdsStr, crossColumnId, coderIncludeCsv, layerScope],
     queryFn: () => textAnalysisApi.crossTabulation(projectId, {
       text_column_ids: focalColumnIds,
       cross_column_id: crossColumnId!,
+      coder_ids: coderIncludeArr,
+      layer_scope: layerScope,
     }),
     enabled: crossColumnId !== null,
   })
 
   // Code density query
   const { data: densityData, isLoading: densityLoading } = useQuery({
-    queryKey: ['text-density', projectId, columnIdsStr, densityGroupColumnId],
+    queryKey: ['text-density', projectId, columnIdsStr, densityGroupColumnId, coderIncludeCsv, layerScope],
     queryFn: () => textAnalysisApi.codeDensity(projectId, {
       column_ids: columnIdsStr,
       group_by_column_id: densityGroupColumnId ?? undefined,
+      coder_ids: coderIncludeCsv,
+      layer_scope: layerScope,
     }),
     enabled: focalColumnIds.length > 0,
   })
 
   // Response length query
   const { data: lengthData, isLoading: lengthLoading } = useQuery({
-    queryKey: ['text-length', projectId, columnIdsStr],
+    queryKey: ['text-length', projectId, columnIdsStr, coderIncludeCsv, layerScope],
     queryFn: () => textAnalysisApi.responseLength(projectId, {
       column_ids: columnIdsStr,
+      coder_ids: coderIncludeCsv,
+      layer_scope: layerScope,
     }),
     enabled: focalColumnIds.length > 0,
   })
@@ -143,6 +179,8 @@ export default function CrossAnalysisPanel({
       column_ids: columnIdsStr,
       filters: debouncedFilters.length > 0 ? JSON.stringify(debouncedFilters) : undefined,
       cross_column_id: crossColumnId ?? undefined,
+      coder_ids: coderIncludeCsv,
+      layer_scope: layerScope,
     })
   }
 
@@ -151,15 +189,53 @@ export default function CrossAnalysisPanel({
       {/* Screen reader announcements */}
       <div aria-live="polite" className="sr-only">{srAnnouncement}</div>
 
-      {/* Subgroup filters */}
-      <SubgroupFilterPanel
-        projectId={projectId}
-        focalColumnIds={focalColumnIds}
-        textColumns={textColumns}
-        filters={filters}
-        onFiltersChange={setFilters}
-        matchCount={matchCount}
-      />
+      {/* Subgroup filters + per-coder lens (multi-coder only) */}
+      <div className="flex items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <SubgroupFilterPanel
+            projectId={projectId}
+            focalColumnIds={focalColumnIds}
+            textColumns={textColumns}
+            filters={filters}
+            onFiltersChange={setFilters}
+            matchCount={matchCount}
+          />
+        </div>
+        {multiCoder && consensusAvailable && (
+          <div className="pt-1 shrink-0 flex items-center gap-2">
+            <SegmentedControl
+              options={([
+                { value: 'human', label: 'Coders' },
+                { value: 'consensus', label: 'Consensus' },
+              ] as { value: 'human' | 'consensus'; label: string }[])}
+              value={layerScope}
+              onChange={setLayerScopePref}
+              ariaLabel="Coding layer"
+              idPrefix="text-layer"
+            />
+            {layerScope === 'consensus' && (consensusStatus?.stale_count ?? 0) > 0 && (
+              <span
+                className="inline-flex items-center gap-1 text-xs text-mm-text-muted"
+                title="Recent coding changed; the consensus layer is recomputing in the background."
+              >
+                <Clock className="w-3.5 h-3.5" aria-hidden="true" />
+                Consensus may be out of date
+              </span>
+            )}
+          </div>
+        )}
+        {/* Per-coder filter is moot on the single consensus layer (UX-2). */}
+        {multiCoder && layerScope !== 'consensus' && (
+          <div className="pt-1 shrink-0">
+            <CoderFilterPopover
+              coders={coders}
+              activeCoderId={user?.id ?? null}
+              hidden={hiddenCoders}
+              onChange={setHiddenCoders}
+            />
+          </div>
+        )}
+      </div>
 
       {/* Frequency comparison (only when filters are active) */}
       {filtersReady && (

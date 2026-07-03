@@ -80,6 +80,7 @@ function makeMetric(overrides: Partial<MetricDefinitionSummaryResponse> = {}): M
     latest_computed_at: null,
     total_valid_n: null,
     result_count: 0,
+    real_group_count: 0,
     last_accessed_at: null,
     created_at: '2026-04-28T00:00:00Z',
     updated_at: '2026-04-28T00:00:00Z',

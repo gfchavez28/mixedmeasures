@@ -45,8 +45,10 @@ def project_with_coded_document(db_session):
     - seg C (6402): universal AND non-universal    → COUNTS (one distinct segment)
     - seg D (6403): uncoded                        → does not count
     - seg E (6404): merged (soft-deleted) + coded  → must NOT count (visibility)
+    - seg F (6405): INACTIVE non-universal only    → COUNTS (#489: is_active is
+      not part of the J-A definition; the doc payload must carry the chip too)
 
-    Expected coded count for the document: 2 (A and C).
+    Expected coded count for the document: 3 (A, C, F).
     """
     db = db_session
     db.add(Project(id=620, name="Doc Coded Counts", user_id=1))
@@ -59,7 +61,7 @@ def project_with_coded_document(db_session):
     db.add(doc)
     db.flush()
 
-    for i in range(5):
+    for i in range(6):
         db.add(Segment(
             id=6400 + i, document_id=620, conversation_id=None,
             speaker_id=None, sequence_order=i,
@@ -74,6 +76,8 @@ def project_with_coded_document(db_session):
              is_universal=True, is_active=True),
         Code(id=6801, project_id=620, numeric_id=100, name="theme A",
              is_universal=False, is_active=True),
+        Code(id=6802, project_id=620, numeric_id=101, name="retired theme",
+             is_universal=False, is_active=False),
     ])
     db.flush()
 
@@ -83,13 +87,14 @@ def project_with_coded_document(db_session):
         CodeApplication(segment_id=6402, code_id=6800, user_id=1),   # C: both...
         CodeApplication(segment_id=6402, code_id=6801, user_id=1),   # ...universal + non-univ
         CodeApplication(segment_id=6404, code_id=6801, user_id=1),   # E: coded but merged
+        CodeApplication(segment_id=6405, code_id=6802, user_id=1),   # F: inactive-only (#489)
     ])
     db.flush()
 
     return db.query(User).filter(User.id == 1).one()
 
 
-EXPECTED_DOC_CODED = 2
+EXPECTED_DOC_CODED = 3
 
 
 # ── helper-level definition ────────────────────────────────────────────────
@@ -159,6 +164,10 @@ def test_document_detail_codes_carry_is_universal(
     assert by_seg[6400].codes[0].is_universal is False
     # seg 6401: universal-only → is_universal True (so the workbench excludes it)
     assert by_seg[6401].codes[0].is_universal is True
+    # seg 6405: inactive-code application must still be IN the payload (#489 —
+    # the old is_active filter dropped it, making the workbench gauge disagree
+    # with this same response's coded_segment_count and hiding the chip).
+    assert [c.name for c in by_seg[6405].codes] == ["retired theme"]
     # client-side definition (≥1 non-universal) must match the backend count
     coded_client = sum(
         1 for s in detail.segments if any(not c.is_universal for c in s.codes)

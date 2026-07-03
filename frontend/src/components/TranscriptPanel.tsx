@@ -1,11 +1,12 @@
-import { useCallback, useRef, useState, useEffect, useMemo, type ReactNode, type RefObject } from 'react'
+import { useCallback, useRef, useState, useEffect, useMemo, forwardRef, type ReactNode, type RefObject, type CSSProperties } from 'react'
+import { mergeArchivedIntoCoderMap, chipHiddenWithArchived } from '@/lib/coder-color'
 import { createPortal } from 'react-dom'
-import { Virtuoso, VirtuosoHandle } from 'react-virtuoso'
+import { Virtuoso, VirtuosoHandle, type Components } from 'react-virtuoso'
 import { Search, X, Filter, Merge, Play, Pause, Quote, Users } from 'lucide-react'
 import { useDroppable } from '@dnd-kit/core'
 import { Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
-import { type Segment, type Code, type Speaker, type Conversation, audioApi } from '@/lib/api'
+import { type Segment, type Code, type Coder, type Speaker, type Conversation, audioApi } from '@/lib/api'
 import type { FloatingCoords } from '@/lib/floating-utils'
 import { getSpeakerInitials } from '@/lib/conversation-import-utils'
 import { useTextSplitSelection } from '@/hooks/useTextSplitSelection'
@@ -15,6 +16,7 @@ import SegmentRow from './SegmentRow'
 import SplitToolbar from './SplitToolbar'
 import TimelineScrubber from './TimelineScrubber'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import CoderFilterPopover from '@/components/CoderFilterPopover'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -51,6 +53,48 @@ function renderSearchSnippet(text: string, query: string, contextChars = 50): Re
       {text.slice(matchEnd, afterEnd)}{suffix}
     </>
   )
+}
+
+// #436: ARIA listbox semantics for the virtualized transcript. The Virtuoso List is
+// the `listbox` that owns the segment rows (each SegmentRow root is role="option" with
+// aria-selected); the per-item wrapper is role="presentation" so the listbox→option
+// ownership survives the Virtuoso wrapper div. Defined at module scope (stable identity)
+// so Virtuoso doesn't remount the list on every parent render. Keyboard navigation +
+// multi-select are handled by the workbench's own keyboard layer (useSegmentSelection),
+// not roving tabindex — the roles add valid structure without changing interaction.
+// #484: the listbox is focusable (tabIndex={0}) and carries aria-activedescendant so a
+// screen reader can follow the workbench's own arrow-nav. The #436 structural roles are
+// valid, but a screen reader had no focus anchor: arrow-nav (a window keydown listener)
+// only moved selection, never focus, so NVDA's browse mode ate the arrows. We use
+// aria-activedescendant — NOT roving tabindex — because the list is virtualized: real focus
+// stays on the never-unmounting List container and survives Virtuoso row recycling, and it
+// composes with the existing window-level arrow model instead of fighting it. The active id
+// is threaded via Virtuoso `context` (module-scope component identity stays stable → no remount).
+interface TranscriptListContext {
+  activeDescendantId?: string
+}
+
+const transcriptComponents: Components<Segment, TranscriptListContext> = {
+  List: forwardRef<HTMLDivElement, { style?: CSSProperties; children?: ReactNode; context?: TranscriptListContext }>(
+    function TranscriptList({ style, children, context }, ref) {
+      return (
+        <div
+          ref={ref}
+          style={style}
+          role="listbox"
+          aria-multiselectable="true"
+          aria-label="Transcript segments"
+          tabIndex={0}
+          aria-activedescendant={context?.activeDescendantId}
+        >
+          {children}
+        </div>
+      )
+    },
+  ),
+  Item: function TranscriptItem({ children, item: _item, context: _context, ...props }) {
+    return <div {...props} role="presentation">{children}</div>
+  },
 }
 
 interface TranscriptPanelProps {
@@ -107,6 +151,27 @@ interface TranscriptPanelProps {
   allCodes?: Code[]
   codeMap?: Map<number, Code>
   onCodeChange?: () => void
+  /** Clicking an applied-code chip pivots to that code in the codes panel (#422a). */
+  onFocusCode?: (codeId: number) => void
+  /** Track J · J1: user_id → Coder lens for attribution badges (multi-coder mode only). */
+  coderMap?: Map<number, Coder>
+  /** Track J · J1 visibility filter (only wired in multi-coder mode). */
+  coders?: Coder[]
+  activeCoderId?: number | null
+  coderFilterHidden?: Set<number>
+  onCoderFilterChange?: (next: Set<number>) => void
+  /** Group A (#457): coder ids with codings on THIS conversation + archived-who-coded
+   *  extras — drive the picklist "active here" markers (undefined = no markers). */
+  coderActiveIds?: Set<number>
+  coderExtra?: Coder[]
+  /** #451: archived coders' chips are hidden by default; this "view all coders"
+   *  toggle reveals them. The panel folds the archived extras into the chip map
+   *  (so they render attributed) and forces them hidden unless this is on. */
+  coderShowArchived?: boolean
+  onCoderShowArchivedChange?: (v: boolean) => void
+  /** Blind mode (DEC-G): suppress the coder-filter popover (the hidden set still
+      threads to rows so colleague chips stay hidden). */
+  hideCoderFilter?: boolean
   scrubberPortalRef?: RefObject<HTMLDivElement | null>
   /** Conversation metadata — used for audio playback sync */
   conversation?: Conversation
@@ -158,6 +223,17 @@ export default function TranscriptPanel({
   allCodes,
   codeMap,
   onCodeChange,
+  onFocusCode,
+  coderMap,
+  coders,
+  activeCoderId,
+  coderFilterHidden,
+  onCoderFilterChange,
+  coderActiveIds,
+  coderExtra,
+  coderShowArchived,
+  onCoderShowArchivedChange,
+  hideCoderFilter,
   scrubberPortalRef,
   conversation,
   playbackRef,
@@ -165,6 +241,32 @@ export default function TranscriptPanel({
   const listRef = useRef<VirtuosoHandle>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [containerHeight, setContainerHeight] = useState(600)
+
+  // #451 — archived coders who coded here are absent from the roster coderMap (so
+  // their chips would render anonymous). Fold the extras in so they render attributed,
+  // and force them hidden unless "view all coders" is on.
+  const archivedIds = useMemo(() => new Set((coderExtra ?? []).map(c => c.id)), [coderExtra])
+  const chipCoderMap = useMemo(
+    () => (coderMap ? mergeArchivedIntoCoderMap(coderMap, coderExtra ?? []) : coderMap),
+    [coderMap, coderExtra],
+  )
+  const chipHidden = useMemo(
+    () => chipHiddenWithArchived(coderFilterHidden ?? new Set(), archivedIds, !!coderShowArchived),
+    [coderFilterHidden, archivedIds, coderShowArchived],
+  )
+
+  // #484: aria-activedescendant target = the last-selected segment (this component's
+  // existing notion of "current", cf. the auto-scroll effect below). Single-step arrow
+  // nav (the reported gap) announces the moved-to segment exactly; a shift+range announces
+  // the range's far end. Threaded to the module-scope listbox via Virtuoso `context`.
+  const listContext = useMemo<TranscriptListContext>(
+    () => ({
+      activeDescendantId: selectedSegments.length > 0
+        ? `segment-${selectedSegments[selectedSegments.length - 1]}`
+        : undefined,
+    }),
+    [selectedSegments],
+  )
 
   // Issue 119: Skip auto-scroll when selection came from a mouse click
   const skipAutoScroll = useRef(false)
@@ -422,7 +524,9 @@ export default function TranscriptPanel({
       return (
         <DroppableSegmentWrapper segmentId={segment.id} isDragActive={isDragActive}>
           {(isDragOver) => (
-            <div className="border-b border-mm-border-subtle">
+            // #436: presentation so the listbox(List)→option(SegmentRow) ownership isn't
+            // broken by this decorative border wrapper.
+            <div className="border-b border-mm-border-subtle" role="presentation">
               <SegmentRow
                 segment={segment}
                 isSelected={isSelected}
@@ -502,13 +606,17 @@ export default function TranscriptPanel({
                 allCodes={allCodes}
                 codeMap={codeMap}
                 onCodeChange={onCodeChange}
+                onFocusCode={onFocusCode}
+                coderMap={chipCoderMap}
+                hiddenCoderIds={chipHidden}
+                activeCoderId={activeCoderId}
               />
             </div>
           )}
         </DroppableSegmentWrapper>
       )
     },
-    [segments, selectedSegments, handleSegmentClick, conversationId, codes, areSelectedAdjacent, onMergeSegments, onUnmergeSegment, onUnsplitSegment, onNoteClick, editingSegmentId, editField, onStartEdit, onCancelEdit, onSaveEdit, onToggleQuote, onSaveExcerpt, onDeleteExcerpt, onAddNoteToExcerpt, speakers, textFilter, isDragActive, canGroupSelected, noneSelectedGrouped, onGroupSegments, onUngroupSegments, groupMembersMap, onContextCodeApply, onContextCreateCode, onContextCreateNote, splitSelection, handleSplit, onSplitSegment, showTimestamps, showNotes, showCodes, projectId, allCodes, codeMap, onCodeChange, onSelectionChange, getTextSelectionForSegment]
+    [segments, selectedSegments, handleSegmentClick, conversationId, codes, areSelectedAdjacent, onMergeSegments, onUnmergeSegment, onUnsplitSegment, onNoteClick, editingSegmentId, editField, onStartEdit, onCancelEdit, onSaveEdit, onToggleQuote, onSaveExcerpt, onDeleteExcerpt, onAddNoteToExcerpt, speakers, textFilter, isDragActive, canGroupSelected, noneSelectedGrouped, onGroupSegments, onUngroupSegments, groupMembersMap, onContextCodeApply, onContextCreateCode, onContextCreateNote, splitSelection, handleSplit, onSplitSegment, showTimestamps, showNotes, showCodes, projectId, allCodes, codeMap, onCodeChange, onFocusCode, chipCoderMap, chipHidden, onSelectionChange, getTextSelectionForSegment, activeCoderId]
   )
 
   // Handle scrubber position change (for live scroll during drag)
@@ -609,12 +717,12 @@ export default function TranscriptPanel({
         {/* Excerpt filter toggle */}
         <button
           className={`w-5 flex-shrink-0 transition-colors ${
-            quotedFilter ? 'text-blue-500' : 'text-emerald-400 hover:text-blue-500'
+            quotedFilter ? 'text-mm-blue' : 'text-emerald-400 hover:text-mm-blue'
           }`}
           onClick={() => onQuotedFilterChange?.(!quotedFilter)}
           title={quotedFilter ? 'Show all segments' : 'Show excerpted segments only'}
         >
-          <Quote className={`w-4 h-4 ${quotedFilter ? 'fill-blue-500' : ''}`} />
+          <Quote className={`w-4 h-4 ${quotedFilter ? 'fill-mm-blue' : ''}`} />
         </button>
 
         {/* Time Column Header */}
@@ -819,8 +927,20 @@ export default function TranscriptPanel({
 
         {/* Codes Header (Item 65) - left aligned */}
         {showCodes && (
-          <div className="w-[160px] flex-shrink-0">
+          <div className="w-[160px] flex-shrink-0 flex items-center gap-1.5">
             <span className="bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 rounded-full px-2.5 py-0.5 text-xs font-medium">Codes</span>
+            {coders && coders.length > 1 && coderFilterHidden && onCoderFilterChange && !hideCoderFilter && (
+              <CoderFilterPopover
+                coders={coders}
+                activeCoderId={activeCoderId ?? null}
+                hidden={coderFilterHidden}
+                onChange={onCoderFilterChange}
+                activeCoderIds={coderActiveIds}
+                extraCoders={coderExtra}
+                showArchived={coderShowArchived}
+                onShowArchivedChange={onCoderShowArchivedChange}
+              />
+            )}
           </div>
         )}
       </div>
@@ -846,6 +966,7 @@ export default function TranscriptPanel({
                       .map(s => s.id)
                     onGroupSegments(sortedIds)
                   }}
+                  title="Code these segments as one unit — they stay separate segments (can be ungrouped)"
                 >
                   <Users className="w-4 h-4 mr-1" />
                   Group Segments
@@ -863,6 +984,7 @@ export default function TranscriptPanel({
                       .map(s => s.id)
                     onMergeSegments(sortedIds)
                   }}
+                  title="Combine these segments into a single segment (can be unmerged)"
                 >
                   <Merge className="w-4 h-4 mr-1" />
                   Merge Segments
@@ -891,6 +1013,8 @@ export default function TranscriptPanel({
             style={{ height: containerHeight }}
             totalCount={segments.length}
             itemContent={itemContent}
+            components={transcriptComponents}
+            context={listContext}
             overscan={200}
           />
         )}
@@ -918,7 +1042,7 @@ function DroppableSegmentWrapper({ segmentId, isDragActive, children }: { segmen
   if (!isDragActive) return <>{children(false)}</>
 
   return (
-    <div ref={setNodeRef}>
+    <div ref={setNodeRef} role="presentation">
       {children(isOver)}
     </div>
   )

@@ -299,7 +299,7 @@ function ConversationReader({
         <h3 className="text-lg font-semibold">{conversationName}</h3>
         <Link
           to={`/projects/${projectId}/conversations/${conversationId}`}
-          className="text-sm text-blue-500 hover:underline flex items-center gap-1"
+          className="text-sm text-mm-blue-text hover:underline flex items-center gap-1"
         >
           <ExternalLink className="w-3.5 h-3.5" />
           Open in workspace
@@ -365,7 +365,9 @@ function ConversationReader({
                       onFocusCode={onFocusCode ?? onCodeClick}
                     />
                   ) : (
-                    seg.applied_codes.map(cid => {
+                    // Distinct codes only (read-only, no attribution): the bare
+                    // array is per-coder, so dedupe to avoid duplicate keys/chips (#441).
+                    [...new Set(seg.applied_codes)].map(cid => {
                       const code = codeMap.get(cid)
                       if (!code) return null
                       return (
@@ -443,7 +445,7 @@ function DocumentReader({
         <h3 className="text-lg font-semibold">{documentName}</h3>
         <Link
           to={`/projects/${projectId}/documents/${documentId}`}
-          className="text-sm text-blue-500 hover:underline flex items-center gap-1"
+          className="text-sm text-mm-blue-text hover:underline flex items-center gap-1"
         >
           <ExternalLink className="w-3.5 h-3.5" />
           Open in workspace
@@ -456,7 +458,8 @@ function DocumentReader({
 
       <div className="border rounded-lg overflow-hidden divide-y divide-mm-border-subtle bg-mm-surface">
         {segments.map((seg) => {
-          const appliedCodeIds = seg.codes.map(c => c.id)
+          // Distinct codes (per-coder rows collapse): one chip per code (#441).
+          const appliedCodeIds = [...new Set(seg.codes.map(c => c.id))]
           const isFocused = focusedCodeId == null || appliedCodeIds.includes(focusedCodeId)
           return (
             <div
@@ -573,7 +576,7 @@ function CommentColumnReader({
         </div>
         <Link
           to={`/projects/${projectId}/datasets/text-coding`}
-          className="text-sm text-blue-500 hover:underline flex items-center gap-1"
+          className="text-sm text-mm-blue-text hover:underline flex items-center gap-1"
         >
           <ExternalLink className="w-3.5 h-3.5" />
           Open in Text Coding

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 from slowapi import Limiter
@@ -12,6 +13,9 @@ from ..schemas.auth import (
     AuthStatusResponse,
     ChangePasswordRequest,
     UpdateProfileRequest,
+    CoderResponse,
+    CreateCoderRequest,
+    SwitchCoderRequest,
 )
 from ..auth import (
     hash_password,
@@ -23,7 +27,8 @@ from ..auth import (
     clear_session_cookie,
     get_current_user,
     ensure_default_user,
-    SESSION_COOKIE_NAME
+    SESSION_COOKIE_NAME,
+    SYSTEM_CODER_TYPES,
 )
 import json
 
@@ -76,6 +81,7 @@ async def get_auth_status(
                         username=user.username,
                         is_admin=user.is_admin,
                         csrf_token=session.csrf_token,
+                        display_color=user.display_color,
                     ),
                     inactivity_timeout_minutes=timeout,
                     encryption_enabled=encryption_enabled,
@@ -93,6 +99,7 @@ async def get_auth_status(
             username=user.username,
             is_admin=user.is_admin,
             csrf_token=csrf_token,
+            display_color=user.display_color,
         ),
         inactivity_timeout_minutes=timeout,
         encryption_enabled=encryption_enabled,
@@ -248,6 +255,7 @@ async def get_current_user_info(
         username=user.username,
         is_admin=user.is_admin,
         csrf_token=session.csrf_token if session else None,
+        display_color=user.display_color,
     )
 
 
@@ -283,6 +291,14 @@ async def update_profile(
         db.commit()
         db.refresh(user)
 
+    # Update the badge color only when the field was explicitly provided, so an
+    # explicit null clears it (the Settings "Use default color" reset) while an
+    # omitted field leaves it untouched. (Plain `is not None` could never clear it.)
+    if "display_color" in data.model_fields_set and data.display_color != user.display_color:
+        user.display_color = data.display_color
+        db.commit()
+        db.refresh(user)
+
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
     session = get_session(db, session_id) if session_id else None
     return UserResponse(
@@ -290,6 +306,7 @@ async def update_profile(
         username=user.username,
         is_admin=user.is_admin,
         csrf_token=session.csrf_token if session else None,
+        display_color=user.display_color,
     )
 
 
@@ -346,3 +363,161 @@ async def create_user(
         username=new_user.username,
         is_admin=new_user.is_admin,
     )
+
+
+# ── Coder roster (Track J · J1) — passwordless, ungated local-roster endpoints ──
+# Distinct from the gated multi-user account endpoints above: these are always
+# available and carry NO security claim (local-first). The active coder is a real
+# `users` row; switching re-points the session so attribution is server-stamped
+# (Option A). The gated /login + /users stay as the cloud-auth substrate.
+
+@router.get("/coders", response_model=list[CoderResponse])
+async def list_coders(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    include_archived: bool = False,
+):
+    """List the local coder roster.
+
+    Default: non-archived, selectable coders only — the roster lens that drives the
+    switcher, attribution badges, and the multi-coder gate (the frontend derives
+    `multiCoder` from this list's length). `include_archived=true` additionally
+    returns archived coders for the Settings roster manager (which lists + unarchives
+    them). System coders (Unattributed / consensus) own data but are NEVER selectable,
+    so they stay excluded in both modes.
+    """
+    q = db.query(User).filter(User.coder_type.notin_(SYSTEM_CODER_TYPES))
+    if not include_archived:
+        q = q.filter(User.archived == False)
+    coders = q.order_by(User.id).all()
+    return [CoderResponse.model_validate(c) for c in coders]
+
+
+@router.post("/coders", response_model=CoderResponse)
+async def create_coder(
+    data: CreateCoderRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a passwordless roster coder."""
+    name = data.username.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Coder name cannot be empty")
+    if db.query(User).filter(User.username == name).first():
+        raise HTTPException(status_code=409, detail=f"The name '{name}' is already taken")
+    coder = User(
+        username=name,
+        password_hash=None,          # passwordless local roster coder
+        is_admin=False,
+        display_color=data.display_color,
+        coder_type="human",
+    )
+    db.add(coder)
+    db.commit()
+    db.refresh(coder)
+    db.add(AuditEntry(
+        user_id=user.id, action="coder_created", entity_type="user", entity_id=coder.id,
+        details=json.dumps({"username": name}),
+    ))
+    db.commit()
+    return CoderResponse.model_validate(coder)
+
+
+@router.post("/switch-coder", response_model=CoderResponse)
+async def switch_coder(
+    data: SwitchCoderRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Make a coder the active identity for this session by re-pointing it (Option A).
+
+    Every subsequent code application is server-stamped with the chosen coder.
+    The CSRF token is per-session and unchanged, so the client keeps using it.
+    """
+    target = (
+        db.query(User)
+        .filter(
+            User.id == data.coder_id,
+            User.archived == False,
+            User.coder_type.notin_(SYSTEM_CODER_TYPES),  # can't switch TO a system coder
+        )
+        .first()
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Coder not found")
+    session_id = request.cookies.get(SESSION_COOKIE_NAME)
+    session = get_session(db, session_id) if session_id else None
+    if not session:
+        raise HTTPException(status_code=401, detail="Session expired")
+    # Stamp recency so the active coder survives session expiry / restart:
+    # ensure_default_user prefers the most-recently-active coder (J1 revert fix).
+    # Set even on a no-op re-select so re-affirming your identity refreshes it.
+    target.last_active_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    if session.user_id != target.id:
+        session.user_id = target.id
+        db.add(AuditEntry(
+            user_id=target.id, action="coder_switched", entity_type="user", entity_id=target.id,
+            details=json.dumps({"from": user.id, "to": target.id}),
+        ))
+    db.commit()
+    db.refresh(target)
+    return CoderResponse.model_validate(target)
+
+
+@router.post("/coders/{coder_id}/archive", response_model=CoderResponse)
+async def archive_coder(
+    coder_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Archive a roster coder (never hard-delete — preserves their attribution)."""
+    if coder_id == user.id:
+        raise HTTPException(status_code=400, detail="Switch to another coder before archiving this one")
+    target = (
+        db.query(User)
+        # System coders (Unattributed / consensus) are not roster coders — they
+        # can't be archived either (consistent with list_coders / switch-coder).
+        .filter(User.id == coder_id, User.coder_type.notin_(SYSTEM_CODER_TYPES))
+        .first()
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Coder not found")
+    if not target.archived:
+        target.archived = True
+        db.commit()
+        db.add(AuditEntry(
+            user_id=user.id, action="coder_archived", entity_type="user", entity_id=target.id,
+        ))
+        db.commit()
+        db.refresh(target)
+    return CoderResponse.model_validate(target)
+
+
+@router.post("/coders/{coder_id}/unarchive", response_model=CoderResponse)
+async def unarchive_coder(
+    coder_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Restore an archived roster coder to the selectable roster.
+
+    Usernames stay globally unique even while archived (create checks all users),
+    so an unarchive can never collide — no rename needed.
+    """
+    target = (
+        db.query(User)
+        .filter(User.id == coder_id, User.coder_type.notin_(SYSTEM_CODER_TYPES))
+        .first()
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Coder not found")
+    if target.archived:
+        target.archived = False
+        db.commit()
+        db.add(AuditEntry(
+            user_id=user.id, action="coder_unarchived", entity_type="user", entity_id=target.id,
+        ))
+        db.commit()
+        db.refresh(target)
+    return CoderResponse.model_validate(target)

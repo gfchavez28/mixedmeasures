@@ -3,6 +3,7 @@ import logging
 import shutil
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 import json
@@ -27,6 +28,12 @@ from ..schemas.conversation import (
 from ..auth import get_current_user
 from ..services.audit import log_action
 from ..services.csv_import import preview_csv, import_csv_to_segments
+from ..services.subtitle_import import (
+    SubtitleImportError,
+    is_subtitle_upload,
+    subtitles_to_csv_bytes,
+)
+from ..services.coding_layers import non_consensus_filter
 from ..services.coding_counts import (
     coded_segment_count as coded_segment_count_fn,
     coded_segment_counts,
@@ -106,6 +113,7 @@ def conversation_to_response(
             Segment.conversation_id == conversation.id,
             Segment.merged_into_id == None,
             Segment.split_into_id == None,
+            non_consensus_filter(),  # J2-B: the derived consensus layer must not inflate the card count
         ).scalar() or 0
 
     return ConversationResponse(
@@ -198,6 +206,7 @@ async def list_conversations(
             Segment.conversation_id.in_(conversation_ids),
             Segment.merged_into_id == None,
             Segment.split_into_id == None,
+            non_consensus_filter(),  # J2-B: the derived consensus layer must not inflate the card count
         )
         .group_by(Segment.conversation_id)
         .all()
@@ -231,6 +240,15 @@ async def preview_csv_upload(
 
     validate_encoding(encoding)
     content = await read_upload_with_limit(file)
+    # VTT/SRT transcripts (#524) convert to conversation-CSV at the boundary; the
+    # converter emits UTF-8 regardless of the upload's encoding.
+    if is_subtitle_upload(file.filename):
+        try:
+            content = await run_in_threadpool(subtitles_to_csv_bytes, content, encoding)
+        except SubtitleImportError as e:
+            logger.warning("Subtitle parse failed: %s", e)
+            raise HTTPException(status_code=400, detail=str(e))
+        encoding = "utf-8"
 
     try:
         result = preview_csv(content, encoding)
@@ -268,6 +286,16 @@ async def import_csv(
 
     validate_encoding(config.encoding)
     content = await read_upload_with_limit(file)
+    # VTT/SRT transcripts (#524): same boundary conversion as the preview; the
+    # converted bytes are UTF-8, so override the configured encoding downstream.
+    subtitle_encoding_override = False
+    if is_subtitle_upload(file.filename):
+        try:
+            content = await run_in_threadpool(subtitles_to_csv_bytes, content, config.encoding)
+        except SubtitleImportError as e:
+            logger.warning("Subtitle parse failed: %s", e)
+            raise HTTPException(status_code=400, detail=str(e))
+        subtitle_encoding_override = True
 
     # Build speaker mapping dict
     speaker_mapping = {
@@ -289,7 +317,7 @@ async def import_csv(
             content,
             config.column_mapping,
             speaker_mapping,
-            config.encoding
+            "utf-8" if subtitle_encoding_override else config.encoding
         )
     except (ValueError, csv.Error, UnicodeDecodeError, KeyError) as e:
         logger.warning("CSV parse failed: %s", e)

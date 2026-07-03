@@ -9,6 +9,7 @@ import {
   ContextMenuSeparator,
 } from '@/components/ui/context-menu'
 import { cn, getCodeColor } from '@/lib/utils'
+import { isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
 import type { TextCodingResponse } from '@/lib/api'
 import type { FloatingCoords } from '@/lib/floating-utils'
 
@@ -21,6 +22,8 @@ interface TextCodingContextMenuProps {
   onContextCreateCode?: (coords: FloatingCoords) => void
   onContextCreateNote?: (dvId: number, coords: FloatingCoords) => void
   lastCoordsRef: React.RefObject<FloatingCoords | null>
+  /** Track J · J1: active coder, so the "applied" check is per-me (#446). */
+  activeCoderId?: number | null
 }
 
 export default function TextCodingContextMenu({
@@ -32,6 +35,7 @@ export default function TextCodingContextMenu({
   onContextCreateCode,
   onContextCreateNote,
   lastCoordsRef,
+  activeCoderId,
 }: TextCodingContextMenuProps) {
   const recordLabel = comment.row_identifier || comment.participant_name || `R${comment.dataset_row_id}`
 
@@ -51,7 +55,7 @@ export default function TextCodingContextMenu({
               </>
             )}
             {activeCodes.map(code => {
-              const isApplied = comment.applied_code_ids.includes(code.id)
+              const isApplied = isCodeAppliedByActiveCoder(comment.applied_code_details, comment.applied_code_ids ?? [], code.id, activeCoderId ?? null)
               const label = codeIdToShortcutLabel.get(code.id) ?? ''
               return (
                 <ContextMenuItem

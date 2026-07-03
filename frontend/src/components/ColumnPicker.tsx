@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useListKeyboardNav } from '@/hooks/useListKeyboardNav'
+import { SELECTED_ROW } from '@/lib/selection'
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Search, Link2, Layers, Table2 } from 'lucide-react'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -468,7 +469,7 @@ function ColumnRow({
           aria-selected={isSelected}
           data-focused={dataFocused}
           className={`flex items-center gap-1.5 pl-8 pr-3 py-1 cursor-pointer hover:bg-mm-surface-hover ${
-            isSelected ? 'bg-blue-50 dark:bg-blue-950/30' : ''
+            isSelected ? SELECTED_ROW : ''
           } ${isEquivHighlighted ? 'bg-violet-50/50 dark:bg-violet-950/30' : ''} ${
             isFocused ? 'ring-1 ring-inset ring-primary/50' : ''
           }`}
@@ -614,7 +615,7 @@ function DomainsView({
             aria-selected={isSelected}
             data-focused={itemProps['data-focused']}
             className={`flex items-start gap-1.5 px-3 py-1.5 cursor-pointer hover:bg-mm-surface-hover ${
-              isSelected ? 'bg-blue-50 dark:bg-blue-950/30' : ''
+              isSelected ? SELECTED_ROW : ''
             } ${focusedIndex === i ? 'ring-1 ring-inset ring-primary/50' : ''}`}
             onClick={() => onToggleDomain(d.id)}
             onMouseEnter={itemProps.onMouseEnter}

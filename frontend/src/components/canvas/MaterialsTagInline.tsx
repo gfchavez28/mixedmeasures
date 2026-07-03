@@ -14,17 +14,19 @@ const TAG_COLORS: Record<string, string> = {
   confirms:     'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300',
   contradicts:  'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300',
   expands:      'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
+  // eslint-disable-next-line no-restricted-syntax -- categorical tag-color map hue (DESIGN.md §5 carve-out; siblings raw, not the mm-blue "selected" token)
   complements:  'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300',
 }
 
 function getTagClasses(tag: string): string {
-  return TAG_COLORS[tag] ?? 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
+  return TAG_COLORS[tag] ?? 'bg-mm-surface-hover text-mm-text-secondary'
 }
 
 const TAG_DOT_COLORS: Record<string, string> = {
   confirms:    'bg-emerald-500',
   contradicts: 'bg-red-500',
   expands:     'bg-amber-500',
+  // eslint-disable-next-line no-restricted-syntax -- categorical tag-dot color map hue (DESIGN.md §5 carve-out)
   complements: 'bg-blue-500',
 }
 
@@ -93,7 +95,7 @@ export default function MaterialsTagInline({
   // Determine tag label classes
   const tagClasses = tag
     ? getTagClasses(tag)
-    : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400 border border-dashed border-gray-300 dark:border-gray-600'
+    : 'bg-mm-surface-hover text-mm-text-muted border border-dashed border-mm-border-medium'
 
   return (
     <div
@@ -155,7 +157,7 @@ export default function MaterialsTagInline({
                 onClick={() => { onTagChange(null); setOpen(false) }}
                 className="flex items-center gap-2 w-full text-left px-2.5 py-1.5 text-xs text-mm-text-muted hover:bg-mm-bg transition-colors"
               >
-                <span className="w-2 h-2 rounded-full shrink-0 bg-gray-300 dark:bg-gray-600" />
+                <span className="w-2 h-2 rounded-full shrink-0 bg-mm-border-medium" />
                 <span>Clear tag</span>
               </button>
             )}

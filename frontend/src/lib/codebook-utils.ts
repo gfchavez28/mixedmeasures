@@ -65,31 +65,32 @@ export function fitViewportToBounds(
   return { x: fitCx - fitW / 2, y: fitCy - fitH / 2, width: fitW, height: fitH }
 }
 
-// ── Hierarchy levels (bottom-up labeling) ────────────────────────────────────
-
-export function buildHierarchyLevels(
-  treeData: CodebookTreeResponse | undefined,
-  customNames?: Record<string, string> | null,
-): { value: number; label: string }[] {
-  const levels: { value: number; label: string }[] = [{ value: -1, label: 'Codes' }]
-  if (!treeData || treeData.tree.length === 0) return levels
-  let maxDepth = 0
-  function walk(cats: CodebookCategoryNode[], d: number) {
-    for (const cat of cats) {
-      if (d > maxDepth) maxDepth = d
-      walk(cat.children, d + 1)
-    }
+/**
+ * Legible default view (#428b). Fitting a very tall/narrow codebook entirely
+ * into a short/wide canvas scales it illegibly small. When the content is
+ * taller than the canvas aspect, open fit-to-WIDTH (same top-left anchor) at a
+ * readable scale and let the user scroll down; otherwise return the
+ * fit-everything viewport unchanged (the "Fit" control always returns to that).
+ *
+ * `topChromePx` nudges the top down so the first row clears a floating toolbar;
+ * it's converted from screen px to SVG units via the fit-to-width scale.
+ */
+export function legibleDefaultViewport(
+  fitVp: Viewport,
+  container: { width: number; height: number } | null,
+  topChromePx = 56,
+): Viewport {
+  if (!container || container.width <= 0 || container.height <= 0) return fitVp
+  const widthScale = container.width / fitVp.width
+  const heightScale = container.height / fitVp.height
+  // Width-constrained already (wide/short content): fit-everything fills the
+  // width, so there's nothing to gain — keep the overview.
+  if (widthScale <= heightScale) return fitVp
+  return {
+    x: fitVp.x,
+    y: fitVp.y - topChromePx / widthScale,
+    width: fitVp.width,
+    height: fitVp.width * (container.height / container.width),
   }
-  walk(treeData.tree, 0)
-  for (let d = maxDepth; d >= 0; d--) {
-    const userLevel = maxDepth - d + 1
-    const custom = customNames?.[String(d)]
-    let label: string
-    if (custom) label = custom
-    else if (d === 0) label = 'Top Categories'
-    else if (userLevel === 1) label = 'Subcategories'
-    else label = `Level ${userLevel}`
-    levels.push({ value: d, label })
-  }
-  return levels
 }
+

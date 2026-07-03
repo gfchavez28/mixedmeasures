@@ -32,6 +32,11 @@ class ProjectUpdate(BaseModel):
         return v
 
 
+class CodebookFreezeRequest(BaseModel):
+    """Track J · J3-1 freeze toggle. frozen=True stamps codebook_frozen_at; False clears it."""
+    frozen: bool
+
+
 class ProjectResponse(BaseModel):
     id: int
     user_id: int
@@ -45,7 +50,17 @@ class ProjectResponse(BaseModel):
     dataset_count: int = 0
     document_count: int = 0
     participant_count: int = 0
+    # Distinct real coders who have coded in this project (Track J · Group A — #1).
+    # Surfaced on the Dashboard card only when > 1; includes archived coders.
+    coder_count: int = 0
     category_level_names: dict[str, str] | None = None
+    codebook_frozen_at: UTCTimestamp | None = None
+    # #422(c): most-recent activity = MAX(audit timestamp) for the project, floored by
+    # updated_at/created_at. Populated by list_projects only (None on other responses).
+    # The Dashboard sorts + labels by it so the list reflects real recent WORK (coding,
+    # dataset/canvas/note edits — all write audit), not just Project-row edits, which
+    # updated_at alone misses.
+    last_activity_at: UTCTimestamp | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

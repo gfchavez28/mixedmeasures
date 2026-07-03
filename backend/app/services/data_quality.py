@@ -482,6 +482,19 @@ def compute_littles_mcar(
             f"due to singular covariance submatrix."
         )
 
+    # #514: the pooled pairwise covariance matrix is not guaranteed
+    # positive-semidefinite (and pinv fallbacks compound this), so pattern
+    # quadratic forms — and their sum — can go negative. A χ² statistic is
+    # non-negative by definition; clamp for display (the same reporting
+    # convention as the ω²/ε²/Spearman-Brown clamps) and say why. The
+    # p-value is unchanged: chi2.sf of any negative statistic is already 1.0.
+    if chi2 < 0:
+        chi2 = 0.0
+        warnings_list.append(
+            "Test statistic was negative (a degenerate pairwise-covariance "
+            "artifact) and was clamped to 0; interpret with caution."
+        )
+
     # Degrees of freedom
     df = df_total - p
     if df <= 0:

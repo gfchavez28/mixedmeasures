@@ -2,6 +2,7 @@ from sqlalchemy import Boolean, Column, Integer, String, DateTime, Text, Float, 
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from sqlalchemy import text as _sa_text
+from uuid import uuid4
 import enum
 from ..database import Base
 
@@ -61,6 +62,8 @@ class Dataset(Base):
     # (crosswalk column headers, cell dots, Datasets list, page titles, etc.).
     # Null → use the auto-assigned palette color from `dataset-color.ts`.
     color = Column(String(7), nullable=True)
+    # Track J · J3-2-0: stable cross-instance identity for merge matching
+    uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
     # Relationships
@@ -115,6 +118,9 @@ class DatasetColumn(Base):
         Boolean, nullable=False, default=True, server_default="1",
     )
 
+    # Track J · J3-2-0: stable cross-instance identity for merge matching
+    uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
+
     # Relationships
     dataset = relationship("Dataset", back_populates="columns")
     equivalence_group = relationship("EquivalenceGroup", back_populates="columns")
@@ -155,6 +161,8 @@ class DatasetRow(Base):
     row_identifier = Column(String(255), nullable=True)  # Original ID from CSV
     import_batch = Column(String(255), nullable=True)  # Batch identifier for append tracking
     submitted_at = Column(DateTime, nullable=True)
+    # Track J · J3-2-0: stable cross-instance identity for merge matching
+    uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
     # Relationships

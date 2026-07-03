@@ -55,7 +55,7 @@ export interface CopyRecodeDialogProps {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 const RECODE_TYPE_STYLES: Record<string, { label: string; cls: string }> = {
-  scale_map: { label: 'Scale Map', cls: 'bg-blue-50 text-blue-600 dark:bg-blue-950/30 dark:text-blue-300' },
+  scale_map: { label: 'Scale Map', cls: 'bg-mm-blue/12 text-mm-blue-text' },
   category_group: { label: 'Category', cls: 'bg-purple-50 text-purple-600 dark:bg-purple-950/30 dark:text-purple-300' },
   reverse: { label: 'Reverse', cls: 'bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-300' },
 }

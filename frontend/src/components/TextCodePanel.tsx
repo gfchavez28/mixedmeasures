@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
+import { ColorDotButton } from '@/components/ColorDotButton'
 
 import { type Code, type CodeCategory, codesApi } from '@/lib/api'
 import { getCodeColor } from '@/lib/utils'
@@ -204,7 +205,7 @@ export default function TextCodePanel({
         className={`
           flex items-center gap-2 w-full px-2.5 py-1.5 text-sm text-left rounded transition-colors
           ${isApplied ? 'bg-mm-bg font-medium' : 'hover:bg-mm-surface-hover'}
-          ${isFocusedItem ? 'ring-2 ring-blue-400 ring-inset' : ''}
+          ${isFocusedItem ? 'ring-2 ring-mm-blue ring-inset' : ''}
           ${disabled ? 'opacity-50' : 'cursor-pointer'}
         `}
         onClick={() => !disabled && onToggleCode(code.id)}
@@ -213,12 +214,12 @@ export default function TextCodePanel({
       >
         <Popover open={colorPickerCodeId === code.id} onOpenChange={(open) => setColorPickerCodeId(open ? code.id : null)}>
           <PopoverTrigger asChild>
-            <span
-              role="button"
-              className="w-3 h-3 rounded-full shrink-0 hover:ring-2 hover:ring-mm-border-medium transition-shadow cursor-pointer"
-              style={{ backgroundColor: getCodeColor(code) }}
+            <ColorDotButton
+              asSpan
+              color={getCodeColor(code)}
               onClick={(e) => { e.stopPropagation(); setColorPickerCodeId(code.id) }}
               title="Change color"
+              aria-label={`Change color for ${code.name}`}
             />
           </PopoverTrigger>
           <PopoverContent className="w-auto p-3" align="start" onClick={(e) => e.stopPropagation()}>
@@ -233,7 +234,7 @@ export default function TextCodePanel({
           <span className="text-[11px] text-muted-foreground font-mono shrink-0">{shortcut}</span>
         )}
         {isApplied && (
-          <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
+          <span className="w-1.5 h-1.5 rounded-full bg-mm-blue shrink-0" />
         )}
       </button>
     )
@@ -244,7 +245,7 @@ export default function TextCodePanel({
       data-panel="codes"
       role="region"
       aria-label="Code panel"
-      className={`flex flex-col h-full ${isFocused ? 'ring-1 ring-inset ring-blue-200' : ''}`}
+      className={`flex flex-col h-full ${isFocused ? 'ring-1 ring-inset ring-mm-blue/40' : ''}`}
       onClick={() => onFocusChange(true)}
     >
       {selectedCount === 0 && (
@@ -279,7 +280,9 @@ export default function TextCodePanel({
               className="h-7 w-7 p-0"
               disabled={exactMatchExists || !searchQuery.trim()}
               onClick={handleCreateCode}
-              title={exactMatchExists ? 'Code already exists' : 'Add new code (Tab or Enter)'}
+              aria-label="Add code"
+              // #518: empty query reads as a prompt, not "Code already exists".
+              title={!searchQuery.trim() ? 'Type a name to add a code' : exactMatchExists ? 'Code already exists' : 'Add new code (Tab or Enter)'}
             >
               <Plus className={`w-3.5 h-3.5 ${!exactMatchExists && searchQuery.trim() ? 'text-green-600' : ''}`} />
             </Button>

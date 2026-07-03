@@ -38,6 +38,8 @@ interface FileConfig {
   datasetDescription: string
   datasetSource: string
   previewError: string | null
+  /** .xlsx only (#523): selected worksheet; null = first sheet. */
+  sheetName: string | null
 }
 
 interface ImportResult {
@@ -48,7 +50,57 @@ interface ImportResult {
   columnsCreated?: number
   recordsCreated?: number
   valuesCreated?: number
+  recognizedMissingCount?: number
+  recognizedMissingLabels?: string[]
   error?: string
+}
+
+/**
+ * #415: discloses that some imported values were recognized as missing (N/A /
+ * refusal labels like "Prefer not to say") and are excluded from analysis the
+ * same way blank cells are — so the handling isn't silent. Renders nothing
+ * when there are none. `compact` is the inline per-dataset suffix used in the
+ * multi-file list.
+ */
+function RecognizedMissingNote({
+  count,
+  labels,
+  projectId,
+  compact = false,
+}: {
+  count?: number
+  labels?: string[]
+  projectId?: string | number
+  compact?: boolean
+}) {
+  if (!count || count <= 0) return null
+  if (compact) {
+    return (
+      <span className="text-mm-text-faint">
+        {' · '}{count.toLocaleString()} recognized as missing
+      </span>
+    )
+  }
+  const examples = (labels ?? []).slice(0, 3)
+  const more = (labels?.length ?? 0) - examples.length
+  const exampleText =
+    examples.length > 0
+      ? ` (${examples.join(', ')}${more > 0 ? `, +${more} more` : ''})`
+      : ''
+  return (
+    <div className="pt-1 text-xs text-mm-text-muted">
+      {count === 1 ? '1 value was' : `${count.toLocaleString()} values were`} recognized as
+      missing{exampleText} and excluded from analysis, the same way blank cells are.
+      Review them on the{' '}
+      <Link
+        to={`/projects/${projectId}/analysis?tab=data_quality`}
+        className="text-mm-blue-text hover:underline"
+      >
+        Data Quality
+      </Link>{' '}
+      tab.
+    </div>
+  )
 }
 
 const MAX_FILES = 50
@@ -122,7 +174,7 @@ export default function DatasetImport() {
 
   const handleFilesSelected = useCallback((selectedFiles: File[]) => {
     setError('')
-    const csvFiles = selectedFiles.filter(f => f.name.toLowerCase().endsWith('.csv'))
+    const csvFiles = selectedFiles.filter(f => /\.(csv|xlsx)$/.test(f.name.toLowerCase()))
     if (csvFiles.length === 0) return
 
     const newFiles = [...files, ...csvFiles].slice(0, MAX_FILES)
@@ -146,6 +198,7 @@ export default function DatasetImport() {
         datasetDescription: '',
         datasetSource: '',
         previewError: null,
+        sheetName: null,
       })
     }
     setFileConfigs(newConfigs)
@@ -185,7 +238,7 @@ export default function DatasetImport() {
       const batchIndices = Array.from({ length: batchEnd - batchStart }, (_, i) => batchStart + i)
 
       const results = await Promise.allSettled(
-        batchIndices.map(i => datasetsApi.preview(id, files[i]))
+        batchIndices.map(i => datasetsApi.preview(id, files[i], 'utf-8', fileConfigs[i]?.sheetName ?? undefined))
       )
 
       results.forEach((result, batchIdx) => {
@@ -241,6 +294,42 @@ export default function DatasetImport() {
 
     setStep('configure')
   }, [files, fileConfigs, id])
+
+  // --- Worksheet change (#523, .xlsx only): re-preview ONE file on its new sheet ---
+
+  const handleSheetChange = useCallback(async (fileIndex: number, sheetName: string) => {
+    setIsLoading(true)
+    try {
+      const preview = await datasetsApi.preview(id, files[fileIndex], 'utf-8', sheetName)
+      const autoSkipped = new Set<number>()
+      const autoSubtypes: Record<number, string> = {}
+      for (const col of preview.columns) {
+        if (col.suggested_type === 'skip') autoSkipped.add(col.column_index)
+        if (col.suggested_type === 'demographic' && col.suggested_demographic_subtype) {
+          autoSubtypes[col.column_index] = col.suggested_demographic_subtype
+        }
+      }
+      setFileConfigs(prev => {
+        const copy = [...prev]
+        copy[fileIndex] = {
+          ...copy[fileIndex],
+          preview,
+          previewColumns: preview.columns,
+          // A different sheet is different data — reseed the per-column choices.
+          skippedIndices: autoSkipped,
+          typeOverrides: {},
+          subtypeOverrides: autoSubtypes,
+          previewError: null,
+          sheetName,
+        }
+        return copy
+      })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to preview worksheet')
+    } finally {
+      setIsLoading(false)
+    }
+  }, [files, id])
 
   // --- Skip toggle ---
 
@@ -343,6 +432,7 @@ export default function DatasetImport() {
           description: config.datasetDescription || null,
           source: config.datasetSource || null,
           column_configs: buildColumnConfigs(config),
+          sheet_name: config.sheetName,
         })
         queryClient.invalidateQueries({ queryKey: ['datasets', id] })
         queryClient.invalidateQueries({ queryKey: ['project', id] })
@@ -358,6 +448,8 @@ export default function DatasetImport() {
             columnsCreated: result.columns_created,
             recordsCreated: result.rows_created,
             valuesCreated: result.values_created,
+            recognizedMissingCount: result.recognized_missing_count,
+            recognizedMissingLabels: result.recognized_missing_labels,
           }],
         })
         setStep('results')
@@ -412,6 +504,7 @@ export default function DatasetImport() {
           description: config.datasetDescription || null,
           source: config.datasetSource || null,
           column_configs: buildColumnConfigs(config),
+          sheet_name: config.sheetName,
         })
         results.push({
           fileName: files[i].name,
@@ -421,6 +514,8 @@ export default function DatasetImport() {
           columnsCreated: result.columns_created,
           recordsCreated: result.rows_created,
           valuesCreated: result.values_created,
+          recognizedMissingCount: result.recognized_missing_count,
+          recognizedMissingLabels: result.recognized_missing_labels,
         })
       } catch (err: unknown) {
         results.push({
@@ -512,7 +607,7 @@ export default function DatasetImport() {
                 key={type}
                 className={cn(
                   'px-2 py-0.5 rounded',
-                  type === 'skip' ? 'bg-mm-bg text-mm-text-muted' : 'bg-blue-50 dark:bg-blue-900/50 text-blue-700 dark:text-blue-200',
+                  type === 'skip' ? 'bg-mm-bg text-mm-text-muted' : 'bg-mm-blue/12 text-mm-blue-text',
                 )}
               >
                 {count} {type}
@@ -522,6 +617,25 @@ export default function DatasetImport() {
             <span className="text-mm-text-muted ml-auto">{config.preview.total_rows} records</span>
           )}
         </div>
+
+        {/* Worksheet picker (#523, .xlsx with multiple sheets only) */}
+        {config.preview?.sheet_names && config.preview.sheet_names.length > 1 && (
+          <div className="bg-mm-surface border rounded-lg px-4 py-3 flex items-center gap-3 text-sm">
+            <label htmlFor={`sheet-picker-${fileIndex}`} className="font-medium">Worksheet</label>
+            <select
+              id={`sheet-picker-${fileIndex}`}
+              value={config.sheetName ?? config.preview.sheet_names[0]}
+              onChange={(e) => handleSheetChange(fileIndex, e.target.value)}
+              disabled={isLoading}
+              className="text-sm px-2 py-1 rounded border bg-mm-bg cursor-pointer"
+            >
+              {config.preview.sheet_names.map(name => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+            <span className="text-mm-text-muted">Only the selected worksheet is imported.</span>
+          </div>
+        )}
 
         {/* Skip Columns */}
         <Card>
@@ -730,9 +844,9 @@ export default function DatasetImport() {
         {step === 'upload' && (
           <Card>
             <CardHeader>
-              <CardTitle>Upload CSV</CardTitle>
+              <CardTitle>Upload data files</CardTitle>
               <CardDescription>
-                Upload one or more CSVs. Each file will be imported as a separate dataset.
+                Upload one or more CSV or Excel (.xlsx) files. Each file will be imported as a separate dataset.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -747,11 +861,11 @@ export default function DatasetImport() {
               >
                 <FileInput className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />
                 <p className="text-mm-text-secondary mb-4">
-                  Drag and drop your CSV file(s) here, or click to browse
+                  Drag and drop CSV or Excel file(s) here, or click to browse
                 </p>
                 <input
                   type="file"
-                  accept=".csv"
+                  accept=".csv,.xlsx"
                   multiple
                   onChange={(e) => {
                     const selected = e.target.files
@@ -801,7 +915,7 @@ export default function DatasetImport() {
                     <label htmlFor="dataset-file-input-add" className="cursor-pointer">
                       <input
                         type="file"
-                        accept=".csv"
+                        accept=".csv,.xlsx"
                         multiple
                         onChange={(e) => {
                           const selected = e.target.files
@@ -858,7 +972,7 @@ export default function DatasetImport() {
             {/* Multi-file: accordion layout */}
             {isMultiFile && (
               <>
-                <div className="p-3 bg-blue-50 dark:bg-blue-950/40 text-blue-800 dark:text-blue-300 rounded-lg text-sm flex items-center gap-2">
+                <div className="p-3 bg-mm-blue/12 text-mm-blue-text rounded-lg text-sm flex items-center gap-2">
                   <CircleAlert className="w-4 h-4 flex-shrink-0" />
                   Each file will be imported as a separate dataset. Configure skip columns and details for each.
                 </div>
@@ -1033,6 +1147,11 @@ export default function DatasetImport() {
                   <div><strong>Columns created:</strong> {importProgress.results[0].columnsCreated}</div>
                   <div><strong>Records imported:</strong> {importProgress.results[0].recordsCreated}</div>
                   <div><strong>Values stored:</strong> {importProgress.results[0].valuesCreated}</div>
+                  <RecognizedMissingNote
+                    count={importProgress.results[0].recognizedMissingCount}
+                    labels={importProgress.results[0].recognizedMissingLabels}
+                    projectId={id}
+                  />
                 </div>
               )}
 
@@ -1040,7 +1159,7 @@ export default function DatasetImport() {
               <p className="text-xs text-mm-text-muted">
                 Have interviews or focus groups too? Connect these records to
                 people on the{' '}
-                <Link to={`/projects/${id}/participants`} className="text-blue-500 hover:underline">
+                <Link to={`/projects/${id}/participants`} className="text-mm-blue-text hover:underline">
                   Participants page
                 </Link>{' '}
                 so each person is one identity across their data and their words.
@@ -1100,6 +1219,7 @@ export default function DatasetImport() {
                         {r.columnsCreated != null && (
                           <span className="text-mm-text-muted flex-shrink-0 text-xs">
                             {r.columnsCreated} columns, {r.recordsCreated} records, {r.valuesCreated} values
+                            <RecognizedMissingNote count={r.recognizedMissingCount} compact />
                           </span>
                         )}
                         {r.error && (

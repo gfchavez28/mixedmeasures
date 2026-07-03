@@ -34,6 +34,7 @@ import type { QuoteGroupBy, QuoteSort, QuoteDensity, QuoteLayout } from '@/lib/q
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { getCodeColor } from '@/lib/utils'
+import { escapeCsvField } from '@/lib/csv'
 import QuoteCard, { formatAttribution } from '@/components/qualitative-analysis/QuoteCard'
 import FocusPill from '@/components/qualitative-analysis/FocusPill'
 
@@ -243,29 +244,16 @@ function deduplicateExcerpts(sections: GroupedSection[]): QuotedExcerptItem[] {
   return result
 }
 
-// Defang CSV-formula-injection. Mirrors backend csv_safe in
-// app/routers/export_helpers.py: scope is the high-impact OWASP subset
-// (=, @, tab, CR), excluding +/- to avoid false-positives on legitimate
-// negative numbers in respondent-derived content.
-const FORMULA_PREFIXES = ['=', '@', '\t', '\r']
-const csvSafe = (val: string): string =>
-  val.length > 0 && FORMULA_PREFIXES.includes(val[0]) ? "'" + val : val
-
 function exportCsv(excerpts: QuotedExcerptItem[]) {
   const headers = [
     'excerpt_text', 'full_text', 'is_sub_segment', 'speaker', 'participant',
     'source_name', 'source_type', 'segment_number', 'codes', 'categories',
     'excerpt_note', 'date_quoted',
   ]
-  const escapeField = (val: string) => {
-    const safe = csvSafe(val)
-    if (safe.includes(',') || safe.includes('"') || safe.includes('\n')) {
-      return `"${safe.replace(/"/g, '""')}"`
-    }
-    return safe
-  }
   const rows = excerpts.map(e => {
-    const codeNames = e.applied_codes.map(c => c.name).join('; ')
+    // Distinct names: applied_codes is per-coder, so a code two coders share
+    // would otherwise export as "Positive; Positive" (#441 residue).
+    const codeNames = [...new Set(e.applied_codes.map(c => c.name))].join('; ')
     const catNames = [...new Set(e.applied_codes.map(c => c.category_name).filter(Boolean))].join('; ')
     return [
       e.text,
@@ -280,7 +268,7 @@ function exportCsv(excerpts: QuotedExcerptItem[]) {
       catNames,
       e.excerpt_note || '',
       e.created_at,
-    ].map(escapeField).join(',')
+    ].map(escapeCsvField).join(',')
   })
   const csv = [headers.join(','), ...rows].join('\n')
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })

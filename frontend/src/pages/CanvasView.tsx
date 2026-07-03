@@ -214,7 +214,7 @@ function OutlineSidebar({
                             'text-[9px] font-bold w-[15px] h-[13px] inline-flex items-center justify-center rounded-sm shrink-0',
                             info.hasQual
                               ? 'bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-300'
-                              : 'border border-dashed border-gray-300 text-gray-500 dark:border-gray-600 dark:text-gray-400',
+                              : 'border border-dashed border-mm-border-medium text-mm-text-muted',
                           )}
                         >
                           Q
@@ -232,7 +232,7 @@ function OutlineSidebar({
                             'text-[9px] font-bold w-[15px] h-[13px] inline-flex items-center justify-center rounded-sm shrink-0',
                             info.hasQuant
                               ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
-                              : 'border border-dashed border-gray-300 text-gray-500 dark:border-gray-600 dark:text-gray-400',
+                              : 'border border-dashed border-mm-border-medium text-mm-text-muted',
                           )}
                         >
                           N
@@ -1669,7 +1669,7 @@ export default function CanvasView() {
               onClick={() => applyTemplate('from_analysis')}
               className="flex flex-col items-center gap-2 p-4 rounded-lg border border-mm-border hover:border-mm-border-medium hover:bg-mm-bg/50 transition-colors text-center"
             >
-              <BarChart3 className="w-6 h-6 text-blue-500" />
+              <BarChart3 className="w-6 h-6 text-mm-blue" />
               <span className="text-sm font-medium text-mm-text">From current analysis</span>
               <span className="text-[11px] text-mm-text-muted leading-tight">Create themes from your existing analysis sources</span>
             </button>

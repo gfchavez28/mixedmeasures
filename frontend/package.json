@@ -1,7 +1,7 @@
 {
   "name": "mixedmeasures-frontend",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.1.0",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -43,7 +43,6 @@
     "@tiptap/suggestion": "3.19.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.0",
-    "d3-force": "^3.0.0",
     "html-to-image": "1.11.13",
     "jszip": "3.10.1",
     "lucide-react": "^1.11.0",
@@ -62,7 +61,6 @@
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
-    "@types/d3-force": "^3.0.10",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

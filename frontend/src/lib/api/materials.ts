@@ -51,6 +51,11 @@ export const materialsApi = {
     api.get<MaterialCollectionListResponse>(`/projects/${projectId}/material-collections`).then(res => res.data),
   get: (projectId: number, collectionId: number) =>
     api.get<MaterialCollectionDetailResponse>(`/projects/${projectId}/material-collections/${collectionId}`).then(res => res.data),
+  // Create a material collection. `name` defaults to "Materials" on the backend
+  // (MaterialCollectionCreate), matching the default collection auto-created on
+  // project create/import — used to lazy-create it for collection-less projects (#469b).
+  createCollection: (projectId: number, data?: { name?: string }) =>
+    api.post<MaterialCollectionResponse>(`/projects/${projectId}/material-collections`, data ?? {}).then(res => res.data),
   createMaterial: (projectId: number, collectionId: number, data: {
     material_type: string
     config: Record<string, unknown>

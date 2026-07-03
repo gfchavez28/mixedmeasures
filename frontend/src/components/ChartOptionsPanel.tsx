@@ -559,7 +559,7 @@ export default function ChartOptionsPanel({
                           <label key={label} className="flex items-center gap-1.5 text-mm-text-secondary cursor-pointer">
                             <input
                               type="checkbox"
-                              className="rounded border-mm-border-medium text-blue-600 dark:text-blue-400 w-3 h-3"
+                              className="rounded border-mm-border-medium accent-mm-blue w-3 h-3"
                               checked={(proportionValues || []).includes(label)}
                               onChange={e => {
                                 const next = e.target.checked
@@ -802,7 +802,7 @@ export default function ChartOptionsPanel({
                   <div className="pl-7">
                     <button
                       type="button"
-                      className="flex items-center gap-1 text-[11px] text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 py-0.5"
+                      className="flex items-center gap-1 text-[11px] text-mm-blue-text hover:text-mm-blue py-0.5"
                       onClick={() => {
                         // Pick the first available demographic as a sensible default — or just reveal dropdown
                         // We reveal the second dropdown by setting a sentinel value
@@ -942,7 +942,7 @@ export default function ChartOptionsPanel({
                               <label key={v} className="flex items-center gap-1.5 text-mm-text-secondary cursor-pointer">
                                 <input
                                   type="checkbox"
-                                  className="rounded border-mm-border-medium text-blue-600 dark:text-blue-400 w-3 h-3"
+                                  className="rounded border-mm-border-medium accent-mm-blue w-3 h-3"
                                   checked={hiddenDim1.includes(v)}
                                   onChange={e => toggleDim(sortedDim2, v, e.target.checked, 1)}
                                 />
@@ -960,7 +960,7 @@ export default function ChartOptionsPanel({
                               <label key={v} className="flex items-center gap-1.5 text-mm-text-secondary cursor-pointer">
                                 <input
                                   type="checkbox"
-                                  className="rounded border-mm-border-medium text-blue-600 dark:text-blue-400 w-3 h-3"
+                                  className="rounded border-mm-border-medium accent-mm-blue w-3 h-3"
                                   checked={hiddenDim2.includes(v)}
                                   onChange={e => toggleDim(sortedDim1, v, e.target.checked, 2)}
                                 />
@@ -976,7 +976,7 @@ export default function ChartOptionsPanel({
                           <label key={gv} className="flex items-center gap-1.5 text-mm-text-secondary cursor-pointer">
                             <input
                               type="checkbox"
-                              className="rounded border-mm-border-medium text-blue-600 dark:text-blue-400 w-3 h-3"
+                              className="rounded border-mm-border-medium accent-mm-blue w-3 h-3"
                               checked={hiddenGroupValues.includes(gv)}
                               onChange={e => {
                                 if (e.target.checked) onHiddenGroupValuesChange([...hiddenGroupValues, gv])
@@ -1091,7 +1091,7 @@ export default function ChartOptionsPanel({
                   <label className="flex items-center gap-1.5 text-mm-text-secondary cursor-pointer">
                     <input
                       type="checkbox"
-                      className="rounded border-mm-border-medium text-blue-600 dark:text-blue-400 w-3.5 h-3.5"
+                      className="rounded border-mm-border-medium accent-mm-blue w-3.5 h-3.5"
                       checked={decompose}
                       onChange={e => onDecomposeChange?.(e.target.checked)}
                     />
@@ -1104,12 +1104,12 @@ export default function ChartOptionsPanel({
                 <div className="border-t border-mm-border-subtle pt-2">
                   <OptionRow icon={EyeOff} label="Exclude values" fullWidth>
                     <div className="flex flex-wrap gap-x-3 gap-y-1">
-                      {isComputing && <span className="text-blue-500 dark:text-blue-400 text-[11px]">computing...</span>}
+                      {isComputing && <span className="text-mm-blue-text text-[11px]">computing...</span>}
                       {responseLabels.map(label => (
                         <label key={label} className="flex items-center gap-1.5 text-mm-text-secondary cursor-pointer">
                           <input
                             type="checkbox"
-                            className="rounded border-mm-border-medium text-blue-600 dark:text-blue-400 w-3 h-3"
+                            className="rounded border-mm-border-medium accent-mm-blue w-3 h-3"
                             checked={excludeValues.includes(label)}
                             onChange={e => {
                               if (e.target.checked) onExcludeValuesChange([...excludeValues, label])
@@ -1132,7 +1132,7 @@ export default function ChartOptionsPanel({
                         <label key={label} className="flex items-center gap-1.5 text-mm-text-secondary cursor-pointer">
                           <input
                             type="checkbox"
-                            className="rounded border-mm-border-medium text-blue-600 dark:text-blue-400 w-3 h-3"
+                            className="rounded border-mm-border-medium accent-mm-blue w-3 h-3"
                             checked={hiddenResponseOptions.includes(label)}
                             onChange={e => {
                               if (e.target.checked) onHiddenResponseOptionsChange([...hiddenResponseOptions, label])
@@ -1411,7 +1411,7 @@ export default function ChartOptionsPanel({
               <label className="flex items-center gap-1.5 text-xs text-mm-text-secondary cursor-pointer">
                 <input
                   type="checkbox"
-                  className="rounded border-mm-border-medium text-blue-600 dark:text-blue-400 w-3.5 h-3.5"
+                  className="rounded border-mm-border-medium accent-mm-blue w-3.5 h-3.5"
                   checked={lineOverlay}
                   onChange={e => onLineOverlayChange?.(e.target.checked)}
                 />
@@ -1448,7 +1448,7 @@ export default function ChartOptionsPanel({
                 <label className="flex items-center gap-1.5 text-xs text-mm-text-secondary cursor-pointer">
                   <input
                     type="checkbox"
-                    className="rounded border-mm-border-medium text-blue-600 dark:text-blue-400 w-3.5 h-3.5"
+                    className="rounded border-mm-border-medium accent-mm-blue w-3.5 h-3.5"
                     checked={showCI}
                     onChange={e => onShowCIChange(e.target.checked)}
                   />
@@ -1481,7 +1481,7 @@ export default function ChartOptionsPanel({
                   <label className="flex items-center gap-1.5 text-xs text-mm-text-secondary cursor-pointer">
                     <input
                       type="checkbox"
-                      className="rounded border-mm-border-medium text-blue-600 dark:text-blue-400 w-3.5 h-3.5"
+                      className="rounded border-mm-border-medium accent-mm-blue w-3.5 h-3.5"
                       checked={showSampleSizes}
                       onChange={e => onToggleSampleSizes(e.target.checked)}
                     />
@@ -1493,7 +1493,7 @@ export default function ChartOptionsPanel({
                       <label className="flex items-center gap-1.5 text-xs text-mm-text-secondary cursor-pointer">
                         <input
                           type="checkbox"
-                          className="rounded border-mm-border-medium text-blue-600 dark:text-blue-400 w-3.5 h-3.5"
+                          className="rounded border-mm-border-medium accent-mm-blue w-3.5 h-3.5"
                           checked={showChartN}
                           onChange={e => onShowChartNChange(e.target.checked)}
                         />
@@ -1503,7 +1503,7 @@ export default function ChartOptionsPanel({
                         <label className="flex items-center gap-1.5 text-xs text-mm-text-secondary cursor-pointer">
                           <input
                             type="checkbox"
-                            className="rounded border-mm-border-medium text-blue-600 dark:text-blue-400 w-3.5 h-3.5"
+                            className="rounded border-mm-border-medium accent-mm-blue w-3.5 h-3.5"
                             checked={showGroupN}
                             onChange={e => onShowGroupNChange(e.target.checked)}
                           />

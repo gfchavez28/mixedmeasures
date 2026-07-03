@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-export type CodebookMode = 'tree' | 'network'
+export type CodebookMode = 'tree' | 'overview'
 export type CodebookSizing = 'uniform' | 'seg' | 'src'
 export type CodebookFormat = 'compact' | 'full'
 
@@ -15,10 +15,8 @@ function getDefaultForKey(key: string): string {
     case 'catFmt': return 'full'
     case 'codeFmt': return 'full'
     case 'sizing': return 'uniform'
-    case 'netLevel': return '-1'
     case 'minSeg': return '0'
     case 'inactive': return ''
-    case 'netTable': return ''
     default: return ''
   }
 }
@@ -39,15 +37,15 @@ export function useCodebookState() {
 
   // ── Read URL params ──────────────────────────────────────────────────
 
-  const mode = (searchParams.get('mode') || 'tree') as CodebookMode
+  // Whitelist the mode so stale links (e.g. the retired `?mode=network`) fall
+  // back to the tree instead of rendering a blank pane.
+  const mode: CodebookMode = searchParams.get('mode') === 'overview' ? 'overview' : 'tree'
   const catFormat = (searchParams.get('catFmt') || 'full') as CodebookFormat
   const codeFormat = (searchParams.get('codeFmt') || 'full') as CodebookFormat
   const sizing = (searchParams.get('sizing') || 'uniform') as CodebookSizing
   const selection = searchParams.get('sel') || null
   const search = searchParams.get('search') || ''
   const inactive = searchParams.get('inactive') === '1'
-  const netTable = searchParams.get('netTable') === '1'
-  const netLevel = Number(searchParams.get('netLevel') ?? '-1')
   const minSeg = Number(searchParams.get('minSeg') ?? '0')
   const maxSeg = useMemo(() => {
     const raw = searchParams.get('maxSeg')
@@ -84,8 +82,6 @@ export function useCodebookState() {
   const setSelection = useCallback((v: string | null) => setUrlParam('sel', v || ''), [setUrlParam])
   const setSearch = useCallback((v: string) => setUrlParam('search', v), [setUrlParam])
   const setInactive = useCallback((v: boolean) => setUrlParam('inactive', v ? '1' : ''), [setUrlParam])
-  const setNetTable = useCallback((v: boolean) => setUrlParam('netTable', v ? '1' : ''), [setUrlParam])
-  const setNetLevel = useCallback((v: number) => setUrlParam('netLevel', String(v)), [setUrlParam])
   const setMinSeg = useCallback((v: number) => setUrlParam('minSeg', String(v)), [setUrlParam])
   const setMaxSeg = useCallback((v: number | null) => setUrlParam('maxSeg', v !== null ? String(v) : ''), [setUrlParam])
 
@@ -126,11 +122,11 @@ export function useCodebookState() {
 
   return {
     // State
-    mode, catFormat, codeFormat, sizing, selection, search, inactive, netTable,
-    netLevel, minSeg, maxSeg, hiddenCodeIds, hiddenConvIds, hiddenColIds,
+    mode, catFormat, codeFormat, sizing, selection, search, inactive,
+    minSeg, maxSeg, hiddenCodeIds, hiddenConvIds, hiddenColIds,
     // Setters
     setMode, setCatFormat, setCodeFormat, setSizing, setSelection, setSearch,
-    setInactive, setNetTable, setNetLevel, setMinSeg, setMaxSeg,
+    setInactive, setMinSeg, setMaxSeg,
     setHiddenCodeIds, setHiddenConvIds, setHiddenColIds,
     removeHiddenCodeIds, clearAllHidden,
     // Generic

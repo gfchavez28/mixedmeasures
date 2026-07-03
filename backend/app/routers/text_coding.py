@@ -1,5 +1,6 @@
 """Router for text coding — coding open-ended text responses."""
 
+import hashlib
 import json
 import io
 import csv
@@ -17,12 +18,15 @@ from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, C
 from ..models.code_application import CodeApplication
 from ..models.code import Code
 from ..models.note import Note
-from ..models.text_coding_config import TextCodingConfig, DEFAULT_TREAT_AS_EMPTY
+from ..models.text_coding_config import TextCodingConfig, is_empty_text, parse_treat_as_empty
 from ..models.excerpt import Excerpt
 from ..models.speaker import Speaker
 from ..models.conversation import Conversation
 from ..models.participant import Participant
 from ..auth import get_current_user
+from ..services.consensus import consensus_enabled
+from ..services.consensus_staleness import mark_consensus_stale
+from ..services.coding_layers import non_consensus_filter
 from .helpers import _get_project_or_404, parse_int_list, sanitize_csv_filename, TEXT_TYPES
 from .export_helpers import csv_safe
 from ..schemas.text_coding import (
@@ -33,10 +37,11 @@ from ..schemas.text_coding import (
     RecordContextResponse, LinkedConversationResponse, ColumnValueResponse,
     NonTextValueResponse, TextValueResponse, ColumnPositionResponse,
     TextColumnsListResponse, TextColumnResponse,
-    CodingProgressResponse, ColumnProgressResponse,
+    CodingProgressResponse, ColumnProgressResponse, CodingProgressByCoderItem,
     TextCodingConfigResponse,
     TextCodeResponse, BulkCodeResponse, BulkRemoveCodeResponse,
 )
+from ..schemas.common import AppliedCodeDetail
 from ..schemas.note import NoteResponse
 
 router = APIRouter(
@@ -81,19 +86,12 @@ def _get_config(db: Session, project_id: int) -> TextCodingConfig:
 
 def _get_treat_as_empty(config: TextCodingConfig) -> list[str]:
     """Get treat_as_empty list from config or defaults."""
-    if config.treat_as_empty:
-        try:
-            return json.loads(config.treat_as_empty)
-        except (json.JSONDecodeError, TypeError):
-            pass
-    return DEFAULT_TREAT_AS_EMPTY
+    return parse_treat_as_empty(config.treat_as_empty)
 
 
 def _is_empty(value_text: str | None, treat_as_empty: list[str]) -> bool:
     """Check if a value is considered empty."""
-    if not value_text or not value_text.strip():
-        return True
-    return value_text.strip() in treat_as_empty
+    return is_empty_text(value_text, treat_as_empty)
 
 
 # ── 1. GET /texts ───────────────────────────────────────────────────────────
@@ -176,19 +174,39 @@ async def list_texts(
         quoted_excerpts = {}
 
     code_apps = {}
+    code_details: dict[int, list[AppliedCodeDetail]] = {}
     if value_ids:
+        # Join Code for is_universal so the enriched detail can drive the
+        # coder-scoped isSegmentCoded predicate (Track J · J1). code_id FK is
+        # non-null so the inner join drops nothing the bare-ID list had.
         ca_query = (
-            db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
+            db.query(
+                CodeApplication.dataset_value_id,
+                CodeApplication.code_id,
+                CodeApplication.user_id,
+                CodeApplication.attribution,
+                Code.is_universal,
+            )
+            .join(Code, Code.id == CodeApplication.code_id)
             .filter(
                 CodeApplication.dataset_value_id.in_(value_ids),
                 CodeApplication.dataset_value_id.isnot(None),
+                # J2-B / P-1: workbench shows the human/working layer only; never
+                # leak derived consensus rows into the client coded predicate.
+                non_consensus_filter(),
             )
             .all()
         )
-        for dv_id, code_id in ca_query:
-            if dv_id not in code_apps:
-                code_apps[dv_id] = []
-            code_apps[dv_id].append(code_id)
+        for dv_id, code_id, ca_user_id, attribution, is_universal in ca_query:
+            code_apps.setdefault(dv_id, []).append(code_id)
+            code_details.setdefault(dv_id, []).append(
+                AppliedCodeDetail(
+                    code_id=code_id,
+                    user_id=ca_user_id,
+                    attribution=attribution,
+                    is_universal=bool(is_universal),
+                )
+            )
 
     # Get note counts
     note_counts = {}
@@ -232,7 +250,10 @@ async def list_texts(
         word_count = len(value_text.split()) if value_text and value_text.strip() else 0
 
         all_record_ids.add(r.row_id)
-        if applied_codes:
+        # #488: "coded" = ≥1 NON-universal application (invariant J-A) — the
+        # bare any-application check counted universal-only values, so these
+        # response fields disagreed with the coding-progress gauge.
+        if any(not d.is_universal for d in code_details.get(dv_id, [])):
             coded_value_ids.add(dv_id)
             coded_record_ids.add(r.row_id)
 
@@ -253,12 +274,19 @@ async def list_texts(
             is_quoted=is_quoted,
             excerpt_id=quoted_excerpts.get(dv_id),
             applied_code_ids=applied_codes,
+            applied_code_details=code_details.get(dv_id, []),
             note_count=nc,
         ))
 
     # Sort
     if random_seed is not None:
-        texts.sort(key=lambda t: abs((t.dataset_value_id * random_seed) % 2147483647))
+        # Deterministic shuffle: hash (seed, id) so the same seed always reproduces
+        # the same order across sessions/platforms. A multiplicative key
+        # (id * seed % p) is NOT a shuffle here — products never reach the modulus
+        # for realistic ids, leaving the key monotone in id (#486).
+        texts.sort(key=lambda t: hashlib.blake2b(
+            f"{random_seed}:{t.dataset_value_id}".encode(), digest_size=8
+        ).digest())
     elif sort_by == "record_asc":
         texts.sort(key=lambda t: (t.row_identifier or "", t.column_sequence_order))
     elif sort_by == "record_desc":
@@ -328,6 +356,9 @@ async def list_records(
     value_ids = [r[0] for r in rows]
     coded_values = set()
     if value_ids:
+        # grain-allow: existence guard (which values have ANY coding). A consensus
+        # row only exists where humans coded the same target, so origin-filtering
+        # this set is a no-op in steady state; left unfiltered intentionally.
         coded_dv_ids = (
             db.query(func.distinct(CodeApplication.dataset_value_id))
             .filter(CodeApplication.dataset_value_id.in_(value_ids))
@@ -572,16 +603,29 @@ async def text_columns(
         non_empty = non_empty_q.group_by(DatasetValue.column_id).all()
         non_empty_counts = {cid: cnt for cid, cnt in non_empty}
 
-    # Coded rows per column
+    # Coded rows per column — the J-A definition (#492): distinct NON-EMPTY
+    # values carrying ≥1 NON-UNIVERSAL, non-consensus application. This is the
+    # displayed "N coded" in TextColumnPicker; it previously counted universal-
+    # only (and even empty/"N/A") values, disagreeing with the coding-progress
+    # gauge on the same screen (7 vs 6 on the audit corpus) and breaking the
+    # "N coded ⊆ y responded" reading of "x/y responded · N coded".
     coded_counts = {}
     if col_ids:
-        coded = (
+        coded_q = (
             db.query(DatasetValue.column_id, func.count(func.distinct(DatasetValue.id)))
             .join(CodeApplication, CodeApplication.dataset_value_id == DatasetValue.id)
-            .filter(DatasetValue.column_id.in_(col_ids))
-            .group_by(DatasetValue.column_id)
-            .all()
+            .join(Code, Code.id == CodeApplication.code_id)
+            .filter(
+                DatasetValue.column_id.in_(col_ids),
+                Code.is_universal == False,
+                non_consensus_filter(),
+                DatasetValue.value_text.isnot(None),
+                DatasetValue.value_text != "",
+            )
         )
+        for val in treat_as_empty:
+            coded_q = coded_q.filter(DatasetValue.value_text != val)
+        coded = coded_q.group_by(DatasetValue.column_id).all()
         coded_counts = {cid: cnt for cid, cnt in coded}
 
     columns = []
@@ -623,10 +667,11 @@ async def apply_code(
     if not code:
         raise HTTPException(status_code=400, detail="Code not found or inactive")
 
-    # Check for duplicate
+    # Check for duplicate by THIS coder (per-coder layer; #J2-1b).
     existing = db.query(CodeApplication).filter(
         CodeApplication.dataset_value_id == data.dataset_value_id,
         CodeApplication.code_id == data.code_id,
+        CodeApplication.user_id == user.id,
     ).first()
     if existing:
         return TextCodeResponse(
@@ -644,6 +689,8 @@ async def apply_code(
         attribution=data.attribution,
     )
     db.add(ca)
+    if consensus_enabled(db):
+        mark_consensus_stale(db, project_id, dataset_value_ids=[data.dataset_value_id])
     db.commit()
     db.refresh(ca)
 
@@ -676,6 +723,8 @@ async def remove_code(
         raise HTTPException(status_code=404, detail="Code application not found")
 
     db.delete(ca)
+    if consensus_enabled(db):
+        mark_consensus_stale(db, project_id, dataset_value_ids=[dataset_value_id])
     db.commit()
 
     return {"status": "ok", "dataset_value_id": dataset_value_id, "code_id": code_id}
@@ -714,11 +763,13 @@ async def bulk_code(
     )
     valid_ids = {dv_id for (dv_id,) in valid_dvs}
 
-    # Get existing applications to skip duplicates
+    # Get THIS coder's existing applications to skip duplicates (per-coder
+    # dedup; #J2-1b — a second coder still gets their own layer rows).
     existing = set(
         dv_id for (dv_id,) in db.query(CodeApplication.dataset_value_id).filter(
             CodeApplication.dataset_value_id.in_(data.dataset_value_ids),
             CodeApplication.code_id == data.code_id,
+            CodeApplication.user_id == user.id,
         ).all()
     )
 
@@ -746,6 +797,7 @@ async def bulk_code(
             dataset_value_id=dv_id,
             code_id=data.code_id,
             user_id=user.id,
+            attribution=data.attribution,
         )
         db.add(ca)
         results.append(TextCodeResponse(
@@ -753,6 +805,8 @@ async def bulk_code(
         ))
         success_count += 1
 
+    if consensus_enabled(db) and valid_ids:
+        mark_consensus_stale(db, project_id, dataset_value_ids=list(valid_ids))
     db.commit()
 
     return BulkCodeResponse(
@@ -793,15 +847,20 @@ async def bulk_remove_code(
     )
     valid_ids = {dv_id for (dv_id,) in valid_dvs}
 
+    # Scoped to THIS coder so a bulk-remove never nukes another coder's
+    # applications (#J2-1b critical nuke site).
     deleted_count = (
         db.query(CodeApplication)
         .filter(
             CodeApplication.dataset_value_id.in_(valid_ids),
             CodeApplication.code_id == data.code_id,
+            CodeApplication.user_id == user.id,
         )
         .delete(synchronize_session=False)
     )
 
+    if consensus_enabled(db) and valid_ids:
+        mark_consensus_stale(db, project_id, dataset_value_ids=list(valid_ids))
     db.commit()
 
     return BulkRemoveCodeResponse(
@@ -1004,6 +1063,11 @@ async def coding_progress(
     column_ids: str | None = Query(None, description="Comma-separated column IDs (all text columns if omitted)"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # Scope coverage to ONE coder (blind mode self-only); omit = all coders. Appended
+    # last (not mid-signature) so existing positional callers are unaffected, and a
+    # BARE `None` default (not Query(None)) so direct-call tests that omit it get real
+    # None — FastAPI still treats a scalar as a query param. (?coder_id=N over the wire.)
+    coder_id: int | None = None,
 ):
     project = _get_project_or_404(db, project_id, user.id)
     parsed_column_ids = parse_int_list(column_ids)
@@ -1039,16 +1103,49 @@ async def coding_progress(
         .all()
     )
 
-    # Get coded value IDs
+    # Get coded value IDs (#400: a value counts as "coded" only when it carries
+    # at least one NON-UNIVERSAL code application — a universal-only marker like
+    # "Unclear" must not inflate coverage; this mirrors lib/coding-progress.ts).
     coded_value_ids = set()
     value_ids = [v[0] for v in values]
     if value_ids:
-        coded = (
+        coded_q = (
             db.query(func.distinct(CodeApplication.dataset_value_id))
-            .filter(CodeApplication.dataset_value_id.in_(value_ids))
-            .all()
+            .join(Code, Code.id == CodeApplication.code_id)
+            .filter(
+                CodeApplication.dataset_value_id.in_(value_ids),
+                Code.is_universal == False,
+                non_consensus_filter(),
+            )
         )
-        coded_value_ids = {dv_id for (dv_id,) in coded}
+        # Blind mode (DEC-G): scope overall_* coverage to the requesting coder so the
+        # gauge shows self-only and no colleague counts reach the wire.
+        if coder_id is not None:
+            coded_q = coded_q.filter(CodeApplication.user_id == coder_id)
+        coded_value_ids = {dv_id for (dv_id,) in coded_q.all()}
+
+    # Per-coder coverage breakdown (Track J · J1 item 4). Same non-universal
+    # rule; only attributed applications (user_id IS NOT NULL) are counted.
+    coder_value_ids: dict[int, set[int]] = defaultdict(set)
+    if value_ids:
+        coder_rows_q = (
+            db.query(CodeApplication.user_id, CodeApplication.dataset_value_id)
+            .join(Code, Code.id == CodeApplication.code_id)
+            .filter(
+                CodeApplication.dataset_value_id.in_(value_ids),
+                Code.is_universal == False,
+                CodeApplication.user_id.isnot(None),
+                # Exclude the consensus user so it never appears as a phantom coder
+                # in the per-coder coverage breakdown (J2-B / P-1).
+                non_consensus_filter(),
+            )
+        )
+        # Blind mode (DEC-G): restrict the by_coder breakdown to the requesting coder
+        # too, so colleague counts are absent from the payload, not just the render.
+        if coder_id is not None:
+            coder_rows_q = coder_rows_q.filter(CodeApplication.user_id == coder_id)
+        for uid, dv_id in coder_rows_q.all():
+            coder_value_ids[uid].add(dv_id)
 
     # Build per-column stats
     by_column = []
@@ -1056,6 +1153,8 @@ async def coding_progress(
     overall_coded = 0
     all_record_ids = set()
     coded_record_ids = set()
+    # value_id -> row_id for non-empty text values (drives per-coder record counts)
+    non_empty_value_row: dict[int, int] = {}
 
     col_map = {c[0]: (c[1] or c[2][:50]) for c in cols}
 
@@ -1075,8 +1174,25 @@ async def coding_progress(
 
         for v in non_empty:
             all_record_ids.add(v[3])
+            non_empty_value_row[v[0]] = v[3]
             if v[0] in coded_value_ids:
                 coded_record_ids.add(v[3])
+
+    # Resolve per-coder coverage against the non-empty value universe so a coder's
+    # coded_texts/coded_records use the same denominators as overall_*.
+    by_coder: list[CodingProgressByCoderItem] = []
+    for uid in sorted(coder_value_ids):
+        coded_texts_for_coder = [
+            dv_id for dv_id in coder_value_ids[uid] if dv_id in non_empty_value_row
+        ]
+        coded_records_for_coder = {
+            non_empty_value_row[dv_id] for dv_id in coded_texts_for_coder
+        }
+        by_coder.append(CodingProgressByCoderItem(
+            user_id=uid,
+            coded_texts=len(coded_texts_for_coder),
+            coded_records=len(coded_records_for_coder),
+        ))
 
     db.commit()
 
@@ -1084,6 +1200,7 @@ async def coding_progress(
         by_column=by_column,
         overall_texts={"coded": overall_coded, "total": overall_total},
         overall_records={"coded": len(coded_record_ids), "total": len(all_record_ids)},
+        by_coder=by_coder,
     )
 
 
@@ -1143,7 +1260,11 @@ async def export_coded_texts(
         cas = (
             db.query(CodeApplication.dataset_value_id, Code.name)
             .join(Code, CodeApplication.code_id == Code.id)
-            .filter(CodeApplication.dataset_value_id.in_(value_ids))
+            # Human/working layer only + de-dup per coder: a code applied by N
+            # coders is one name in the export, and the consensus canonical name
+            # never leaks into this user-facing CSV (#448b / J2-B).
+            .filter(CodeApplication.dataset_value_id.in_(value_ids), non_consensus_filter())
+            .distinct()
             .all()
         )
         for dv_id, code_name in cas:

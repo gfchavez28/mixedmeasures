@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, Text, Boolean, DateTime, ForeignKey, Index, CheckConstraint, text
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Index, CheckConstraint, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from uuid import uuid4
 from ..database import Base
 
 
@@ -28,6 +29,8 @@ class Note(Base):
     content = Column(Text, nullable=False)
     sequence_number = Column(Integer, nullable=False)
     is_archived = Column(Boolean, default=False, nullable=False)
+    # Track J · J3-2-0b: stable cross-instance identity for merge matching
+    uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 

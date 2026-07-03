@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, isValidElement, cloneElement } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { Link, useNavigate, useLocation, matchPath } from 'react-router-dom'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Sun,
   Moon,
@@ -8,7 +8,7 @@ import {
   FileInput,
   Settings,
 } from 'lucide-react'
-import { ChevronDown, Clock, Users } from 'lucide-react'
+import { ChevronDown, Clock, Users, UserPlus } from 'lucide-react'
 // #409: chrome icons are lucide SVGs, not emoji — emoji render as tofu on
 // systems without an emoji font (Linux/WSL) and as inconsistent OS art elsewhere.
 import {
@@ -35,8 +35,14 @@ import { formatRelativeTime } from '@/lib/format'
 import { useTheme } from '@/lib/theme-context'
 import { useAuth } from '@/lib/auth-context'
 import MMLogo from '@/components/MMLogo'
-import { projectsApi } from '@/lib/api'
+import { projectsApi, authApi } from '@/lib/api'
 import type { Project, ProjectSummary } from '@/lib/api'
+import { coderColor } from '@/lib/coder-color'
+import { useCoders } from '@/hooks/useCoders'
+import { readRevealed } from '@/hooks/useBlindMode'
+import { useCoderCoverage } from '@/hooks/useCoderCoverage'
+import { useCoderSwitch } from '@/hooks/useCoderSwitch'
+import { toast } from 'sonner'
 import type { BreadcrumbSegment } from '@/layouts/ProjectLayout'
 
 interface TopRailProps {
@@ -766,19 +772,79 @@ function HelpMenu() {
 
 
 function UserMenu() {
-  // Local-first: no sign-out. The menu surfaces the active coder and a shortcut
-  // to rename it in Settings (attribution / who-did-what reads this name).
+  // Track J · J1: a passwordless coder roster. The menu surfaces the active coder,
+  // lets you switch to (or create) another, and links to Settings. Attribution /
+  // who-coded-what reads the active coder; switching re-points it server-side.
   const { user } = useAuth()
+  const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [newName, setNewName] = useState('')
   const menuRef = useRef<HTMLDivElement>(null)
+
+  const closeMenu = useCallback(() => {
+    setOpen(false)
+    setCreating(false)
+    setNewName('')
+  }, [])
+
+  const { coders, multiCoder } = useCoders()
+
+  // #3 — per-source "coded here" markers in the switcher. The TopRail is global,
+  // so this only scopes to a single conversation/document we can read from the
+  // route (on Overview/Analysis there's no source). Dataset/text-coding is deferred:
+  // its coverage keys on text columns, which aren't in the URL.
+  const location = useLocation()
+  const convMatch = matchPath('/projects/:projectId/conversations/:conversationId', location.pathname)
+  const docMatch = matchPath('/projects/:projectId/documents/:documentId', location.pathname)
+  const conversationId = convMatch && /^\d+$/.test(convMatch.params.conversationId ?? '')
+    ? Number(convMatch.params.conversationId) : undefined
+  const documentId = docMatch && /^\d+$/.test(docMatch.params.documentId ?? '')
+    ? Number(docMatch.params.documentId) : undefined
+  const projMatch = matchPath('/projects/:projectId/*', location.pathname)
+  const sourceProjectId = projMatch ? Number(projMatch.params.projectId) : undefined
+  const inSource = conversationId != null || documentId != null
+
+  // Blind mode hides colleague coding-presence (DEC-G). Mirror the #457 picklist:
+  // the whole coverage UI is hidden while blind and returns on reveal — never leak
+  // which colleagues coded a source while you're coding independently. Read the
+  // flag fresh each render (not a useBlindMode instance) so a reveal/blind toggle
+  // in the workbench is reflected the next time this transient menu opens.
+  const revealed = sourceProjectId != null && user ? readRevealed(sourceProjectId, user.id) : false
+  const blind = multiCoder && !revealed
+  const coverage = useCoderCoverage(
+    sourceProjectId ?? 0,
+    { conversationId, documentId },
+    { enabled: open && inSource && multiCoder && !blind, rosterCoderIds: coders.map(c => c.id) },
+  )
+  const showCoverage = !blind && inSource && multiCoder && coverage.isLoaded
+  const sourceNoun = conversationId != null ? 'this conversation' : 'this document'
+  const rosterCodedCount = coders.filter(c => coverage.activeCoderIds.has(c.id)).length
+
+  // #459/#460 — shared switch-with-confirm flow (also used by Settings + Dashboard).
+  const { requestSwitch, dialog: switchDialog, switching } = useCoderSwitch({ onSwitched: closeMenu })
+
+  const createMutation = useMutation({
+    mutationFn: (name: string) => authApi.createCoder(name),
+    onSuccess: (coder) => {
+      queryClient.invalidateQueries({ queryKey: ['coders'] })
+      setNewName('')
+      setCreating(false)
+      // Creating a coder is already an explicit choice — skip the switch confirm.
+      requestSwitch({ id: coder.id, username: coder.username }, { skipConfirm: true })
+    },
+    onError: (err: Error & { response?: { data?: { detail?: string } } }) => {
+      toast.error(err.response?.data?.detail || 'Could not create coder')
+    },
+  })
 
   useEffect(() => {
     if (!open) return
     const handleClick = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpen(false)
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) closeMenu()
     }
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key === 'Escape') closeMenu()
     }
     document.addEventListener('mousedown', handleClick)
     document.addEventListener('keydown', handleKey)
@@ -786,42 +852,111 @@ function UserMenu() {
       document.removeEventListener('mousedown', handleClick)
       document.removeEventListener('keydown', handleKey)
     }
-  }, [open])
+  }, [open, closeMenu])
 
   if (!user) return null
+
+  const others = coders.filter(c => c.id !== user.id)
+  const itemClass =
+    'flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.06] transition-colors'
 
   return (
     <div ref={menuRef} className="relative">
       <button
-        onClick={() => setOpen(v => !v)}
-        className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] transition-colors ${FOCUS_RING}`}
+        onClick={() => (open ? closeMenu() : setOpen(true))}
+        className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] transition-colors ${FOCUS_RING}`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`${user.username} — Coder menu`}
       >
+        <span
+          className="w-2 h-2 rounded-full flex-none"
+          style={{ backgroundColor: coderColor({ id: user.id, display_color: user.display_color }) }}
+          aria-hidden="true"
+        />
         <span className="max-w-[80px] truncate">{user.username}</span>
         <ChevronDown className="w-3 h-3" />
       </button>
       {open && (
         <div
           role="menu"
-          className="absolute right-0 top-full mt-1 w-48 rounded-md border border-white/[0.1] bg-[hsl(var(--mm-chrome))] shadow-lg z-50 py-1"
+          className="absolute right-0 top-full mt-1 w-56 rounded-md border border-white/[0.1] bg-[hsl(var(--mm-chrome))] shadow-lg z-50 py-1"
         >
           <div className="px-3 py-1.5 text-[10px] text-[hsl(var(--mm-chrome-text-muted))]">
-            Active coder: <span className="font-medium text-[hsl(var(--mm-chrome-text))]">{user.username}</span>
+            Coding as <span className="font-medium text-[hsl(var(--mm-chrome-text))]">{user.username}</span>
           </div>
+          {others.length > 0 && (
+            <>
+              <div role="separator" className="my-1 border-t border-white/[0.07]" />
+              <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-[hsl(var(--mm-chrome-text-muted))]/70">
+                Switch coder
+              </div>
+              {showCoverage && (
+                <div className="px-3 pb-1 -mt-0.5 text-[10px] text-[hsl(var(--mm-chrome-text-muted))]/70">
+                  {rosterCodedCount} of {coders.length} coded {sourceNoun}
+                  {coverage.extraCoders.length > 0 && ` · +${coverage.extraCoders.length} archived`}
+                </div>
+              )}
+              {others.map(c => (
+                <button
+                  key={c.id}
+                  role="menuitem"
+                  onClick={() => requestSwitch({ id: c.id, username: c.username })}
+                  disabled={switching}
+                  className={itemClass}
+                >
+                  <span
+                    className="w-2.5 h-2.5 rounded-full flex-none"
+                    style={{ backgroundColor: coderColor(c) }}
+                    aria-hidden="true"
+                  />
+                  <span className="truncate">{c.username}</span>
+                  {showCoverage && coverage.activeCoderIds.has(c.id) && (
+                    <span
+                      className="ml-auto text-[10px] text-emerald-400 whitespace-nowrap"
+                      title={`${c.username} has coded ${sourceNoun}`}
+                    >
+                      coded here
+                    </span>
+                  )}
+                </button>
+              ))}
+            </>
+          )}
           <div role="separator" className="my-1 border-t border-white/[0.07]" />
-          <Link
-            role="menuitem"
-            to="/settings"
-            onClick={() => setOpen(false)}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.06] transition-colors"
-          >
+          {creating ? (
+            <form
+              onSubmit={e => {
+                e.preventDefault()
+                const n = newName.trim()
+                if (n) createMutation.mutate(n)
+              }}
+              className="px-3 py-1.5"
+            >
+              <input
+                autoFocus
+                value={newName}
+                onChange={e => setNewName(e.target.value)}
+                placeholder="New coder name…"
+                maxLength={50}
+                aria-label="New coder name"
+                className={`w-full rounded bg-white/[0.06] px-2 py-1 text-xs text-[hsl(var(--mm-chrome-text))] placeholder:text-[hsl(var(--mm-chrome-text-muted))]/60 outline-none ${FOCUS_RING}`}
+              />
+            </form>
+          ) : (
+            <button role="menuitem" onClick={() => setCreating(true)} className={itemClass}>
+              <UserPlus className="w-3 h-3" />
+              New coder
+            </button>
+          )}
+          <div role="separator" className="my-1 border-t border-white/[0.07]" />
+          <Link role="menuitem" to="/settings" onClick={closeMenu} className={itemClass}>
             <Settings className="w-3 h-3" />
             Coder settings
           </Link>
         </div>
       )}
+      {switchDialog}
     </div>
   )
 }
@@ -866,7 +1001,7 @@ function BackupStatusBadge() {
 
   const iconColorClass = data.is_stale
     ? 'text-amber-400'
-    : 'text-stone-400 dark:text-stone-500'
+    : 'text-[hsl(var(--mm-chrome-text-muted))]'
 
   return (
     <Link

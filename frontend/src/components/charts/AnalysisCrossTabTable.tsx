@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import type { AnalysisCrossTabResponse } from '@/lib/api'
-import { resolveHeatmapColors, DISPLAY_PRECISION, mergeFormatting } from '@/lib/chart-data'
+import { resolveHeatmapColors, DISPLAY_PRECISION, mergeFormatting, formatPValue } from '@/lib/chart-data'
 import { useChartColors } from '@/lib/theme-context'
 import type { ChartFormatting } from '@/lib/chart-data'
 
@@ -101,8 +101,7 @@ export default function AnalysisCrossTabTable({
   const chiSquareText = useMemo(() => {
     if (!data.chi_square) return null
     const { statistic, df, p_value, cramers_v } = data.chi_square
-    const pText = p_value < 0.001 ? '< .001' : `= ${p_value.toFixed(3).replace(/^0/, '')}`
-    return `χ²(${df}) = ${statistic.toFixed(2)}, p ${pText}, V = ${cramers_v.toFixed(2)}`
+    return `χ²(${df}) = ${statistic.toFixed(2)}, ${formatPValue(p_value)}, V = ${cramers_v.toFixed(2)}`
   }, [data.chi_square])
 
   const grandTotal = data.n_shared
@@ -118,7 +117,11 @@ export default function AnalysisCrossTabTable({
           role="table"
           className="text-xs border-collapse"
           style={{ fontSize: fmt.axisFontSize }}
+          aria-label={`Cross-tabulation of ${data.row_column_label} by ${data.col_column_label}`}
         >
+          <caption className="sr-only">
+            Cross-tabulation of {data.row_column_label} (rows) by {data.col_column_label} (columns), with cell counts and row/column totals.
+          </caption>
           <thead>
             <tr>
               <th

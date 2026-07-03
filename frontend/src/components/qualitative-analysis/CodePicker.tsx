@@ -265,7 +265,7 @@ export default function CodePicker({
 
   const renderCheckbox = (checked: boolean, indeterminate?: boolean) => (
     <span className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${
-      checked ? 'bg-blue-500 border-blue-500' : indeterminate ? 'bg-blue-300 border-blue-400' : 'border-mm-border-medium'
+      checked ? 'bg-mm-blue border-mm-blue' : indeterminate ? 'bg-mm-blue/50 border-mm-blue/70' : 'border-mm-border-medium'
     }`}>
       {checked && <Check className="w-3 h-3 text-white" />}
       {indeterminate && !checked && <span className="w-2 h-0.5 bg-white rounded-full" />}

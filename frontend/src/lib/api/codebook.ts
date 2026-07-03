@@ -14,6 +14,9 @@ export interface CodebookCodeNode {
   source_count: number
   excerpt_count: number
   category_id: number | null
+  // #501: typed source identities ("conv:1", "col:13", "doc:2") — lets the
+  // peek multi-select UNION sources instead of double-counting shared ones.
+  source_keys?: string[]
 }
 
 export interface CodebookCategoryNode {
@@ -38,33 +41,6 @@ export interface CodebookTreeResponse {
   uncategorized_codes: CodebookCodeNode[]
 }
 
-export interface CodebookCooccurrenceNode {
-  id: number
-  name: string
-  color: string | null
-  segment_count: number
-  source_count: number
-  category_path: string[]
-}
-
-export interface CodebookCooccurrenceEdge {
-  source: number
-  target: number
-  weight: number
-}
-
-export interface CodebookCooccurrenceResponse {
-  nodes: CodebookCooccurrenceNode[]
-  edges: CodebookCooccurrenceEdge[]
-  max_weight: number
-  hierarchy_level: number
-  // #354: total non-universal codes in the project (respects include_inactive)
-  // — denominator for the "Showing N of M codes" affordance. The network drops
-  // codes with zero co-occurrence-eligible applications; this lets the UI
-  // explain the discrepancy with the tree count.
-  total_codes_in_project: number
-}
-
 // ── API ──────────────────────────────────────────────────────────────────────
 
 export const codebookApi = {
@@ -76,16 +52,5 @@ export const codebookApi = {
     min_segments?: number
     max_segments?: number
   }) => api.get<CodebookTreeResponse>(`/projects/${pid}/codebook/tree`, { params })
-    .then(r => r.data),
-
-  cooccurrence: (pid: number, params?: {
-    hierarchy_level?: number
-    conversation_ids?: string
-    text_column_ids?: string
-    exclude_facilitator?: boolean
-    include_inactive?: boolean
-    min_segments?: number
-    max_segments?: number
-  }) => api.get<CodebookCooccurrenceResponse>(`/projects/${pid}/codebook/cooccurrence`, { params })
     .then(r => r.data),
 }

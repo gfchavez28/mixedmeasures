@@ -23,6 +23,8 @@ from ..services.coding_counts import (
     coded_segment_count,
     participant_segment_count,
 )
+from ..services.consensus import consensus_enabled
+from ..services.consensus_staleness import mark_consensus_stale
 from .helpers import _get_project_or_404, _verify_segment_ownership, _verify_conversation_ownership
 
 router = APIRouter(prefix="/api", tags=["coding"])
@@ -37,6 +39,30 @@ def _get_segment_project_id(db: Session, segment: Segment) -> int | None:
         doc = db.query(Document).filter(Document.id == segment.document_id).first()
         return doc.project_id if doc else None
     return None
+
+
+def _mark_segment_consensus_stale(db: Session, project_id: int, segment: Segment) -> None:
+    """Mark this segment (and its visible group siblings) for consensus recompute.
+
+    A coded segment's consensus depends on every coder's layer, so an apply/remove
+    by ANY coder invalidates it. Grouped coding fans out to the group's visible
+    siblings, so they invalidate too. Gated on multi-coder (no-op for single-coder
+    projects) and drained by the background sweep (Track J · J2-3, Slab 5b).
+    """
+    if not consensus_enabled(db):
+        return
+    ids = [segment.id]
+    if segment.group_id:
+        ids = [
+            r[0] for r in db.query(Segment.id).filter(
+                Segment.group_id == segment.group_id,
+                Segment.merged_into_id == None,  # noqa: E711
+                Segment.split_into_id == None,  # noqa: E711
+            ).all()
+        ]
+        if segment.id not in ids:
+            ids.append(segment.id)
+    mark_consensus_stale(db, project_id, segment_ids=ids)
 
 
 @router.post("/segments/{segment_id}/codes/{code_id}", response_model=CodeApplicationResponse)
@@ -63,10 +89,13 @@ async def apply_code(
     if not project_id or project_id != code.project_id:
         raise HTTPException(status_code=400, detail="Segment and code must belong to the same project")
 
-    # Check if already applied
+    # Check if already applied by THIS coder (per-coder layer; #J2-1b).
+    # Scoped to user.id so a second coder applying the same code creates their
+    # own layer row instead of silently no-op'ing on the first coder's row.
     existing = db.query(CodeApplication).filter(
         CodeApplication.segment_id == segment_id,
-        CodeApplication.code_id == code_id
+        CodeApplication.code_id == code_id,
+        CodeApplication.user_id == user.id
     ).first()
 
     if existing:
@@ -98,7 +127,8 @@ async def apply_code(
         for group_seg in group_segments:
             existing_group = db.query(CodeApplication).filter(
                 CodeApplication.segment_id == group_seg.id,
-                CodeApplication.code_id == code_id
+                CodeApplication.code_id == code_id,
+                CodeApplication.user_id == user.id
             ).first()
 
             if not existing_group:
@@ -122,6 +152,7 @@ async def apply_code(
         project_id=project_id,
         details={"segment_id": segment_id, "code_id": code_id}
     )
+    _mark_segment_consensus_stale(db, project_id, segment)
     db.commit()
 
     return CodeApplicationResponse(
@@ -150,10 +181,11 @@ async def remove_code(
     if not project_id or project_id != code.project_id:
         raise HTTPException(status_code=400, detail="Segment and code must belong to the same project")
 
-    # Find and delete the application
+    # Find and delete THIS coder's application only (per-coder layer; #J2-1b).
     application = db.query(CodeApplication).filter(
         CodeApplication.segment_id == segment_id,
-        CodeApplication.code_id == code_id
+        CodeApplication.code_id == code_id,
+        CodeApplication.user_id == user.id
     ).first()
 
     if not application:
@@ -163,7 +195,9 @@ async def remove_code(
             applied=False
         )
 
-    # If segment is in a group, remove from all visible segments in group
+    # If segment is in a group, remove from all visible segments in group.
+    # Scoped to user.id so removing a grouped code deletes only THIS coder's
+    # applications across the group — never another coder's (#J2-1b nuke site).
     if segment.group_id:
         db.query(CodeApplication).filter(
             CodeApplication.segment_id.in_(
@@ -173,7 +207,8 @@ async def remove_code(
                     Segment.split_into_id == None,
                 )
             ),
-            CodeApplication.code_id == code_id
+            CodeApplication.code_id == code_id,
+            CodeApplication.user_id == user.id
         ).delete(synchronize_session=False)
     else:
         db.delete(application)
@@ -187,6 +222,7 @@ async def remove_code(
         details={"segment_id": segment_id, "code_id": code_id}
     )
 
+    _mark_segment_consensus_stale(db, project_id, segment)
     db.commit()
 
     return CodeApplicationResponse(
@@ -227,10 +263,12 @@ async def bulk_code(
     ).all()
     segment_map = {s.id: s for s in segments}
 
-    # Batch check existing code applications in one query
+    # Batch check existing code applications by THIS coder (per-coder dedup;
+    # #J2-1b — "have *I* applied this?", not "has anyone?").
     existing_apps = db.query(CodeApplication).filter(
         CodeApplication.segment_id.in_(data.segment_ids),
-        CodeApplication.code_id == data.code_id
+        CodeApplication.code_id == data.code_id,
+        CodeApplication.user_id == user.id
     ).all()
     existing_set = {ca.segment_id for ca in existing_apps}
 
@@ -275,14 +313,21 @@ async def bulk_code(
                 applied=False
             ))
 
-    # Batch delete for remove action
+    # Batch delete for remove action — scoped to THIS coder so a bulk-remove
+    # never nukes another coder's applications (#J2-1b critical nuke site).
     if data.action == "remove":
         valid_segment_ids = [sid for sid in data.segment_ids if sid in segment_map]
         if valid_segment_ids:
             db.query(CodeApplication).filter(
                 CodeApplication.segment_id.in_(valid_segment_ids),
-                CodeApplication.code_id == data.code_id
+                CodeApplication.code_id == data.code_id,
+                CodeApplication.user_id == user.id
             ).delete(synchronize_session=False)
+
+    if consensus_enabled(db):
+        affected = [sid for sid in data.segment_ids if sid in segment_map]
+        if affected:
+            mark_consensus_stale(db, code.project_id, segment_ids=affected)
 
     db.commit()
 

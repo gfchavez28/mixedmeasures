@@ -289,14 +289,14 @@ function FilterPill({
   return (
     <div
       role="listitem"
-      className="inline-flex items-center gap-1 border rounded-md px-2 py-1 bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800 text-xs"
+      className="inline-flex items-center gap-1 border rounded-md px-2 py-1 bg-mm-blue/12 border-mm-blue/30 text-xs"
       aria-label={`Filter: ${colName} ${opLabel} ${valueSummary}`}
     >
-      <Filter className="w-3 h-3 text-blue-500 dark:text-blue-400 flex-shrink-0" />
-      <span className="font-medium text-blue-700 dark:text-blue-300">{colName}</span>
+      <Filter className="w-3 h-3 text-mm-blue flex-shrink-0" />
+      <span className="font-medium text-mm-blue-text">{colName}</span>
 
       <select
-        className="bg-transparent text-blue-600 dark:text-blue-400 border-none text-xs cursor-pointer focus:outline-none"
+        className="bg-transparent text-mm-blue-text border-none text-xs cursor-pointer focus:outline-none"
         aria-label={`Operator for ${colName}`}
         value={filter.operator}
         onChange={e => {
@@ -316,7 +316,7 @@ function FilterPill({
       {isCategoricalOperator(filter.operator) && (
         <div className="relative" ref={valuesRef}>
           <button
-            className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 flex items-center gap-0.5"
+            className="text-mm-blue-text hover:text-mm-blue flex items-center gap-0.5"
             onClick={() => setShowValues(!showValues)}
           >
             {valueSummary}
@@ -336,7 +336,7 @@ function FilterPill({
       {isValueOperator(filter.operator) && (
         <input
           type="number"
-          className="w-16 bg-mm-surface border border-blue-200 dark:border-blue-800 rounded px-1 text-xs"
+          className="w-16 bg-mm-surface border border-mm-blue/30 rounded px-1 text-xs"
           aria-label={`Value for ${colName} ${opLabel}`}
           value={filter.value || ''}
           onChange={e => onChange({ value: e.target.value })}
@@ -345,7 +345,7 @@ function FilterPill({
       )}
 
       <button
-        className="text-blue-400 hover:text-blue-600 dark:hover:text-blue-300 ml-0.5"
+        className="text-mm-blue hover:text-mm-blue-text ml-0.5"
         onClick={onRemove}
         aria-label={`Remove filter: ${colName}`}
       >
@@ -401,7 +401,7 @@ function ValueSelector({
             }}
           >
             <span className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${
-              checked ? 'bg-blue-500 border-blue-500 dark:bg-blue-600 dark:border-blue-600' : 'border-mm-border-medium'
+              checked ? 'bg-mm-blue border-mm-blue' : 'border-mm-border-medium'
             }`}>
               {checked && <Check className="w-3 h-3 text-white" />}
             </span>

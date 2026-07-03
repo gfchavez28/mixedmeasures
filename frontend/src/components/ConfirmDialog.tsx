@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -19,6 +20,8 @@ interface ConfirmDialogProps {
   onConfirm: () => void
   destructive?: boolean
   loading?: boolean
+  /** Optional extra body between the description and the footer (e.g. a checkbox). */
+  children?: ReactNode
 }
 
 export function ConfirmDialog({
@@ -31,6 +34,7 @@ export function ConfirmDialog({
   onConfirm,
   destructive = true,
   loading = false,
+  children,
 }: ConfirmDialogProps) {
   return (
     <AlertDialog open={open} onOpenChange={loading ? undefined : onOpenChange}>
@@ -39,6 +43,7 @@ export function ConfirmDialog({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
+        {children}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={loading}>Cancel</AlertDialogCancel>
           <AlertDialogAction

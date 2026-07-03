@@ -207,6 +207,10 @@ class MetricDefinitionSummaryResponse(BaseModel):
     latest_computed_at: UTCTimestamp | None = None
     total_valid_n: int | None = None
     result_count: int = 0
+    # #506: results with a non-null group_value — excludes the None
+    # listwise-deletion bucket. Group-count displays and the t-vs-ANOVA
+    # picker must read this, never result_count.
+    real_group_count: int = 0
     last_accessed_at: UTCTimestamp | None = None
     created_at: UTCTimestamp
     updated_at: UTCTimestamp
