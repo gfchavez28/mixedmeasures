@@ -1,0 +1,30 @@
+# Dependabot policy: ALERTS ONLY — no automated pull requests.
+#
+# This repository is a sync target: its tree is regenerated from a private
+# working repository, so a PR merged here would be silently reverted by the
+# next sync. Dependency bumps are made in the private repo and flow out with
+# the next release. Dependabot *alerts* stay enabled (Security tab) so new
+# advisories are still visible; the release pipeline additionally hard-gates
+# on `npm audit` + `pip-audit`.
+#
+# `open-pull-requests-limit: 0` disables version-update PRs per ecosystem
+# (the documented pattern). Security-update PRs are a separate repository
+# setting and are disabled there ("Dependabot security updates" — off).
+
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 0
+  - package-ecosystem: "npm"
+    directory: "/electron"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 0
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 0
