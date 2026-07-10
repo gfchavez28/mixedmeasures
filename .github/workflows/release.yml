@@ -522,17 +522,24 @@ jobs:
       #    "which file do I download / first launch" notes — previously typed by hand in the UI
       #    and therefore LOST on every automated release — are templated in
       #    .github/release-notes-template.md and rendered here (__VERSION__/__REPO__ substituted).
-      #    Gated to the linux leg: it always completes (the macos-13 Intel leg habitually hangs)
-      #    and runs once, avoiding concurrent PATCHes to the same release body. success() implied,
-      #    so it only runs if this leg's build/publish succeeded; tag-only (dispatch has no version).
+      #    Gated to one leg (linux) so concurrent PATCHes can't race on the same release body.
+      #    success() implied, so it only runs if this leg's build/publish succeeded; tag-only
+      #    (dispatch has no version).
+      #
+      #    The release is named for the PACKAGE version, NOT the git tag: electron-builder's
+      #    GitHub publisher derives the release name from electron/package.json, so an -rc tag
+      #    (v1.2.0-rc1) publishes a draft named v1.2.0. Reading GITHUB_REF_NAME here made this
+      #    step `gh release edit v1.2.0-rc1` → "release not found", failing every rc run at the
+      #    last step (and it would have rendered "1.2.0-rc1" into the notes body). Derive the
+      #    version the same way every other publish step in this workflow does.
       - name: Set release notes from template
         if: github.ref_type == 'tag' && matrix.eb_target == 'linux'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
+          VERSION="$(node -p "require('./electron/package.json').version")"
+          TAG="v${VERSION}"
           RENDERED="$(mktemp)"
           sed -e "s/__VERSION__/${VERSION}/g" -e "s#__REPO__#${GITHUB_REPOSITORY}#g" \
             "${GITHUB_WORKSPACE}/.github/release-notes-template.md" > "$RENDERED"
