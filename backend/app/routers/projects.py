@@ -1,6 +1,8 @@
 import logging
+import os
 import shutil
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -9,7 +11,7 @@ from ..config import get_documents_dir, get_media_dir
 from ..database import get_db
 from ..models.user import User
 from ..models.project import Project
-from ..models.conversation import Conversation
+from ..models.conversation import Conversation, VIDEO_FORMATS
 from ..models.segment import Segment
 from ..models.code import Code
 from ..models.speaker import Speaker
@@ -28,6 +30,7 @@ from ..schemas.project import (
     ProjectUpdate,
     ProjectResponse,
     ProjectListResponse,
+    ProjectStorageResponse,
     ProjectSummaryResponse,
     CodebookFreezeRequest,
     RecentConversation,
@@ -237,6 +240,41 @@ async def get_project(
     """Get a project by ID."""
     project = _get_project_or_404(db, project_id, user.id)
     return project_to_response(project, db)
+
+
+@router.get("/{project_id}/storage", response_model=ProjectStorageResponse)
+async def get_project_storage(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """On-disk storage footprint (media incl. video + documents) for one
+    project — drives the Overview storage line and the export dialog's
+    include-media default (video V1 slab 5)."""
+    _get_project_or_404(db, project_id, user.id)
+
+    def _dir_bytes(root: Path) -> tuple[int, int]:
+        total = video = 0
+        if root.is_dir():
+            for walk_root, _dirs, files in os.walk(root):
+                for f in files:
+                    p = Path(walk_root) / f
+                    try:
+                        size = p.stat().st_size
+                    except OSError:
+                        continue
+                    total += size
+                    if p.suffix.lstrip(".").lower() in VIDEO_FORMATS:
+                        video += size
+        return total, video
+
+    media_bytes, video_bytes = _dir_bytes(get_media_dir() / str(project_id))
+    documents_bytes, _ = _dir_bytes(get_documents_dir() / str(project_id))
+    return ProjectStorageResponse(
+        media_bytes=media_bytes,
+        video_bytes=video_bytes,
+        documents_bytes=documents_bytes,
+    )
 
 
 @router.get("/{project_id}/summary", response_model=ProjectSummaryResponse)

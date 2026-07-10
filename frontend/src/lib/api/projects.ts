@@ -73,11 +73,19 @@ export interface ProjectSummary {
   recent_documents: RecentDocument[]
 }
 
+/** On-disk footprint (slab 5). media_bytes includes video_bytes. */
+export interface ProjectStorage {
+  media_bytes: number
+  video_bytes: number
+  documents_bytes: number
+}
+
 // API functions - Projects
 export const projectsApi = {
   list: () => api.get<{ projects: Project[]; total: number }>('/projects').then(res => res.data),
   get: (id: number) => api.get<Project>(`/projects/${id}`).then(res => res.data),
   summary: (id: number) => api.get<ProjectSummary>(`/projects/${id}/summary`).then(res => res.data),
+  storage: (id: number) => api.get<ProjectStorage>(`/projects/${id}/storage`).then(res => res.data),
   create: (data: { name: string; description?: string }) =>
     api.post<Project>('/projects', data).then(res => res.data),
   update: (id: number, data: Partial<Project>) =>

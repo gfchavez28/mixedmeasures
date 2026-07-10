@@ -40,6 +40,7 @@ export const MANUAL_COLUMN_TYPES = [
   { value: 'percentage', label: 'Percentage' },
   { value: 'open_text', label: 'Open Text' },
   { value: 'multi_select', label: 'Multi Select' },
+  { value: 'identifier', label: 'Identifier' }, // #414: participant/row ID codes
 ]
 
 const COMPUTED_TYPE_OPTIONS = [

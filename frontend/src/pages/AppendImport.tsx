@@ -20,6 +20,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
+import { DATASET_ACCEPT, DATASET_FORMAT_LABEL, isSupportedDatasetFile } from '@/lib/dataset-import-formats'
 
 type Step = 'upload' | 'review' | 'results'
 
@@ -58,6 +59,9 @@ export default function AppendImport() {
   const [isLoading, setIsLoading] = useState(false)
   const [skipDuplicates, setSkipDuplicates] = useState(true)
   const [showAllRows, setShowAllRows] = useState(false)
+  // #414 (DEC-7): link NEW rows by the dataset's identifier column when the
+  // preview offers one (exactly one identifier column, matched by this file).
+  const [linkParticipants, setLinkParticipants] = useState(true)
 
   const handleFileSelect = useCallback(async (selectedFile: File, sheet?: string) => {
     setFile(selectedFile)
@@ -81,7 +85,7 @@ export default function AppendImport() {
     (e: React.DragEvent) => {
       e.preventDefault()
       const droppedFile = e.dataTransfer.files[0]
-      if (droppedFile && /\.(csv|xlsx)$/.test(droppedFile.name.toLowerCase())) {
+      if (droppedFile && isSupportedDatasetFile(droppedFile.name)) {
         handleFileSelect(droppedFile)
       }
     },
@@ -99,6 +103,10 @@ export default function AppendImport() {
         skip_duplicates: skipDuplicates,
         row_start_id: preview.next_row_id,
         sheet_name: sheetName,
+        participant_link_column_id:
+          preview.participant_link_column && linkParticipants
+            ? preview.participant_link_column.column_id
+            : null,
       }, encoding)
     },
     onSuccess: (result) => {
@@ -107,6 +115,9 @@ export default function AppendImport() {
       queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, did] })
       queryClient.invalidateQueries({ queryKey: ['datasets', pid] })
       queryClient.invalidateQueries({ queryKey: ['dataset', pid, did] })
+      if (result.participant_link_report) {
+        queryClient.invalidateQueries({ queryKey: ['participants', pid] })
+      }
     },
     onError: (err: unknown) => {
       const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
@@ -201,11 +212,11 @@ export default function AppendImport() {
                 >
                   <FileInput className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />
                   <p className="text-mm-text-secondary mb-4">
-                    Drag and drop a CSV or Excel (.xlsx) file here, or click to browse
+                    Drag and drop a {DATASET_FORMAT_LABEL} file here, or click to browse
                   </p>
                   <input
                     type="file"
-                    accept=".csv,.xlsx"
+                    accept={DATASET_ACCEPT}
                     onChange={(e) => {
                       const selectedFile = e.target.files?.[0]
                       if (selectedFile) handleFileSelect(selectedFile)
@@ -339,6 +350,30 @@ export default function AppendImport() {
               </Card>
             )}
 
+            {/* #414 (DEC-7): participant linking for the new rows */}
+            {preview.participant_link_column && (
+              <Card>
+                <CardContent className="py-4 space-y-1.5">
+                  <label className="flex items-start gap-2 text-sm cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={linkParticipants}
+                      onChange={(e) => setLinkParticipants(e.target.checked)}
+                      className="mt-0.5 rounded border-mm-border-medium text-primary"
+                    />
+                    <span>
+                      Link new records to participants using{' '}
+                      <strong>{preview.participant_link_column.column_text}</strong>
+                    </span>
+                  </label>
+                  <p className="text-xs text-mm-text-muted pl-6">
+                    IDs matching an existing participant link to them; new IDs create
+                    participants. Records with blank, N/A, or duplicated IDs stay unlinked.
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+
             {/* Preview rows */}
             <Card>
               <CardHeader className="pb-3">
@@ -462,6 +497,22 @@ export default function AppendImport() {
                 <div><strong>Values stored:</strong> {importResult.values_created}</div>
                 {importResult.duplicates_skipped > 0 && (
                   <div><strong>Duplicates skipped:</strong> {importResult.duplicates_skipped}</div>
+                )}
+                {importResult.participant_link_report && (
+                  <div>
+                    <strong>Participants:</strong>{' '}
+                    {importResult.participant_link_report.linked} linked
+                    {importResult.participant_link_report.linked > 0 && (
+                      <> ({importResult.participant_link_report.created} new, {importResult.participant_link_report.matched} matched)</>
+                    )}
+                    {(() => {
+                      const r = importResult.participant_link_report
+                      const skipped = r.skipped_missing + r.skipped_duplicate + r.skipped_conflict
+                      return skipped > 0 ? (
+                        <span className="text-mm-text-muted"> · {skipped} not linked (blank, duplicated, or already-linked IDs)</span>
+                      ) : null
+                    })()}
+                  </div>
                 )}
                 <div className="text-xs text-mm-text-muted mt-2">Batch ID: {importResult.batch_id}</div>
               </div>

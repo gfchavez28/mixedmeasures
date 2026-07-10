@@ -81,9 +81,14 @@ async function request<T>(
     headers['X-CSRF-Token'] = csrfToken
   }
 
-  // Timeout via AbortSignal
-  const timeoutSignal = AbortSignal.timeout(timeout)
-  const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+  // Timeout via AbortSignal. A zero/negative timeout DISABLES it entirely —
+  // used for large media uploads that legitimately exceed any fixed wall-clock
+  // bound (a 4 GB file over a normal link takes many minutes). We must SKIP the
+  // signal, not pass 0: AbortSignal.timeout(0) aborts immediately.
+  const timeoutSignal = timeout > 0 ? AbortSignal.timeout(timeout) : undefined
+  const combinedSignal = signal
+    ? (timeoutSignal ? AbortSignal.any([signal, timeoutSignal]) : signal)
+    : timeoutSignal
 
   const response = await fetch(url, {
     method,

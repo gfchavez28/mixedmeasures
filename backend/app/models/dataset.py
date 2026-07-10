@@ -16,6 +16,9 @@ class ColumnType(str, enum.Enum):
     PERCENTAGE = "percentage"    # 0-100 percentage
     OPEN_TEXT = "open_text"      # Open-ended text response
     DEMOGRAPHIC = "demographic"  # Routes to participant attributes
+    IDENTIFIER = "identifier"    # Participant/row identity code (#414) — links rows
+    #                              to Participants; member of NO eligibility set
+    #                              (not numeric, not scale, not text, not groupable)
     SKIP = "skip"                # Ignored column
 
 

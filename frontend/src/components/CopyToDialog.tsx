@@ -10,7 +10,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Button } from '@/components/ui/button'
 import { TypeBadge } from '@/components/TypeBadge'
 
-const RECODE_DISALLOWED_TYPES = new Set(['open_text'])
+const RECODE_DISALLOWED_TYPES = new Set(['open_text', 'identifier'])
 
 // ── Copy-to Dialog ───────────────────────────────────────────────────────────
 

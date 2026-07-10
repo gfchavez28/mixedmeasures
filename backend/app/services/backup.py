@@ -17,6 +17,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from ..database import open_raw_connection
+from ..models.conversation import VIDEO_FORMATS
 from ..schemas.backup import (
     BackupInfo,
     BackupManifest,
@@ -27,7 +28,7 @@ from ..schemas.backup import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 MANIFEST_FORMAT_VERSION = 1
 STALE_HOURS = 24
 
@@ -115,8 +116,15 @@ def create_backup(
     media_dir: Path,
     backup_dir: Path,
     backup_type: str = "manual",
+    include_video: bool = True,
 ) -> BackupInfo:
     """Create a .mmbackup ZIP containing the database and documents.
+
+    include_video=False (the periodic auto-backup policy — video V1 slab 5)
+    skips video recordings: the 4h × 5-rotation would otherwise multiply a
+    multi-GB video project onto the researcher's disk. Transcripts, coding,
+    the DB, documents, and audio stay protected; recordings are re-attachable
+    and restore preserves any local video files the backup lacks.
 
     Returns BackupInfo on success. Raises on failure.
     """
@@ -152,13 +160,17 @@ def create_backup(
                     doc_files.append((arcname, file_path))
                     doc_count += 1
 
-        # Count media files
+        # Count media files (optionally excluding video recordings)
         media_count = 0
+        video_excluded_count = 0
         media_files: list[tuple[str, Path]] = []
         if media_dir.exists():
             for root, _dirs, files in os.walk(media_dir):
                 for f in files:
                     file_path = Path(root) / f
+                    if not include_video and file_path.suffix.lstrip(".").lower() in VIDEO_FORMATS:
+                        video_excluded_count += 1
+                        continue
                     arcname = "media/" + str(file_path.relative_to(media_dir))
                     media_files.append((arcname, file_path))
                     media_count += 1
@@ -173,6 +185,8 @@ def create_backup(
             db_size_bytes=db_size,
             document_count=doc_count,
             media_file_count=media_count,
+            video_excluded=not include_video,
+            video_files_excluded=video_excluded_count,
             project_summaries=project_summaries,
         )
 
@@ -186,7 +200,9 @@ def create_backup(
                 for arcname, file_path in doc_files:
                     zf.write(str(file_path), arcname)
                 for arcname, file_path in media_files:
-                    zf.write(str(file_path), arcname)
+                    # Recordings are already-compressed containers — deflate
+                    # wastes CPU for ~0 gain (video V1 slab 5).
+                    zf.write(str(file_path), arcname, compress_type=zipfile.ZIP_STORED)
             shutil.move(tmp_zip_path, str(backup_path))
         except Exception:
             if os.path.exists(tmp_zip_path):
@@ -326,6 +342,31 @@ def restore_from_backup(
             for member in media_members:
                 zf.extract(member, tmp_dir)
 
+            # Preserve local video recordings the backup does not carry
+            # (video V1 slab 5: auto-backups exclude video, so a restore must
+            # never DELETE video bytes the backup deliberately left out).
+            # Files at paths the backup DOES provide defer to the backup.
+            preserved_video: list[tuple[Path, Path]] = []  # (relative, absolute)
+            backup_media_paths = {m[len("media/"):] for m in media_members}
+            if media_dir.exists():
+                for root, _dirs, files in os.walk(media_dir):
+                    for f in files:
+                        file_path = Path(root) / f
+                        if file_path.suffix.lstrip(".").lower() not in VIDEO_FORMATS:
+                            continue
+                        rel = file_path.relative_to(media_dir)
+                        if str(rel).replace(os.sep, "/") not in backup_media_paths:
+                            preserved_video.append((rel, file_path))
+            # Keep-dir is a SIBLING of media_dir (same filesystem → instant
+            # renames; /tmp may be tmpfs, where multi-GB moves would burn RAM).
+            tmp_video_keep = media_dir.parent / ".video_keep_restore_tmp"
+            if tmp_video_keep.exists():
+                shutil.rmtree(str(tmp_video_keep))
+            for rel, file_path in preserved_video:
+                keep_path = tmp_video_keep / rel
+                keep_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(file_path), str(keep_path))
+
             # Replace media directory
             if media_dir.exists():
                 shutil.rmtree(str(media_dir))
@@ -333,6 +374,19 @@ def restore_from_backup(
                 shutil.move(str(tmp_media), str(media_dir))
             else:
                 media_dir.mkdir(parents=True, exist_ok=True)
+
+            # Re-seat the preserved video files at their original paths
+            for rel, _ in preserved_video:
+                src = tmp_video_keep / rel
+                dst = media_dir / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+            if preserved_video:
+                shutil.rmtree(str(tmp_video_keep), ignore_errors=True)
+                logger.info(
+                    "Restore preserved %d local video file(s) not present in the backup",
+                    len(preserved_video),
+                )
 
         logger.info("Restore complete from backup")
         return pre_restore_info

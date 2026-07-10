@@ -12,7 +12,7 @@ vi.mock('./client', () => ({
 }))
 
 import api from './client'
-import { projectPortabilityApi } from './project-portability'
+import { projectPortabilityApi, defaultIncludeMedia, EXPORT_MEDIA_DEFAULT_LIMIT_BYTES } from './project-portability'
 
 const file = new File(['x'], 'p.mmproject')
 const lastFormData = () => (api.post as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][1] as FormData
@@ -39,5 +39,22 @@ describe('projectPortabilityApi.importProject (J3-1 modes)', () => {
     const fd = lastFormData()
     expect(fd.get('import_mode')).toBe('new')
     expect(fd.get('target_project_id')).toBeNull()
+  })
+})
+
+describe('defaultIncludeMedia (slab 5 export-dialog default)', () => {
+  it('includes media by default at or under 1 GB', () => {
+    expect(defaultIncludeMedia(0)).toBe(true)
+    expect(defaultIncludeMedia(500 * 1024 * 1024)).toBe(true)
+    expect(defaultIncludeMedia(EXPORT_MEDIA_DEFAULT_LIMIT_BYTES)).toBe(true)
+  })
+
+  it('defaults OFF above 1 GB (the archive would balloon — user opts in)', () => {
+    expect(defaultIncludeMedia(EXPORT_MEDIA_DEFAULT_LIMIT_BYTES + 1)).toBe(false)
+    expect(defaultIncludeMedia(5 * 1024 * 1024 * 1024)).toBe(false)
+  })
+
+  it('unknown storage falls back to the historical include-everything behavior', () => {
+    expect(defaultIncludeMedia(undefined)).toBe(true)
   })
 })

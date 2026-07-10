@@ -656,7 +656,7 @@ async def suggest_domains(
     )
     columns = [
         c for c in columns
-        if c.column_type.value not in ("skip", "demographic")
+        if c.column_type.value not in ("skip", "demographic", "identifier")
     ]
 
     if len(columns) < 2:

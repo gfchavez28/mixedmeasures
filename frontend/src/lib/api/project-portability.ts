@@ -142,12 +142,25 @@ export interface CodebookImportResult {
 
 // ── API ────────────────────────────────────────────────────────────────
 
+/** Export-dialog include-media default (slab 5 / Q3 decision): media travels
+ * by default up to this total; above it the toggle defaults OFF (the archive
+ * would balloon) and the user opts in explicitly. */
+export const EXPORT_MEDIA_DEFAULT_LIMIT_BYTES = 1024 * 1024 * 1024 // 1 GB
+
+export function defaultIncludeMedia(mediaBytes: number | undefined): boolean {
+  if (mediaBytes === undefined) return true // storage unknown → historical behavior
+  return mediaBytes <= EXPORT_MEDIA_DEFAULT_LIMIT_BYTES
+}
+
 export const projectPortabilityApi = {
-  /** Export a project as .mmproject (triggers browser download). */
-  exportProject: async (projectId: number) => {
+  /** Export a project as .mmproject (triggers browser download).
+   * includeMedia=false produces a media-less archive — transcripts/coding/
+   * documents travel, recordings are re-attachable after import (slab 5). */
+  exportProject: async (projectId: number, includeMedia: boolean = true) => {
     const res = await api.get(`/projects/${projectId}/export-project`, {
+      params: { include_media: includeMedia },
       responseType: 'blob',
-      timeout: 120_000,
+      timeout: 300_000,
     })
     const filename = extractFilename(res.headers, `project_export.mmproject`)
     downloadBlob(res.data as Blob, filename)

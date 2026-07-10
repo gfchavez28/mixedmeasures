@@ -40,16 +40,21 @@ class ConversationResponse(BaseModel):
     media_duration_seconds: float | None = None
     media_offset_seconds: float = 0.0
     media_is_vbr: bool | None = None
-    has_audio: bool = False
+    # Derived: a media file (audio or video) is attached. The player gates on
+    # media_type; this flag drives management affordances (badge, attach/remove).
+    has_media: bool = False
+    # On-disk size of the attached recording (slab 5 storage visibility);
+    # None when no file is attached or the stat fails.
+    media_size_bytes: int | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
-class AudioOffsetUpdate(BaseModel):
+class MediaOffsetUpdate(BaseModel):
     offset_seconds: float = Field(ge=-300.0, le=300.0)
 
 
-class AudioUploadResponse(BaseModel):
+class MediaUploadResponse(BaseModel):
     media_filename: str
     media_format: str
     media_type: str

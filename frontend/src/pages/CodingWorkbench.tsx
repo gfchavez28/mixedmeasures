@@ -2,8 +2,9 @@ import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { BookOpen, ChevronLeft, ChevronRight, Check, Undo2, Redo2, Eye, EyeOff, Pencil, Mic, Volume2, Trash2, RefreshCw, AlertCircle } from 'lucide-react'
+import { BookOpen, ChevronLeft, ChevronRight, Check, Undo2, Redo2, Eye, EyeOff, Pencil, Mic, Volume2, Trash2, RefreshCw, AlertCircle, Video, Tags, StickyNote, NotebookPen, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { toast } from 'sonner'
+import { validateMediaFile, MEDIA_ACCEPT, describeMediaUploadError } from '@/lib/media-constants'
 import {
   DndContext,
   DragOverlay,
@@ -27,7 +28,7 @@ import {
   type Segment,
   type Code,
   type Note,
-  audioApi,
+  mediaApi,
 } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -43,7 +44,8 @@ import SegmentProgressBar from '@/components/SegmentProgressBar'
 import BlindModeToggle from '@/components/BlindModeToggle'
 import CoderCountBadge from '@/components/CoderCountBadge'
 import { useBlindMode } from '@/hooks/useBlindMode'
-import TranscriptPanel from '@/components/TranscriptPanel'
+import TranscriptPanel, { type PlaybackHandle } from '@/components/TranscriptPanel'
+import { useCollapsibleColumn } from '@/hooks/useCollapsibleColumn'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
 import { useCoders } from '@/hooks/useCoders'
@@ -104,7 +106,7 @@ export default function CodingWorkbench() {
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const codePanelRef = useRef<CodePanelHandle>(null)
   const scrubberSlotRef = useRef<HTMLDivElement>(null)
-  const playbackRef = useRef<{ togglePlayback: () => void } | null>(null)
+  const playbackRef = useRef<PlaybackHandle | null>(null)
   const audioFileInputRef = useRef<HTMLInputElement>(null)
   const [showRemoveAudioConfirm, setShowRemoveAudioConfirm] = useState(false)
 
@@ -147,6 +149,9 @@ export default function CodingWorkbench() {
     notes: { collapsed: true },
     memos: { collapsed: true },
   })
+  // #39: the whole Codes/Notes/Memos COLUMN folds to a slim icon rail,
+  // returning its width to transcript/video. Distinct from per-panel collapse.
+  const rightColumn = useCollapsibleColumn('conversation')
 
   // Keyboard navigation state
   const [focusedPanel, setFocusedPanel] = useState<'transcript' | 'codes' | 'notes' | 'memos'>('transcript')
@@ -178,30 +183,33 @@ export default function CodingWorkbench() {
     enabled: !!pid && !!cid,
   })
 
-  const hasAudio = conversation?.has_audio === true
+  // Any media file attached (audio or video) — gates the management toolbar
+  // (offset popover, attach/remove). The player itself gates on media_type
+  // inside TranscriptPanel/usePlayback.
+  const hasMedia = conversation?.has_media === true
 
   // Audio upload mutation
   const uploadAudioMutation = useMutation({
-    mutationFn: (file: File) => audioApi.upload(pid, cid, file),
+    mutationFn: (file: File) => mediaApi.upload(pid, cid, file),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['conversation', pid, cid] })
       queryClient.invalidateQueries({ queryKey: ['conversations', pid] })
-      toast.success('Audio uploaded successfully')
+      toast.success('Recording uploaded')
     },
-    onError: () => {
-      toast.error('Failed to upload audio file')
+    onError: (err) => {
+      toast.error(describeMediaUploadError(err))
     },
   })
 
   const deleteAudioMutation = useMutation({
-    mutationFn: () => audioApi.remove(pid, cid),
+    mutationFn: () => mediaApi.remove(pid, cid),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['conversation', pid, cid] })
       queryClient.invalidateQueries({ queryKey: ['conversations', pid] })
-      toast.success('Audio removed')
+      toast.success('Recording removed')
     },
     onError: () => {
-      toast.error('Failed to remove audio')
+      toast.error('Failed to remove recording')
     },
   })
 
@@ -211,7 +219,7 @@ export default function CodingWorkbench() {
   }, [conversation?.media_offset_seconds])
 
   const offsetMutation = useMutation({
-    mutationFn: (val: number) => audioApi.updateOffset(pid, cid, val),
+    mutationFn: (val: number) => mediaApi.updateOffset(pid, cid, val),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['conversation', pid, cid] })
     },
@@ -227,18 +235,9 @@ export default function CodingWorkbench() {
     const file = e.target.files?.[0]
     if (!file) return
 
-    // Frontend size validation
-    const MAX_SIZE = 500 * 1024 * 1024
-    if (file.size > MAX_SIZE) {
-      toast.error('Audio file exceeds 500MB limit')
-      e.target.value = ''
-      return
-    }
-
-    // Extension check (preliminary — backend validates by content)
-    const ext = file.name.split('.').pop()?.toLowerCase()
-    if (!ext || !['mp3', 'm4a', 'wav'].includes(ext)) {
-      toast.error('Accepted formats: MP3, M4A, WAV')
+    const validation = validateMediaFile(file)
+    if (!validation.ok) {
+      toast.error(validation.error)
       e.target.value = ''
       return
     }
@@ -298,7 +297,7 @@ export default function CodingWorkbench() {
   // Whether this conversation carries per-segment timestamps. Drives the Time
   // column default (#453): an imported transcript with no times shows no empty
   // column, and the (no-op) Time toggle is hidden. Independent of audio — playback
-  // is driven by `has_audio`, so an audio conversation lacking per-segment times
+  // is driven by the media fields, so an audio conversation lacking per-segment times
   // correctly hides the blank column without affecting the player/scrubber.
   const hasTimestamps = useMemo(() => allSegments.some(s => s.start_time != null), [allSegments])
   const codes = useMemo(() => codesData?.codes ?? [], [codesData?.codes])
@@ -322,10 +321,14 @@ export default function CodingWorkbench() {
     queryClient.invalidateQueries({ queryKey: ['segments', cid] })
     queryClient.invalidateQueries({ queryKey: ['codes', pid] })
   }, [queryClient, cid, pid])
-  // Clicking an applied-code chip on a segment pivots to that code in the codes panel (#422a).
+  // Clicking an applied-code chip on a segment pivots to that code in the
+  // codes panel (#422a) — unfolding the column/panel first (#39 auto-restore;
+  // inlined rather than expandPanelIfCollapsed, which is declared later).
   const handleFocusCode = useCallback((codeId: number) => {
+    rightColumn.expand()
+    setPanelStates(prev => (prev.codes.collapsed ? { ...prev, codes: { collapsed: false } } : prev))
     codePanelRef.current?.focusCode(codeId)
-  }, [])
+  }, [rightColumn])
   const progress = coverage.total > 0 ? Math.round((coverage.codedVisible / coverage.total) * 100) : 0
   const conversations = useMemo(() => conversationsData?.conversations ?? [], [conversationsData?.conversations])
 
@@ -1139,15 +1142,18 @@ export default function CodingWorkbench() {
     }))
   }, [])
 
-  // Expand panel if collapsed
+  // Expand panel if collapsed. Also the #39 auto-restore chokepoint: any
+  // flow that brings a panel into view must first unfold the column, or a
+  // collapsed column silently swallows the action.
   const expandPanelIfCollapsed = useCallback((panel: keyof typeof panelStates) => {
+    rightColumn.expand()
     if (panelStates[panel].collapsed) {
       setPanelStates(prev => ({
         ...prev,
         [panel]: { collapsed: false }
       }))
     }
-  }, [panelStates])
+  }, [panelStates, rightColumn])
 
   // Navigate to next/prev panel in the right sidebar
   const navigateToNextPanel = useCallback((fromPanel: 'codes' | 'notes' | 'memos') => {
@@ -1369,6 +1375,8 @@ export default function CodingWorkbench() {
       },
     },
     clearSelection: () => setSelectedSegments([]),
+    // Video theater/PiP exit — the overlay Escape layer (slab 4).
+    onEscapeOverlay: () => playbackRef.current?.exitVideoOverlay() ?? false,
     onEscapeFallback: () => {
       if (focusedPanel !== 'transcript') {
         const panelKey = focusedPanel as keyof typeof panelStates
@@ -1557,23 +1565,27 @@ export default function CodingWorkbench() {
           </Button>
         </div>
 
-        {/* Audio controls */}
+        {/* Media controls */}
         <div className="flex items-center gap-1 border-l border-mm-border-subtle pl-2">
-          {/* Hidden file input for audio upload */}
+          {/* Hidden file input for media upload */}
           <input
             ref={audioFileInputRef}
             type="file"
-            accept="audio/mpeg,audio/wav,audio/x-m4a,.mp3,.m4a,.wav"
+            accept={MEDIA_ACCEPT}
             className="hidden"
             onChange={handleAudioFileSelect}
           />
 
-          {hasAudio ? (
+          {hasMedia ? (
             <>
               <Popover>
                 <PopoverTrigger asChild>
                   <button className="flex items-center gap-1 text-xs text-mm-text-secondary px-1 hover:text-mm-text cursor-pointer rounded transition-colors">
-                    <Volume2 className="w-3.5 h-3.5 text-mm-green-text" />
+                    {conversation?.media_type === 'video' ? (
+                      <Video className="w-3.5 h-3.5 text-mm-green-text" />
+                    ) : (
+                      <Volume2 className="w-3.5 h-3.5 text-mm-green-text" />
+                    )}
                     {offsetValue !== 0 && (
                       <span className="text-[10px] font-mono text-amber-600 dark:text-amber-400">
                         {offsetValue > 0 ? '+' : ''}{offsetValue.toFixed(1)}s
@@ -1583,7 +1595,7 @@ export default function CodingWorkbench() {
                 </PopoverTrigger>
                 <PopoverContent side="bottom" align="start" className="w-64 p-3">
                   <div className="space-y-2">
-                    <p className="text-xs font-medium">Audio Sync Offset</p>
+                    <p className="text-xs font-medium">{conversation?.media_type === 'video' ? 'Video' : 'Audio'} Sync Offset</p>
                     <div className="flex items-center gap-1">
                       <Button variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => adjustOffset(-1)} aria-label="Decrease offset by 1 second">−1s</Button>
                       <Button variant="outline" size="sm" className="h-7 px-1.5 text-xs" onClick={() => adjustOffset(-0.1)} aria-label="Decrease offset by 0.1 seconds">−.1s</Button>
@@ -1606,7 +1618,7 @@ export default function CodingWorkbench() {
                       <Button variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => adjustOffset(1)} aria-label="Increase offset by 1 second">+1s</Button>
                     </div>
                     <p className="text-[11px] text-mm-text-muted">
-                      If audio plays too early, decrease. If too late, increase.
+                      If the recording plays too early, decrease. If too late, increase.
                     </p>
                     {offsetValue !== 0 && (
                       <Button variant="ghost" size="sm" className="h-6 text-xs w-full" onClick={() => { setOffsetValue(0); offsetMutation.mutate(0) }}>
@@ -1629,7 +1641,7 @@ export default function CodingWorkbench() {
                     <RefreshCw className="w-3 h-3" />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="bottom" className="text-xs">Replace audio</TooltipContent>
+                <TooltipContent side="bottom" className="text-xs">Replace recording</TooltipContent>
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -1643,7 +1655,7 @@ export default function CodingWorkbench() {
                     <Trash2 className="w-3 h-3" />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="bottom" className="text-xs">Remove audio</TooltipContent>
+                <TooltipContent side="bottom" className="text-xs">Remove recording</TooltipContent>
               </Tooltip>
             </>
           ) : (
@@ -1659,11 +1671,11 @@ export default function CodingWorkbench() {
                   {uploadAudioMutation.isPending ? (
                     <><Mic className="w-3.5 h-3.5 animate-pulse" /> Uploading...</>
                   ) : (
-                    <><Mic className="w-3.5 h-3.5" /> Attach Audio</>
+                    <><Mic className="w-3.5 h-3.5" /> Attach Recording</>
                   )}
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="bottom" className="text-xs">Upload MP3, M4A, or WAV</TooltipContent>
+              <TooltipContent side="bottom" className="text-xs">Upload MP3, M4A, WAV audio or MP4, MOV, WebM video</TooltipContent>
             </Tooltip>
           )}
         </div>
@@ -1733,9 +1745,9 @@ export default function CodingWorkbench() {
       <ConfirmDialog
         open={showRemoveAudioConfirm}
         onOpenChange={setShowRemoveAudioConfirm}
-        title="Remove Audio"
-        description="Remove the audio file from this conversation? The transcript and coding are not affected."
-        confirmLabel="Remove Audio"
+        title="Remove Recording"
+        description="Remove the media file from this conversation? The transcript and coding are not affected."
+        confirmLabel="Remove Recording"
         loading={deleteAudioMutation.isPending}
         loadingLabel="Removing..."
         onConfirm={() => {
@@ -1825,7 +1837,51 @@ export default function CodingWorkbench() {
           />
         </div>
 
-        {/* Right Panel - Collapsible Sections with Resize Handle */}
+        {/* Right Panel - Collapsible Sections with Resize Handle.
+          * #39: the whole column folds to a slim icon rail (width returns to
+          * transcript/video); rail icons expand + focus their panel. */}
+        {rightColumn.collapsed ? (
+          <div
+            role="toolbar"
+            aria-orientation="vertical"
+            aria-label="Panels (collapsed)"
+            className="w-10 flex-shrink-0 flex flex-col items-center gap-1 py-2 bg-mm-surface"
+          >
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={rightColumn.expand} aria-label="Expand panels">
+                  <PanelRightOpen className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="left" className="text-xs">Expand panels</TooltipContent>
+            </Tooltip>
+            <span className="w-5 h-px bg-mm-border-subtle my-1" />
+            {([
+              { key: 'codes' as const, label: 'Codes', Icon: Tags, focus: () => codePanelRef.current?.focus() },
+              { key: 'notes' as const, label: 'Notes', Icon: StickyNote, focus: () => notesPanelRef.current?.focus() },
+              { key: 'memos' as const, label: 'Memos', Icon: NotebookPen, focus: () => memoPanelRef.current?.focus() },
+            ]).map(({ key, label, Icon, focus }) => (
+              <Tooltip key={key}>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 w-7 p-0"
+                    aria-label={`Open ${label}`}
+                    onClick={() => {
+                      expandPanelIfCollapsed(key)
+                      setFocusedPanel(key)
+                      requestAnimationFrame(() => focus())
+                    }}
+                  >
+                    <Icon className="w-4 h-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="left" className="text-xs">{label}</TooltipContent>
+              </Tooltip>
+            ))}
+          </div>
+        ) : (
         <div
           className="relative flex flex-col bg-mm-surface overflow-hidden"
           style={{ width: rightPanelWidth }}
@@ -1844,12 +1900,22 @@ export default function CodingWorkbench() {
             onToggle={() => togglePanel('codes')}
             className={panelStates.codes.collapsed ? '' : 'flex-[2] min-h-0'}
             headerExtra={
-              <button
-                onClick={(e) => { e.stopPropagation(); handleJumpToNextUncoded() }}
-                className="text-[10px] text-mm-text-muted hover:text-mm-text-secondary transition-colors"
-              >
-                Jump to uncoded ⏭
-              </button>
+              <span className="flex items-center gap-1.5">
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleJumpToNextUncoded() }}
+                  className="text-[10px] text-mm-text-muted hover:text-mm-text-secondary transition-colors"
+                >
+                  Jump to uncoded ⏭
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); rightColumn.collapse() }}
+                  aria-label="Collapse panels"
+                  title="Collapse panels — reclaim width for the transcript"
+                  className="text-mm-text-muted hover:text-mm-text-secondary transition-colors"
+                >
+                  <PanelRightClose className="w-3.5 h-3.5" />
+                </button>
+              </span>
             }
           >
             <PageErrorBoundary>
@@ -1863,6 +1929,7 @@ export default function CodingWorkbench() {
                 onCreateCode={(name) => createCodeMutation.mutate(name)}
                 onAddCodeMemo={(codeId, codeName) => {
                   // Expand memos panel and set up creation for this code
+                  rightColumn.expand()
                   setPanelStates(prev => ({ ...prev, memos: { collapsed: false } }))
                   setFocusedPanel('memos')
                   setCreateMemoForCode({ id: codeId, name: codeName })
@@ -1932,6 +1999,7 @@ export default function CodingWorkbench() {
           </CollapsiblePanel>
 
         </div>
+        )}
       </div>
 
       {/* Drag overlay ghost (Issue 110) */}

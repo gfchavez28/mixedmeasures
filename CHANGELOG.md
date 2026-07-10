@@ -5,7 +5,74 @@ All notable changes to Mixed Measures are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.0] - 2026-07-10
+
+### Added
+
+- **SPSS `.sav` dataset import.** Import and append `.sav` files anywhere you can
+  import a CSV or Excel file. SPSS's own value labels, scale order, and
+  user-missing codes come across, so an ordinal variable arrives with the order and
+  the codes it was recorded with — a 0–3 scale stays 0–3 — instead of being guessed
+  from the text. Values flagged as user-missing in SPSS (for example "Refused") are
+  treated as missing rather than as an extra scale point.
+- **Citation support.** A `CITATION.cff` file makes GitHub render a "Cite this
+  repository" entry, and **Settings → About & citation** shows the running version
+  with copyable APA and BibTeX references. Cite the version you analyzed with —
+  it is part of what makes an analysis reproducible.
+- The README now states support expectations (solo maintainer; Issues for bugs,
+  Discussions for questions) and links the citation formats.
+
+### Fixed
+
+- Reverse-scored recodes now reflect a scale about its own midpoint. Scales
+  numbered from 1 are unaffected; a scale numbered from 0 no longer reversed into
+  values outside its own range.
+- **SPSS import: partially-labelled scales import at full width.** SPSS files
+  routinely label only a scale's endpoints (1 = "Not at all" … 7 = "Extremely");
+  those scales previously imported as two-point scales and quietly dropped every
+  mid-scale answer. Unlabelled in-range codes now become scale points, codes
+  outside the scale surface as a warning instead of vanishing silently, and a
+  label span too wide to be a scale (1 = "Low" / 100 = "High") imports as plain
+  numbers.
+- **R export converts ordinal and binary factors back to their real codes.**
+  Exported scripts previously used R's positional factor coding, which shifted
+  means for 0-based scales, diverged correlations for gapped code sets, and could
+  error outright on statistical tests over ordinal columns.
+- Appending rows to a reverse-scored column re-applies the reverse scoring to the
+  new rows (they previously landed forward-coded next to reversed neighbors).
+- The SPSS row-count cap now binds while reading the file, so a file whose header
+  under-reports its size can no longer exhaust memory.
+- Dropping an `.xlsx` or `.sav` file onto the Datasets page now opens the import
+  wizard (previously only `.csv` was accepted there).
+- The BibTeX citation renders on screen in Settings, so it remains reachable when
+  the browser clipboard is unavailable (plain-http deployments).
+- **Leaving the import wizard while a recording is still attaching is now safe.**
+  A recording that finishes attaching after you navigate elsewhere announces
+  itself with a notification instead of yanking you into the workbench — and a
+  failed attach shows a notification instead of failing silently (previously the
+  conversation simply had no recording, with no message at all). Import warnings
+  also now survive the recording-failed path: they appear on the failure card and
+  after a successful retry.
+- The conversations list shows a just-attached recording immediately, instead of
+  serving a cached "no recording" state for up to a minute.
+- Uploads that fill the disk now report "not enough disk space" reliably — the
+  earlier phase of the upload pipeline previously reported a generic server error.
+- Very large recording uploads on a slow connection no longer time out just short
+  of completion (the timeout ceiling now covers a maximum-size file at the
+  slowest assumed transfer rate).
+- **SPSS import: two codes sharing one value label stay distinguishable.** Each
+  duplicated label is suffixed with its code ("Agree (1)" / "Agree (2)") instead
+  of the two answers silently collapsing onto one number.
+- SPSS import: values declared missing on *text* variables (for example "XX" or
+  "SKIP") now import as missing instead of as answers.
+- Reverse-scored recodes with a non-numeric entry in the mapping (for example a
+  "not scored" label) now reverse the numeric values consistently everywhere —
+  previously a single such entry could leave individually edited cells
+  un-reversed while bulk-applied cells were reversed.
+- Editing a scale's recode mapping now also updates the column's stored scale
+  metadata, so exports and appends that fall back to it can't see pre-edit codes.
+- Creating a category-grouping recode as a column's first recode now clears the
+  column's numeric encoding, matching what editing one already did.
 
 ## [1.1.1] - 2026-07-03
 
@@ -127,7 +194,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.0.0...v1.0.1

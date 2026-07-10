@@ -36,14 +36,14 @@ function renderPopover(props: Partial<Parameters<typeof TypePickerPopover>[0]> =
 }
 
 describe('TypePickerPopover', () => {
-  it('opens with 9 column-type options when no recodes', () => {
+  it('opens with 10 column-type options when no recodes', () => {
     renderPopover()
     fireEvent.click(screen.getByTestId('trigger-btn'))
-    // All 9 types from COLUMN_TYPES render as menuitems
+    // All 10 types from COLUMN_TYPES render as menuitems (#414 added identifier)
     for (const t of COLUMN_TYPES) {
       expect(screen.getByTestId(`type-picker-option-${t}`)).toBeInTheDocument()
     }
-    expect(COLUMN_TYPES.length).toBe(9)
+    expect(COLUMN_TYPES.length).toBe(10)
   })
 
   it('marks the current type with aria-current', () => {

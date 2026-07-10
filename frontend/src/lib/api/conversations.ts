@@ -15,14 +15,18 @@ export interface Conversation {
   coded_segment_count: number
   speaker_count: number
   code_count: number
-  // Media fields (E3 audio playback)
+  // Media fields (E3 audio playback / E4 video)
   media_filename: string | null
   media_format: string | null
   media_type: 'audio' | 'video' | null
   media_duration_seconds: number | null
   media_offset_seconds: number
   media_is_vbr: boolean | null
-  has_audio: boolean
+  /** A media file (any type) is attached — drives management affordances
+   * (badge, attach/remove). The player gates on media_type instead. */
+  has_media: boolean
+  /** On-disk size of the attached recording (slab 5 storage visibility). */
+  media_size_bytes: number | null
 }
 
 /** #356: import endpoint returns the imported conversation + any import-time

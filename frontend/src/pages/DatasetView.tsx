@@ -125,6 +125,7 @@ const DataGridHead = memo(function DataGridHead({
   handleEditComputed, handleDeleteComputed, handleRecompute,
   handleRemoveFromGroup,
   handleToggleParticipantVisibility,
+  handleLinkByColumn,
   handlePopoverOpenChange, setActiveField, goNextColumn, goPrevColumn,
 }: {
   columns: DatasetColumn[]
@@ -150,6 +151,7 @@ const DataGridHead = memo(function DataGridHead({
   handleRecompute: (column: DatasetColumn) => void
   handleRemoveFromGroup: (columnId: number, domainId: number) => void
   handleToggleParticipantVisibility: (column: DatasetColumn) => void
+  handleLinkByColumn: (column: DatasetColumn) => void
   handlePopoverOpenChange: (columnId: number, open: boolean) => void
   setActiveField: (field: EditorField) => void
   goNextColumn: (field: EditorField) => void
@@ -183,6 +185,7 @@ const DataGridHead = memo(function DataGridHead({
             onEditComputed={handleEditComputed}
             onDeleteComputed={handleDeleteComputed}
             onRecompute={handleRecompute}
+            onLinkByColumn={handleLinkByColumn}
             isPopoverOpen={activeColumnId === q.id}
             onPopoverOpenChange={handlePopoverOpenChange}
             activeField={activeColumnId === q.id ? activeField : null}
@@ -321,6 +324,34 @@ export default function DatasetView() {
       },
     )
   }, [updateHeaderMutation, queryClient, pid])
+
+  // #414 (DEC-8): retro bulk-link — run the identifier-column linking over
+  // this dataset's unlinked rows. Manual links are never overwritten (the
+  // service counts them already_linked).
+  const linkByColumnMutation = useMutation({
+    mutationFn: (columnId: number) => datasetsApi.linkByColumn(pid, iid, columnId),
+    onSuccess: (report) => {
+      queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })
+      queryClient.invalidateQueries({ queryKey: ['participants', pid] })
+      const skipped = report.skipped_missing + report.skipped_duplicate + report.skipped_conflict
+      if (report.linked === 0 && skipped === 0) {
+        toast.info('All rows are already linked to participants')
+      } else if (report.linked === 0) {
+        toast.info(`No rows linked — ${skipped} skipped (blank, duplicated, or conflicting IDs)`)
+      } else {
+        toast.success(
+          `${report.linked} ${report.linked === 1 ? 'row' : 'rows'} linked to participants `
+          + `(${report.created} new, ${report.matched} matched)`
+          + (skipped > 0 ? ` · ${skipped} skipped` : ''),
+        )
+      }
+    },
+    onError: (err: unknown) => toast.error(extractApiError(err, 'Failed to link rows to participants')),
+  })
+
+  const handleLinkByColumn = useCallback((column: DatasetColumn) => {
+    linkByColumnMutation.mutate(column.id)
+  }, [linkByColumnMutation])
 
   const handleColumnNameEdit = useCallback((columnId: number, newName: string) => {
     if (!data) return
@@ -1066,6 +1097,7 @@ export default function DatasetView() {
                     handleRecompute={handleRecompute}
                     handleRemoveFromGroup={handleRemoveFromGroup}
                     handleToggleParticipantVisibility={handleToggleParticipantVisibility}
+                    handleLinkByColumn={handleLinkByColumn}
                     handlePopoverOpenChange={handlePopoverOpenChange}
                     setActiveField={setActiveField}
                     goNextColumn={goNextColumn}

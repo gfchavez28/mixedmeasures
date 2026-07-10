@@ -750,7 +750,7 @@ async def get_analysis_columns(
     for col, ds_name, ds_id in columns:
         col_type = col.column_type.value if col.column_type else ""
 
-        if col_type in ("skip", "open_text"):
+        if col_type in ("skip", "open_text", "identifier"):
             continue
 
         if col_type == "demographic":

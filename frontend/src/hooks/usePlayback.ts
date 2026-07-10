@@ -1,6 +1,13 @@
 import { useState, useCallback, useRef, useEffect, useMemo, type RefObject } from 'react'
 import { type Segment, type Conversation } from '@/lib/api'
-import { PLAYBACK_SPEEDS, SEEK_LEAD_IN_SECONDS, findPlayingSegment, findNearestSegment } from '@/lib/playback-utils'
+import {
+  PLAYBACK_SPEEDS,
+  SEEK_LEAD_IN_SECONDS,
+  codecErrorMessage,
+  findNearestSegment,
+  findPlayingSegment,
+  isPlayableMedia,
+} from '@/lib/playback-utils'
 
 export { PLAYBACK_SPEEDS }
 
@@ -9,9 +16,12 @@ interface UsePlaybackOptions {
   segments: Segment[]
   selectedSegments: number[]
   onSelectionChange: (ids: number[]) => void
-  /** Audio element ref — when present and conversation has audio, drives real playback */
-  audioRef?: RefObject<HTMLAudioElement | null>
-  /** Conversation with media metadata — used for offset and hasAudio detection */
+  /**
+   * Media element ref (<audio> today, <video> once the pane ships) — when
+   * present and the conversation has playable media, drives real playback.
+   */
+  mediaRef?: RefObject<HTMLMediaElement | null>
+  /** Conversation with media metadata — used for offset and the playback gate */
   conversation?: Conversation
 }
 
@@ -25,6 +35,13 @@ export interface UsePlaybackReturn {
   playbackSpeed: number
   currentPlaybackTime: number | null
   segmentsWithTime: Segment[]
+  /**
+   * The playback gate (lib/playback-utils::isPlayableMedia) — true when the
+   * conversation has media the player can mount. Consumers must use THIS to
+   * gate the media element and player chrome rather than re-deriving from
+   * conversation fields, so the hook and the mounting surface always agree.
+   */
+  hasPlayableMedia: boolean
   togglePlayback: () => void
   cyclePlaybackSpeed: () => void
   /** Stop playback and update the current time (e.g. from a scrubber drag). */
@@ -35,21 +52,21 @@ export interface UsePlaybackReturn {
    * segment was found.
    */
   handleTimeSeek: (time: number) => TimeSeekResult | null
-  /** Seek audio to a segment's start_time with lead-in buffer */
+  /** Seek media to a segment's start_time with lead-in buffer */
   seekToSegment: (segment: Segment) => void
-  /** True after audio loadedmetadata fires */
-  isAudioReady: boolean
+  /** True after the media element's loadedmetadata fires */
+  isMediaReady: boolean
   /** True between waiting and playing events */
   isBuffering: boolean
-  /** Audio error message, if any */
-  audioError: string | null
+  /** Media error message, if any */
+  mediaError: string | null
 }
 
 export function usePlayback({
   segments,
   selectedSegments,
   onSelectionChange,
-  audioRef,
+  mediaRef,
   conversation,
 }: UsePlaybackOptions): UsePlaybackReturn {
   const [isPlaying, setIsPlaying] = useState(false)
@@ -58,17 +75,17 @@ export function usePlayback({
   const currentPlaybackTimeRef = useRef<number | null>(null)
   // State mirror of currentPlaybackTimeRef for render (ref is mutated in interval callback)
   const [currentPlaybackTime, setCurrentPlaybackTime] = useState<number | null>(null)
-  const [isAudioReady, setIsAudioReady] = useState(false)
+  const [isMediaReady, setIsMediaReady] = useState(false)
   const [isBuffering, setIsBuffering] = useState(false)
-  const [audioError, setAudioError] = useState<string | null>(null)
+  const [mediaError, setMediaError] = useState<string | null>(null)
 
-  // Latest-value refs. The audio-element listener effect below is long-lived
-  // (it owns the playing audio). If it depended on `selectedSegments` /
+  // Latest-value refs. The media-element listener effect below is long-lived
+  // (it owns the playing media). If it depended on `selectedSegments` /
   // `onSelectionChange` / `isPlaying` directly, React would tear it down and
-  // re-run it — invoking the cleanup's `audio.pause()` — every time the
+  // re-run it — invoking the cleanup's `media.pause()` — every time the
   // playing segment changes, halting playback at the first segment boundary
   // (bug: cuts off at segment 2). Reading these through refs keeps the
-  // subscription stable for the life of the audio element.
+  // subscription stable for the life of the media element.
   const selectedSegmentsRef = useRef(selectedSegments)
   selectedSegmentsRef.current = selectedSegments
   const onSelectionChangeRef = useRef(onSelectionChange)
@@ -76,7 +93,7 @@ export function usePlayback({
   const isPlayingRef = useRef(isPlaying)
   isPlayingRef.current = isPlaying
 
-  const hasAudio = conversation?.media_type === 'audio' && !!conversation?.media_filename
+  const hasPlayableMedia = isPlayableMedia(conversation)
   const offset = conversation?.media_offset_seconds ?? 0
 
   // Get segments with timestamps sorted by start_time
@@ -86,21 +103,21 @@ export function usePlayback({
     [segments]
   )
 
-  // Reset audio ready state when conversation changes or audio is removed
+  // Reset media ready state when conversation changes or media is removed
   useEffect(() => {
-    setIsAudioReady(false)
-    setAudioError(null)
+    setIsMediaReady(false)
+    setMediaError(null)
     setIsBuffering(false)
   }, [conversation?.id, conversation?.media_filename])
 
-  // ── Audio element event listeners ──────────────────────────────────
+  // ── Media element event listeners ──────────────────────────────────
   useEffect(() => {
-    const audio = audioRef?.current
-    if (!audio || !hasAudio) return
+    const media = mediaRef?.current
+    if (!media || !hasPlayableMedia) return
 
     const handleTimeUpdate = () => {
-      const audioTime = audio.currentTime
-      const transcriptTime = audioTime - offset
+      const mediaTime = media.currentTime
+      const transcriptTime = mediaTime - offset
       currentPlaybackTimeRef.current = transcriptTime
       setCurrentPlaybackTime(transcriptTime)
 
@@ -125,18 +142,15 @@ export function usePlayback({
     const handleError = () => {
       setIsPlaying(false)
       // The file uploaded fine (the server accepts by container, which is
-      // broader than what browsers decode — e.g. ALAC .m4a, video .mp4,
+      // broader than what browsers decode — e.g. ALAC .m4a, HEVC .mp4,
       // 24-bit WAV). Be specific so the user isn't confused why an
       // "uploaded" file won't play, and give an actionable fix.
-      setAudioError(
-        'This audio uploaded, but your browser can’t play this codec. ' +
-        'Re-export or convert it to MP3, AAC (.m4a), or 16-bit WAV and re-attach.'
-      )
+      setMediaError(codecErrorMessage(conversation?.media_type ?? null))
     }
 
     const handleLoadedMetadata = () => {
-      setIsAudioReady(true)
-      setAudioError(null)
+      setIsMediaReady(true)
+      setMediaError(null)
     }
 
     const handleWaiting = () => {
@@ -147,36 +161,36 @@ export function usePlayback({
       setIsBuffering(false)
     }
 
-    audio.addEventListener('timeupdate', handleTimeUpdate)
-    audio.addEventListener('ended', handleEnded)
-    audio.addEventListener('error', handleError)
-    audio.addEventListener('loadedmetadata', handleLoadedMetadata)
-    audio.addEventListener('waiting', handleWaiting)
-    audio.addEventListener('playing', handlePlaying)
+    media.addEventListener('timeupdate', handleTimeUpdate)
+    media.addEventListener('ended', handleEnded)
+    media.addEventListener('error', handleError)
+    media.addEventListener('loadedmetadata', handleLoadedMetadata)
+    media.addEventListener('waiting', handleWaiting)
+    media.addEventListener('playing', handlePlaying)
 
     // If metadata is already loaded (e.g. cached), set ready immediately
-    if (audio.readyState >= 1) {
-      setIsAudioReady(true)
+    if (media.readyState >= 1) {
+      setIsMediaReady(true)
     }
 
     return () => {
-      audio.removeEventListener('timeupdate', handleTimeUpdate)
-      audio.removeEventListener('ended', handleEnded)
-      audio.removeEventListener('error', handleError)
-      audio.removeEventListener('loadedmetadata', handleLoadedMetadata)
-      audio.removeEventListener('waiting', handleWaiting)
-      audio.removeEventListener('playing', handlePlaying)
-      audio.pause()
+      media.removeEventListener('timeupdate', handleTimeUpdate)
+      media.removeEventListener('ended', handleEnded)
+      media.removeEventListener('error', handleError)
+      media.removeEventListener('loadedmetadata', handleLoadedMetadata)
+      media.removeEventListener('waiting', handleWaiting)
+      media.removeEventListener('playing', handlePlaying)
+      media.pause()
     }
     // selectedSegments / onSelectionChange / isPlaying are intentionally read
-    // via refs (above) — keeping them out of deps keeps this audio-owning
+    // via refs (above) — keeping them out of deps keeps this media-owning
     // subscription stable so a segment change never tears it down + pauses.
-  }, [hasAudio, offset, segmentsWithTime, audioRef])
+  }, [hasPlayableMedia, offset, segmentsWithTime, mediaRef, conversation?.media_type])
 
   // ── Text-only simulated playback (interval-based fallback) ─────────
   useEffect(() => {
-    // Skip interval-based playback when audio element is handling it
-    if (hasAudio) return
+    // Skip interval-based playback when the media element is handling it
+    if (hasPlayableMedia) return
 
     if (!isPlaying) {
       if (playbackIntervalRef.current) {
@@ -230,11 +244,11 @@ export function usePlayback({
         playbackIntervalRef.current = null
       }
     }
-    // selectedSegments / onSelectionChange read via refs — see audio effect.
-  }, [isPlaying, playbackSpeed, segmentsWithTime, segments, hasAudio])
+    // selectedSegments / onSelectionChange read via refs — see media effect.
+  }, [isPlaying, playbackSpeed, segmentsWithTime, segments, hasPlayableMedia])
 
   // Reset playback time when selection changes manually (not during playback)
-  // When audio is present, also seek audio to the selected segment with lead-in
+  // When media is present, also seek it to the selected segment with lead-in
   useEffect(() => {
     if (!isPlaying && selectedSegments.length > 0) {
       const selectedSeg = segments.find(s => s.id === selectedSegments[0])
@@ -242,49 +256,48 @@ export function usePlayback({
         currentPlaybackTimeRef.current = selectedSeg.start_time
         setCurrentPlaybackTime(selectedSeg.start_time)
 
-        // Seek audio with lead-in buffer
-        const audio = audioRef?.current
-        if (audio && hasAudio) {
+        // Seek media with lead-in buffer
+        const media = mediaRef?.current
+        if (media && hasPlayableMedia) {
           const targetTime = selectedSeg.start_time + offset
           const seekTime = Math.max(0, targetTime - SEEK_LEAD_IN_SECONDS)
-          audio.currentTime = seekTime // eslint-disable-line react-hooks/immutability -- DOM audio seek
+          media.currentTime = seekTime // eslint-disable-line react-hooks/immutability -- DOM media seek
         }
       }
     }
-  }, [selectedSegments, segments, isPlaying, audioRef, hasAudio, offset])
+  }, [selectedSegments, segments, isPlaying, mediaRef, hasPlayableMedia, offset])
 
-  // Sync playback speed to audio element
+  // Sync playback speed to the media element. preservesPitch is the Chromium
+  // default but set explicitly: natural-pitch speed listening is the feature.
   useEffect(() => {
-    const audio = audioRef?.current
-    if (audio && hasAudio) {
-      audio.playbackRate = playbackSpeed // eslint-disable-line react-hooks/immutability -- DOM audio rate
+    const media = mediaRef?.current
+    if (media && hasPlayableMedia) {
+      media.preservesPitch = true // eslint-disable-line react-hooks/immutability -- DOM media rate/pitch
+      media.playbackRate = playbackSpeed
     }
-  }, [playbackSpeed, hasAudio, audioRef])
+  }, [playbackSpeed, hasPlayableMedia, mediaRef])
 
   const togglePlayback = useCallback(() => {
-    const audio = audioRef?.current
+    const media = mediaRef?.current
 
     if (isPlaying) {
-      if (audio && hasAudio) {
-        audio.pause()
+      if (media && hasPlayableMedia) {
+        media.pause()
       }
       setIsPlaying(false)
     } else {
-      // Gate on audio ready when audio is present
-      if (hasAudio && !isAudioReady) return
+      // Gate on media ready when media is present
+      if (hasPlayableMedia && !isMediaReady) return
 
-      if (audio && hasAudio) {
+      if (media && hasPlayableMedia) {
         // If no current time set, start from selection or beginning
         if (selectedSegments.length === 0 && segmentsWithTime.length > 0) {
           onSelectionChange([segmentsWithTime[0].id])
           const startTime = (segmentsWithTime[0].start_time ?? 0) + offset
-          audio.currentTime = Math.max(0, startTime) // eslint-disable-line react-hooks/immutability -- DOM audio seek
+          media.currentTime = Math.max(0, startTime) // eslint-disable-line react-hooks/immutability -- DOM media seek
         }
-        audio.play().catch(() => {
-          setAudioError(
-            'Playback failed — your browser may not support this audio codec. ' +
-            'Try converting it to MP3, AAC (.m4a), or 16-bit WAV.'
-          )
+        media.play().catch(() => {
+          setMediaError(codecErrorMessage(conversation?.media_type ?? null))
         })
       } else {
         // Text-only fallback
@@ -297,7 +310,7 @@ export function usePlayback({
       }
       setIsPlaying(true)
     }
-  }, [isPlaying, selectedSegments, segmentsWithTime, onSelectionChange, audioRef, hasAudio, isAudioReady, offset])
+  }, [isPlaying, selectedSegments, segmentsWithTime, onSelectionChange, mediaRef, hasPlayableMedia, isMediaReady, offset, conversation?.media_type])
 
   const cyclePlaybackSpeed = useCallback(() => {
     setPlaybackSpeed(current => {
@@ -308,19 +321,19 @@ export function usePlayback({
   }, [])
 
   const seekToTime = useCallback((time: number) => {
-    const audio = audioRef?.current
-    if (audio && hasAudio) {
-      audio.currentTime = Math.max(0, time + offset) // eslint-disable-line react-hooks/immutability -- DOM audio seek
+    const media = mediaRef?.current
+    if (media && hasPlayableMedia) {
+      media.currentTime = Math.max(0, time + offset) // eslint-disable-line react-hooks/immutability -- DOM media seek
     }
     setIsPlaying(false)
     currentPlaybackTimeRef.current = time
     setCurrentPlaybackTime(time)
-  }, [audioRef, hasAudio, offset])
+  }, [mediaRef, hasPlayableMedia, offset])
 
   const handleTimeSeek = useCallback((time: number): TimeSeekResult | null => {
-    const audio = audioRef?.current
-    if (audio && hasAudio) {
-      audio.currentTime = Math.max(0, time + offset) // eslint-disable-line react-hooks/immutability -- DOM audio seek
+    const media = mediaRef?.current
+    if (media && hasPlayableMedia) {
+      media.currentTime = Math.max(0, time + offset) // eslint-disable-line react-hooks/immutability -- DOM media seek
     }
     setIsPlaying(false)
     currentPlaybackTimeRef.current = time
@@ -335,34 +348,35 @@ export function usePlayback({
       }
     }
     return null
-  }, [segments, onSelectionChange, audioRef, hasAudio, offset])
+  }, [segments, onSelectionChange, mediaRef, hasPlayableMedia, offset])
 
   const seekToSegment = useCallback((segment: Segment) => {
-    const audio = audioRef?.current
+    const media = mediaRef?.current
     const targetTime = (segment.start_time ?? 0) + offset
     const seekTime = Math.max(0, targetTime - SEEK_LEAD_IN_SECONDS)
 
-    if (audio && hasAudio) {
-      audio.currentTime = seekTime // eslint-disable-line react-hooks/immutability -- DOM audio seek
+    if (media && hasPlayableMedia) {
+      media.currentTime = seekTime // eslint-disable-line react-hooks/immutability -- DOM media seek
     }
 
     const transcriptTime = segment.start_time ?? 0
     currentPlaybackTimeRef.current = transcriptTime
     setCurrentPlaybackTime(transcriptTime)
-  }, [audioRef, hasAudio, offset])
+  }, [mediaRef, hasPlayableMedia, offset])
 
   return {
     isPlaying,
     playbackSpeed,
     currentPlaybackTime,
     segmentsWithTime,
+    hasPlayableMedia,
     togglePlayback,
     cyclePlaybackSpeed,
     seekToTime,
     handleTimeSeek,
     seekToSegment,
-    isAudioReady,
+    isMediaReady,
     isBuffering,
-    audioError,
+    mediaError,
   }
 }

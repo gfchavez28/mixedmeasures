@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert } from 'lucide-react'
-import { datasetsApi, type DatasetPreviewResponse, type DatasetColumnPreview, type DatasetColumnConfig } from '@/lib/api'
+import { datasetsApi, participantsApi, type DatasetPreviewResponse, type DatasetColumnPreview, type DatasetColumnConfig, type ParticipantLinkReport } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -12,6 +12,7 @@ import { Progress } from '@/components/ui/progress'
 import { cn } from '@/lib/utils'
 import { consumePendingImportFiles } from '@/lib/pending-import-files'
 import { COLUMN_TYPES, TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
+import { DATASET_ACCEPT, DATASET_FORMAT_LABEL, isSupportedDatasetFile } from '@/lib/dataset-import-formats'
 
 /** Human-readable labels for auto-detected column types. */
 const TYPE_LABELS: Record<string, string> = {
@@ -23,12 +24,13 @@ const TYPE_LABELS: Record<string, string> = {
   percentage: 'Percentage',
   open_text: 'Open Text',
   demographic: 'Demographic',
+  identifier: 'Identifier',
   skip: 'Skip',
 }
 
 type Step = 'upload' | 'configure' | 'importing' | 'results'
 
-interface FileConfig {
+export interface FileConfig {
   preview: DatasetPreviewResponse | null
   previewColumns: DatasetColumnPreview[]
   skippedIndices: Set<number>
@@ -40,6 +42,11 @@ interface FileConfig {
   previewError: string | null
   /** .xlsx only (#523): selected worksheet; null = first sheet. */
   sheetName: string | null
+  /** #414 (DEC-6): link rows to participants by the identifier column. */
+  linkParticipants: boolean
+  /** #414: user-picked identifier column when several exist; null = auto
+   *  (first identifier column). Compare with `??` — index 0 is valid. */
+  linkColumnIndex: number | null
 }
 
 interface ImportResult {
@@ -52,7 +59,31 @@ interface ImportResult {
   valuesCreated?: number
   recognizedMissingCount?: number
   recognizedMissingLabels?: string[]
+  linkReport?: ParticipantLinkReport | null
   error?: string
+}
+
+/** #414: identifier-typed, non-skipped columns of a file (the link candidates). */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper, unit-tested
+export function identifierColumns(config: FileConfig): DatasetColumnPreview[] {
+  return config.previewColumns.filter(col => {
+    if (config.skippedIndices.has(col.column_index)) return false
+    const effectiveType = config.typeOverrides[col.column_index] || col.suggested_type
+    return effectiveType === 'identifier'
+  })
+}
+
+/** #414: the column_index the import will link by, or null when linking is off. */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper, unit-tested
+export function effectiveLinkColumnIndex(config: FileConfig): number | null {
+  if (!config.linkParticipants) return null
+  const idCols = identifierColumns(config)
+  if (idCols.length === 0) return null
+  // A stale user pick (column retyped/skipped since) falls back to the first.
+  if (config.linkColumnIndex != null && idCols.some(c => c.column_index === config.linkColumnIndex)) {
+    return config.linkColumnIndex
+  }
+  return idCols[0].column_index
 }
 
 /**
@@ -103,6 +134,78 @@ function RecognizedMissingNote({
   )
 }
 
+/**
+ * #414: what participant linking did at import time. `compact` is the inline
+ * per-dataset suffix for the multi-file list. `hadParticipants` (project had
+ * participants BEFORE this import) drives the identity-pollution callout —
+ * all-created/none-matched against an existing roster usually means the IDs
+ * don't line up with the people already in the project.
+ */
+function ParticipantLinkNote({
+  report,
+  projectId,
+  hadParticipants,
+  compact = false,
+}: {
+  report?: ParticipantLinkReport | null
+  projectId?: string | number
+  hadParticipants?: boolean
+  compact?: boolean
+}) {
+  if (!report) return null
+  if (compact) {
+    if (report.linked <= 0) return null
+    return (
+      <span className="text-mm-text-faint">
+        {' · '}{report.linked.toLocaleString()} linked to participants
+      </span>
+    )
+  }
+  const skippedParts: string[] = []
+  if (report.skipped_duplicate > 0) {
+    const examples = report.duplicate_values.slice(0, 3).join(', ')
+    skippedParts.push(
+      `${report.skipped_duplicate} with a duplicated ID${examples ? ` (${examples})` : ''}`,
+    )
+  }
+  if (report.skipped_missing > 0) skippedParts.push(`${report.skipped_missing} with a blank or N/A ID`)
+  if (report.skipped_conflict > 0) {
+    skippedParts.push(`${report.skipped_conflict} whose participant is already linked to another record`)
+  }
+  const pollution = hadParticipants && report.created > 0 && report.matched === 0
+  return (
+    <div className="pt-1 space-y-1 text-xs text-mm-text-muted">
+      <div>
+        <strong className="text-mm-text">Participants:</strong>{' '}
+        {report.linked === 1 ? '1 record linked' : `${report.linked.toLocaleString()} records linked`}
+        {report.linked > 0 && (
+          <>
+            {' '}({report.created > 0 && `${report.created} new`}
+            {report.created > 0 && report.matched > 0 && ', '}
+            {report.matched > 0 && `${report.matched} matched to existing`})
+          </>
+        )}
+      </div>
+      {skippedParts.length > 0 && (
+        <div>Not linked: {skippedParts.join(' · ')}. These records stay unlinked — you can link them by hand on the Participants page.</div>
+      )}
+      {pollution && (
+        <div className="flex items-start gap-1.5 text-amber-700 dark:text-amber-300">
+          <TriangleAlert className="w-3.5 h-3.5 flex-shrink-0 mt-px" aria-hidden="true" />
+          <span>
+            None of these IDs matched the participants already in this project, so{' '}
+            {report.created === 1 ? 'a new participant was' : `${report.created} new participants were`} created.
+            If these records belong to people already here, review and merge them on the{' '}
+            <Link to={`/projects/${projectId}/participants`} className="underline">
+              Participants page
+            </Link>.
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 const MAX_FILES = 50
 const PREVIEW_CONCURRENCY = 5
 
@@ -143,6 +246,16 @@ export default function DatasetImport() {
     enabled: !!id,
   })
 
+  // #414: whether the project had participants BEFORE this import — drives
+  // the results-step identity-pollution callout. Snapshotted into a ref at
+  // import start (the import itself creates participants).
+  const { data: participantsData } = useQuery({
+    queryKey: ['participants', id],
+    queryFn: () => participantsApi.list(id),
+    enabled: !!id,
+  })
+  const hadParticipantsRef = useRef(false)
+
   const existingDatasetNames = useMemo(
     () => (existingDatasets?.datasets || []).map(d => d.name.toLowerCase()),
     [existingDatasets]
@@ -174,7 +287,7 @@ export default function DatasetImport() {
 
   const handleFilesSelected = useCallback((selectedFiles: File[]) => {
     setError('')
-    const csvFiles = selectedFiles.filter(f => /\.(csv|xlsx)$/.test(f.name.toLowerCase()))
+    const csvFiles = selectedFiles.filter(f => isSupportedDatasetFile(f.name))
     if (csvFiles.length === 0) return
 
     const newFiles = [...files, ...csvFiles].slice(0, MAX_FILES)
@@ -199,6 +312,8 @@ export default function DatasetImport() {
         datasetSource: '',
         previewError: null,
         sheetName: null,
+        linkParticipants: true,
+        linkColumnIndex: null,
       })
     }
     setFileConfigs(newConfigs)
@@ -321,6 +436,7 @@ export default function DatasetImport() {
           subtypeOverrides: autoSubtypes,
           previewError: null,
           sheetName,
+          linkColumnIndex: null,
         }
         return copy
       })
@@ -384,6 +500,24 @@ export default function DatasetImport() {
     })
   }, [])
 
+  // --- #414: participant-linking choices ---
+
+  const setLinkParticipants = useCallback((fileIndex: number, enabled: boolean) => {
+    setFileConfigs(prev => {
+      const copy = [...prev]
+      copy[fileIndex] = { ...copy[fileIndex], linkParticipants: enabled }
+      return copy
+    })
+  }, [])
+
+  const setLinkColumnIndex = useCallback((fileIndex: number, columnIndex: number) => {
+    setFileConfigs(prev => {
+      const copy = [...prev]
+      copy[fileIndex] = { ...copy[fileIndex], linkColumnIndex: columnIndex }
+      return copy
+    })
+  }, [])
+
   // --- Build column configs for import ---
 
   const buildColumnConfigs = useCallback((config: FileConfig): DatasetColumnConfig[] => {
@@ -399,6 +533,9 @@ export default function DatasetImport() {
         group_code: col.suggested_group_code,
         group_label: null,
         scale_labels: col.suggested_scale_labels,
+        // #28: only .sav previews carry these; the backend falls back to a
+        // positional 1..N encoding whenever they are absent or mismatched.
+        scale_values: col.suggested_scale_values ?? null,
         demographic_subtype: effectiveType === 'demographic'
           ? (config.subtypeOverrides[col.column_index] || col.suggested_demographic_subtype || null)
           : null,
@@ -422,6 +559,8 @@ export default function DatasetImport() {
   const handleImport = useCallback(async () => {
     setError('')
 
+    hadParticipantsRef.current = (participantsData?.participants?.length ?? 0) > 0
+
     if (files.length === 1) {
       // Single file: import directly, navigate to ProjectView
       setIsLoading(true)
@@ -433,9 +572,13 @@ export default function DatasetImport() {
           source: config.datasetSource || null,
           column_configs: buildColumnConfigs(config),
           sheet_name: config.sheetName,
+          participant_link_column_index: effectiveLinkColumnIndex(config),
         })
         queryClient.invalidateQueries({ queryKey: ['datasets', id] })
         queryClient.invalidateQueries({ queryKey: ['project', id] })
+        if (result.participant_link_report) {
+          queryClient.invalidateQueries({ queryKey: ['participants', id] })
+        }
 
         // Show single-file results inline
         setImportProgress({
@@ -450,6 +593,7 @@ export default function DatasetImport() {
             valuesCreated: result.values_created,
             recognizedMissingCount: result.recognized_missing_count,
             recognizedMissingLabels: result.recognized_missing_labels,
+            linkReport: result.participant_link_report,
           }],
         })
         setStep('results')
@@ -505,6 +649,7 @@ export default function DatasetImport() {
           source: config.datasetSource || null,
           column_configs: buildColumnConfigs(config),
           sheet_name: config.sheetName,
+          participant_link_column_index: effectiveLinkColumnIndex(config),
         })
         results.push({
           fileName: files[i].name,
@@ -516,6 +661,7 @@ export default function DatasetImport() {
           valuesCreated: result.values_created,
           recognizedMissingCount: result.recognized_missing_count,
           recognizedMissingLabels: result.recognized_missing_labels,
+          linkReport: result.participant_link_report,
         })
       } catch (err: unknown) {
         results.push({
@@ -532,6 +678,9 @@ export default function DatasetImport() {
     // Invalidate queries
     queryClient.invalidateQueries({ queryKey: ['datasets', id] })
     queryClient.invalidateQueries({ queryKey: ['project', id] })
+    if (results.some(r => r.linkReport)) {
+      queryClient.invalidateQueries({ queryKey: ['participants', id] })
+    }
 
     setStep('results')
   }, [files, fileConfigs, id, buildColumnConfigs, queryClient])
@@ -750,6 +899,60 @@ export default function DatasetImport() {
           </CardContent>
         </Card>
 
+        {/* #414 (DEC-6): participant linking — rendered only when the file has
+            an identifier column (auto-detected or user-set above). */}
+        {(() => {
+          const idCols = identifierColumns(config)
+          if (idCols.length === 0) return null
+          const chosenIndex = config.linkColumnIndex != null && idCols.some(c => c.column_index === config.linkColumnIndex)
+            ? config.linkColumnIndex
+            : idCols[0].column_index
+          return (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Participant Linking</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <div className="flex items-start gap-2 text-sm">
+                  <input
+                    id={`link-participants-${fileIndex}`}
+                    type="checkbox"
+                    checked={config.linkParticipants}
+                    onChange={(e) => setLinkParticipants(fileIndex, e.target.checked)}
+                    className="mt-0.5 rounded border-mm-border-medium text-primary"
+                  />
+                  <span>
+                    <label htmlFor={`link-participants-${fileIndex}`} className="cursor-pointer">
+                      Link records to participants using{' '}
+                      {idCols.length === 1 && <strong>{idCols[0].suggested_column_text}</strong>}
+                    </label>
+                    {idCols.length > 1 && (
+                      <select
+                        value={chosenIndex}
+                        onChange={(e) => setLinkColumnIndex(fileIndex, parseInt(e.target.value))}
+                        disabled={!config.linkParticipants}
+                        aria-label="Identifier column to link by"
+                        className="mx-1 h-7 text-sm border border-mm-border-medium rounded px-1 bg-mm-surface"
+                      >
+                        {idCols.map(c => (
+                          <option key={c.column_index} value={c.column_index}>
+                            {c.suggested_column_text}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </span>
+                </div>
+                <p className="text-xs text-mm-text-muted pl-6">
+                  IDs matching an existing participant link to them; new IDs create
+                  participants. Records with blank, N/A, or duplicated IDs stay
+                  unlinked — you'll see a summary after import.
+                </p>
+              </CardContent>
+            </Card>
+          )
+        })()}
+
         {/* Dataset Details */}
         <Card>
           <CardHeader className="pb-3">
@@ -846,7 +1049,7 @@ export default function DatasetImport() {
             <CardHeader>
               <CardTitle>Upload data files</CardTitle>
               <CardDescription>
-                Upload one or more CSV or Excel (.xlsx) files. Each file will be imported as a separate dataset.
+                Upload one or more {DATASET_FORMAT_LABEL} files. Each file will be imported as a separate dataset.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -861,11 +1064,11 @@ export default function DatasetImport() {
               >
                 <FileInput className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />
                 <p className="text-mm-text-secondary mb-4">
-                  Drag and drop CSV or Excel file(s) here, or click to browse
+                  Drag and drop {DATASET_FORMAT_LABEL} file(s) here, or click to browse
                 </p>
                 <input
                   type="file"
-                  accept=".csv,.xlsx"
+                  accept={DATASET_ACCEPT}
                   multiple
                   onChange={(e) => {
                     const selected = e.target.files
@@ -915,7 +1118,7 @@ export default function DatasetImport() {
                     <label htmlFor="dataset-file-input-add" className="cursor-pointer">
                       <input
                         type="file"
-                        accept=".csv,.xlsx"
+                        accept={DATASET_ACCEPT}
                         multiple
                         onChange={(e) => {
                           const selected = e.target.files
@@ -1152,18 +1355,34 @@ export default function DatasetImport() {
                     labels={importProgress.results[0].recognizedMissingLabels}
                     projectId={id}
                   />
+                  <ParticipantLinkNote
+                    report={importProgress.results[0].linkReport}
+                    projectId={id}
+                    hadParticipants={hadParticipantsRef.current}
+                  />
                 </div>
               )}
 
-              {/* #407: surface the participant spine at import time */}
-              <p className="text-xs text-mm-text-muted">
-                Have interviews or focus groups too? Connect these records to
-                people on the{' '}
-                <Link to={`/projects/${id}/participants`} className="text-mm-blue-text hover:underline">
-                  Participants page
-                </Link>{' '}
-                so each person is one identity across their data and their words.
-              </p>
+              {/* #407/#414: surface the participant spine at import time —
+                  when linking just ran, point at reviewing instead of connecting */}
+              {importProgress.results.some(r => (r.linkReport?.linked ?? 0) > 0) ? (
+                <p className="text-xs text-mm-text-muted">
+                  Records were linked to participants, so each person is one identity
+                  across their data and their words. Review them on the{' '}
+                  <Link to={`/projects/${id}/participants`} className="text-mm-blue-text hover:underline">
+                    Participants page
+                  </Link>.
+                </p>
+              ) : (
+                <p className="text-xs text-mm-text-muted">
+                  Have interviews or focus groups too? Connect these records to
+                  people on the{' '}
+                  <Link to={`/projects/${id}/participants`} className="text-mm-blue-text hover:underline">
+                    Participants page
+                  </Link>{' '}
+                  so each person is one identity across their data and their words.
+                </p>
+              )}
 
               {/* Multi-file results */}
               {isMultiFile && (
@@ -1220,6 +1439,7 @@ export default function DatasetImport() {
                           <span className="text-mm-text-muted flex-shrink-0 text-xs">
                             {r.columnsCreated} columns, {r.recordsCreated} records, {r.valuesCreated} values
                             <RecognizedMissingNote count={r.recognizedMissingCount} compact />
+                            <ParticipantLinkNote report={r.linkReport} compact />
                           </span>
                         )}
                         {r.error && (

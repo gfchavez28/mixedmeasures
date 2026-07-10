@@ -16,6 +16,11 @@ class BackupManifest(BaseModel):
     db_size_bytes: int
     document_count: int
     media_file_count: int = 0
+    # Video V1 slab 5: periodic auto-backups exclude video recordings (the
+    # 4h × 5-rotation would multiply multi-GB projects onto the researcher's
+    # disk). Defaults keep pre-video backups parsing unchanged.
+    video_excluded: bool = False
+    video_files_excluded: int = 0
     project_summaries: list[ProjectBackupSummary]
 
 

@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use Mixed Measures in published work, please cite it as below."
+type: software
+title: "Mixed Measures"
+abstract: >-
+  A local-first desktop workspace for mixed-methods research. Qualitative and
+  quantitative data live in one project with shared participants, codes, and
+  memos, so a survey item and the quote that explains it stay connected.
+  Supports multi-coder qualitative coding with intercoder reliability
+  (Cohen's kappa, Krippendorff's alpha) and a reconciliation layer.
+authors:
+  - family-names: Chavez
+    given-names: George
+version: 1.2.0
+date-released: 2026-07-10
+license: Apache-2.0
+repository-code: "https://github.com/gfchavez28/mixedmeasures"
+url: "https://mixedmeasures.com"
+keywords:
+  - mixed methods
+  - qualitative data analysis
+  - CAQDAS
+  - intercoder reliability
+  - program evaluation

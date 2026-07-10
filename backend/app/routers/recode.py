@@ -23,6 +23,7 @@ from ..schemas.recode import (
     ValueFrequency,
     ColumnFrequenciesResponse,
 )
+from ..services.dataset_import import _coerce_scale_codes
 from ..services.recode import (
     apply_definition_to_column,
     get_value_frequencies,
@@ -114,6 +115,46 @@ def _definition_to_response(
     )
 
 
+def _write_back_scale_metadata(
+    db: Session, definition: RecodeDefinition, column_id: int,
+) -> None:
+    """Keep ``column.scale_labels``/``scale_values`` in step with the primary
+    mapping on ordinal columns (#542a — owner-2 of the #28 three-owner
+    invariant).
+
+    Every consumer prefers the primary mapping while it exists (append re-apply,
+    R export priority 1), so a stale copy is invisible — until the definition is
+    DELETED and consumers fall back to the column metadata, which then carries
+    the pre-edit codes while ``value_numeric`` carries the post-edit ones.
+
+    The mapping is ``{label: code}``; for REVERSE those are the FORWARD codes
+    (reversal happens at apply time), which is exactly what the append stamp and
+    R export expect. Non-numeric values are skipped per value (#542b semantics);
+    if no numeric pairs remain the existing metadata is left alone rather than
+    destroyed. Codes store as ints when integral (the #28 int/float parity rule
+    — ``_coerce_scale_codes``).
+    """
+    column = db.query(DatasetColumn).filter(DatasetColumn.id == column_id).first()
+    if column is None or column.column_type != ColumnType.ORDINAL:
+        return
+    try:
+        mapping = json.loads(definition.mapping) if definition.mapping else {}
+    except (json.JSONDecodeError, TypeError):
+        return
+    pairs: list[tuple[str, float]] = []
+    for label, code in mapping.items():
+        try:
+            pairs.append((str(label), float(code)))
+        except (ValueError, TypeError):
+            continue
+    if not pairs:
+        return
+    pairs.sort(key=lambda p: p[1])
+    column.scale_labels = json.dumps([label for label, _ in pairs])
+    column.scale_values = json.dumps(_coerce_scale_codes([code for _, code in pairs]))
+    column.scale_points = len(pairs)
+
+
 def _recompute_primary_value_numeric(
     db: Session, definition: RecodeDefinition, column_id: int,
 ) -> None:
@@ -128,13 +169,16 @@ def _recompute_primary_value_numeric(
     delete-then-promote) shares one apply-vs-clear decision. The #359 bug was exactly
     these callsites drifting apart — REVERSE was applied in none of them, silently
     leaving reverse-scored subscales un-reversed (e.g. Cronbach's α collapsing because
-    negatively-worded items were never flipped).
+    negatively-worded items were never flipped). #542a: applying a numeric primary
+    also writes the mapping back to the column's scale metadata (see
+    ``_write_back_scale_metadata``).
     """
     rtype = definition.recode_type
     if hasattr(rtype, "value"):
         rtype = rtype.value
     if rtype in ("scale_map", "reverse"):
         apply_definition_to_column(db, definition)
+        _write_back_scale_metadata(db, definition, column_id)
     else:  # category_group → no numeric output
         clear_value_numeric(db, column_id)
 
@@ -188,8 +232,8 @@ async def create_definition(
             detail="Recode definitions cannot be created for computed columns",
         )
 
-    # Reject recode on open-ended column types
-    if col.column_type == ColumnType.OPEN_TEXT:
+    # Reject recode on open-ended and identifier column types (#414)
+    if col.column_type in (ColumnType.OPEN_TEXT, ColumnType.IDENTIFIER):
         raise HTTPException(
             status_code=400,
             detail=f"Recode definitions cannot be created for {col.column_type.value} columns",
@@ -240,11 +284,13 @@ async def create_definition(
     db.add(definition)
     db.flush()
 
-    # Apply to the column's values when this definition is primary and produces
-    # numeric output — scale_map OR reverse (#359). REVERSE carries its own
-    # {label: numeric} mapping and reverses internally, so it applies the same way.
-    if is_primary and recode_type in (RecodeType.SCALE_MAP, RecodeType.REVERSE):
-        apply_definition_to_column(db, definition)
+    # Route through the SHARED apply-vs-clear decision (#359/#542a): scale_map
+    # and reverse apply (+ write scale metadata back); a category_group primary
+    # clears value_numeric — previously create skipped the clear, so a
+    # categorical primary created FIRST on a stamped column silently left the
+    # numeric encoding behind (the exact callsite drift the helper exists for).
+    if is_primary:
+        _recompute_primary_value_numeric(db, definition, column_id)
 
     mark_metrics_stale(db, project_id, column_ids=[column_id])
 

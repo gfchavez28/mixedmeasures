@@ -289,6 +289,7 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
   onEditComputed,
   onDeleteComputed,
   onRecompute,
+  onLinkByColumn,
   isPopoverOpen,
   onPopoverOpenChange,
   activeField,
@@ -325,6 +326,8 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
   onEditComputed?: (column: DatasetColumn) => void
   onDeleteComputed?: (column: DatasetColumn) => void
   onRecompute?: (column: DatasetColumn) => void
+  /** #414 (DEC-8): retro bulk-link by an identifier column. */
+  onLinkByColumn?: (column: DatasetColumn) => void
   isPopoverOpen: boolean
   onPopoverOpenChange: (columnId: number, open: boolean) => void
   activeField: EditorField
@@ -398,6 +401,7 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
             onDeleteColumn={handleDelete}
             onEditComputed={onEditComputed}
             onRecompute={onRecompute}
+            onLinkByColumn={onLinkByColumn}
             projectId={projectId}
             datasetId={datasetId}
             columnIndex={columnIndex}

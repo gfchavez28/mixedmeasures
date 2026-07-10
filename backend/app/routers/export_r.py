@@ -302,14 +302,25 @@ def _build_r_script(
     # analyses (#363). Ordinal items are converted to ordered factors below for
     # display/tabulation, but Cronbach's alpha, correlations, covariance and
     # scale means need numerics — passing factors to cor()/cov()/colMeans()
-    # errors ("'x' must be numeric" / empty matrix). Ordered factors here use
-    # consecutive integer levels, so factor codes equal the scale values; for
-    # correlation (scale/shift-invariant) this is exact regardless.
+    # errors ("'x' must be numeric" / empty matrix). #537: `as.numeric(factor)`
+    # returns the 1..K level POSITIONS, never the level values — exact only for
+    # 1..N consecutive scales, and wrong for the 0-based / gapped codes that
+    # SPSS imports (#28) carry (a 0-based mean shifts +1; a gapped code set is
+    # non-affine, so even correlations diverge). `.mm_scale_codes` (filled in
+    # the factor sections below) maps each factor column back to its real
+    # codes; data.frame recursion threads column names, single-column callers
+    # pass the name explicitly, and positional coercion survives only as the
+    # fallback for factors with no registered codes (string-level categoricals).
     r_lines.append("# ---- Helpers ----")
-    r_lines.append(".mm_num <- function(x) {")
-    r_lines.append("  if (is.data.frame(x)) as.data.frame(lapply(x, .mm_num))")
-    r_lines.append("  else if (is.factor(x)) as.numeric(x)")
-    r_lines.append("  else x")
+    r_lines.append(".mm_scale_codes <- list()  # filled after the factor sections")
+    r_lines.append(".mm_num <- function(x, nm = NULL) {")
+    r_lines.append("  if (is.data.frame(x)) {")
+    r_lines.append("    as.data.frame(Map(function(col, n) .mm_num(col, n), x, names(x)),")
+    r_lines.append("                  check.names = FALSE)")
+    r_lines.append("  } else if (is.factor(x)) {")
+    r_lines.append("    codes <- if (is.null(nm)) NULL else .mm_scale_codes[[nm]]")
+    r_lines.append("    if (is.null(codes)) as.numeric(x) else codes[as.integer(x)]")
+    r_lines.append("  } else x")
     r_lines.append("}")
     r_lines.append("# First non-NA across equivalent columns (one item per record —")
     r_lines.append("# mirrors Mixed Measures' equivalence-group collapse).")
@@ -329,6 +340,16 @@ def _build_r_script(
     reverse_lines: list[str] = []
     excluded_values_map: dict[str, list[str]] = {}
     script_notes: list[str] = []
+    # (r_name, level codes) for every factor built from NUMERIC codes — feeds
+    # the .mm_scale_codes registry so .mm_num recovers values, not positions
+    # (#537). Level order must match the factor() levels= emission exactly.
+    scale_code_entries: list[tuple[str, list]] = []
+
+    def _register_scale_codes(r_name: str, values: list) -> None:
+        if values and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in values
+        ):
+            scale_code_entries.append((r_name, values))
 
     for cid, meta in col_meta.items():
         col = meta["col"]
@@ -366,7 +387,7 @@ def _build_r_script(
 
         # Reverse-scored
         if primary_recode and primary_recode.recode_type.value == "reverse":
-            scale_max = None
+            scale_min = scale_max = None
             if primary_recode.mapping:
                 try:
                     r_mapping = (
@@ -379,16 +400,25 @@ def _build_r_script(
                             float(v) for v in r_mapping.values() if v is not None
                         ]
                         if all_numeric:
+                            scale_min = min(all_numeric)
                             scale_max = max(all_numeric)
                 except (json.JSONDecodeError, TypeError, ValueError):
                     pass
 
             if scale_max is not None:
-                sm = int(scale_max) if scale_max == int(scale_max) else scale_max
-                reverse_lines.append(f"# {r_name}: reverse-scored (original scale 1-{sm})")
+                # These are comments, not executed R — the CSV already carries the
+                # reversed values. They must still be TRUE: a scale need not start
+                # at 1 (SPSS .sav imports can be 0-based, #28), so quote the real
+                # bounds and the general `(min + max) - v` form that the tool uses
+                # (`services/recode.py::reverse_offset`), not a hardcoded `(max+1)`.
+                def _fmt(x: float):
+                    return int(x) if x == int(x) else x
+
+                lo, sm = _fmt(scale_min), _fmt(scale_max)
+                reverse_lines.append(f"# {r_name}: reverse-scored (original scale {lo}-{sm})")
                 reverse_lines.append("# CSV contains pre-reversed values")
                 reverse_lines.append(
-                    f"# To recreate from raw: data${r_name}_R <- ({sm}+1) - data${r_name}_raw"
+                    f"# To recreate from raw: data${r_name}_R <- ({lo}+{sm}) - data${r_name}_raw"
                 )
             else:
                 reverse_lines.append(
@@ -409,6 +439,7 @@ def _build_r_script(
                 ordinal_lines.append(f"  labels = c({labels_str}),")
                 ordinal_lines.append("  ordered = TRUE)")
                 ordinal_lines.append("")
+                _register_scale_codes(r_name, mapping["values"])
             else:
                 script_notes.append(
                     f"# {r_name}: ordinal type but no scale labels defined"
@@ -426,6 +457,7 @@ def _build_r_script(
                 nominal_lines.append(f"  levels = c({levels_str}),")
                 nominal_lines.append(f"  labels = c({labels_str}))")
                 nominal_lines.append("")
+                _register_scale_codes(r_name, mapping["values"])
             else:
                 script_notes.append(
                     f"# {r_name}: binary type but no labels defined"
@@ -443,6 +475,7 @@ def _build_r_script(
                 nominal_lines.append(f"  levels = c({levels_str}),")
                 nominal_lines.append(f"  labels = c({labels_str}))")
                 nominal_lines.append("")
+                _register_scale_codes(r_name, mapping["values"])
             else:
                 # Try distinct observed values
                 observed = _get_observed_values(db, col.id)
@@ -481,6 +514,17 @@ def _build_r_script(
         toc_sections.append("Nominal / demographic / binary items (unordered factors)")
         r_lines.append("# ---- Nominal / demographic / binary items (unordered factors) ----")
         r_lines.extend(nominal_lines)
+
+    if scale_code_entries:
+        r_lines.append("# Level VALUES per factor column — lets .mm_num recover the real")
+        r_lines.append("# scale codes instead of 1..K level positions (#537).")
+        r_lines.append(".mm_scale_codes <- list(")
+        for idx, (entry_name, entry_values) in enumerate(scale_code_entries):
+            comma = "," if idx < len(scale_code_entries) - 1 else ""
+            vals_str = ", ".join(str(v) for v in entry_values)
+            r_lines.append(f"  `{entry_name}` = c({vals_str}){comma}")
+        r_lines.append(")")
+        r_lines.append("")
 
     if label_lines:
         toc_sections.append("Variable labels")
@@ -772,8 +816,8 @@ def _build_r_script(
                         metric_lines.append(f"  filter(!is.na({r_name})) %>%")
                         metric_lines.append(f"  group_by({grp_expr}) %>%")
                         metric_lines.append(f"  summarise(")
-                        metric_lines.append(f"    mean = mean(.mm_num({r_name}), na.rm = TRUE),")
-                        metric_lines.append(f"    sd = sd(.mm_num({r_name}), na.rm = TRUE),")
+                        metric_lines.append(f'    mean = mean(.mm_num({r_name}, "{r_name}"), na.rm = TRUE),')
+                        metric_lines.append(f'    sd = sd(.mm_num({r_name}, "{r_name}"), na.rm = TRUE),')
                         metric_lines.append(f"    n = sum(!is.na({r_name})),")
                         metric_lines.append(
                             f"    ci_lower = mean - qt(0.975, n-1) * sd / sqrt(n),"
@@ -784,10 +828,10 @@ def _build_r_script(
                         metric_lines.append(f"  )")
                     else:
                         metric_lines.append(
-                            f"mean(.mm_num(data${r_name}), na.rm = TRUE)"
+                            f'mean(.mm_num(data${r_name}, "{r_name}"), na.rm = TRUE)'
                         )
                         metric_lines.append(
-                            f"sd(.mm_num(data${r_name}), na.rm = TRUE)"
+                            f'sd(.mm_num(data${r_name}, "{r_name}"), na.rm = TRUE)'
                         )
 
                 elif mt == "proportion":
@@ -870,8 +914,8 @@ def _build_r_script(
         )
         metric_lines.append(f"# Metric: {_escape_r_string(hm_label)}")
         if hm.metric_type == "mean":
-            metric_lines.append(f"mean(.mm_num(data${hm_r}), na.rm = TRUE)")
-            metric_lines.append(f"sd(.mm_num(data${hm_r}), na.rm = TRUE)")
+            metric_lines.append(f'mean(.mm_num(data${hm_r}, "{hm_r}"), na.rm = TRUE)')
+            metric_lines.append(f'sd(.mm_num(data${hm_r}, "{hm_r}"), na.rm = TRUE)')
         elif hm.metric_type == "frequency_distribution":
             metric_lines.append(f"table(data${hm_r})")
         elif (
@@ -1029,14 +1073,14 @@ def _build_r_script(
                         "# Welch's t-test (same as scipy.stats.ttest_ind)"
                     )
                     test_lines.append(
-                        f"t.test({tm_r} ~ {tm_grp_r}, data = data, var.equal = FALSE)"
+                        f't.test(.mm_num(data${tm_r}, "{tm_r}") ~ data${tm_grp_r}, var.equal = FALSE)'
                     )
                 else:  # one_way_anova
                     test_lines.append(
                         f"# One-way ANOVA: {_escape_r_string(tm_r)} by {_escape_r_string(tm_grp_r)}"
                     )
                     test_lines.append(
-                        f"aov_result <- aov({tm_r} ~ {tm_grp_r}, data = data)"
+                        f'aov_result <- aov(.mm_num(data${tm_r}, "{tm_r}") ~ data${tm_grp_r})'
                     )
                     test_lines.append("summary(aov_result)")
                     test_lines.append("TukeyHSD(aov_result)")
@@ -1100,7 +1144,9 @@ def _build_r_script(
                 rc_lines.append("for (i in 1:(length(cor_vars)-1)) {")
                 rc_lines.append("  for (j in (i+1):length(cor_vars)) {")
                 rc_lines.append(
-                    f'    ct <- cor.test(data[[cor_vars[i]]], data[[cor_vars[j]]], method = "{corr_type}")'
+                    "    ct <- cor.test(.mm_num(data[[cor_vars[i]]], cor_vars[i]),"
+                    " .mm_num(data[[cor_vars[j]]], cor_vars[j]),"
+                    f' method = "{corr_type}")'
                 )
                 rc_lines.append(
                     '    cat(cor_vars[i], "vs", cor_vars[j], ": r =", ct$estimate, ", p =", ct$p.value, "\\n")'
@@ -1223,11 +1269,11 @@ def _build_r_script(
                             " scipy.stats.mannwhitneyu)"
                         )
                         rc_lines.append(
-                            f"wilcox.test({vr} ~ {grp_r}, data = {data_ref})"
+                            f'wilcox.test(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r})'
                         )
                     else:
                         rc_lines.append(
-                            f"kruskal.test({vr} ~ {grp_r}, data = {data_ref})"
+                            f'kruskal.test(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r})'
                         )
                 else:
                     if test_type in ("t_test", "auto"):
@@ -1235,14 +1281,14 @@ def _build_r_script(
                             f"# Parametric test: {vr} by {grp_r}"
                         )
                         rc_lines.append(
-                            f"t.test({vr} ~ {grp_r}, data = {data_ref}, var.equal = FALSE)"
+                            f't.test(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r}, var.equal = FALSE)'
                         )
                         rc_lines.append(
-                            f"# (If 3+ groups, use: aov({vr} ~ {grp_r}, data = {data_ref}) %>% summary())"
+                            f'# (If 3+ groups, use: aov(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r}) %>% summary())'
                         )
                     else:
                         rc_lines.append(
-                            f"aov_result <- aov({vr} ~ {grp_r}, data = {data_ref})"
+                            f'aov_result <- aov(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r})'
                         )
                         rc_lines.append("summary(aov_result)")
                         rc_lines.append("TukeyHSD(aov_result)")
@@ -1809,7 +1855,7 @@ def _build_r_script(
                         "line_data <- do.call(rbind, lapply(line_cols,"
                         " function(col) {"
                     )
-                    chart_lines.append("  agg <- aggregate(.mm_num(data[[col]]),")
+                    chart_lines.append("  agg <- aggregate(.mm_num(data[[col]], col),")
                     chart_lines.append(
                         f"                   by = list(group = data${grp_r}),"
                     )
@@ -1844,7 +1890,7 @@ def _build_r_script(
                         "  value = sapply(line_cols, function(col)"
                     )
                     chart_lines.append(
-                        "    mean(.mm_num(data[[col]]), na.rm = TRUE))"
+                        "    mean(.mm_num(data[[col]], col), na.rm = TRUE))"
                     )
                     chart_lines.append(")")
                     chart_lines.append("")

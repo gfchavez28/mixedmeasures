@@ -12,6 +12,13 @@ class ConversationStatus(str, enum.Enum):
     COMPLETED = "completed"
 
 
+# Formats stored with media_type='video' (the format seam lives in
+# routers/media.py::_detect_format; this membership set is hosted here so
+# services — backup video-exclusion, storage accounting — can consume it
+# without importing router modules).
+VIDEO_FORMATS = frozenset({"mp4", "mov", "webm"})
+
+
 class Conversation(Base):
     __tablename__ = "conversations"
 
@@ -29,8 +36,8 @@ class Conversation(Base):
 
     # Media (audio/video) fields — E3 audio playback alongside transcripts
     media_filename = Column(String(500), nullable=True)
-    media_format = Column(String(10), nullable=True)  # "mp3", "m4a", "wav"
-    media_type = Column(String(10), nullable=True)  # "audio", future "video"
+    media_format = Column(String(10), nullable=True)  # "mp3", "m4a", "wav" audio; VIDEO_FORMATS video
+    media_type = Column(String(10), nullable=True)  # "audio" | "video"
     media_duration_seconds = Column(Float, nullable=True)
     media_offset_seconds = Column(Float, nullable=False, default=0.0)
     media_is_vbr = Column(Boolean, nullable=True)

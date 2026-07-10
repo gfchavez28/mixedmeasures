@@ -84,13 +84,13 @@ def _r_has_irr() -> bool:
 _HAS_IRR = _r_has_irr()
 
 
-def _r_irr(rows: list[list], n: int) -> dict:
+def _r_irr(rows: list[list], n: int, method: str = "nominal") -> dict:
     """Run rows (units × coders, None→NA) through R's irr; return {alpha,kappa,agree}."""
     vals = ",".join("NA" if v is None else str(v) for row in rows for v in row)
     script = f"""
 suppressMessages(library(irr))
 m <- matrix(c({vals}), nrow={len(rows)}, ncol={n}, byrow=TRUE)
-cat("alpha", kripp.alpha(t(m), method="nominal")$value, "\\n")
+cat("alpha", kripp.alpha(t(m), method="{method}")$value, "\\n")
 if (ncol(m) == 2) {{
   dc <- m[stats::complete.cases(m), , drop=FALSE]
   if (nrow(dc) > 0) {{
@@ -119,6 +119,76 @@ def test_irr_matches_r(rows, n):
     if n == 2:
         assert _cohens_kappa(rows) == pytest.approx(r["kappa"], abs=1e-6)
         assert _percent_agreement(rows) == pytest.approx(r["agree"], abs=1e-6)
+
+
+# ── 2b. Metric generalization (ordinal/interval/ratio — the #35 / v1.4 seam) ───
+#
+# Krippendorff (2011, "Computing Krippendorff's Alpha-Reliability") worked
+# example: 4 observers × 12 units, values 1–5, missing cells. The paper publishes
+# nominal α = 0.743 and interval α = 0.849 — independent literature anchors.
+M_K2011 = [
+    [1, 1, None, 1],
+    [2, 2, 3, 2],
+    [3, 3, 3, 3],
+    [3, 3, 3, 3],
+    [2, 2, 2, 2],
+    [1, 2, 3, 4],
+    [4, 4, 4, 4],
+    [1, 1, 2, 1],
+    [2, 2, 2, 2],
+    [None, 5, 5, 5],
+    [None, None, 1, 1],
+    [None, 3, None, None],  # <2 present → contributes nothing
+]
+
+# Ordering-sensitive data MUST include values ≥10 (backend/tests/CLAUDE.md): a
+# string-ranked ordinal metric would order 1 < 10 < 2 and get a different α.
+M_MULTIDIGIT = [[1, 1], [2, 3], [10, 10], [1, 2], [5, 5], [10, 2], [3, 3]]
+
+
+def test_alpha_metric_published_anchors():
+    assert _krippendorff_alpha(M_K2011, metric="nominal") == pytest.approx(0.743, abs=5e-4)
+    assert _krippendorff_alpha(M_K2011, metric="interval") == pytest.approx(0.849, abs=5e-4)
+
+
+def test_alpha_metric_properties():
+    # nominal is the default and unchanged
+    assert _krippendorff_alpha(M_BASIC, metric="nominal") == _krippendorff_alpha(M_BASIC)
+    # on binary data every metric coincides (only one nonzero δ² cell, so it cancels)
+    for metric in ("ordinal", "interval", "ratio"):
+        assert _krippendorff_alpha(M_BASIC, metric=metric) == pytest.approx(
+            _krippendorff_alpha(M_BASIC), abs=1e-12
+        )
+    # perfect agreement is 1.0 under every metric; all-missing stays undefined
+    for metric in ("nominal", "ordinal", "interval", "ratio"):
+        assert _krippendorff_alpha([[3, 3], [1, 1], [5, 5]], metric=metric) == 1.0
+        assert _krippendorff_alpha([[1, None], [None, 2]], metric=metric) is None
+    # interval respects distance: a 1-vs-2 disagreement hurts less than 1-vs-5
+    near = _krippendorff_alpha([[1, 2], [3, 3], [4, 4], [5, 5]], metric="interval")
+    far = _krippendorff_alpha([[1, 5], [3, 3], [4, 4], [5, 5]], metric="interval")
+    assert near > far
+    # ordinal ranks numerically: with ranks 1<2<3<5<10, the 10-vs-2 disagreement
+    # spans more coincidence mass than 2-vs-3 → hand-derivable ordering holds
+    assert _krippendorff_alpha(M_MULTIDIGIT, metric="ordinal") == pytest.approx(
+        0.6523157, abs=1e-6
+    )
+
+
+@pytest.mark.skipif(not _HAS_IRR, reason="Rscript + irr package not available")
+@pytest.mark.parametrize("rows,n", [
+    (M_K2011, 4),          # the published 2011 example (missing → canonical regime)
+    (M_MULTIDIGIT, 2),     # multi-digit values: numeric ranking must match R's
+    ([[1, 1, 2], [2, 2, None], [10, 12, 10], [1, None, 1], [5, 5, 6], [None, 2, 2]], 3),
+])
+@pytest.mark.parametrize("metric", ["nominal", "ordinal", "interval", "ratio"])
+def test_alpha_metrics_match_r(rows, n, metric):
+    # NOTE: multi-coder fixtures deliberately include ≥1 missing cell — with ZERO
+    # missing cells irr::kripp.alpha skips the canonical 1/(m−1) pair weighting
+    # (its complete-data coincidence matrix deviates from Krippendorff's canonical
+    # definition for ≥3 raters), so complete-data 3+-coder matrices are not
+    # comparable to R.
+    r = _r_irr(rows, n, method=metric)
+    assert _krippendorff_alpha(rows, metric=metric) == pytest.approx(r["alpha"], abs=1e-6)
 
 
 # ── 3. DB integration — Option-B semantics + exclusions ───────────────────────

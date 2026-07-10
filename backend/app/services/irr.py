@@ -85,14 +85,56 @@ def _interpret_alpha(a: float | None) -> str | None:
 # n_coders holding 0 / 1 / None (None = that coder did not judge the unit).
 
 
-def _krippendorff_alpha(units: list[list[int | None]]) -> float | None:
-    """Krippendorff's α, nominal metric, n coders, missing-data tolerant.
+def _delta_squared_table(
+    metric: str, values: list, n_c: dict,
+) -> dict[tuple, float]:
+    """δ²_ck lookup for the non-nominal metrics (Krippendorff 2011, "Computing
+    Krippendorff's Alpha-Reliability"). ``values`` must be numerically sorted;
+    ``n_c`` are the coincidence-matrix marginals (the ordinal metric needs them).
+
+    - ordinal:  δ²_ck = (Σ_{g=c..k} n_g − (n_c+n_k)/2)²  — ranks by NUMERIC value
+      (R's ``irr`` ranks by factor-level order, which for numeric matrices is also
+      numeric; for character data it string-sorts — we deliberately never do).
+    - interval: δ²_ck = (c−k)²
+    - ratio:    δ²_ck = ((c−k)/(c+k))²  — values must be non-negative
+    """
+    d2: dict[tuple, float] = {}
+    for i, c in enumerate(values):
+        for j in range(i, len(values)):
+            k = values[j]
+            if i == j:
+                d2[(c, k)] = 0.0
+                continue
+            if metric == "ordinal":
+                span = sum(n_c[values[g]] for g in range(i, j + 1))
+                val = (span - (n_c[c] + n_c[k]) / 2.0) ** 2
+            elif metric == "interval":
+                val = float(c - k) ** 2
+            elif metric == "ratio":
+                val = ((c - k) / (c + k)) ** 2 if (c + k) != 0 else 0.0
+            else:  # pragma: no cover — guarded by the caller
+                raise ValueError(f"unknown alpha metric: {metric}")
+            d2[(c, k)] = d2[(k, c)] = val
+    return d2
+
+
+def _krippendorff_alpha(
+    units: list[list[int | None]], metric: str = "nominal",
+) -> float | None:
+    """Krippendorff's α, n coders, missing-data tolerant.
 
     Builds the coincidence matrix the canonical way (each unit with m≥2 present
-    values contributes 1/(m-1) per ordered value pair), then α = 1 − (n−1)·Σ_{c≠k}
-    o_ck / Σ_{c≠k} n_c·n_k. Reproduces ``irr::kripp.alpha(method="nominal")``.
+    values contributes 1/(m-1) per ordered value pair), then
+    α = 1 − (n−1)·Σ_{c,k} o_ck·δ²_ck / Σ_{c,k} n_c·n_k·δ²_ck with the metric's
+    difference function δ² (nominal: 1 for c≠k). Reproduces
+    ``irr::kripp.alpha(method=metric)`` for numeric data. Non-nominal metrics
+    require numeric values; ratio additionally requires non-negative values.
+
+    The binary presence/absence IRR surfaces use the nominal default; the metric
+    generalization is the designed extension point for ordinal/interval magnitude
+    ratings (#35) and the v1.4 honest-ICR arc.
     """
-    o: dict[tuple[int, int], float] = defaultdict(float)
+    o: dict[tuple, float] = defaultdict(float)
     for row in units:
         present = [v for v in row if v is not None]
         m = len(present)
@@ -106,13 +148,19 @@ def _krippendorff_alpha(units: list[list[int | None]]) -> float | None:
     if not o:
         return None  # no unit had ≥2 raters → α undefined
 
-    n_c: dict[int, float] = defaultdict(float)
+    n_c: dict = defaultdict(float)
     for (c, _k), val in o.items():
         n_c[c] += val
     n = sum(n_c.values())
-    do_num = sum(val for (c, k), val in o.items() if c != k)
-    values = list(n_c)
-    de_num = sum(n_c[c] * n_c[k] for c in values for k in values if c != k)
+    if metric == "nominal":
+        do_num = sum(val for (c, k), val in o.items() if c != k)
+        values = list(n_c)
+        de_num = sum(n_c[c] * n_c[k] for c in values for k in values if c != k)
+    else:
+        values = sorted(n_c)
+        d2 = _delta_squared_table(metric, values, n_c)
+        do_num = sum(val * d2[(c, k)] for (c, k), val in o.items())
+        de_num = sum(n_c[c] * n_c[k] * d2[(c, k)] for c in values for k in values)
     if de_num == 0:
         return 1.0  # only one value observed anywhere → no possible disagreement
     return 1.0 - (n - 1) * do_num / de_num

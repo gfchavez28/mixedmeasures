@@ -6,7 +6,7 @@ import { Search, X, Filter, Merge, Play, Pause, Quote, Users } from 'lucide-reac
 import { useDroppable } from '@dnd-kit/core'
 import { Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
-import { type Segment, type Code, type Coder, type Speaker, type Conversation, audioApi } from '@/lib/api'
+import { type Segment, type Code, type Coder, type Speaker, type Conversation, mediaApi } from '@/lib/api'
 import type { FloatingCoords } from '@/lib/floating-utils'
 import { getSpeakerInitials } from '@/lib/conversation-import-utils'
 import { useTextSplitSelection } from '@/hooks/useTextSplitSelection'
@@ -15,6 +15,7 @@ import { usePlayback } from '@/hooks/usePlayback'
 import SegmentRow from './SegmentRow'
 import SplitToolbar from './SplitToolbar'
 import TimelineScrubber from './TimelineScrubber'
+import VideoPane, { type VideoPaneHandle } from './VideoPane'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import CoderFilterPopover from '@/components/CoderFilterPopover'
 import { Button } from '@/components/ui/button'
@@ -97,6 +98,14 @@ const transcriptComponents: Components<Segment, TranscriptListContext> = {
   },
 }
 
+/** Imperative playback surface exposed to the workbench (Space shortcut +
+ * the Escape overlay layer for video theater/PiP). */
+export interface PlaybackHandle {
+  togglePlayback: () => void
+  /** Exit video theater/PiP back to the docked size. True if an overlay was exited. */
+  exitVideoOverlay: () => boolean
+}
+
 interface TranscriptPanelProps {
   segments: Segment[]
   allSegments: Segment[]
@@ -176,7 +185,7 @@ interface TranscriptPanelProps {
   /** Conversation metadata — used for audio playback sync */
   conversation?: Conversation
   /** Ref for parent to access togglePlayback */
-  playbackRef?: RefObject<{ togglePlayback: () => void } | null>
+  playbackRef?: RefObject<PlaybackHandle | null>
 }
 
 const HEADER_HEIGHT = 40
@@ -287,38 +296,53 @@ export default function TranscriptPanel({
   const searchInputRef = useRef<HTMLInputElement>(null)
   const searchResultsRef = useRef<HTMLDivElement>(null)
 
-  // Audio element ref for real audio playback
-  const audioRef = useRef<HTMLAudioElement>(null)
-  const hasAudio = conversation?.media_type === 'audio' && !!conversation?.media_filename
+  // Media element ref for real playback — the hidden <audio> element for
+  // audio conversations, the VideoPane's <video> for video ones. One ref,
+  // exactly one element mounted at a time; usePlayback drives whichever it is.
+  const mediaElementRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null)
+  const isVideo = conversation?.media_type === 'video'
+  // Wrapper around the docked VideoPane — measured (ResizeObserver) so the
+  // Virtuoso height math can subtract whatever the pane currently occupies.
+  const videoPaneWrapRef = useRef<HTMLDivElement>(null)
+  const videoPaneHandleRef = useRef<VideoPaneHandle>(null)
 
-  // Playback state (Item 62) — extracted to usePlayback hook
+  // Playback state (Item 62) — extracted to usePlayback hook. The playback
+  // gate (hasPlayableMedia) comes FROM the hook — single-sourced in
+  // lib/playback-utils::isPlayableMedia — never re-derive it here.
   const {
     isPlaying,
     playbackSpeed,
     currentPlaybackTime,
     segmentsWithTime,
+    hasPlayableMedia,
     togglePlayback,
     cyclePlaybackSpeed,
     handleTimeSeek,
-    isAudioReady,
+    isMediaReady,
     isBuffering,
-    audioError,
-  } = usePlayback({ segments, selectedSegments, onSelectionChange, audioRef, conversation })
+    mediaError,
+  } = usePlayback({ segments, selectedSegments, onSelectionChange, mediaRef: mediaElementRef, conversation })
 
-  // Show toast on audio error
+  // Show toast on media error
   useEffect(() => {
-    if (audioError) toast.error(audioError)
-  }, [audioError])
+    if (mediaError) toast.error(mediaError)
+  }, [mediaError])
 
-  // Expose togglePlayback to parent (for Space shortcut)
+  // Expose the playback handle to the parent: Space shortcut + the Escape
+  // overlay layer (video theater/PiP exit — routed through the workbench's
+  // single keydown listener, never a second one here).
   useEffect(() => {
     if (playbackRef) {
+      const handle: PlaybackHandle = {
+        togglePlayback,
+        exitVideoOverlay: () => videoPaneHandleRef.current?.exitOverlay() ?? false,
+      }
       // eslint-disable-next-line react-hooks/immutability -- imperative ref handle assignment in effect
-      (playbackRef as React.MutableRefObject<{ togglePlayback: () => void } | null>).current = { togglePlayback }
+      ;(playbackRef as React.MutableRefObject<PlaybackHandle | null>).current = handle
     }
     return () => {
       if (playbackRef) {
-        (playbackRef as React.MutableRefObject<{ togglePlayback: () => void } | null>).current = null
+        (playbackRef as React.MutableRefObject<PlaybackHandle | null>).current = null
       }
     }
   }, [togglePlayback, playbackRef])
@@ -326,21 +350,35 @@ export default function TranscriptPanel({
   useEffect(() => {
     const updateHeight = () => {
       if (containerRef.current) {
-        setContainerHeight(containerRef.current.clientHeight - HEADER_HEIGHT)
+        // The docked video pane (when present) shares the column — subtract
+        // its current in-flow height (collapsed bar, S/M/L, theater all
+        // report through offsetHeight; the PiP floating well is fixed-position
+        // and costs only its placeholder bar).
+        const paneHeight = videoPaneWrapRef.current?.offsetHeight ?? 0
+        setContainerHeight(containerRef.current.clientHeight - HEADER_HEIGHT - paneHeight)
       }
     }
 
     updateHeight()
     window.addEventListener('resize', updateHeight)
 
+    // Track pane size changes (S/M/L/theater/collapse) without coupling to
+    // the pane's internal state. Guarded: jsdom has no ResizeObserver.
+    let observer: ResizeObserver | null = null
+    if (typeof ResizeObserver !== 'undefined' && videoPaneWrapRef.current) {
+      observer = new ResizeObserver(updateHeight)
+      observer.observe(videoPaneWrapRef.current)
+    }
+
     // Also update after a short delay to account for layout shifts
     const timeout = setTimeout(updateHeight, 100)
 
     return () => {
       window.removeEventListener('resize', updateHeight)
+      observer?.disconnect()
       clearTimeout(timeout)
     }
-  }, [])
+  }, [isVideo, hasPlayableMedia])
 
   // Auto-scroll to selected segment when selection changes (for keyboard navigation)
   // Issue 119: Skip auto-scroll for mouse clicks (segment is already visible)
@@ -627,12 +665,31 @@ export default function TranscriptPanel({
     listRef.current.scrollToIndex({ index, behavior: 'auto', align: 'start' })
   }, [segments.length])
 
-  // Show controls when segments have timestamps OR when audio is attached (play/pause only)
-  const showPlaybackControls = segmentsWithTime.length > 0 || hasAudio
-  // Disabled while audio metadata is still loading AND when audio errored —
+  // Transcript-domain playhead for the scrubbers (toolbar + video pane).
+  const scrubberCurrentTime =
+    isPlaying && currentPlaybackTime !== null
+      ? currentPlaybackTime
+      : selectedSegments.length > 0
+        ? segments.find(s => s.id === selectedSegments[0])?.start_time ?? null
+        : null
+
+  // Scrubber seek + scroll-to-segment (shared by the toolbar scrubber and
+  // the video pane's transport).
+  const handleScrubTimeChange = useCallback((time: number) => {
+    const result = handleTimeSeek(time)
+    if (result && listRef.current) {
+      listRef.current.scrollToIndex({ index: result.segmentIndex, behavior: 'auto', align: 'center' })
+    }
+  }, [handleTimeSeek])
+
+  // Show controls when segments have timestamps OR when playable media is attached (play/pause only).
+  // For VIDEO the toolbar scrubber-portal slot stays EMPTY — the pane's
+  // transport strip owns play/seek/speed (mockup note 6). Audio unchanged.
+  const showPlaybackControls = (segmentsWithTime.length > 0 || hasPlayableMedia) && !isVideo
+  // Disabled while media metadata is still loading AND when media errored —
   // a file the browser can't decode must not present a clickable-but-dead
   // play button (clicking would just re-error).
-  const playButtonDisabled = hasAudio && (!isAudioReady || !!audioError)
+  const playButtonDisabled = hasPlayableMedia && (!isMediaReady || !!mediaError)
 
   const scrubberControls = showPlaybackControls ? (
     <>
@@ -644,11 +701,11 @@ export default function TranscriptPanel({
         disabled={playButtonDisabled}
         aria-label={
           isBuffering ? 'Buffering audio' :
-          isPlaying ? (hasAudio ? 'Pause audio' : 'Pause transcript') :
-          (hasAudio ? 'Play audio (Space)' : 'Play transcript (Space)')
+          isPlaying ? (hasPlayableMedia ? 'Pause audio' : 'Pause transcript') :
+          (hasPlayableMedia ? 'Play audio (Space)' : 'Play transcript (Space)')
         }
         title={
-          audioError ? 'Audio unavailable — this codec can’t play in-browser' :
+          mediaError ? 'Audio unavailable — this codec can’t play in-browser' :
           playButtonDisabled ? 'Loading audio...' :
           isPlaying ? 'Pause (Space)' : 'Play (Space)'
         }
@@ -664,19 +721,8 @@ export default function TranscriptPanel({
       {segmentsWithTime.length > 0 && (
         <TimelineScrubber
           segments={allSegments}
-          currentTime={
-            isPlaying && currentPlaybackTime !== null
-              ? currentPlaybackTime
-              : selectedSegments.length > 0
-                ? segments.find(s => s.id === selectedSegments[0])?.start_time ?? null
-                : null
-          }
-          onTimeChange={(time) => {
-            const result = handleTimeSeek(time)
-            if (result && listRef.current) {
-              listRef.current.scrollToIndex({ index: result.segmentIndex, behavior: 'auto', align: 'center' })
-            }
-          }}
+          currentTime={scrubberCurrentTime}
+          onTimeChange={handleScrubTimeChange}
           onPositionChange={handleScrubberPositionChange}
           mediaDuration={conversation?.media_duration_seconds}
           isVbr={conversation?.media_is_vbr === true}
@@ -697,11 +743,42 @@ export default function TranscriptPanel({
 
   return (
     <div ref={containerRef} className="h-full flex flex-col">
-      {/* Hidden audio element for real audio playback */}
-      {hasAudio && conversation && projectId && (
+      {/* Video pane (Layout A: docked at the top of the transcript column).
+        * Mounts the <video> element into the shared media ref. */}
+      {isVideo && hasPlayableMedia && conversation && projectId && (
+        <div ref={videoPaneWrapRef} className="flex-shrink-0">
+          {/* key: remount per conversation — fresh persisted size, fresh
+            * <video> src, theater/PiP state drops (they never persist) */}
+          <VideoPane
+            key={conversationId}
+            ref={videoPaneHandleRef}
+            projectId={projectId}
+            conversationId={conversationId}
+            mediaRef={mediaElementRef}
+            segments={allSegments}
+            mediaDuration={conversation.media_duration_seconds}
+            isVbr={conversation.media_is_vbr === true}
+            isPlaying={isPlaying}
+            isMediaReady={isMediaReady}
+            isBuffering={isBuffering}
+            mediaError={mediaError}
+            currentTime={scrubberCurrentTime}
+            playbackSpeed={playbackSpeed}
+            onTogglePlayback={togglePlayback}
+            onCycleSpeed={cyclePlaybackSpeed}
+            onTimeChange={handleScrubTimeChange}
+            onPositionChange={handleScrubberPositionChange}
+          />
+        </div>
+      )}
+
+      {/* Hidden audio element for real audio playback (video mounts the
+        * pane's <video> instead; the gate is the shared isPlayableMedia
+        * predicate, the element choice is media_type) */}
+      {!isVideo && hasPlayableMedia && conversation && projectId && (
         <audio
-          ref={audioRef}
-          src={audioApi.getStreamUrl(projectId, conversationId)}
+          ref={mediaElementRef as RefObject<HTMLAudioElement>}
+          src={mediaApi.getStreamUrl(projectId, conversationId)}
           preload="metadata"
         />
       )}

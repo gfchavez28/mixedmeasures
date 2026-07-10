@@ -15,6 +15,10 @@ export interface DatasetColumnPreview {
   suggested_type: string
   suggested_scale_name: string | null
   suggested_scale_labels: string[] | null
+  /** #28: SPSS .sav only — the codes an ordinal scale's labels actually carry
+   *  (may be 0-based or gapped), parallel to suggested_scale_labels. Null for
+   *  every other format, which keeps the positional 1..N encoding. */
+  suggested_scale_values: number[] | null
   suggested_scale_unmatched: string[] | null
   suggested_column_code: string | null
   suggested_group_code: string | null
@@ -43,6 +47,8 @@ export interface DatasetColumnConfig {
   group_code: string | null
   group_label: string | null
   scale_labels: string[] | null
+  /** #28: parallel to scale_labels; preserves an SPSS scale's own codes. */
+  scale_values?: number[] | null
   demographic_subtype?: string | null
 }
 
@@ -53,6 +59,21 @@ export interface DatasetImportConfig {
   column_configs: DatasetColumnConfig[]
   /** .xlsx uploads only (#523): which worksheet to import (omit = first sheet). */
   sheet_name?: string | null
+  /** #414: column_index of the identifier column to link rows to Participants
+   *  by. Omit/null = no linking. Index 0 is valid — check `!= null`. */
+  participant_link_column_index?: number | null
+}
+
+/** #414: what import-time / append / retro participant linking did. */
+export interface ParticipantLinkReport {
+  linked: number
+  created: number
+  matched: number
+  skipped_missing: number
+  skipped_duplicate: number
+  skipped_conflict: number
+  already_linked: number
+  duplicate_values: string[]
 }
 
 export interface DatasetImportResponse {
@@ -64,6 +85,8 @@ export interface DatasetImportResponse {
   // analysis per #381/#384. Disclosed on the import results screen.
   recognized_missing_count: number
   recognized_missing_labels: string[]
+  /** #414: present iff the request asked for participant linking. */
+  participant_link_report?: ParticipantLinkReport | null
 }
 
 export interface Dataset {
@@ -331,6 +354,9 @@ export interface DatasetAppendPreviewResponse {
   row_pad_width: number
   /** .xlsx uploads only (#523). */
   sheet_names?: string[] | null
+  /** #414 (DEC-7): offered when the dataset has exactly one identifier column
+   *  and this file matched it. */
+  participant_link_column?: { column_id: number; column_text: string } | null
 }
 
 export interface DatasetAppendResponse {
@@ -339,6 +365,8 @@ export interface DatasetAppendResponse {
   duplicates_skipped: number
   batch_id: string
   next_row_id: string
+  /** #414: present iff the request asked for participant linking. */
+  participant_link_report?: ParticipantLinkReport | null
 }
 
 // Project-wide column types
@@ -468,11 +496,18 @@ export const datasetsApi = {
       { headers: { 'Content-Type': 'multipart/form-data' } },
     ).then(res => res.data)
   },
+  linkByColumn: (projectId: number, datasetId: number, columnId: number) =>
+    api.post<ParticipantLinkReport>(
+      `/projects/${projectId}/datasets/${datasetId}/link-by-column`,
+      { column_id: columnId }
+    ).then(res => res.data),
   appendImport: (projectId: number, datasetId: number, file: File, config: {
     column_mapping: Array<{ csv_column_index: number; column_id: number }>
     skip_duplicates: boolean
     row_start_id?: string | null
     sheet_name?: string | null
+    /** #414 (DEC-7): identifier column id to link the NEW rows by. */
+    participant_link_column_id?: number | null
   }, encoding = 'utf-8') => {
     const formData = new FormData()
     formData.append('file', file)

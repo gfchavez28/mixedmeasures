@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Sun, Moon, Monitor, Download, FileInput, ChevronDown, ChevronUp, LoaderCircle, ArrowLeft, Clock, Info, Lock, Unlock, Archive, ArchiveRestore, UserPlus } from 'lucide-react'
+import { Sun, Moon, Monitor, Download, FileInput, ChevronDown, ChevronUp, LoaderCircle, ArrowLeft, Clock, Info, Lock, Unlock, Archive, ArchiveRestore, UserPlus, Copy, Quote } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuth } from '@/lib/auth-context'
 import { useTheme, type ThemeMode } from '@/lib/theme-context'
@@ -9,6 +9,7 @@ import { authApi, backupApi, type RestorePreview } from '@/lib/api'
 import { formatRelativeTime, formatBytes } from '@/lib/format'
 import MMLogo from '@/components/MMLogo'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -29,6 +30,7 @@ import { useCoderSwitch } from '@/hooks/useCoderSwitch'
 import { useCreateCoder } from '@/hooks/useCreateCoder'
 import { coderColor, coderInitials } from '@/lib/coder-color'
 import { getContrastColor } from '@/lib/utils'
+import { apaCitation, bibtexCitation, CITATION_LICENSE } from '@/lib/citation'
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
   { value: 'light', label: 'Light', icon: Sun },
@@ -111,8 +113,85 @@ export default function SettingsPage() {
 
         {/* Coder identity */}
         <CoderIdentitySection />
+
+        {/* About & citation */}
+        <AboutSection />
       </main>
     </div>
+  )
+}
+
+function AboutSection() {
+  // The citability trust move: researchers who use the tool in published work need a
+  // reference, and the version they used is part of it. Both formats are copyable —
+  // APA for a manuscript, BibTeX for a reference manager. Strings come from
+  // `lib/citation.ts`; the version/date are build-time defines, never hardcoded here.
+  const version = __APP_VERSION__
+  const releaseDate = __APP_RELEASE_DATE__
+  const apa = apaCitation(version, releaseDate)
+  const bibtex = bibtexCitation(version, releaseDate)
+
+  const copy = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      toast.success(`${label} citation copied`)
+    } catch {
+      toast.error(`Could not copy the ${label} citation.`)
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-mm-surface-border bg-mm-surface shadow-mm-card p-4">
+      <h2 className="text-base font-semibold text-mm-text mb-1">About & citation</h2>
+      <p className="text-sm text-mm-text-muted">
+        Mixed Measures {version} · {CITATION_LICENSE} · released{' '}
+        {new Date(`${releaseDate}T00:00:00`).toLocaleDateString(undefined, {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        })}
+      </p>
+
+      <div className="mt-3 pt-3 border-t border-mm-border-subtle">
+        <div className="flex items-start gap-3">
+          <Quote className="w-4 h-4 mt-0.5 shrink-0 text-mm-text-muted" aria-hidden="true" />
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-mm-text">Cite Mixed Measures</p>
+            <p className="text-sm text-mm-text-muted mt-0.5">
+              If you use Mixed Measures in published work, please cite the version you
+              analyzed with — it is part of what makes your analysis reproducible.
+            </p>
+          </div>
+        </div>
+
+        <p className="mt-3 rounded-md border border-mm-border-subtle bg-mm-bg px-3 py-2 text-xs leading-relaxed text-mm-text break-words">
+          {apa}
+        </p>
+
+        {/* #546: BibTeX renders on screen too — in a non-secure context (plain-http
+            LAN deploy) navigator.clipboard is undefined, and a copy-only BibTeX
+            would be unreachable. Rendered text keeps manual select-and-copy as the
+            fallback; the buttons are the convenience. */}
+        <pre className="mt-2 rounded-md border border-mm-border-subtle bg-mm-bg px-3 py-2 text-xs leading-relaxed text-mm-text overflow-x-auto">
+          {bibtex}
+        </pre>
+
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => void copy(apa, 'APA')}>
+            <Copy className="w-4 h-4" />
+            Copy APA
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void copy(bibtex, 'BibTeX')}
+          >
+            <Copy className="w-4 h-4" />
+            Copy BibTeX
+          </Button>
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -200,6 +279,7 @@ function BackupSection() {
   const [restoreFile, setRestoreFile] = useState<File | null>(null)
   const [restorePreview, setRestorePreview] = useState<RestorePreview | null>(null)
   const [showHistory, setShowHistory] = useState(false)
+  const [includeVideo, setIncludeVideo] = useState(true)
 
   const { data: status } = useQuery({
     queryKey: ['backup-status'],
@@ -332,11 +412,13 @@ function BackupSection() {
           <PopoverContent align="start" className="text-sm text-mm-text-secondary leading-relaxed max-w-xs">
             <p className="font-medium text-mm-text mb-1">Saved vs. backed up</p>
             Every edit is saved to disk the moment you make it — your work isn't waiting in
-            memory anywhere. Backups are a separate safety net: Mixed Measures takes a full
-            snapshot of the project's database, documents, and media every 4 hours, keeping
+            memory anywhere. Backups are a separate safety net: Mixed Measures takes a
+            snapshot of the database, documents, and audio every 4 hours, keeping
             the 5 most recent so you can recover from disk corruption or accidental deletion.
-            Use <span className="font-medium text-mm-text">Backup now</span> before a big change
-            for an extra fresh snapshot.
+            Video recordings are excluded from these automatic snapshots to keep them small
+            — restoring never deletes video already on disk, and a downloaded backup can
+            include video. Use <span className="font-medium text-mm-text">Backup now</span>{' '}
+            before a big change for an extra fresh snapshot.
           </PopoverContent>
         </Popover>
       </p>
@@ -389,7 +471,7 @@ function BackupSection() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => createMutation.mutate()}
+          onClick={() => createMutation.mutate(includeVideo)}
           disabled={createMutation.isPending}
         >
           {createMutation.isPending ? (
@@ -399,6 +481,17 @@ function BackupSection() {
           )}
           {createMutation.isPending ? 'Creating...' : 'Download Backup'}
         </Button>
+
+        {/* Slab 5: downloads default to FULL (video included); the auto
+          * rotation above is always video-less. */}
+        <label className="flex items-center gap-1.5 text-xs text-mm-text-secondary cursor-pointer select-none">
+          <Checkbox
+            checked={includeVideo}
+            onCheckedChange={(v) => setIncludeVideo(v === true)}
+            aria-label="Include video recordings in the downloaded backup"
+          />
+          Include video
+        </label>
 
         <Button
           variant="outline"

@@ -29,6 +29,42 @@ def _parse_exclude_values(definition: RecodeDefinition) -> list[str]:
         return []
 
 
+def mapping_numeric_values(mapping: dict) -> list[float]:
+    """The numeric SUBSET of a mapping's values — what reverse scoring reflects
+    about.
+
+    Single-sourced (#542b): non-floatable values in a mixed mapping are skipped
+    PER VALUE, never allowed to abort the collection. `compute_value` previously
+    built this in one list comprehension inside a try, so one stray non-numeric
+    mapping value silently returned every other value un-reversed — while
+    `apply_definition_to_column` filtered per value and reversed the numeric
+    subset. Same input, two results, depending on which path computed the cell.
+    """
+    out: list[float] = []
+    for v in mapping.values():
+        try:
+            out.append(float(v))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def reverse_offset(scale_values: list[float]) -> float:
+    """The reflection offset for reverse scoring: ``min + max``.
+
+    Reverse-scoring reflects a value about the scale's midpoint, so the reversed
+    value is ``(min + max) - v``. For any 1..N scale min is 1, making this exactly
+    the historical ``(max + 1) - v`` — every existing dataset is unaffected. It is
+    the general form that also stays inside the scale for a 0-based or offset
+    scale, which SPSS imports can produce (#28); ``(max + 1) - v`` would map 0..3
+    onto 1..4 and shift every mean.
+
+    Single-sourced: both the per-value path (`compute_value`) and the bulk UPDATE
+    path (`apply_definition_to_column`) must reverse identically.
+    """
+    return min(scale_values) + max(scale_values)
+
+
 def compute_value(
     value_text: str,
     definition: RecodeDefinition,
@@ -52,16 +88,17 @@ def compute_value(
     lower_map = {k.lower(): v for k, v in mapping.items()}
     result = lower_map.get(value_text.strip().lower())
 
-    # Reverse recode: map to numeric first, then reverse
+    # Reverse recode: map to numeric first, then reflect about the scale midpoint.
     if result is not None and definition.recode_type == RecodeType.REVERSE:
         try:
             numeric_val = float(result)
-            all_numeric = [float(v) for v in mapping.values() if v is not None]
-            if all_numeric:
-                scale_max = max(all_numeric)
-                result = (scale_max + 1) - numeric_val
         except (ValueError, TypeError):
-            pass
+            # The bulk path treats a non-numeric mapping value as unmapped
+            # (NULL + a warning) — mirror it, never return the raw value (#542b).
+            return None
+        all_numeric = mapping_numeric_values(mapping)
+        if all_numeric:
+            result = reverse_offset(all_numeric) - numeric_val
 
     return result
 
@@ -84,17 +121,14 @@ def apply_definition_to_column(
     # Build case-insensitive mapping
     lower_map = {k.lower(): v for k, v in mapping.items()}
 
-    # For REVERSE type, compute scale_max from mapping values
+    # For REVERSE type, precompute the reflection offset from the mapping values.
+    # Same collection as `compute_value` (#542b) — the two paths must reverse
+    # identically or one cell gets two different numbers.
     is_reverse = (definition.recode_type == RecodeType.REVERSE)
-    reverse_max = 0.0
+    rev_offset = 0.0
     if is_reverse:
-        all_numeric = []
-        for v in lower_map.values():
-            try:
-                all_numeric.append(float(v))
-            except (ValueError, TypeError):
-                pass
-        reverse_max = max(all_numeric) if all_numeric else 0.0
+        all_numeric = mapping_numeric_values(mapping)
+        rev_offset = reverse_offset(all_numeric) if all_numeric else 0.0
 
     # Get all distinct value_text for this column
     distinct_values = (
@@ -123,7 +157,7 @@ def apply_definition_to_column(
             try:
                 numeric_val = float(lower_map[lower_val])
                 if is_reverse:
-                    numeric_val = (reverse_max + 1) - numeric_val
+                    numeric_val = rev_offset - numeric_val
                 whens.append((func.lower(func.trim(DatasetValue.value_text)) == lower_val, numeric_val))
             except (ValueError, TypeError):
                 logger.warning("Non-numeric recode mapping value for '%s': %s", lower_val, lower_map[lower_val])
@@ -229,13 +263,19 @@ def get_unmapped_values(
     return [val for (val,) in distinct_values if val.strip().lower() not in known_lower]
 
 
-def clear_value_numeric(db: Session, column_id: int) -> int:
-    """Bulk UPDATE SET value_numeric = NULL for all values of a column."""
-    return (
-        db.query(DatasetValue)
-        .filter(DatasetValue.column_id == column_id)
-        .update(
-            {DatasetValue.value_numeric: None},
-            synchronize_session="fetch",
-        )
+def clear_value_numeric(
+    db: Session, column_id: int, row_ids: list[int] | None = None
+) -> int:
+    """Bulk UPDATE SET value_numeric = NULL for a column's values.
+
+    ``row_ids`` scopes the clear to specific rows — the append path (#538) uses
+    this to keep NEW rows consistent with a category_group-primary column whose
+    existing values were already cleared.
+    """
+    query = db.query(DatasetValue).filter(DatasetValue.column_id == column_id)
+    if row_ids is not None:
+        query = query.filter(DatasetValue.row_id.in_(row_ids))
+    return query.update(
+        {DatasetValue.value_numeric: None},
+        synchronize_session="fetch",
     )

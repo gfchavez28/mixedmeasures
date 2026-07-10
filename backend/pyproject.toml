@@ -1,7 +1,9 @@
-[project]
-name = "mixed-measures-backend"
-version = "1.0.0"
-requires-python = ">=3.12"
+# This file exists to host tool configuration. It deliberately declares NO
+# [project] packaging metadata: the backend ships via PyInstaller (never pip),
+# and a `version` here sat two releases stale outside the version guard (#545).
+# If packaging metadata is ever reintroduced, its version becomes a shipping
+# site — wire it into backend/tests/test_version_agreement.py AND the
+# RELEASING.md version table (a tripwire test there enforces this).
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

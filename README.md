@@ -69,15 +69,35 @@ mean anything is wrong:
 ## What it does
 
 ### Bring data in
-- **Datasets** — import survey/quantitative data from **CSV**, with automatic
-  column-type detection (Likert/scale, numeric, percentage, binary, categorical),
-  scale-pattern recognition, and N/A / refusal-label handling. Append additional
-  rows from another CSV.
+- **Datasets** — import survey/quantitative data from **CSV, Excel (`.xlsx`), or
+  SPSS (`.sav`)**, with automatic column-type detection (Likert/scale, numeric,
+  percentage, binary, categorical), scale-pattern recognition, and N/A / refusal-label
+  handling. SPSS files bring their own value labels, scale order, and user-missing
+  codes, so an ordinal variable arrives with the order and codes it was recorded
+  with rather than a guess. Append additional rows from another file.
 - **Documents** — import **`.docx`, `.pdf`, and `.txt`** files; they're
   auto-segmented (with page numbers and headings) for coding.
 - **Conversations** — import transcripts as **CSV** (speaker- and timestamp-aware,
-  e.g. exports from common transcription tools), with optional **audio** (`.mp3`,
-  `.m4a`, `.wav`) attached for synchronized playback while you code.
+  e.g. exports from common transcription tools) or as **VTT/SRT subtitle files**
+  (Zoom and Teams transcript exports import directly), with an optional
+  **recording** attached for synchronized playback while you code.
+
+### Work with recordings (audio & video)
+- Attach **audio** (`.mp3`, `.m4a`, `.wav`) or **video** (`.mp4`, `.mov`, `.webm`)
+  to any conversation. Video docks above the transcript in a resizable pane
+  (small/medium/large, a temporary theater mode, and a floating mini-player) —
+  the transcript stays primary: click a row to seek, and the playhead follows
+  the active segment as it plays. Playback speed runs 0.5×–2× with pitch
+  preserved.
+- **Zoom:** cloud recordings download as an MP4 plus a speaker-labeled `.vtt`
+  transcript — import the `.vtt` as a conversation, then attach the MP4.
+- **No transcript?** (Zoom *local* recordings don't produce one.) Free offline
+  transcription tools such as [aTrain](https://github.com/JuergenFleiss/aTrain)
+  export `.srt` files you can import directly; speakers can be assigned to
+  segments after import. Recordings never leave your machine either way.
+- **Codec note:** the player decodes H.264/AAC MP4, MOV, and WebM (VP8/VP9).
+  HEVC video (the iPhone camera default) uploads but won't play in-app —
+  re-export it as H.264 (most tools call this "MP4 (H.264)").
 
 ### Code and analyze qualitatively
 - Three coding surfaces — for **conversations**, **documents**, and **open-ended
@@ -88,8 +108,8 @@ mean anything is wrong:
 - **Participants** and **speakers** form a shared cross-source identity spine, so a
   person links across their survey record and their interview.
 - Qualitative analysis: code frequencies, **co-occurrence**, a **thematic
-  saturation curve**, group comparisons of code frequency, and a force-directed
-  **codebook network** view.
+  saturation curve**, group comparisons of code frequency, and a **codebook
+  treemap** overview.
 
 ### Analyze quantitatively
 - Descriptives (means, SDs, frequencies, proportions).
@@ -245,7 +265,12 @@ guidance, and dependency policy.
 Qualitative coding is irreplaceable manual work, so the app keeps several backup
 mechanisms: automatic pre-migration backups, periodic auto-backups, and
 user-triggered `.mmbackup` archives (database + documents + media) with a
-validate-and-preview restore flow. Back up regularly, and keep a copy off the
+validate-and-preview restore flow. Periodic auto-backups exclude **video**
+recordings so a multi-gigabyte project doesn't multiply across the backup
+rotation — downloaded backups can include video, and restoring never deletes
+video files already on disk. Project exports (`.mmproject`) can likewise
+include or exclude recordings; a media-less archive re-imports cleanly with
+recordings re-attachable. Back up regularly, and keep a copy off the
 working machine.
 
 ## License
@@ -260,7 +285,24 @@ independent tool** before relying on them in deliverables or decisions.
 
 "Mixed Measures" is used as a common-law trademark of the project author.
 
+## Citing Mixed Measures
+
+If you use Mixed Measures in published work, please cite the version you analyzed
+with — it is part of what makes the analysis reproducible. GitHub renders a ready
+citation from [CITATION.cff](CITATION.cff) via **Cite this repository** in the
+sidebar, and the app itself offers copyable APA and BibTeX under
+**Settings → About & citation**.
+
 ## Contributing & security
 
 - Development setup and conventions: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Reporting a vulnerability: [SECURITY.md](SECURITY.md)
+
+### Support & expectations
+
+Mixed Measures is built and maintained by one person. Bug reports and feature
+requests belong in [Issues](https://github.com/gfchavez28/mixedmeasures/issues);
+questions, workflow help, and "is this a bug?" belong in
+[Discussions](https://github.com/gfchavez28/mixedmeasures/discussions). Expect a
+reply within a few business days — sometimes sooner, occasionally longer around
+a release. Security reports follow [SECURITY.md](SECURITY.md) and jump the queue.

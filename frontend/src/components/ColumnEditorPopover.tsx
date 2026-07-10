@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { SELECTED_SEGMENT } from '@/lib/selection'
-import { Trash2, FunctionSquare, RefreshCw, Settings2 } from 'lucide-react'
+import { Trash2, FunctionSquare, RefreshCw, Settings2, Users } from 'lucide-react'
 import {
   Popover,
   PopoverContent,
@@ -38,6 +38,9 @@ interface ColumnEditorPopoverProps {
   onDeleteColumn: (column: DatasetColumn) => void
   onEditComputed?: (column: DatasetColumn) => void
   onRecompute?: (column: DatasetColumn) => void
+  /** #414 (DEC-8): retro bulk-link — identifier columns only. Links unlinked
+   * rows by this column's values; never overwrites manual links. */
+  onLinkByColumn?: (column: DatasetColumn) => void
   // Context
   projectId: number
   datasetId: number
@@ -66,6 +69,7 @@ export function ColumnEditorPopover({
   onDeleteColumn,
   onEditComputed,
   onRecompute,
+  onLinkByColumn,
   projectId,
   datasetId,
   columnIndex,
@@ -393,6 +397,15 @@ export function ColumnEditorPopover({
           <>
             <div className="border-t my-2" />
             <div className="space-y-1">
+              {column.column_type === 'identifier' && onLinkByColumn && (
+                <button
+                  onClick={() => onLinkByColumn(column)}
+                  className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-mm-surface-hover text-mm-text-secondary flex items-center gap-1.5"
+                >
+                  <Users className="w-3 h-3" />
+                  Link rows to participants
+                </button>
+              )}
               <button
                 onClick={() => onOpenDetails(column)}
                 className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-mm-surface-hover text-mm-text-secondary flex items-center gap-1.5"

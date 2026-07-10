@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { formatBytes } from '@/lib/format'
 import { useNavigate } from 'react-router-dom'
 import { Quote, FileInput, ChevronRight, Layers, MessageSquareText, Package, Pencil, MessageSquare, Table2, FileText, BarChart3, Users, StickyNote } from 'lucide-react'
 import { projectsApi, projectPortabilityApi } from '@/lib/api'
@@ -80,6 +81,15 @@ export default function OverviewPage() {
       setExportingProject(false)
     }
   }, [projectId])
+
+  // Slab 5 storage visibility: on-disk footprint (media incl. video +
+  // documents). Same key as the export dialog → shared cache.
+  const { data: storage } = useQuery({
+    queryKey: ['project-storage', projectId],
+    queryFn: () => projectsApi.storage(projectId),
+    enabled: !!projectId,
+    staleTime: 60_000,
+  })
 
   const { data: summary, isLoading, isError } = useQuery({
     queryKey: ['project-summary', projectId],
@@ -263,6 +273,17 @@ export default function OverviewPage() {
               title="Saved canvases."
             />
           </div>
+          {/* Slab 5: on-disk footprint — multi-GB recordings made disk usage
+            * worth surfacing. Auto-backups exclude video (see Settings). */}
+          {storage && (storage.media_bytes > 0 || storage.documents_bytes > 0) && (
+            <p className="border-t border-mm-border-subtle px-3 py-1.5 text-[11px] text-mm-text-muted">
+              On disk: {formatBytes(storage.media_bytes)} recordings
+              {storage.video_bytes > 0 && (
+                <> ({formatBytes(storage.video_bytes)} video — excluded from automatic backups)</>
+              )}
+              {' · '}{formatBytes(storage.documents_bytes)} documents
+            </p>
+          )}
         </div>
       )}
 

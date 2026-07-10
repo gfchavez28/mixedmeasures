@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import logging
 import os
 import secrets
@@ -17,7 +18,7 @@ from .database import run_migrations, SessionLocal
 from .models.user import Session as SessionModel
 from slowapi.errors import RateLimitExceeded
 from starlette.responses import JSONResponse
-from .routers import auth, projects, conversations, segments, codes, coding, notes, memos, export, search, participants, dataset, recode, equivalence, code_equivalence, analysis_domains, crosswalk, metrics, materials, code_analysis, statistical_tests, text_coding, text_analysis, excerpts, all_notes, correlations, comparisons, scratchpad, data_quality, quote_board, codebook, documents, backup, project_portability, canvas, audio
+from .routers import auth, projects, conversations, segments, codes, coding, notes, memos, export, search, participants, dataset, recode, equivalence, code_equivalence, analysis_domains, crosswalk, metrics, materials, code_analysis, statistical_tests, text_coding, text_analysis, excerpts, all_notes, correlations, comparisons, scratchpad, data_quality, quote_board, codebook, documents, backup, project_portability, canvas, media
 
 
 def cleanup_expired_sessions():
@@ -51,8 +52,11 @@ async def _auto_backup_loop():
             backup_dir = get_backup_dir()
 
             if db_path.exists() and db_path.stat().st_size > 0:
+                # Auto rotation excludes video (slab 5 policy: 4h × 5-rotation
+                # would multiply multi-GB recordings; restore preserves them).
                 await asyncio.to_thread(
-                    create_backup, db_path, docs_dir, media_dir, backup_dir, "auto"
+                    create_backup, db_path, docs_dir, media_dir, backup_dir, "auto",
+                    False,  # include_video
                 )
                 await asyncio.to_thread(
                     cleanup_old_backups, backup_dir, "auto", settings.auto_backup_max_count
@@ -113,7 +117,7 @@ def _shutdown_backup():
         backup_dir = get_backup_dir()
 
         if db_path.exists() and db_path.stat().st_size > 0:
-            create_backup(db_path, docs_dir, media_dir, backup_dir, "auto")
+            create_backup(db_path, docs_dir, media_dir, backup_dir, "auto", include_video=False)
             cleanup_old_backups(backup_dir, "auto", settings.auto_backup_max_count)
             logger.info("Shutdown backup completed")
     except Exception as e:
@@ -196,7 +200,7 @@ _startup_settings = get_settings()
 app = FastAPI(
     title="Mixed Measures",
     description="Mixed-methods research analysis platform",
-    version="1.1.1",
+    version="1.2.0",
     lifespan=lifespan,
     docs_url="/docs" if _startup_settings.enable_api_docs else None,
     redoc_url="/redoc" if _startup_settings.enable_api_docs else None,
@@ -218,6 +222,25 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
 app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
 if _startup_settings.mm_database_path.startswith(":memory:"):
     auth.limiter.enabled = False
+
+
+async def _enospc_handler(request: Request, exc: OSError):
+    """Disk-full anywhere in request handling → 507, not a generic 500 (#544).
+
+    The media router's streaming copy already maps its own ENOSPC to 507, but
+    Starlette spools a multipart body to the OS temp dir BEFORE any endpoint
+    code runs — on a nearly-full disk that spool is the LIKELIER failure site,
+    and it surfaces here as a raw OSError. Everything else re-raises so
+    non-disk OSErrors keep their existing 500 path.
+    """
+    if exc.errno == errno.ENOSPC:
+        return JSONResponse(
+            status_code=507,
+            content={"detail": "Not enough disk space to save the upload."},
+        )
+    raise exc
+
+app.add_exception_handler(OSError, _enospc_handler)
 
 # CORS configuration
 _settings = get_settings()
@@ -377,7 +400,7 @@ app.include_router(backup.router)
 app.include_router(project_portability.router)
 app.include_router(canvas.router, prefix="/api/projects/{project_id}/canvases", tags=["canvases"])
 app.include_router(canvas.image_router, prefix="/api/projects/{project_id}/canvas-images", tags=["canvas-images"])
-app.include_router(audio.router, prefix="/api/projects/{project_id}/conversations/{conversation_id}/audio", tags=["audio"])
+app.include_router(media.router, prefix="/api/projects/{project_id}/conversations/{conversation_id}/media", tags=["media"])
 
 
 @app.get("/health")

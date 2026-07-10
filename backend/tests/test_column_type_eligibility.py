@@ -60,6 +60,19 @@ def test_str_enum_membership_property():
     assert "open_text" not in VALUE_NUMERIC_TYPES
 
 
+def test_identifier_is_in_no_eligibility_set():
+    """#414: IDENTIFIER is deliberately a member of NO eligibility set — not a
+    numeric operand, not scale-score eligible, not text (TEXT_TYPES), so every
+    analysis surface excludes it by absence. If someone adds it to any of these,
+    that's a design change, not a fix — see the #414 scoping doc DEC-1."""
+    from app.routers.helpers import TEXT_TYPES
+
+    assert ColumnType.IDENTIFIER not in VALUE_NUMERIC_TYPES
+    assert ColumnType.IDENTIFIER not in SCALE_SCORE_ELIGIBLE_TYPES
+    assert ColumnType.IDENTIFIER not in TEXT_TYPES
+    assert "identifier" not in VALUE_NUMERIC_TYPES  # str-enum hash property holds
+
+
 def test_call_sites_alias_the_canonical_objects():
     """Every numeric-eligibility site must reference the single source, not a
     private copy. Identity (`is`) proves no shadow definition snuck back in."""

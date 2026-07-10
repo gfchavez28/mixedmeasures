@@ -5,7 +5,7 @@
 
 export const COLUMN_TYPES = [
   'ordinal', 'nominal', 'binary', 'numeric', 'percentage',
-  'open_text', 'demographic', 'multi_select', 'skip',
+  'open_text', 'demographic', 'identifier', 'multi_select', 'skip',
 ] as const
 
 // ── Column-type eligibility sets — single source of truth (invariant I-D, #399) ──
@@ -39,6 +39,7 @@ export const TYPE_BADGE_CLASSES: Record<string, string> = {
   percentage: 'bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-200',
   open_text: 'bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-200',
   demographic: 'bg-teal-100 text-teal-700 dark:bg-teal-900/50 dark:text-teal-200',
+  identifier: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-200',
   multi_select: 'bg-pink-100 text-pink-700 dark:bg-pink-900/50 dark:text-pink-200',
   skip: 'bg-mm-bg text-mm-text-muted',
 }

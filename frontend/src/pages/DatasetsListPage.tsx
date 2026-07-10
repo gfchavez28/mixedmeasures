@@ -5,6 +5,7 @@ import { FileInput, ChevronRight, SlidersHorizontal, Pencil, Trash2, Palette, Pa
 import { datasetsApi, domainsApi, textCodingApi, extractApiError } from '@/lib/api'
 import { toast } from 'sonner'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
+import { isSupportedDatasetFile } from '@/lib/dataset-import-formats'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import InlineEditableText from '@/components/InlineEditableText'
@@ -106,9 +107,12 @@ export default function DatasetsListPage() {
       dragCounterRef.current = 0
       setIsDragOver(false)
       const droppedFiles = Array.from(e.dataTransfer.files)
-      const csvFiles = droppedFiles.filter(f => f.name.toLowerCase().endsWith('.csv'))
-      if (csvFiles.length === 0) return
-      setPendingImportFiles(csvFiles, 'dataset')
+      // #540: route through the single-source format gate — this filter was the
+      // one consumer the dataset-import-formats sweep missed, silently dropping
+      // .xlsx/.sav files that every other surface accepts.
+      const supportedFiles = droppedFiles.filter(f => isSupportedDatasetFile(f.name))
+      if (supportedFiles.length === 0) return
+      setPendingImportFiles(supportedFiles, 'dataset')
       navigate(`/projects/${projectId}/datasets/import`)
     },
   }), [projectId, navigate])

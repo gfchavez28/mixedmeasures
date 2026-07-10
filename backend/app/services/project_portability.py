@@ -72,7 +72,11 @@ from ..services.canvas import (
 
 logger = logging.getLogger(__name__)
 
-CURRENT_FORMAT_VERSION = 1
+# Version 2 (2026-07-06, #414): ColumnType gained "identifier". Older builds
+# constructing ColumnType("identifier") at import would crash mid-write with a
+# LookupError, so files exported from ≥2 must be refused cleanly by the gate
+# below rather than half-imported. Version-1 files still import (warning only).
+CURRENT_FORMAT_VERSION = 2
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
 
 
@@ -122,7 +126,13 @@ def _serialize_all(objects, columns: list[str]) -> list[dict]:
 
 # ── Export ──────────────────────────────────────────────────────────────
 
-def export_project(db: Session, project_id: int, docs_dir: Path, media_dir: Path | None = None) -> io.BytesIO:
+def export_project(
+    db: Session,
+    project_id: int,
+    docs_dir: Path,
+    media_dir: Path | None = None,
+    include_media: bool = True,
+) -> io.BytesIO:
     """Export a project as an in-memory .mmproject ZIP.
 
     Returns a BytesIO buffer containing the ZIP. Raises ValueError
@@ -436,16 +446,25 @@ def export_project(db: Session, project_id: int, docs_dir: Path, media_dir: Path
                     arcname = f"documents/{doc.id}/{file_path.relative_to(doc_dir)}"
                     zf.write(str(file_path), arcname)
 
-        # Add media files (audio per conversation)
+        # Add media files. Canvas images (media/{pid}/canvas/) are canvas
+        # CONTENT and always travel; conversation recordings (numeric dirs)
+        # are skipped when include_media=False — the media-less export.
+        # The import side clears the orphaned media_* metadata so the
+        # workbench shows a clean re-attach state, not a dead player (§8 of
+        # the video scoping doc). Recordings are already-compressed
+        # containers, so ZIP_STORED skips a pointless deflate pass.
         if media_dir is not None:
             project_media_dir = media_dir / str(project_id)
             if project_media_dir.is_dir():
                 for conv_id_dir in project_media_dir.iterdir():
-                    if conv_id_dir.is_dir():
-                        for file_path in conv_id_dir.rglob("*"):
-                            if file_path.is_file():
-                                arcname = f"media/{conv_id_dir.name}/{file_path.relative_to(conv_id_dir)}"
-                                zf.write(str(file_path), arcname)
+                    if not conv_id_dir.is_dir():
+                        continue
+                    if conv_id_dir.name != "canvas" and not include_media:
+                        continue
+                    for file_path in conv_id_dir.rglob("*"):
+                        if file_path.is_file():
+                            arcname = f"media/{conv_id_dir.name}/{file_path.relative_to(conv_id_dir)}"
+                            zf.write(str(file_path), arcname, compress_type=zipfile.ZIP_STORED)
 
     buf.seek(0)
     return buf
@@ -2153,6 +2172,28 @@ def import_project(
 
                     with zf.open(member) as src, open(target_path, "wb") as dst:
                         dst.write(src.read())
+
+        # Media-less archives (include_media=False exports, or trimmed files):
+        # clear orphaned media metadata for any conversation whose recording
+        # did not land on disk, so the workbench offers a clean "Attach
+        # Recording" state instead of a dead player (§8 iii — graceful
+        # degradation is the point of the media-less export). Stat-based, so
+        # merge-matched conversations whose local files exist are untouched.
+        if media_dir is not None:
+            for conv in (
+                db.query(Conversation)
+                .filter(Conversation.project_id == pid, Conversation.media_filename.isnot(None))
+                .all()
+            ):
+                expected = media_dir / str(pid) / str(conv.id) / f"original.{conv.media_format}"
+                if not expected.is_file():
+                    conv.media_filename = None
+                    conv.media_format = None
+                    conv.media_type = None
+                    conv.media_duration_seconds = None
+                    conv.media_offset_seconds = 0.0
+                    conv.media_is_vbr = None
+            db.flush()
 
     return pid, project_name
 

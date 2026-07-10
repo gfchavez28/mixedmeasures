@@ -47,8 +47,14 @@ export const backupApi = {
   list: () =>
     api.get<BackupInfo[]>('/backup/list').then(r => r.data),
 
-  create: () =>
-    api.post('/backup/create', null, { responseType: 'blob', timeout: 120_000 })
+  /** Manual download backup. includeVideo=false for a lighter archive —
+   * the auto rotation is always video-less (slab 5 policy). */
+  create: (includeVideo: boolean = true) =>
+    api.post('/backup/create', null, {
+      params: { include_video: includeVideo },
+      responseType: 'blob',
+      timeout: 300_000,
+    })
       .then(r => ({
         blob: r.data as Blob,
         filename: (r.headers['content-disposition']?.match(/filename="?([^"]+)"?/)?.[1])

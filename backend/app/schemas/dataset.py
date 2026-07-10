@@ -24,6 +24,10 @@ class DatasetColumnPreview(BaseModel):
     suggested_type: str
     suggested_scale_name: str | None = None
     suggested_scale_labels: list[str] | None = None
+    # #28: the codes an SPSS ordinal scale's labels actually carry (may be 0-based
+    # or gapped), parallel to suggested_scale_labels. None for every other format —
+    # the import then keeps the positional 1..N encoding.
+    suggested_scale_values: list[float] | None = None
     suggested_scale_unmatched: list[str] | None = None  # #364: stray values not in the scale
     suggested_column_code: str | None = None
     suggested_group_code: str | None = None
@@ -57,6 +61,9 @@ class DatasetColumnConfig(BaseModel):
     group_code: str | None = None
     group_label: str | None = None
     scale_labels: list[str] | None = None
+    # #28: parallel to scale_labels. Supplied by the .sav import path so an SPSS
+    # scale's own codes survive; omitted elsewhere → positional 1..N.
+    scale_values: list[float] | None = None
     demographic_subtype: str | None = None
 
 
@@ -67,6 +74,22 @@ class DatasetImportRequest(BaseModel):
     column_configs: list[DatasetColumnConfig]
     # .xlsx uploads only (#523): which worksheet to import (None = first sheet).
     sheet_name: str | None = None
+    # #414: column_index of the identifier column to link rows to Participants
+    # by (match-or-create on Participant.identifier). None = no linking.
+    # Consumers MUST check `is not None` — index 0 is a valid column.
+    participant_link_column_index: int | None = None
+
+
+class ParticipantLinkReport(BaseModel):
+    """#414: what import-time / retro participant linking did (scoping doc §3)."""
+    linked: int
+    created: int            # new Participants created (identifier=value)
+    matched: int            # linked to pre-existing Participants
+    skipped_missing: int    # blank / recognized-N/A / absent identifier values
+    skipped_duplicate: int  # rows whose value appeared on >1 row (DEC-4: none link)
+    skipped_conflict: int   # participant already linked to another row in dataset
+    already_linked: int     # rows that had a link before this run (never touched)
+    duplicate_values: list[str] = Field(default_factory=list)  # examples, capped
 
 
 class DatasetImportResponse(BaseModel):
@@ -81,6 +104,8 @@ class DatasetImportResponse(BaseModel):
     # Distinct recognized labels (e.g. "N/A", "Prefer not to say"), capped for
     # a bounded response; the frontend shows a few as examples.
     recognized_missing_labels: list[str] = Field(default_factory=list)
+    # #414: present iff the request asked for participant linking.
+    participant_link_report: ParticipantLinkReport | None = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -292,7 +317,7 @@ class BulkLinkResponse(BaseModel):
 
 ALLOWED_MANUAL_TYPES = {
     "ordinal", "nominal", "binary", "numeric", "percentage",
-    "open_text", "multi_select", "demographic",
+    "open_text", "multi_select", "demographic", "identifier",
 }
 
 
@@ -405,6 +430,14 @@ class AppendPreviewRow(BaseModel):
     is_duplicate: bool = False
 
 
+class AppendLinkColumnOffer(BaseModel):
+    """#414 (DEC-7): the identifier column append-linking can run against —
+    offered when the dataset has exactly ONE identifier column and the
+    uploaded file matched it (else new rows would carry no identifier values)."""
+    column_id: int
+    column_text: str
+
+
 class DatasetAppendPreviewResponse(BaseModel):
     matched_columns: list[AppendMatchedColumn]
     unmatched_csv_columns: list[AppendUnmatchedCsvColumn]
@@ -416,6 +449,8 @@ class DatasetAppendPreviewResponse(BaseModel):
     row_pad_width: int
     # .xlsx uploads only (#523): workbook sheet names for the append sheet picker.
     sheet_names: list[str] | None = None
+    # #414: present when append-linking is offerable (see AppendLinkColumnOffer).
+    participant_link_column: AppendLinkColumnOffer | None = None
 
 
 class DatasetAppendRequest(BaseModel):
@@ -424,6 +459,9 @@ class DatasetAppendRequest(BaseModel):
     row_start_id: str | None = None
     # .xlsx uploads only (#523): which worksheet to append from (None = first sheet).
     sheet_name: str | None = None
+    # #414 (DEC-7): identifier column id to link the NEW rows by (append's
+    # vocabulary is column ids, unlike the initial import's column_index).
+    participant_link_column_id: int | None = None
 
 
 class DatasetAppendResponse(BaseModel):
@@ -432,6 +470,13 @@ class DatasetAppendResponse(BaseModel):
     duplicates_skipped: int
     batch_id: str
     next_row_id: str
+    # #414: present iff the request asked for participant linking.
+    participant_link_report: ParticipantLinkReport | None = None
+
+
+class LinkByColumnRequest(BaseModel):
+    """#414 (DEC-8): retro bulk-link request for an existing dataset."""
+    column_id: int
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

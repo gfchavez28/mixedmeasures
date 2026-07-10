@@ -19,7 +19,7 @@ import { TypeBadge } from '@/components/TypeBadge'
 import { CopyToDialog } from '@/components/CopyToDialog'
 import { CopyToEquivalentsDialog } from '@/components/CopyToEquivalentsDialog'
 
-const RECODE_DISALLOWED_TYPES = new Set(['open_text'])
+const RECODE_DISALLOWED_TYPES = new Set(['open_text', 'identifier'])
 
 /** Determine labels for a draft mapping preview, in priority order */
 function getLabels(

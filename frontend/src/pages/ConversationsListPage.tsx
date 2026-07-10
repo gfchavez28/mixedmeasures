@@ -1,10 +1,12 @@
 import { useState, useMemo, useRef, useCallback } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { FileInput, Trash2, Pencil, Search, X, ArrowUpDown, Volume2, Mic, BookOpen, MessageSquare } from 'lucide-react'
+import { FileInput, Trash2, Pencil, Search, X, ArrowUpDown, Volume2, Video, Mic, BookOpen, MessageSquare } from 'lucide-react'
 import { toast } from 'sonner'
-import { conversationsApi, audioApi, type Conversation } from '@/lib/api'
+import { validateMediaFile, MEDIA_ACCEPT, describeMediaUploadError } from '@/lib/media-constants'
+import { conversationsApi, mediaApi, type Conversation } from '@/lib/api'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
+import { formatBytes } from '@/lib/format'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import InlineEditableText from '@/components/InlineEditableText'
@@ -88,25 +90,25 @@ export default function ConversationsListPage() {
 
   const uploadAudioMutation = useMutation({
     mutationFn: ({ conversationId, file }: { conversationId: number; file: File }) =>
-      audioApi.upload(projectId, conversationId, file),
+      mediaApi.upload(projectId, conversationId, file),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['conversations', projectId] })
-      toast.success('Audio uploaded successfully')
+      toast.success('Recording uploaded')
     },
-    onError: () => {
-      toast.error('Failed to upload audio file')
+    onError: (err) => {
+      toast.error(describeMediaUploadError(err))
     },
   })
 
   const removeAudioMutation = useMutation({
-    mutationFn: (conversationId: number) => audioApi.remove(projectId, conversationId),
+    mutationFn: (conversationId: number) => mediaApi.remove(projectId, conversationId),
     onSuccess: () => {
       setRemoveAudioConversationId(null)
       queryClient.invalidateQueries({ queryKey: ['conversations', projectId] })
-      toast.success('Audio removed')
+      toast.success('Recording removed')
     },
     onError: () => {
-      toast.error('Failed to remove audio')
+      toast.error('Failed to remove recording')
     },
   })
 
@@ -114,16 +116,9 @@ export default function ConversationsListPage() {
     const file = e.target.files?.[0]
     if (!file || audioTargetConversationId === null) return
 
-    const MAX_SIZE = 500 * 1024 * 1024
-    if (file.size > MAX_SIZE) {
-      toast.error('Audio file exceeds 500MB limit')
-      e.target.value = ''
-      return
-    }
-
-    const ext = file.name.split('.').pop()?.toLowerCase()
-    if (!ext || !['mp3', 'm4a', 'wav'].includes(ext)) {
-      toast.error('Accepted formats: MP3, M4A, WAV')
+    const validation = validateMediaFile(file)
+    if (!validation.ok) {
+      toast.error(validation.error)
       e.target.value = ''
       return
     }
@@ -331,7 +326,7 @@ export default function ConversationsListPage() {
       <input
         ref={audioFileInputRef}
         type="file"
-        accept="audio/mpeg,audio/wav,audio/x-m4a,.mp3,.m4a,.wav"
+        accept={MEDIA_ACCEPT}
         className="hidden"
         onChange={handleAudioFileSelect}
       />
@@ -340,9 +335,9 @@ export default function ConversationsListPage() {
       <ConfirmDialog
         open={removeAudioConversationId !== null}
         onOpenChange={(open) => { if (!open) setRemoveAudioConversationId(null) }}
-        title="Remove Audio"
-        description="Remove the audio file from this conversation? The transcript and coding are not affected."
-        confirmLabel="Remove Audio"
+        title="Remove Recording"
+        description="Remove the media file from this conversation? The transcript and coding are not affected."
+        confirmLabel="Remove Recording"
         loading={removeAudioMutation.isPending}
         loadingLabel="Removing..."
         onConfirm={() => {
@@ -428,17 +423,24 @@ function ConversationCard({
                   {conversation.subject_id && (
                     <span>{conversation.subject_id}</span>
                   )}
-                  {conversation.has_audio && (
+                  {conversation.has_media && (
                     <>
                       {(conversation.speaker_count > 0 || conversation.subject_id) && (
                         <span className="text-mm-text-faint">·</span>
                       )}
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <Volume2 className="w-3 h-3 text-mm-green-text" />
+                          {conversation.media_type === 'video' ? (
+                            <Video className="w-3 h-3 text-mm-green-text" />
+                          ) : (
+                            <Volume2 className="w-3 h-3 text-mm-green-text" />
+                          )}
                         </TooltipTrigger>
                         <TooltipContent side="top" className="text-xs">
                           {conversation.media_filename}
+                          {conversation.media_size_bytes != null && (
+                            <> · {formatBytes(conversation.media_size_bytes)}</>
+                          )}
                         </TooltipContent>
                       </Tooltip>
                     </>
@@ -490,21 +492,21 @@ function ConversationCard({
           Rename
         </ContextMenuItem>
         <ContextMenuSeparator />
-        {conversation.has_audio ? (
+        {conversation.has_media ? (
           <>
             <ContextMenuItem onClick={onAttachAudio}>
               <Mic className="w-4 h-4 mr-2" />
-              Replace Audio
+              Replace Recording
             </ContextMenuItem>
             <ContextMenuItem onClick={onRemoveAudio} className="text-red-600">
               <Volume2 className="w-4 h-4 mr-2" />
-              Remove Audio
+              Remove Recording
             </ContextMenuItem>
           </>
         ) : (
           <ContextMenuItem onClick={onAttachAudio}>
             <Mic className="w-4 h-4 mr-2" />
-            Attach Audio
+            Attach Recording
           </ContextMenuItem>
         )}
         <ContextMenuSeparator />

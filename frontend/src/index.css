@@ -159,6 +159,7 @@
     --mm-blue-cell: 210 60% 93%;  /* #480: OPAQUE selected-cell bg (sticky cells can't use the alpha tint) */
     --mm-teal: 174 60% 42%;
     --mm-teal-text: 170 40% 30%;
+    --mm-media-well: 204 12% 20%;  /* video letterbox fill — deep neutral in the app's hue family, never raw black (§7.5) */
     --mm-canvas: 45 70% 50%;
     --mm-canvas-text: 42 52% 40%;
     /* Context column backgrounds */
@@ -234,6 +235,7 @@
     --mm-blue-cell: 212 28% 24%;  /* #480: OPAQUE selected-cell bg (dark) */
     --mm-teal: 174 55% 50%;
     --mm-teal-text: 170 50% 70%;
+    --mm-media-well: 228 10% 8%;  /* video letterbox fill (dark) */
     --mm-canvas: 45 66% 55%;
     --mm-canvas-text: 42 68% 68%;
     /* Context column backgrounds (dark mode) */

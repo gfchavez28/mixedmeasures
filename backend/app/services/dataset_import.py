@@ -806,6 +806,92 @@ def _is_skip_column(header: str, raw_code: str | None) -> bool:
     return any(sub in lower for sub in _SKIP_SUBSTRINGS)
 
 
+# -- Identifier detection (#414) -----------------------------------------------
+#
+# Participant/row identity codes (P001, R-17, respondent names). Header-hint-
+# gated (scoping DEC-9): value shape alone must never trigger — a near-unique
+# numeric measure is not an ID. Runs BEFORE the skip check in
+# `_detect_column_type` because the skip lists swallow id-family headers
+# ("id", "respondent id"), silently discarding the identity column.
+#
+# Two keyword tiers:
+#   strong — the header names a PERSON concept; trusted even for 1..N values
+#   weak   — bare id-words; demoted back to skip when the values are just a
+#            sequential row counter (LimeSurvey's `id` column)
+# "response" is a negative signal: a "Response ID" is a platform response key,
+# not a person (bare camelCase `ResponseId` never matches — no word boundary).
+
+_IDENTIFIER_STRONG_RE = re.compile(
+    r"\b(?:participant|respondent|subject|pid)\b", re.IGNORECASE,
+)
+_IDENTIFIER_WEAK_RE = re.compile(
+    r"\b(?:id|ids|uid|identifier)\b", re.IGNORECASE,
+)
+_IDENTIFIER_NEGATIVE_RE = re.compile(r"\bresponse\b", re.IGNORECASE)
+
+IDENTIFIER_MIN_UNIQUENESS_RATIO = 0.95  # identity values are (near-)unique per row
+IDENTIFIER_MAX_AVG_LEN = 40             # codes are short; prose runs long
+IDENTIFIER_MAX_AVG_TOKENS = 4           # "Maria Lopez" yes, a sentence no
+IDENTIFIER_MIN_SUBSTANTIVE = 3          # too few rows to judge uniqueness
+
+
+def _normalize_header_words(text: str | None) -> str:
+    """Lower + collapse ``_``/``-``/``.`` to spaces so ``\\b`` can fire —
+    Python regex treats ``_`` as a word character, so ``\\bid\\b`` never
+    matches inside ``participant_id`` (the `_header_signals_percentage`
+    lesson)."""
+    if not text:
+        return ""
+    return re.sub(r"[_\-\.]+", " ", text).lower()
+
+
+def _is_sequential_counter(substantive_set: set[str]) -> bool:
+    """True when the values are a dense integer sequence starting at 0/1 —
+    a platform row counter, not an identity referenced by other sources."""
+    try:
+        ints = {int(v) for v in substantive_set}
+    except ValueError:
+        return False
+    return min(ints) in (0, 1) and (max(ints) - min(ints) + 1) == len(ints)
+
+
+def _is_identifier_column(
+    header: str,
+    raw_code: str | None,
+    substantive_set: set[str],
+    substantive_list: list[str],
+) -> bool:
+    """#414 / DEC-9: header-hint-gated participant-identifier detection."""
+    words = _normalize_header_words(header)
+    code_words = _normalize_header_words(raw_code)
+    if _IDENTIFIER_NEGATIVE_RE.search(words) or _IDENTIFIER_NEGATIVE_RE.search(code_words):
+        return False
+    strong = bool(
+        _IDENTIFIER_STRONG_RE.search(words) or _IDENTIFIER_STRONG_RE.search(code_words)
+    )
+    weak = bool(
+        _IDENTIFIER_WEAK_RE.search(words) or _IDENTIFIER_WEAK_RE.search(code_words)
+    )
+    if not (strong or weak):
+        return False
+    n = len(substantive_list)
+    if n < IDENTIFIER_MIN_SUBSTANTIVE:
+        return False
+    unique_count = len(substantive_set)
+    if (unique_count / n) < IDENTIFIER_MIN_UNIQUENESS_RATIO:
+        return False
+    avg_len = sum(len(v) for v in substantive_set) / unique_count
+    if avg_len > IDENTIFIER_MAX_AVG_LEN:
+        return False
+    avg_tokens = sum(len(v.split()) for v in substantive_set) / unique_count
+    if avg_tokens > IDENTIFIER_MAX_AVG_TOKENS:
+        return False
+    # A bare id-word over a dense 1..N counter is platform metadata — keep skip.
+    if not strong and _is_sequential_counter(substantive_set):
+        return False
+    return True
+
+
 # -- Demographic detection -----------------------------------------------------
 
 _DEMOGRAPHIC_KEYWORDS = {
@@ -1058,18 +1144,41 @@ def _match_scale(values: set[str]) -> tuple[str, list[str]] | None:
 # -- Numeric value computation for answers -------------------------------------
 
 
+def _coerce_scale_codes(scale_values: list[float]) -> list[int | float]:
+    """Store an integral scale code as an int, so both import paths agree (#28).
+
+    The CSV path derives codes from `range(1, n+1)` and stores `[1, 2, 3]`; the
+    .sav path receives them as JSON floats and would store `[1.0, 2.0, 3.0]` for
+    the same logical scale. `routers/export_r.py` emits `scale_values` verbatim as
+    R factor levels, so the divergence would surface in exported scripts.
+    """
+    return [int(v) if float(v).is_integer() else float(v) for v in scale_values]
+
+
 def _compute_value_numeric(
     raw_value: str,
     question_type: str,
     scale_labels: list[str] | None,
+    scale_values: list[float] | None = None,
 ) -> float | None:
-    """Compute the numeric encoding for a cell value."""
+    """Compute the numeric encoding for a cell value.
+
+    ``scale_values`` (#28) supplies the codes an ordinal scale's labels actually
+    carry, parallel to ``scale_labels``. SPSS files know them (a scale may be
+    0-based, or skip codes); CSV imports do not and pass None, which keeps the
+    historical positional 1..N encoding byte-for-byte. A length mismatch falls
+    back to positional rather than silently mis-encoding.
+    """
     if _is_na(raw_value):
         return None
 
     if question_type == ColumnType.ORDINAL.value:
         if scale_labels:
-            label_map = {l.lower(): float(i + 1) for i, l in enumerate(scale_labels)}
+            if scale_values and len(scale_values) == len(scale_labels):
+                codes = [float(v) for v in scale_values]
+            else:
+                codes = [float(i + 1) for i in range(len(scale_labels))]
+            label_map = {l.lower(): codes[i] for i, l in enumerate(scale_labels)}
             return label_map.get(raw_value.strip().lower())
         return None
 
@@ -1137,12 +1246,22 @@ def _detect_column_type(
         "suggested_type": ColumnType.OPEN_TEXT.value,
         "suggested_scale_name": None,
         "suggested_scale_labels": None,
+        # #28: only a format that KNOWS its scale codes fills this (SPSS .sav, via
+        # sav_import.apply_sav_metadata). Inference over CSV text never can, so
+        # None here means "positional 1..N" downstream.
+        "suggested_scale_values": None,
         "suggested_scale_unmatched": None,
         "suggested_demographic_subtype": None,
         "numeric_format": None,
         "numeric_min": None,
         "numeric_max": None,
     }
+
+    # 0. Identifier (#414) — MUST run before skip: the skip lists swallow
+    # id-family headers ("id", "respondent id"), discarding the identity column.
+    if _is_identifier_column(header, parsed["raw_code"], substantive_set, substantive_list):
+        result["suggested_type"] = ColumnType.IDENTIFIER.value
+        return result
 
     # 1. Skip (platform metadata)
     if _is_skip_column(header, parsed["raw_code"]):
@@ -1421,6 +1540,7 @@ def preview_dataset_csv(file_contents: str) -> dict:
             "suggested_type": detection["suggested_type"],
             "suggested_scale_name": detection["suggested_scale_name"],
             "suggested_scale_labels": detection["suggested_scale_labels"],
+            "suggested_scale_values": detection["suggested_scale_values"],
             "suggested_scale_unmatched": detection["suggested_scale_unmatched"],
             "suggested_column_code": parsed["column_code"],
             "suggested_group_code": parsed["group_code"],
@@ -1443,6 +1563,7 @@ def import_dataset_csv(
     file_contents: str,
     description: str | None = None,
     source: str | None = None,
+    participant_link_column_index: int | None = None,
 ) -> dict:
     """
     Import a dataset CSV into the database.
@@ -1451,8 +1572,10 @@ def import_dataset_csv(
     every object has been created successfully.
 
     Each row gets a system-generated record identifier (R0001, R0002,
-    etc.) based on CSV row order.  Participant linking is a post-import
-    operation handled by the recode/management layer.
+    etc.) based on CSV row order.  Participant linking (#414) runs in the
+    same transaction when `participant_link_column_index` names an
+    identifier column; otherwise it remains a post-import operation via
+    the row-link endpoints / retro link-by-column.
 
     Args:
         db: SQLAlchemy session.
@@ -1469,7 +1592,8 @@ def import_dataset_csv(
 
     Returns:
         Summary dict: dataset_id, columns_created, rows_created,
-        values_created.
+        values_created, recognized_missing_*, participant_link_report
+        (None unless linking ran).
     """
     text = _strip_bom(file_contents)
     reader = csv.reader(io.StringIO(text))
@@ -1504,6 +1628,16 @@ def import_dataset_csv(
 
         qtype = ColumnType(cfg["column_type"])
         scale_labels = cfg.get("scale_labels")
+        # #28: an SPSS import supplies the scale's real codes (possibly 0-based or
+        # gapped). Anything else omits them and keeps the positional 1..N encoding.
+        scale_values = cfg.get("scale_values")
+        if scale_values and len(scale_values) != len(scale_labels or []):
+            logger.warning(
+                "scale_values/scale_labels length mismatch on column %s (%s vs %s) — "
+                "falling back to positional encoding",
+                col_idx, len(scale_values), len(scale_labels or []),
+            )
+            scale_values = None
 
         # Scale metadata
         scale_labels_json = None
@@ -1511,7 +1645,11 @@ def import_dataset_csv(
         scale_pts = None
         if qtype == ColumnType.ORDINAL and scale_labels:
             scale_labels_json = json.dumps(scale_labels)
-            scale_values_json = json.dumps(list(range(1, len(scale_labels) + 1)))
+            scale_values_json = json.dumps(
+                _coerce_scale_codes(scale_values)
+                if scale_values
+                else list(range(1, len(scale_labels) + 1))
+            )
             scale_pts = len(scale_labels)
 
         # Numeric metadata (computed from data)
@@ -1570,8 +1708,17 @@ def import_dataset_csv(
         if qtype_str != ColumnType.ORDINAL.value or not scale_labels:
             continue
 
-        # Build mapping: label -> 1-based index
-        mapping = {label: i + 1 for i, label in enumerate(scale_labels)}
+        # Build mapping: label -> code. The primary scale_map recode is a SECOND
+        # owner of value_numeric — `append_import` re-applies it to new rows, and
+        # the recode workbench re-applies it on demand. It must agree with
+        # `_compute_value_numeric`, or an SPSS 0-based scale imports as 0..3 and
+        # then silently rewrites to 1..4 on the first append (#28).
+        scale_values = cfg.get("scale_values")
+        if scale_values and len(scale_values) == len(scale_labels):
+            codes = _coerce_scale_codes(scale_values)
+        else:
+            codes = list(range(1, len(scale_labels) + 1))
+        mapping = {label: codes[i] for i, label in enumerate(scale_labels)}
 
         # Pre-scan data rows for N/A values
         na_values = set()
@@ -1642,6 +1789,7 @@ def import_dataset_csv(
             cfg = cfg_by_idx.get(col_idx, {})
             value_numeric = _compute_value_numeric(
                 cell, cfg.get("column_type", ""), cfg.get("scale_labels"),
+                cfg.get("scale_values"),
             )
 
             col_type = cfg.get("column_type", "")
@@ -1658,6 +1806,26 @@ def import_dataset_csv(
 
     db.flush()
 
+    # -- 4. Participant linking (#414, DEC-6) ------------------------------------
+    # `is not None` is load-bearing: column index 0 is a valid link column.
+    participant_link_report = None
+    if participant_link_column_index is not None:
+        link_col = columns.get(participant_link_column_index)
+        if link_col is None or link_col.column_type != ColumnType.IDENTIFIER:
+            raise ValueError(
+                "participant_link_column_index must reference a non-skipped identifier column"
+            )
+        # Function-level import: participant_linking imports _is_na from this
+        # module at top level, so the reverse edge must stay lazy.
+        from .participant_linking import link_rows_by_identifier_column
+
+        participant_link_report = link_rows_by_identifier_column(
+            db,
+            project_id=project_id,
+            dataset_id=dataset.id,
+            column_id=link_col.id,
+        )
+
     return {
         "dataset_id": dataset.id,
         "columns_created": len(columns),
@@ -1665,4 +1833,5 @@ def import_dataset_csv(
         "values_created": values_created,
         "recognized_missing_count": recognized_missing_count,
         "recognized_missing_labels": sorted(recognized_missing_labels),
+        "participant_link_report": participant_link_report,
     }

@@ -1,4 +1,5 @@
 fastapi==0.136.1
+starlette>=0.49.1  # security floor: GHSA-7f5h-v6xp-fcq8 (Range-header parsing DoS in FileResponse), transitive via fastapi. Range streaming is load-bearing for media seek (audio + video V1).
 uvicorn[standard]==0.42.0
 pydantic==2.13.3
 pydantic-settings==2.14.2  # security floor: GHSA-4xgf-cpjx-pc3j (NestedSecretsSettingsSource symlink traversal; MM doesn't use secrets_dir). Bumped from 2.14.0.
@@ -13,6 +14,7 @@ python-docx>=1.1.0,<2.0.0
 lxml==6.1.0  # security floor: CVE-2026-41066, transitive via python-docx (uploaded .docx parsing). Pinned to vetted 6.1.0; revisit when 6.1.x clears cooldown.
 pdfminer.six==20260107  # PDF text extraction (replaced AGPL-licensed PyMuPDF for Apache-2.0 compat, 2026-06-01). Pulls cryptography (Apache/BSD) + cffi (MIT) transitively.
 tinytag==2.2.1  # audio duration/VBR metadata (replaced GPLv2+ mutagen for Apache-2.0 compat, 2026-06-01). Zero runtime deps.
+pyreadstat==1.3.5  # SPSS .sav dataset import (#28). Apache-2.0, wrapping ReadStat (MIT) — permissive. Pulls narwhals (MIT) + numpy (already direct). Lazy-imported inside services/sav_import.py; read with output_format="dict" so pandas (an installed statsmodels transitive) is never imported. Ships a Cython extension — PyInstaller must collect it (see mixedmeasures.spec).
 defusedxml>=0.7.0,<1.0.0
 slowapi>=0.1.9,<1.0.0
 sqlcipher3==0.6.2  # SQLCipher 4.x at-rest DB encryption (packaging P4; default-OFF via mm_encryption_enabled — dev.db + the test suite stay plaintext). Plain `sqlcipher3`, NOT `sqlcipher3-binary` (that one is Linux-x86_64-only + SQLCipher 3.x). 0.6.2 ships prebuilt wheels for win_amd64/win32/win_arm64 + macOS + manylinux/musllinux, bundling SQLCipher 4.12.0 statically. Exact-pin keeps the bundled SQLCipher version identical across OS wheels (no cipher_compatibility juggling). PyInstaller must collect the bundled extension (Phase 7).

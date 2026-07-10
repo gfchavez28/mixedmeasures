@@ -23,7 +23,8 @@ function makeFakeAudio() {
   return {
     currentTime: 0,
     playbackRate: 1,
-    readyState: 1, // metadata available -> hook marks audio ready
+    preservesPitch: false, // hook must set true explicitly
+    readyState: 1, // metadata available -> hook marks media ready
     play: vi.fn().mockResolvedValue(undefined),
     pause: vi.fn(),
     addEventListener: (t: string, h: () => void) => {
@@ -62,14 +63,14 @@ beforeEach(() => {
 
 function setup(selectedSegments: number[]) {
   const onSelectionChange = vi.fn()
-  const audioRef = { current: audio as unknown as HTMLAudioElement }
+  const mediaRef = { current: audio as unknown as HTMLMediaElement }
   const view = renderHook(
     ({ sel }: { sel: number[] }) =>
       usePlayback({
         segments: SEGMENTS,
         selectedSegments: sel,
         onSelectionChange,
-        audioRef,
+        mediaRef,
         conversation: CONVERSATION,
       }),
     { initialProps: { sel: selectedSegments } },
@@ -136,5 +137,34 @@ describe('usePlayback — Bug B: paused seek must not cascade selection backward
     expect(onSelectionChange).not.toHaveBeenCalled()
     // currentTime not walked backward toward 0
     expect(audio.currentTime).toBeCloseTo(98.5, 3)
+  })
+})
+
+describe('usePlayback — playback speed (V1 slab 3: 0.5×–2×, natural pitch)', () => {
+  it('gates the playback surface via the shared predicate', () => {
+    const { result } = setup([1])
+    expect(result.current.hasPlayableMedia).toBe(true)
+  })
+
+  it('syncs playbackRate to the media element and pins preservesPitch true', () => {
+    const { result } = setup([1])
+    // Effect ran on mount: rate synced to initial 1×, pitch pinned
+    expect(audio.preservesPitch).toBe(true)
+    expect(audio.playbackRate).toBe(1)
+
+    act(() => result.current.cyclePlaybackSpeed())
+    expect(result.current.playbackSpeed).toBe(1.25)
+    expect(audio.playbackRate).toBe(1.25)
+  })
+
+  it('cycles through the full range: past 2× wraps to the sub-1× speeds', () => {
+    const { result } = setup([1])
+    const seen: number[] = [result.current.playbackSpeed]
+    for (let i = 0; i < 7; i++) {
+      act(() => result.current.cyclePlaybackSpeed())
+      seen.push(result.current.playbackSpeed)
+    }
+    // 1 → 1.25 → 1.5 → 1.75 → 2 → 0.5 → 0.75 → back to 1
+    expect(seen).toEqual([1, 1.25, 1.5, 1.75, 2, 0.5, 0.75, 1])
   })
 })

@@ -93,12 +93,22 @@ async def export_project_endpoint(
     project_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    # Appended LAST + bare default (tests CLAUDE.md: direct-call positional
+    # args must not shift; a Query() default would leak its sentinel).
+    include_media: bool = True,
 ):
-    """Export a project as a .mmproject ZIP file."""
+    """Export a project as a .mmproject ZIP file.
+
+    include_media=False produces a media-less archive (canvas images still
+    travel — they are canvas content): transcripts/coding/documents only,
+    with recordings re-attachable after import. The archive-then-trim flow
+    for large video projects is a media-INCLUSIVE export to external
+    storage, then Remove Recording locally.
+    """
     project = _get_project_or_404(db, project_id, user.id)
     docs_dir, media_dir = _get_data_dirs()
     try:
-        buf = export_project(db, project_id, docs_dir, media_dir)
+        buf = export_project(db, project_id, docs_dir, media_dir, include_media=include_media)
     except ValueError as e:
         raise HTTPException(404, str(e))
     slug = _slugify(project.name)
@@ -113,7 +123,7 @@ async def export_project_endpoint(
         entity_type="project",
         entity_id=project_id,
         project_id=project_id,
-        details=json.dumps({"filename": filename}),
+        details=json.dumps({"filename": filename, "include_media": include_media}),
     )
     db.add(audit)
     db.commit()

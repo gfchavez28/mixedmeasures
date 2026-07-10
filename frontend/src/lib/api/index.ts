@@ -16,9 +16,9 @@ export type { Project, ProjectSummary, RecentConversation, RecentDataset, Recent
 export { conversationsApi } from './conversations'
 export type { Conversation } from './conversations'
 
-// Audio
-export { audioApi } from './audio'
-export type { AudioUploadResponse } from './audio'
+// Media (audio/video)
+export { mediaApi } from './media'
+export type { MediaUploadResponse } from './media'
 
 // Segments
 export { segmentsApi } from './segments'
@@ -114,6 +114,7 @@ export type {
   AppendPreviewRow,
   DatasetAppendPreviewResponse,
   DatasetAppendResponse,
+  ParticipantLinkReport,
   ProjectColumnInfo,
   ProjectColumnListResponse,
 } from './datasets'

@@ -1,5 +1,6 @@
-"""Audio file management for conversations — upload, stream, delete, offset."""
+"""Media (audio/video) file management for conversations — upload, stream, delete, offset."""
 
+import errno
 import logging
 import os
 import shutil
@@ -14,9 +15,9 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_user
 from ..config import get_media_dir
 from ..database import get_db
-from ..models.conversation import Conversation
+from ..models.conversation import Conversation, VIDEO_FORMATS
 from ..models.user import User
-from ..schemas.conversation import AudioOffsetUpdate, AudioUploadResponse
+from ..schemas.conversation import MediaOffsetUpdate, MediaUploadResponse
 from ..services.audit import log_action
 from .helpers import _get_project_or_404
 from .conversations import conversation_to_response
@@ -25,8 +26,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-MAX_MEDIA_SIZE = 500 * 1024 * 1024  # 500 MB
+MAX_MEDIA_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB (raised from 500 MB for video; streaming path is bounded-memory so the cap is policy)
 UPLOAD_CHUNK = 1024 * 1024  # 1 MiB — stream granularity (never buffer whole file)
+
+# VIDEO_FORMATS is hosted in models/conversation.py (services consume it too);
+# re-exported here because this router is the format seam's home.
+__all__ = ["VIDEO_FORMATS", "MAX_MEDIA_SIZE"]
 
 
 def _media_dir(project_id: int, conversation_id: int) -> Path:
@@ -34,7 +39,13 @@ def _media_dir(project_id: int, conversation_id: int) -> Path:
 
 
 def _detect_format(header: bytes) -> str | None:
-    """Detect audio format from file content (first 12 bytes)."""
+    """Detect media container from file content (first 12 bytes).
+
+    'ftyp' (MP4 family) is deliberately preliminary: video-vs-audio needs the
+    'moov' box, which may sit at the END of the file — callers that have the
+    whole file must refine via `_refine_mp4_family` (done in
+    `_stream_upload_to_temp` once the upload is complete).
+    """
     if len(header) < 12:
         return None
     # MP3: ID3v2 tag or MPEG sync word
@@ -42,13 +53,86 @@ def _detect_format(header: bytes) -> str | None:
         return "mp3"
     if len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xE0) == 0xE0:
         return "mp3"
-    # M4A/AAC: bytes 4-8 are 'ftyp' (MP4 container)
+    # MP4 family (m4a audio, mp4/mov video): bytes 4-8 are 'ftyp'
     if header[4:8] == b"ftyp":
         return "m4a"
     # WAV: starts with 'RIFF' and bytes 8-12 are 'WAVE'
     if header[:4] == b"RIFF" and header[8:12] == b"WAVE":
         return "wav"
+    # WebM/Matroska: EBML magic
+    if header[:4] == b"\x1a\x45\xdf\xa3":
+        return "webm"
     return None
+
+
+# Container boxes worth descending into on the way to trak→mdia→hdlr. 'meta'
+# is deliberately NOT here: m4a files carry a meta/hdlr with handler 'mdir'
+# (iTunes metadata) that must not count as a media track.
+_MP4_CONTAINER_BOXES = frozenset({b"moov", b"trak", b"mdia"})
+
+
+def _mp4_handler_types(f, start: int, end: int, depth: int = 0) -> set[bytes]:
+    """Walk MP4 boxes in [start, end) collecting hdlr handler types.
+
+    Header-seek walk: payloads are never read (an mdat of gigabytes is skipped
+    by one seek), only container boxes are recursed. Malformed sizes abort the
+    walk rather than raise — the caller treats an inconclusive walk as audio.
+    """
+    handlers: set[bytes] = set()
+    pos = start
+    while pos + 8 <= end:
+        f.seek(pos)
+        header = f.read(8)
+        if len(header) < 8:
+            break
+        size = int.from_bytes(header[:4], "big")
+        box_type = header[4:8]
+        header_len = 8
+        if size == 1:  # 64-bit largesize follows
+            large = f.read(8)
+            if len(large) < 8:
+                break
+            size = int.from_bytes(large, "big")
+            header_len = 16
+        elif size == 0:  # box extends to end of enclosing scope
+            size = end - pos
+        if size < header_len:  # malformed
+            break
+        if box_type == b"hdlr":
+            payload = f.read(12)  # version/flags(4) + pre_defined(4) + handler_type(4)
+            if len(payload) == 12:
+                handlers.add(payload[8:12])
+        elif box_type in _MP4_CONTAINER_BOXES and depth < 6:
+            handlers |= _mp4_handler_types(
+                f, pos + header_len, min(pos + size, end), depth + 1
+            )
+        pos += size
+    return handlers
+
+
+def _refine_mp4_family(filepath: Path) -> str:
+    """Classify a completed 'ftyp' upload as video ('mp4'/'mov') or audio ('m4a').
+
+    A 'vide' track handler is authoritative for video; an 'M4A ' major brand is
+    authoritative for audio. Anything inconclusive (no moov, malformed boxes,
+    read errors) falls back to 'm4a' — the pre-video behavior.
+    """
+    try:
+        file_size = filepath.stat().st_size
+        with open(filepath, "rb") as f:
+            brand = b""
+            header = f.read(12)
+            if len(header) >= 12 and header[4:8] == b"ftyp":
+                brand = header[8:12]
+            if brand == b"M4A ":
+                return "m4a"
+            handlers = _mp4_handler_types(f, 0, file_size)
+    except OSError as e:
+        logger.warning("MP4-family probe failed for %s: %s", filepath, e)
+        return "m4a"
+    if b"vide" in handlers:
+        return "mov" if brand == b"qt  " else "mp4"
+    return "m4a"
 
 
 def _extract_duration(filepath: Path, fmt: str) -> float | None:
@@ -59,7 +143,7 @@ def _extract_duration(filepath: Path, fmt: str) -> float | None:
     project's Apache-2.0 license; 2026-06-01.)
     """
     try:
-        if fmt in ("mp3", "m4a"):
+        if fmt in ("mp3", "m4a", "mp4", "mov", "webm"):
             from tinytag import TinyTag
             tag = TinyTag.get(str(filepath))
             return float(tag.duration) if tag.duration is not None else None
@@ -139,6 +223,15 @@ async def _stream_upload_to_temp(
     Returns (fmt, temp_path). Raises HTTPException (400 unsupported/empty,
     413 too large) and always removes the temp file on failure. The caller is
     responsible for atomically moving the returned temp file into place.
+
+    Spool caveat (#544): Starlette parses the multipart body into a spooled
+    temp file in the OS temp dir BEFORE this function ever runs — so disk
+    usage during an upload is transiently ~2x the file size, the 413 cap only
+    fires after the full body has landed, and an ENOSPC in that spool phase
+    never reaches the handler below. The app-level OSError handler in main.py
+    maps that spool-phase ENOSPC to the same 507. A single-copy fix means
+    reading `request.stream()` directly instead of taking an UploadFile —
+    deliberately deferred (it bypasses FastAPI's multipart handling).
     """
     parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".upload-", suffix=".part", dir=str(parent))
@@ -156,30 +249,43 @@ async def _stream_upload_to_temp(
                     if fmt is None:
                         raise HTTPException(
                             400,
-                            "Unsupported audio format. Accepted formats: "
-                            "MP3, M4A/AAC, WAV.",
+                            "Unsupported media format. Accepted formats: "
+                            "MP3, M4A/AAC, WAV audio; MP4, MOV, WebM video.",
                         )
                 total += len(chunk)
                 if total > max_size:
-                    raise HTTPException(413, "Audio file exceeds 500MB limit")
+                    raise HTTPException(413, "Media file exceeds 4GB limit")
                 out.write(chunk)
         if fmt is None:
-            raise HTTPException(400, "Empty or unreadable audio file.")
+            raise HTTPException(400, "Empty or unreadable media file.")
+        if fmt == "m4a":
+            # First-chunk sniff can't see moov (may be at end of file) — now
+            # that the whole file is on disk, resolve video-MP4 vs m4a audio.
+            fmt = _refine_mp4_family(tmp)
         return fmt, tmp
+    except OSError as exc:
+        # A write that fills the disk (ENOSPC) is a common, actionable failure
+        # for multi-GB video — surface it as 507 rather than a generic 500.
+        tmp.unlink(missing_ok=True)
+        if exc.errno == errno.ENOSPC:
+            raise HTTPException(
+                507, "Not enough disk space to save the recording."
+            ) from exc
+        raise
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
 
 
-@router.post("", response_model=AudioUploadResponse)
-async def upload_audio(
+@router.post("", response_model=MediaUploadResponse)
+async def upload_media(
     project_id: int,
     conversation_id: int,
     file: UploadFile,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Upload an audio file for a conversation."""
+    """Upload an audio or video file for a conversation."""
     conversation = _get_conversation(db, project_id, conversation_id, user.id)
     media_path = _media_dir(project_id, conversation_id)
 
@@ -208,16 +314,16 @@ async def upload_audio(
     is_vbr = _detect_vbr(dest, fmt)
 
     # Update conversation
-    conversation.media_filename = file.filename or f"audio.{fmt}"
+    conversation.media_filename = file.filename or f"media.{fmt}"
     conversation.media_format = fmt
-    conversation.media_type = "audio"
+    conversation.media_type = "video" if fmt in VIDEO_FORMATS else "audio"
     conversation.media_duration_seconds = duration
     conversation.media_offset_seconds = 0.0  # Reset on new upload
     conversation.media_is_vbr = is_vbr
 
     log_action(
         db,
-        action="audio_upload",
+        action="media_upload",
         entity_type="conversation",
         entity_id=conversation.id,
         user_id=user.id,
@@ -232,7 +338,7 @@ async def upload_audio(
     db.commit()
     db.refresh(conversation)
 
-    return AudioUploadResponse(
+    return MediaUploadResponse(
         media_filename=conversation.media_filename,
         media_format=conversation.media_format,
         media_type=conversation.media_type,
@@ -243,23 +349,30 @@ async def upload_audio(
 
 
 @router.get("/stream")
-async def stream_audio(
+async def stream_media(
     project_id: int,
     conversation_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Stream the audio file with HTTP Range support for seeking."""
+    """Stream the media file with HTTP Range support for seeking."""
     conversation = _get_conversation(db, project_id, conversation_id, user.id)
 
     if not conversation.media_filename:
-        raise HTTPException(404, "No audio file attached to this conversation")
+        raise HTTPException(404, "No media file attached to this conversation")
 
     media_path = _media_dir(project_id, conversation_id) / f"original.{conversation.media_format}"
     if not media_path.is_file():
-        raise HTTPException(404, "Audio file not found on disk")
+        raise HTTPException(404, "Media file not found on disk")
 
-    media_types = {"mp3": "audio/mpeg", "m4a": "audio/mp4", "wav": "audio/wav"}
+    media_types = {
+        "mp3": "audio/mpeg",
+        "m4a": "audio/mp4",
+        "wav": "audio/wav",
+        "mp4": "video/mp4",
+        "mov": "video/quicktime",
+        "webm": "video/webm",
+    }
 
     return FileResponse(
         path=str(media_path),
@@ -273,17 +386,17 @@ async def stream_audio(
 
 
 @router.delete("")
-async def delete_audio(
+async def delete_media(
     project_id: int,
     conversation_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Remove the audio file from a conversation."""
+    """Remove the media file from a conversation."""
     conversation = _get_conversation(db, project_id, conversation_id, user.id)
 
     if not conversation.media_filename:
-        raise HTTPException(404, "No audio file attached to this conversation")
+        raise HTTPException(404, "No media file attached to this conversation")
 
     # Delete file from disk
     media_path = _media_dir(project_id, conversation_id)
@@ -304,7 +417,7 @@ async def delete_audio(
 
     log_action(
         db,
-        action="audio_delete",
+        action="media_delete",
         entity_type="conversation",
         entity_id=conversation.id,
         user_id=user.id,
@@ -321,21 +434,21 @@ async def delete_audio(
 async def update_offset(
     project_id: int,
     conversation_id: int,
-    data: AudioOffsetUpdate,
+    data: MediaOffsetUpdate,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update the audio sync offset for a conversation."""
+    """Update the media sync offset for a conversation."""
     conversation = _get_conversation(db, project_id, conversation_id, user.id)
 
     if not conversation.media_filename:
-        raise HTTPException(404, "No audio file attached to this conversation")
+        raise HTTPException(404, "No media file attached to this conversation")
 
     conversation.media_offset_seconds = data.offset_seconds
 
     log_action(
         db,
-        action="audio_offset_change",
+        action="media_offset_change",
         entity_type="conversation",
         entity_id=conversation.id,
         user_id=user.id,

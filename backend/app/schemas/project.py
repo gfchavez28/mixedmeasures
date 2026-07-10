@@ -114,3 +114,12 @@ class ProjectSummaryResponse(BaseModel):
     recent_conversations: list[RecentConversation] = []
     recent_datasets: list[RecentDataset] = []
     recent_documents: list[RecentDocument] = []
+
+
+class ProjectStorageResponse(BaseModel):
+    """On-disk footprint for one project (video V1 slab 5 — nothing surfaced
+    disk usage before multi-GB recordings made it matter). media_bytes
+    includes video_bytes; the DB is instance-wide and deliberately absent."""
+    media_bytes: int = 0
+    video_bytes: int = 0
+    documents_bytes: int = 0

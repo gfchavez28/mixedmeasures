@@ -760,6 +760,18 @@ function HelpMenu() {
             </a>{' '}
             and open it with Import Project on the Projects page.
           </p>
+          <p className="text-[11px] leading-relaxed text-[hsl(var(--mm-chrome-text-muted))] mb-2">
+            Publishing with Mixed Measures? Copy a citation for the version you analyzed
+            with from{' '}
+            <Link
+              to="/settings"
+              onClick={() => setOpen(false)}
+              className="text-[hsl(var(--mm-chrome-text))] underline underline-offset-2 hover:opacity-80"
+            >
+              Settings → About &amp; citation
+            </Link>
+            .
+          </p>
           <p className="text-[11px] text-[hsl(var(--mm-chrome-text-muted))]">
             Press <kbd className="px-1 rounded bg-white/[0.08] text-[10px]">?</kbd> for keyboard
             shortcuts, <kbd className="px-1 rounded bg-white/[0.08] text-[10px]">Ctrl+K</kbd> to search.

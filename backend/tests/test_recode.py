@@ -268,6 +268,39 @@ class TestClearValueNumeric:
 # ── Reverse recode tests ────────────────────────────────────────────────────
 
 
+class TestReverseOffset:
+    """#28: reverse scoring reflects about the scale midpoint, `(min + max) - v`.
+
+    For any 1..N scale min is 1, so this equals the historical `(max + 1) - v`
+    exactly — no existing dataset changes. It is the general form that also stays
+    inside the scale for the 0-based scales an SPSS import can produce, where
+    `(max + 1) - v` would map 0..3 onto 1..4 and shift every mean.
+    """
+
+    @pytest.mark.parametrize("n", range(2, 12))
+    def test_identical_to_the_historical_formula_on_1_to_n(self, n):
+        from app.services.recode import reverse_offset
+
+        values = [float(i) for i in range(1, n + 1)]
+        offset = reverse_offset(values)
+        for v in values:
+            assert offset - v == (max(values) + 1) - v
+
+    def test_zero_based_scale_stays_inside_its_own_range(self):
+        from app.services.recode import reverse_offset
+
+        values = [0.0, 1.0, 2.0, 3.0]
+        offset = reverse_offset(values)
+        assert [offset - v for v in values] == [3.0, 2.0, 1.0, 0.0]
+
+    def test_reverse_of_reverse_is_identity(self):
+        from app.services.recode import reverse_offset
+
+        for values in ([1.0, 2.0, 3.0], [0.0, 1.0, 2.0, 3.0], [1.0, 2.0, 4.0, 5.0]):
+            offset = reverse_offset(values)
+            assert [offset - (offset - v) for v in values] == values
+
+
 class TestReverseRecode:
     """Tests for RecodeType.REVERSE computation."""
 
@@ -735,3 +768,327 @@ class TestReverseRecodeAppliesViaRouter:
         nums = _numeric_by_label(db_session)
         assert nums["Strongly Disagree"] == 5.0
         assert nums["Strongly Agree"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# #538: append_import must re-apply the PRIMARY recode to the NEW rows for
+# BOTH numeric primary types (SCALE_MAP + REVERSE) and CLEAR under
+# CATEGORY_GROUP — mirroring routers/recode.py::_recompute_primary_value_numeric
+# (the #359 seam). The pre-fix filter re-applied SCALE_MAP only, so a
+# REVERSE-primary column's appended rows landed FORWARD-coded while every
+# existing row was reversed: same label, two numbers in one column.
+# ---------------------------------------------------------------------------
+
+_APPEND_LABELS = ["None", "A little", "Some", "A lot"]  # ZERO-BASED codes 0..3
+# 0-based on purpose (degenerate-fixture rule): on 0..3 the old (max+1)-v and
+# the correct (min+max)-v reversal DISAGREE, so a formula regression fails too.
+
+
+def _setup_append_scenario(db, *, primary_type):
+    """Import a zero-based ordinal column, then install the given primary
+    recode the way the workbench's set-primary path leaves the column."""
+    from app.models.user import User
+    from app.services.dataset_import import import_dataset_csv
+
+    db.add(Project(id=538, name="Append Primary", user_id=1))
+    db.flush()
+    configs = [{
+        "column_index": 0,
+        "column_type": "ordinal",
+        "column_text": "support",
+        "column_name": "support",
+        "scale_labels": list(_APPEND_LABELS),
+        "scale_values": [0, 1, 2, 3],
+    }]
+    import_dataset_csv(
+        db=db, project_id=538, name="DS", column_configs=configs,
+        file_contents="support\n" + "\n".join(_APPEND_LABELS) + "\n",
+    )
+    db.flush()
+    dataset = db.query(Dataset).filter_by(project_id=538).one()
+    column = db.query(DatasetColumn).filter_by(dataset_id=dataset.id).one()
+
+    # Demote whatever primary the import auto-created, then install ours.
+    for d in db.query(RecodeDefinition).filter_by(column_id=column.id):
+        d.is_primary = False
+    if primary_type == RecodeType.REVERSE:
+        defn = RecodeDefinition(
+            column_id=column.id, name="Reversed",
+            recode_type=RecodeType.REVERSE, output_type=OutputType.NUMERIC,
+            mapping=json.dumps({l: i for i, l in enumerate(_APPEND_LABELS)}),
+            is_primary=True,
+        )
+        db.add(defn)
+        db.flush()
+        apply_definition_to_column(db, defn)   # existing rows now reversed
+    else:  # CATEGORY_GROUP
+        defn = RecodeDefinition(
+            column_id=column.id, name="Banded",
+            recode_type=RecodeType.CATEGORY_GROUP,
+            output_type=OutputType.CATEGORICAL,
+            mapping=json.dumps({"None": "Low", "A little": "Low",
+                                "Some": "High", "A lot": "High"}),
+            is_primary=True,
+        )
+        db.add(defn)
+        db.flush()
+        clear_value_numeric(db, column.id)     # existing rows carry NO numeric
+    db.flush()
+    return dataset, column, db.query(User).filter(User.id == 1).one()
+
+
+def _append_one_row(db, dataset, column, user, cell):
+    """Append one CSV row via the real endpoint; return the new DatasetValue.
+
+    skip_duplicates must be OFF and the assertion must read the NEW value only
+    (id-diff) — the toothless-guard trap from the #28 session.
+    """
+    import asyncio
+    import io as _io
+
+    from starlette.datastructures import UploadFile as StarletteUploadFile
+
+    from app.routers.dataset import append_import
+
+    pre_existing = {v.id for v in db.query(DatasetValue).filter_by(column_id=column.id)}
+    upload = StarletteUploadFile(
+        filename="more.csv", file=_io.BytesIO(f"support\n{cell}\n".encode())
+    )
+    config = json.dumps({
+        "column_mapping": [{"csv_column_index": 0, "column_id": column.id}],
+        "skip_duplicates": False,
+    })
+    resp = asyncio.run(append_import(
+        project_id=538, dataset_id=dataset.id, file=upload,
+        import_config=config, encoding="utf-8", user=user, db=db,
+    ))
+    db.flush()
+    assert resp.rows_created == 1, "the append must actually create a row"
+    appended = [
+        v for v in db.query(DatasetValue).filter_by(column_id=column.id)
+        if v.id not in pre_existing
+    ]
+    assert len(appended) == 1
+    return appended[0]
+
+
+class TestAppendReappliesPrimaryRecode:
+    def test_reverse_primary_reverses_appended_rows(self, db_session):
+        dataset, column, user = _setup_append_scenario(
+            db_session, primary_type=RecodeType.REVERSE
+        )
+        by_label = {
+            v.value_text: v.value_numeric
+            for v in db_session.query(DatasetValue).filter_by(column_id=column.id)
+        }
+        assert by_label["None"] == 3.0 and by_label["A lot"] == 0.0, \
+            "scenario sanity: existing rows must already be reversed"
+
+        appended = _append_one_row(db_session, dataset, column, user, "None")
+        assert appended.value_text == "None"
+        assert appended.value_numeric == 3.0, (
+            "appended row must carry the REVERSED encoding like every existing "
+            "row, not the forward scale code"
+        )
+
+    def test_category_group_primary_clears_appended_rows(self, db_session):
+        dataset, column, user = _setup_append_scenario(
+            db_session, primary_type=RecodeType.CATEGORY_GROUP
+        )
+        appended = _append_one_row(db_session, dataset, column, user, "Some")
+        assert appended.value_text == "Some"
+        assert appended.value_numeric is None, (
+            "a category_group-primary column carries no numeric encoding — the "
+            "raw scale code must not be stamped onto appended rows"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #542 — recode-seam agreement: reversal-path parity + scale-metadata write-back
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from app.routers.recode import create_definition, update_definition
+from app.schemas.recode import RecodeDefinitionCreate, RecodeDefinitionUpdate
+
+
+class TestMixedMappingReversalParity:
+    """#542b — a mixed (part-numeric) REVERSE mapping must reverse identically
+    on the per-value path (`compute_value`) and the bulk path
+    (`apply_definition_to_column`). One non-floatable mapping value previously
+    aborted compute_value's numeric collection, returning every mapped value
+    UN-reversed — while the bulk path filtered per value and reversed."""
+
+    MIXED = {"Low": 1, "Mid": 2, "High": 3, "Unsure": "not scored"}
+
+    def _definition(self, defn_id=99, column_id=1, in_db=None):
+        d = RecodeDefinition(
+            id=defn_id, column_id=column_id, name="Reverse mixed",
+            recode_type=RecodeType.REVERSE, output_type=OutputType.NUMERIC,
+            mapping=json.dumps(self.MIXED), exclude_values=json.dumps([]),
+            is_primary=True, is_auto_detected=False, sequence_order=0,
+        )
+        if in_db is not None:
+            in_db.add(d)
+            in_db.flush()
+        return d
+
+    def test_compute_value_reverses_despite_non_numeric_mapping_value(self):
+        d = self._definition()
+        assert compute_value("Low", d) == 3.0    # (1+3) - 1
+        assert compute_value("Mid", d) == 2.0
+        assert compute_value("High", d) == 1.0
+
+    def test_non_numeric_mapped_value_is_unmapped_like_the_bulk_path(self):
+        """The bulk path warns + NULLs a non-floatable mapping value; the
+        per-value path must not hand back the raw string instead."""
+        d = self._definition()
+        assert compute_value("Unsure", d) is None
+
+    def test_both_paths_agree_cell_for_cell(self, db_session):
+        project = Project(id=1, name="Parity", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+        dataset = Dataset(id=1, project_id=1, name="Survey")
+        db_session.add(dataset)
+        db_session.flush()
+        column = DatasetColumn(
+            id=1, dataset_id=1, column_code="Q1", column_text="Rating",
+            column_type="ordinal", sequence_order=0, display_order=0,
+        )
+        db_session.add(column)
+        db_session.flush()
+        for i, text in enumerate(["Low", "Mid", "High", "Unsure"], start=1):
+            row = DatasetRow(id=i, dataset_id=1)
+            db_session.add(row)
+            db_session.flush()
+            db_session.add(DatasetValue(
+                row_id=i, column_id=1, value_text=text, value_numeric=None,
+            ))
+        db_session.flush()
+
+        d = self._definition(defn_id=1, in_db=db_session)
+        apply_definition_to_column(db_session, d)
+        db_session.flush()
+
+        vals = (
+            db_session.query(DatasetValue)
+            .filter(DatasetValue.column_id == 1)
+            .order_by(DatasetValue.row_id)
+            .all()
+        )
+        for dv in vals:
+            assert dv.value_numeric == compute_value(dv.value_text, d), (
+                f"bulk and per-value paths disagree for {dv.value_text!r}"
+            )
+
+
+class TestPrimaryMappingWritesBackScaleMetadata:
+    """#542a — workbench edits to a primary numeric recode write the mapping
+    back to column.scale_labels/scale_values (owner-2 of the #28 three-owner
+    invariant). Consumers prefer the mapping while it exists; the stale copy
+    bites when the definition is later DELETED and append/R-export fall back
+    to pre-edit codes."""
+
+    def test_update_definition_syncs_scale_metadata(self, db_session):
+        column, definition, _ = _setup_ordinal_column(db_session)
+        user = db_session.query(User).filter(User.id == 1).one()
+
+        _run(update_definition(
+            project_id=1, dataset_id=1, column_id=1, definition_id=1,
+            data=RecodeDefinitionUpdate(
+                mapping={"Poor": 0, "Fair": 2, "Good": 4, "Excellent": 6},
+            ),
+            user=user, db=db_session,
+        ))
+
+        assert json.loads(column.scale_labels) == ["Poor", "Fair", "Good", "Excellent"]
+        # code-sorted, stored as ints (the #28 int/float parity rule)
+        assert json.loads(column.scale_values) == [0, 2, 4, 6]
+        assert column.scale_points == 4
+
+    def test_create_primary_definition_syncs_scale_metadata(self, db_session):
+        project = Project(id=1, name="WriteBack", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+        dataset = Dataset(id=1, project_id=1, name="Survey")
+        db_session.add(dataset)
+        db_session.flush()
+        column = DatasetColumn(
+            id=1, dataset_id=1, column_code="Q1", column_text="Agree?",
+            column_type="ordinal", sequence_order=0, display_order=0,
+        )
+        db_session.add(column)
+        db_session.flush()
+        user = db_session.query(User).filter(User.id == 1).one()
+
+        _run(create_definition(
+            project_id=1, dataset_id=1, column_id=1,
+            data=RecodeDefinitionCreate(
+                name="Scale", recode_type="scale_map", output_type="numeric",
+                mapping={"No": 0, "Maybe": 1, "Yes": 2},
+            ),
+            user=user, db=db_session,
+        ))
+
+        assert json.loads(column.scale_labels) == ["No", "Maybe", "Yes"]
+        assert json.loads(column.scale_values) == [0, 1, 2]
+
+    def test_non_numeric_mapping_values_skipped_not_fatal(self, db_session):
+        column, definition, _ = _setup_ordinal_column(db_session)
+        user = db_session.query(User).filter(User.id == 1).one()
+
+        _run(update_definition(
+            project_id=1, dataset_id=1, column_id=1, definition_id=1,
+            data=RecodeDefinitionUpdate(
+                mapping={"Poor": 1, "Excellent": 5, "Unsure": "n/a"},
+            ),
+            user=user, db=db_session,
+        ))
+
+        assert json.loads(column.scale_labels) == ["Poor", "Excellent"]
+        assert json.loads(column.scale_values) == [1, 5]
+
+    def test_category_group_created_first_clears_stamped_numerics(self, db_session):
+        """Callsite-drift corollary: create_definition previously skipped the
+        category_group CLEAR branch, so a categorical primary created FIRST on
+        a stamped column left the numeric encoding behind."""
+        project = Project(id=1, name="CGCreate", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+        dataset = Dataset(id=1, project_id=1, name="Survey")
+        db_session.add(dataset)
+        db_session.flush()
+        column = DatasetColumn(
+            id=1, dataset_id=1, column_code="Q1", column_text="Rating",
+            column_type="ordinal", sequence_order=0, display_order=0,
+        )
+        db_session.add(column)
+        db_session.flush()
+        for i, (text, num) in enumerate(
+            [("Low", 1.0), ("Mid", 2.0), ("High", 3.0)], start=1
+        ):
+            row = DatasetRow(id=i, dataset_id=1)
+            db_session.add(row)
+            db_session.flush()
+            db_session.add(DatasetValue(
+                row_id=i, column_id=1, value_text=text, value_numeric=num,
+            ))
+        db_session.flush()
+        user = db_session.query(User).filter(User.id == 1).one()
+
+        _run(create_definition(
+            project_id=1, dataset_id=1, column_id=1,
+            data=RecodeDefinitionCreate(
+                name="Groups", recode_type="category_group", output_type="categorical",
+                mapping={"Low": "L", "Mid": "M", "High": "H"},
+            ),
+            user=user, db=db_session,
+        ))
+
+        numerics = [
+            dv.value_numeric
+            for dv in db_session.query(DatasetValue).filter(DatasetValue.column_id == 1)
+        ]
+        assert numerics == [None, None, None], (
+            "a category_group primary means the column carries NO numeric encoding"
+        )

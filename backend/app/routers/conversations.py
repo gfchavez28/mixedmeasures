@@ -116,6 +116,19 @@ def conversation_to_response(
             non_consensus_filter(),  # J2-B: the derived consensus layer must not inflate the card count
         ).scalar() or 0
 
+    # On-disk recording size (slab 5 storage visibility) — one stat per
+    # conversation; None when nothing attached or the file is missing.
+    media_size_bytes = None
+    if conversation.media_filename and conversation.media_format:
+        media_path = (
+            get_media_dir() / str(conversation.project_id) / str(conversation.id)
+            / f"original.{conversation.media_format}"
+        )
+        try:
+            media_size_bytes = media_path.stat().st_size
+        except OSError:
+            media_size_bytes = None
+
     return ConversationResponse(
         id=conversation.id,
         project_id=conversation.project_id,
@@ -136,7 +149,8 @@ def conversation_to_response(
         media_duration_seconds=conversation.media_duration_seconds,
         media_offset_seconds=conversation.media_offset_seconds,
         media_is_vbr=conversation.media_is_vbr,
-        has_audio=conversation.media_type == "audio",
+        has_media=conversation.media_filename is not None,
+        media_size_bytes=media_size_bytes,
     )
 
 

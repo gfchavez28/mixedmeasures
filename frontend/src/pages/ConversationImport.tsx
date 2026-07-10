@@ -1,8 +1,11 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert } from 'lucide-react'
-import { conversationsApi, participantsApi, type Participant } from '@/lib/api'
+import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, Video, Volume2, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert } from 'lucide-react'
+import { toast } from 'sonner'
+import { conversationsApi, participantsApi, mediaApi, type Participant } from '@/lib/api'
+import { validateMediaFile, MEDIA_ACCEPT, MEDIA_FORMAT_LABEL, describeMediaUploadError, isVideoFilename } from '@/lib/media-constants'
+import { formatBytes } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -71,6 +74,35 @@ export default function ConversationImport() {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
 
+  // Slab 1: an optional recording to attach after a single-file transcript
+  // import (uploaded in Slab 2). Kept even in multi-file mode (D-1), but only
+  // uploaded when exactly one transcript is present.
+  const [mediaFile, setMediaFile] = useState<File | null>(null)
+  const [recordingError, setRecordingError] = useState<string | null>(null)
+  const recFileInputRef = useRef<HTMLInputElement>(null)
+  // Slab 2: single-file import → media-attach phase (progress + partial-failure).
+  const [attach, setAttach] = useState<{
+    conversationId: number
+    conversationName: string
+    segmentCount: number | undefined
+    fileName: string
+    mediaName: string
+    status: 'attaching' | 'failed'
+    error?: string
+    /** #356/#543: import-time warnings, carried so the failed-attach card and
+     * the retry-success path can still route through the warnings display. */
+    warnings?: string[]
+  } | null>(null)
+
+  // #543: attaches legitimately run minutes-to-hours, and react-router keeps
+  // `navigate` live after unmount — a stale success must never yank the user
+  // back, and a stale failure must fall back to a toast instead of silence.
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true // StrictMode re-runs effects: reset after the dev-only unmount
+    return () => { mountedRef.current = false }
+  }, [])
+
   // First file's preview (used for column mapping UI)
   const [firstPreview, setFirstPreview] = useState<PreviewData | null>(null)
 
@@ -110,6 +142,7 @@ export default function ConversationImport() {
   })
 
   const isMultiFile = files.length > 1
+  const recIsVideo = !!mediaFile && isVideoFilename(mediaFile.name)
 
   // Pick up files staged by drag-drop on ProjectView empty tab
   useEffect(() => {
@@ -321,6 +354,31 @@ export default function ConversationImport() {
     [handleFilesSelected]
   )
 
+  // --- Recording (optional media) staging (Slab 1) ---
+
+  const stageRecording = useCallback((file: File | undefined | null) => {
+    if (!file) return
+    const validation = validateMediaFile(file)
+    if (!validation.ok) {
+      setRecordingError(validation.error)
+      setMediaFile(null)
+      return
+    }
+    setRecordingError(null)
+    setMediaFile(file)
+  }, [])
+
+  const handleRecordingSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = '' // reset so the same file can be re-picked
+    stageRecording(file)
+  }, [stageRecording])
+
+  const handleRecordingDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    stageRecording(e.dataTransfer.files?.[0])
+  }, [stageRecording])
+
   // --- Column mapping ---
 
   const handleColumnMappingChange = useCallback((type: string, value: string) => {
@@ -466,32 +524,146 @@ export default function ConversationImport() {
       queryClient.invalidateQueries({ queryKey: ['project', id] })
       queryClient.invalidateQueries({ queryKey: ['conversations', id] })
       queryClient.invalidateQueries({ queryKey: ['participants', id] })
-      // #356: if import surfaced warnings, route through the results step
-      // so the researcher sees them before navigating to the transcript.
-      // (Silent success path is preserved when warnings is empty.)
-      if (warnings && warnings.length > 0) {
-        setImportProgress({
-          current: 1,
-          results: [{
-            fileName: files[0].name,
-            conversationName: name,
-            status: 'success',
-            conversationId: conversation.id,
-            segmentCount: conversation.segment_count,
-            warnings,
-          }],
-        })
-        setStep('results')
-        setIsLoading(false)
-      } else {
-        navigate(`/projects/${id}/conversations/${conversation.id}`)
+
+      const finishTranscriptOnly = () => {
+        if (!mountedRef.current) {
+          // #543: the user left the wizard while this finished — never navigate
+          // them from wherever they are now. Surface the outcome (and any
+          // warnings, which have no post-hoc home) as a toast instead.
+          toast.success(
+            `Transcript "${name}" imported`,
+            warnings && warnings.length > 0 ? { description: warnings.join(' · '), duration: 10_000 } : undefined,
+          )
+          return
+        }
+        // #356: if import surfaced warnings, route through the results step so
+        // the researcher sees them before navigating. Silent success otherwise.
+        if (warnings && warnings.length > 0) {
+          setImportProgress({
+            current: 1,
+            results: [{
+              fileName: files[0].name,
+              conversationName: name,
+              status: 'success',
+              conversationId: conversation.id,
+              segmentCount: conversation.segment_count,
+              warnings,
+            }],
+          })
+          setStep('results')
+          setIsLoading(false)
+        } else {
+          navigate(`/projects/${id}/conversations/${conversation.id}`)
+        }
       }
+
+      // A staged recording (single-file only) → attach it to the just-created
+      // conversation, then land in the workbench (the video pane confirms it).
+      // The transcript import already committed, so a media failure NEVER loses
+      // it (D-5): we surface a retryable results card instead of erroring out.
+      if (mediaFile) {
+        setAttach({
+          conversationId: conversation.id,
+          conversationName: name,
+          segmentCount: conversation.segment_count,
+          fileName: files[0].name,
+          mediaName: mediaFile.name,
+          status: 'attaching',
+          warnings,
+        })
+        setStep('importing')
+        setIsLoading(false)
+        try {
+          await mediaApi.upload(id, conversation.id, mediaFile)
+          // #543(c): the pre-attach invalidation above cached has_media=false —
+          // refresh the list + workbench detail now that the recording exists.
+          queryClient.invalidateQueries({ queryKey: ['conversations', id] })
+          queryClient.invalidateQueries({ queryKey: ['conversation', id, conversation.id] })
+          if (!mountedRef.current) {
+            toast.success(`Recording attached to "${name}"`)
+            return
+          }
+          setAttach(null)
+          finishTranscriptOnly() // navigates (or shows warnings) now that media is attached
+        } catch (mediaErr: unknown) {
+          const reason = describeMediaUploadError(mediaErr)
+          if (!mountedRef.current) {
+            // #543(a): the retry card is unreachable once the page is gone — a
+            // toast is the only way this failure isn't silent. Most reasons
+            // already end with a "…from the workbench" pointer — don't double it.
+            toast.error(`Recording not attached to "${name}"`, {
+              description: /workbench/i.test(reason) ? reason : `${reason} You can add it any time from the workbench.`,
+              duration: 15_000,
+            })
+            return
+          }
+          setAttach(prev => prev && {
+            ...prev,
+            status: 'failed',
+            error: reason,
+          })
+          setStep('results')
+        }
+        return
+      }
+
+      finishTranscriptOnly()
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : 'Import failed'
       setError(errorMessage)
       setIsLoading(false)
     }
-  }, [files, id, columnMapping, queryClient, navigate])
+  }, [files, id, columnMapping, queryClient, navigate, mediaFile])
+
+  // Retry a failed recording attach against the already-created conversation.
+  const handleRetryAttach = useCallback(async () => {
+    if (!attach || !mediaFile) return
+    setAttach({ ...attach, status: 'attaching', error: undefined })
+    setStep('importing')
+    try {
+      await mediaApi.upload(id, attach.conversationId, mediaFile)
+      queryClient.invalidateQueries({ queryKey: ['conversations', id] })
+      queryClient.invalidateQueries({ queryKey: ['conversation', id, attach.conversationId] })
+      if (!mountedRef.current) {
+        toast.success(`Recording attached to "${attach.conversationName}"`)
+        return
+      }
+      // #356/#543(b): a retried attach must still show the import warnings —
+      // navigating directly here was the corner that dropped them.
+      if (attach.warnings && attach.warnings.length > 0) {
+        setImportProgress({
+          current: 1,
+          results: [{
+            fileName: attach.fileName,
+            conversationName: attach.conversationName,
+            status: 'success',
+            conversationId: attach.conversationId,
+            segmentCount: attach.segmentCount,
+            warnings: attach.warnings,
+          }],
+        })
+        setAttach(null)
+        setStep('results')
+      } else {
+        navigate(`/projects/${id}/conversations/${attach.conversationId}`)
+      }
+    } catch (mediaErr: unknown) {
+      const reason = describeMediaUploadError(mediaErr)
+      if (!mountedRef.current) {
+        toast.error(`Recording not attached to "${attach.conversationName}"`, {
+          description: /workbench/i.test(reason) ? reason : `${reason} You can add it any time from the workbench.`,
+          duration: 15_000,
+        })
+        return
+      }
+      setAttach(prev => prev && {
+        ...prev,
+        status: 'failed',
+        error: reason,
+      })
+      setStep('results')
+    }
+  }, [attach, mediaFile, id, navigate, queryClient])
 
   const handleBatchImport = useCallback(async (names: string[], speakerSets: SpeakerMapping[][]) => {
     cancelledRef.current = false
@@ -614,17 +786,23 @@ export default function ConversationImport() {
     setExpandedFileIndex(0)
     setImportProgress({ current: 0, results: [] })
     setError('')
+    setMediaFile(null)
+    setRecordingError(null)
     cancelledRef.current = false
     userEditedNames.current = new Set()
   }, [])
 
   // --- Step indicators ---
 
+  // A single-file import with a staged recording gains an "Import" step (the
+  // attach-progress screen); "Results" stays multi-file-only (single-file only
+  // lands there on media failure — a rare branch, not an always-reached step).
+  const willAttachRecording = !isMultiFile && !!mediaFile
   const steps: { key: Step; label: string }[] = [
     { key: 'upload', label: 'Upload' },
     { key: 'columns', label: 'Columns' },
     { key: 'speakers', label: 'Speakers' },
-    ...(isMultiFile ? [{ key: 'importing' as Step, label: 'Import' }] : []),
+    ...((isMultiFile || willAttachRecording) ? [{ key: 'importing' as Step, label: 'Import' }] : []),
     ...(isMultiFile ? [{ key: 'results' as Step, label: 'Results' }] : []),
   ]
 
@@ -833,6 +1011,13 @@ export default function ConversationImport() {
               <CardDescription>
                 Upload transcript CSVs, or VTT/SRT subtitle files exported from Zoom or Teams.
                 Multiple files will share the same column mapping.
+                {/* Video V1 slab 6 (§15.3): Zoom LOCAL recordings produce no
+                    transcript — point that gap at free offline transcription
+                    (aTrain et al. export SRT) instead of dead-ending. */}
+                <br />
+                Have a recording but no transcript? Free offline tools like aTrain
+                export SRT files you can import here — speakers can be assigned
+                after import.
                 {/* #412: the most common real-world transcript is a Word/PDF file —
                     point that path at Documents instead of dead-ending here. */}
                 <br />
@@ -880,6 +1065,101 @@ export default function ConversationImport() {
                     <span>{isLoading ? 'Processing...' : 'Select Files'}</span>
                   </Button>
                 </label>
+              </div>
+
+              {/* Recording (optional) — attached after a single-file import (Slab 2).
+                  Visible from the start (D-2) so the affordance is discoverable, but
+                  the transcript is still required to proceed. */}
+              <div className="mt-6">
+                <div className="flex items-center gap-2 mb-2">
+                  <Video className="w-4 h-4 text-primary" aria-hidden />
+                  <span className="text-sm font-semibold text-mm-text">Recording</span>
+                  <span className="text-xs font-medium text-mm-text-faint">(optional)</span>
+                </div>
+
+                {isMultiFile ? (
+                  <div className="p-3 bg-mm-blue/12 text-mm-blue-text rounded-lg text-sm flex items-start gap-2">
+                    <CircleAlert className="w-4 h-4 flex-shrink-0 mt-0.5" aria-hidden />
+                    <span>
+                      Recordings attach to single-transcript imports. Remove the extra file to add one.
+                      {mediaFile ? ' Your selected recording is kept.' : ''}
+                    </span>
+                  </div>
+                ) : mediaFile ? (
+                  <div className="flex items-center gap-3 p-3 rounded-lg border border-primary/30 bg-primary/5 text-sm">
+                    {recIsVideo ? (
+                      <Video className="w-4 h-4 text-primary flex-shrink-0" aria-hidden />
+                    ) : (
+                      <Volume2 className="w-4 h-4 text-primary flex-shrink-0" aria-hidden />
+                    )}
+                    <span className="flex-1 truncate font-medium">{mediaFile.name}</span>
+                    <span className="text-xs text-mm-text-faint flex-shrink-0">
+                      {formatBytes(mediaFile.size)} · {recIsVideo ? 'video' : 'audio'}
+                    </span>
+                    <button
+                      onClick={() => { setMediaFile(null); setRecordingError(null) }}
+                      className="p-1 hover:bg-mm-surface-hover rounded"
+                      aria-label="Remove recording"
+                    >
+                      <X className="w-3.5 h-3.5 text-mm-text-muted" />
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    className="border-2 border-dashed rounded-lg p-6 text-center hover:border-primary/50 transition-colors"
+                    onDrop={handleRecordingDrop}
+                    onDragOver={(e) => e.preventDefault()}
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Add a recording, or press Enter to select a file"
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); recFileInputRef.current?.click() } }}
+                  >
+                    <p className="text-sm text-mm-text-secondary mb-3">
+                      Add the audio or video this transcript came from — {MEDIA_FORMAT_LABEL}.
+                    </p>
+                    <input
+                      ref={recFileInputRef}
+                      type="file"
+                      accept={MEDIA_ACCEPT}
+                      className="hidden"
+                      id="recording-input"
+                      onChange={handleRecordingSelect}
+                    />
+                    <label htmlFor="recording-input">
+                      <Button variant="outline" size="sm" asChild>
+                        <span>Select recording</span>
+                      </Button>
+                    </label>
+                  </div>
+                )}
+
+                {/* Zoom golden-path hint */}
+                {!isMultiFile && !mediaFile && (
+                  <p className="mt-2 text-xs text-mm-text-muted">
+                    Recording from Zoom? Add the MP4 here and the VTT transcript above — they import together.
+                  </p>
+                )}
+
+                {/* Recording staged but no transcript yet — point at transcription, don't dead-end */}
+                {!isMultiFile && mediaFile && files.length === 0 && (
+                  <div role="alert" className="mt-2 p-3 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 rounded-lg text-sm flex items-start gap-2">
+                    <CircleAlert className="w-4 h-4 flex-shrink-0 mt-0.5" aria-hidden />
+                    <span>
+                      A recording still needs a transcript to code against. Add a transcript above, or export
+                      one with a free offline tool like aTrain (SRT) and import it here.
+                    </span>
+                  </div>
+                )}
+
+                {/* Validation error — hidden in multi-file mode, where the slot is
+                    disabled and a stale rejection message would sit under the
+                    disabled note as if it applied (#543d) */}
+                {!isMultiFile && recordingError && (
+                  <p role="alert" className="mt-2 text-sm text-red-600 flex items-center gap-1">
+                    <CircleAlert className="w-4 h-4" aria-hidden />
+                    {recordingError}
+                  </p>
+                )}
               </div>
 
               {/* File list */}
@@ -1410,8 +1690,39 @@ export default function ConversationImport() {
           </Card>
         )}
 
+        {/* Single-file: attaching the recording after import (Slab 2) */}
+        {step === 'importing' && attach && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Importing</CardTitle>
+              <CardDescription>Bringing in your transcript and attaching the recording.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex items-center gap-3 p-3 rounded-lg border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/40">
+                <CircleCheck className="w-5 h-5 text-green-600 flex-shrink-0" aria-hidden />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-green-800 dark:text-green-300">Transcript imported</div>
+                  {attach.segmentCount != null && (
+                    <div className="text-xs text-mm-text-muted">{attach.segmentCount} segments</div>
+                  )}
+                </div>
+              </div>
+              <div role="status" aria-live="polite" className="flex items-center gap-3 p-3 rounded-lg border">
+                <LoaderCircle className="w-5 h-5 animate-spin text-primary flex-shrink-0" aria-hidden />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium">Attaching recording…</div>
+                  <div className="text-xs text-mm-text-muted truncate">{attach.mediaName}</div>
+                </div>
+              </div>
+              <p className="text-xs text-mm-text-faint">
+                Large recordings can take a few minutes. Keep this tab open until it finishes.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Step 4: Importing (multi-file only) */}
-        {step === 'importing' && (
+        {step === 'importing' && !attach && (
           <Card>
             <CardHeader>
               <CardTitle>Importing Conversations</CardTitle>
@@ -1476,8 +1787,63 @@ export default function ConversationImport() {
           </Card>
         )}
 
+        {/* Single-file: recording failed to attach — the import itself is safe (Slab 2) */}
+        {step === 'results' && attach && attach.status === 'failed' && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Import complete — with one issue</CardTitle>
+              <CardDescription>Your transcript imported. The recording couldn’t be attached this time.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex items-center gap-3 p-3 rounded-lg border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/40 text-sm">
+                <CircleCheck className="w-5 h-5 text-green-600 flex-shrink-0" aria-hidden />
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium">Transcript imported</div>
+                  <div className="text-xs text-mm-text-muted truncate">
+                    {attach.conversationName}{attach.segmentCount != null ? ` · ${attach.segmentCount} segments` : ''}
+                  </div>
+                </div>
+              </div>
+              <div role="alert" className="flex items-start gap-3 p-3 rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/40 text-sm">
+                <CircleX className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" aria-hidden />
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium">Recording not attached</div>
+                  <div className="text-xs text-mm-text-muted">
+                    {attach.mediaName}{attach.error ? ` — ${attach.error}` : ''}. You can add it any time from the workbench.
+                  </div>
+                </div>
+              </div>
+              {/* #356/#543(b): import warnings must survive the failed-attach corner too. */}
+              {attach.warnings && attach.warnings.length > 0 && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2.5 p-3 rounded-lg border bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800/60 text-amber-900 dark:text-amber-200 text-xs"
+                >
+                  <TriangleAlert className="w-4 h-4 flex-shrink-0 mt-0.5" aria-hidden />
+                  <div className="flex-1 min-w-0 space-y-1">
+                    <div className="font-medium">
+                      {attach.warnings.length === 1 ? 'Import warning' : `${attach.warnings.length} import warnings`}
+                    </div>
+                    <ul className="space-y-0.5 list-disc list-inside marker:text-amber-700 dark:marker:text-amber-300">
+                      {attach.warnings.map((w, wi) => <li key={wi}>{w}</li>)}
+                    </ul>
+                  </div>
+                </div>
+              )}
+              <div className="flex justify-between gap-2 pt-2">
+                <Button variant="outline" onClick={() => navigate(`/projects/${id}/conversations/${attach.conversationId}`)}>
+                  Open conversation
+                </Button>
+                <Button onClick={handleRetryAttach}>
+                  Retry recording
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Step 5: Results (multi-file only) */}
-        {step === 'results' && (
+        {step === 'results' && !attach && (
           <Card>
             <CardHeader>
               <CardTitle>Import Complete</CardTitle>

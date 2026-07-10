@@ -12,7 +12,8 @@ import { buildShortcutCategories, type ShortcutCodeInput } from '@/lib/codeShort
  *     visible label (`useCodeShortcutLabels`) — see plan §3a.
  *   - 1500ms clear-on-timeout (never auto-commits a code); a non-digit key cancels a
  *     pending chord immediately and then passes through to its normal action.
- *   - Escape unwinds ONE layer per press: pending-chord → selection → fallback (panel).
+ *   - Escape unwinds ONE layer per press: pending-chord → media overlay (theater/PiP)
+ *     → selection → fallback (panel).
  *     The inline-edit layer lives in the editing control's own handler, reached because
  *     this listener bails entirely while `isEditing` (plan G-B); don't add it here.
  *   - input guard skips INPUT/TEXTAREA/SELECT/contenteditable.
@@ -67,6 +68,13 @@ export interface UseCodeChordShortcutsOptions<T extends ShortcutCodeInput> {
 
   /** Clear the current selection (Escape: list-focused layer). */
   clearSelection?: () => void
+  /**
+   * Escape layer for a temporary media overlay state (video theater / PiP —
+   * V1 slab 4). Checked right after the pending-chord layer; return true if an
+   * overlay was exited (the press is consumed), false to fall through to the
+   * panel/selection layers.
+   */
+  onEscapeOverlay?: () => boolean
   /** Escape layer when a side panel is focused (dismiss it) and the final fallback. */
   onEscapeFallback?: () => void
 
@@ -172,6 +180,7 @@ export function useCodeChordShortcuts<T extends ShortcutCodeInput>(
       // unambiguous: chord → (panel focused ⇒ dismiss it) → (list focused ⇒ clear selection).
       if (e.key === 'Escape') {
         if (chordPrefixRef.current !== null) { clearChord(); return }            // layer 1: chord
+        if (o.onEscapeOverlay?.()) return                                        // layer 2: media overlay (theater/PiP)
         if (!o.arrowNavEnabled) { o.onEscapeFallback?.(); return }               // side panel → dismiss
         if (o.selectionCount > 0) { o.clearSelection?.(); return }               // list → clear selection
         return

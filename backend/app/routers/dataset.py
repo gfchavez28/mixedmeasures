@@ -60,10 +60,13 @@ from ..schemas.dataset import (
     AppendUnmatchedCsvColumn,
     AppendUnmatchedColumn,
     AppendPreviewRow,
+    AppendLinkColumnOffer,
     DatasetAppendPreviewResponse,
     DatasetAppendRequest,
     DatasetAppendResponse,
     ColumnReorderRequest,
+    LinkByColumnRequest,
+    ParticipantLinkReport,
 )
 from ..models.recode import RecodeDefinition, RecodeType
 from ..services.dataset_import import (
@@ -77,9 +80,20 @@ from ..services.dataset_import import (
     xlsx_to_csv_text,
     XlsxImportError,
 )
+from ..services.sav_import import (
+    apply_sav_metadata,
+    is_sav_upload,
+    sav_to_csv_text,
+    SavColumnMeta,
+    SavImportError,
+)
 from ..models.equivalence_group import EquivalenceGroup
 from ..schemas.equivalence import ProjectColumnInfo, ProjectColumnListResponse
-from ..services.recode import compute_value, apply_definition_to_column
+from ..services.recode import (
+    apply_definition_to_column,
+    clear_value_numeric,
+    compute_value,
+)
 from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
 from ..models.metric import MetricDefinition
 from ..models.row_score import RowScore
@@ -95,7 +109,10 @@ from ..services.computed_columns import (
     evaluate_computed_column,
 )
 from ..services.audit import log_action
-from ..services.participant_linking import auto_fill_role_from_linked_row
+from ..services.participant_linking import (
+    auto_fill_role_from_linked_row,
+    link_rows_by_identifier_column,
+)
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/datasets",
@@ -166,17 +183,23 @@ async def preview_dataset(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Preview a dataset file (CSV or .xlsx, #523) before importing."""
+    """Preview a dataset file (CSV, .xlsx #523, or SPSS .sav #28) before importing."""
     _get_project_or_404(db, project_id, user.id)
     validate_encoding(encoding)
 
-    text, sheet_names = await _upload_to_csv_text(file, encoding, sheet_name)
+    text, sheet_names, sav_meta = await _upload_to_csv_text(file, encoding, sheet_name)
 
     try:
         result = preview_dataset_csv(text)
     except (ValueError, csv.Error, TypeError) as e:
         logger.warning("CSV parse failed: %s", e)
         raise HTTPException(status_code=400, detail="Unable to parse CSV file. Check the file format and try again.")
+
+    # #28: SPSS carries an authoritative ordinal order + scale codes that no amount
+    # of inference over the CSV text can recover. Overlay it onto the suggestions;
+    # the wizard still shows them to the user for confirmation.
+    if sav_meta:
+        apply_sav_metadata(result["columns"], sav_meta)
 
     return DatasetPreviewResponse(
         total_rows=result["total_rows"],
@@ -206,7 +229,7 @@ async def import_dataset(
             status_code=400, detail=f"Invalid import config: {e}",
         )
 
-    text, _sheet_names = await _upload_to_csv_text(file, encoding, config.sheet_name)
+    text, _sheet_names, _sav_meta = await _upload_to_csv_text(file, encoding, config.sheet_name)
 
     # Convert Pydantic models to dicts for the service
     column_configs = [cfg.model_dump() for cfg in config.column_configs]
@@ -220,6 +243,7 @@ async def import_dataset(
             file_contents=text,
             description=config.description,
             source=config.source,
+            participant_link_column_index=config.participant_link_column_index,
         )
     except (ValueError, csv.Error, TypeError, KeyError) as e:
         db.rollback()
@@ -238,6 +262,15 @@ async def import_dataset(
             "columns_created": result["columns_created"],
             "rows_created": result["rows_created"],
             "values_created": result["values_created"],
+            # #414: record what linking did when it ran
+            **(
+                {
+                    "participants_linked": result["participant_link_report"]["linked"],
+                    "participants_created": result["participant_link_report"]["created"],
+                }
+                if result.get("participant_link_report")
+                else {}
+            ),
         },
     )
     # Service flushed; commit import data + audit log together
@@ -1119,6 +1152,55 @@ async def bulk_link_participants(
     return BulkLinkResponse(linked=linked, unlinked=unlinked, skipped=skipped)
 
 
+@router.post("/{dataset_id}/link-by-column", response_model=ParticipantLinkReport)
+async def link_by_column(
+    project_id: int,
+    dataset_id: int,
+    payload: LinkByColumnRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """#414 (DEC-8) — retro bulk-link: run the identifier-column linking over
+    a dataset that already exists (imported before the feature, or imported
+    with linking opted out). Processes UNLINKED rows only — a manual link is
+    user intent and is never overwritten (the service counts them
+    ``already_linked``). Same service, same semantics as import-time linking.
+    """
+    _get_project_or_404(db, project_id, user.id)
+    _get_dataset_or_404(db, project_id, dataset_id)
+
+    try:
+        report = link_rows_by_identifier_column(
+            db,
+            project_id=project_id,
+            dataset_id=dataset_id,
+            column_id=payload.column_id,
+        )
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+    log_action(
+        db,
+        action="participants_linked_by_column",
+        entity_type="dataset",
+        entity_id=dataset_id,
+        user_id=user.id,
+        project_id=project_id,
+        details={
+            "column_id": payload.column_id,
+            "linked": report["linked"],
+            "created": report["created"],
+            "matched": report["matched"],
+            "skipped_duplicate": report["skipped_duplicate"],
+            "skipped_conflict": report["skipped_conflict"],
+        },
+    )
+    db.commit()
+
+    return ParticipantLinkReport(**report)
+
+
 # ── Linkable rows endpoint ───────────────────────────────────────────────
 
 
@@ -1145,7 +1227,8 @@ async def get_linkable_rows(
         .all()
     )
     demo_cols = [c for c in all_cols if c.column_type == ColumnType.DEMOGRAPHIC]
-    identifying_types = {ColumnType.OPEN_TEXT, ColumnType.NOMINAL, ColumnType.DEMOGRAPHIC}
+    # #414: identifier columns are the BEST row label — they exist to name rows.
+    identifying_types = {ColumnType.IDENTIFIER, ColumnType.OPEN_TEXT, ColumnType.NOMINAL, ColumnType.DEMOGRAPHIC}
     identifying_col_ids = [c.id for c in all_cols if c.column_type in identifying_types]
 
     # 2. Get all rows with optional participant
@@ -2442,22 +2525,35 @@ async def update_value(
 
 async def _upload_to_csv_text(
     file: UploadFile, encoding: str, sheet_name: str | None = None,
-) -> tuple[str, list[str] | None]:
-    """Read a dataset upload (CSV or .xlsx) as CSV text (#523).
+) -> tuple[str, list[str] | None, dict[str, SavColumnMeta] | None]:
+    """Read a dataset upload (CSV, .xlsx, or SPSS .sav) as CSV text (#523/#28).
 
     The single format seam for ALL dataset upload endpoints (preview / import /
     append preview / append import): .xlsx converts through the openpyxl adapter
-    (in a threadpool — untrusted zip parse), everything else takes the existing
-    text-decode path. Returns (csv_text, sheet_names) — sheet_names only for xlsx.
+    and .sav through the pyreadstat adapter (both in a threadpool — untrusted
+    binary parse); everything else takes the existing text-decode path.
+
+    Returns ``(csv_text, sheet_names, sav_meta)``. ``sheet_names`` is xlsx-only;
+    ``sav_meta`` is .sav-only and carries what CSV cannot express (SPSS's measure
+    and code-ordered scale points). Only the preview endpoint can act on the
+    metadata — everything downstream consumes plain CSV, unchanged.
     """
     content = await read_upload_with_limit(file)
     if is_xlsx_upload(file.filename, content):
         try:
-            return await run_in_threadpool(xlsx_to_csv_text, content, sheet_name)
+            text, sheet_names = await run_in_threadpool(xlsx_to_csv_text, content, sheet_name)
+            return text, sheet_names, None
         except XlsxImportError as e:
             logger.warning("xlsx parse failed: %s", e)
             raise HTTPException(status_code=400, detail=str(e))
-    return _decode_csv(content, encoding), None
+    if is_sav_upload(file.filename, content):
+        try:
+            text, sav_meta = await run_in_threadpool(sav_to_csv_text, content)
+            return text, None, sav_meta
+        except SavImportError as e:
+            logger.warning("sav parse failed: %s", e)
+            raise HTTPException(status_code=400, detail=str(e))
+    return _decode_csv(content, encoding), None, None
 
 
 def _decode_csv(content: bytes, encoding: str) -> str:
@@ -2496,7 +2592,7 @@ async def append_preview(
     ds = _get_dataset_or_404(db, project_id, dataset_id)
     validate_encoding(encoding)
 
-    text, sheet_names = await _upload_to_csv_text(file, encoding, sheet_name)
+    text, sheet_names, _sav_meta = await _upload_to_csv_text(file, encoding, sheet_name)
 
     try:
         reader = csv.reader(io.StringIO(text))
@@ -2654,6 +2750,17 @@ async def append_preview(
 
     next_rid = f"R{str(max_num + 1).zfill(pad_width)}"
 
+    # #414 (DEC-7): offer append-linking when the dataset has exactly ONE
+    # identifier column AND the file matched it (otherwise new rows would
+    # carry no identifier values and every row would report skipped_missing).
+    identifier_cols = [c for c in columns if c.column_type == ColumnType.IDENTIFIER]
+    participant_link_column = None
+    if len(identifier_cols) == 1 and identifier_cols[0].id in matched_column_ids:
+        participant_link_column = AppendLinkColumnOffer(
+            column_id=identifier_cols[0].id,
+            column_text=identifier_cols[0].column_text,
+        )
+
     return DatasetAppendPreviewResponse(
         matched_columns=matched,
         unmatched_csv_columns=unmatched_csv,
@@ -2664,6 +2771,7 @@ async def append_preview(
         next_row_id=next_rid,
         row_pad_width=pad_width,
         sheet_names=sheet_names,
+        participant_link_column=participant_link_column,
     )
 
 
@@ -2692,7 +2800,7 @@ async def append_import(
         logger.warning("Invalid import config: %s", e)
         raise HTTPException(status_code=400, detail="Invalid import configuration.")
 
-    text, _sheet_names = await _upload_to_csv_text(file, encoding, config.sheet_name)
+    text, _sheet_names, _sav_meta = await _upload_to_csv_text(file, encoding, config.sheet_name)
 
     try:
         reader = csv.reader(io.StringIO(text))
@@ -2772,17 +2880,30 @@ async def append_import(
             next_num = max(req_num, max_num + 1)
             pad_width = req_pad
 
-    # Build column metadata for value_numeric computation
+    # Build column metadata for value_numeric computation. `scale_values` carries
+    # the codes the column was imported with (#28) — an SPSS scale may be 0-based
+    # or gapped, and an append must encode identically to the original import or
+    # the same label would mean two different numbers within one column.
     col_meta: dict[int, dict] = {}
     for q in col_mapping.values():
         qtype = q.column_type.value
         scale_labels = None
+        scale_values = None
         if q.scale_labels:
             try:
                 scale_labels = json.loads(q.scale_labels)
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning("Failed to parse scale_labels JSON for column %s during append: %s", q.id, e)
-        col_meta[q.id] = {"column_type": qtype, "scale_labels": scale_labels}
+        if q.scale_values:
+            try:
+                scale_values = json.loads(q.scale_values)
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning("Failed to parse scale_values JSON for column %s during append: %s", q.id, e)
+        col_meta[q.id] = {
+            "column_type": qtype,
+            "scale_labels": scale_labels,
+            "scale_values": scale_values,
+        }
 
     # Generate batch ID
     file_name = file.filename or "unknown"
@@ -2835,7 +2956,7 @@ async def append_import(
 
             meta = col_meta[q.id]
             value_numeric = _compute_value_numeric(
-                cell, meta["column_type"], meta["scale_labels"],
+                cell, meta["column_type"], meta["scale_labels"], meta["scale_values"],
             )
 
             wc = len(cell.split()) if meta["column_type"] == "open_text" and cell.strip() else None
@@ -2851,19 +2972,27 @@ async def append_import(
 
     db.flush()
 
-    # Apply scale_map primary recodes scoped to new row_ids
+    # Re-apply each column's PRIMARY recode scoped to the new rows, mirroring
+    # routers/recode.py::_recompute_primary_value_numeric's apply-vs-clear
+    # decision (the #359 seam). #538: filtering to SCALE_MAP here left a
+    # REVERSE-primary column's appended rows FORWARD-coded while every existing
+    # row was reversed — same label, two numbers in one column; and a
+    # category_group primary means the column carries NO numeric encoding, so
+    # new rows must be cleared, not stamped with the raw scale codes.
     if new_row_ids:
         primary_defs = (
             db.query(RecodeDefinition)
             .filter(
                 RecodeDefinition.column_id.in_(column_ids_in_mapping),
                 RecodeDefinition.is_primary == True,
-                RecodeDefinition.recode_type == RecodeType.SCALE_MAP,
             )
             .all()
         )
         for defn in primary_defs:
-            apply_definition_to_column(db, defn, row_ids=new_row_ids)
+            if defn.recode_type in (RecodeType.SCALE_MAP, RecodeType.REVERSE):
+                apply_definition_to_column(db, defn, row_ids=new_row_ids)
+            else:  # category_group → categorical output only
+                clear_value_numeric(db, defn.column_id, row_ids=new_row_ids)
 
     # Evaluate computed columns for new rows
     if new_row_ids:
@@ -2880,6 +3009,23 @@ async def append_import(
                 evaluate_computed_column(db, cc, row_ids=new_row_ids)
             except Exception:
                 logger.warning("Failed to evaluate computed column %s during append", cc.id)
+
+    # #414 (DEC-7): link the NEW rows by the identifier column. `is not None`
+    # is load-bearing (falsy-zero); runs even when new_row_ids is empty so the
+    # response shape is consistent (an all-duplicates append reports zeros).
+    participant_link_report = None
+    if config.participant_link_column_id is not None:
+        try:
+            participant_link_report = link_rows_by_identifier_column(
+                db,
+                project_id=project_id,
+                dataset_id=dataset_id,
+                column_id=config.participant_link_column_id,
+                row_ids=new_row_ids,
+            )
+        except ValueError as e:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(e))
 
     # Compute next record ID for response
     final_next_rid = f"R{str(next_num).zfill(pad_width)}"
@@ -2906,6 +3052,15 @@ async def append_import(
             "values_created": values_created,
             "duplicates_skipped": duplicates_skipped,
             "file_name": file_name,
+            # #414: record what linking did when it ran
+            **(
+                {
+                    "participants_linked": participant_link_report["linked"],
+                    "participants_created": participant_link_report["created"],
+                }
+                if participant_link_report
+                else {}
+            ),
         },
     )
     db.commit()
@@ -2916,4 +3071,5 @@ async def append_import(
         duplicates_skipped=duplicates_skipped,
         batch_id=batch_id,
         next_row_id=final_next_rid,
+        participant_link_report=participant_link_report,
     )

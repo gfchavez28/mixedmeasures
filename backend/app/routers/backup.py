@@ -98,8 +98,10 @@ async def backup_now(
     try:
         # Run the synchronous backup machinery in a worker thread so we
         # don't block the event loop — matches the lifespan loop's pattern.
+        # Counts toward the auto rotation → same policy: video excluded.
         info = await asyncio.to_thread(
             create_backup, db_path, docs_dir, media_dir, backup_dir, "auto",
+            False,  # include_video
         )
         await asyncio.to_thread(
             cleanup_old_backups, backup_dir, "auto", settings.auto_backup_max_count,
@@ -135,12 +137,21 @@ async def backup_list(user: User = Depends(get_current_user)):
 async def backup_create(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # Appended LAST + bare default (direct-call positional safety).
+    include_video: bool = True,
 ):
-    """Create a manual backup and stream it as a download."""
+    """Create a manual backup and stream it as a download.
+
+    Manual downloads default to a FULL backup including video; pass
+    include_video=false for a lighter archive (the auto rotation is always
+    video-less — slab 5 policy).
+    """
     db_path, docs_dir, media_dir, backup_dir = _get_paths()
 
     try:
-        info = create_backup(db_path, docs_dir, media_dir, backup_dir, "manual")
+        info = create_backup(
+            db_path, docs_dir, media_dir, backup_dir, "manual", include_video=include_video
+        )
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
     except Exception as e:

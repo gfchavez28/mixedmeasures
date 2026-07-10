@@ -4,6 +4,7 @@ import {
   CATEGORICAL_GROUPING_TYPES,
   FILTERABLE_TYPES,
   VALUE_NUMERIC_TYPES,
+  TYPE_BADGE_CLASSES,
 } from './dataset-constants'
 
 // Invariant I-D guard (#399, Seam-1): the grouping/filter/numeric eligibility sets
@@ -44,6 +45,14 @@ describe('column-type eligibility sets', () => {
     for (const set of [CATEGORICAL_GROUPING_TYPES, FILTERABLE_TYPES, VALUE_NUMERIC_TYPES]) {
       for (const t of set) expect(valid.has(t)).toBe(true)
       expect(set).not.toContain('likert')
+    }
+  })
+
+  it('#414: identifier is a real type with a badge but in NO eligibility set', () => {
+    expect(COLUMN_TYPES).toContain('identifier')
+    expect(TYPE_BADGE_CLASSES.identifier).toBeTruthy()
+    for (const set of [CATEGORICAL_GROUPING_TYPES, FILTERABLE_TYPES, VALUE_NUMERIC_TYPES]) {
+      expect(set).not.toContain('identifier')
     }
   })
 })

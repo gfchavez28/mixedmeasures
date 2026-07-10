@@ -4,6 +4,10 @@
 // desktop app; undefined in the browser/dev — always feature-detect before use.
 export {}
 declare global {
+  // Injected by vite.config.ts `define` from package.json / CITATION.cff.
+  const __APP_VERSION__: string
+  const __APP_RELEASE_DATE__: string
+
   interface Window {
     mmDesktop?: {
       isDesktop: boolean

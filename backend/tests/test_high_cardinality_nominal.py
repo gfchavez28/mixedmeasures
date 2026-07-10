@@ -66,11 +66,15 @@ def test_genuine_open_text_stays_open_text():
     assert res["suggested_type"] == "open_text", res["suggested_type"]
 
 
-def test_near_unique_id_column_stays_open_text():
-    """Control: an ID column (every value unique, ratio 1.0) is not a category."""
+def test_near_unique_id_column_is_identifier_not_nominal():
+    """Control: an ID column (every value unique, ratio 1.0) is not a category.
+    Pre-#414 the correct answer was open_text (the least-wrong type available);
+    since #414 added the identifier type + header-gated detection, `Resp_ID`
+    over unique codes is now IDENTIFIER — the #380 concern (must not be
+    nominal) still holds."""
     ids = [f"R{i:05d}" for i in range(500)]  # 500 unique short codes, ratio 1.0
     res = _detect("Resp_ID", ids)
-    assert res["suggested_type"] == "open_text", res["suggested_type"]
+    assert res["suggested_type"] == "identifier", res["suggested_type"]
 
 
 def test_high_cardinality_distinct_short_phrases_stays_open_text():

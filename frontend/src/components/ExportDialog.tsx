@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import {
   Dialog,
   DialogContent,
@@ -11,8 +12,10 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { FileOutput, ChevronDown, ChevronRight, Package, BookOpen } from 'lucide-react'
-import { exportApi, metricsApi, projectPortabilityApi } from '@/lib/api'
+import { exportApi, metricsApi, projectPortabilityApi, projectsApi } from '@/lib/api'
 import type { ExportOptions } from '@/lib/api'
+import { defaultIncludeMedia } from '@/lib/api/project-portability'
+import { formatBytes } from '@/lib/format'
 import { toast } from 'sonner'
 
 interface ExportDialogProps {
@@ -78,6 +81,18 @@ function delay(ms: number): Promise<void> {
 
 export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProps) {
   const [state, setState] = useState<ExportState>(defaultState)
+
+  // Slab 5: the .mmproject include-media decision needs the real footprint.
+  // Default = include when the media total is small (≤1 GB), exclude above —
+  // the user's explicit choice (includeMediaChoice) always wins.
+  const { data: storage } = useQuery({
+    queryKey: ['project-storage', projectId],
+    queryFn: () => projectsApi.storage(projectId),
+    enabled: open && !!projectId,
+    staleTime: 60_000,
+  })
+  const [includeMediaChoice, setIncludeMediaChoice] = useState<boolean | null>(null)
+  const includeMedia = includeMediaChoice ?? defaultIncludeMedia(storage?.media_bytes)
   const [subOptionsExpanded, setSubOptionsExpanded] = useState(false)
   const [exporting, setExporting] = useState(false)
 
@@ -235,7 +250,7 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
                   onClick={async () => {
                     setExporting(true)
                     try {
-                      await projectPortabilityApi.exportProject(projectId)
+                      await projectPortabilityApi.exportProject(projectId, includeMedia)
                       toast.success('Project exported')
                     } catch {
                       toast.error('Project export failed')
@@ -250,6 +265,25 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
                 <p className="text-xs text-mm-text-secondary mt-1 ml-0.5">
                   Self-contained archive with all project data and documents
                 </p>
+                {(storage?.media_bytes ?? 0) > 0 && (
+                  <div className="flex items-start gap-2 mt-2 ml-0.5">
+                    <Checkbox
+                      id="export-include-media"
+                      checked={includeMedia}
+                      onCheckedChange={(v) => setIncludeMediaChoice(v === true)}
+                    />
+                    <div>
+                      <Label htmlFor="export-include-media" className="text-xs font-normal cursor-pointer">
+                        Include recordings &amp; media ({formatBytes(storage!.media_bytes)})
+                      </Label>
+                      {!includeMedia && (
+                        <p className="text-[11px] text-mm-text-muted mt-0.5">
+                          Recordings can be re-attached after import — transcripts and coding always travel.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="flex gap-2">
                 <Button

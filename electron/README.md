@@ -29,6 +29,10 @@ the single-page app that the backend serves same-origin at
 - `backend-process.test.js` — `node --test` suite (no Electron, no display).
 - `preload.js` — minimal hardened context bridge (`window.mmDesktop`).
 - `splash.html` — shown while the backend starts.
+- `scripts/update-manifest.js` — release-pipeline tool (#29): re-patches
+  `latest-mac.yml` after the DMG staple rewrites the artifact, and merges the
+  two mac arch legs' manifests into the one file the auto-updater reads.
+  Dependency-free; exercised by `release.yml`. Unit tests alongside it.
 
 ## Building and running a dev shell
 
@@ -55,8 +59,10 @@ cd electron && npm install && npm test   # node --test, headless
 ```
 
 The helper suite covers port selection, the health gate (including crash-bail and
-timeout), per-platform executable resolution, spawn-environment injection, and
-teardown (POSIX `SIGTERM`-then-`SIGKILL`, Windows `taskkill`).
+timeout), per-platform executable resolution, spawn-environment injection,
+teardown (POSIX `SIGTERM`-then-`SIGKILL`, Windows `taskkill`), and the
+update-manifest patch/merge tool (round-trip fidelity, hash recomputation,
+arch-merge dedup, version-mismatch refusal).
 
 A windowed smoke test still needs a display: launch with `npm start`, create a
 project, import a CSV, code a segment, run a statistic, export a file, then quit

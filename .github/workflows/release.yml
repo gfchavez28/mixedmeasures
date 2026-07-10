@@ -129,8 +129,8 @@ jobs:
 
   # ── Package: one runner per platform/arch ───────────────────────────────────
   # The backend is a NATIVE PyInstaller bundle, so each arch must build on its own
-  # native runner — there is no cross-compile. macos-14 = Apple Silicon (arm64),
-  # macos-13 = Intel (x64). All four publish to the same draft release for the tag.
+  # native runner — there is no cross-compile. macos-14 = Apple Silicon (arm64).
+  # All three publish to the same draft release for the tag.
   package:
     needs: verify
     # 45 (was 30): the mac path now does TWO notarization round-trips (app in
@@ -141,18 +141,21 @@ jobs:
       fail-fast: false
       matrix:
         # Full release matrix. The backend is a NATIVE PyInstaller bundle, so each arch
-        # builds on its own native runner (no cross-compile): macos-14 = Apple Silicon,
-        # macos-13 = Intel. Every entry was validated individually during the 2026-06-14
-        # signing/packaging bring-up — mac sign+notarize+backend-boot-smoke, windows Azure
-        # signing, linux build. NOTE: macOS bills at 10x; if you need to debug ONE platform,
-        # temporarily trim this list rather than running all four (see the rc2 cost lesson).
+        # builds on its own native runner (no cross-compile): macos-14 = Apple Silicon.
+        # Every entry was validated individually during the 2026-06-14 signing/packaging
+        # bring-up — mac sign+notarize+backend-boot-smoke, windows Azure signing, linux.
+        #
+        # macOS INTEL (macos-13) WAS REMOVED 2026-07-10 (#29 S1). It habitually hung on
+        # GitHub's scarce Intel runners and v1.1.1 shipped without an Intel dmg anyway;
+        # nothing (README, website, release notes) promises Intel. Keeping it meant every
+        # release waited out a 45-minute timeout, and a hung leg silently produced a
+        # single-arch latest-mac.yml — which strands the missing arch on every future
+        # auto-update. Re-adding a mac arch means adding it HERE and to EXPECTED_ARCHES
+        # in the finalize-mac-manifest job below; the two must never disagree.
         include:
           - os: macos-14
             eb_target: mac
             eb_arch: arm64
-          - os: macos-13
-            eb_target: mac
-            eb_arch: x64
           - os: windows-latest
             eb_target: win
             eb_arch: x64
@@ -196,7 +199,12 @@ jobs:
       #     asserts /health → 200. Gatekeeper/GUI still need a real desktop, but "does the
       #     packaged app actually start on this OS" is the real risk, and this proves it.
       #     Runs on mac + linux (unix); Windows is already validated by a manual install.
-      - name: Smoke — frozen backend boots + /health
+      #     #535 (#29 S1/D11): then drives the REAL dataset-preview endpoint with the
+      #     committed SPSS fixture — pyreadstat ships its parser as a Cython extension
+      #     resolved by dynamic import, so "the spec collects it" is a claim the source-
+      #     tree test suite can never prove; parsing a .sav INSIDE the frozen bundle is
+      #     the proof. A collection miss surfaces here as a 400/500 on preview.
+      - name: Smoke — frozen backend boots + /health + .sav preview (#535)
         if: matrix.eb_target != 'win'
         working-directory: backend
         run: |
@@ -219,13 +227,45 @@ jobs:
             kill -0 "$BPID" 2>/dev/null || { echo "backend process exited early"; break; }
             sleep 1
           done
+
+          sav_ok=0
+          if [ "$ok" = "1" ]; then
+            # Single-user auto-auth: the first /auth/status mints the coder + session
+            # cookie + CSRF in one call (curl's jar handles the HttpOnly cookie).
+            JAR="$TMP/cookies.txt"
+            CSRF="$(curl -fsS -c "$JAR" "http://127.0.0.1:$PORT/api/auth/status" | jq -r '.user.csrf_token')" || CSRF=""
+            if [ -n "$CSRF" ] && [ "$CSRF" != "null" ]; then
+              PROJ="$(curl -fsS -b "$JAR" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
+                -d '{"name":"frozen smoke"}' "http://127.0.0.1:$PORT/api/projects" | jq -r '.id')" || PROJ=""
+              if [ -n "$PROJ" ] && [ "$PROJ" != "null" ]; then
+                PREVIEW="$(curl -fsS -b "$JAR" -H "X-CSRF-Token: $CSRF" \
+                  -F "file=@tests/reference_data/spss_sample.sav" \
+                  "http://127.0.0.1:$PORT/api/projects/$PROJ/datasets/preview")" || PREVIEW=""
+                COLS="$(echo "$PREVIEW" | jq '.columns | length' 2>/dev/null)" || COLS=0
+                ORDINALS="$(echo "$PREVIEW" | jq '[.columns[] | select(.suggested_type=="ordinal")] | length' 2>/dev/null)" || ORDINALS=0
+                echo ".sav preview: columns=$COLS ordinal-suggestions=$ORDINALS"
+                if [ "$COLS" = "6" ] && [ "${ORDINALS:-0}" -ge 2 ]; then
+                  sav_ok=1
+                else
+                  echo "----- preview response -----"; echo "$PREVIEW" | head -c 2000; echo
+                fi
+              else
+                echo "project create failed (no id)"
+              fi
+            else
+              echo "auth bootstrap failed (no csrf from /api/auth/status)"
+            fi
+          fi
+
           echo "----- backend log (tail) -----"; tail -50 "$TMP/backend.log" 2>/dev/null || true
           kill "$BPID" 2>/dev/null || true; wait "$BPID" 2>/dev/null || true
-          if [ "$ok" = "1" ]; then
-            echo "✅ frozen backend booted (migrations ran) + /health 200 on ${{ matrix.os }}"
-          else
+          if [ "$ok" != "1" ]; then
             echo "❌ frozen backend never became healthy on ${{ matrix.os }}"; exit 1
           fi
+          if [ "$sav_ok" != "1" ]; then
+            echo "❌ frozen .sav preview failed on ${{ matrix.os }} — pyreadstat's Cython ext likely missing from the bundle (#535)"; exit 1
+          fi
+          echo "✅ frozen backend booted + /health 200 + .sav preview parsed (pyreadstat frozen-proof, #535) on ${{ matrix.os }}"
 
       # 3) Package + (conditionally) sign + publish to the draft release.
       #    electron-builder signs macOS automatically when CSC_LINK is present and
@@ -300,10 +340,12 @@ jobs:
       #      notarytool, staple the returned ticket, then re-upload the now-stapled dmg over
       #      the un-stapled one electron-builder already pushed to the draft release, so the
       #      file users download carries an offline-verifiable ticket (Apple's recommended
-      #      practice for dmg distribution). Re-upload with --clobber; the now-stale dmg hash
-      #      in latest-mac.yml is inert because NO auto-updater is wired in v1.0 (electron-
-      #      updater isn't a dependency) — nothing consumes that manifest. Revisit if/when
-      #      auto-update + a zip target land post-launch.
+      #      practice for dmg distribution).
+      #      ⚠ latest-mac.yml is LOAD-BEARING since the auto-updater (#29): stapling changes
+      #      the dmg bytes AFTER electron-builder computed the manifest entry, so the local
+      #      manifest is re-patched here (update-manifest.js recomputes sha512/size) BEFORE
+      #      the next step publishes it. Never re-upload a mac artifact without re-patching —
+      #      a stale hash fails every mac update at validation.
       - name: Notarize + staple the DMG (macOS)
         if: matrix.eb_target == 'mac'
         timeout-minutes: 15
@@ -329,11 +371,41 @@ jobs:
           xcrun stapler staple "$DMG"
           xcrun stapler validate "$DMG"
           echo "✅ dmg notarized + stapled"
+          # The staple rewrote the dmg → recompute its manifest entry (sha512/size)
+          # in the LOCAL latest-mac.yml before anything publishes it (#29 S1).
+          node scripts/update-manifest.js patch release/latest-mac.yml release
           # Replace the un-stapled dmg electron-builder already pushed to the draft release
           # (tag = v<version>, the release electron-builder publishes to).
           VERSION="$(node -p "require('./package.json').version")"
           echo "re-uploading stapled dmg to draft release v${VERSION}"
           gh release upload "v${VERSION}" "$DMG" --clobber --repo "$GITHUB_REPOSITORY"
+
+      # 3a3) Publish this arch's update manifest under an ARCH-SPECIFIC name (#29 S1).
+      #      Each mac leg generates a latest-mac.yml listing only its OWN arch's files;
+      #      if two legs publish under the SAME name it is last-writer-wins and the
+      #      losing arch hash-mismatches on every update. So each leg uploads
+      #      latest-mac-<arch>.yml (patched by 3a2 on the signed path, as-built on the
+      #      unsigned path) and the finalize-mac-manifest job below merges them into the
+      #      one latest-mac.yml electron-updater actually reads, then removes these
+      #      helper assets. Draft-only visibility until the human publishes.
+      #      The indirection is kept at one mac arch on purpose: it is what makes
+      #      re-adding an arch a two-line change instead of a rediscovered bug.
+      - name: Publish per-arch update manifest (macOS)
+        if: matrix.eb_target == 'mac'
+        timeout-minutes: 5
+        working-directory: electron
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ ! -f release/latest-mac.yml ]; then
+            echo "❌ release/latest-mac.yml missing — electron-builder should have generated it"; exit 1
+          fi
+          VERSION="$(node -p "require('./package.json').version")"
+          cp release/latest-mac.yml "latest-mac-${{ matrix.eb_arch }}.yml"
+          gh release upload "v${VERSION}" "latest-mac-${{ matrix.eb_arch }}.yml" \
+            --clobber --repo "$GITHUB_REPOSITORY"
+          echo "✅ uploaded latest-mac-${{ matrix.eb_arch }}.yml (merged by finalize-mac-manifest)"
 
       # 3b) Gatekeeper / signature verification (macOS) — the headless equivalent of the
       #     "double-click on a clean Mac" smoke. `spctl --assess` IS the Gatekeeper engine,
@@ -466,3 +538,88 @@ jobs:
             "${GITHUB_WORKSPACE}/.github/release-notes-template.md" > "$RENDERED"
           gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --notes-file "$RENDERED"
           echo "release notes applied to $TAG from template"
+
+  # ── Finalize the mac update manifest (#29 S1) ────────────────────────────────
+  # Merges the per-arch latest-mac-{arm64,x64}.yml helper assets (uploaded by
+  # step 3a3) into the single latest-mac.yml electron-updater reads, replacing
+  # whichever single-arch manifest electron-builder's publishers left behind
+  # (last-writer-wins clobber), then deletes the helpers. Runs even when a mac
+  # leg failed (`!cancelled()`): merging ONE manifest is a valid single-arch
+  # passthrough, and the run's failed leg already flags the release as broken.
+  # Cheap ubuntu job — no packaging, just gh + the dependency-free merge script.
+  # ── Merge the mac legs' per-arch manifests into the one the updater reads ────
+  # `!cancelled()` (not `success()`) so a failed win/linux leg can't leave the draft
+  # with an un-merged mac manifest. NOTE the corollary: CANCELLING THE RUN CANCELS
+  # THIS JOB TOO. Never `gh run cancel` to kill a stuck leg — let it hit the package
+  # job's 45-minute timeout, which is a *failure*, not a cancellation, so this still
+  # runs. (Cancelling leaves latest-mac-<arch>.yml helpers on the draft — a release
+  # in that state must not be published; its latest-mac.yml is single-arch.)
+  finalize-mac-manifest:
+    needs: package
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - name: Merge per-arch manifests → latest-mac.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # MUST list exactly the `eb_arch` of every `eb_target: mac` entry in the
+          # package matrix above. This is the guard that makes a dead mac leg LOUD:
+          # merging whatever happens to be present would publish a single-arch
+          # latest-mac.yml, and the arches missing from it hash-mismatch — i.e. never
+          # update again — with nothing failing. Drift in either direction is fatal,
+          # so an unexpected arch fails too.
+          EXPECTED_ARCHES=( arm64 )
+
+          VERSION="$(node -p "require('./electron/package.json').version")"
+          TAG="v${VERSION}"
+          WORK="$(mktemp -d)"
+
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'latest-mac-*.yml' --dir "$WORK" || true
+
+          # Every expected arch must have uploaded its manifest in step 3a3.
+          missing=()
+          for arch in "${EXPECTED_ARCHES[@]}"; do
+            [ -f "$WORK/latest-mac-${arch}.yml" ] || missing+=( "$arch" )
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "❌ no per-arch mac manifest for: ${missing[*]}"
+            echo "   That leg never reached 'Publish per-arch update manifest' (it failed,"
+            echo "   timed out, or was cancelled). The draft's latest-mac.yml is whatever a"
+            echo "   single electron-builder leg last uploaded — publishing it strands the"
+            echo "   missing arch on every future auto-update. Fix the leg and re-run, or"
+            echo "   drop the arch from BOTH the matrix and EXPECTED_ARCHES."
+            exit 1
+          fi
+
+          # And nothing unexpected: a manifest for an arch we don't build means the
+          # matrix and EXPECTED_ARCHES have drifted apart.
+          for f in "$WORK"/latest-mac-*.yml; do
+            [ -e "$f" ] || continue
+            arch="$(basename "$f")"; arch="${arch#latest-mac-}"; arch="${arch%.yml}"
+            case " ${EXPECTED_ARCHES[*]} " in
+              *" ${arch} "*) ;;
+              *) echo "❌ unexpected per-arch manifest 'latest-mac-${arch}.yml' — the package"
+                 echo "   matrix and EXPECTED_ARCHES in this job have drifted. Reconcile them."
+                 exit 1 ;;
+            esac
+          done
+
+          INPUTS=()
+          for arch in "${EXPECTED_ARCHES[@]}"; do INPUTS+=( "$WORK/latest-mac-${arch}.yml" ); done
+          echo "merging: ${INPUTS[*]##*/}"
+          node electron/scripts/update-manifest.js merge "$WORK/latest-mac.yml" "${INPUTS[@]}"
+          echo "----- merged latest-mac.yml -----"
+          cat "$WORK/latest-mac.yml"
+
+          gh release upload "$TAG" "$WORK/latest-mac.yml" --clobber --repo "$GITHUB_REPOSITORY"
+          for f in "${INPUTS[@]}"; do
+            gh release delete-asset "$TAG" "$(basename "$f")" --yes --repo "$GITHUB_REPOSITORY" || true
+          done
+          echo "✅ merged manifest published; per-arch helpers removed"

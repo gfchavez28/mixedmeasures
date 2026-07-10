@@ -84,6 +84,13 @@ DSID = 900
 MPG, HP, WT, DISP, CYL, AM = 9001, 9002, 9003, 9004, 9005, 9006
 Q1, Q2, Q3, Q4 = 9011, 9012, 9013, 9014
 SCALE_COLS = [Q1, Q2, Q3, Q4]
+# #537: ordinals whose codes differ from their 1..K factor POSITIONS — the
+# degenerate-fixture rule: every other scale here is 1..N, where positional
+# coercion coincides with the codes and can't catch the regression.
+ZB, GAP = 9021, 9022
+ZB_LABELS = ["None", "A little", "Some", "A lot"]        # codes 0..3
+GAP_LABELS = ["Never", "Rarely", "Often", "Always"]      # codes 1,2,4,5
+GAP_CODES = [1, 2, 4, 5]
 
 
 def _likert(row_idx: int, item: int) -> int:
@@ -121,6 +128,21 @@ def _seed(db):
                              column_type="ordinal", scale_labels=labels,
                              sequence_order=order, display_order=order))
         order += 1
+    # #537: a 0-based and a gapped scale (SPSS-import shapes, #28 D2)
+    db.add(DatasetColumn(id=ZB, dataset_id=DSID, column_code="zb",
+                         column_name="zb", column_text="zb",
+                         column_type="ordinal",
+                         scale_labels=json.dumps(ZB_LABELS),
+                         scale_values=json.dumps([0, 1, 2, 3]),
+                         sequence_order=order, display_order=order))
+    order += 1
+    db.add(DatasetColumn(id=GAP, dataset_id=DSID, column_code="gap",
+                         column_name="gap", column_text="gap",
+                         column_type="ordinal",
+                         scale_labels=json.dumps(GAP_LABELS),
+                         scale_values=json.dumps(GAP_CODES),
+                         sequence_order=order, display_order=order))
+    order += 1
     db.flush()
 
     vid = 0
@@ -139,6 +161,16 @@ def _seed(db):
             vid += 1
             db.add(DatasetValue(id=900000 + vid, row_id=dr.id, column_id=cid,
                                 value_text=str(v), value_numeric=float(v)))
+        # #537: 8 of each code across 32 rows → true means 1.5 (zb) / 3.0 (gap);
+        # positional coercion says 2.5 for BOTH.
+        idx = r % 4
+        vid += 1
+        db.add(DatasetValue(id=900000 + vid, row_id=dr.id, column_id=ZB,
+                            value_text=ZB_LABELS[idx], value_numeric=float(idx)))
+        vid += 1
+        db.add(DatasetValue(id=900000 + vid, row_id=dr.id, column_id=GAP,
+                            value_text=GAP_LABELS[idx],
+                            value_numeric=float(GAP_CODES[idx])))
     db.flush()
 
     # --- metric definitions (origin="human" so the export emits them) ---
@@ -160,6 +192,24 @@ def _seed(db):
     db.add(MetricDefinition(id=9104, project_id=PID, name="cyl freq",
                             metric_type="frequency_distribution",
                             input_source_type="dataset_column", input_source_id=CYL,
+                            config="{}", origin="human", stale=False))
+    # #537: mean metrics on the 0-based and gapped scales — the emission must
+    # reproduce the tool's means from the CODES, not the factor positions.
+    db.add(MetricDefinition(id=9107, project_id=PID, name="zb mean",
+                            metric_type="mean", input_source_type="dataset_column",
+                            input_source_id=ZB, config="{}", origin="human",
+                            stale=False))
+    db.add(MetricDefinition(id=9108, project_id=PID, name="gap mean",
+                            metric_type="mean", input_source_type="dataset_column",
+                            input_source_id=GAP, config="{}", origin="human",
+                            stale=False))
+    # #537: t-test on an ORDINAL (factor) DV — the pre-fix emission
+    # `t.test(gap ~ am, data)` crashed source() outright ("var(x) on a factor"),
+    # and gapped codes are non-affine so even the t-statistic differs from a
+    # positional coercion.
+    db.add(MetricDefinition(id=9109, project_id=PID, name="gap by am",
+                            metric_type="mean", input_source_type="dataset_column",
+                            input_source_id=GAP, grouping_column_id=AM,
                             config="{}", origin="human", stale=False))
     db.flush()
 
@@ -206,6 +256,9 @@ def _seed(db):
                            config="{}", result_data="{}"))
     db.add(StatisticalTest(id=9202, project_id=PID, test_type="one_way_anova",
                            target_type="metric_definition", target_id=9102,
+                           config="{}", result_data="{}"))
+    db.add(StatisticalTest(id=9205, project_id=PID, test_type="independent_t_test",
+                           target_type="metric_definition", target_id=9109,
                            config="{}", result_data="{}"))
     db.add(StatisticalTest(id=9203, project_id=PID, test_type="cronbachs_alpha",
                            target_type="analysis_domain", target_id=9300,
@@ -291,6 +344,13 @@ def _tool_expected(db) -> dict:
     tt = t["rows"][0]["test"]
     assert tt["test_type"] == "independent_t_test"
     exp["t_stat"], exp["t_df"] = tt["statistic"], tt["df"]
+    # #537: Welch t on the gapped ordinal (factor DV) — codes, not positions
+    tg = compute_group_comparison(db, project_id=PID, column_ids=[GAP], domain_ids=[],
+                                  grouping_column_id=AM, grouping_column_id_2=None,
+                                  test_type="auto", include_effect_size_ci=False)
+    tgt = tg["rows"][0]["test"]
+    assert tgt["test_type"] == "independent_t_test"
+    exp["gap_t_stat"] = tgt["statistic"]
     # One-way ANOVA + Tukey post-hoc (mpg by cyl)
     a = compute_group_comparison(db, project_id=PID, column_ids=[MPG], domain_ids=[],
                                  grouping_column_id=CYL, grouping_column_id_2=None,
@@ -341,6 +401,12 @@ def _tool_expected(db) -> dict:
     # mean / sd (wt)
     mr = json.loads(compute_metric(db, db.get(MetricDefinition, 9103))[0].result_data)
     exp["wt_mean"], exp["wt_sd"] = mr["mean"], mr["std_dev"]
+    # #537: 0-based / gapped scale means (true code means 1.5 / 3.0; positional
+    # coercion of either factor gives 2.5)
+    zm = json.loads(compute_metric(db, db.get(MetricDefinition, 9107))[0].result_data)
+    exp["zb_mean"] = zm["mean"]
+    gm = json.loads(compute_metric(db, db.get(MetricDefinition, 9108))[0].result_data)
+    exp["gap_mean"] = gm["mean"]
     # frequency (cyl)
     fr = json.loads(compute_metric(db, db.get(MetricDefinition, 9104))[0].result_data)
     exp["freq"] = {str(k): int(v) for k, v in fr["counts"].items()}
@@ -413,6 +479,16 @@ emit("sh_r", sh_r); emit("sh_sb", sh_sb)
 emit("wt_mean", mean(.mm_num(data$wt), na.rm = TRUE))
 emit("wt_sd", sd(.mm_num(data$wt), na.rm = TRUE))
 
+# #537: 0-based + gapped scales — factor POSITIONS disagree with codes here,
+# so these only match the tool if .mm_num recovers the registered codes.
+emit("zb_mean", mean(.mm_num(data$zb, "zb"), na.rm = TRUE))
+emit("gap_mean", mean(.mm_num(data$gap, "gap"), na.rm = TRUE))
+
+# #537: t-test on the factor DV — re-run the exported script's own call form
+# (the pre-fix `t.test(gap ~ am, data)` emission crashed source() entirely).
+tg <- t.test(.mm_num(data$gap, "gap") ~ data$am, var.equal = FALSE)
+emit("gap_t_stat", unname(tg$statistic))
+
 # frequency (cyl): re-run table().
 tb <- table(data$cyl)
 for (nm in names(tb)) emit(paste0("freq_", nm), tb[[nm]])
@@ -477,12 +553,19 @@ def test_exported_script_reproduces_tool_results(db_session):
         # The export fix must branch by effective group count: Mann-Whitney
         # (wilcox.test) for the 2-group comparison, Kruskal-Wallis for the 3-group.
         script_text = (workdir / setup_name).read_text(encoding="utf-8")
-        assert re.search(r"wilcox\.test\(mpg ~ am", script_text), \
-            "2-group non-parametric comparison must emit wilcox.test (Mann-Whitney)"
-        assert re.search(r"kruskal\.test\(mpg ~ cyl", script_text), \
-            "3-group non-parametric comparison must emit kruskal.test"
-        assert "kruskal.test(mpg ~ am" not in script_text, \
+        assert re.search(
+            r'wilcox\.test\(\.mm_num\(data\$mpg, "mpg"\) ~ data\$am', script_text
+        ), "2-group non-parametric comparison must emit wilcox.test (Mann-Whitney)"
+        assert re.search(
+            r'kruskal\.test\(\.mm_num\(data\$mpg, "mpg"\) ~ data\$cyl', script_text
+        ), "3-group non-parametric comparison must emit kruskal.test"
+        assert 'kruskal.test(.mm_num(data$mpg, "mpg") ~ data$am' not in script_text, \
             "2-group comparison must NOT emit kruskal.test"
+        # #537: the level-value registry must carry the real codes.
+        assert re.search(r"`zb` = c\(0, 1, 2, 3\)", script_text), \
+            ".mm_scale_codes must register the 0-based scale's codes"
+        assert re.search(r"`gap` = c\(1, 2, 4, 5\)", script_text), \
+            ".mm_scale_codes must register the gapped scale's codes"
         actual = _run_r(workdir / setup_name, workdir)
 
     # --- scalar statistics: every one must have come back from R ---
@@ -490,7 +573,8 @@ def test_exported_script_reproduces_tool_results(db_session):
                    "mw_stat", "mw_p", "cor_mpg_hp", "cor_mpg_wt", "scor_mpg_hp",
                    "scor_mpg_wt", "chisq", "chisq_df", "cramers_v", "cronbach",
                    "sh_r", "sh_sb", "wt_mean", "wt_sd", "domain_agg",
-                   "sb_total_count", "line_grand_mean")
+                   "sb_total_count", "line_grand_mean", "zb_mean", "gap_mean",
+                   "gap_t_stat")
     for key in scalar_keys:
         assert key in actual, f"R did not emit {key}; got {sorted(actual)}"
 
@@ -522,6 +606,13 @@ def test_exported_script_reproduces_tool_results(db_session):
     assert actual["wt_mean"] == pytest.approx(expected["wt_mean"], abs=0.001)
     assert actual["wt_sd"] == pytest.approx(expected["wt_sd"], abs=0.001)
     assert actual["domain_agg"] == pytest.approx(expected["domain_agg"], abs=0.001)
+    # #537: inputs where factor positions and scale codes DISAGREE — positional
+    # coercion returns 2.5 for both; the tool's code means are 1.5 and 3.0.
+    assert expected["zb_mean"] == pytest.approx(1.5, abs=1e-9)
+    assert expected["gap_mean"] == pytest.approx(3.0, abs=1e-9)
+    assert actual["zb_mean"] == pytest.approx(expected["zb_mean"], abs=0.001)
+    assert actual["gap_mean"] == pytest.approx(expected["gap_mean"], abs=0.001)
+    assert actual["gap_t_stat"] == pytest.approx(expected["gap_t_stat"], abs=0.01)
 
     # --- #12a chart code ran under source() and reproduced known tool numbers ---
     # Stacked bar: 32 complete rows x 4 Likert columns = 128 tallied responses.
