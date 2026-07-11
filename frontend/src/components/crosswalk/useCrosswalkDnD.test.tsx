@@ -780,3 +780,121 @@ describe('useCrosswalkDnD — flash timer race (#339)', () => {
     }
   })
 })
+
+describe('useCrosswalkDnD — identifier/skip assignment rejection (#556b)', () => {
+  // An identifier column holds row identity, not a measurement: it carries no
+  // value_numeric, so a group containing one either can't compute its scale
+  // score (400 → "failed" Σ badge) or silently averages a NULL member. The drop
+  // is refused client-side rather than 409'd server-side, so the user gets a
+  // reason instead of a red badge.
+  const IDENT = { id: 9, dataset_id: 10, column_type: 'identifier', column_code: 'PID' }
+
+  function harness(m: MockMutations, extraCols: ProjectColumnInfo[] = []) {
+    const allColumns = [
+      col(IDENT),
+      col({ id: 1, dataset_id: 10 }),                              // unassigned ordinal
+      col({ id: 2, dataset_id: 11, equivalence_group_id: 100 }),   // member of domain 50
+      ...extraCols,
+    ]
+    const handlerRefs: { current: CrosswalkDnDHandlerRefs } = { current: {} }
+    return renderHook(() =>
+      useCrosswalkDnD({
+        activeDatasetIds: [10, 11],
+        allColumns,
+        mutations: asMutations(m),
+        handlerRefs,
+        domainByColumnId: new Map([[2, 50]]),
+        domainByEgId: new Map([[100, 50]]),
+        bracketDatasetsByDomainId: new Map([[50, new Set([11])]]),
+      }),
+    )
+  }
+
+  function assertNoMutation(m: MockMutations) {
+    expect(m.moveMembersMutation.mutate).not.toHaveBeenCalled()
+    expect(m.moveColumnMutation.mutate).not.toHaveBeenCalled()
+    expect(m.swapMutation.mutate).not.toHaveBeenCalled()
+  }
+
+  it('rejects an identifier dropped on "+ Add variable row"', () => {
+    const m = buildMockMutations()
+    const { result } = harness(m)
+    result.current._handleDragEnd(buildEvent(makeCellDragId(9), makeAddRowDropId(50)))
+    assertNoMutation(m)
+  })
+
+  it('rejects an identifier dropped on an existing EG empty cell', () => {
+    const m = buildMockMutations()
+    const { result } = harness(m)
+    result.current._handleDragEnd(
+      buildEvent(makeCellDragId(9), makeEmptyCellDropId({ kind: 'eg', egId: 100, datasetId: 10 })),
+    )
+    assertNoMutation(m)
+  })
+
+  it('rejects an identifier dropped on an empty-unlinked cell (promote-to-paired)', () => {
+    const m = buildMockMutations()
+    const { result } = harness(m)
+    result.current._handleDragEnd(
+      buildEvent(
+        makeCellDragId(9),
+        makeEmptyCellDropId({ kind: 'unlinked', columnId: 2, datasetId: 10 }),
+      ),
+    )
+    assertNoMutation(m)
+  })
+
+  it('rejects an identifier dropped on the "+ New variable group" tile', () => {
+    const m = buildMockMutations()
+    const onNewBracketDrop = vi.fn()
+    const handlerRefs: { current: CrosswalkDnDHandlerRefs } = { current: {} }
+    const { result } = renderHook(() =>
+      useCrosswalkDnD({
+        activeDatasetIds: [10],
+        allColumns: [col(IDENT), col({ id: 1, dataset_id: 10 })],
+        mutations: asMutations(m),
+        handlerRefs,
+        domainByColumnId: new Map(),
+        domainByEgId: new Map(),
+        bracketDatasetsByDomainId: new Map(),
+        onNewBracketDrop,
+      }),
+    )
+    result.current._handleDragEnd(
+      buildEvent(makeCellDragId(9), NEW_BRACKET_TILE_DROP_ID),
+    )
+    // The dialog must not even OPEN pre-seeded with an ineligible column.
+    expect(onNewBracketDrop).not.toHaveBeenCalled()
+  })
+
+  it('STILL ALLOWS dragging an identifier OUT to the Unassigned panel', () => {
+    // The repair gesture. A guard that also blocked this would trap a
+    // mis-assigned identifier inside its group forever.
+    const m = buildMockMutations()
+    const handlerRefs: { current: CrosswalkDnDHandlerRefs } = { current: {} }
+    const { result } = renderHook(() =>
+      useCrosswalkDnD({
+        activeDatasetIds: [10],
+        allColumns: [col({ ...IDENT, equivalence_group_id: 100 })],
+        mutations: asMutations(m),
+        handlerRefs,
+        domainByColumnId: new Map([[9, 50]]),
+        domainByEgId: new Map([[100, 50]]),
+        bracketDatasetsByDomainId: new Map([[50, new Set([10])]]),
+      }),
+    )
+    result.current._handleDragEnd(buildEvent(makeCellDragId(9), DRAWER_DROP_ID))
+
+    expect(m.moveMembersMutation.mutate).toHaveBeenCalledTimes(1)
+    const [payload] = m.moveMembersMutation.mutate.mock.calls[0]
+    expect(payload).toMatchObject({ column_ids: [9], target_mode: 'strip' })
+  })
+
+  it('lets an ordinary ordinal column through the same drop unharmed', () => {
+    // The exclusion must be surgical: if this fails, the guard is over-broad.
+    const m = buildMockMutations()
+    const { result } = harness(m)
+    result.current._handleDragEnd(buildEvent(makeCellDragId(1), makeAddRowDropId(50)))
+    expect(m.moveMembersMutation.mutate).toHaveBeenCalledTimes(1)
+  })
+})

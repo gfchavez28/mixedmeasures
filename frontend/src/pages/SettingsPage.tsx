@@ -25,12 +25,14 @@ import {
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { ColorDotButton } from '@/components/ColorDotButton'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
+import SoftwareUpdateSection from '@/components/SoftwareUpdateSection'
 import { useCoders } from '@/hooks/useCoders'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
 import { useCreateCoder } from '@/hooks/useCreateCoder'
 import { coderColor, coderInitials } from '@/lib/coder-color'
 import { getContrastColor } from '@/lib/utils'
 import { apaCitation, bibtexCitation, CITATION_LICENSE } from '@/lib/citation'
+import { MMBACKUP_ACCEPT } from '@/lib/mm-formats'
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
   { value: 'light', label: 'Light', icon: Sun },
@@ -113,6 +115,9 @@ export default function SettingsPage() {
 
         {/* Coder identity */}
         <CoderIdentitySection />
+
+        {/* Software update (#29) — desktop-only; renders nothing in the browser */}
+        <SoftwareUpdateSection />
 
         {/* About & citation */}
         <AboutSection />
@@ -341,12 +346,34 @@ function BackupSection() {
   })
 
   const restoreMutation = useMutation({
-    mutationFn: backupApi.restore,
-    onSuccess: () => {
-      toast.success('Restored successfully. Reloading...')
-      setTimeout(() => {
-        window.location.href = '/'
-      }, 1000)
+    // The video-excluded facts ride the mutation VARIABLES, not component
+    // state: clicking the Radix AlertDialogAction closes the dialog, whose
+    // onOpenChange runs handleCancelRestore and nulls restorePreview BEFORE
+    // onSuccess fires (found live — the state read always saw null).
+    mutationFn: (vars: { file: File; videoExcluded: boolean; videoFilesExcluded: number }) =>
+      backupApi.restore(vars.file),
+    onSuccess: (_data, vars) => {
+      // #551: a video-excluded backup needs its post-restore notice to be
+      // READABLE — the default 1s reload would swallow it, so hold the
+      // reload just long enough in that case. (Local video files survive a
+      // same-machine restore; the notice matters on a new machine.)
+      if (vars.videoExcluded) {
+        const n = vars.videoFilesExcluded
+        toast.warning(
+          `Restored — but this backup did not include ${n} video recording${n === 1 ? '' : 's'}. ` +
+            'If a conversation’s video is missing on this computer, re-attach it via ' +
+            '“Replace recording” in its workbench. Reloading…',
+          { duration: 4500 },
+        )
+        setTimeout(() => {
+          window.location.href = '/'
+        }, 4500)
+      } else {
+        toast.success('Restored successfully. Reloading...')
+        setTimeout(() => {
+          window.location.href = '/'
+        }, 1000)
+      }
     },
     onError: (err: Error) => {
       const detail = (err as unknown as { response?: { data?: { detail?: string } } })?.response?.data?.detail
@@ -364,7 +391,11 @@ function BackupSection() {
 
   const handleConfirmRestore = () => {
     if (restoreFile) {
-      restoreMutation.mutate(restoreFile)
+      restoreMutation.mutate({
+        file: restoreFile,
+        videoExcluded: restorePreview?.manifest.video_excluded ?? false,
+        videoFilesExcluded: restorePreview?.manifest.video_files_excluded ?? 0,
+      })
     }
   }
 
@@ -509,7 +540,7 @@ function BackupSection() {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".mmbackup"
+          accept={MMBACKUP_ACCEPT}
           className="hidden"
           onChange={handleFileSelect}
         />
@@ -574,6 +605,14 @@ function BackupSection() {
                     <div className="flex justify-between">
                       <span className="text-mm-text-muted">Documents</span>
                       <span className="text-mm-text">{restorePreview.manifest.document_count}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-mm-text-muted">Recordings</span>
+                      <span className="text-mm-text">
+                        {restorePreview.manifest.media_file_count ?? 0}
+                        {restorePreview.manifest.video_excluded &&
+                          ` (${restorePreview.manifest.video_files_excluded} video excluded)`}
+                      </span>
                     </div>
                     {restorePreview.manifest.project_summaries.length > 0 && (
                       <div>

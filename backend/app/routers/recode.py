@@ -44,8 +44,15 @@ router = APIRouter(tags=["recode"])
 
 
 def _get_column_or_404(
-    db: Session, project_id: int, dataset_id: int, column_id: int,
+    db: Session, project_id: int, dataset_id: int, column_id: int, user_id: int,
 ) -> DatasetColumn:
+    """Load a dataset column, gating on project ownership first (#553).
+
+    Same shape as ``helpers._get_dataset_or_404``: every recode endpoint reaches
+    its column through here (including ``copy_to``, which rewrites value_numeric
+    across a whole column), so the gate lives in the helper, not the call sites.
+    """
+    _get_project_or_404(db, project_id, user_id)
     col = (
         db.query(DatasetColumn)
         .join(Dataset)
@@ -198,7 +205,7 @@ async def list_definitions(
     db: Session = Depends(get_db),
 ):
     """List recode definitions for a column, ordered by sequence_order."""
-    _get_column_or_404(db, project_id, dataset_id, column_id)
+    _get_column_or_404(db, project_id, dataset_id, column_id, user.id)
 
     definitions = (
         db.query(RecodeDefinition)
@@ -223,7 +230,7 @@ async def create_definition(
     db: Session = Depends(get_db),
 ):
     """Create a new recode definition for a column."""
-    col = _get_column_or_404(db, project_id, dataset_id, column_id)
+    col = _get_column_or_404(db, project_id, dataset_id, column_id, user.id)
 
     # Reject recode on computed columns
     if col.source == "computed":
@@ -323,7 +330,7 @@ async def update_definition(
     db: Session = Depends(get_db),
 ):
     """Update a recode definition."""
-    _get_column_or_404(db, project_id, dataset_id, column_id)
+    _get_column_or_404(db, project_id, dataset_id, column_id, user.id)
     definition = _get_definition_or_404(db, column_id, definition_id)
 
     update_data = data.model_dump(exclude_unset=True)
@@ -409,7 +416,7 @@ async def delete_definition(
     db: Session = Depends(get_db),
 ):
     """Delete a recode definition. Clears value_numeric if it was primary."""
-    _get_column_or_404(db, project_id, dataset_id, column_id)
+    _get_column_or_404(db, project_id, dataset_id, column_id, user.id)
     definition = _get_definition_or_404(db, column_id, definition_id)
 
     was_primary = bool(definition.is_primary)
@@ -464,7 +471,7 @@ async def set_primary(
     db: Session = Depends(get_db),
 ):
     """Set a definition as the primary for its column. Recomputes value_numeric."""
-    _get_column_or_404(db, project_id, dataset_id, column_id)
+    _get_column_or_404(db, project_id, dataset_id, column_id, user.id)
     definition = _get_definition_or_404(db, column_id, definition_id)
 
     # Clear other primaries
@@ -503,7 +510,7 @@ async def copy_to(
     db: Session = Depends(get_db),
 ):
     """Clone a recode definition to target columns. Skips if same-name exists."""
-    _get_column_or_404(db, project_id, dataset_id, column_id)
+    _get_column_or_404(db, project_id, dataset_id, column_id, user.id)
     source = _get_definition_or_404(db, column_id, definition_id)
 
     mapping = source.mapping
@@ -581,13 +588,15 @@ async def copy_to(
         db.add(new_def)
         db.flush()
 
-        # If became primary scale_map, apply
+        # A copy that lands as the target's primary must go through the
+        # central apply-vs-clear decision (#548 — this was the one
+        # primary-changing callsite left on the pre-#542 SCALE_MAP-only
+        # shape): REVERSE applies with its own reflection, CATEGORY_GROUP
+        # clears stale numerics, and numeric primaries write the mapping
+        # back to the target's scale metadata (#542a). Non-primary copies
+        # never touch value_numeric.
         if new_def.is_primary:
-            rtype = new_def.recode_type
-            if hasattr(rtype, "value"):
-                rtype = rtype.value
-            if rtype == "scale_map":
-                apply_definition_to_column(db, new_def)
+            _recompute_primary_value_numeric(db, new_def, target_col_id)
 
         created += 1
 
@@ -617,7 +626,7 @@ async def column_frequencies(
     db: Session = Depends(get_db),
 ):
     """Get value frequency distribution for a column."""
-    _get_column_or_404(db, project_id, dataset_id, column_id)
+    _get_column_or_404(db, project_id, dataset_id, column_id, user.id)
 
     freqs = get_value_frequencies(db, column_id)
 

@@ -46,6 +46,12 @@ class ConversationResponse(BaseModel):
     # On-disk size of the attached recording (slab 5 storage visibility);
     # None when no file is attached or the stat fails.
     media_size_bytes: int | None = None
+    # Opaque cache token for the on-disk recording (#549): mtime_ns + size,
+    # from the same stat as media_size_bytes. Changes on EVERY replace —
+    # including a same-name re-export, which media_filename cannot detect —
+    # so the client can cache-bust the stream URL and reload mounted media
+    # elements. None when no file is attached or the file is missing.
+    media_version: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

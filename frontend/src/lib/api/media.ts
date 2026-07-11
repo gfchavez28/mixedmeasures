@@ -25,8 +25,16 @@ export const mediaApi = {
     ).then(res => res.data)
   },
 
-  getStreamUrl: (projectId: number, conversationId: number) =>
-    `/api/projects/${projectId}/conversations/${conversationId}/media/stream`,
+  /**
+   * Stream URL for the mounted media element. `version` is the conversation's
+   * media_version cache token (#549): including it means a replaced recording
+   * gets a DIFFERENT URL, so the element reloads (src change triggers the
+   * media load algorithm) and the browser cache can never serve stale bytes —
+   * even for a same-name re-export. Pass conversation.media_version.
+   */
+  getStreamUrl: (projectId: number, conversationId: number, version?: string | null) =>
+    `/api/projects/${projectId}/conversations/${conversationId}/media/stream` +
+    (version ? `?v=${encodeURIComponent(version)}` : ''),
 
   remove: (projectId: number, conversationId: number) =>
     api.delete(`/projects/${projectId}/conversations/${conversationId}/media`).then(res => res.data),

@@ -6,6 +6,7 @@ import { toast } from 'sonner'
 import { validateMediaFile, MEDIA_ACCEPT, describeMediaUploadError } from '@/lib/media-constants'
 import { conversationsApi, mediaApi, type Conversation } from '@/lib/api'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
+import { isSupportedTranscriptFile, TRANSCRIPT_FORMAT_LABEL } from '@/lib/conversation-import-formats'
 import { formatBytes } from '@/lib/format'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
@@ -170,9 +171,11 @@ export default function ConversationsListPage() {
       dragCounterRef.current = 0
       setIsDragOver(false)
       const droppedFiles = Array.from(e.dataTransfer.files)
-      const csvFiles = droppedFiles.filter(f => f.name.toLowerCase().endsWith('.csv'))
-      if (csvFiles.length === 0) return
-      setPendingImportFiles(csvFiles, 'conversation')
+      // #552: was `.endsWith('.csv')` — it silently refused the VTT/SRT subtitles
+      // the wizard has accepted since #524, so a dropped Zoom transcript no-op'd.
+      const transcriptFiles = droppedFiles.filter(f => isSupportedTranscriptFile(f.name))
+      if (transcriptFiles.length === 0) return
+      setPendingImportFiles(transcriptFiles, 'conversation')
       navigate(`/projects/${projectId}/conversations/import`)
     },
   }), [projectId, navigate])
@@ -277,14 +280,14 @@ export default function ConversationsListPage() {
           <MessageSquare className="w-8 h-8 mx-auto mb-4 text-mm-text-faint" aria-hidden="true" />
           {isDragOver ? (
             <>
-              <h2 className="text-lg font-semibold text-[hsl(var(--mm-green))] mb-2">Drop CSV files to import</h2>
+              <h2 className="text-lg font-semibold text-[hsl(var(--mm-green))] mb-2">Drop transcript files to import</h2>
               <p className="text-sm text-mm-text-muted">Release to start importing conversations</p>
             </>
           ) : (
             <>
               <h2 className="text-lg font-semibold text-mm-text mb-2">No conversations yet</h2>
               <p className="text-sm text-mm-text-muted mb-6">
-                Import a CSV transcript to get started, or drag and drop CSV files here.
+                Import a transcript to get started, or drag and drop files here — {TRANSCRIPT_FORMAT_LABEL}.
               </p>
               <button
                 onClick={() => navigate(`/projects/${projectId}/conversations/import`)}
@@ -428,13 +431,32 @@ function ConversationCard({
                       {(conversation.speaker_count > 0 || conversation.subject_id) && (
                         <span className="text-mm-text-faint">·</span>
                       )}
+                      {/* #559: the badge was a bare <svg> — no name, not focusable, so a
+                          screen-reader user could not tell the conversation HAS a recording,
+                          and the hover tooltip (its only carrier of filename/size) was
+                          unreachable. The facts now live in the badge's own accessible name,
+                          which is deliberately NOT made focusable: a tab stop per row would
+                          cost every keyboard user N stops to read something the name already
+                          announces in browse mode. Tooltip stays for sighted hover. */}
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          {conversation.media_type === 'video' ? (
-                            <Video className="w-3 h-3 text-mm-green-text" />
-                          ) : (
-                            <Volume2 className="w-3 h-3 text-mm-green-text" />
-                          )}
+                          <span
+                            role="img"
+                            aria-label={
+                              `${conversation.media_type === 'video' ? 'Video' : 'Audio'} recording: `
+                              + `${conversation.media_filename ?? 'attached'}`
+                              + (conversation.media_size_bytes != null
+                                ? `, ${formatBytes(conversation.media_size_bytes)}`
+                                : '')
+                            }
+                            className="inline-flex"
+                          >
+                            {conversation.media_type === 'video' ? (
+                              <Video className="w-3 h-3 text-mm-green-text" aria-hidden />
+                            ) : (
+                              <Volume2 className="w-3 h-3 text-mm-green-text" aria-hidden />
+                            )}
+                          </span>
                         </TooltipTrigger>
                         <TooltipContent side="top" className="text-xs">
                           {conversation.media_filename}

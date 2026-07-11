@@ -126,6 +126,13 @@ jobs:
         run: |
           npm ci
           npm test
+      # #547: electron ships a runtime dep (electron-updater) since #29 S2, so it
+      # needs the same hard gate as frontend. --omit=dev is load-bearing: a
+      # full-tree audit re-flags the dev-only electron-builder/tar/node-gyp chain
+      # that policy says to dismiss, never --force, and would fail every release.
+      - name: Electron dependency audit (HARD gate, production deps)
+        working-directory: electron
+        run: npm audit --omit=dev --audit-level=high
 
   # ── Package: one runner per platform/arch ───────────────────────────────────
   # The backend is a NATIVE PyInstaller bundle, so each arch must build on its own
@@ -561,9 +568,13 @@ jobs:
   # job's 45-minute timeout, which is a *failure*, not a cancellation, so this still
   # runs. (Cancelling leaves latest-mac-<arch>.yml helpers on the draft — a release
   # in that state must not be published; its latest-mac.yml is single-arch.)
+  # The `!= 'skipped'` arm (#554b): when `verify` fails, `package` is SKIPPED — but
+  # a skipped need still satisfies `!cancelled()`, so this job used to run against
+  # a draft with no manifests and fail RED pointing at the mac leg when the real
+  # failure was the verify gate. Skipped package ⇒ nothing to merge ⇒ skip.
   finalize-mac-manifest:
     needs: package
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.package.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

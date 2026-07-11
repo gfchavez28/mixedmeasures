@@ -69,6 +69,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { navigateToScaleScore } from '@/components/crosswalk/navigation'
 import { SwapErrorOverlay } from '@/components/crosswalk/SwapErrorOverlay'
 import { BulkAssignPickerDialog } from '@/components/crosswalk/BulkAssignPickerDialog'
+import { rejectIneligibleAssignment } from '@/components/crosswalk/identifier-guard'
 import { CopyRecodeDialog } from '@/components/CopyRecodeDialog'
 import { useOpenCopyRecode } from '@/hooks/useOpenCopyRecode'
 import { useCrosswalkNavigation } from '@/components/crosswalk/useCrosswalkNavigation'
@@ -1162,6 +1163,12 @@ export default function CrosswalkView() {
           brackets={grid.brackets}
           columnIds={Array.from(selectedUnassignedIds)}
           onConfirm={(bracketId) => {
+            // #556b: the dialog is the KEYBOARD path to the same assignment the
+            // drag branches guard — it has to reject identifier/skip columns too,
+            // or the guard is mouse-only and keyboard users get the broken state
+            // (failed Σ badge / silent NULL member) it exists to prevent.
+            const columnIds = Array.from(selectedUnassignedIds)
+            if (rejectIneligibleAssignment(columnIds, columnsById)) return
             const domain = domains.find((d) => d.id === bracketId)
             mutations.bulkAssignMutation.mutate(
               {

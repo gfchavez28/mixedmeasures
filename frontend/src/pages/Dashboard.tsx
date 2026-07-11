@@ -20,6 +20,7 @@ import { Textarea } from '@/components/ui/textarea'
 import MMLogo from '@/components/MMLogo'
 import InlineEditableText from '@/components/InlineEditableText'
 import { formatRelativeTime } from '@/lib/format'
+import { MMPROJECT_ACCEPT } from '@/lib/mm-formats'
 import {
   Dialog,
   DialogContent,
@@ -342,7 +343,7 @@ export default function Dashboard() {
             <input
               ref={importFileRef}
               type="file"
-              accept=".mmproject"
+              accept={MMPROJECT_ACCEPT}
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0]

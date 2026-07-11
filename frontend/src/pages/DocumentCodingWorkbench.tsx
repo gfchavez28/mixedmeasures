@@ -44,7 +44,6 @@ import {
   SelectTrigger,
 } from '@/components/ui/select'
 import CollapsiblePanel from '@/components/CollapsiblePanel'
-import ResizeHandle from '@/components/ResizeHandle'
 import CodePanel, { type CodePanelHandle } from '@/components/CodePanel'
 import MemoPanel, { type MemoPanelHandle } from '@/components/MemoPanel'
 import InlineCodeActions from '@/components/qualitative-analysis/InlineCodeActions'
@@ -353,7 +352,6 @@ export default function DocumentCodingWorkbench() {
 
   // ── Panel state ──
 
-  const [rightPanelWidth, setRightPanelWidth] = useState(320)
   const [panelStates, setPanelStates] = useState({
     codes: { collapsed: false },
     notes: { collapsed: true },
@@ -1519,18 +1517,8 @@ export default function DocumentCodingWorkbench() {
           </div>
         </div>
 
-        {/* Right panel */}
-        <div
-          className="relative border-l bg-mm-surface flex flex-col shrink-0"
-          style={{ width: rightPanelWidth }}
-        >
-          <ResizeHandle
-            onResize={delta => setRightPanelWidth(w => Math.min(600, Math.max(200, w + delta)))}
-            minWidth={200}
-            maxWidth={600}
-            currentWidth={rightPanelWidth}
-          />
-
+        {/* Right panel — fixed width (#565: the resizer never worked; removed) */}
+        <div className="relative border-l bg-mm-surface flex flex-col shrink-0 w-80">
           {/* Codes */}
           <CollapsiblePanel
             title="Codes"

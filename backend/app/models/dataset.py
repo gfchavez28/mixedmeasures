@@ -49,6 +49,25 @@ SCALE_SCORE_ELIGIBLE_TYPES = frozenset({
     ColumnType.PERCENTAGE,
 })
 
+# CROSSWALK_INELIGIBLE_TYPES — types that can never be an equivalence-group /
+# analysis-domain member (#556b). An EXCLUSION set, unlike the two above, because
+# what belongs in a variable group is "a measurement" — an open list — while what
+# cannot is a short closed one:
+#   SKIP       — discarded data; never analysed.
+#   IDENTIFIER — holds row IDENTITY, not a measurement (#414). It carries no
+#                `value_numeric`, so an identifier-only group's auto scale-score
+#                400s (`non_numeric_domain` → a "failed" Σ badge) and an
+#                identifier added to a numeric group contributes NULL silently.
+# Consumed by the equivalence find-matches + suggest pools and the analysis-domain
+# suggest pool (which excludes DEMOGRAPHIC on top of this — that one is a routing
+# concern, not an ineligibility one, so it stays local). Frontend mirror:
+# `lib/dataset-constants.ts::CROSSWALK_INELIGIBLE_TYPES`. New crosswalk-eligibility
+# gates MUST import this, never re-inline a `!= "skip"` string check (invariant I-D).
+CROSSWALK_INELIGIBLE_TYPES = frozenset({
+    ColumnType.SKIP,
+    ColumnType.IDENTIFIER,
+})
+
 
 class Dataset(Base):
     """A dataset within a project (e.g. 'Board 360 Assessment')."""

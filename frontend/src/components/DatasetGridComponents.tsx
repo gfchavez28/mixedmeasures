@@ -1,8 +1,9 @@
 import { useState, useMemo, useCallback, memo } from 'react'
 import { useListKeyboardNav } from '@/hooks/useListKeyboardNav'
 import { useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { Link2, X, Pencil, Trash2, Settings2, GripVertical, FunctionSquare, RefreshCw, Check } from 'lucide-react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
+import { Link2, X, Pencil, Trash2, Settings2, GripVertical, FunctionSquare, RefreshCw, Check, UserPlus, LoaderCircle } from 'lucide-react'
 import { useSortable } from '@dnd-kit/sortable'
 import {
   participantsApi,
@@ -504,14 +505,20 @@ export function ParticipantCell({
   projectId,
   linkedParticipantMap,
   onLink,
+  suggestedIdentifier = null,
 }: {
   row: DatasetDataRow
   projectId: number
   linkedParticipantMap: Map<number, string>
   onLink: (rowId: number, participantId: number | null, participantName: string | null) => void
+  /** #532: this row's identifier-column value (falling back to row_identifier),
+   *  trimmed — drives the "New participant from this row" affordance. */
+  suggestedIdentifier?: string | null
 }) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
+  const [creating, setCreating] = useState(false)
+  const queryClient = useQueryClient()
 
   const { data: participantsData } = useQuery({
     queryKey: ['participants', projectId],
@@ -538,6 +545,49 @@ export function ParticipantCell({
     onLink(row.id, participant.id, name)
     setOpen(false)
     setSearch('')
+  }
+
+  // #532: create a participant FROM this row (identifier = the row's
+  // identifier-column value, falling back to row_identifier) and link it in one
+  // gesture. The backend's 409-on-duplicate-identifier becomes "link to that
+  // existing participant instead" — unless it is already linked to another row
+  // in this dataset (one row per participant per dataset).
+  const handleCreateFromRow = async () => {
+    if (!suggestedIdentifier || creating) return
+    setCreating(true)
+    try {
+      const created = await participantsApi.create(projectId, { identifier: suggestedIdentifier })
+      queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
+      toast.success(`Created participant "${created.display_name || created.identifier}"`)
+      handleSelect(created)
+    } catch (err) {
+      if ((err as { status?: number })?.status === 409) {
+        const existing = participants.find(p => p.identifier === suggestedIdentifier)
+        const linkedElsewhere = existing
+          && linkedParticipantMap.has(existing.id)
+          && existing.id !== row.participant_id
+        if (existing && !linkedElsewhere) {
+          toast.success(
+            `"${suggestedIdentifier}" already existed — linked to that participant`,
+          )
+          handleSelect(existing)
+        } else if (existing) {
+          toast.error(
+            `Participant "${suggestedIdentifier}" is already linked to record ${linkedParticipantMap.get(existing.id)}.`,
+          )
+        } else {
+          // Popover list is stale (created elsewhere) — refresh so it appears.
+          queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
+          toast.error(
+            `A participant with ID "${suggestedIdentifier}" already exists — pick it from the list.`,
+          )
+        }
+      } else {
+        toast.error('Could not create participant.')
+      }
+    } finally {
+      setCreating(false)
+    }
   }
 
   const { focusedIndex, getItemProps, listProps } = useListKeyboardNav({
@@ -651,6 +701,25 @@ export function ParticipantCell({
               })
             )}
           </div>
+
+          {suggestedIdentifier && (
+            <div className="p-1.5 border-t">
+              <button
+                onClick={() => void handleCreateFromRow()}
+                disabled={creating}
+                className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-sm text-mm-green-text hover:bg-mm-surface-hover disabled:opacity-50"
+              >
+                {creating ? (
+                  <LoaderCircle className="w-3.5 h-3.5 shrink-0 animate-spin" aria-hidden="true" />
+                ) : (
+                  <UserPlus className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                )}
+                <span className="truncate">
+                  New participant &ldquo;{suggestedIdentifier}&rdquo;
+                </span>
+              </button>
+            </div>
+          )}
         </PopoverContent>
       </Popover>
     </td>
@@ -700,6 +769,15 @@ export const DataRow = memo(function DataRow({
 }) {
   const recordLabel = row.row_identifier || `R${rowIndex + 1}`
 
+  // #532: the row's identity for create-from-row — the identifier column's
+  // value when the dataset has one (trim-then-exact, the linking seam's rule),
+  // else the row_identifier.
+  const idCol = columns.find(c => c.column_type === 'identifier')
+  const suggestedIdentifier =
+    (idCol ? row.values[String(idCol.id)]?.value_text?.trim() : undefined)
+    || row.row_identifier?.trim()
+    || null
+
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -715,6 +793,7 @@ export const DataRow = memo(function DataRow({
             projectId={projectId}
             linkedParticipantMap={linkedParticipantMap}
             onLink={onLink}
+            suggestedIdentifier={suggestedIdentifier}
           />
           {columns.map((q) => {
             const activeDefId = activeDefinitions[q.id]

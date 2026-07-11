@@ -38,7 +38,11 @@ from ..services.project_portability import (
     import_project,
     validate_project_file,
 )
-from .helpers import _get_project_or_404, read_upload_with_limit
+from .helpers import (
+    _get_project_or_404,
+    apply_project_owner_filter,
+    read_upload_with_limit,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["project-portability"])
@@ -228,9 +232,9 @@ def _find_existing_project_by_uuid(db: Session, project_uuid: str, user: User) -
     """Track J · J3-1: a local project sharing this stable identity, scoped to the
     same visibility as list_projects (all roster projects locally; own projects only
     under multi-tenant auth)."""
-    q = db.query(Project).filter(Project.project_uuid == project_uuid)
-    if get_settings().mm_multiuser_auth_enabled:
-        q = q.filter(Project.user_id == user.id)
+    q = apply_project_owner_filter(
+        db.query(Project).filter(Project.project_uuid == project_uuid), user.id
+    )
     return q.first()
 
 
@@ -306,9 +310,9 @@ async def import_project_endpoint(
         # project under multi-tenant auth.
         if target_project_id is None:
             raise HTTPException(400, f"{import_mode.capitalize()} import requires target_project_id.")
-        target = db.query(Project).filter(Project.id == target_project_id)
-        if get_settings().mm_multiuser_auth_enabled:
-            target = target.filter(Project.user_id == user.id)
+        target = apply_project_owner_filter(
+            db.query(Project).filter(Project.id == target_project_id), user.id
+        )
         if target.first() is None:
             raise HTTPException(404, "Target project not found.")
 
@@ -468,6 +472,10 @@ async def import_codebook_endpoint(
     user: User = Depends(get_current_user),
 ):
     """Import a codebook file (.mmcodebook or .qdc) into a project."""
+    # #553: this was the one endpoint in the router with NO ownership gate at
+    # all — it passed project_id straight to the import service, so under
+    # multi-tenant auth a file holder could inject codes into any project.
+    _get_project_or_404(db, project_id, user.id)
     content = await read_upload_with_limit(file, 10 * 1024 * 1024)
     content_str = content.decode("utf-8")
 

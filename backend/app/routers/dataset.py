@@ -433,7 +433,7 @@ async def get_dataset(
     db: Session = Depends(get_db),
 ):
     """Get a single dataset with column and row counts."""
-    ds = _get_dataset_or_404(db, project_id, dataset_id)
+    ds = _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     col_count = (
         db.query(func.count(DatasetColumn.id))
@@ -467,7 +467,7 @@ async def update_dataset(
     db: Session = Depends(get_db),
 ):
     """Update dataset name and/or description."""
-    ds = _get_dataset_or_404(db, project_id, dataset_id)
+    ds = _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     for field in data.model_fields_set:
         setattr(ds, field, getattr(data, field))
@@ -515,7 +515,7 @@ async def delete_dataset(
     db: Session = Depends(get_db),
 ):
     """Delete an entire dataset and all its columns, rows, and values."""
-    dataset = _get_dataset_or_404(db, project_id, dataset_id)
+    dataset = _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     # Unlink any equivalence group references before deletion
     db.query(DatasetColumn).filter(
@@ -658,7 +658,7 @@ async def delete_row(
     db: Session = Depends(get_db),
 ):
     """Delete a single dataset row (case) and all its values."""
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
     row = (
         db.query(DatasetRow)
         .filter(
@@ -707,7 +707,7 @@ async def list_columns(
     db: Session = Depends(get_db),
 ):
     """List columns for a dataset, ordered by sequence."""
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     columns = (
         db.query(DatasetColumn)
@@ -731,7 +731,7 @@ async def list_rows(
     db: Session = Depends(get_db),
 ):
     """List rows for a dataset with value counts."""
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     rows = (
         db.query(DatasetRow)
@@ -777,7 +777,7 @@ async def get_row(
     db: Session = Depends(get_db),
 ):
     """Get a single row with all its values."""
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     row = (
         db.query(DatasetRow)
@@ -819,7 +819,7 @@ async def get_dataset_data(
     db: Session = Depends(get_db),
 ):
     """Get full dataset data as a spreadsheet-like grid (columns as columns, rows as rows)."""
-    ds = _get_dataset_or_404(db, project_id, dataset_id)
+    ds = _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     # Columns ordered by sequence, with recode definitions and equivalence group eager-loaded
     columns = (
@@ -942,7 +942,7 @@ async def link_participant(
     db: Session = Depends(get_db),
 ):
     """Link or unlink a dataset row to a participant."""
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     row = (
         db.query(DatasetRow)
@@ -1033,7 +1033,7 @@ async def bulk_link_participants(
     db: Session = Depends(get_db),
 ):
     """Bulk link/unlink dataset rows to participants."""
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     # Validate no duplicate row_ids
     row_ids = [item.row_id for item in req.links]
@@ -1167,7 +1167,7 @@ async def link_by_column(
     ``already_linked``). Same service, same semantics as import-time linking.
     """
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     try:
         report = link_rows_by_identifier_column(
@@ -1214,7 +1214,7 @@ async def get_linkable_rows(
     """Get all rows from a dataset with linking status, display labels, and
     searchable values (#418)."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     # 1. Get the dataset's columns once; demographic subset keeps the labeled
     #    values shape, text-ish identifying columns drive display_values (#418
@@ -1335,7 +1335,7 @@ async def update_column_subtype(
 ):
     """Update the demographic subtype for a column."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     column = (
         db.query(DatasetColumn)
@@ -1390,7 +1390,7 @@ async def update_column_header(
 ):
     """Update column_name and/or column_text for any column."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     column = (
         db.query(DatasetColumn)
@@ -1454,7 +1454,7 @@ async def reorder_columns(
 ):
     """Set display_order for columns based on the provided ID list."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     # Verify all column IDs belong to this dataset
     existing_ids = set(
@@ -1498,7 +1498,7 @@ async def create_manual_column(
 ):
     """Create a new manual column in a dataset."""
     _get_project_or_404(db, project_id, user.id)
-    ds = _get_dataset_or_404(db, project_id, dataset_id)
+    ds = _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     # Validate column_type
     if req.column_type not in ALLOWED_MANUAL_TYPES:
@@ -1635,7 +1635,7 @@ async def update_manual_column(
 ):
     """Update metadata of a manual column."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     column = (
         db.query(DatasetColumn)
@@ -1738,7 +1738,7 @@ async def delete_manual_column(
 ):
     """Delete a manual column and all its values/recode definitions."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     column = (
         db.query(DatasetColumn)
@@ -1956,7 +1956,7 @@ async def get_domain_scores(
 ):
     """Return per-row domain aggregate scores for this dataset's domains."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     # Find domains that have member columns in this dataset
     domain_ids_in_dataset = (
@@ -2066,7 +2066,7 @@ async def preview_computed_column(
 ):
     """Validate an expression and return a preview of first 5 rows without persisting."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     try:
         ast = parse_expression(req.expression)
@@ -2168,7 +2168,7 @@ async def create_computed_column(
 ):
     """Create a computed column with a formula expression."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     # Parse and validate expression
     try:
@@ -2271,7 +2271,7 @@ async def update_computed_column(
 ):
     """Update a computed column's formula."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     column = (
         db.query(DatasetColumn)
@@ -2347,7 +2347,7 @@ async def recompute_column(
 ):
     """Recompute a stale computed column."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     column = (
         db.query(DatasetColumn)
@@ -2381,7 +2381,7 @@ async def delete_computed_column(
 ):
     """Delete a computed column and all its values."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     column = (
         db.query(DatasetColumn)
@@ -2451,7 +2451,7 @@ async def update_value(
 ):
     """Update a single value cell (manual columns only)."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     value = (
         db.query(DatasetValue)
@@ -2589,7 +2589,7 @@ async def append_preview(
 ):
     """Preview a file (CSV or .xlsx, #523) for appending rows to an existing dataset."""
     _get_project_or_404(db, project_id, user.id)
-    ds = _get_dataset_or_404(db, project_id, dataset_id)
+    ds = _get_dataset_or_404(db, project_id, dataset_id, user.id)
     validate_encoding(encoding)
 
     text, sheet_names, _sav_meta = await _upload_to_csv_text(file, encoding, sheet_name)
@@ -2790,7 +2790,7 @@ async def append_import(
 ):
     """Append CSV rows to an existing dataset."""
     _get_project_or_404(db, project_id, user.id)
-    ds = _get_dataset_or_404(db, project_id, dataset_id)
+    ds = _get_dataset_or_404(db, project_id, dataset_id, user.id)
     validate_encoding(encoding)
 
     # Parse config

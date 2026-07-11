@@ -11,11 +11,12 @@ import { Progress } from '@/components/ui/progress'
 import { cn } from '@/lib/utils'
 import { formatBytes } from '@/lib/format'
 import { consumePendingImportFiles } from '@/lib/pending-import-files'
+import { DOCUMENT_ACCEPT, isSupportedDocumentFile } from '@/lib/document-import-formats'
+import { openPickerFromZoneClick } from '@/lib/drop-zone'
 
 type Step = 'upload' | 'segmentation' | 'importing' | 'results'
 
 const MAX_FILES = 50
-const ALLOWED_EXTENSIONS = ['.docx', '.pdf', '.txt']
 
 const SEGMENTATION_MODES = [
   { value: 'paragraph', label: 'By Paragraph', description: 'Each paragraph becomes a segment. Best for most documents.' },
@@ -75,9 +76,7 @@ export default function DocumentImport() {
   useEffect(() => {
     const pending = consumePendingImportFiles('document')
     if (pending && pending.length > 0) {
-      const valid = pending.filter(f =>
-        ALLOWED_EXTENSIONS.some(ext => f.name.toLowerCase().endsWith(ext))
-      ).slice(0, MAX_FILES)
+      const valid = pending.filter(f => isSupportedDocumentFile(f.name)).slice(0, MAX_FILES)
       if (valid.length > 0) {
         setFiles(valid)
         setDocumentNames(valid.map(f => f.name.replace(/\.[^/.]+$/, '')))
@@ -108,9 +107,7 @@ export default function DocumentImport() {
   }, [step, segmentationMode, files, projectId])
 
   const addFiles = useCallback((newFiles: File[]) => {
-    const valid = newFiles.filter(f =>
-      ALLOWED_EXTENSIONS.some(ext => f.name.toLowerCase().endsWith(ext))
-    )
+    const valid = newFiles.filter(f => isSupportedDocumentFile(f.name))
     setFiles(prev => {
       const combined = [...prev, ...valid].slice(0, MAX_FILES)
       setDocumentNames(names => {
@@ -232,10 +229,7 @@ export default function DocumentImport() {
                 'rounded-lg border-2 border-dashed p-12 text-center transition-colors mb-4',
                 isDragOver ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/10' : 'border-mm-border-medium bg-mm-surface'
               )}
-              role="button"
-              tabIndex={0}
-              aria-label="Drop zone for file upload, or press Enter to select files"
-              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInputRef.current?.click() } }}
+              onClick={(e) => openPickerFromZoneClick(e, () => fileInputRef.current?.click())}
               {...dragHandlers}
             >
               <FileInput className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />
@@ -252,7 +246,7 @@ export default function DocumentImport() {
                 ref={fileInputRef}
                 type="file"
                 multiple
-                accept=".docx,.pdf,.txt"
+                accept={DOCUMENT_ACCEPT}
                 className="hidden"
                 onChange={(e) => {
                   if (e.target.files) addFiles(Array.from(e.target.files))
@@ -277,7 +271,12 @@ export default function DocumentImport() {
                       <span className="truncate text-mm-text">{f.name}</span>
                       <span className="text-mm-text-faint shrink-0">{formatBytes(f.size)}</span>
                     </div>
-                    <button onClick={() => removeFile(i)} className="text-mm-text-faint hover:text-mm-text transition-colors ml-2">
+                    <button
+                      onClick={() => removeFile(i)}
+                      className="text-mm-text-faint hover:text-mm-text transition-colors ml-2"
+                      aria-label={`Remove ${f.name}`}
+                      title={`Remove ${f.name}`}
+                    >
                       <X className="w-3.5 h-3.5" />
                     </button>
                   </div>

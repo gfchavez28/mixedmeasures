@@ -35,6 +35,7 @@ import { formatRelativeTime } from '@/lib/format'
 import { useTheme } from '@/lib/theme-context'
 import { useAuth } from '@/lib/auth-context'
 import MMLogo from '@/components/MMLogo'
+import UpdateStatusBadge from '@/components/UpdateStatusBadge'
 import { projectsApi } from '@/lib/api'
 import type { Project, ProjectSummary } from '@/lib/api'
 import { coderColor } from '@/lib/coder-color'
@@ -200,6 +201,7 @@ export default function TopRail({
           >
             {isDark ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
           </button>
+          <UpdateStatusBadge />
           <BackupStatusBadge />
           <HelpMenu />
           <Link
@@ -311,6 +313,7 @@ export default function TopRail({
           >
             {isDark ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
           </button>
+          <UpdateStatusBadge />
           <BackupStatusBadge />
           <HelpMenu />
           <Link

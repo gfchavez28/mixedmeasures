@@ -91,6 +91,9 @@ ZB, GAP = 9021, 9022
 ZB_LABELS = ["None", "A little", "Some", "A lot"]        # codes 0..3
 GAP_LABELS = ["Never", "Rarely", "Often", "Always"]      # codes 1,2,4,5
 GAP_CODES = [1, 2, 4, 5]
+# #533: an identifier column with LEADING-ZERO ids — the degenerate fixture
+# where character and numeric reads disagree ("007" numeric-guesses to 7).
+IDC = 9031
 
 
 def _likert(row_idx: int, item: int) -> int:
@@ -143,6 +146,13 @@ def _seed(db):
                          scale_values=json.dumps(GAP_CODES),
                          sequence_order=order, display_order=order))
     order += 1
+    # #533: identifier column — must ride the export as a character join key
+    # (never a stats input, never numeric-guessed).
+    db.add(DatasetColumn(id=IDC, dataset_id=DSID, column_code="pid",
+                         column_name="pid", column_text="pid",
+                         column_type="identifier",
+                         sequence_order=order, display_order=order))
+    order += 1
     db.flush()
 
     vid = 0
@@ -171,6 +181,10 @@ def _seed(db):
         db.add(DatasetValue(id=900000 + vid, row_id=dr.id, column_id=GAP,
                             value_text=GAP_LABELS[idx],
                             value_numeric=float(GAP_CODES[idx])))
+        # #533: zero-padded ids "007".."038" — value_text only, no numeric.
+        vid += 1
+        db.add(DatasetValue(id=900000 + vid, row_id=dr.id, column_id=IDC,
+                            value_text=f"{r + 7:03d}", value_numeric=None))
     db.flush()
 
     # --- metric definitions (origin="human" so the export emits them) ---
@@ -503,6 +517,11 @@ emit("sb_total_count", sum(sb_long$count))
 # line (#12a): reuse the `line_data` object the ungrouped line chart built; the
 # mean of its per-item means is the domain aggregate (mean of per-column means).
 emit("line_grand_mean", mean(line_data$value))
+
+# #533: the identifier column must arrive as CHARACTER with leading zeros
+# intact — a numeric guess reads "007" as 7 and breaks joins on external data.
+emit("id_is_character", as.numeric(is.character(data$pid)))
+emit("id_leading_zero_count", sum(data$pid == "007", na.rm = TRUE))
 '''
 
 
@@ -574,7 +593,7 @@ def test_exported_script_reproduces_tool_results(db_session):
                    "scor_mpg_wt", "chisq", "chisq_df", "cramers_v", "cronbach",
                    "sh_r", "sh_sb", "wt_mean", "wt_sd", "domain_agg",
                    "sb_total_count", "line_grand_mean", "zb_mean", "gap_mean",
-                   "gap_t_stat")
+                   "gap_t_stat", "id_is_character", "id_leading_zero_count")
     for key in scalar_keys:
         assert key in actual, f"R did not emit {key}; got {sorted(actual)}"
 
@@ -613,6 +632,10 @@ def test_exported_script_reproduces_tool_results(db_session):
     assert actual["zb_mean"] == pytest.approx(expected["zb_mean"], abs=0.001)
     assert actual["gap_mean"] == pytest.approx(expected["gap_mean"], abs=0.001)
     assert actual["gap_t_stat"] == pytest.approx(expected["gap_t_stat"], abs=0.01)
+    # #533: the identifier column arrived in R as character, leading zeros intact
+    # (a numeric guess would read "007" as 7 → count 0, is_character 0).
+    assert actual["id_is_character"] == pytest.approx(1.0, abs=1e-9)
+    assert actual["id_leading_zero_count"] == pytest.approx(1.0, abs=1e-9)
 
     # --- #12a chart code ran under source() and reproduced known tool numbers ---
     # Stacked bar: 32 complete rows x 4 Likert columns = 128 tallied responses.
@@ -643,6 +666,47 @@ def test_exported_script_reproduces_tool_results(db_session):
         fkey = f"freq_{label}"
         assert fkey in actual, f"R missing frequency category {label}: {sorted(actual)}"
         assert actual[fkey] == pytest.approx(count, abs=0.5)
+
+
+def test_identifier_column_rides_export_as_character_join_key(db_session):
+    """#533 (NOT Rscript-gated — content checks only; the gated round-trip above
+    proves R actually reads it as character). The identifier column must ride
+    the CSV with raw zero-padded values, get a col_character() read spec, and
+    stay OUT of every analysis emission — no factor, no scale codes, no stats
+    reference `data$pid` anywhere in the script.
+
+    Mutation note (2026-07-10): THIS test is the enforced guard for the read
+    spec — readr's current guesser happens to keep leading-zero strings as
+    character on its own, so the gated R-side assertions certify the end state
+    but do not fail when the col_types emission is dropped. The explicit spec
+    protects against guesser drift and readr's first-1000-rows inference on ID
+    columns whose early values look numeric."""
+    db = db_session
+    user = _seed(db)
+
+    raw = asyncio.run(_export_zip_bytes(PID, user, db))
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        setup_name = next(n for n in zf.namelist() if n.endswith(".R"))
+        csv_name = next(n for n in zf.namelist() if n.endswith("_data.csv"))
+        script_text = zf.read(setup_name).decode("utf-8")
+        csv_text = zf.read(csv_name).decode("utf-8-sig")
+
+    # CSV: header carries the column; row 0's id survives verbatim with its
+    # leading zeros (this is what a numeric guess would destroy).
+    header = csv_text.splitlines()[0].split(",")
+    assert "pid" in header, f"identifier column missing from CSV header: {header}"
+    assert any(line.split(",")[header.index("pid")] == "007"
+               for line in csv_text.splitlines()[1:]), \
+        "zero-padded identifier value did not survive into the CSV"
+
+    # Script: forced character at read time…
+    assert "`pid` = col_character()" in script_text, \
+        "identifier column must get a col_character() read spec"
+    # …and never referenced by any analysis code (factors, stats, registries).
+    assert "data$pid" not in script_text, \
+        "no analysis emission may reference the identifier column"
+    assert '"pid"' not in script_text.split("col_character()")[1], \
+        ".mm_scale_codes / stats must not register the identifier column"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

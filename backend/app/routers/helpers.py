@@ -34,6 +34,21 @@ async def read_upload_with_limit(file: UploadFile, max_size: int = MAX_UPLOAD_SI
     return content
 
 
+def apply_project_owner_filter(query, user_id: int):
+    """Apply the multi-tenant ownership predicate to a Project-selecting query.
+
+    THE single place the ``Project.user_id`` filter is expressed (#553). Every
+    ownership decision — ``_get_project_or_404`` below, and the uuid-keyed
+    project lookups in ``project_portability`` that can't go through it —
+    routes here, so the gate's semantics can never diverge across call sites.
+    A no-op in local-roster mode (``MM_MULTIUSER_AUTH_ENABLED`` off, default).
+    """
+    from ..config import get_settings
+    if get_settings().mm_multiuser_auth_enabled:
+        query = query.filter(Project.user_id == user_id)
+    return query
+
+
 def _get_project_or_404(db: Session, project_id: int, user_id: int) -> Project:
     """Load project by ID, enforcing ownership only in multi-tenant (cloud) mode.
 
@@ -42,10 +57,9 @@ def _get_project_or_404(db: Session, project_id: int, user_id: int) -> Project:
     an access gate (Track J · J1). Cloud/multi-tenant mode (flag on) keeps per-user
     isolation. All project access MUST still go through this helper.
     """
-    from ..config import get_settings
-    query = db.query(Project).filter(Project.id == project_id)
-    if get_settings().mm_multiuser_auth_enabled:
-        query = query.filter(Project.user_id == user_id)
+    query = apply_project_owner_filter(
+        db.query(Project).filter(Project.id == project_id), user_id
+    )
     project = query.first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -155,8 +169,17 @@ def _validate_column_in_project(db: Session, column_id: int, project_id: int) ->
 
 
 def _get_dataset_or_404(
-    db: Session, project_id: int, dataset_id: int,
+    db: Session, project_id: int, dataset_id: int, user_id: int,
 ) -> Dataset:
+    """Load a dataset, gating on project ownership first (#553).
+
+    ``user_id`` is REQUIRED, not optional: this helper is the only thing ~27
+    dataset endpoints call, and every one of them used to reach the rows
+    without the per-user gate ever firing under ``MM_MULTIUSER_AUTH_ENABLED``.
+    Folding the gate in (rather than adding it at each call site) means a NEW
+    dataset endpoint cannot forget it — the signature won't let it.
+    """
+    _get_project_or_404(db, project_id, user_id)
     dataset = (
         db.query(Dataset)
         .filter(

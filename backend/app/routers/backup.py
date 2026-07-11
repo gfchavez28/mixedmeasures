@@ -16,6 +16,7 @@ from ..models.user import User
 from ..models.audit import AuditEntry
 from ..schemas.backup import BackupInfo, BackupStatus, RestorePreview
 from ..services.backup import (
+    RestoreError,
     create_backup,
     cleanup_old_backups,
     get_backup_status,
@@ -235,6 +236,15 @@ async def backup_restore(
         raise HTTPException(400, str(e))
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
+    except RestoreError as e:
+        # #550: the failure moment is disaster recovery — name the escape
+        # hatch instead of pointing at server logs.
+        logger.error("Restore failed: %s", e)
+        raise HTTPException(500, (
+            "Restore failed partway. Your previous data was saved to backup "
+            f"'{e.pre_restore_filename}' before the restore began — restore "
+            "that file from the backups folder to return to the prior state."
+        ))
     except Exception as e:
         logger.error("Restore failed: %s", e)
         raise HTTPException(500, "Restore failed. Check server logs for details.")

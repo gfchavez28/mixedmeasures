@@ -67,6 +67,7 @@ import type { CellData, ProjectColumnInfo } from './crosswalk-types'
 import { parseSwapError, type SwapError } from './useCrosswalkMutations'
 import type { useCrosswalkMutations } from './useCrosswalkMutations'
 import { DragPreviewTooltip } from './DragPreviewTooltip'
+import { rejectIneligibleAssignment } from './identifier-guard'
 import {
   ADD_ROW_PREFIX,
   DRAWER_DROP_ID,
@@ -529,6 +530,24 @@ export function useCrosswalkDnD({
             },
           },
         )
+        return
+      }
+
+      // #556b: every remaining branch except the swap ASSIGNS the dragged
+      // column(s) into a variable group / equivalence row. Identifier (and
+      // skip) columns can't be members — reject here, once, rather than in
+      // each branch. Deliberately placed AFTER the Unassigned-panel branch
+      // above: dragging an identifier OUT of a group is the repair gesture and
+      // must keep working. Cell-to-cell swap (further down) is also untouched —
+      // it exchanges two columns that are already members and adds nothing.
+      const isAssigningDrop =
+        over.id === NEW_BRACKET_TILE_DROP_ID ||
+        parseAddRowDropId(over.id) != null ||
+        parseEmptyCellDropId(over.id) != null
+      if (
+        isAssigningDrop &&
+        rejectIneligibleAssignment(movingColumnIds, columnsById, flashConflict)
+      ) {
         return
       }
 

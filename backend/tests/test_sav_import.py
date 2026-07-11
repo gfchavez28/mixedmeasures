@@ -225,9 +225,11 @@ class TestCaps:
             sav_to_csv_text(sav_bytes)
 
     def test_caps_mirror_the_xlsx_adapter(self):
-        from app.services.dataset_import import MAX_XLSX_COLS
+        from app.services.dataset_import import MAX_XLSX_COLS, MAX_XLSX_ROWS
+        from app.services.sav_import import MAX_SAV_ROWS
 
         assert MAX_SAV_COLS == MAX_XLSX_COLS
+        assert MAX_SAV_ROWS == MAX_XLSX_ROWS  # #555b — the docstring's claim, now enforced
 
 
 class TestPreviewOverlay:
@@ -413,6 +415,33 @@ class TestPartialLabelCoverage:
         assert meta["satisfied"].ordered_values == [1.0, 2.0, 3.0, 4.0, 5.0]
         assert meta["satisfied"].stray_values == []
         assert meta["support"].ordered_values == [0.0, 1.0, 2.0, 3.0]
+
+    def test_single_label_ordinal_suppresses_substitution_column_wide(self, partial_converted):
+        """#555c: a lone anchor label (anxiety: only 1='Not at all' on a 1..7
+        slider) is not a scale. Substituting it would leave mixed text/number
+        cells — the exact shape the demote branch exists to prevent — so the
+        column imports as plain numbers throughout, is never promoted, and the
+        anchor stays on the meta record rather than in any cell."""
+        rows, meta = partial_converted
+        anx = meta["anxiety"]
+        assert not anx.is_labelled_ordinal  # single label never promotes
+        assert anx.ordered_labels == ["Not at all"]  # anchor survives in metadata
+        cells = _col(rows, "anxiety")
+        assert "Not at all" not in cells  # no substitution anywhere
+        assert set(cells) == {"1", "2", "3", "4", "5", "6", "7"}
+
+    def test_single_label_column_keeps_its_variable_label_in_the_preview(self):
+        """#555c: suppression drops the CELL substitution only — the SPSS
+        variable label (the question text) still overlays the preview."""
+        from app.services.dataset_import import preview_dataset_csv
+        from app.services.sav_import import apply_sav_metadata
+
+        text, meta = sav_to_csv_text(PARTIAL_FIXTURE.read_bytes())
+        result = preview_dataset_csv(text)
+        apply_sav_metadata(result["columns"], meta)
+        cols = {c["column_name"]: c for c in result["columns"]}
+        assert cols["anxiety"]["suggested_column_text"] == "How anxious were you this week?"
+        assert cols["anxiety"].get("suggested_type") != "ordinal"  # no promotion
 
 
 class TestPreviewEndpointSeam:

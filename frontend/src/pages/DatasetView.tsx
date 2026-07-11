@@ -634,8 +634,18 @@ export default function DatasetView() {
       })
       return { previous }
     },
-    onError: (_err, _vars, context) => {
+    // #556d: the per-mutation onError REPLACES the global default, so without a
+    // toast here a failed link (e.g. the row was linked from another tab since
+    // load → 409) rolled the cell back in silence — after the #532 flow had
+    // already told the user "linked". Mirrors linkByColumnMutation's onError.
+    onError: (err: unknown, vars, context) => {
       if (context?.previous) queryClient.setQueryData(['dataset-data', pid, iid], context.previous)
+      toast.error(extractApiError(
+        err,
+        vars.participantId == null
+          ? 'Failed to unlink participant'
+          : 'Failed to link participant',
+      ))
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })

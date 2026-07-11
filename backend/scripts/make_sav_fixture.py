@@ -44,6 +44,9 @@ def make_partial_labels() -> None:
       → must demote (no promotion, raw numbers throughout, no mixed cells)
     * ``mood``   — endpoint-anchored AND code 99 declared user-missing → 99 is
       missing, not a stray; the synthesized scale must not absorb it
+    * ``anxiety``— SINGLE-label ordinal (only 1="Not at all"; #555c) → not a
+      scale: label substitution suppressed column-wide, plain numbers
+      throughout, variable label still overlays the preview
     """
     df = pd.DataFrame(
         {
@@ -51,13 +54,17 @@ def make_partial_labels() -> None:
             "agree": [1, 2, 3, 4, 5, 9, 2.5, 1],
             "slider": [1, 10, 25, 40, 55, 70, 85, 100],
             "mood": [1, 3, 99, 7, 2, 5, 6, 4],
+            "anxiety": [1, 2, 3, 4, 5, 6, 7, 1],
         }
     )
 
     pyreadstat.write_sav(
         df,
         str(DEST_PARTIAL),
-        column_labels={"stress": "How stressed were you this week?"},
+        column_labels={
+            "stress": "How stressed were you this week?",
+            "anxiety": "How anxious were you this week?",
+        },
         variable_value_labels={
             "stress": {1: "Not at all", 7: "Extremely"},
             "agree": {
@@ -69,12 +76,14 @@ def make_partial_labels() -> None:
             },
             "slider": {1: "Low", 100: "High"},
             "mood": {1: "Bad", 7: "Good"},
+            "anxiety": {1: "Not at all"},
         },
         variable_measure={
             "stress": "ordinal",
             "agree": "ordinal",
             "slider": "ordinal",
             "mood": "ordinal",
+            "anxiety": "ordinal",
         },
         missing_ranges={"mood": [{"lo": 99, "hi": 99}]},
     )

@@ -121,7 +121,7 @@ test('stopBackend — POSIX sends SIGTERM then escalates to SIGKILL', () => {
   const calls = []
   let escalate = null
   const child = { exitCode: null, killed: false, pid: 999, kill: (sig) => calls.push(sig) }
-  stopBackend(child, { platform: 'linux', graceMs: 10, spawn: () => {}, setTimeoutFn: (fn) => { escalate = fn } })
+  stopBackend(child, { platform: 'linux', graceMs: 10, setTimeoutFn: (fn) => { escalate = fn } })
   assert.deepEqual(calls, ['SIGTERM'])
   escalate() // grace elapsed, still alive → hard kill
   assert.deepEqual(calls, ['SIGTERM', 'SIGKILL'])
@@ -130,13 +130,62 @@ test('stopBackend — POSIX sends SIGTERM then escalates to SIGKILL', () => {
 test('stopBackend — Windows tree-kills via taskkill /T /F', () => {
   const spawned = []
   const child = { exitCode: null, killed: false, pid: 1234, kill: () => { throw new Error('should not SIGTERM on win') } }
-  stopBackend(child, { platform: 'win32', spawn: (cmd, args) => spawned.push([cmd, args]) })
+  stopBackend(child, { platform: 'win32', spawnSync: (cmd, args) => { spawned.push([cmd, args]); return {} } })
   assert.deepEqual(spawned, [['taskkill', ['/pid', '1234', '/T', '/F']]])
+})
+
+// #554a — the kill must BLOCK. quitAndInstall() launches the NSIS installer and
+// only then calls app.quit(), so before-quit is the last synchronous moment we
+// have: if taskkill is still in flight when the app exe exits, the installer can
+// begin overwriting the install dir while mm-backend.exe still holds locks in it.
+// A fire-and-forget spawn() is therefore a real race — the API we call is the fix.
+test('stopBackend — the Windows kill is SYNCHRONOUS (spawnSync, not spawn)', () => {
+  let usedSync = false
+  const child = { exitCode: null, killed: false, pid: 7, kill: () => {} }
+  stopBackend(child, {
+    platform: 'win32',
+    spawnSync: () => { usedSync = true; return {} },
+    // If the implementation ever reverts to fire-and-forget, this blows up.
+    spawn: () => { throw new Error('stopBackend must not fire-and-forget on win32 (#554a)') },
+  })
+  assert.equal(usedSync, true, 'win32 must tear the tree down synchronously')
+})
+
+test('stopBackend — the Windows kill is bounded so quit can never hang', () => {
+  let opts = null
+  const child = { exitCode: null, killed: false, pid: 7, kill: () => {} }
+  stopBackend(child, { platform: 'win32', graceMs: 1234, spawnSync: (_c, _a, o) => { opts = o; return {} } })
+  assert.equal(opts.timeout, 1234, 'a wedged taskkill must not strand the app in before-quit')
+  assert.equal(opts.windowsHide, true, 'no console flash on the way out')
+})
+
+test('stopBackend — a failing taskkill is logged, never thrown (a throw in before-quit strands the app)', () => {
+  const logged = []
+  const child = { exitCode: null, killed: false, pid: 7, kill: () => {} }
+  // spawnSync reports failure two ways: a returned `error`, or a throw.
+  assert.doesNotThrow(() =>
+    stopBackend(child, {
+      platform: 'win32',
+      spawnSync: () => ({ error: new Error('taskkill missing') }),
+      log: (m) => logged.push(m),
+    }),
+  )
+  assert.match(logged.join(' '), /taskkill failed/)
+
+  logged.length = 0
+  assert.doesNotThrow(() =>
+    stopBackend(child, {
+      platform: 'win32',
+      spawnSync: () => { throw new Error('EPERM') },
+      log: (m) => logged.push(m),
+    }),
+  )
+  assert.match(logged.join(' '), /taskkill threw/)
 })
 
 test('stopBackend — no-op on an already-exited child', () => {
   const child = { exitCode: 0, killed: false, pid: 1, kill: () => { throw new Error('should not kill') } }
-  stopBackend(child, { platform: 'linux', spawn: () => { throw new Error('should not spawn') } })
+  stopBackend(child, { platform: 'linux', spawnSync: () => { throw new Error('should not spawn') } })
 })
 
 // --- resolveAppPort (an internal audit: stable per-install port) ----------------

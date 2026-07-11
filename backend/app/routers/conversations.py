@@ -50,8 +50,18 @@ router = APIRouter(prefix="/api/projects/{project_id}/conversations", tags=["con
 def ensure_participant_for_speaker(
     db: Session, project_id: int, speaker: Speaker, name: str
 ) -> None:
-    """Auto-create or link Participant for non-facilitator speakers."""
+    """Auto-create or link Participant for non-facilitator speakers.
+
+    #534: matching is trim-then-exact on Participant.identifier — the same rule
+    dataset linking uses (services/participant_linking.py, DEC-2) — so a stray
+    leading/trailing space in a CSV speaker label can't silently mint a
+    duplicate participant. Case stays sensitive; a whitespace-only label
+    identifies nobody and links nothing.
+    """
     if speaker.is_facilitator or speaker.participant_id is not None:
+        return
+    name = name.strip()
+    if not name:
         return
     existing = db.query(Participant).filter(
         Participant.project_id == project_id,
@@ -118,14 +128,20 @@ def conversation_to_response(
 
     # On-disk recording size (slab 5 storage visibility) — one stat per
     # conversation; None when nothing attached or the file is missing.
+    # media_version (#549) rides the same stat: an opaque mtime_ns+size token
+    # that changes on every replace (os.replace refreshes mtime), so the
+    # client can cache-bust the stream URL even for a same-name re-export.
     media_size_bytes = None
+    media_version = None
     if conversation.media_filename and conversation.media_format:
         media_path = (
             get_media_dir() / str(conversation.project_id) / str(conversation.id)
             / f"original.{conversation.media_format}"
         )
         try:
-            media_size_bytes = media_path.stat().st_size
+            media_stat = media_path.stat()
+            media_size_bytes = media_stat.st_size
+            media_version = f"{media_stat.st_mtime_ns}-{media_stat.st_size}"
         except OSError:
             media_size_bytes = None
 
@@ -151,6 +167,7 @@ def conversation_to_response(
         media_is_vbr=conversation.media_is_vbr,
         has_media=conversation.media_filename is not None,
         media_size_bytes=media_size_bytes,
+        media_version=media_version,
     )
 
 
@@ -432,6 +449,7 @@ async def get_conversation(
     db: Session = Depends(get_db)
 ):
     """Get a conversation by ID."""
+    _get_project_or_404(db, project_id, user.id)
     conversation = db.query(Conversation).filter(
         Conversation.id == conversation_id,
         Conversation.project_id == project_id
@@ -452,6 +470,7 @@ async def update_conversation(
     db: Session = Depends(get_db)
 ):
     """Update a conversation."""
+    _get_project_or_404(db, project_id, user.id)
     conversation = db.query(Conversation).filter(
         Conversation.id == conversation_id,
         Conversation.project_id == project_id
@@ -487,6 +506,7 @@ async def delete_conversation(
     db: Session = Depends(get_db)
 ):
     """Delete a conversation and all associated data."""
+    _get_project_or_404(db, project_id, user.id)
     conversation = db.query(Conversation).filter(
         Conversation.id == conversation_id,
         Conversation.project_id == project_id

@@ -36,6 +36,7 @@ from ..services.coding_layers import (
 from ..services.metrics import resolve_input_source_labels
 from ..services.grouping import load_grouping_values, order_value_labels
 from ..services.dataset_import import _is_na
+from ..services.recode import mapping_numeric_values
 from ..services.computed_columns import (
     parse as parse_expression,
     validate as validate_expression,
@@ -247,6 +248,7 @@ def _build_r_script(
     irr_per_code: dict | None = None,
     irr_code_names: dict | None = None,
     na_blanked_count: int = 0,
+    identifier_cols: list[dict] | None = None,
 ) -> str:
     """Build the R script content. Returns the full script string with UTF-8 BOM."""
     now_utc = datetime.now(timezone.utc)
@@ -295,7 +297,19 @@ def _build_r_script(
     # Read data
     toc_sections.append("Read data")
     r_lines.append("# ---- Read data ----")
-    r_lines.append(f'data <- read_csv("{project_slug}_data.csv", na = c("", "NA"))')
+    if identifier_cols:
+        # #533: identifier columns are join keys — force character so readr
+        # can't numeric-guess "007" into 7 and break joins on external data.
+        id_spec = ", ".join(
+            f"`{m['r_name']}` = col_character()" for m in identifier_cols
+        )
+        r_lines.append(f'data <- read_csv("{project_slug}_data.csv", na = c("", "NA"),')
+        r_lines.append(f"                 col_types = cols(.default = col_guess(), {id_spec}))")
+        id_names = ", ".join(m["r_name"] for m in identifier_cols)
+        r_lines.append(f"# Identifier column(s) ({id_names}) are participant/record IDs kept as")
+        r_lines.append("# character for joining external data; no statistics are computed on IDs.")
+    else:
+        r_lines.append(f'data <- read_csv("{project_slug}_data.csv", na = c("", "NA"))')
     r_lines.append("")
 
     # Helper: coerce (ordered) factor columns back to numeric for numeric
@@ -396,9 +410,10 @@ def _build_r_script(
                         else primary_recode.mapping
                     )
                     if r_mapping:
-                        all_numeric = [
-                            float(v) for v in r_mapping.values() if v is not None
-                        ]
+                        # #542b shape (#555a): non-floatable mapping values skip
+                        # PER VALUE — one stray string must not degrade the
+                        # emitted bounds/formula to the vague fallback.
+                        all_numeric = mapping_numeric_values(r_mapping)
                         if all_numeric:
                             scale_min = min(all_numeric)
                             scale_max = max(all_numeric)
@@ -2193,7 +2208,17 @@ async def export_r_data(
 
     # ── Step 3: Build column name map ────────────────────────────────────
     is_multi_dataset = len(qualifying_datasets) > 1
-    used_names: set[str] = set()
+    # #556c: seed the uniqueness pool with the CSV's fixed headers (written at
+    # `header = ["record_id", "dataset"]` + the participant pair below). Without
+    # this, a column whose code/name slugifies to one of them emits a DUPLICATE
+    # header — and R then attaches the `col_character()` read spec to the wrong
+    # column, silently voiding #533's leading-zeros guarantee for the join key.
+    # Seeded unconditionally (not gated on `has_participants`) so a column's R
+    # name doesn't change identity depending on whether participants happen to
+    # be linked. Needs a hand-edited column code to collide — CSV/xlsx
+    # auto-assign C00N and .sav puts the SPSS name in column_name — so this is a
+    # pre-existing hole #533 pointed at, not a live bug on shipped imports.
+    used_names: set[str] = {"record_id", "dataset", "participant_id", "participant_role"}
 
     col_meta: dict[int, dict] = {}  # col_id → {r_name, col, dataset, is_demographic}
     demographic_col_ids: list[int] = []
@@ -2236,6 +2261,33 @@ async def export_r_data(
                 item_col_ids.append(col.id)
 
     all_qualifying_col_ids = demographic_col_ids + item_col_ids
+
+    # #533: identifier columns ride along as plain character ID columns (join
+    # keys for external data). Deliberately NOT in _R_EXPORT_TYPES / col_meta —
+    # nothing downstream (factor conversion, labels, stats, domain membership)
+    # can reference them; the export emits their raw values plus a
+    # col_character() read spec so R can't numeric-guess "007" into 7.
+    identifier_cols: list[dict] = []
+    for ds, _cols in qualifying_datasets:
+        ds_slug = _slugify(ds.name, max_len=20)
+        id_cols = [c for c in ds.columns if c.column_type == ColumnType.IDENTIFIER]
+        id_cols.sort(key=lambda c: (c.display_order or 999999, c.sequence_order))
+        for col in id_cols:
+            if col.column_code:
+                base = _make_r_identifier(col.column_code)
+            elif col.column_name:
+                base = _make_r_identifier(col.column_name)
+            else:
+                base = _make_r_identifier(col.column_text)
+            r_name = f"{ds_slug}__{base}" if is_multi_dataset else base
+            candidate = r_name
+            counter = 2
+            while candidate in used_names:
+                candidate = f"{r_name}_{counter}"
+                counter += 1
+            r_name = candidate
+            used_names.add(r_name)
+            identifier_cols.append({"r_name": r_name, "col": col})
 
     # ── Step 4: Load domain metrics & scores ─────────────────────────────
     domain_metrics = (
@@ -2322,9 +2374,10 @@ async def export_r_data(
 
     ds_by_id = {ds.id: ds for ds, _ in qualifying_datasets}
 
-    # Batch-load all values for qualifying columns
+    # Batch-load all values for qualifying columns (+ #533 identifier columns)
+    value_load_col_ids = all_qualifying_col_ids + [m["col"].id for m in identifier_cols]
     value_pivot: dict[int, dict[int, tuple]] = defaultdict(dict)
-    if all_qualifying_col_ids:
+    if value_load_col_ids:
         values = (
             db.query(
                 DatasetValue.row_id,
@@ -2332,7 +2385,7 @@ async def export_r_data(
                 DatasetValue.value_text,
                 DatasetValue.value_numeric,
             )
-            .filter(DatasetValue.column_id.in_(all_qualifying_col_ids))
+            .filter(DatasetValue.column_id.in_(value_load_col_ids))
             .all()
         )
         for resp_id, col_id, vtext, vnum in values:
@@ -2466,6 +2519,7 @@ async def export_r_data(
     header = ["record_id", "dataset"]
     if has_participants:
         header += ["participant_id", "participant_role"]
+    header += [m["r_name"] for m in identifier_cols]
     header += [m["r_name"] for m in demo_cols]
     header += [m["r_name"] for m in item_cols]
     header += [d["r_name"] for d in domain_score_cols]
@@ -2507,6 +2561,12 @@ async def export_r_data(
             csv_row += [csv_safe(p_identifier or ""), csv_safe(p_role or "")]
 
         row_values = value_pivot.get(row_obj.id, {})
+
+        for m in identifier_cols:
+            # Raw, not _text_cell: an ID is a join key, not an analysis value —
+            # never blank an "N/A"-looking identifier (#533).
+            vals = row_values.get(m["col"].id)
+            csv_row.append(csv_safe(vals[0]) if vals and vals[0] is not None else "")
 
         for m in demo_cols:
             # Demographic value_text is free-form respondent input; defang.
@@ -2580,6 +2640,7 @@ async def export_r_data(
         irr_per_code=irr_per_code,
         irr_code_names=irr_code_names,
         na_blanked_count=na_blanked_count,
+        identifier_cols=identifier_cols,
     )
 
     # ── Step 10: ZIP & stream ────────────────────────────────────────────

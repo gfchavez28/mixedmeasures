@@ -378,6 +378,7 @@ async def delete_excerpt(
     db: Session = Depends(get_db),
 ):
     """Delete an excerpt. Associated note gets excerpt_id SET NULL."""
+    _get_project_or_404(db, project_id, user.id)
     excerpt = db.query(Excerpt).filter(
         Excerpt.id == excerpt_id,
         Excerpt.project_id == project_id,
@@ -782,6 +783,7 @@ async def get_excerpt(
     db: Session = Depends(get_db),
 ):
     """Get a single excerpt with surrounding context."""
+    _get_project_or_404(db, project_id, user.id)
     excerpt = _base_excerpt_query(db, project_id).filter(
         Excerpt.id == excerpt_id,
         Excerpt.project_id == project_id,

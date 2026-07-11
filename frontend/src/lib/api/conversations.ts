@@ -25,8 +25,15 @@ export interface Conversation {
   /** A media file (any type) is attached — drives management affordances
    * (badge, attach/remove). The player gates on media_type instead. */
   has_media: boolean
-  /** On-disk size of the attached recording (slab 5 storage visibility). */
+  /** On-disk size of the attached recording (slab 5 storage visibility).
+   * null while media_filename is set = the file is MISSING on disk (e.g. a
+   * video-excluded backup restored cross-machine) — the player uses this to
+   * distinguish missing-file from codec failure (#551). */
   media_size_bytes: number | null
+  /** Opaque cache token (mtime+size) for the on-disk recording — changes on
+   * EVERY replace, including same-name re-exports. Drives the stream URL's
+   * cache-buster and media-element reloads (#549). null when file missing. */
+  media_version: string | null
 }
 
 /** #356: import endpoint returns the imported conversation + any import-time

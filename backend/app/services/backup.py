@@ -33,6 +33,60 @@ MANIFEST_FORMAT_VERSION = 1
 STALE_HOURS = 24
 
 
+class RestoreError(RuntimeError):
+    """Restore failed AFTER the pre-restore safety backup was created.
+
+    Carries the safety backup's filename so the failure surface can point the
+    user at recovery instead of leaving it in the server log (#550 — disaster
+    recovery is the worst moment for a silent escape hatch).
+    """
+
+    def __init__(self, message: str, pre_restore_filename: str):
+        super().__init__(message)
+        self.pre_restore_filename = pre_restore_filename
+
+
+def _reseat_keep_dir(keep_dir: Path, media_dir: Path) -> None:
+    """Move every file in the video keep-dir back to its path under media_dir.
+
+    The keep-dir holds the ONLY copy of local video the backup being restored
+    doesn't carry, so this is written to never lose bytes (#550):
+
+    * never overwrites — a file already at the destination wins (by design,
+      paths the backup provides defer to the backup) and the kept copy stays
+      in the keep-dir rather than being deleted;
+    * never raises — a failed move leaves the file in the keep-dir for the
+      NEXT run's entry re-seat (this helper runs on the success path, the
+      failure path, and on entry when a crashed run left the dir behind);
+    * removes the keep-dir only once it is fully emptied.
+    """
+    if not keep_dir.exists():
+        return
+    left_behind = 0
+    for root, _dirs, files in os.walk(keep_dir):
+        for f in files:
+            src = Path(root) / f
+            rel = src.relative_to(keep_dir)
+            dst = media_dir / rel
+            try:
+                if dst.exists():
+                    left_behind += 1
+                    continue
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+            except OSError as e:
+                left_behind += 1
+                logger.error("Could not re-seat preserved media %s: %s", rel, e)
+    if left_behind:
+        logger.error(
+            "%d preserved media file(s) could not be re-seated and remain in %s "
+            "— they will be retried on the next restore",
+            left_behind, keep_dir,
+        )
+    else:
+        shutil.rmtree(str(keep_dir), ignore_errors=True)
+
+
 def checkpoint_wal(db_path: Path) -> None:
     """Checkpoint WAL so the .db file is self-contained."""
     conn = open_raw_connection(db_path)
@@ -258,6 +312,21 @@ def validate_backup(zip_path: Path) -> RestorePreview:
                     f"Backup was created with app version {manifest.app_version} "
                     f"(current: {APP_VERSION})"
                 )
+            # #551: video-excluded backups (the periodic auto-backup policy)
+            # must SAY so before the user commits — restoring one on a machine
+            # without the original files leaves video conversations pointing
+            # at recordings that don't exist. On the same machine, restore
+            # preserves local video untouched (slab 5), so this is a heads-up
+            # there and a real warning on a new machine.
+            if manifest.video_excluded:
+                n = manifest.video_files_excluded
+                count = f"{n} video recording{'s were' if n != 1 else ' was'}"
+                warnings.append(
+                    f"This backup does not include video recordings ({count} "
+                    "excluded when it was created). Video files already on this "
+                    "computer are preserved; on a different computer, re-attach "
+                    "each conversation's recording after restoring."
+                )
 
             # Decrypt/readability + integrity probe on the actual DB. Runs here
             # (not only at restore) so it fails fast — restore_from_backup calls
@@ -286,8 +355,20 @@ def restore_from_backup(
 ) -> BackupInfo:
     """Restore from a .mmbackup ZIP.
 
-    Creates a pre-restore safety backup first, then replaces the DB
-    and documents directory. Returns the pre-restore backup info.
+    Creates a pre-restore safety backup first, then replaces the DB,
+    documents, and media. Returns the pre-restore backup info.
+
+    Failure-safety shape (#550): the WHOLE payload is extracted to staging
+    before anything is mutated — media into a SIBLING of media_dir (same
+    filesystem → the install move is a rename; multi-GB payloads never land
+    in OS temp, which is commonly size-capped tmpfs) — so an extraction
+    failure aborts with nothing changed, and the destructive phase is
+    renames/rmtrees only. Local video the backup doesn't carry is moved to a
+    sibling keep-dir and re-seated via ``_reseat_keep_dir`` on success, on
+    failure, AND on entry (a crashed run's leftover keep-dir holds the only
+    copy — it is re-seated, never deleted). A failure after the safety
+    backup exists raises ``RestoreError`` naming it, so callers can point
+    the user at recovery instead of a bare 500.
     """
     # Validate first
     validate_backup(zip_path)
@@ -296,13 +377,32 @@ def restore_from_backup(
     pre_restore_info = create_backup(db_path, docs_dir, media_dir, backup_dir, "pre_restore")
     logger.info("Pre-restore backup created: %s", pre_restore_info.filename)
 
-    tmp_dir = tempfile.mkdtemp()
+    media_dir.parent.mkdir(parents=True, exist_ok=True)
+    tmp_video_keep = media_dir.parent / ".video_keep_restore_tmp"
+    # A leftover keep-dir means a prior restore crashed after moving video
+    # out — it may hold the ONLY copy of those recordings. Re-seat it before
+    # doing anything else; NEVER delete it wholesale (#550: the old entry
+    # rmtree here is what turned a failed restore + retry into data loss).
+    _reseat_keep_dir(tmp_video_keep, media_dir)
+
+    # Media staging: sibling of media_dir. A leftover stage dir holds only
+    # COPIES extracted from some backup (unlike the keep-dir), so clearing
+    # it on entry is safe.
+    media_stage = media_dir.parent / ".media_restore_stage_tmp"
+    if media_stage.exists():
+        shutil.rmtree(str(media_stage), ignore_errors=True)
+
+    tmp_dir = tempfile.mkdtemp()  # db + documents staging (small payloads)
     try:
         with zipfile.ZipFile(str(zip_path), "r") as zf:
             # Zip-slip prevention during extraction
             for member in zf.namelist():
                 if member.startswith("/") or ".." in member:
                     raise ValueError(f"Suspicious path in backup: {member}")
+
+            # ---- Staging phase: extract EVERYTHING before mutating anything.
+            # An ENOSPC/IO failure here (the likeliest failure on a multi-GB
+            # restore) aborts with the install untouched.
 
             # Extract database to temp and re-verify it decrypts + passes
             # integrity on the EXACT file we're about to install. validate_backup
@@ -319,84 +419,94 @@ def restore_from_backup(
             for member in doc_members:
                 zf.extract(member, tmp_dir)
 
-            # Replace database (atomic-ish on same filesystem)
-            shutil.move(str(tmp_db), str(db_path))
-
-            # Remove WAL/SHM files that belong to the old DB
-            for suffix in (".db-wal", ".db-shm"):
-                wal_path = db_path.with_suffix(suffix)
-                if wal_path.exists():
-                    wal_path.unlink()
-
-            # Replace documents directory
-            if docs_dir.exists():
-                shutil.rmtree(str(docs_dir))
-            if tmp_docs.exists():
-                shutil.move(str(tmp_docs), str(docs_dir))
-            else:
-                docs_dir.mkdir(parents=True, exist_ok=True)
-
-            # Extract media to temp
-            tmp_media = Path(tmp_dir) / "media"
+            # Extract media to the sibling staging dir
             media_members = [m for m in zf.namelist() if m.startswith("media/")]
             for member in media_members:
-                zf.extract(member, tmp_dir)
+                zf.extract(member, media_stage)
+            tmp_media = media_stage / "media"
 
-            # Preserve local video recordings the backup does not carry
-            # (video V1 slab 5: auto-backups exclude video, so a restore must
-            # never DELETE video bytes the backup deliberately left out).
-            # Files at paths the backup DOES provide defer to the backup.
-            preserved_video: list[tuple[Path, Path]] = []  # (relative, absolute)
-            backup_media_paths = {m[len("media/"):] for m in media_members}
-            if media_dir.exists():
-                for root, _dirs, files in os.walk(media_dir):
-                    for f in files:
-                        file_path = Path(root) / f
-                        if file_path.suffix.lstrip(".").lower() not in VIDEO_FORMATS:
-                            continue
-                        rel = file_path.relative_to(media_dir)
-                        if str(rel).replace(os.sep, "/") not in backup_media_paths:
-                            preserved_video.append((rel, file_path))
-            # Keep-dir is a SIBLING of media_dir (same filesystem → instant
-            # renames; /tmp may be tmpfs, where multi-GB moves would burn RAM).
-            tmp_video_keep = media_dir.parent / ".video_keep_restore_tmp"
-            if tmp_video_keep.exists():
-                shutil.rmtree(str(tmp_video_keep))
-            for rel, file_path in preserved_video:
-                keep_path = tmp_video_keep / rel
-                keep_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(file_path), str(keep_path))
+        # ---- Destructive phase: renames and rmtrees only from here on.
 
-            # Replace media directory
-            if media_dir.exists():
-                shutil.rmtree(str(media_dir))
-            if tmp_media.exists():
-                shutil.move(str(tmp_media), str(media_dir))
-            else:
-                media_dir.mkdir(parents=True, exist_ok=True)
+        # Replace database (atomic-ish on same filesystem)
+        shutil.move(str(tmp_db), str(db_path))
 
-            # Re-seat the preserved video files at their original paths
-            for rel, _ in preserved_video:
-                src = tmp_video_keep / rel
-                dst = media_dir / rel
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(dst))
-            if preserved_video:
-                shutil.rmtree(str(tmp_video_keep), ignore_errors=True)
-                logger.info(
-                    "Restore preserved %d local video file(s) not present in the backup",
-                    len(preserved_video),
-                )
+        # Remove WAL/SHM files that belong to the old DB
+        for suffix in (".db-wal", ".db-shm"):
+            wal_path = db_path.with_suffix(suffix)
+            if wal_path.exists():
+                wal_path.unlink()
+
+        # Replace documents directory
+        if docs_dir.exists():
+            shutil.rmtree(str(docs_dir))
+        if tmp_docs.exists():
+            shutil.move(str(tmp_docs), str(docs_dir))
+        else:
+            docs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Preserve local video recordings the backup does not carry
+        # (video V1 slab 5: auto-backups exclude video, so a restore must
+        # never DELETE video bytes the backup deliberately left out).
+        # Files at paths the backup DOES provide defer to the backup.
+        preserved_video: list[tuple[Path, Path]] = []  # (relative, absolute)
+        backup_media_paths = {m[len("media/"):] for m in media_members}
+        if media_dir.exists():
+            for root, _dirs, files in os.walk(media_dir):
+                for f in files:
+                    file_path = Path(root) / f
+                    if file_path.suffix.lstrip(".").lower() not in VIDEO_FORMATS:
+                        continue
+                    rel = file_path.relative_to(media_dir)
+                    if str(rel).replace(os.sep, "/") not in backup_media_paths:
+                        preserved_video.append((rel, file_path))
+        # Keep-dir is a SIBLING of media_dir (same filesystem → instant
+        # renames; /tmp may be tmpfs, where multi-GB moves would burn RAM).
+        for rel, file_path in preserved_video:
+            keep_path = tmp_video_keep / rel
+            keep_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(file_path), str(keep_path))
+
+        # Replace media directory
+        if media_dir.exists():
+            shutil.rmtree(str(media_dir))
+        if tmp_media.exists():
+            shutil.move(str(tmp_media), str(media_dir))
+        else:
+            media_dir.mkdir(parents=True, exist_ok=True)
+
+        # Re-seat the preserved video files at their original paths
+        if preserved_video:
+            logger.info(
+                "Restore preserving %d local video file(s) not present in the backup",
+                len(preserved_video),
+            )
+        _reseat_keep_dir(tmp_video_keep, media_dir)
 
         logger.info("Restore complete from backup")
         return pre_restore_info
 
     except Exception as e:
+        # Put any moved-out video back where it came from, best-effort —
+        # whatever cannot move back stays in the keep-dir, which the next
+        # run's entry re-seat retries instead of deleting (#550).
+        _reseat_keep_dir(tmp_video_keep, media_dir)
         logger.error(
             "Restore failed: %s. Pre-restore backup: %s",
             e, pre_restore_info.filename,
         )
-        raise
+        if isinstance(e, ValueError):
+            raise  # validation-shaped errors keep their 400 semantics
+        raise RestoreError(
+            f"Restore failed partway ({e}). Your previous data was saved to "
+            f"backup '{pre_restore_info.filename}' before the restore began.",
+            pre_restore_info.filename,
+        ) from e
+    finally:
+        # create_backup cleans its temp dir; restore historically did NOT — a
+        # failed restore leaked the full extracted payload into OS temp. The
+        # stage dir holds only copies, so unconditional cleanup is safe.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(str(media_stage), ignore_errors=True)
 
 
 def get_backup_status(backup_dir: Path, interval_hours: float | None = None) -> BackupStatus:

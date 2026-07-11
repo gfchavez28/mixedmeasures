@@ -2,6 +2,7 @@ import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
 import { Info } from 'lucide-react'
 import { type Segment } from '@/lib/api'
 import { formatTimestamp } from '@/lib/utils'
+import { isBeyondRecording, recordingEndsAtTimelineTime } from '@/lib/playback-utils'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 
@@ -12,6 +13,9 @@ interface TimelineScrubberProps {
   onPositionChange?: (position: number) => void  // 0-1 for scroll sync
   /** Audio duration — extends max boundary beyond last segment */
   mediaDuration?: number | null
+  /** Media sync offset (#564): timeline time t maps to media time t + offset, so
+   *  the recording covers the timeline only up to `mediaDuration − offset`. */
+  mediaOffset?: number
   /** Show VBR info icon */
   isVbr?: boolean
   className?: string
@@ -23,6 +27,7 @@ export default function TimelineScrubber({
   onTimeChange,
   onPositionChange,
   mediaDuration,
+  mediaOffset = 0,
   isVbr = false,
   className,
 }: TimelineScrubberProps) {
@@ -60,6 +65,30 @@ export default function TimelineScrubber({
       duration: max - min,
     }
   }, [segments, mediaDuration])
+
+  // #563: the transcript can outrun the RECORDING — a partial capture, a trimmed
+  // clip, or simply the wrong file attached (the recording slot accepts any file
+  // for any transcript). The timeline still spans the whole transcript (you must
+  // be able to read and code the untaped part), but the stretch past the end of
+  // the recording has nothing to play, and saying so is the difference between a
+  // dead zone and a mystery: before this, scrubbing there parked the player on
+  // the final frame and the next Play silently restarted at 0:00.
+  const recordingEnd = useMemo(
+    () => recordingEndsAtTimelineTime(mediaDuration, mediaOffset),
+    [mediaDuration, mediaOffset],
+  )
+  const coverageEnd = useMemo(() => {
+    if (recordingEnd === null || duration <= 0) return null
+    if (recordingEnd >= maxTime) return null // the recording covers everything
+    return Math.max(0, Math.min(1, (recordingEnd - minTime) / duration))
+  }, [recordingEnd, minTime, maxTime, duration])
+
+  /** #564: is a given timeline position past the end of the recording? */
+  const beyond = useCallback(
+    (t: number | null) => t !== null && isBeyondRecording(t, mediaDuration, mediaOffset),
+    [mediaDuration, mediaOffset],
+  )
+  const playheadBeyond = beyond(currentTime)
 
   // Fixed reference tick marks at 25%, 50%, 75%
   const REFERENCE_TICKS = [
@@ -130,22 +159,28 @@ export default function TimelineScrubber({
     const handleRelease = (clientX: number) => {
       const position = getPositionFromEvent(clientX)
       if (position !== null && duration > 0) {
-        const time = minTime + position * duration
-        // Find closest segment
-        let closestTime: number | null = null
-        let closestDistance = Infinity
-        segments.forEach(seg => {
-          if (seg.start_time !== null && seg.start_time !== undefined) {
-            const distance = Math.abs(seg.start_time - time)
-            if (distance < closestDistance) {
-              closestDistance = distance
-              closestTime = seg.start_time
-            }
-          }
-        })
-        if (closestTime !== null) {
-          onTimeChange(closestTime)
-        }
+        // #563b: seek to WHERE THE USER DROPPED THE PLAYHEAD.
+        //
+        // This used to snap the drop to the nearest segment's `start_time`, which
+        // silently destroyed the drag's precision — and with it, most of the
+        // timeline. Turns are long: a transcript whose segments start at 0, 8.2,
+        // and 133s has exactly THREE reachable positions, so dragging to 1:02
+        // slammed the playhead back to 0:08 (nearer to 8.2 than to 133). On a
+        // 1:53 recording that left precisely two seekable points in the whole
+        // video. The keyboard path never snapped, so drag and arrow-keys also
+        // disagreed about where the same timeline position was.
+        //
+        // The precision is what the consumer is built for: usePlayback's
+        // `handleTimeSeek` seeks the media to this exact time AND selects the
+        // nearest segment for transcript context (pre-seeding its guard ref so the
+        // selection effect can't overwrite the scrubbed position with
+        // segment-start − lead-in). Snapping here threw that away before it
+        // could be used.
+        //
+        // Calling unconditionally also fixes a dead scrubber: the old code only
+        // fired when a timestamped segment existed, so media attached to a
+        // transcript with no timestamps had a draggable-but-inert timeline.
+        onTimeChange(minTime + position * duration)
       }
       setIsDragging(false)
       setDragPosition(null)
@@ -167,7 +202,10 @@ export default function TimelineScrubber({
       window.removeEventListener('touchmove', handleTouchMove)
       window.removeEventListener('touchend', handleTouchEnd)
     }
-  }, [isDragging, getPositionFromEvent, segments, minTime, duration, onTimeChange, onPositionChange])
+    // `segments` is deliberately NOT a dep any more: the release no longer reads
+    // it (no snapping), and it churns identity on every refetch — listing it
+    // would rebind these window listeners mid-drag.
+  }, [isDragging, getPositionFromEvent, minTime, duration, onTimeChange, onPositionChange])
 
   // Handle hover preview
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
@@ -234,7 +272,9 @@ export default function TimelineScrubber({
         aria-valuemin={0}
         aria-valuemax={Math.round(duration)}
         aria-valuenow={Math.round(currentTime ?? 0)}
-        aria-valuetext={formatTimestamp(currentTime ?? 0)}
+        aria-valuetext={
+          formatTimestamp(currentTime ?? 0) + (playheadBeyond ? ', transcript only — past the end of the recording' : '')
+        }
         tabIndex={0}
         className={cn(
           "relative h-4 bg-mm-bg rounded cursor-pointer select-none flex-1 outline-none focus-visible:ring-2 focus-visible:ring-mm-green/50",
@@ -251,6 +291,23 @@ export default function TimelineScrubber({
         }}
         onKeyDown={handleKeyDown}
       >
+        {/* #563: the region the recording doesn't reach. Dimmed + hatched so it
+            reads as "no recording here", with a hard edge at the recording's end. */}
+        {coverageEnd !== null && (
+          <>
+            <div
+              className="absolute top-0 bottom-0 right-0 rounded-r bg-[repeating-linear-gradient(135deg,hsl(var(--mm-text-faint)/0.12)_0px,hsl(var(--mm-text-faint)/0.12)_3px,transparent_3px,transparent_6px)] pointer-events-none"
+              style={{ left: `${coverageEnd * 100}%` }}
+              aria-hidden
+            />
+            <div
+              className="absolute top-0 bottom-0 w-px bg-mm-text-faint/60 pointer-events-none"
+              style={{ left: `${coverageEnd * 100}%` }}
+              aria-hidden
+            />
+          </>
+        )}
+
         {/* Reference tick marks at quarter, half, three-quarter */}
         {REFERENCE_TICKS.map((tick) => (
           <div
@@ -263,13 +320,18 @@ export default function TimelineScrubber({
         {/* Current position marker */}
         <div
           className={cn(
-            "absolute top-0 bottom-0 w-0.5 bg-[hsl(var(--mm-green))]",
+            "absolute top-0 bottom-0 w-0.5",
+            // #564: amber past the end of the recording. Amber, not red: this is a
+            // MODE (no video here), not an error — red is reserved for failures.
+            // Never colour-alone — the ticker and aria-valuetext say it in words.
+            playheadBeyond ? "bg-amber-500" : "bg-[hsl(var(--mm-green))]",
             !isDragging && "transition-all duration-150"
           )}
           style={{ left: `calc(${currentPosition * 100}% - 1px)` }}
         >
           <div className={cn(
-            "absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 bg-[hsl(var(--mm-green))] rounded-full cursor-grab",
+            "absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 rounded-full cursor-grab",
+            playheadBeyond ? "bg-amber-500" : "bg-[hsl(var(--mm-green))]",
             isDragging && "cursor-grabbing w-4 h-4"
           )} />
         </div>
@@ -277,13 +339,17 @@ export default function TimelineScrubber({
         {/* Persistent time ticker below indicator - always shows current time */}
         {currentTime !== null && !isDragging && hoveredTime === null && (
           <div
-            className="absolute top-5 px-1.5 py-0.5 bg-[hsl(var(--mm-green))] text-white text-[11px] rounded pointer-events-none whitespace-nowrap z-10"
+            className={cn(
+              "absolute top-5 px-1.5 py-0.5 text-white text-[11px] rounded pointer-events-none whitespace-nowrap z-10",
+              playheadBeyond ? "bg-amber-500" : "bg-[hsl(var(--mm-green))]",
+            )}
             style={{
               left: `${currentPosition * 100}%`,
               transform: 'translateX(-50%)',
             }}
           >
             {formatTimestamp(currentTime)}
+            {playheadBeyond && <span className="ml-1 opacity-90">(transcript only)</span>}
           </div>
         )}
 
@@ -297,6 +363,9 @@ export default function TimelineScrubber({
             }}
           >
             {formatTimestamp(minTime + currentPosition * duration)}
+            {beyond(minTime + currentPosition * duration) && (
+              <span className="ml-1 opacity-90">(transcript only)</span>
+            )}
           </div>
         )}
 
@@ -310,14 +379,39 @@ export default function TimelineScrubber({
             }}
           >
             {formatTimestamp(hoveredTime)}
+            {beyond(hoveredTime) && <span className="ml-1 opacity-90">(transcript only)</span>}
           </div>
         )}
       </div>
 
-      {/* End time label */}
-      <span className="text-[11px] text-mm-text-muted font-mono whitespace-nowrap select-none">
-        {formatTimestamp(maxTime)}
-      </span>
+      {/* End time label. #563: when the recording stops before the transcript does,
+          the bare transcript end reads as a promise the player can't keep — name
+          where the recording actually ends, in text (the hatched region is
+          invisible to a screen reader, and this is also how a user discovers they
+          attached the WRONG recording). Wrapped in a Tooltip ONLY when there is
+          something to explain — like the VBR icon below, so a consumer that renders
+          the scrubber outside a TooltipProvider isn't forced to add one. */}
+      {coverageEnd !== null && mediaDuration != null ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="text-[11px] text-mm-text-muted font-mono whitespace-nowrap select-none">
+              {formatTimestamp(maxTime)}
+              <span className="ml-1 text-mm-text-faint">
+                (rec. {formatTimestamp(mediaDuration)})
+              </span>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-xs text-xs">
+            The recording ends at {formatTimestamp(mediaDuration)}, before the transcript
+            ends at {formatTimestamp(maxTime)}. You can still read and code the rest —
+            there is just nothing to play there.
+          </TooltipContent>
+        </Tooltip>
+      ) : (
+        <span className="text-[11px] text-mm-text-muted font-mono whitespace-nowrap select-none">
+          {formatTimestamp(maxTime)}
+        </span>
+      )}
 
       {/* VBR indicator */}
       {isVbr && (

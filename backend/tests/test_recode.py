@@ -1092,3 +1092,154 @@ class TestPrimaryMappingWritesBackScaleMetadata:
         assert numerics == [None, None, None], (
             "a category_group primary means the column carries NO numeric encoding"
         )
+
+
+# ---------------------------------------------------------------------------
+# #548: copy_to was the one un-swept primary-changing callsite — its apply
+# branch kept the pre-#542 SCALE_MAP-only shape, so a copy that landed as the
+# target's primary (a) never applied REVERSE (value_numeric stayed NULL while
+# the primary claimed REVERSE — the first append then stamped REVERSED values
+# via the #538 mirror: same label, two numbers in one column), (b) never
+# cleared stamped numerics under CATEGORY_GROUP, and (c) skipped the #542a
+# scale-metadata write-back. Copying a reverse across a battery of
+# negatively-worded items is copy_to's canonical use.
+# Zero-based mapping on purpose (degenerate-fixture rule): on 0..3 the old
+# (max+1)-v and the correct (min+max)-v reversal DISAGREE.
+# ---------------------------------------------------------------------------
+
+from app.routers.recode import copy_to
+from app.schemas.recode import CopyToRequest
+
+_COPY_LABELS = ["None", "A little", "Some", "A lot"]  # codes 0..3
+_COPY_MAPPING = {label: i for i, label in enumerate(_COPY_LABELS)}
+
+
+def _setup_copy_to_scenario(db, *, source_type, target_stamped=False):
+    """Source column 7801 carrying a primary definition of ``source_type``;
+    bare target column 7802 (same dataset, same labels, NO definitions).
+
+    ``target_stamped`` pre-stamps the target's value_numeric with the forward
+    codes (the import-compute shape) so the CATEGORY_GROUP clear is observable.
+    """
+    project = Project(id=7800, name="CopyTo", user_id=1)
+    db.add(project)
+    db.flush()
+    dataset = Dataset(id=7800, project_id=7800, name="Battery")
+    db.add(dataset)
+    db.flush()
+    source = DatasetColumn(
+        id=7801, dataset_id=7800, column_code="Q1", column_name="Q1",
+        column_text="Q1 (reverse-worded)", column_type="ordinal",
+        sequence_order=0, display_order=0,
+    )
+    target = DatasetColumn(
+        id=7802, dataset_id=7800, column_code="Q2", column_name="Q2",
+        column_text="Q2 (reverse-worded)", column_type="ordinal",
+        sequence_order=1, display_order=1,
+    )
+    db.add_all([source, target])
+    db.flush()
+
+    for i, label in enumerate(_COPY_LABELS):
+        row = DatasetRow(id=7810 + i, dataset_id=7800)
+        db.add(row)
+        db.flush()
+        db.add(DatasetValue(
+            row_id=row.id, column_id=7801, value_text=label, value_numeric=None,
+        ))
+        db.add(DatasetValue(
+            row_id=row.id, column_id=7802, value_text=label,
+            value_numeric=float(_COPY_MAPPING[label]) if target_stamped else None,
+        ))
+    db.flush()
+
+    mapping = (
+        {label: f"G{i % 2}" for i, label in enumerate(_COPY_LABELS)}
+        if source_type == RecodeType.CATEGORY_GROUP
+        else _COPY_MAPPING
+    )
+    definition = RecodeDefinition(
+        id=7801, column_id=7801, name="Battery recode",
+        recode_type=source_type,
+        output_type=(
+            OutputType.CATEGORICAL
+            if source_type == RecodeType.CATEGORY_GROUP
+            else OutputType.NUMERIC
+        ),
+        mapping=json.dumps(mapping),
+        exclude_values=json.dumps([]),
+        is_primary=True, is_auto_detected=False, sequence_order=0,
+    )
+    db.add(definition)
+    db.flush()
+    return definition
+
+
+def _target_numeric_by_label(db):
+    return {
+        v.value_text: v.value_numeric
+        for v in db.query(DatasetValue).filter(DatasetValue.column_id == 7802).all()
+    }
+
+
+def _copy(db, definition):
+    user = db.query(User).filter(User.id == 1).one()
+    return _run(copy_to(
+        project_id=7800, dataset_id=7800, column_id=7801,
+        definition_id=definition.id,
+        data=CopyToRequest(target_column_ids=[7802]),
+        user=user, db=db,
+    ))
+
+
+class TestCopyToAppliesPrimary:
+    """#548 — a copy that lands as the target's primary routes through
+    _recompute_primary_value_numeric, matching every other callsite."""
+
+    def test_copied_reverse_primary_applies_on_zero_based_scale(self, db_session):
+        definition = _setup_copy_to_scenario(db_session, source_type=RecodeType.REVERSE)
+        resp = _copy(db_session, definition)
+        assert resp.created == 1
+
+        nums = _target_numeric_by_label(db_session)
+        # (min+max)-v on 0..3: 0→3, 1→2, 2→1, 3→0. The old code left all None;
+        # the old (max+1)-v formula would give 4..1.
+        assert nums == {"None": 3.0, "A little": 2.0, "Some": 1.0, "A lot": 0.0}
+
+    def test_copied_category_group_primary_clears_stamped_numerics(self, db_session):
+        definition = _setup_copy_to_scenario(
+            db_session, source_type=RecodeType.CATEGORY_GROUP, target_stamped=True,
+        )
+        assert _target_numeric_by_label(db_session)["A lot"] == 3.0  # stamped
+        _copy(db_session, definition)
+        assert all(v is None for v in _target_numeric_by_label(db_session).values()), (
+            "a categorical primary must clear the column's numeric encoding (#542 corollary)"
+        )
+
+    def test_copied_scale_map_primary_writes_back_scale_metadata(self, db_session):
+        definition = _setup_copy_to_scenario(db_session, source_type=RecodeType.SCALE_MAP)
+        _copy(db_session, definition)
+
+        target = db_session.query(DatasetColumn).filter(DatasetColumn.id == 7802).one()
+        assert json.loads(target.scale_labels) == _COPY_LABELS  # code-sorted
+        assert json.loads(target.scale_values) == [0, 1, 2, 3]  # ints (#28 parity)
+        nums = _target_numeric_by_label(db_session)
+        assert nums == {"None": 0.0, "A little": 1.0, "Some": 2.0, "A lot": 3.0}
+
+    def test_copy_onto_target_with_existing_primary_does_not_apply(self, db_session):
+        definition = _setup_copy_to_scenario(db_session, source_type=RecodeType.REVERSE)
+        existing = RecodeDefinition(
+            id=7802, column_id=7802, name="Existing primary",
+            recode_type=RecodeType.SCALE_MAP, output_type=OutputType.NUMERIC,
+            mapping=json.dumps(_COPY_MAPPING), exclude_values=json.dumps([]),
+            is_primary=True, is_auto_detected=False, sequence_order=0,
+        )
+        db_session.add(existing)
+        db_session.flush()
+        apply_definition_to_column(db_session, existing)
+        db_session.flush()
+
+        _copy(db_session, definition)
+        nums = _target_numeric_by_label(db_session)
+        # The copy lands NON-primary and must not touch value_numeric.
+        assert nums == {"None": 0.0, "A little": 1.0, "Some": 2.0, "A lot": 3.0}

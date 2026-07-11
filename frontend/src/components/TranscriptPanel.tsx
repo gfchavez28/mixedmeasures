@@ -12,6 +12,7 @@ import { getSpeakerInitials } from '@/lib/conversation-import-utils'
 import { useTextSplitSelection } from '@/hooks/useTextSplitSelection'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { usePlayback } from '@/hooks/usePlayback'
+import { scrubberPlayheadTime } from '@/lib/playback-utils'
 import SegmentRow from './SegmentRow'
 import SplitToolbar from './SplitToolbar'
 import TimelineScrubber from './TimelineScrubber'
@@ -321,6 +322,7 @@ export default function TranscriptPanel({
     isMediaReady,
     isBuffering,
     mediaError,
+    isTranscriptOnly,
   } = usePlayback({ segments, selectedSegments, onSelectionChange, mediaRef: mediaElementRef, conversation })
 
   // Show toast on media error
@@ -666,12 +668,13 @@ export default function TranscriptPanel({
   }, [segments.length])
 
   // Transcript-domain playhead for the scrubbers (toolbar + video pane).
-  const scrubberCurrentTime =
-    isPlaying && currentPlaybackTime !== null
-      ? currentPlaybackTime
-      : selectedSegments.length > 0
-        ? segments.find(s => s.id === selectedSegments[0])?.start_time ?? null
-        : null
+  // Single-sourced in playback-utils (#563c) — see there for why this must NOT
+  // fall back to the selected segment's start while paused.
+  const scrubberCurrentTime = scrubberPlayheadTime(
+    currentPlaybackTime,
+    selectedSegments.length > 0 ? selectedSegments[0] : null,
+    segments,
+  )
 
   // Scrubber seek + scroll-to-segment (shared by the toolbar scrubber and
   // the video pane's transport).
@@ -725,6 +728,7 @@ export default function TranscriptPanel({
           onTimeChange={handleScrubTimeChange}
           onPositionChange={handleScrubberPositionChange}
           mediaDuration={conversation?.media_duration_seconds}
+          mediaOffset={conversation?.media_offset_seconds ?? 0}
           isVbr={conversation?.media_is_vbr === true}
           className="flex-1"
         />
@@ -755,13 +759,16 @@ export default function TranscriptPanel({
             projectId={projectId}
             conversationId={conversationId}
             mediaRef={mediaElementRef}
+            mediaVersion={conversation.media_version}
             segments={allSegments}
             mediaDuration={conversation.media_duration_seconds}
+            mediaOffset={conversation.media_offset_seconds ?? 0}
             isVbr={conversation.media_is_vbr === true}
             isPlaying={isPlaying}
             isMediaReady={isMediaReady}
             isBuffering={isBuffering}
             mediaError={mediaError}
+            isTranscriptOnly={isTranscriptOnly}
             currentTime={scrubberCurrentTime}
             playbackSpeed={playbackSpeed}
             onTogglePlayback={togglePlayback}
@@ -778,7 +785,10 @@ export default function TranscriptPanel({
       {!isVideo && hasPlayableMedia && conversation && projectId && (
         <audio
           ref={mediaElementRef as RefObject<HTMLAudioElement>}
-          src={mediaApi.getStreamUrl(projectId, conversationId)}
+          // media_version in the URL (#549): a replaced recording changes the
+          // src, which per spec re-runs the media load algorithm — the element
+          // reloads in place with fresh (never HTTP-cache-stale) bytes.
+          src={mediaApi.getStreamUrl(projectId, conversationId, conversation.media_version)}
           preload="metadata"
         />
       )}

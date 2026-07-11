@@ -4,6 +4,8 @@ import {
   CATEGORICAL_GROUPING_TYPES,
   FILTERABLE_TYPES,
   VALUE_NUMERIC_TYPES,
+  CROSSWALK_INELIGIBLE_TYPES,
+  isCrosswalkEligible,
   TYPE_BADGE_CLASSES,
 } from './dataset-constants'
 
@@ -54,5 +56,28 @@ describe('column-type eligibility sets', () => {
     for (const set of [CATEGORICAL_GROUPING_TYPES, FILTERABLE_TYPES, VALUE_NUMERIC_TYPES]) {
       expect(set).not.toContain('identifier')
     }
+  })
+
+  // #556b — backend mirror. `models/dataset.py::CROSSWALK_INELIGIBLE_TYPES` is the
+  // server half (it gates the suggest pools); this is the client half (it rejects
+  // the drag/dialog gestures). test_556_identifier_hardening.py pins the same two
+  // members, so changing one side fails that side's own suite.
+  it('crosswalk-ineligible = skip + identifier (backend mirror)', () => {
+    expect([...CROSSWALK_INELIGIBLE_TYPES].sort()).toEqual(['identifier', 'skip'])
+  })
+
+  it('ineligible types are never analysable (no overlap with the numeric sets)', () => {
+    for (const t of CROSSWALK_INELIGIBLE_TYPES) {
+      expect(VALUE_NUMERIC_TYPES).not.toContain(t)
+      expect(CATEGORICAL_GROUPING_TYPES).not.toContain(t)
+    }
+  })
+
+  it('isCrosswalkEligible rejects identifier/skip and passes real measures', () => {
+    expect(isCrosswalkEligible('identifier')).toBe(false)
+    expect(isCrosswalkEligible('skip')).toBe(false)
+    expect(isCrosswalkEligible('ordinal')).toBe(true)
+    expect(isCrosswalkEligible('numeric')).toBe(true)
+    expect(isCrosswalkEligible('nominal')).toBe(true)
   })
 })

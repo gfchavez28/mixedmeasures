@@ -19,6 +19,7 @@ function renderPane(overrides: Partial<React.ComponentProps<typeof VideoPane>> =
     projectId: 1,
     conversationId: 7,
     mediaRef,
+    mediaVersion: '1700000000-1234',
     segments: [],
     mediaDuration: 120,
     isVbr: false,
@@ -114,5 +115,20 @@ describe('VideoPane', () => {
   it('renders the codec-error message inside the well', () => {
     renderPane({ mediaError: 'This video uploaded, but your browser can’t play this codec.' })
     expect(screen.getByText(/can’t play this codec/)).toBeTruthy()
+  })
+
+  // #549: replacing a recording changes media_version → the src attribute
+  // changes → the media load algorithm re-runs on the SAME element (no
+  // remount — the never-unmount invariant holds through a replace).
+  it('a media_version change updates the src in place (replace reloads, element persists)', () => {
+    const { container, rerender, props } = renderPane()
+    const videoBefore = getVideo(container)
+    expect(videoBefore!.getAttribute('src')).toContain('v=1700000000-1234')
+
+    rerender(<VideoPane ref={createRef<VideoPaneHandle>()} {...props} mediaVersion="1800000000-5678" />)
+    const videoAfter = getVideo(container)
+    expect(videoAfter).toBe(videoBefore) // same element — reload, not remount
+    expect(videoAfter!.getAttribute('src')).toContain('v=1800000000-5678')
+    expect(videoAfter!.getAttribute('src')).not.toContain('1700000000-1234')
   })
 })

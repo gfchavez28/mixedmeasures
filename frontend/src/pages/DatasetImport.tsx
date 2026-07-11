@@ -13,6 +13,7 @@ import { cn } from '@/lib/utils'
 import { consumePendingImportFiles } from '@/lib/pending-import-files'
 import { COLUMN_TYPES, TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
 import { DATASET_ACCEPT, DATASET_FORMAT_LABEL, isSupportedDatasetFile } from '@/lib/dataset-import-formats'
+import { openPickerFromZoneClick } from '@/lib/drop-zone'
 
 /** Human-readable labels for auto-detected column types. */
 const TYPE_LABELS: Record<string, string> = {
@@ -230,6 +231,8 @@ export default function DatasetImport() {
     results: ImportResult[]
   }>({ current: 0, results: [] })
   const cancelledRef = useRef(false)
+  const datasetInputRef = useRef<HTMLInputElement>(null)
+  const datasetAddMoreInputRef = useRef<HTMLInputElement>(null)
 
   const isMultiFile = files.length > 1
 
@@ -1053,20 +1056,21 @@ export default function DatasetImport() {
               </CardDescription>
             </CardHeader>
             <CardContent>
+              {/* #560a: plain div + guarded click-to-browse; the Button below is the
+                  accessible control (real <button> — focusable, named, honors `disabled`).
+                  See lib/drop-zone.ts for why role="button" must NOT come back. */}
               <div
                 className="border-2 border-dashed rounded-lg p-12 text-center hover:border-[hsl(var(--mm-orange)/0.5)] transition-colors"
                 onDrop={handleDrop}
                 onDragOver={(e) => e.preventDefault()}
-                role="button"
-                tabIndex={0}
-                aria-label="Drop zone for file upload, or press Enter to select files"
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.getElementById('dataset-file-input')?.click() } }}
+                onClick={(e) => openPickerFromZoneClick(e, () => datasetInputRef.current?.click())}
               >
                 <FileInput className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />
                 <p className="text-mm-text-secondary mb-4">
                   Drag and drop {DATASET_FORMAT_LABEL} file(s) here, or click to browse
                 </p>
                 <input
+                  ref={datasetInputRef}
                   type="file"
                   accept={DATASET_ACCEPT}
                   multiple
@@ -1080,11 +1084,13 @@ export default function DatasetImport() {
                   className="hidden"
                   id="dataset-file-input"
                 />
-                <label htmlFor="dataset-file-input">
-                  <Button asChild disabled={isLoading} className="bg-[hsl(var(--mm-orange))] hover:opacity-90 text-white">
-                    <span>{isLoading ? 'Processing...' : 'Select Files'}</span>
-                  </Button>
-                </label>
+                <Button
+                  onClick={() => datasetInputRef.current?.click()}
+                  disabled={isLoading}
+                  className="bg-[hsl(var(--mm-orange))] hover:opacity-90 text-white"
+                >
+                  {isLoading ? 'Processing...' : 'Select Files'}
+                </Button>
               </div>
 
               {/* File list */}
@@ -1103,7 +1109,8 @@ export default function DatasetImport() {
                       <button
                         onClick={() => handleRemoveFile(i)}
                         className="p-1 hover:bg-mm-surface-hover rounded"
-                        title="Remove file"
+                        aria-label={`Remove ${f.name}`}
+                        title={`Remove ${f.name}`}
                       >
                         <X className="w-3 h-3 text-mm-text-muted" />
                       </button>
@@ -1115,8 +1122,9 @@ export default function DatasetImport() {
                   )}
 
                   <div className="flex justify-between items-center pt-2">
-                    <label htmlFor="dataset-file-input-add" className="cursor-pointer">
+                    <div>
                       <input
+                        ref={datasetAddMoreInputRef}
                         type="file"
                         accept={DATASET_ACCEPT}
                         multiple
@@ -1130,10 +1138,14 @@ export default function DatasetImport() {
                         className="hidden"
                         id="dataset-file-input-add"
                       />
-                      <Button variant="outline" size="sm" asChild>
-                        <span>Add More Files</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => datasetAddMoreInputRef.current?.click()}
+                      >
+                        Add More Files
                       </Button>
-                    </label>
+                    </div>
                     <Button
                       onClick={handlePreviewAll}
                       disabled={files.length === 0 || isLoading}

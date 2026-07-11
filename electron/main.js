@@ -8,7 +8,7 @@
 // The non-GUI logic lives in ./backend-process.js (unit-tested headlessly).
 
 const { app, BrowserWindow, Menu, dialog, shell, safeStorage, ipcMain, session } = require('electron')
-const { spawn } = require('node:child_process')
+const { spawn, spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 const { randomBytes } = require('node:crypto')
@@ -21,9 +21,16 @@ const {
   stopBackend,
 } = require('./backend-process')
 const { resolveKey, saveRecoveryKeyToFile } = require('./key-manager')
+const {
+  canAutoUpdate,
+  readAutoCheck,
+  writeAutoCheck,
+  createUpdaterController,
+} = require('./updater')
 
 const KEY_FILE_NAME = 'mm-encryption.key'
 const PORT_FILE_NAME = 'mm-port'
+const UPDATER_CONFIG_NAME = 'mm-updater.json'
 
 // Name the running app "Mixed Measures" so app.getPath('userData') resolves to
 // %APPDATA%/Mixed Measures (macOS: ~/Library/Application Support/Mixed Measures)
@@ -46,6 +53,7 @@ let backendExited = false
 let isQuitting = false
 let mainWindow = null
 let splashWindow = null
+let updater = null
 
 function applyAppMenu() {
   // The app is a single-purpose tool; the default Electron menu (Reload /
@@ -206,6 +214,62 @@ function createMainWindow(port) {
   return mainWindow.loadURL(`http://127.0.0.1:${port}/`)
 }
 
+/**
+ * Wire the auto-updater (#29 S2). Must run AFTER the window exists — the first
+ * state push happens on the launch check, and a dropped push would leave the
+ * renderer showing "idle" while an update downloads behind it.
+ *
+ * `electron-updater` is required lazily: on an unsupported install (dev run, or a
+ * read-only AppImage) we never load it at all, so a broken/absent module can't
+ * take down startup for a user who was never going to auto-update anyway.
+ */
+function setupUpdater() {
+  const configPath = path.join(app.getPath('userData'), UPDATER_CONFIG_NAME)
+  const supported = canAutoUpdate({
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    env: process.env,
+    fs,
+  })
+
+  let autoUpdater = null
+  if (supported) {
+    try {
+      ;({ autoUpdater } = require('electron-updater'))
+    } catch (err) {
+      console.error(`updater: electron-updater unavailable (${(err && err.message) || err})`)
+      return null
+    }
+  }
+
+  const send = (state) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:state', state)
+  }
+
+  const controller = createUpdaterController({
+    autoUpdater,
+    supported,
+    autoCheck: readAutoCheck({ configPath, fs }),
+    emit: send,
+    log: (msg) => console.log(msg),
+  })
+
+  ipcMain.handle('update:getState', () => controller.getState())
+  ipcMain.handle('update:check', () => controller.check({ manual: true }))
+  ipcMain.handle('update:setAutoCheck', (_event, next) => {
+    const state = controller.setAutoCheck(next)
+    writeAutoCheck(state.autoCheck, { configPath, fs, log: (m) => console.log(m) })
+    return state
+  })
+  // The renderer takes a fresh backup BEFORE invoking this (D4) — Windows quits by
+  // hard-killing the backend, so no shutdown backup runs on the way into an update.
+  // quitAndInstall() calls app.quit() internally, so `before-quit` → stopBackend still fires.
+  ipcMain.handle('update:install', () => controller.install())
+
+  controller.start()
+  return controller
+}
+
 async function startup() {
   try {
     applyAppMenu()
@@ -245,6 +309,7 @@ async function startup() {
     createSplash()
     await waitForHealth(port, { isExited: () => backendExited })
     await createMainWindow(port)
+    updater = setupUpdater()
   } catch (err) {
     closeSplash()
     dialog.showErrorBox('Mixed Measures failed to start', String((err && err.message) || err))
@@ -261,7 +326,18 @@ app.on('second-instance', () => {
 
 app.on('before-quit', () => {
   isQuitting = true
-  stopBackend(backend, { platform: process.platform, spawn })
+  // Also reached via autoUpdater.quitAndInstall() and the autoInstallOnAppQuit
+  // path, so the backend always gets its stop signal before an update is applied.
+  if (updater) updater.stop()
+  // #554a: spawnSync — the Windows kill must COMPLETE before the app exe exits,
+  // or the auto-updater's already-running NSIS installer can start overwriting the
+  // install dir while mm-backend.exe still holds locks in it. before-quit is our
+  // last synchronous moment.
+  stopBackend(backend, {
+    platform: process.platform,
+    spawnSync,
+    log: (msg) => console.log(msg),
+  })
 })
 
 // Single-window desktop app: closing the window quits (incl. macOS).

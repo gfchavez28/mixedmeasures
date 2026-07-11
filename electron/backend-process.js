@@ -159,12 +159,42 @@ function waitForHealth(port, { timeoutMs = 60_000, intervalMs = 300, isExited = 
  *   mitigation). A PyInstaller onedir on Windows is a bootloader + child python
  *   process, so a plain child.kill() would orphan python; the tree-kill avoids that.
  *
- * `deps` is injectable for testing (spawn + setTimeout).
+ * #554a — THE WINDOWS KILL MUST BLOCK. It used to `spawn` taskkill and return
+ * immediately, which raced the auto-updater: `quitAndInstall()` launches the NSIS
+ * installer FIRST and only then calls `app.quit()` (verified in
+ * electron-updater/out/BaseUpdater.js — `install(...)` runs, then
+ * `setImmediate(() => app.quit())`). The installer then polls for the *app* exe to
+ * exit before overwriting files. So `before-quit` is our last synchronous moment:
+ * if taskkill is still in flight when the app exe goes away, the installer can start
+ * overwriting the install dir while `mm-backend.exe` still holds file locks in it.
+ * `spawnSync` closes that window — when it returns, the tree is gone.
+ *
+ * `before-quit` is a SYNCHRONOUS Electron handler, which is why this is spawnSync
+ * and not an awaited `exit` event: making the quit path async would mean
+ * preventDefault + re-quit, i.e. risking an app that never quits at all.
+ *
+ * `deps` is injectable for testing (spawnSync + setTimeout).
  */
-function stopBackend(child, { platform, graceMs = 5_000, spawn, setTimeoutFn = setTimeout } = {}) {
+function stopBackend(
+  child,
+  { platform, graceMs = 5_000, spawnSync, setTimeoutFn = setTimeout, log = () => {} } = {},
+) {
   if (!child || child.exitCode !== null || child.killed) return
   if (platform === 'win32') {
-    spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'])
+    try {
+      // `timeout` bounds a wedged taskkill so quit can never hang forever;
+      // windowsHide keeps a console window from flashing on the way out.
+      const result = spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+        timeout: graceMs,
+        windowsHide: true,
+      })
+      if (result && result.error) {
+        log(`backend: taskkill failed (${result.error.message}) — the installer may race a live backend`)
+      }
+    } catch (err) {
+      // Never let the quit path throw: a crash in before-quit strands the app.
+      log(`backend: taskkill threw (${(err && err.message) || err})`)
+    }
     return
   }
   child.kill('SIGTERM')

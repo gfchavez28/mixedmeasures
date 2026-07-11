@@ -55,7 +55,6 @@ import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import { useAuth } from '@/lib/auth-context'
 import CodePanel, { type CodePanelHandle } from '@/components/CodePanel'
 import CollapsiblePanel from '@/components/CollapsiblePanel'
-import ResizeHandle from '@/components/ResizeHandle'
 import NotesPanel, { type NotesPanelHandle } from '@/components/NotesPanel'
 import MemoPanel, { type MemoPanelHandle } from '@/components/MemoPanel'
 import { useHistory } from '@/hooks/useHistory'
@@ -143,7 +142,6 @@ export default function CodingWorkbench() {
   }, [])
 
   // Panel state
-  const [rightPanelWidth, setRightPanelWidth] = useState(320)
   const [panelStates, setPanelStates] = useState({
     codes: { collapsed: false },
     notes: { collapsed: true },
@@ -1432,9 +1430,10 @@ export default function CodingWorkbench() {
               onClick={() =>
                 prevConversation && navigate(`/projects/${pid}/conversations/${prevConversation.id}`)
               }
+              aria-label="Previous conversation"
               title={prevConversation ? `Previous: ${prevConversation.name}` : undefined}
             >
-              <ChevronLeft className="w-4 h-4" />
+              <ChevronLeft className="w-4 h-4" aria-hidden />
             </Button>
 
             <Select
@@ -1460,9 +1459,10 @@ export default function CodingWorkbench() {
               onClick={() =>
                 nextConversation && navigate(`/projects/${pid}/conversations/${nextConversation.id}`)
               }
+              aria-label="Next conversation"
               title={nextConversation ? `Next: ${nextConversation.name}` : undefined}
             >
-              <ChevronRight className="w-4 h-4" />
+              <ChevronRight className="w-4 h-4" aria-hidden />
             </Button>
 
             <span className="text-xs text-muted-foreground font-mono tabular-nums">
@@ -1579,20 +1579,36 @@ export default function CodingWorkbench() {
           {hasMedia ? (
             <>
               <Popover>
-                <PopoverTrigger asChild>
-                  <button className="flex items-center gap-1 text-xs text-mm-text-secondary px-1 hover:text-mm-text cursor-pointer rounded transition-colors">
-                    {conversation?.media_type === 'video' ? (
-                      <Video className="w-3.5 h-3.5 text-mm-green-text" />
-                    ) : (
-                      <Volume2 className="w-3.5 h-3.5 text-mm-green-text" />
-                    )}
-                    {offsetValue !== 0 && (
-                      <span className="text-[10px] font-mono text-amber-600 dark:text-amber-400">
-                        {offsetValue > 0 ? '+' : ''}{offsetValue.toFixed(1)}s
-                      </span>
-                    )}
-                  </button>
-                </PopoverTrigger>
+                {/* #559: icon-only trigger — a Radix tooltip DESCRIBES a trigger but
+                    never NAMES it, so this announced as a bare "button". The aria-label
+                    carries the current offset too, since the visible chip only renders
+                    when the offset is non-zero. */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <PopoverTrigger asChild>
+                      <button
+                        aria-label={
+                          offsetValue !== 0
+                            ? `Media sync offset: ${offsetValue > 0 ? '+' : ''}${offsetValue.toFixed(1)} seconds`
+                            : 'Media sync offset'
+                        }
+                        className="flex items-center gap-1 text-xs text-mm-text-secondary px-1 hover:text-mm-text cursor-pointer rounded transition-colors"
+                      >
+                        {conversation?.media_type === 'video' ? (
+                          <Video className="w-3.5 h-3.5 text-mm-green-text" aria-hidden />
+                        ) : (
+                          <Volume2 className="w-3.5 h-3.5 text-mm-green-text" aria-hidden />
+                        )}
+                        {offsetValue !== 0 && (
+                          <span className="text-[10px] font-mono text-amber-600 dark:text-amber-400">
+                            {offsetValue > 0 ? '+' : ''}{offsetValue.toFixed(1)}s
+                          </span>
+                        )}
+                      </button>
+                    </PopoverTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="text-xs">Media sync offset</TooltipContent>
+                </Tooltip>
                 <PopoverContent side="bottom" align="start" className="w-64 p-3">
                   <div className="space-y-2">
                     <p className="text-xs font-medium">{conversation?.media_type === 'video' ? 'Video' : 'Audio'} Sync Offset</p>
@@ -1635,10 +1651,11 @@ export default function CodingWorkbench() {
                     variant="ghost"
                     size="sm"
                     className="h-6 w-6 p-0"
+                    aria-label="Replace recording"
                     onClick={() => audioFileInputRef.current?.click()}
                     disabled={uploadAudioMutation.isPending}
                   >
-                    <RefreshCw className="w-3 h-3" />
+                    <RefreshCw className="w-3 h-3" aria-hidden />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom" className="text-xs">Replace recording</TooltipContent>
@@ -1649,10 +1666,11 @@ export default function CodingWorkbench() {
                     variant="ghost"
                     size="sm"
                     className="h-6 w-6 p-0 text-red-500 hover:text-red-600"
+                    aria-label="Remove recording"
                     onClick={() => setShowRemoveAudioConfirm(true)}
                     disabled={deleteAudioMutation.isPending}
                   >
-                    <Trash2 className="w-3 h-3" />
+                    <Trash2 className="w-3 h-3" aria-hidden />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom" className="text-xs">Remove recording</TooltipContent>
@@ -1837,7 +1855,8 @@ export default function CodingWorkbench() {
           />
         </div>
 
-        {/* Right Panel - Collapsible Sections with Resize Handle.
+        {/* Right Panel - Collapsible Sections, fixed width (#565: the resizer
+          * never worked and was removed; the rail below is the real-estate move).
           * #39: the whole column folds to a slim icon rail (width returns to
           * transcript/video); rail icons expand + focus their panel. */}
         {rightColumn.collapsed ? (
@@ -1882,17 +1901,7 @@ export default function CodingWorkbench() {
             ))}
           </div>
         ) : (
-        <div
-          className="relative flex flex-col bg-mm-surface overflow-hidden"
-          style={{ width: rightPanelWidth }}
-        >
-          <ResizeHandle
-            onResize={(delta) => setRightPanelWidth(w => w + delta)}
-            currentWidth={rightPanelWidth}
-            minWidth={200}
-            maxWidth={600}
-          />
-
+        <div className="relative flex flex-col bg-mm-surface overflow-hidden w-80 shrink-0">
           {/* Codes Panel */}
           <CollapsiblePanel
             title="Codes"

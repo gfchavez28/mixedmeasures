@@ -548,6 +548,45 @@ class TestPortabilityWithMedia:
             assert len(all_mp3s) > 0
             assert all_mp3s[0].read_bytes() == mp3_data
 
+    def test_video_conversation_round_trips(self, audio_session, tmp_path):
+        """#551 rider: a VIDEO conversation's media metadata + bytes survive
+        the .mmproject round trip. The class was audio-only, so a video-shaped
+        regression (metadata columns dropped, remap missing the mp4) would
+        have passed silently."""
+        db, project, conv, _ = audio_session
+        conv.media_filename = "clinic_visit.mp4"
+        conv.media_format = "mp4"
+        conv.media_type = "video"
+        conv.media_duration_seconds = 12.5
+        db.flush()
+
+        docs_dir = tmp_path / "documents"
+        docs_dir.mkdir()
+        media_dir = tmp_path / "media"
+        conv_media = media_dir / str(project.id) / str(conv.id)
+        conv_media.mkdir(parents=True)
+        video_bytes = _ftyp(b"isom") + _moov(b"vide")
+        (conv_media / "original.mp4").write_bytes(video_bytes)
+
+        from app.services.project_portability import export_project, import_project
+
+        buf = export_project(db, project.id, docs_dir, media_dir)
+        export_path = tmp_path / "export.mmproject"
+        export_path.write_bytes(buf.getvalue())
+        import_media_dir = tmp_path / "import_media"
+
+        new_id, _name = import_project(db, export_path, docs_dir, import_media_dir, user_id=1)
+
+        imported = db.query(Conversation).filter(Conversation.project_id == new_id).one()
+        assert imported.media_type == "video"
+        assert imported.media_format == "mp4"
+        assert imported.media_filename == "clinic_visit.mp4"
+        assert imported.media_duration_seconds == 12.5
+        imported_file = (
+            import_media_dir / str(new_id) / str(imported.id) / "original.mp4"
+        )
+        assert imported_file.read_bytes() == video_bytes
+
 
 # ── Storage policy (V1 slab 5) ────────────────────────────────────────────
 
@@ -1148,6 +1187,51 @@ class TestMediaWireFormat:
         deleted = wire_client.delete(f"{base}/media", headers=headers)
         assert deleted.status_code == 200, deleted.text
         assert deleted.json()["has_media"] is False
+
+    def test_media_version_cache_token_and_stream_no_cache(self, wire_client):
+        """#549: conversation responses carry an opaque media_version
+        (mtime_ns+size) that changes on EVERY replace — including a same-name,
+        same-bytes re-upload, which media_filename cannot detect — and the
+        stream response is `no-cache` so a replaced recording is never served
+        from a day-old browser cache. (Starlette's FileResponse does NOT
+        answer If-None-Match with 304, so `max-age` here would pin stale
+        bytes with no revalidation escape hatch.)"""
+        import time
+
+        pid, cid, headers = _wire_bootstrap(wire_client)
+        base = f"/api/projects/{pid}/conversations/{cid}"
+
+        # No media attached: no version token.
+        assert wire_client.get(base).json()["media_version"] is None
+
+        mp3 = _read_fixture("test_audio.mp3")
+        up1 = wire_client.post(
+            f"{base}/media",
+            files={"file": ("interview.mp3", mp3, "audio/mpeg")},
+            headers=headers,
+        )
+        assert up1.status_code == 200, up1.text
+        v1 = wire_client.get(base).json()["media_version"]
+        assert v1
+
+        # Same-name, same-bytes replace — the hardest corner: filename AND
+        # size are unchanged, only mtime moves. (Sleep clears coarse-mtime
+        # filesystems' granularity.)
+        time.sleep(0.02)
+        up2 = wire_client.post(
+            f"{base}/media",
+            files={"file": ("interview.mp3", mp3, "audio/mpeg")},
+            headers=headers,
+        )
+        assert up2.status_code == 200, up2.text
+        detail = wire_client.get(base).json()
+        assert detail["media_filename"] == "interview.mp3"
+        assert detail["media_version"] != v1
+
+        # The stream must revalidate instead of trusting a stale cache entry.
+        stream = wire_client.get(f"{base}/media/stream")
+        assert stream.status_code == 200
+        assert stream.headers.get("cache-control") == "private, no-cache"
 
     def test_old_audio_path_is_gone(self, wire_client):
         pid, cid, headers = _wire_bootstrap(wire_client)

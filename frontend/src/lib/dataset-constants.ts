@@ -30,6 +30,23 @@ export const VALUE_NUMERIC_TYPES: readonly string[] = [
   'ordinal', 'numeric', 'percentage', 'binary',
 ]
 
+// CROSSWALK_INELIGIBLE_TYPES — types that can never be an equivalence-group /
+// variable-group member (#556b). Mirror of the backend frozenset of the same name
+// in models/dataset.py, which gates the suggest pools server-side; this is the
+// client half, which rejects the drag/dialog gestures before they round-trip.
+//   skip       — discarded data.
+//   identifier — holds row IDENTITY, not a measurement (#414): no value_numeric,
+//                so the group's scale score can't compute.
+// Identifier columns stay VISIBLE in the Unassigned panel on purpose (hiding them
+// would remove the only place a mis-typed identity column is discoverable) — they
+// are rejected at the point of ASSIGNMENT, not hidden. The crosswalk type picker
+// is likewise unchanged; retyping a column TO identifier is a supported #414 move.
+export const CROSSWALK_INELIGIBLE_TYPES: readonly string[] = ['skip', 'identifier']
+
+export function isCrosswalkEligible(columnType: string): boolean {
+  return !CROSSWALK_INELIGIBLE_TYPES.includes(columnType)
+}
+
 export const TYPE_BADGE_CLASSES: Record<string, string> = {
   // eslint-disable-next-line no-restricted-syntax -- categorical column-type color map hue (DESIGN.md §5 carve-out; siblings raw, not the mm-blue "selected" token)
   ordinal: 'bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-200',

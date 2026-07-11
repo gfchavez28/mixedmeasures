@@ -1040,6 +1040,28 @@ class TestRExportScript:
         assert "original scale 1-5" in script
         assert "score_a_R" in script
 
+    def test_reverse_comment_survives_mixed_mapping(self, db_session):
+        """#555a: one non-floatable mapping value must not degrade the emitted
+        bounds/formula comment to the vague fallback — the reverse collection
+        skips PER VALUE (the #542b shape). The all-numeric fixture above is
+        degenerate for this: old (abort-on-ValueError) and new (skip) code
+        agree on it, so this test adds the stray value where they disagree."""
+        project, dataset, cols, *_ = _setup_r_export_project(db_session)
+        rev = (
+            db_session.query(RecodeDefinition)
+            .filter(RecodeDefinition.recode_type == "reverse")
+            .one()
+        )
+        mapping = json.loads(rev.mapping)
+        mapping["Unsure"] = "N/A"  # stray non-numeric value in a mixed mapping
+        rev.mapping = json.dumps(mapping)
+        db_session.flush()
+
+        script = _call_build_r_script(db_session, project, dataset, cols)
+        assert "original scale 1-5" in script
+        assert "(1+5) - data$score_a_raw" in script
+        assert "values in data are already reversed)" not in script  # the vague fallback
+
     def test_psych_package_for_alpha(self, db_session):
         project, dataset, cols, *_ = _setup_r_export_project(db_session)
         script = _call_build_r_script(db_session, project, dataset, cols)

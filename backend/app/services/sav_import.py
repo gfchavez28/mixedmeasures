@@ -402,6 +402,14 @@ def sav_to_csv_text(content: bytes) -> tuple[str, dict[str, SavColumnMeta]]:
             )
             if demoted:
                 suppress_labels.add(name)
+        elif measures.get(name) == "ordinal" and len(ordered_labels) == 1:
+            # #555c: a lone labelled code (an anchor like 1="Not at all" on a
+            # 1..7 slider) is not a scale — substituting it would leave mixed
+            # text/number cells, the exact shape the demote branch above
+            # exists to prevent. Suppress substitution column-wide: the column
+            # imports as plain numbers, the SPSS variable label still overlays
+            # the preview, and the anchor stays available on this meta record.
+            suppress_labels.add(name)
         meta_by_column[name] = SavColumnMeta(
             name=name,
             measure=measures.get(name),

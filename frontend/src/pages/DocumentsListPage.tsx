@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { FileInput, Trash2, Search, X, ArrowUpDown, FileText } from 'lucide-react'
 import { documentsApi, type DocumentListItem } from '@/lib/api'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
+import { isSupportedDocumentFile } from '@/lib/document-import-formats'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import InlineEditableText from '@/components/InlineEditableText'
@@ -36,7 +37,6 @@ const MODE_LABELS: Record<string, string> = {
   double_newline: 'By Blank Line',
 }
 
-const ALLOWED_EXTENSIONS = ['.docx', '.pdf', '.txt']
 
 export default function DocumentsListPage() {
   const { projectId, openCodebook } = useProjectLayout()
@@ -125,9 +125,7 @@ export default function DocumentsListPage() {
       dragCounterRef.current = 0
       setIsDragOver(false)
       const droppedFiles = Array.from(e.dataTransfer.files)
-      const validFiles = droppedFiles.filter(f =>
-        ALLOWED_EXTENSIONS.some(ext => f.name.toLowerCase().endsWith(ext))
-      )
+      const validFiles = droppedFiles.filter(f => isSupportedDocumentFile(f.name))
       if (validFiles.length === 0) return
       setPendingImportFiles(validFiles, 'document')
       navigate(`/projects/${projectId}/documents/import`)

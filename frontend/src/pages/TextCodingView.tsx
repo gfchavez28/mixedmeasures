@@ -36,7 +36,6 @@ import { useBlindMode } from '@/hooks/useBlindMode'
 import TextCodePanel from '@/components/TextCodePanel'
 import TextNotesPanel from '@/components/TextNotesPanel'
 import CollapsiblePanel from '@/components/CollapsiblePanel'
-import ResizeHandle from '@/components/ResizeHandle'
 import MemoPanel from '@/components/MemoPanel'
 import CrossAnalysisPanel from '@/components/CrossAnalysisPanel'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
@@ -95,7 +94,6 @@ export default function TextCodingView() {
   const [selectedRecordId, setSelectedRecordId] = useState<number | null>(null)
   const [focusedPanel, setFocusedPanel] = useState<'main' | 'codes' | 'notes'>('main')
   const [announcement, setAnnouncement] = useState('')
-  const [rightPanelWidth, setRightPanelWidth] = useState(288)
   const [panelStates, setPanelStates] = useState({
     codes: { collapsed: false },
     notes: { collapsed: true },
@@ -1290,17 +1288,9 @@ export default function TextCodingView() {
               )}
             </div>
 
-            {/* Right panels: CodePanel + NotesPanel + MemosPanel */}
-            <div
-              className="relative border-l bg-mm-surface flex flex-col shrink-0 overflow-hidden"
-              style={{ width: rightPanelWidth }}
-            >
-              <ResizeHandle
-                onResize={delta => setRightPanelWidth(w => Math.min(600, Math.max(200, w + delta)))}
-                minWidth={200}
-                maxWidth={600}
-                currentWidth={rightPanelWidth}
-              />
+            {/* Right panels: CodePanel + NotesPanel + MemosPanel — fixed width
+              (#565: the resizer never worked; removed) */}
+            <div className="relative border-l bg-mm-surface flex flex-col shrink-0 overflow-hidden w-72">
               <CollapsiblePanel
                 title="Codes"
                 isCollapsed={panelStates.codes.collapsed}

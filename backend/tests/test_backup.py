@@ -534,3 +534,162 @@ def test_restore_unreadable_db_fails_before_pre_restore_backup(tmp_path):
     # and the live DB is untouched.
     assert list(backup_dir.glob("pre_restore_*.mmbackup")) == []
     assert live_db.read_bytes() == original_bytes
+
+
+# ── #550/#551: restore failure-safety + video-excluded surfacing ──────────
+
+import shutil
+import tempfile
+
+from app.services.backup import RestoreError
+
+
+def _setup_restore_with_video(tmp_path):
+    """Live install with an mp3 + mp4 under data/media, and a VIDEO-EXCLUDED
+    backup of it — the shape where restore must preserve local video."""
+    live_db = tmp_path / "live.db"
+    _create_test_db(live_db)
+    docs_dir = tmp_path / "documents"
+    docs_dir.mkdir()
+    media_dir = tmp_path / "data" / "media"
+    conv_media = media_dir / "1" / "1"
+    conv_media.mkdir(parents=True)
+    (conv_media / "original.mp3").write_bytes(b"ID3-fake-audio-bytes")
+    (conv_media / "original.mp4").write_bytes(b"fake-video-bytes-the-only-copy")
+    backup_dir = tmp_path / "backups"
+    info = create_backup(live_db, docs_dir, media_dir, backup_dir, "auto", include_video=False)
+    return live_db, docs_dir, media_dir, backup_dir, backup_dir / info.filename
+
+
+def test_failed_restore_reseats_preserved_video_and_names_safety_backup(tmp_path, monkeypatch):
+    """#550(a): a failure AFTER video moved to the keep-dir must put the video
+    back and raise RestoreError naming the safety backup; a retry must then
+    succeed with the video intact. (The old entry-guard rmtree'd the keep-dir
+    on retry — destroying the only copy.)"""
+    import app.services.backup as backup_service
+
+    live_db, docs_dir, media_dir, backup_dir, backup_path = _setup_restore_with_video(tmp_path)
+    video_path = media_dir / "1" / "1" / "original.mp4"
+    video_bytes = video_path.read_bytes()
+
+    real_rmtree = shutil.rmtree
+    state = {"failed": False}
+
+    def failing_rmtree(path, *args, **kwargs):
+        # Fail the media_dir teardown once — the Windows open-handle shape.
+        if Path(str(path)) == media_dir and not state["failed"]:
+            state["failed"] = True
+            raise OSError("simulated open playback handle")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(backup_service.shutil, "rmtree", failing_rmtree)
+
+    with pytest.raises(RestoreError) as excinfo:
+        restore_from_backup(backup_path, live_db, docs_dir, media_dir, backup_dir)
+    assert excinfo.value.pre_restore_filename.startswith("pre_restore_")
+    assert "pre_restore_" in str(excinfo.value)
+
+    # The ONLY copy of the video is back at its original path, not stranded
+    # in (or destroyed with) the keep-dir.
+    assert video_path.read_bytes() == video_bytes
+    assert not (media_dir.parent / ".video_keep_restore_tmp").exists()
+
+    # Retry with no staged failure: succeeds, video still intact.
+    restore_from_backup(backup_path, live_db, docs_dir, media_dir, backup_dir)
+    assert video_path.read_bytes() == video_bytes
+    assert (media_dir / "1" / "1" / "original.mp3").exists()
+
+
+def test_leftover_keep_dir_from_crashed_restore_is_reseated_not_deleted(tmp_path):
+    """#550(a), hard-crash flavor: a keep-dir left behind by a KILLED restore
+    (no except/finally ever ran) holds the only copy of preserved video — the
+    next restore must re-seat it, never delete it."""
+    live_db, docs_dir, media_dir, backup_dir, backup_path = _setup_restore_with_video(tmp_path)
+    video_path = media_dir / "1" / "1" / "original.mp4"
+    video_bytes = video_path.read_bytes()
+
+    keep = media_dir.parent / ".video_keep_restore_tmp"
+    (keep / "1" / "1").mkdir(parents=True)
+    shutil.move(str(video_path), str(keep / "1" / "1" / "original.mp4"))
+    assert not video_path.exists()
+
+    restore_from_backup(backup_path, live_db, docs_dir, media_dir, backup_dir)
+    assert video_path.read_bytes() == video_bytes
+    assert not keep.exists()
+
+
+def test_media_extraction_stages_next_to_media_dir(tmp_path, monkeypatch):
+    """#550(b): the media payload stages in a SIBLING of media_dir (same
+    filesystem → the install is a rename), never in OS temp — multi-GB
+    payloads in tmpfs plus a cross-device copy were the ENOSPC vector."""
+    import app.services.backup as backup_service
+
+    live_db, docs_dir, media_dir, backup_dir, _ = _setup_restore_with_video(tmp_path)
+    info = create_backup(live_db, docs_dir, media_dir, backup_dir, "manual")  # video INCLUDED
+
+    moves: list[tuple[str, str]] = []
+    real_move = shutil.move
+
+    def recording_move(src, dst, *args, **kwargs):
+        moves.append((str(src), str(dst)))
+        return real_move(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(backup_service.shutil, "move", recording_move)
+    restore_from_backup(backup_dir / info.filename, live_db, docs_dir, media_dir, backup_dir)
+
+    media_installs = [s for s, d in moves if d == str(media_dir)]
+    assert media_installs, "expected a media install move"
+    assert all(s.startswith(str(media_dir.parent) + os.sep) for s in media_installs), (
+        f"media must stage under {media_dir.parent}, got {media_installs}"
+    )
+
+
+def test_restore_cleans_staging_on_failure(tmp_path, monkeypatch):
+    """A failed restore must not leak the extracted payload — the historical
+    code had no finally, so a multi-GB extraction survived in OS temp."""
+    import app.services.backup as backup_service
+
+    live_db, docs_dir, media_dir, backup_dir, backup_path = _setup_restore_with_video(tmp_path)
+
+    tmp_root = tmp_path / "ostemp"
+    tmp_root.mkdir()
+    real_mkdtemp = tempfile.mkdtemp
+    monkeypatch.setattr(
+        backup_service.tempfile, "mkdtemp", lambda *a, **k: real_mkdtemp(dir=str(tmp_root))
+    )
+
+    real_rmtree = shutil.rmtree
+    state = {"failed": False}
+
+    def failing_rmtree(path, *args, **kwargs):
+        if Path(str(path)) == media_dir and not state["failed"]:
+            state["failed"] = True
+            raise OSError("simulated failure mid-destructive-phase")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(backup_service.shutil, "rmtree", failing_rmtree)
+
+    with pytest.raises(RestoreError):
+        restore_from_backup(backup_path, live_db, docs_dir, media_dir, backup_dir)
+
+    assert list(tmp_root.iterdir()) == [], "extraction temp dirs must be cleaned on failure"
+    assert not (media_dir.parent / ".media_restore_stage_tmp").exists()
+
+
+def test_validate_warns_on_video_excluded_backup(tmp_path):
+    """#551: the restore preview must SAY a backup carries no video — the
+    manifest flag had zero consumers, so a cross-machine restore read as a
+    codec failure at the worst possible moment."""
+    live_db, docs_dir, media_dir, backup_dir, backup_path = _setup_restore_with_video(tmp_path)
+
+    preview = validate_backup(backup_path)
+    assert preview.manifest.video_excluded is True
+    assert preview.manifest.video_files_excluded == 1
+    assert any("does not include video" in w for w in preview.warnings)
+    assert any("re-attach" in w.lower() for w in preview.warnings)
+
+    # A full (video-included) backup must NOT carry the warning.
+    info = create_backup(live_db, docs_dir, media_dir, backup_dir, "manual")
+    preview_full = validate_backup(backup_dir / info.filename)
+    assert preview_full.manifest.video_excluded is False
+    assert not any("does not include video" in w for w in preview_full.warnings)

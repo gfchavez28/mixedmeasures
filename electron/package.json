@@ -18,16 +18,35 @@
     "appId": "com.mixedmeasures.app",
     "productName": "Mixed Measures",
     "artifactName": "MixedMeasures-${version}-${os}-${arch}.${ext}",
-    "directories": { "output": "release", "buildResources": "build" },
-    "files": ["main.js", "preload.js", "backend-process.js", "key-manager.js", "splash.html"],
-    "extraResources": [
-      { "from": "../backend/dist/mm-backend", "to": "mm-backend" }
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "backend-process.js",
+      "key-manager.js",
+      "updater.js",
+      "splash.html"
     ],
-    "publish": { "provider": "github", "releaseType": "draft" },
+    "extraResources": [
+      {
+        "from": "../backend/dist/mm-backend",
+        "to": "mm-backend"
+      }
+    ],
+    "publish": {
+      "provider": "github",
+      "releaseType": "draft"
+    },
     "mac": {
       "icon": "build/icon.png",
       "category": "public.app-category.education",
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
@@ -35,13 +54,24 @@
     },
     "win": {
       "icon": "build/icon.png",
-      "target": ["nsis"],
-      "executableName": "MixedMeasures"
+      "target": [
+        "nsis"
+      ],
+      "executableName": "MixedMeasures",
+      "verifyUpdateCodeSignature": true,
+      "publisherName": [
+        "CN=George Chavez, O=George Chavez, L=Washington, S=dc, C=US"
+      ]
     },
     "linux": {
       "icon": "build/icon.png",
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "category": "Education"
     }
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9"
   }
 }

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
@@ -21,6 +21,7 @@ import {
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import { DATASET_ACCEPT, DATASET_FORMAT_LABEL, isSupportedDatasetFile } from '@/lib/dataset-import-formats'
+import { openPickerFromZoneClick } from '@/lib/drop-zone'
 
 type Step = 'upload' | 'review' | 'results'
 
@@ -47,6 +48,8 @@ export default function AppendImport() {
   useEffect(() => {
     if (dataset?.name) setBreadcrumbLabel(dataset.name)
   }, [dataset?.name, setBreadcrumbLabel])
+
+  const appendInputRef = useRef<HTMLInputElement>(null)
 
   const [step, setStep] = useState<Step>('upload')
   const [file, setFile] = useState<File | null>(null)
@@ -201,34 +204,36 @@ export default function AppendImport() {
                   </Select>
                 </div>
 
+                {/* #560a: plain div + guarded click-to-browse; the Button is the
+                    accessible control. See lib/drop-zone.ts — role="button" must not
+                    come back once a real button lives inside. */}
                 <div
                   className="border-2 border-dashed rounded-lg p-12 text-center hover:border-[hsl(var(--mm-orange)/0.5)] transition-colors"
                   onDrop={handleDrop}
                   onDragOver={(e) => e.preventDefault()}
-                  role="button"
-                  tabIndex={0}
-                  aria-label="Drop zone for file upload, or press Enter to select files"
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.getElementById('append-file-input')?.click() } }}
+                  onClick={(e) => openPickerFromZoneClick(e, () => appendInputRef.current?.click())}
                 >
                   <FileInput className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />
                   <p className="text-mm-text-secondary mb-4">
                     Drag and drop a {DATASET_FORMAT_LABEL} file here, or click to browse
                   </p>
                   <input
+                    ref={appendInputRef}
                     type="file"
                     accept={DATASET_ACCEPT}
                     onChange={(e) => {
                       const selectedFile = e.target.files?.[0]
                       if (selectedFile) handleFileSelect(selectedFile)
+                      // Reset so re-picking the SAME file fires onChange again — without
+                      // this, retrying after an error/back-navigation silently no-ops.
+                      e.target.value = ''
                     }}
                     className="hidden"
                     id="append-file-input"
                   />
-                  <label htmlFor="append-file-input">
-                    <Button asChild disabled={isLoading}>
-                      <span>{isLoading ? 'Analyzing...' : 'Select File'}</span>
-                    </Button>
-                  </label>
+                  <Button onClick={() => appendInputRef.current?.click()} disabled={isLoading}>
+                    {isLoading ? 'Analyzing...' : 'Select File'}
+                  </Button>
                 </div>
               </CardContent>
             </Card>

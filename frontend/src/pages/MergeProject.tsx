@@ -16,6 +16,7 @@ import { useCoders } from '@/hooks/useCoders'
 import { coderColor, coderInitials } from '@/lib/coder-color'
 import { getContrastColor, cn } from '@/lib/utils'
 import { consumePendingMerge } from '@/lib/pending-merge'
+import { MMPROJECT_ACCEPT } from '@/lib/mm-formats'
 import {
   defaultDecisions, decisionToValue, parseDecisionValue, buildCoderMapping, resultingCoderCount,
 } from '@/lib/merge-coder-mapping'
@@ -274,7 +275,7 @@ export default function MergeProject() {
                 </div>
               )}
               <input
-                ref={uploadRef} type="file" accept=".mmproject" className="hidden"
+                ref={uploadRef} type="file" accept={MMPROJECT_ACCEPT} className="hidden"
                 onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f) }}
               />
               <div className="flex items-center justify-center gap-2">

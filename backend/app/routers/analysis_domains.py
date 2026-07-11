@@ -9,7 +9,12 @@ from ..auth import get_current_user
 from .auth import limiter
 from ..database import get_db
 from ..models.user import User
-from ..models.dataset import Dataset, DatasetColumn
+from ..models.dataset import (
+    Dataset,
+    DatasetColumn,
+    ColumnType,
+    CROSSWALK_INELIGIBLE_TYPES,
+)
 from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
 from ..schemas.analysis_domain import (
     AnalysisDomainCreate,
@@ -654,9 +659,13 @@ async def suggest_domains(
         .options(joinedload(DatasetColumn.dataset))
         .all()
     )
+    # skip + identifier are structurally ineligible (#556b, single-sourced);
+    # demographic is excluded on top of that as a ROUTING choice (it belongs to
+    # the participant, not the instrument), which is why it stays local.
     columns = [
         c for c in columns
-        if c.column_type.value not in ("skip", "demographic", "identifier")
+        if c.column_type not in CROSSWALK_INELIGIBLE_TYPES
+        and c.column_type != ColumnType.DEMOGRAPHIC
     ]
 
     if len(columns) < 2:

@@ -2,11 +2,11 @@ Mixed Measures **__VERSION__** — a local-first desktop workspace for mixed-met
 
 **What's new in this release**
 
-- **Team coding** — multiple coders on one project: attribution, blind coding, a consensus layer, side-by-side reconciliation, and inter-rater reliability (Cohen's κ / Krippendorff's α, validated against R). Share a copy with co-coders and merge their work back.
-- **Excel import** — `.xlsx` workbooks import directly as datasets (sheet picker + append).
-- **Zoom/Teams transcripts** — `.vtt`/`.srt` files import directly as conversations, with speaker turns and audio-sync timestamps.
-- Plus a codebook treemap, screen-reader-navigable coding workbenches, and an accuracy audit of every displayed statistic, chart, and export. Full details in the [changelog](https://github.com/__REPO__/blob/main/CHANGELOG.md).
-- **1.1.1** — the "Add coder" entry point now appears in Settings and on the projects screen, so setting up a second coder no longer requires finding the menu inside an open project.
+- **Video coding** — attach a video recording (`.mp4`/`.mov`/`.webm`) to a conversation and code with the player right beside the transcript, timestamp-synced like audio. Recordings can be attached directly in the import wizard.
+- **SPSS import** — `.sav` datasets import directly, keeping SPSS's own value labels, scale order, and user-missing codes.
+- **Participant-ID linking** — identifier columns ("Participant ID", "Respondent", …) now link dataset rows to participants automatically at import, append, or retroactively.
+- **Automatic updates** — the app now keeps itself current: quiet background download, install only when you restart (with a fresh backup first), and an off switch in Settings. This is the last release you'll need to download by hand.
+- Full details in the [changelog](https://github.com/__REPO__/blob/main/CHANGELOG.md).
 
 ## Which file should I download?
 

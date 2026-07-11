@@ -52,11 +52,18 @@ interface VideoPaneProps {
   conversationId: number
   /** Media element ref shared with usePlayback (the pane's <video> assigns into it). */
   mediaRef: RefObject<HTMLVideoElement | HTMLAudioElement | null>
+  /** Cache token for the stream URL (#549) — conversation.media_version. */
+  mediaVersion: string | null
   /** All segments (unfiltered) — drives the scrubber's segment tick marks. */
   segments: Segment[]
   mediaDuration: number | null
+  /** Media sync offset (#564) — the scrubber needs it to know where the recording ends. */
+  mediaOffset?: number
   isVbr: boolean
   isPlaying: boolean
+  /** #564: the playhead is past the end of the recording — the video is parked
+   *  and the transcript is rolling on its own. Explains the frozen frame. */
+  isTranscriptOnly?: boolean
   isMediaReady: boolean
   isBuffering: boolean
   mediaError: string | null
@@ -75,10 +82,13 @@ const VideoPane = forwardRef<VideoPaneHandle, VideoPaneProps>(function VideoPane
     projectId,
     conversationId,
     mediaRef,
+    mediaVersion,
     segments,
     mediaDuration,
+    mediaOffset = 0,
     isVbr,
     isPlaying,
+    isTranscriptOnly = false,
     isMediaReady,
     isBuffering,
     mediaError,
@@ -173,6 +183,7 @@ const VideoPane = forwardRef<VideoPaneHandle, VideoPaneProps>(function VideoPane
       onTimeChange={onTimeChange}
       onPositionChange={onPositionChange}
       mediaDuration={mediaDuration}
+      mediaOffset={mediaOffset}
       isVbr={isVbr}
       className="flex-1"
     />
@@ -221,9 +232,13 @@ const VideoPane = forwardRef<VideoPaneHandle, VideoPaneProps>(function VideoPane
         onPointerUp={handlePipPointerUp}
       >
         {/* No <track> captions: the synced transcript IS the caption surface (transcript-first design). */}
+        {/* mediaVersion in the URL (#549): a replaced recording changes the
+          * src, which re-runs the media load algorithm — the SAME element
+          * reloads in place (the never-unmount invariant holds; pane
+          * size/PiP state survive a replace). */}
         <video
           ref={mediaRef as RefObject<HTMLVideoElement>}
-          src={mediaApi.getStreamUrl(projectId, conversationId)}
+          src={mediaApi.getStreamUrl(projectId, conversationId, mediaVersion)}
           preload="metadata"
           playsInline
           muted={muted}
@@ -244,6 +259,17 @@ const VideoPane = forwardRef<VideoPaneHandle, VideoPaneProps>(function VideoPane
             >
               {isMediaReady ? <Play className="w-5 h-5 ml-0.5" /> : <Loader2 className="w-5 h-5 animate-spin" />}
             </button>
+          </div>
+        )}
+
+        {/* #564: past the end of the recording the video sits frozen on its last
+          * frame while the transcript rolls on. A frozen picture with a moving
+          * transcript reads as a stall — say what is actually happening. */}
+        {isTranscriptOnly && !mediaError && (
+          <div className="absolute inset-x-0 bottom-2 flex justify-center pointer-events-none">
+            <span className="px-2.5 py-1 rounded-full bg-amber-500/90 text-white text-[10.5px] shadow-sm">
+              Recording ended — transcript continues
+            </span>
           </div>
         )}
 

@@ -65,7 +65,17 @@ router = APIRouter(
 ALLOWED_EXTENSIONS = {".docx", ".pdf", ".txt"}
 
 
-def _get_document_or_404(db: Session, project_id: int, document_id: int) -> Document:
+def _get_document_or_404(
+    db: Session, project_id: int, document_id: int, user_id: int,
+) -> Document:
+    """Load a document, gating on project ownership first (#553).
+
+    ``user_id`` is REQUIRED — 14 endpoints reach documents only through here,
+    including ``get_original_file`` (serves the raw uploaded .docx/.pdf bytes
+    off disk) and ``delete_document``. Same fold-the-gate-into-the-helper shape
+    as ``helpers._get_dataset_or_404``.
+    """
+    _get_project_or_404(db, project_id, user_id)
     doc = db.query(Document).filter(
         Document.id == document_id,
         Document.project_id == project_id,
@@ -336,7 +346,7 @@ async def get_document(
     db: Session = Depends(get_db),
 ):
     """Get document detail with all segments."""
-    document = _get_document_or_404(db, project_id, document_id)
+    document = _get_document_or_404(db, project_id, document_id, user.id)
 
     # Load segments with eager loading
     segments = (
@@ -460,7 +470,7 @@ async def get_original_file(
     db: Session = Depends(get_db),
 ):
     """Serve the original uploaded document file."""
-    document = _get_document_or_404(db, project_id, document_id)
+    document = _get_document_or_404(db, project_id, document_id, user.id)
 
     doc_dir = _document_dir(project_id, document_id)
     original_path = doc_dir / f"original.{document.source_format}"
@@ -495,7 +505,7 @@ async def get_document_image(
     db: Session = Depends(get_db),
 ):
     """Serve an extracted image from a document."""
-    _get_document_or_404(db, project_id, document_id)
+    _get_document_or_404(db, project_id, document_id, user.id)
 
     if image_index < 0:
         raise HTTPException(status_code=400, detail="Invalid image index")
@@ -536,7 +546,7 @@ async def delete_document_image(
     db: Session = Depends(get_db),
 ):
     """Delete an extracted image from a document."""
-    _get_document_or_404(db, project_id, document_id)
+    _get_document_or_404(db, project_id, document_id, user.id)
 
     if image_index < 0:
         raise HTTPException(status_code=400, detail="Invalid image index")
@@ -580,7 +590,7 @@ async def update_image_position(
     db: Session = Depends(get_db),
 ):
     """Update the position of an extracted image."""
-    _get_document_or_404(db, project_id, document_id)
+    _get_document_or_404(db, project_id, document_id, user.id)
 
     if image_index < 0:
         raise HTTPException(status_code=400, detail="Invalid image index")
@@ -635,7 +645,7 @@ async def update_document(
     db: Session = Depends(get_db),
 ):
     """Update document name or description."""
-    document = _get_document_or_404(db, project_id, document_id)
+    document = _get_document_or_404(db, project_id, document_id, user.id)
 
     update_fields = data.model_dump(exclude_unset=True)
     for field_name, value in update_fields.items():
@@ -686,7 +696,7 @@ async def delete_document(
     db: Session = Depends(get_db),
 ):
     """Delete a document and all associated data + files."""
-    document = _get_document_or_404(db, project_id, document_id)
+    document = _get_document_or_404(db, project_id, document_id, user.id)
     doc_name = document.name
 
     log_action(
@@ -727,7 +737,7 @@ async def update_document_segment(
     db: Session = Depends(get_db),
 ):
     """Update a document segment's text."""
-    _get_document_or_404(db, project_id, document_id)
+    _get_document_or_404(db, project_id, document_id, user.id)
 
     segment = db.query(Segment).filter(
         Segment.id == segment_id,
@@ -761,7 +771,7 @@ async def create_document_note(
     db: Session = Depends(get_db),
 ):
     """Create a note on a document segment."""
-    document = _get_document_or_404(db, project_id, document_id)
+    document = _get_document_or_404(db, project_id, document_id, user.id)
 
     # Validate segment belongs to this document
     segment = db.query(Segment).filter(
@@ -801,7 +811,7 @@ async def list_document_notes(
     db: Session = Depends(get_db),
 ):
     """List all notes for a document."""
-    _get_document_or_404(db, project_id, document_id)
+    _get_document_or_404(db, project_id, document_id, user.id)
 
     notes = (
         db.query(Note)
@@ -884,7 +894,7 @@ async def merge_document_segments(
     """Merge adjacent document segments."""
     from ..services.segment_operations import merge_segments
 
-    document = _get_document_or_404(db, project_id, document_id)
+    document = _get_document_or_404(db, project_id, document_id, user.id)
     merged_segment, deleted_count = merge_segments(
         db, data.segment_ids, 'document', document_id,
         document.project_id, user.id,
@@ -906,7 +916,7 @@ async def unmerge_document_segment(
     """Unmerge a previously merged document segment."""
     from ..services.segment_operations import unmerge_segment
 
-    document = _get_document_or_404(db, project_id, document_id)
+    document = _get_document_or_404(db, project_id, document_id, user.id)
     restored, restored_count = unmerge_segment(
         db, segment_id, 'document', document_id,
         document.project_id, user.id,
@@ -928,7 +938,7 @@ async def split_document_segments(
     """Split document segment(s) by text selection."""
     from ..services.segment_operations import split_segment
 
-    document = _get_document_or_404(db, project_id, document_id)
+    document = _get_document_or_404(db, project_id, document_id, user.id)
     new_segments, deleted_ids = split_segment(
         db, data.ranges, 'document', document_id,
         document.project_id, user.id,
@@ -950,7 +960,7 @@ async def unsplit_document_segment(
     """Unsplit/rejoin a previously split document segment."""
     from ..services.segment_operations import unsplit_segment
 
-    document = _get_document_or_404(db, project_id, document_id)
+    document = _get_document_or_404(db, project_id, document_id, user.id)
     restored, deleted_count = unsplit_segment(
         db, segment_id, 'document', document_id,
         document.project_id, user.id,

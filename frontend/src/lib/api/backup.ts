@@ -14,6 +14,13 @@ export interface BackupManifest {
   backup_type: string
   db_size_bytes: number
   document_count: number
+  /** Recordings in the ZIP (audio + any included video). */
+  media_file_count: number
+  /** #551: video recordings were excluded when this backup was created (the
+   * periodic auto-backup policy) — the restore preview and post-restore toast
+   * must SAY so, or a cross-machine restore reads as a codec failure. */
+  video_excluded: boolean
+  video_files_excluded: number
   project_summaries: ProjectBackupSummary[]
 }
 

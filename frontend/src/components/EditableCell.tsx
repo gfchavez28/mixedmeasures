@@ -64,8 +64,16 @@ export function computeDisplayValue(
   if (activeDef.recode_type === 'scale_map' || activeDef.recode_type === 'reverse') {
     const numVal = Number(mappedValue)
     const maxVal = Math.max(...Object.values(activeDef.mapping).map(Number).filter(n => !isNaN(n)))
+    // #561: the .sav dedupe suffix (#541a) bakes the code into the label —
+    // "Agree (1)" — and appending our own annotation renders "Agree (1) (1)".
+    // Skip the annotation ONLY when the label's trailing (N) equals the
+    // displayed numeric; if they differ (e.g. a REVERSE shows "Agree (1) (5)")
+    // the annotation is information and stays. Display-side by design — the
+    // adapter suffix is load-bearing across the three-owner invariant.
+    const trailing = valueText.match(/\((-?\d+(?:\.\d+)?)\)\s*$/)
+    const alreadyAnnotated = trailing !== null && Number(trailing[1]) === numVal
     return {
-      display: `${valueText} (${numVal})`,
+      display: alreadyAnnotated ? valueText : `${valueText} (${numVal})`,
       isNumeric: true,
       numericValue: numVal,
       isExcluded: false,

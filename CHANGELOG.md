@@ -9,12 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Video coding.** Conversations can now carry a video recording (`.mp4`,
+  `.mov`, `.webm` — up to 4 GB) alongside or instead of audio. The video plays in
+  a pane beside the transcript with the same timestamp synchronization as audio,
+  so focus-group and observation footage can be coded without leaving the
+  workbench. A recording — audio or video — can also be attached directly in the
+  conversation-import wizard rather than afterwards. Automatic backup snapshots
+  deliberately exclude video to stay small; downloaded backups include it by
+  default, with an "Include video" option in Settings.
 - **SPSS `.sav` dataset import.** Import and append `.sav` files anywhere you can
   import a CSV or Excel file. SPSS's own value labels, scale order, and
   user-missing codes come across, so an ordinal variable arrives with the order and
   the codes it was recorded with — a 0–3 scale stays 0–3 — instead of being guessed
   from the text. Values flagged as user-missing in SPSS (for example "Refused") are
   treated as missing rather than as an extra scale point.
+- **Participant-ID columns now link your data automatically.** Columns like
+  "Participant ID" or "Respondent" are recognized as identifier columns
+  (previously they were discarded as import noise) and can link dataset rows to
+  the project's participants — during import, when appending, or retroactively
+  from the dataset view — so a person's survey record and their interview turns
+  connect without hand-matching. Existing manual links are never overwritten, and
+  ambiguous (duplicated) identifier values are left unlinked rather than guessed.
+  The dataset view's per-row Link popover can also create a new participant from
+  the row's ID in one step, and R exports carry identifier columns as plain
+  character ID columns for joining external data (leading zeros preserved, no
+  statistics computed on IDs).
+- **Automatic updates.** The desktop app now keeps itself current: it checks
+  quietly on launch and every few hours, downloads new versions in the
+  background, and installs only when you choose "Restart to update" (or on your
+  next quit) — never mid-work. Choosing "Restart to update" takes a fresh backup
+  first. The check sends only the app's version and platform to github.com,
+  nothing else, and can be switched off in Settings → Software update. This makes
+  v1.2.0 the last release that has to be downloaded by hand.
 - **Citation support.** A `CITATION.cff` file makes GitHub render a "Cite this
   repository" entry, and **Settings → About & citation** shows the running version
   with copyable APA and BibTeX references. Cite the version you analyzed with —
@@ -24,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Conversation import matches speaker names to participants after trimming
+  stray spaces, so a trailing space in a CSV speaker label no longer silently
+  creates a duplicate participant.
 - Reverse-scored recodes now reflect a scale about its own midpoint. Scales
   numbered from 1 are unaffected; a scale numbered from 0 no longer reversed into
   values outside its own range.

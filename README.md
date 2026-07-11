@@ -106,7 +106,9 @@ mean anything is wrong:
   tracking, **excerpts** and a **Quote Board**, **memos**, **notes**, and a
   quick-capture **Scratchpad**.
 - **Participants** and **speakers** form a shared cross-source identity spine, so a
-  person links across their survey record and their interview.
+  person links across their survey record and their interview. Datasets with an
+  identifier column ("Participant ID", "Respondent", …) link their rows to
+  participants automatically at import, append, or retroactively.
 - Qualitative analysis: code frequencies, **co-occurrence**, a **thematic
   saturation curve**, group comparisons of code frequency, and a **codebook
   treemap** overview.
@@ -169,9 +171,12 @@ Being honest about scope:
 
 ## Privacy & your data
 
-- **Fully local and offline.** The app makes no outbound network calls — no
-  telemetry, no analytics, no update checks, no external CDNs (fonts are
-  self-hosted). The browser content-security-policy is locked to `self`.
+- **Fully local.** Your research data never leaves the machine — no telemetry,
+  no analytics, no external CDNs (fonts are self-hosted). The browser
+  content-security-policy is locked to `self`. The desktop app's one outbound
+  call is its update check against github.com, which carries only the app's
+  version and platform — nothing else; it can be switched off in
+  **Settings → Software update**, and the app works fully offline.
 - **No accounts, no sign-in.** The desktop app opens straight into your workspace
   as a single local researcher — there is no login screen or password. Your
   operating-system account is the security boundary; an optional inactivity

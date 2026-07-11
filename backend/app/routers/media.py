@@ -380,7 +380,15 @@ async def stream_media(
         filename=conversation.media_filename,
         headers={
             "Accept-Ranges": "bytes",
-            "Cache-Control": "private, max-age=86400",
+            # no-cache (revalidate, not no-store): a replaced recording must
+            # never serve stale bytes for up to a day (#549). NOTE Starlette's
+            # FileResponse sets an ETag but does NOT answer If-None-Match with
+            # 304, so revalidation is a refetch — negligible on the loopback
+            # deployment. The client additionally cache-busts via the
+            # media_version query param, so app-driven fetches never rely on
+            # revalidation at all. Revisit with real 304 support if a
+            # networked (VPS) deployment ships.
+            "Cache-Control": "private, no-cache",
         },
     )
 

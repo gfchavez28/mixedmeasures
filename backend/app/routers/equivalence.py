@@ -11,7 +11,7 @@ from ..auth import get_current_user
 from .auth import limiter
 from ..database import get_db
 from ..models.user import User
-from ..models.dataset import Dataset, DatasetColumn
+from ..models.dataset import Dataset, DatasetColumn, CROSSWALK_INELIGIBLE_TYPES
 from ..models.analysis_domain import AnalysisDomainMember
 from ..models.equivalence_group import EquivalenceGroup
 from ..models.metric import MetricDefinition
@@ -1060,8 +1060,12 @@ async def find_matches(
             fuzzy_candidates_query = fuzzy_candidates_query.filter(
                 ~DatasetColumn.id.in_(anchor_id_set)
             )
+        # #556b: identifier columns are ineligible members, so never offer them
+        # as match candidates (they'd land in an EG whose scale score can't
+        # compute). Was a bare `!= "skip"`.
         fuzzy_candidates = [
-            c for c in fuzzy_candidates_query.all() if c.column_type.value != "skip"
+            c for c in fuzzy_candidates_query.all()
+            if c.column_type not in CROSSWALK_INELIGIBLE_TYPES
         ]
 
     threshold = data.min_similarity
@@ -1212,10 +1216,10 @@ async def suggest_groups(
         .all()
     )
 
-    # Filter out skip types
+    # Filter out types that can never be an EG member (#556b — skip + identifier)
     columns = [
         col for col in columns
-        if (col.column_type.value) != "skip"
+        if col.column_type not in CROSSWALK_INELIGIBLE_TYPES
     ]
 
     if len(columns) < 2:

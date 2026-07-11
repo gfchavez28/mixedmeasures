@@ -6,6 +6,8 @@ import { toast } from 'sonner'
 import { conversationsApi, participantsApi, mediaApi, type Participant } from '@/lib/api'
 import { validateMediaFile, MEDIA_ACCEPT, MEDIA_FORMAT_LABEL, describeMediaUploadError, isVideoFilename } from '@/lib/media-constants'
 import { formatBytes } from '@/lib/format'
+import { TRANSCRIPT_ACCEPT, isSupportedTranscriptFile } from '@/lib/conversation-import-formats'
+import { openPickerFromZoneClick } from '@/lib/drop-zone'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -79,6 +81,8 @@ export default function ConversationImport() {
   // uploaded when exactly one transcript is present.
   const [mediaFile, setMediaFile] = useState<File | null>(null)
   const [recordingError, setRecordingError] = useState<string | null>(null)
+  const transcriptInputRef = useRef<HTMLInputElement>(null)
+  const addMoreInputRef = useRef<HTMLInputElement>(null)
   const recFileInputRef = useRef<HTMLInputElement>(null)
   // Slab 2: single-file import → media-attach phase (progress + partial-failure).
   const [attach, setAttach] = useState<{
@@ -280,8 +284,9 @@ export default function ConversationImport() {
   const handleFilesSelected = useCallback(async (selectedFiles: File[]) => {
     setError('')
 
-    // Transcript formats: CSV + VTT/SRT subtitles (#524 — Zoom/Teams exports)
-    const csvFiles = selectedFiles.filter(f => /\.(csv|vtt|srt)$/.test(f.name.toLowerCase()))
+    // Transcript formats: CSV + VTT/SRT subtitles (#524 — Zoom/Teams exports).
+    // Single-sourced in lib/conversation-import-formats.ts (#552).
+    const csvFiles = selectedFiles.filter(f => isSupportedTranscriptFile(f.name))
     if (csvFiles.length === 0) return
 
     // Enforce max
@@ -1032,22 +1037,28 @@ export default function ConversationImport() {
               </CardDescription>
             </CardHeader>
             <CardContent>
+              {/* #560a: the zone is a plain div with a guarded click-to-browse (a click
+                  on the Button below must not open a SECOND chooser). The Button is the
+                  accessible control — a real <button>, so it is focusable, named, and
+                  actually honors `disabled`. It used to be a <span> inside a <label>
+                  (not focusable, no role, `disabled` a silent no-op), which is why the
+                  zone had to carry role="button" to be reachable at all. Do NOT put that
+                  role back: with a real button inside, it nests an interactive element
+                  inside an interactive role. */}
               <div
                 className="border-2 border-dashed rounded-lg p-12 text-center hover:border-primary/50 transition-colors"
                 onDrop={handleDrop}
                 onDragOver={(e) => e.preventDefault()}
-                role="button"
-                tabIndex={0}
-                aria-label="Drop zone for file upload, or press Enter to select files"
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.getElementById('file-input')?.click() } }}
+                onClick={(e) => openPickerFromZoneClick(e, () => transcriptInputRef.current?.click())}
               >
                 <FileInput className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />
                 <p className="text-mm-text-secondary mb-4">
                   Drag and drop transcript file(s) here, or click to browse
                 </p>
                 <input
+                  ref={transcriptInputRef}
                   type="file"
-                  accept=".csv,.vtt,.srt"
+                  accept={TRANSCRIPT_ACCEPT}
                   multiple
                   onChange={(e) => {
                     const selected = e.target.files
@@ -1060,11 +1071,9 @@ export default function ConversationImport() {
                   className="hidden"
                   id="file-input"
                 />
-                <label htmlFor="file-input">
-                  <Button asChild disabled={isLoading}>
-                    <span>{isLoading ? 'Processing...' : 'Select Files'}</span>
-                  </Button>
-                </label>
+                <Button onClick={() => transcriptInputRef.current?.click()} disabled={isLoading}>
+                  {isLoading ? 'Processing...' : 'Select Files'}
+                </Button>
               </div>
 
               {/* Recording (optional) — attached after a single-file import (Slab 2).
@@ -1109,10 +1118,7 @@ export default function ConversationImport() {
                     className="border-2 border-dashed rounded-lg p-6 text-center hover:border-primary/50 transition-colors"
                     onDrop={handleRecordingDrop}
                     onDragOver={(e) => e.preventDefault()}
-                    role="button"
-                    tabIndex={0}
-                    aria-label="Add a recording, or press Enter to select a file"
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); recFileInputRef.current?.click() } }}
+                    onClick={(e) => openPickerFromZoneClick(e, () => recFileInputRef.current?.click())}
                   >
                     <p className="text-sm text-mm-text-secondary mb-3">
                       Add the audio or video this transcript came from — {MEDIA_FORMAT_LABEL}.
@@ -1125,11 +1131,13 @@ export default function ConversationImport() {
                       id="recording-input"
                       onChange={handleRecordingSelect}
                     />
-                    <label htmlFor="recording-input">
-                      <Button variant="outline" size="sm" asChild>
-                        <span>Select recording</span>
-                      </Button>
-                    </label>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => recFileInputRef.current?.click()}
+                    >
+                      Select recording
+                    </Button>
                   </div>
                 )}
 
@@ -1178,7 +1186,8 @@ export default function ConversationImport() {
                       <button
                         onClick={() => handleRemoveFile(i)}
                         className="p-1 hover:bg-mm-surface-hover rounded"
-                        title="Remove file"
+                        aria-label={`Remove ${f.name}`}
+                        title={`Remove ${f.name}`}
                       >
                         <X className="w-3 h-3 text-mm-text-muted" />
                       </button>
@@ -1190,10 +1199,11 @@ export default function ConversationImport() {
                   )}
 
                   <div className="flex justify-between items-center pt-2">
-                    <label htmlFor="file-input-add" className="cursor-pointer">
+                    <div>
                       <input
+                        ref={addMoreInputRef}
                         type="file"
-                        accept=".csv,.vtt,.srt"
+                        accept={TRANSCRIPT_ACCEPT}
                         multiple
                         onChange={(e) => {
                           const selected = e.target.files
@@ -1205,10 +1215,14 @@ export default function ConversationImport() {
                         className="hidden"
                         id="file-input-add"
                       />
-                      <Button variant="outline" size="sm" asChild>
-                        <span>Add More Files</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => addMoreInputRef.current?.click()}
+                      >
+                        Add More Files
                       </Button>
-                    </label>
+                    </div>
                     <Button
                       onClick={async () => {
                         setIsLoading(true)
@@ -1435,6 +1449,7 @@ export default function ConversationImport() {
                           <button
                             onClick={() => handleRemoveFile(i)}
                             className="ml-auto text-red-600 hover:text-red-800 text-xs underline"
+                            aria-label={`Remove ${files[i].name}`}
                           >
                             Remove
                           </button>

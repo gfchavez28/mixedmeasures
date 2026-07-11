@@ -218,6 +218,7 @@ async def get_code(
     db: Session = Depends(get_db)
 ):
     """Get a code by ID."""
+    _get_project_or_404(db, project_id, user.id)
     code = db.query(Code).options(
         joinedload(Code.category),
     ).filter(
@@ -240,6 +241,7 @@ async def update_code(
     db: Session = Depends(get_db)
 ):
     """Update a code (never delete, use is_active=False to deactivate)."""
+    _get_project_or_404(db, project_id, user.id)
     code = db.query(Code).options(
         joinedload(Code.category),
     ).filter(
@@ -318,6 +320,7 @@ async def get_code_segments(
     db: Session = Depends(get_db)
 ):
     """Get all segments that have this code applied, grouped by conversation."""
+    _get_project_or_404(db, project_id, user.id)
     code = db.query(Code).filter(
         Code.id == code_id,
         Code.project_id == project_id
@@ -432,6 +435,7 @@ async def merge_codes(
     db: Session = Depends(get_db)
 ):
     """Merge source code into target: reassign all applications, handle duplicates."""
+    _get_project_or_404(db, project_id, user.id)
     if source_code_id == target_code_id:
         raise HTTPException(status_code=400, detail="Cannot merge a code with itself")
 
@@ -777,6 +781,7 @@ async def update_category(
     db: Session = Depends(get_db)
 ):
     """Update a category."""
+    _get_project_or_404(db, project_id, user.id)
     category = db.query(CodeCategory).filter(
         CodeCategory.id == category_id,
         CodeCategory.project_id == project_id
@@ -847,6 +852,7 @@ async def delete_category(
     db: Session = Depends(get_db)
 ):
     """Delete a category (codes remain, just lose category assignment)."""
+    _get_project_or_404(db, project_id, user.id)
     category = db.query(CodeCategory).filter(
         CodeCategory.id == category_id,
         CodeCategory.project_id == project_id
