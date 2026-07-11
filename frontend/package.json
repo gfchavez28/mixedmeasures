@@ -2,7 +2,7 @@
   "name": "mixedmeasures-frontend",
   "private": true,
   "version": "1.2.0",
-  "releaseDate": "2026-07-10",
+  "releaseDate": "2026-07-11",
   "type": "module",
   "engines": {
     "node": ">=20"
