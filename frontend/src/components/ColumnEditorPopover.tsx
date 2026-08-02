@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { SELECTED_SEGMENT } from '@/lib/selection'
-import { Trash2, FunctionSquare, RefreshCw, Settings2, Users } from 'lucide-react'
+import { Trash2, FunctionSquare, RefreshCw, Settings2, Users, Tags, ArrowLeftRight } from 'lucide-react'
 import {
   Popover,
   PopoverContent,
@@ -41,6 +41,10 @@ interface ColumnEditorPopoverProps {
   /** #414 (DEC-8): retro bulk-link — identifier columns only. Links unlinked
    * rows by this column's values; never overwrites manual links. */
   onLinkByColumn?: (column: DatasetColumn) => void
+  /** #576/#577: open the value-labels editor for a numbers-only column. */
+  onEditValueLabels?: (column: DatasetColumn) => void
+  /** #575: swap column_name ↔ column_text (promote label→name when name empty). */
+  onSwapNameLabel?: (column: DatasetColumn) => void
   // Context
   projectId: number
   datasetId: number
@@ -70,6 +74,8 @@ export function ColumnEditorPopover({
   onEditComputed,
   onRecompute,
   onLinkByColumn,
+  onEditValueLabels,
+  onSwapNameLabel,
   projectId,
   datasetId,
   columnIndex,
@@ -406,13 +412,47 @@ export function ColumnEditorPopover({
                   Link rows to participants
                 </button>
               )}
-              <button
-                onClick={() => onOpenDetails(column)}
-                className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-mm-surface-hover text-mm-text-secondary flex items-center gap-1.5"
-              >
-                <Settings2 className="w-3 h-3" />
-                Column details...
-              </button>
+              {onEditValueLabels &&
+                ['ordinal', 'nominal', 'numeric', 'percentage', 'binary'].includes(column.column_type) && (
+                <button
+                  onClick={() => onEditValueLabels(column)}
+                  className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-mm-surface-hover text-mm-text-secondary flex items-center gap-1.5"
+                >
+                  <Tags className="w-3 h-3" />
+                  {/* #592: the dialog owns value labels AND missing values now,
+                      so a column with neither still needs a way in — a
+                      continuous `age` declaring "-99 to -1" missing has no
+                      labels at all (the gated-entry-point rule). */}
+                  {/* `[]` ("nothing is missing") IS a declaration — key on
+                      null-ness, never length (#609c). */}
+                  {(column.scale_labels && column.scale_labels.length > 0) ||
+                   column.missing_values != null
+                    ? 'Edit value labels & missing...'
+                    : 'Value labels & missing...'}
+                </button>
+              )}
+              {onSwapNameLabel && (
+                <button
+                  onClick={() => onSwapNameLabel(column)}
+                  className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-mm-surface-hover text-mm-text-secondary flex items-center gap-1.5"
+                >
+                  <ArrowLeftRight className="w-3 h-3" />
+                  {column.column_name ? 'Swap name ↔ label' : 'Use label as short name'}
+                </button>
+              )}
+              {/* #575: "Column details" edits scale metadata via the manual-only
+                  PATCH, which 403s on imported columns. For imported columns the
+                  popover already covers name/label (header PATCH), type, and value
+                  labels — so only offer the details dialog for manual columns. */}
+              {isManual && (
+                <button
+                  onClick={() => onOpenDetails(column)}
+                  className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-mm-surface-hover text-mm-text-secondary flex items-center gap-1.5"
+                >
+                  <Settings2 className="w-3 h-3" />
+                  Column details...
+                </button>
+              )}
               <button
                 onClick={() => onDeleteColumn(column)}
                 className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 flex items-center gap-1.5"

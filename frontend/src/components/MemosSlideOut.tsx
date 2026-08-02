@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useFocusTrap } from '@/hooks/useFocusTrap'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { X, ArrowUpRight } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import MemosPanelContent from '@/components/MemosPanelContent'

@@ -26,7 +26,7 @@
  * the domains list loads — Phase 4.7 polish.
  */
 
-import type { NavigateFunction } from 'react-router-dom'
+import type { NavigateFunction } from 'react-router'
 
 export function navigateToScaleScore(
   navigate: NavigateFunction,

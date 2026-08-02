@@ -3,15 +3,20 @@ import api from './client'
 // Search types
 export interface SegmentSearchResult {
   id: number
-  conversation_id: number
+  // #569 deprecation pair: conversation_id is overloaded with the document id on
+  // doc hits (one-release beat) and null on observation hits; source_type is the
+  // deprecated alias of source_kind. New consumers read source_kind + source_id.
+  conversation_id: number | null
   conversation_name: string
   speaker_name: string | null
   is_facilitator: boolean
-  start_time: number | null
+  start_time: number | null // clip hits: the clip's start (timecode subtitle)
   text: string
   sequence_order: number
   is_quoted: boolean
-  source_type?: string // "conversation" or "document"
+  source_type?: string // deprecated alias of source_kind
+  source_kind?: string // "conversation" | "document" | "observation"
+  source_id?: number | null // the id in source_kind's namespace — the honest pair
 }
 
 export interface CodeSearchResult {
@@ -35,13 +40,17 @@ export interface ConversationSearchResult {
 
 export interface NoteSearchResult {
   id: number
-  conversation_id: number
+  // Nullable since 4b (#569): observation notes carry null; conv/doc hits keep
+  // the (doc-overloaded) id one release. New consumers read source_kind + source_id.
+  conversation_id: number | null
   conversation_name: string
   segment_id: number | null
   segment_text_preview: string | null
   content: string
   sequence_number: number
-  source_type?: string // "conversation" or "document"
+  source_type?: string // deprecated alias of source_kind
+  source_kind?: string // "conversation" | "document" | "observation"
+  source_id?: number | null // the id in source_kind's namespace — the honest pair
 }
 
 export interface MemoSearchResult {
@@ -59,6 +68,14 @@ export interface DocumentSearchResult {
   name: string
   segment_count: number
   source_format: string | null
+}
+
+export interface ObservationSearchResult {
+  // Observation NAME hit (the 4th name block, slab 4b). UI consumption = 4e.
+  id: number
+  name: string
+  segment_count: number // visible clip count
+  has_media: boolean
 }
 
 export interface TextSearchResult {
@@ -94,11 +111,12 @@ export interface SearchResponse {
   notes?: SearchResults<NoteSearchResult>
   memos?: SearchResults<MemoSearchResult>
   documents?: SearchResults<DocumentSearchResult>
+  observations?: SearchResults<ObservationSearchResult>
   text?: SearchResults<TextSearchResult>
   canvases?: SearchResults<CanvasSearchResult>
 }
 
-export type SearchEntityType = 'segments' | 'codes' | 'conversations' | 'notes' | 'memos' | 'documents' | 'text' | 'canvases'
+export type SearchEntityType = 'segments' | 'codes' | 'conversations' | 'notes' | 'memos' | 'documents' | 'observations' | 'text' | 'canvases'
 
 // API functions - Search
 export const searchApi = {

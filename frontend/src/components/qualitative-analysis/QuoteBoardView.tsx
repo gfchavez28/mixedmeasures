@@ -33,8 +33,9 @@ import {
 import type { QuoteGroupBy, QuoteSort, QuoteDensity, QuoteLayout } from '@/lib/qual-analysis-types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { getCodeColor } from '@/lib/utils'
-import { escapeCsvField } from '@/lib/csv'
+import { formatTimecode, getCodeColor } from '@/lib/utils'
+import { excerptRestorePayload } from '@/lib/excerpt-shape'
+import { escapeCsvField, UTF8_BOM } from '@/lib/csv'
 import QuoteCard, { formatAttribution } from '@/components/qualitative-analysis/QuoteCard'
 import FocusPill from '@/components/qualitative-analysis/FocusPill'
 
@@ -58,6 +59,7 @@ interface QuoteBoardViewProps {
   hiddenConversationIds?: Set<number>
   hiddenTextColumnIds?: Set<number>
   hiddenDocumentIds?: Set<number>
+  hiddenObservationIds?: Set<number>
   hasActiveFilters?: boolean
   onClearFilters?: () => void
   onCodeChange?: () => void
@@ -207,7 +209,13 @@ function buildGroups(
     // Sort excerpts by source order first
     const ordered = sortExcerpts(excerpts, 'source')
     for (const e of ordered) {
-      const key = `src-${e.source_name}`
+      // Clips key on observation_id, NOT the name (slab 5c). Two reasons: the
+      // name alone would merge two observations that share one — and before
+      // 5c dropped it, source_name carried a per-clip timecode suffix, so this
+      // key shattered the view into ONE BUCKET PER CLIP. Conversation, document
+      // and text keys stay byte-identical: QuoteBoardConfig.custom_orders is
+      // keyed by section key, so changing theirs would orphan saved orders.
+      const key = e.observation_id != null ? `obs-${e.observation_id}` : `src-${e.source_name}`
       if (!sourceMap.has(key)) {
         sourceMap.set(key, [])
         sourceOrder.push(key)
@@ -245,10 +253,16 @@ function deduplicateExcerpts(sections: GroupedSection[]): QuotedExcerptItem[] {
 }
 
 function exportCsv(excerpts: QuotedExcerptItem[]) {
+  // The time columns are LOAD-BEARING, not decoration (slab 5c): source_name
+  // used to carry a per-clip ` · {timecode}` suffix, which was the only thing
+  // distinguishing one clip's row from another's here. Dropping the suffix
+  // without these would have exported every clip of one observation as an
+  // identical row — a silent regression, which is why they ship together.
   const headers = [
     'excerpt_text', 'full_text', 'is_sub_segment', 'speaker', 'participant',
-    'source_name', 'source_type', 'segment_number', 'codes', 'categories',
-    'excerpt_note', 'date_quoted',
+    'source_name', 'source_type', 'segment_number',
+    'clip_start', 'clip_end', 'clip_duration', 'quote_start', 'quote_end',
+    'codes', 'categories', 'excerpt_note', 'date_quoted',
   ]
   const rows = excerpts.map(e => {
     // Distinct names: applied_codes is per-coder, so a code two coders share
@@ -264,14 +278,22 @@ function exportCsv(excerpts: QuotedExcerptItem[]) {
       e.source_name,
       e.source_type,
       e.sequence_order !== null ? String(e.sequence_order + 1) : '',
+      e.segment_start_time !== null ? formatTimecode(e.segment_start_time) : '',
+      e.segment_end_time !== null ? formatTimecode(e.segment_end_time) : '',
+      e.segment_start_time !== null && e.segment_end_time !== null
+        ? formatTimecode(e.segment_end_time - e.segment_start_time) : '',
+      e.start_time !== null ? formatTimecode(e.start_time) : '',
+      e.end_time !== null ? formatTimecode(e.end_time) : '',
       codeNames,
       catNames,
       e.excerpt_note || '',
       e.created_at,
     ].map(escapeCsvField).join(',')
   })
-  const csv = [headers.join(','), ...rows].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+  // CRLF + BOM per lib/csv.ts — the two deviations this writer carried since it
+  // was written (Excel needs the BOM to read UTF-8 names correctly).
+  const csv = [headers.join(','), ...rows].join('\r\n')
+  const blob = new Blob([UTF8_BOM + csv], { type: 'text/csv;charset=utf-8;' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -381,6 +403,7 @@ export default function QuoteBoardView({
   hiddenConversationIds,
   hiddenTextColumnIds,
   hiddenDocumentIds,
+  hiddenObservationIds,
   hasActiveFilters,
   onClearFilters,
   onCodeChange,
@@ -450,7 +473,8 @@ export default function QuoteBoardView({
     const hasExcludes = (hiddenCodeIds && hiddenCodeIds.size > 0) || hideUncoded ||
       (hiddenConversationIds && hiddenConversationIds.size > 0) ||
       (hiddenTextColumnIds && hiddenTextColumnIds.size > 0) ||
-      (hiddenDocumentIds && hiddenDocumentIds.size > 0)
+      (hiddenDocumentIds && hiddenDocumentIds.size > 0) ||
+      (hiddenObservationIds && hiddenObservationIds.size > 0)
     if (!hasExcludes) return allExcerpts
     return allExcerpts.filter(e => {
       // Hide uncoded excerpts
@@ -461,11 +485,13 @@ export default function QuoteBoardView({
       if (hiddenConversationIds && hiddenConversationIds.size > 0 && e.source_type === 'segment' && e.conversation_id && hiddenConversationIds.has(e.conversation_id)) return false
       // Hide excerpts from hidden documents
       if (hiddenDocumentIds && hiddenDocumentIds.size > 0 && e.source_type === 'segment' && e.document_id && hiddenDocumentIds.has(e.document_id)) return false
+      // Hide excerpts from hidden observations
+      if (hiddenObservationIds && hiddenObservationIds.size > 0 && e.source_type === 'segment' && e.observation_id && hiddenObservationIds.has(e.observation_id)) return false
       // Hide excerpts from hidden comment columns
       if (hiddenTextColumnIds && hiddenTextColumnIds.size > 0 && e.source_type === 'text' && e.column_id && hiddenTextColumnIds.has(e.column_id)) return false
       return true
     })
-  }, [allExcerpts, hiddenCodeIds, hideUncoded, hiddenConversationIds, hiddenDocumentIds, hiddenTextColumnIds])
+  }, [allExcerpts, hiddenCodeIds, hideUncoded, hiddenConversationIds, hiddenDocumentIds, hiddenTextColumnIds, hiddenObservationIds])
   const hiddenCount = allExcerpts.length - afterExcludes.length
 
   // SR announcement for filter changes
@@ -594,17 +620,12 @@ export default function QuoteBoardView({
         action: removed ? {
           label: 'Undo',
           onClick: () => {
-            const createData: Record<string, unknown> = {}
-            if (removed.segment_id) {
-              createData.segment_id = removed.segment_id
-              if (removed.is_sub_segment && removed.start_offset !== null && removed.end_offset !== null) {
-                createData.start_offset = removed.start_offset
-                createData.end_offset = removed.end_offset
-              }
-            } else if (removed.dataset_value_id) {
-              createData.dataset_value_id = removed.dataset_value_id
-            }
-            excerptsApi.create(projectId, createData as Parameters<typeof excerptsApi.create>[1]).then(() => {
+            // Restores the SHAPE, not just the target (slab 5b) — see
+            // lib/excerpt-shape.ts. The previous inline version keyed on the
+            // char-only `is_sub_segment`, so undoing a sub-clip quote silently
+            // re-created it as a WHOLE-clip quote.
+            const createData = excerptRestorePayload(removed)
+            excerptsApi.create(projectId, createData).then(() => {
               queryClient.invalidateQueries({ queryKey: ['excerpts-quoted', projectId] })
               queryClient.invalidateQueries({ queryKey: ['excerpts', projectId] })
             })

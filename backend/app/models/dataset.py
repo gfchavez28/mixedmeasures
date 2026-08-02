@@ -117,6 +117,12 @@ class DatasetColumn(Base):
     numeric_max = Column(Float, nullable=True)
     numeric_format = Column(String(20), nullable=True)  # "integer", "decimal", "percentage", "currency"
 
+    # #592: declared missing values — JSON rule list (discrete {"value","label"?}
+    # and numeric-range {"lo","hi","label"?} forms; see services/missing_values.py
+    # for the shapes + REPLACE semantics). NULL = no declaration = the
+    # recognized-N/A defaults apply (the treat_as_empty pattern: no backfill).
+    missing_values = Column(Text, nullable=True)
+
     source = Column(String(20), nullable=False, default="imported", server_default="imported")
     # "imported" (from CSV), "manual" (created in data view), or "computed" (formula-derived)
 

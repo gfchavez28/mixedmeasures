@@ -119,11 +119,18 @@ class TestUserMissingIsNotAScalePoint:
     would import "Refused" as a valid 6th point of a 5-point scale.
     """
 
-    def test_user_missing_cell_is_blank_not_refused(self, converted):
-        rows, _ = converted
+    def test_user_missing_cell_is_preserved_and_declared(self, converted):
+        """#596 flips this: the refusal is KEPT, not blanked.
+
+        It used to emit "" — which dataset_import skips entirely — so a refusal
+        and a genuinely blank cell became indistinguishable. The cell now reads
+        "Refused" (SPSS's own display) and the DECLARATION is what keeps it out
+        of the statistics. The class's premise still holds by the two assertions
+        below it: "Refused" is not a scale point, and it is declared missing."""
+        rows, meta = converted
         satisfied = _col(rows, "satisfied")
-        assert satisfied == ["Strongly agree", "Strongly disagree", "", "Neutral"]
-        assert "Refused" not in satisfied
+        assert satisfied == ["Strongly agree", "Strongly disagree", "Refused", "Neutral"]
+        assert meta["satisfied"].missing_rules == [{"value": "9", "label": "Refused"}]
 
     def test_user_missing_label_excluded_from_scale_points(self, converted):
         _, meta = converted
@@ -401,13 +408,20 @@ class TestPartialLabelCoverage:
         assert cells[0] == "1" and cells[-1] == "100"
 
     def test_declared_missing_is_not_a_stray(self, partial_converted):
-        """mood declares 99 user-missing: the cell blanks (existing rule), and 99
-        must neither join the synthesized scale nor surface as a stray."""
+        """mood declares 99 user-missing: the cell is now PRESERVED (#596), and
+        99 must still neither join the synthesized scale nor read as a stray.
+
+        This is the #536 interaction the plan flagged: the observed set that
+        feeds the scale synthesizer excludes missing codes, so preserving the
+        cell must not make 99 a scale point. If it ever did, C4 would break —
+        `compute_frequency_distribution` zero-fills scale_labels, so 99 would
+        render as a bar."""
         rows, meta = partial_converted
         mood = meta["mood"]
         assert mood.stray_values == []
         assert mood.ordered_values == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
-        assert "" in _col(rows, "mood")
+        assert "99" in _col(rows, "mood"), "the code is preserved, not blanked"
+        assert mood.missing_rules == [{"value": "99"}]
 
     def test_full_coverage_is_untouched(self, converted):
         """The original fixture's fully-covered scales reconcile to themselves."""
@@ -524,6 +538,11 @@ class TestImportPersistsSpssCodes:
                 "column_name": c.get("suggested_column_name"),
                 "scale_labels": c.get("suggested_scale_labels"),
                 "scale_values": c.get("suggested_scale_values"),
+                # #596: the wizard path — carry SPSS's declaration through the
+                # config. The ENDPOINT additionally injects it server-side, so a
+                # config that omits this still imports correctly (see
+                # TestSavMissingInjectedServerSide).
+                "missing_values": c.get("suggested_missing_values"),
             }
             for c in preview["columns"]
         ]
@@ -623,19 +642,33 @@ class TestImportPersistsSpssCodes:
         assert json.loads(defn.mapping) == {"Poor": 1, "Fair": 2, "Good": 3}
         assert col.scale_values == "[1, 2, 3]"  # string: ints, not 1.0/2.0/3.0
 
-    def test_user_missing_row_stores_no_value(self, db_session, sav_bytes):
-        """Row 3's 'Refused' blanked in the CSV, so no DatasetValue should exist."""
+    def test_user_missing_row_is_stored_and_declared(self, db_session, sav_bytes):
+        """#596: the refusal is now a real row — text preserved, numeric NULL,
+        declaration persisted.
+
+        It previously stored NO row at all (blanked -> `if not cell: continue`),
+        which is what made "99 = Refused" and an unanswered question
+        indistinguishable. The row now exists and behaves exactly like a
+        CSV-declared one: readable text, excluded from every statistic."""
         from app.models.dataset import DatasetColumn, DatasetValue
+        from app.services.missing_values import parse_missing_rules
 
         db = db_session
         self._import(db, sav_bytes, 992)
 
         sat = db.query(DatasetColumn).filter_by(column_name="satisfied").one()
-        texts = [
-            v.value_text for v in db.query(DatasetValue).filter_by(column_id=sat.id)
+        vals = {
+            v.value_text: v.value_numeric
+            for v in db.query(DatasetValue).filter_by(column_id=sat.id)
+        }
+        assert len(vals) == 4, "all four rows are stored now, none dropped"
+        assert "Refused" in vals
+        assert vals["Refused"] is None, "declared missing -> value_numeric NULL"
+        assert vals["Neutral"] == 3.0, "real responses keep SPSS's own codes"
+        # The declaration itself must persist, or nothing downstream knows why.
+        assert parse_missing_rules(sat.missing_values) == [
+            {"value": "9", "label": "Refused"}
         ]
-        assert "Refused" not in texts
-        assert len(texts) == 3  # four rows, one user-missing
 
 
 class TestAppendReusesTheStoredCodes:
@@ -676,6 +709,11 @@ class TestAppendReusesTheStoredCodes:
                 "column_name": c.get("suggested_column_name"),
                 "scale_labels": c.get("suggested_scale_labels"),
                 "scale_values": c.get("suggested_scale_values"),
+                # #596: the wizard path — carry SPSS's declaration through the
+                # config. The ENDPOINT additionally injects it server-side, so a
+                # config that omits this still imports correctly (see
+                # TestSavMissingInjectedServerSide).
+                "missing_values": c.get("suggested_missing_values"),
             }
             for c in preview["columns"]
         ]
@@ -765,9 +803,17 @@ class TestStringUserMissing:
     """#541b — declared discrete missing VALUES on string variables (pyreadstat
     reports them as lo==hi string dicts) import as missing, not as data."""
 
-    def test_string_missing_values_blank(self, edge_converted):
-        rows, _ = edge_converted
-        assert _col(rows, "region") == ["North", "South", "", "East", "", "West"]
+    def test_string_missing_values_are_preserved_and_declared(self, edge_converted):
+        """#596 + #541b: a STRING user-missing value is kept and declared.
+
+        pyreadstat reports these as degenerate lo==hi STRING dicts. They must
+        translate to DISCRETE rules — the range shape rejects non-numeric bounds,
+        and `parse_missing_rules` is whole-or-nothing, so one string value taking
+        the range branch would silently discard the column's entire
+        declaration."""
+        rows, meta = edge_converted
+        assert _col(rows, "region") == ["North", "South", "XX", "East", "SKIP", "West"]
+        assert meta["region"].missing_rules == [{"value": "XX"}, {"value": "SKIP"}]
 
     def test_in_missing_range_type_guards(self):
         str_ranges = [{"lo": "XX", "hi": "XX"}, {"lo": "SKIP", "hi": "SKIP"}]
@@ -801,3 +847,106 @@ print("clean")
     )
     assert result.returncode == 0, result.stderr
     assert "clean" in result.stdout
+
+
+class TestSavMissingInjectedServerSide:
+    """#596 / plan §K.5: the import endpoint injects SPSS's user-missing
+    declaration itself, from metadata it re-reads anyway.
+
+    This is the sequencing the plan got wrong. `apply_sav_metadata` runs only in
+    the PREVIEW endpoint; the import endpoint used to discard `sav_meta`
+    outright, so the declaration could only arrive through the wizard's column
+    config. Since the adapter now PRESERVES user-missing codes instead of
+    blanking them, a config that omits the field would import every
+    "99 = Refused" as ordinary data feeding the means — strictly WORSE than the
+    old destructive blank (destroyed-but-excluded -> preserved-and-counted).
+
+    Owning it on the server makes the half-landed state unreachable: a client
+    that never learns the field, and a direct API caller, both get it right.
+    Same "the import must protect itself" logic as the format-version gate.
+    """
+
+    def _configs_without_declaration(self, text):
+        from app.services.dataset_import import preview_dataset_csv
+        preview = preview_dataset_csv(text)
+        # Deliberately NO missing_values — a client that ignores the suggestion.
+        return [
+            {
+                "column_index": c["column_index"],
+                "column_type": c["suggested_type"],
+                "column_text": c["suggested_column_text"],
+                # The CSV header — which IS the SPSS variable name, and the
+                # join `_inject_sav_missing_rules` uses. `suggested_column_name`
+                # is only set by apply_sav_metadata, which the import endpoint
+                # deliberately does not run.
+                "column_name": c["column_name"],
+            }
+            for c in preview["columns"]
+        ]
+
+    def test_endpoint_injects_when_the_config_omits_it(self, sav_bytes):
+        from app.routers.dataset import _inject_sav_missing_rules
+
+        text, meta = sav_to_csv_text(sav_bytes)
+        configs = self._configs_without_declaration(text)
+        assert all(c.get("missing_values") is None for c in configs)
+
+        _inject_sav_missing_rules(configs, meta, text)
+
+        sat = next(c for c in configs if c["column_name"] == "satisfied")
+        assert sat["missing_values"] == [{"value": "9", "label": "Refused"}], (
+            "without this the preserved refusal imports as real data"
+        )
+
+    def test_an_explicit_config_value_wins(self, sav_bytes):
+        """The wizard may override SPSS once it offers the control — and `[]`
+        ("nothing is missing") is a real declaration, so only None is absent."""
+        from app.routers.dataset import _inject_sav_missing_rules
+
+        text, meta = sav_to_csv_text(sav_bytes)
+        configs = self._configs_without_declaration(text)
+        for c in configs:
+            if c["column_name"] == "satisfied":
+                c["missing_values"] = []
+
+        _inject_sav_missing_rules(configs, meta, text)
+
+        sat = next(c for c in configs if c["column_name"] == "satisfied")
+        assert sat["missing_values"] == [], "an explicit [] must not be overwritten"
+
+    def test_columns_spss_says_nothing_about_are_untouched(self, sav_bytes):
+        from app.routers.dataset import _inject_sav_missing_rules
+
+        text, meta = sav_to_csv_text(sav_bytes)
+        configs = self._configs_without_declaration(text)
+        _inject_sav_missing_rules(configs, meta, text)
+        # A variable with no user-missing declaration must stay undeclared —
+        # None (the recognized-N/A defaults), never [] ("nothing is missing").
+        undeclared = [c for c in configs if c["column_name"] != "satisfied"]
+        assert all(c.get("missing_values") is None for c in undeclared)
+
+
+def test_suggested_missing_values_survives_the_preview_schema(sav_bytes):
+    """#586 shape: `apply_sav_metadata` writes `suggested_missing_values` into
+    the column dict, and the preview endpoint then does
+    `DatasetColumnPreview(**col)`. Pydantic's extra='ignore' would DROP an
+    undeclared key without a word — which is exactly how `scale_values` never
+    reached the value-labels dialog and left it showing five empty rows.
+
+    The import does not depend on this field (it injects the rules server-side),
+    but the wizard cannot show what SPSS declared without it.
+    """
+    from app.schemas.dataset import DatasetColumnPreview
+    from app.services.dataset_import import preview_dataset_csv
+    from app.services.sav_import import apply_sav_metadata
+
+    text, meta = sav_to_csv_text(sav_bytes)
+    preview = preview_dataset_csv(text)
+    apply_sav_metadata(preview["columns"], meta)
+
+    raw = next(c for c in preview["columns"] if c["column_name"] == "satisfied")
+    assert raw["suggested_missing_values"] == [{"value": "9", "label": "Refused"}]
+
+    # Through the response model — the step that silently drops undeclared keys.
+    serialized = DatasetColumnPreview(**raw)
+    assert serialized.suggested_missing_values == [{"value": "9", "label": "Refused"}]

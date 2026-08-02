@@ -5,13 +5,18 @@
  * The label scheme is the visible counterpart of the chord keystroke resolver,
  * so these tests double as documentation of the label space the future shared
  * chord hook must keep in sync (see gotcha in the internal design notes):
- *   - universal codes      → String(numeric_id)            (the 0 / 1 row)
  *   - categorized codes    → `${catIdx+2}.${codeIdx+1}`    (2.1 … 9.9)
- *   - uncategorized codes  → String(numeric_id)
+ *   - everything else      → String(numeric_id), ONLY when that digit reaches it
  * Category index is by FIRST-APPEARANCE order in the input array, and the
- * scheme TRUNCATES at 8 categories / 9 codes-per-category — overflow falls back
- * to numeric_id. Those truncation/collision edges are characterized below and
- * flagged for the refactor; do not "fix" them here.
+ * scheme TRUNCATES at 8 categories / 9 codes-per-category.
+ *
+ * ⚠️ **Updated 2026-08-02 (#664).** Overflow used to fall back to `numeric_id`
+ * unconditionally, and the two edges below were characterized as QUIRKS to
+ * "revisit in the #388 refactor". The revisit found them to be a defect, not a
+ * quirk: the resolver's bare-digit arm is a SINGLE keypress consulted for every
+ * digit only while the project has no categories (after that, 2–9 are the chord
+ * prefix space), so those labels advertised keys that did nothing. No label now
+ * means no key — assert `.has(id) === false`, not a fallback string.
  */
 import { describe, it, expect } from 'vitest'
 import { renderHook } from '@testing-library/react'
@@ -34,8 +39,10 @@ describe('useCodeShortcutLabels', () => {
     expect(m.get(2)).toBe('1')
   })
 
-  it("labels a universal code with no numeric_id as '?'", () => {
-    expect(labels([{ id: 1, numeric_id: null, is_universal: true }]).get(1)).toBe('?')
+  // #664: this used to yield the literal label '?', advertising a key that not
+  // only fails to apply the code but is bound to the help dialog.
+  it('gives a universal code with no numeric_id NO label', () => {
+    expect(labels([{ id: 1, numeric_id: null, is_universal: true }]).has(1)).toBe(false)
   })
 
   it('labels a single category as 2.1, 2.2, 2.3 (category index +2, code position 1-indexed)', () => {
@@ -73,21 +80,39 @@ describe('useCodeShortcutLabels', () => {
     expect(m.get(7 * 100 + 8)).toBe('9.9') // cat 7 (→9), code 8 (→9)
   })
 
-  describe('characterized quirks (revisit in #388 refactor)', () => {
-    it('QUIRK: a 9th category falls outside the chord space → its codes get numeric_id labels', () => {
+  // #664 — these two were flagged "revisit in the #388 refactor" and the revisit
+  // is here: overflow codes were labelled with a numeric_id the resolver never
+  // consults, so the label was a promise nothing kept. Silence is the fix.
+  describe('overflow past the chord space has NO key, and now says so', () => {
+    it('a 9th category is outside the prefix space → its codes get no label', () => {
       const codes: Code[] = []
       for (let c = 0; c < 9; c++) codes.push({ id: c, numeric_id: 50 + c, category_id: 1000 + c })
       const m = labels(codes)
       expect(m.get(7)).toBe('9.1') // 8th category still chorded
-      expect(m.get(8)).toBe('58') // 9th category → numeric_id fallback (50 + 8)
+      expect(m.has(8)).toBe(false) // 9th → unreachable, so unlabelled (was '58')
     })
 
-    it('QUIRK: a 10th code in a category falls back to numeric_id', () => {
+    it('a 10th code in a category gets no label', () => {
       const codes: Code[] = []
       for (let k = 0; k < 10; k++) codes.push({ id: k, numeric_id: 60 + k, category_id: 100 })
       const m = labels(codes)
       expect(m.get(8)).toBe('2.9') // 9th code chorded
-      expect(m.get(9)).toBe('69') // 10th code → numeric_id fallback (60 + 9)
+      expect(m.has(9)).toBe(false) // 10th → unreachable (was '69')
+    })
+
+    // The rule that makes the above true, stated directly.
+    it('once ANY category exists, a leftover code keeps its digit only for 0/1', () => {
+      const withCat = (extra: Code[]) => labels([{ id: 99, category_id: 100 }, ...extra])
+      expect(withCat([{ id: 1, numeric_id: 1, is_universal: true }]).get(1)).toBe('1')
+      // 2–9 are the chord PREFIX space once categories exist — this code is
+      // unreachable even though its id is a single digit.
+      expect(withCat([{ id: 5, numeric_id: 5, category_id: null }]).has(5)).toBe(false)
+      // With no categories at all, the same code is reachable.
+      expect(labels([{ id: 5, numeric_id: 5, category_id: null }]).get(5)).toBe('5')
+    })
+
+    it('a two-digit numeric_id is never a single keypress, so it never gets a label', () => {
+      expect(labels([{ id: 5, numeric_id: 12, category_id: null }]).has(5)).toBe(false)
     })
 
     it('QUIRK: a universal code that also has a category_id is still labeled by numeric_id (not chorded)', () => {

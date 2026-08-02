@@ -35,7 +35,7 @@ from ..services.coding_layers import (
 )
 from ..services.metrics import resolve_input_source_labels
 from ..services.grouping import load_grouping_values, order_value_labels
-from ..services.dataset_import import _is_na
+from ..services.missing_values import column_missing_rules, is_missing
 from ..services.recode import mapping_numeric_values
 from ..services.computed_columns import (
     parse as parse_expression,
@@ -90,8 +90,24 @@ def _get_factor_mapping(
     """Extract factor levels/labels from a column's metadata.
     Returns {values: [...], labels: [...]} or None if no metadata available.
     """
-    # Priority 1: Primary recode mapping
-    if primary_recode and primary_recode.mapping:
+    # Priority 1: Primary recode mapping — but ONLY for numeric-output recodes
+    # (#581). A category_group primary maps {label: group_name_string}; reading it
+    # here as {label: numeric} put the group-name STRINGS into the R factor's
+    # `levels = c(...)` slot (bare, unquoted → an `object 'Low' not found` runtime
+    # error) with levels and labels inverted. Skipping it falls through to the
+    # scale_labels metadata (priority 2) or None, both handled gracefully below.
+    # Key on recode_type, never output_type — the schema doesn't constrain them to
+    # agree (a category_group can carry output_type=numeric).
+    _rtype = getattr(primary_recode, "recode_type", None)
+    if hasattr(_rtype, "value"):
+        _rtype = _rtype.value
+    # #592 (C4): a missing value is never a scale point — a mapping or scale
+    # metadata pair whose label the column's rule marks missing must not become
+    # an R factor level (its CSV cells are blanked as NA by _text_cell, so the
+    # level would be structurally empty AND semantically wrong).
+    factor_missing_rules = column_missing_rules(col)
+
+    if primary_recode and primary_recode.mapping and _rtype in ("scale_map", "reverse"):
         try:
             mapping = (
                 json.loads(primary_recode.mapping)
@@ -102,12 +118,16 @@ def _get_factor_mapping(
                 # mapping is {label: numeric_value, ...}
                 # Sort by numeric value for ordinal
                 pairs = sorted(
-                    mapping.items(),
+                    (
+                        (k, v) for k, v in mapping.items()
+                        if not is_missing(str(k), factor_missing_rules)
+                    ),
                     key=lambda x: (float(x[1]) if isinstance(x[1], (int, float)) else 0),
                 )
-                labels = [p[0] for p in pairs]
-                values = [p[1] for p in pairs]
-                return {"values": values, "labels": labels}
+                if pairs:
+                    labels = [p[0] for p in pairs]
+                    values = [p[1] for p in pairs]
+                    return {"values": values, "labels": labels}
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -129,30 +149,42 @@ def _get_factor_mapping(
                 else:
                     # Generate 1-based sequential values
                     values = list(range(1, len(labels) + 1))
-                return {"values": values, "labels": labels}
+                # Positional codes are assigned BEFORE the missing filter so a
+                # skipped pair never shifts its neighbours' codes.
+                kept = [
+                    (v, l) for v, l in zip(values, labels)
+                    if not is_missing(str(l), factor_missing_rules)
+                ]
+                if kept:
+                    return {
+                        "values": [v for v, _ in kept],
+                        "labels": [l for _, l in kept],
+                    }
         except (json.JSONDecodeError, TypeError):
             pass
 
     return None
 
 
-def _get_observed_values(db: Session, column_id: int) -> list[str]:
+def _get_observed_values(db: Session, column: DatasetColumn) -> list[str]:
     """Distinct observed value_text values for a column, in the app's canonical
     display order (#495c: `order_value_labels` — numeric-aware, so "8" < "10";
     the old alphabetical sort gave R factor levels the #406 ordering) and with
-    recognized non-response labels dropped (#495b: they export as missing, so
-    they must not be factor levels either)."""
+    missing values dropped (#495b: they export as missing, so they must not be
+    factor levels either; #592: column-aware — the column's declared rules win
+    over the recognized-N/A defaults)."""
+    rules = column_missing_rules(column)
     results = (
         db.query(DatasetValue.value_text)
         .filter(
-            DatasetValue.column_id == column_id,
+            DatasetValue.column_id == column.id,
             DatasetValue.value_text != None,
             DatasetValue.value_text != "",
         )
         .distinct()
         .all()
     )
-    return order_value_labels([r[0] for r in results if not _is_na(r[0])])
+    return order_value_labels([r[0] for r in results if not is_missing(r[0], rules)])
 
 
 # Qualifying column types for R export
@@ -493,7 +525,7 @@ def _build_r_script(
                 _register_scale_codes(r_name, mapping["values"])
             else:
                 # Try distinct observed values
-                observed = _get_observed_values(db, col.id)
+                observed = _get_observed_values(db, col)
                 if observed:
                     levels_str = ", ".join(
                         f'"{_escape_r_string(v)}"' for v in observed
@@ -508,7 +540,7 @@ def _build_r_script(
                     )
 
         elif col_type == ColumnType.DEMOGRAPHIC:
-            observed = _get_observed_values(db, col.id)
+            observed = _get_observed_values(db, col)
             if observed:
                 levels_str = ", ".join(
                     f'"{_escape_r_string(v)}"' for v in observed
@@ -2531,15 +2563,23 @@ async def export_r_data(
     na_blanked_count = 0
     fallback_counters: dict[int, int] = defaultdict(int)
 
-    def _text_cell(vals):
-        """Text emission with #495b semantics: recognized non-response labels
-        ("N/A", "Don't know", refusals) are missing EVERYWHERE in the app
-        (#381/#384), so they export as empty cells — otherwise R would keep
-        them as factor groups the tool's analyses exclude."""
+    # #592: per-column missing rules for the CSV text emission (parsed once,
+    # not per cell). None = the recognized-N/A defaults.
+    _cell_rules_by_col = {
+        m["col"].id: column_missing_rules(m["col"])
+        for m in demo_cols + item_cols
+    }
+
+    def _text_cell(vals, col_id):
+        """Text emission with #495b semantics: missing values ("N/A",
+        "Don't know", refusals — or the column's DECLARED missing set, #592)
+        are missing EVERYWHERE in the app (#381/#384), so they export as empty
+        cells — otherwise R would keep them as factor groups the tool's
+        analyses exclude."""
         nonlocal na_blanked_count
         if not vals or vals[0] is None:
             return ""
-        if _is_na(vals[0]):
+        if is_missing(vals[0], _cell_rules_by_col.get(col_id)):
             na_blanked_count += 1
             return ""
         return csv_safe(vals[0])
@@ -2570,7 +2610,7 @@ async def export_r_data(
 
         for m in demo_cols:
             # Demographic value_text is free-form respondent input; defang.
-            csv_row.append(_text_cell(row_values.get(m["col"].id)))
+            csv_row.append(_text_cell(row_values.get(m["col"].id), m["col"].id))
 
         for m in item_cols:
             vals = row_values.get(m["col"].id)
@@ -2579,7 +2619,7 @@ async def export_r_data(
                 # — the numeric-only emission wrote an all-empty column while
                 # the script defined its text factor levels, so every R
                 # analysis on the column errored or silently lost it.
-                csv_row.append(_text_cell(vals))
+                csv_row.append(_text_cell(vals, m["col"].id))
             elif vals and vals[1] is not None:
                 csv_row.append(vals[1])
             else:

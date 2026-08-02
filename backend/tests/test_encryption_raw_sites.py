@@ -147,6 +147,7 @@ def test_backup_project_summaries_read_encrypted(enc):
     conn.execute("CREATE TABLE conversations (project_id INTEGER)")
     conn.execute("CREATE TABLE datasets (project_id INTEGER)")
     conn.execute("CREATE TABLE documents (project_id INTEGER)")
+    conn.execute("CREATE TABLE observations (project_id INTEGER)")
     conn.execute("INSERT INTO projects (id, name) VALUES (1, 'Encrypted Project')")
     conn.execute("INSERT INTO conversations (project_id) VALUES (1)")
     conn.commit()
@@ -199,6 +200,7 @@ def _seed_encrypted_db(db_path, project_names=("Alpha",)):
     conn.execute("CREATE TABLE conversations (project_id INTEGER)")
     conn.execute("CREATE TABLE datasets (project_id INTEGER)")
     conn.execute("CREATE TABLE documents (project_id INTEGER)")
+    conn.execute("CREATE TABLE observations (project_id INTEGER)")
     for i, name in enumerate(project_names, start=1):
         conn.execute("INSERT INTO projects (id, name) VALUES (?, ?)", (i, name))
     conn.commit()

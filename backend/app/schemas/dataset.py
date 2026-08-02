@@ -3,7 +3,7 @@
 from datetime import datetime
 from .common import UTCTimestamp
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -28,7 +28,18 @@ class DatasetColumnPreview(BaseModel):
     # or gapped), parallel to suggested_scale_labels. None for every other format —
     # the import then keeps the positional 1..N encoding.
     suggested_scale_values: list[float] | None = None
-    suggested_scale_unmatched: list[str] | None = None  # #364: stray values not in the scale
+    suggested_scale_unmatched: list[str] | None = None
+    # #596: SPSS's own user-missing declaration for this variable, translated to
+    # the `missing_values` rule shape. The IMPORT does not depend on this — it
+    # injects the same rules server-side (§K.5) — but the wizard needs it to SHOW
+    # what SPSS declared. Must be declared here or Pydantic's extra='ignore'
+    # drops the key `apply_sav_metadata` sets, silently (the #586 shape).
+    suggested_missing_values: list[dict] | None = None  # #364: stray values not in the scale
+    # #575: the sorted distinct numeric values observed (populated only for an
+    # all-numeric column with bounded cardinality — a scale, not a continuous
+    # measure), so the wizard's value-labels editor can seed the COMPLETE code set
+    # (sample_values is capped at 5). None otherwise.
+    distinct_numeric_values: list[float] | None = None
     suggested_column_code: str | None = None
     suggested_group_code: str | None = None
     suggested_column_text: str
@@ -64,7 +75,34 @@ class DatasetColumnConfig(BaseModel):
     # #28: parallel to scale_labels. Supplied by the .sav import path so an SPSS
     # scale's own codes survive; omitted elsewhere → positional 1..N.
     scale_values: list[float] | None = None
+    # #575: the cells are numeric CODES (not labels), and scale_labels/scale_values
+    # declare a code→label dictionary to substitute at import — the wizard-authored
+    # analog of a .sav import. When set, the importer stores the label in value_text
+    # and the code in value_numeric (via apply_value_labels), making the column
+    # byte-identical to a labelled .sav column. Import-config only; not persisted.
+    cells_are_codes: bool = False
     demographic_subtype: str | None = None
+    # #592: declared missing-value rules for THIS column — persisted on the
+    # created column and honored by the import cell loop, numeric metadata,
+    # and exclude seeding. Same shape (and the same single-sourced validation)
+    # as the missing-values endpoint; None = the recognized-N/A defaults,
+    # [] = nothing is missing. Filled by the wizard (slab 4) / .sav (slab 5).
+    missing_values: list[dict] | None = None
+
+    @field_validator("missing_values")
+    @classmethod
+    def _normalize_missing_rules(cls, v: list[dict] | None) -> list[dict] | None:
+        if v is None:
+            return None
+        # #614: the import config is a SECOND write path to the same persisted
+        # field — it must run the same payload-internal checks as the PUT
+        # endpoint (dup labels / label-equals-value were bypassable here, and
+        # a config rule whose label matches real response text classifies
+        # those cells missing AT IMPORT). The DB-dependent #606 arms cannot
+        # run at config time (no column exists yet) and stay in
+        # missing_declaration._assert_no_label_collisions.
+        from ..services.missing_values import normalize_missing_rules_payload
+        return normalize_missing_rules_payload(v)
 
 
 class DatasetImportRequest(BaseModel):
@@ -106,6 +144,11 @@ class DatasetImportResponse(BaseModel):
     recognized_missing_labels: list[str] = Field(default_factory=list)
     # #414: present iff the request asked for participant linking.
     participant_link_report: ParticipantLinkReport | None = None
+    # #575: for each cells-are-codes column authored in the wizard, the codes
+    # observed in the data that the user did NOT give a label (kept numeric, never
+    # nulled) — keyed by column_index, so the results screen can prompt to label
+    # them. Empty when no value labels were authored.
+    value_label_unlabeled: dict[int, list[float]] = Field(default_factory=dict)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -156,10 +199,19 @@ class DatasetColumnResponse(BaseModel):
     sequence_order: int
     display_order: int | None = None
     scale_labels: list[str] | None = None
+    # #576: parallel to scale_labels — the numeric code each label carries. Lets
+    # the value-labels editor pre-fill code↔label pairs when editing.
+    scale_values: list[float] | None = None
     scale_points: int | None = None
     numeric_min: float | None = None
     numeric_max: float | None = None
     numeric_format: str | None = None
+    # #592: declared missing-value rules, parsed from the column's JSON (see
+    # services/missing_values.py for the rule shapes). None = no declaration
+    # (the recognized-N/A defaults). Declared on BOTH column schemas — the
+    # /data sibling is splat-constructed and silently drops undeclared
+    # fields (#586).
+    missing_values: list[dict] | None = None
     source: str = "imported"
     expression: str | None = None
     depends_on_column_ids: list[int] | None = None
@@ -219,6 +271,14 @@ class RecodeDefinitionSummary(BaseModel):
     is_primary: bool
     is_auto_detected: bool
     source_definition_id: int | None = None
+    # #600: THE reflection offset for a REVERSE recode, computed server-side by
+    # services/recode.py::effective_reverse_offset over the mapping's NON-null-set
+    # values (a missing/excluded key is not a scale point and must not set the
+    # endpoint). The client MUST display `offset - code` using this, never
+    # re-derive it from `mapping`: the null set needs the recognized-N/A rule and
+    # the column's missing declaration, so a client mirror would drift from
+    # storage (#578). None for non-reverse definitions.
+    reverse_offset: float | None = None
 
 
 class DatasetDataColumnResponse(BaseModel):
@@ -232,10 +292,22 @@ class DatasetDataColumnResponse(BaseModel):
     column_type: str
     sequence_order: int
     scale_labels: list[str] | None = None
+    # #576: parallel to scale_labels — the code each label carries. Declared on
+    # DatasetColumnResponse, but this schema is built by splatting that one's
+    # model_dump(), and Pydantic's default extra='ignore' silently DROPS any
+    # field this class doesn't declare. Omitting it stripped scale_values from
+    # /data — the only payload the value-labels editor reads — so its edit-mode
+    # pre-fill always missed and it re-seeded from the OBSERVED codes, silently
+    # dropping any declared zero-response level (#577's whole point).
+    scale_values: list[float] | None = None
     scale_points: int | None = None
     numeric_min: float | None = None
     numeric_max: float | None = None
     numeric_format: str | None = None
+    # #592: declared missing-value rules — same #586 rule as scale_values
+    # above: this splat-constructed sibling must re-declare the field or /data
+    # (the only payload the column editors read) silently drops it.
+    missing_values: list[dict] | None = None
     source: str = "imported"
     expression: str | None = None
     depends_on_column_ids: list[int] | None = None
@@ -472,6 +544,10 @@ class DatasetAppendResponse(BaseModel):
     next_row_id: str
     # #414: present iff the request asked for participant linking.
     participant_link_report: ParticipantLinkReport | None = None
+    # #575: appended values (on a value-labelled/scale column) that did NOT map to
+    # a numeric code — unknown labels/typos or codes with no declared label. They
+    # store as text with value_numeric NULL; surfaced so the append isn't silent.
+    unmapped_values: list[str] = Field(default_factory=list)
 
 
 class LinkByColumnRequest(BaseModel):

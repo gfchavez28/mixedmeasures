@@ -1,5 +1,5 @@
 import { Suspense, useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { Outlet, useParams, useLocation, useOutletContext } from 'react-router-dom'
+import { Outlet, useParams, useLocation, useOutletContext } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { projectsApi, scratchpadApi, type Project, type Conversation, type Dataset, type DatasetDataResponse, type DatasetList } from '@/lib/api'
 import TopRail from '@/components/TopRail'
@@ -27,6 +27,9 @@ export interface ProjectLayoutContext {
   closeCodebook: () => void
   openMemos: () => void
   closeMemos: () => void
+  /** The `?` dialog. Exposed so a dense keyboard surface can POINT at it —
+   *  the key is global, but nothing on the page said so (#663). */
+  openKeyboardHelp: () => void
   isCodebookOpen: boolean
   isMemosOpen: boolean
   setBreadcrumbLabel: (label: string) => void
@@ -136,6 +139,12 @@ function resolveEntityName(
     const docList = queryClient.getQueryData<{ id: number; name: string }[]>(['documents', projectId])
     return docList?.find(d => d.id === entityId)?.name || ''
   }
+  if (workspace === 'observations') {
+    const obs = queryClient.getQueryData<{ name: string }>(['observation', projectId, entityId])
+    if (obs?.name) return obs.name
+    const obsList = queryClient.getQueryData<{ id: number; name: string }[]>(['observations', projectId])
+    return obsList?.find(o => o.id === entityId)?.name || ''
+  }
   return ''
 }
 
@@ -233,9 +242,19 @@ export default function ProjectLayout() {
     // Resolve empty entity placeholder from child state or query cache
     for (let i = crumbs.length - 1; i >= 0; i--) {
       if (crumbs[i].label === '') {
+        // The id-extraction list must cover every workspace resolveEntityName
+        // knows about, or that branch is unreachable. It didn't: `documents` was
+        // missing here, so the documents branch has never run — document
+        // breadcrumbs only ever worked because the workbench sets
+        // `breadcrumbLabel` itself, which masked it. Adding observations without
+        // fixing this would have shipped the same dead branch again.
         const name = breadcrumbLabel || resolveEntityName(
           detectWorkspace(location.pathname),
-          Number(location.pathname.match(/\/(conversations|datasets)\/(\d+)/)?.[2] || '0'),
+          Number(
+            location.pathname.match(
+              /\/(conversations|datasets|documents|observations)\/(\d+)/,
+            )?.[2] || '0',
+          ),
           projectId,
           queryClient,
         )
@@ -251,6 +270,7 @@ export default function ProjectLayout() {
   const closeCodebook = useCallback(() => setIsCodebookOpen(false), [])
   const openMemos = useCallback(() => { bringToFront(setMemosZ); setIsMemosOpen(true) }, [bringToFront])
   const closeMemos = useCallback(() => setIsMemosOpen(false), [])
+  const openKeyboardHelp = useCallback(() => setIsKeyboardHelpOpen(true), [])
 
   // Global keyboard shortcuts: Cmd+K → search, ? → keyboard help
   useEffect(() => {
@@ -280,10 +300,11 @@ export default function ProjectLayout() {
     closeCodebook,
     openMemos,
     closeMemos,
+    openKeyboardHelp,
     isCodebookOpen,
     isMemosOpen,
     setBreadcrumbLabel,
-  }), [project, projectId, isCompact, openSearch, openCodebook, closeCodebook, openMemos, closeMemos, isCodebookOpen, isMemosOpen, setBreadcrumbLabel])
+  }), [project, projectId, isCompact, openSearch, openCodebook, closeCodebook, openMemos, closeMemos, openKeyboardHelp, isCodebookOpen, isMemosOpen, setBreadcrumbLabel])
 
   return (
     <div className="h-screen flex flex-col">

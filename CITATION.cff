@@ -11,8 +11,8 @@ abstract: >-
 authors:
   - family-names: Chavez
     given-names: George
-version: 1.2.0
-date-released: 2026-07-11
+version: 1.3.0
+date-released: 2026-08-02
 license: Apache-2.0
 repository-code: "https://github.com/gfchavez28/mixedmeasures"
 url: "https://mixedmeasures.com"

@@ -10,7 +10,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import { TypePickerPopover } from './TypePickerPopover'
 import { COLUMN_TYPES } from '@/lib/dataset-constants'
 

@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { FileInput, X, LoaderCircle, CircleCheck, CircleX, TriangleAlert, ChevronRight } from 'lucide-react'
 import { documentsApi, type SegmentationPreviewResponse, type DocumentImportResultItem } from '@/lib/api'

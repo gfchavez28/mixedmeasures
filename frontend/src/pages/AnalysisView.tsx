@@ -1,5 +1,5 @@
 import { useState, useRef, useMemo, useCallback, useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle, useDefaultLayout } from 'react-resizable-panels'
 import {

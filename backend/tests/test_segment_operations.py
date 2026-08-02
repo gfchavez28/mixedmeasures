@@ -84,6 +84,55 @@ def _visible_segments(db, conversation_id):
 
 
 # ===========================================================================
+# Parent-type dispatch fails CLOSED (slab-0 hardening for the Observations track)
+# ===========================================================================
+
+
+class TestParentTypeFailClosed:
+    """An unrecognized parent_type must RAISE, not silently target the wrong
+    parent. Both dispatch helpers were fail-open: _parent_filter fell through to
+    the DOCUMENT filter for any non-'conversation' value, and
+    _make_segment_fields left both FKs NULL (→ ck_segment_exactly_one_parent
+    violation at flush).
+
+    'observation' became a KNOWN parent in slab 3b (_PARENT_FK gained it for
+    the time ops + the reused unmerge), so the unknown-exemplar here is 'media'
+    — fittingly, the stale token the plan once used. The observation-specific
+    refusal moved to the TEXT ops (test_observation_time_ops.py::
+    TestTextOpParentGuards — a different error, by design).
+    """
+
+    def test_parent_filter_rejects_unknown(self):
+        from app.services.segment_operations import _parent_filter
+        with pytest.raises(ValueError, match="Unknown segment parent_type"):
+            _parent_filter("media", 1)
+
+    def test_make_segment_fields_rejects_unknown(self):
+        from app.services.segment_operations import _make_segment_fields
+        with pytest.raises(ValueError, match="Unknown segment parent_type"):
+            _make_segment_fields("media", 1)
+
+    @pytest.mark.parametrize("parent_type,expected_fk", [
+        ("conversation", "conversation_id"),
+        ("document", "document_id"),
+        ("observation", "observation_id"),
+    ])
+    def test_known_types_set_exactly_one_fk(self, parent_type, expected_fk):
+        from app.services.segment_operations import _parent_filter, _make_segment_fields
+        _parent_filter(parent_type, 1)  # must not raise
+        fields = _make_segment_fields(parent_type, 7)
+        set_fks = [k for k, v in fields.items() if v is not None]
+        assert set_fks == [expected_fk], (
+            f"expected only {expected_fk} set, got {set_fks}")
+
+    def test_public_op_rejects_unknown_parent_before_touching_db(self, db_session):
+        """The guard is REACHED in the real merge flow (transitively via
+        _parent_filter), so a mis-wired op can't run against the wrong parent."""
+        with pytest.raises(ValueError, match="Unknown segment parent_type"):
+            merge_segments(db_session, [1, 2], "media", 1, project_id=1, user_id=1)
+
+
+# ===========================================================================
 # Merge
 # ===========================================================================
 

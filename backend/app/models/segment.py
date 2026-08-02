@@ -21,6 +21,10 @@ class Segment(Base):
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=True, index=True)
     page_number = Column(Integer, nullable=True)    # page in source PDF (1-based), null for non-PDF
     heading_level = Column(Integer, nullable=True)   # 1-6 if segment was derived from a heading, else null
+    # Third parent (Observations track): a time-range clip on a recording's
+    # timeline. start_time/end_time (above) carry the range; text holds the
+    # clip's label (may be '').
+    observation_id = Column(Integer, ForeignKey("observations.id", ondelete="CASCADE"), nullable=True, index=True)
     group_id = Column(Integer, ForeignKey("segment_groups.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
@@ -45,6 +49,7 @@ class Segment(Base):
     # Relationships
     conversation = relationship("Conversation", back_populates="segments")
     document = relationship("Document", back_populates="segments")
+    observation = relationship("Observation", back_populates="segments")
     speaker = relationship("Speaker", back_populates="segments")
     group = relationship("SegmentGroup", back_populates="segments")
     code_applications = relationship("CodeApplication", back_populates="segment", cascade="all, delete-orphan")
@@ -68,12 +73,17 @@ class Segment(Base):
     )
 
     __table_args__ = (
+        # Exactly one of the three parents is non-null. Explicit-OR form (matches
+        # ck_code_application_exactly_one_target's style, not arithmetic).
         CheckConstraint(
-            '(conversation_id IS NOT NULL AND document_id IS NULL) OR '
-            '(conversation_id IS NULL AND document_id IS NOT NULL)',
+            '(conversation_id IS NOT NULL AND document_id IS NULL AND observation_id IS NULL) OR '
+            '(conversation_id IS NULL AND document_id IS NOT NULL AND observation_id IS NULL) OR '
+            '(conversation_id IS NULL AND document_id IS NULL AND observation_id IS NOT NULL)',
             name='ck_segment_exactly_one_parent'
         ),
         Index("ix_segments_conversation_sequence", "conversation_id", "sequence_order"),
         Index("ix_segments_conversation_starred", "conversation_id", "is_starred"),
         Index("ix_segments_document_sequence", "document_id", "sequence_order"),
+        Index("ix_segments_observation_sequence", "observation_id", "sequence_order"),
+        Index("ix_segments_observation_time", "observation_id", "start_time"),
     )

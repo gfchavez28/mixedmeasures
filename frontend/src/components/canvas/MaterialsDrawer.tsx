@@ -1,9 +1,10 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { X, ChevronDown, ChevronRight, Check, Plus, ExternalLink } from 'lucide-react'
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu'
 import { excerptsApi, materialsApi, memosApi } from '@/lib/api'
+import { excerptDisplayLabel, excerptAttributionLine } from '@/lib/canvas-excerpt'
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -109,9 +110,14 @@ export default function MaterialsDrawer({
       lowerFilter
         ? excerpts.filter(
             e =>
-              e.excerpt_text.toLowerCase().includes(lowerFilter) ||
-              (e.speaker_name?.toLowerCase().includes(lowerFilter) ?? false) ||
-              (e.conversation_name?.toLowerCase().includes(lowerFilter) ?? false),
+              // #630 sibling: filter on what the row DISPLAYS. A clip's
+              // excerpt_text is empty and it has no speaker/conversation, so
+              // the old three-field test could never match one — it was
+              // unfindable by the observation name shown on its own row.
+              excerptDisplayLabel(e).toLowerCase().includes(lowerFilter) ||
+              excerptAttributionLine(e, { includeSpeaker: true })
+                .toLowerCase()
+                .includes(lowerFilter),
           )
         : excerpts,
     [excerpts, lowerFilter],
@@ -209,6 +215,13 @@ export default function MaterialsDrawer({
             ) : (
               filteredExcerpts.map(e => {
                 const isOnCanvas = onCanvasExcerpts.has(e.id)
+                // #630: a clip has no speaker and no conversation, and a
+                // time-range quote carries no text — so the old
+                // `{excerpt_text}` over `[speaker, conversation]` row rendered
+                // completely blank. Both lines now come from the same helpers
+                // the embed uses, so the drawer and the embed cannot drift.
+                const label = excerptDisplayLabel(e)
+                const attribution = excerptAttributionLine(e, { includeSpeaker: true })
                 return (
                   <ContextMenu key={e.id}>
                     <ContextMenuTrigger asChild>
@@ -216,16 +229,20 @@ export default function MaterialsDrawer({
                         type="button"
                         onClick={() => onInsertExcerpt(e.id)}
                         disabled={inserting}
+                        // Guards the empty case generally: a dataset-value
+                        // excerpt is the other parent kind that can render thin,
+                        // and a button with no text has no accessible name.
+                        aria-label={`Insert ${[label, attribution].filter(Boolean).join(' — ') || 'excerpt'}`}
                         className={`w-full text-left px-2 py-1.5 rounded hover:bg-mm-bg transition-colors disabled:opacity-40 ${
                           isOnCanvas ? 'opacity-60 bg-mm-bg/50' : ''
                         }`}
                       >
                         <p className="text-xs text-mm-text italic line-clamp-2 leading-relaxed">
-                          {e.excerpt_text}
+                          {label}
                         </p>
                         <div className="flex items-center gap-1 mt-0.5">
                           <p className="text-[10px] text-mm-text-muted truncate">
-                            {[e.speaker_name, e.conversation_name].filter(Boolean).join(' \u00b7 ')}
+                            {attribution}
                           </p>
                           {isOnCanvas && (
                             <span className="ml-auto flex items-center gap-0.5 text-[10px] text-mm-text-faint shrink-0">

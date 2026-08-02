@@ -1,30 +1,36 @@
 import { useState, useMemo, useCallback, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Check, ChevronDown, ChevronRight } from 'lucide-react'
-import type { ConversationOption, TextColumnInfo, DocumentListItem } from '@/lib/api'
+import type { ConversationOption, TextColumnInfo, DocumentListItem, Observation } from '@/lib/api'
 
 interface SourceSelectorProps {
   conversations: ConversationOption[]
   textColumns: TextColumnInfo[]
   documents?: DocumentListItem[]
+  observations?: Observation[]
   selectedConversationIds: Set<number>
   selectedTextColumnIds: Set<number>
   selectedDocumentIds?: Set<number>
+  selectedObservationIds?: Set<number>
   onConversationChange: (ids: Set<number>) => void
   onTextColumnChange: (ids: Set<number>) => void
   onDocumentChange?: (ids: Set<number>) => void
-  onAllSourcesChange?: (convIds: Set<number>, ccolIds: Set<number>, docIds: Set<number>) => void
+  onObservationChange?: (ids: Set<number>) => void
+  onAllSourcesChange?: (convIds: Set<number>, ccolIds: Set<number>, docIds: Set<number>, obsIds: Set<number>) => void
 }
 
 export default function SourceSelector({
   conversations,
   textColumns,
   documents = [],
+  observations = [],
   selectedConversationIds,
   selectedTextColumnIds,
   selectedDocumentIds = new Set(),
+  selectedObservationIds = new Set(),
   onConversationChange,
   onTextColumnChange,
   onDocumentChange,
+  onObservationChange,
   onAllSourcesChange,
 }: SourceSelectorProps) {
   const [convsExpanded, setConvsExpanded] = useState(true)
@@ -45,37 +51,41 @@ export default function SourceSelector({
     return Array.from(map.entries())
   }, [textColumns])
 
-  // Documents expand state
+  // Documents / observations expand state
   const [docsExpanded, setDocsExpanded] = useState(true)
+  const [obsExpanded, setObsExpanded] = useState(true)
 
   // "All sources" state
-  const totalSources = conversations.length + textColumns.length + documents.length
-  const totalSelected = selectedConversationIds.size + selectedTextColumnIds.size + selectedDocumentIds.size
+  const totalSources = conversations.length + textColumns.length + documents.length + observations.length
+  const totalSelected = selectedConversationIds.size + selectedTextColumnIds.size + selectedDocumentIds.size + selectedObservationIds.size
   const allEmpty = totalSelected === 0
   const allSelected = totalSelected === totalSources && totalSources > 0
 
   const toggleAll = useCallback(() => {
     if (allSelected) {
       if (onAllSourcesChange) {
-        onAllSourcesChange(new Set(), new Set(), new Set())
+        onAllSourcesChange(new Set(), new Set(), new Set(), new Set())
       } else {
         onConversationChange(new Set())
         onTextColumnChange(new Set())
         onDocumentChange?.(new Set())
+        onObservationChange?.(new Set())
       }
     } else {
       const convIds = new Set(conversations.map(c => c.id))
       const ccolIds = new Set(textColumns.map(c => c.column_id))
       const docIds = new Set(documents.map(d => d.id))
+      const obsIds = new Set(observations.map(o => o.id))
       if (onAllSourcesChange) {
-        onAllSourcesChange(convIds, ccolIds, docIds)
+        onAllSourcesChange(convIds, ccolIds, docIds, obsIds)
       } else {
         onConversationChange(convIds)
         onTextColumnChange(ccolIds)
         onDocumentChange?.(docIds)
+        onObservationChange?.(obsIds)
       }
     }
-  }, [allSelected, conversations, textColumns, documents, onConversationChange, onTextColumnChange, onDocumentChange, onAllSourcesChange])
+  }, [allSelected, conversations, textColumns, documents, observations, onConversationChange, onTextColumnChange, onDocumentChange, onObservationChange, onAllSourcesChange])
 
   // Conversation toggles
   const toggleConversation = useCallback((id: number) => {
@@ -134,6 +144,25 @@ export default function SourceSelector({
       onDocumentChange?.(new Set(documents.map(d => d.id)))
     }
   }, [allDocsSelected, documents, onDocumentChange])
+
+  // Observation toggles
+  const toggleObservation = useCallback((id: number) => {
+    const next = new Set(selectedObservationIds)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    onObservationChange?.(next)
+  }, [selectedObservationIds, onObservationChange])
+
+  const allObsSelected = observations.length > 0 && observations.every(o => selectedObservationIds.has(o.id))
+  const someObsSelected = !allObsSelected && observations.some(o => selectedObservationIds.has(o.id))
+
+  const toggleAllObs = useCallback(() => {
+    if (allObsSelected) {
+      onObservationChange?.(new Set())
+    } else {
+      onObservationChange?.(new Set(observations.map(o => o.id)))
+    }
+  }, [allObsSelected, observations, onObservationChange])
 
   const toggleDatasetExpand = useCallback((datasetId: number) => {
     setExpandedDatasets(prev => {
@@ -364,8 +393,53 @@ export default function SourceSelector({
         </div>
       )}
 
+      {/* Observations section */}
+      {observations.length > 0 && (
+        <div role="none">
+          <div
+            role="treeitem"
+            tabIndex={-1}
+            aria-expanded={obsExpanded}
+            aria-checked={allObsSelected}
+            className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-mm-surface-hover rounded"
+            onClick={toggleAllObs}
+          >
+            <button
+              className="flex-shrink-0 p-0.5 -ml-0.5 rounded hover:bg-mm-border-light"
+              onClick={e => { e.stopPropagation(); setObsExpanded(!obsExpanded) }}
+              aria-label={obsExpanded ? 'Collapse observations' : 'Expand observations'}
+            >
+              {obsExpanded
+                ? <ChevronDown className="w-3 h-3 text-mm-text-faint" />
+                : <ChevronRight className="w-3 h-3 text-mm-text-faint" />
+              }
+            </button>
+            {renderCheckbox(allObsSelected, someObsSelected)}
+            <span className="text-xs font-semibold text-mm-text-muted uppercase tracking-wide">Observations</span>
+            <span className="text-xs text-mm-text-faint ml-auto tabular-nums">{observations.length}</span>
+          </div>
+          {obsExpanded && (
+            <div role="group" className="ml-4 space-y-0.5">
+              {observations.map(obs => (
+                <div
+                  key={obs.id}
+                  role="treeitem"
+                  tabIndex={-1}
+                  aria-checked={selectedObservationIds.has(obs.id)}
+                  className="flex items-center gap-2 px-2 py-1 text-sm rounded cursor-pointer hover:bg-mm-surface-hover"
+                  onClick={() => toggleObservation(obs.id)}
+                >
+                  {renderCheckbox(selectedObservationIds.has(obs.id))}
+                  <span className="truncate">{obs.name}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Empty state */}
-      {conversations.length === 0 && textColumns.length === 0 && documents.length === 0 && (
+      {conversations.length === 0 && textColumns.length === 0 && documents.length === 0 && observations.length === 0 && (
         <p className="text-xs text-mm-text-faint text-center py-4">No sources available.</p>
       )}
     </div>

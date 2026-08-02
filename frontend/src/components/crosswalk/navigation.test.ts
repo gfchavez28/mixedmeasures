@@ -9,7 +9,7 @@
  * DomainPickerPopover. Today no consumer reads it; the URL just carries it.
  */
 import { describe, it, expect, vi } from 'vitest'
-import type { NavigateFunction } from 'react-router-dom'
+import type { NavigateFunction } from 'react-router'
 import { navigateToScaleScore, parseFocusRow, formatFocusRow } from './navigation'
 
 describe('navigateToScaleScore (#320)', () => {

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { CircleCheck } from 'lucide-react'
 import { toast } from 'sonner'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
-import { codebookApi, codesApi, categoriesApi, conversationsApi, textCodingApi, projectPortabilityApi } from '@/lib/api'
+import { codebookApi, codesApi, categoriesApi, conversationsApi, textCodingApi, projectPortabilityApi, extractApiError } from '@/lib/api'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import type { CodebookTreeResponse, CodebookCategoryNode } from '@/lib/api'
 import { useCodebookState } from '@/hooks/useCodebookState'
@@ -935,8 +935,11 @@ export default function CodebookView() {
     try {
       await projectPortabilityApi.exportCodebook(projectId, format)
       toast.success(format === 'qdc' ? 'QDC codebook exported' : 'Codebook exported')
-    } catch {
-      toast.error('Codebook export failed')
+    } catch (err) {
+      // The backend refuses a QDC export of an empty codebook with an
+      // actionable 400 (#633) — a generic failure toast would hide the one
+      // sentence that tells the researcher what to do.
+      toast.error(extractApiError(err, 'Codebook export failed'))
     } finally {
       setIsExportingCodebook(false)
     }
@@ -954,8 +957,11 @@ export default function CodebookView() {
       queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
       queryClient.invalidateQueries({ queryKey: ['categories', projectId] })
       queryClient.invalidateQueries({ queryKey: ['codebook-tree', projectId] })
-    } catch {
-      toast.error('Codebook import failed')
+    } catch (err) {
+      // The import returns actionable 400s ("Invalid XML: …", "No <Codes>
+      // element found…", the depth/count caps) — surface them rather than
+      // swallowing the only diagnosis the researcher gets.
+      toast.error(extractApiError(err, 'Codebook import failed'))
     }
   }, [projectId, queryClient])
 

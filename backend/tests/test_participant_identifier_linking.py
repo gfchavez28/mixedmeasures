@@ -466,8 +466,11 @@ def test_identifier_column_and_links_roundtrip_mmproject(db_session, tmp_path):
     export → import-as-new: column_type rides reflection as its value string,
     DatasetRow.participant_id remaps to the NEW project's participants, and
     participant uuids are FRESH-stamped (the unique-index collision trap).
-    The manifest must carry format version 2 — an older build must refuse the
-    file at the gate instead of crashing on ColumnType("identifier")."""
+    The manifest must carry a format version of AT LEAST 2 — an older build must
+    refuse the file at the gate instead of crashing on ColumnType("identifier").
+    Asserted as a FLOOR, not a literal: later tracks legitimately bump the version
+    (3 = Observations), and pinning the constant here just breaks on every bump
+    without protecting anything the floor doesn't already protect."""
     import zipfile
     from pathlib import Path
 
@@ -486,7 +489,8 @@ def test_identifier_column_and_links_roundtrip_mmproject(db_session, tmp_path):
     buf = export_project(db, PROJECT_ID, Path("/nonexistent"))
     with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as zf:
         manifest = json.loads(zf.read("manifest.json"))
-    assert manifest["format_version"] == CURRENT_FORMAT_VERSION == 2
+    assert manifest["format_version"] == CURRENT_FORMAT_VERSION
+    assert CURRENT_FORMAT_VERSION >= 2  # the #414 identifier gate's floor
 
     mm = tmp_path / "roundtrip.mmproject"
     mm.write_bytes(buf.getvalue())

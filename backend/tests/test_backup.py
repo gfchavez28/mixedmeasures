@@ -31,6 +31,7 @@ def _create_test_db(path: Path):
     conn.execute("CREATE TABLE conversations (id INTEGER PRIMARY KEY, project_id INTEGER)")
     conn.execute("CREATE TABLE datasets (id INTEGER PRIMARY KEY, project_id INTEGER)")
     conn.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY, project_id INTEGER)")
+    conn.execute("CREATE TABLE observations (id INTEGER PRIMARY KEY, project_id INTEGER)")
     conn.execute("INSERT INTO projects VALUES (1, 'Test Project')")
     conn.commit()
     conn.close()
@@ -113,13 +114,81 @@ def test_create_backup_manifest_fields(tmp_path):
         manifest = json.loads(zf.read("manifest.json"))
 
     assert manifest["format_version"] == 1
-    assert manifest["app_version"] == "1.2.0"
+    assert manifest["app_version"] == "1.3.0"
     assert "created_at" in manifest
     assert manifest["backup_type"] == "auto"
     assert manifest["db_size_bytes"] > 0
     assert manifest["document_count"] == 1
     assert len(manifest["project_summaries"]) == 1
     assert manifest["project_summaries"][0]["name"] == "Test Project"
+
+
+def test_manifest_summary_counts_observations(tmp_path):
+    """An observation-only project must not read as empty in the restore preview.
+
+    The fixture is deliberately DEGENERATE-PROOF: this project has observations
+    and ZERO conversations/datasets/documents, so under the pre-v1.3.0 summary
+    (which queried only those three) it reported "0 conv, 0 ds, 0 doc" — a
+    researcher previewing the restore of their whole study saw nothing at all
+    and could reasonably conclude the backup was empty and abort. A fixture
+    carrying a conversation as well would pass either way.
+    """
+    db_path = tmp_path / "test.db"
+    _create_test_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO projects VALUES (2, 'Observation Only')")
+    conn.execute("INSERT INTO observations VALUES (1, 2)")
+    conn.execute("INSERT INTO observations VALUES (2, 2)")
+    conn.commit()
+    conn.close()
+
+    docs_dir = tmp_path / "documents"
+    docs_dir.mkdir()
+    backup_dir = tmp_path / "backups"
+
+    info = create_backup(db_path, docs_dir, tmp_path / "media", backup_dir, "manual")
+    preview = validate_backup(backup_dir / info.filename)
+
+    summary = next(
+        p for p in preview.manifest.project_summaries if p.name == "Observation Only"
+    )
+    assert summary.observation_count == 2
+    # The other three stay zero — this project genuinely has none, and the point
+    # is that the row is no longer all-zero.
+    assert (summary.conversation_count, summary.dataset_count, summary.document_count) == (0, 0, 0)
+
+
+def test_validate_accepts_pre_v130_manifest_without_observation_count(tmp_path):
+    """A backup written before v1.3.0 carries no `observation_count` key.
+
+    `validate_backup` parses the STORED manifest.json straight into the model,
+    so making the field required would raise ValidationError here — i.e. every
+    backup a researcher made before upgrading would become unrestorable. This
+    pins the default that prevents that.
+    """
+    db_path = tmp_path / "test.db"
+    _create_test_db(db_path)
+    docs_dir = tmp_path / "documents"
+    docs_dir.mkdir()
+    backup_dir = tmp_path / "backups"
+
+    info = create_backup(db_path, docs_dir, tmp_path / "media", backup_dir, "manual")
+    backup_path = backup_dir / info.filename
+
+    # Rewrite the archive with the key stripped from every project summary,
+    # reproducing a genuine pre-v1.3.0 backup while keeping the DB intact.
+    with zipfile.ZipFile(str(backup_path), "r") as zf:
+        entries = {name: zf.read(name) for name in zf.namelist()}
+    manifest = json.loads(entries["manifest.json"])
+    for summary in manifest["project_summaries"]:
+        del summary["observation_count"]
+    entries["manifest.json"] = json.dumps(manifest).encode()
+    with zipfile.ZipFile(str(backup_path), "w") as zf:
+        for name, payload in entries.items():
+            zf.writestr(name, payload)
+
+    preview = validate_backup(backup_path)
+    assert preview.manifest.project_summaries[0].observation_count == 0
 
 
 def test_create_backup_no_db_raises(tmp_path):

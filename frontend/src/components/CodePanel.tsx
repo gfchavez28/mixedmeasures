@@ -2,7 +2,6 @@ import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, useImper
 import { SELECTED_TINT } from '@/lib/selection'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Search, Plus, Ellipsis, Pencil, Check, X, Power, PowerOff, StickyNote, FolderInput, ChevronLeft } from 'lucide-react'
-import { useDraggable } from '@dnd-kit/core'
 import { type Code, codesApi, categoriesApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -20,6 +19,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { cn, getCodeColor } from '@/lib/utils'
+import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import { ColorSwatchPicker, CATEGORY_COLORS } from '@/components/ColorSwatchPicker'
 import { ColorDotButton } from '@/components/ColorDotButton'
 import { CreatableComboList } from '@/components/ui/creatable-combobox'
@@ -116,6 +116,13 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
     }
     return Array.from(seen.values())
   }, [codes])
+
+  // #663/#664: the panel's own labels come from the SAME map the row menus and
+  // the chord resolver use. Built from the UNFILTERED codes on purpose — a
+  // search narrows what's listed, not which keys exist, and deriving
+  // "are there categories?" from the filtered set would flip the digit rule
+  // mid-search.
+  const shortcutLabels = useCodeShortcutLabels(codes)
 
   // Filter and separate codes into groups
   const { universalCodes, categorizedGroups, uncategorizedCodes, allDisplayedCodes } = useMemo(() => {
@@ -531,7 +538,7 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
                   <div className="px-4 py-1.5 bg-mm-blue/12 text-xs font-medium text-mm-blue-text">
                     Universal Codes
                   </div>
-                  {universalCodes.map(code => renderCodeItem(code, String(code.numeric_id)))}
+                  {universalCodes.map(code => renderCodeItem(code, shortcutLabels.get(code.id)))}
                 </div>
               )}
 
@@ -583,12 +590,21 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
                   )}
                   {uncategorizedCodes.length > 0 && (
                     <div className="px-4 py-0.5 text-[10px] text-mm-text-faint">
+                      {/* #663: the old copy read "Organize into categories for
+                        * keyboard shortcuts" even when these codes ALREADY had
+                        * one — a single digit works while the project has no
+                        * categories. It only becomes true once a category
+                        * exists, which is exactly when the digit stops working
+                        * (2–9 turn into the chord prefix space). */}
                       {categorizedGroups.length > 0
-                        ? 'Categorize for shortcuts'
-                        : 'Tip: Organize into categories for keyboard shortcuts'}
+                        ? 'No shortcut — categorize to chord these'
+                        : 'Press a code’s number to apply it'}
                     </div>
                   )}
-                  {uncategorizedCodes.map(code => renderCodeItem(code))}
+                  {/* The label map decides — it mirrors the resolver, so a code
+                    * with no reachable key shows nothing rather than a digit
+                    * that does nothing (#664). */}
+                  {uncategorizedCodes.map(code => renderCodeItem(code, shortcutLabels.get(code.id)))}
                 </div>
               )}
 
@@ -651,11 +667,6 @@ function CodeItem({
     () => buildCategoryOptions(categoriesData?.categories ?? []),
     [categoriesData],
   )
-
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
-    id: `code-${code.id}`,
-    data: { type: 'code' as const, code, shortcutLabel: shortcutLabel || String(code.numeric_id) },
-  })
 
   const updateMutation = useMutation({
     mutationFn: (description: string) =>
@@ -784,9 +795,6 @@ function CodeItem({
 
   return (
     <div
-      ref={setNodeRef}
-      {...listeners}
-      {...attributes}
       data-code-item
       className={cn(
         'px-4 py-2 flex items-center gap-3 hover:bg-mm-surface-hover cursor-pointer border-b border-mm-border-subtle group',
@@ -795,7 +803,6 @@ function CodeItem({
         isSelected && SELECTED_TINT,
         isFocused && `ring-2 ring-inset ring-[hsl(var(--mm-blue)/0.6)] ${SELECTED_TINT}`,
         isPendingApply && `shadow-[inset_4px_0_0_0_hsl(var(--mm-blue)/0.7)] ${SELECTED_TINT}`,
-        isDragging && 'opacity-40'
       )}
       // #434: the dimmed (opacity-50) no-segment-selected / inactive-code state
       // is faux-disabled — convey it to AT so the low-contrast text falls under

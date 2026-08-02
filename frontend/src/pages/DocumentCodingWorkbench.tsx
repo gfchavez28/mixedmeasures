@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, type CSSProperties, type ReactNode } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Virtuoso, type VirtuosoHandle, type Components } from 'react-virtuoso'
 import {
@@ -1117,7 +1117,8 @@ export default function DocumentCodingWorkbench() {
             size="icon"
             disabled={!history.canUndo}
             onClick={() => history.undo()}
-            title="Undo (Ctrl+Z)"
+            aria-label="Undo"
+              title="Undo (Ctrl+Z)"
           >
             <Undo2 className="w-4 h-4" />
           </Button>
@@ -1126,7 +1127,8 @@ export default function DocumentCodingWorkbench() {
             size="icon"
             disabled={!history.canRedo}
             onClick={() => history.redo()}
-            title="Redo (Ctrl+Y)"
+            aria-label="Redo"
+              title="Redo (Ctrl+Y)"
           >
             <Redo2 className="w-4 h-4" />
           </Button>

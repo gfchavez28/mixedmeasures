@@ -24,6 +24,7 @@ from ..models.statistical_test import StatisticalTest
 from ..models.code_category import CodeCategory
 from ..models.note import Note
 from ..models.document import Document
+from ..models.observation import Observation
 from ..models.canvas import Canvas
 from ..schemas.project import (
     ProjectCreate,
@@ -36,6 +37,7 @@ from ..schemas.project import (
     RecentConversation,
     RecentDataset,
     RecentDocument,
+    RecentObservation,
 )
 from .helpers import visible_segment_filter, _get_project_or_404
 from ..schemas.segment import SpeakerResponse, SpeakerColorUpdateRequest
@@ -76,6 +78,10 @@ def project_to_response(project: Project, db: Session) -> ProjectResponse:
         Document.project_id == project.id
     ).scalar() or 0
 
+    observation_count = db.query(func.count(Observation.id)).filter(
+        Observation.project_id == project.id
+    ).scalar() or 0
+
     coder_count = project_coder_counts(db, [project.id]).get(project.id, 0)
 
     return ProjectResponse(
@@ -90,6 +96,7 @@ def project_to_response(project: Project, db: Session) -> ProjectResponse:
         code_count=code_count,
         dataset_count=dataset_count,
         document_count=document_count,
+        observation_count=observation_count,
         participant_count=participant_count,
         coder_count=coder_count,
         category_level_names=project.category_level_names,
@@ -150,6 +157,13 @@ async def list_projects(
         .all()
     )
 
+    observation_counts = dict(
+        db.query(Observation.project_id, func.count(Observation.id))
+        .filter(Observation.project_id.in_(project_ids))
+        .group_by(Observation.project_id)
+        .all()
+    )
+
     coder_counts = project_coder_counts(db, project_ids)
 
     # #422(c): "last activity" = most-recent audit entry per project. Audit is written
@@ -186,6 +200,7 @@ async def list_projects(
                 code_count=code_counts.get(p.id, 0),
                 dataset_count=dataset_counts.get(p.id, 0),
                 document_count=document_counts.get(p.id, 0),
+                observation_count=observation_counts.get(p.id, 0),
                 participant_count=participant_counts.get(p.id, 0),
                 coder_count=coder_counts.get(p.id, 0),
                 category_level_names=p.category_level_names,
@@ -433,10 +448,25 @@ async def get_project_summary(
         Document.project_id == project_id
     ).scalar() or 0
 
+    observation_count = db.query(func.count(Observation.id)).filter(
+        Observation.project_id == project_id
+    ).scalar() or 0
+
     document_segments = db.query(func.count(Segment.id)).join(
         Document, Segment.document_id == Document.id
     ).filter(
         Document.project_id == project_id,
+        *visible_segment_filter(),
+    ).scalar() or 0
+
+    # #627: project-wide clip total for the Overview's Observations stat cell.
+    # `recent_observations` carries per-observation counts for the four most
+    # recent only, so the sub-label needs its own aggregate — same shape as
+    # document_segments directly above.
+    observation_clips = db.query(func.count(Segment.id)).join(
+        Observation, Segment.observation_id == Observation.id
+    ).filter(
+        Observation.project_id == project_id,
         *visible_segment_filter(),
     ).scalar() or 0
 
@@ -474,6 +504,41 @@ async def get_project_summary(
             for d in recent_docs
         ]
 
+    # Recent observations (4 most recently updated). Batched exactly like the
+    # documents block above — never a per-row count.
+    recent_obs_rows = db.query(Observation).filter(
+        Observation.project_id == project_id
+    ).order_by(Observation.updated_at.desc()).limit(4).all()
+
+    recent_observations = []
+    if recent_obs_rows:
+        ro_ids = [o.id for o in recent_obs_rows]
+        obs_clip_counts = dict(
+            db.query(Segment.observation_id, func.count(Segment.id))
+            .filter(
+                Segment.observation_id.in_(ro_ids),
+                *visible_segment_filter(),
+            )
+            .group_by(Segment.observation_id)
+            .all()
+        )
+        # An observation has no speaker spine, so participant_only=False (same
+        # posture as documents).
+        obs_coded_counts = coded_segment_counts(
+            db, Segment.observation_id, ro_ids, participant_only=False
+        )
+        recent_observations = [
+            RecentObservation(
+                id=o.id,
+                name=o.name,
+                updated_at=o.updated_at,
+                segment_count=obs_clip_counts.get(o.id, 0),
+                coded_segment_count=obs_coded_counts.get(o.id, 0),
+                has_media=o.media_filename is not None,
+            )
+            for o in recent_obs_rows
+        ]
+
     # Document notes count
     doc_notes_count = db.query(func.count(Note.id)).join(
         Document, Note.document_id == Document.id
@@ -489,20 +554,26 @@ async def get_project_summary(
     ).scalar() or 0
 
     # Coded segments: also count document segments (invariant J-A; #398 applies
-    # the universal-code exclusion here too).
+    # the universal-code exclusion here too) and observation clips (Observations
+    # track — media segments coded on a timeline count toward the project total).
     coded_doc_segments = coded_segment_count_for_project(
         db, project_id, source="document"
+    )
+    coded_observation_segments = coded_segment_count_for_project(
+        db, project_id, source="observation"
     )
 
     return ProjectSummaryResponse(
         conversations=conversations,
         datasets=datasets,
         documents=document_count,
+        observations=observation_count,
         participants=participants,
         codes=codes,
         categories=categories,
-        coded_segments=coded_segments + coded_doc_segments,
+        coded_segments=coded_segments + coded_doc_segments + coded_observation_segments,
         document_segments=document_segments,
+        observation_clips=observation_clips,
         materials=materials_count,
         statistical_tests=statistical_tests,
         memos=memos,
@@ -514,6 +585,7 @@ async def get_project_summary(
         recent_conversations=recent_conversations,
         recent_datasets=recent_datasets,
         recent_documents=recent_documents,
+        recent_observations=recent_observations,
     )
 
 

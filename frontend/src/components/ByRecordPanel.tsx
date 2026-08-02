@@ -1,7 +1,7 @@
 import { useMemo, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { SELECTED_CARD } from '@/lib/selection'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { ExternalLink, MapPin, Quote } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
@@ -98,7 +98,8 @@ export default function ByRecordPanel({
     }
   }, [selectedValueIds])
 
-  // Card keyboard navigation (arrow keys only — [/] handled by CommentView)
+  // Card keyboard navigation (arrow keys only — [/] handled by TextCodingView,
+  // via useCodeChordShortcuts' extraKeys hatch)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement

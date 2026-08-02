@@ -15,7 +15,7 @@ from ..models.dataset import Dataset, DatasetColumn, DatasetValue
 from ..models.recode import RecodeDefinition
 # #384: exclude recognized N/A values from cross-tab categories (different query
 # shape from the shared grouping loader — a paired two-column join — so filter inline).
-from .dataset_import import _is_na
+from .missing_values import column_missing_rules, is_missing
 from .grouping import order_value_labels
 
 logger = logging.getLogger(__name__)
@@ -140,11 +140,15 @@ def compute_cross_tabulation(
             "chi_square": None,
         }
 
-    # Count joint frequencies (#384: skip pairs where either value is a
-    # recognized N/A — those rows are missing, not a real cross-tab category).
+    # Count joint frequencies (#384: skip pairs where either value is missing
+    # — those rows are missing, not a real cross-tab category). #592: the
+    # decision is column-aware — each axis is judged by ITS column's declared
+    # rules (REPLACE semantics), defaults when undeclared.
+    row_rules = column_missing_rules(row_col)
+    col_rules = column_missing_rules(col_col)
     joint_counts: Counter[tuple[str, str]] = Counter()
     for row_val, col_val in pairs:
-        if _is_na(row_val) or _is_na(col_val):
+        if is_missing(row_val, row_rules) or is_missing(col_val, col_rules):
             continue
         joint_counts[(row_val, col_val)] += 1
 

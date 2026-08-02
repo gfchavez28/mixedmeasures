@@ -5,21 +5,40 @@ import logging
 import os
 import shutil
 import tempfile
-import wave
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
-from ..config import get_media_dir
 from ..database import get_db
 from ..models.conversation import Conversation, VIDEO_FORMATS
 from ..models.user import User
 from ..schemas.conversation import MediaOffsetUpdate, MediaUploadResponse
+from ..services import media_storage
 from ..services.audit import log_action
-from .helpers import _get_project_or_404
+from ..services.media_duration import (  # noqa: F401 — re-exported, see __all__
+    _EBML_DEFAULT_TIMECODE_SCALE,
+    _EBML_DURATION,
+    _EBML_INFO,
+    _EBML_MAX_ELEMENTS,
+    _EBML_SEGMENT,
+    _EBML_TIMECODE_SCALE,
+    _ebml_find,
+    _ebml_read_id,
+    _ebml_read_size,
+    _ebml_vint_len,
+    _extract_duration,
+    _mp4_duration,
+    _mp4_find_box,
+    _webm_duration,
+    MAX_MEDIA_DURATION_SECONDS,
+    sane_duration,
+    sanitize_duration_hint,
+)
+from .helpers import _get_observation_or_404, _get_project_or_404
 from .conversations import conversation_to_response
 
 logger = logging.getLogger(__name__)
@@ -30,12 +49,17 @@ MAX_MEDIA_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB (raised from 500 MB for video; s
 UPLOAD_CHUNK = 1024 * 1024  # 1 MiB — stream granularity (never buffer whole file)
 
 # VIDEO_FORMATS is hosted in models/conversation.py (services consume it too);
-# re-exported here because this router is the format seam's home.
+# re-exported here because this router is the format seam's home. The duration
+# probes moved to services/media_duration.py for the same reason (#574's startup
+# backfill is not an HTTP caller and must not import a router) and are
+# re-exported here unchanged — the #578 pattern, so callsites stay put.
 __all__ = ["VIDEO_FORMATS", "MAX_MEDIA_SIZE"]
 
 
-def _media_dir(project_id: int, conversation_id: int) -> Path:
-    return get_media_dir() / str(project_id) / str(conversation_id)
+# The on-disk path convention lives in ONE place — services/media_storage.py —
+# and is shared by the conversation layout ({id}/) and the observation layout
+# (obs-{id}/), by the response stat block, and by .mmproject export/import. This
+# module deliberately has no local copy of it.
 
 
 def _detect_format(header: bytes) -> str | None:
@@ -135,33 +159,6 @@ def _refine_mp4_family(filepath: Path) -> str:
     return "m4a"
 
 
-def _extract_duration(filepath: Path, fmt: str) -> float | None:
-    """Extract audio duration in seconds via tinytag (MP3/M4A) or wave stdlib (WAV).
-
-    Best-effort: never raises on a malformed/uploaded file — returns None.
-    (tinytag replaced mutagen, which is GPLv2+ and incompatible with the
-    project's Apache-2.0 license; 2026-06-01.)
-    """
-    try:
-        if fmt in ("mp3", "m4a", "mp4", "mov", "webm"):
-            from tinytag import TinyTag
-            tag = TinyTag.get(str(filepath))
-            return float(tag.duration) if tag.duration is not None else None
-        elif fmt == "wav":
-            with wave.open(str(filepath), "rb") as wf:
-                frames = wf.getnframes()
-                rate = wf.getframerate()
-                if rate > 0:
-                    return frames / rate
-            return None
-    except Exception as e:
-        # Broad by design: the input is an untrusted upload and the contract is
-        # "best-effort, never raise". tinytag raises TinyTagException (and may
-        # surface struct/value errors) on partial frames; wave raises wave.Error.
-        logger.warning("Failed to extract duration from %s: %s", filepath, e)
-    return None
-
-
 def _mp3_is_vbr(filepath: Path) -> bool | None:
     """Best-effort VBR detection: scan the MP3's first audio frame for a
     Xing/VBRI (VBR) or Info (CBR) header.
@@ -211,6 +208,286 @@ def _get_conversation(db: Session, project_id: int, conversation_id: int, user_i
     if not conversation:
         raise HTTPException(404, "Conversation not found")
     return conversation
+
+
+MEDIA_MIME = {
+    "mp3": "audio/mpeg",
+    "m4a": "audio/mp4",
+    "wav": "audio/wav",
+    "mp4": "video/mp4",
+    "mov": "video/quicktime",
+    "webm": "video/webm",
+}
+
+
+# ── Owner-agnostic recording handlers (Observations track, slab 1) ──────────
+#
+# A recording hangs off a Conversation (an aid beside the transcript) or an
+# Observation (the material itself). NOTHING about attaching, streaming or
+# detaching one differs between them: the format sniff, the mp4-family refine,
+# the chunked spool, the ENOSPC guard, the atomic replace, the stale-format
+# sweep and the six media columns are identical. Only three things differ, and
+# they are the three arguments below:
+#
+#   owner       — the ALREADY-RESOLVED ORM row  ⚠️ see the authz note
+#   owner_kind  — media_storage.CONVERSATION | OBSERVATION. Doubles as the
+#                 on-disk dir segment AND the audit entity_type (same word).
+#   (response)  — built by the CALLER, since each owner has its own schema.
+#
+# ⚠️ AUTHZ: these handlers do NO ownership checking. They take an owner that the
+# ROUTER already gated (`_get_conversation` / `_get_observation_or_404`). That is
+# deliberate: it keeps the gate call inside each endpoint, by name, where the
+# fail-closed AST sweep (tests/test_ownership_gate_sweep.py) can SEE it. An
+# injected owner-resolver would have hidden the gate behind a parameter and
+# forced a GATE_TOKENS/allowlist entry — i.e. it would have bought DRY at the
+# cost of the guarantee that exists because ownership rotted in six routers at
+# once (#553). Never call these from anywhere that hasn't gated the owner.
+
+
+async def attach_recording(
+    db: Session, *, project_id: int, owner, owner_kind: str,
+    file: UploadFile, user_id: int, duration_hint: float | None = None,
+) -> None:
+    """Attach a recording to a media owner. Sets the six media columns + commits.
+
+    `duration_hint` is a client-measured length used ONLY when the server cannot
+    read one itself (WebM, or an unparsable header). It is what keeps an
+    Observation's timeline from being NULL-length on those files.
+    """
+    media_path = media_storage.media_owner_dir(project_id, owner_kind, owner.id)
+
+    # Stream to a temp file (bounded memory). The old recording is left untouched
+    # until the new file is fully written and validated.
+    fmt, tmp = await _stream_upload_to_temp(file, media_path, MAX_MEDIA_SIZE)
+
+    # Atomically swap the new file into place, then drop any stale original of a
+    # *different* prior format. os.replace is atomic within the dir, so a crash
+    # here can't leave a half-written original.
+    dest = media_path / f"original.{fmt}"
+    try:
+        os.replace(str(tmp), str(dest))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    for stale in media_path.glob("original.*"):
+        if stale != dest:
+            try:
+                stale.unlink()
+            except OSError:
+                logger.warning("Could not remove stale media file %s", stale)
+
+    # Server probe first; the client's measurement is a FALLBACK, never an
+    # override — we prefer the bytes on disk to anything the caller asserts.
+    duration = _extract_duration(dest, fmt)
+    if duration is None:
+        duration = sanitize_duration_hint(duration_hint)
+    is_vbr = _detect_vbr(dest, fmt)
+
+    owner.media_filename = file.filename or f"media.{fmt}"
+    owner.media_format = fmt
+    owner.media_type = "video" if fmt in VIDEO_FORMATS else "audio"
+    owner.media_duration_seconds = duration
+    # Reset on every new upload. For an Observation this is definitionally 0 (the
+    # recording IS the timeline) and no endpoint can change it — there is no
+    # /offset mount for observations.
+    owner.media_offset_seconds = 0.0
+    owner.media_is_vbr = is_vbr
+
+    log_action(
+        db,
+        action="media_upload",
+        entity_type=owner_kind,
+        entity_id=owner.id,
+        user_id=user_id,
+        project_id=project_id,
+        details={
+            "filename": owner.media_filename,
+            "format": fmt,
+            "duration_seconds": duration,
+            "is_vbr": is_vbr,
+        },
+    )
+    db.commit()
+    db.refresh(owner)
+
+
+def _copy_file_chunked(src: Path, dest_dir: Path, fmt: str) -> Path:
+    """Copy a recording into `dest_dir` as original.{fmt}. Blocking — call in a threadpool.
+
+    Same shape as the upload path: stage to a temp file IN THE TARGET DIR, then
+    os.replace it into place (atomic within a dir), so a crash or a full disk can
+    never leave a truncated `original.*` that stats as a real, playable file.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".copy-", suffix=".part", dir=str(dest_dir))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+            # Chunked: a 4 GB recording must never be buffered whole (#567).
+            shutil.copyfileobj(inp, out, UPLOAD_CHUNK)
+        dest = dest_dir / f"original.{fmt}"
+        os.replace(str(tmp), str(dest))
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        if exc.errno == errno.ENOSPC:
+            raise HTTPException(
+                507, "Not enough disk space to copy the recording."
+            ) from exc
+        raise
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    # Drop any stale original of a *different* prior format (an id can be reused
+    # after a delete, so the target dir is not guaranteed to be empty).
+    for stale in dest_dir.glob("original.*"):
+        if stale != dest:
+            try:
+                stale.unlink()
+            except OSError:
+                logger.warning("Could not remove stale media file %s", stale)
+    return dest
+
+
+async def copy_recording(
+    db: Session, *, project_id: int,
+    source_owner, source_kind: str,
+    target_owner, target_kind: str,
+    user_id: int,
+) -> None:
+    """Re-use an existing recording on another source, without a re-upload.
+
+    This is the escape hatch (D17). It COPIES the file — it never shares the path.
+    Both `delete_conversation` and `delete_observation` rmtree their owner's media
+    dir, so a shared file would be deleted out from under the surviving source.
+    The disk cost is real and the UI states it.
+
+    It carries the FILE, never the coding: the new source starts with no codes.
+    That is why this is "also code this as an Observation", not "convert" —
+    nothing moves.
+    """
+    if not source_owner.media_filename or not source_owner.media_format:
+        raise HTTPException(409, "That source has no recording to re-use.")
+
+    src = (
+        media_storage.media_owner_dir(project_id, source_kind, source_owner.id)
+        / f"original.{source_owner.media_format}"
+    )
+    if not src.exists():
+        # The row claims a recording the disk doesn't have (#551).
+        raise HTTPException(409, "That source's recording file is missing from disk.")
+
+    fmt = source_owner.media_format
+    dest_dir = media_storage.media_owner_dir(project_id, target_kind, target_owner.id)
+
+    # A same-disk copy of a multi-GB file takes tens of seconds — off the event
+    # loop, or it stalls every other request (and Electron's /health probe).
+    await run_in_threadpool(_copy_file_chunked, src, dest_dir, fmt)
+
+    target_owner.media_filename = source_owner.media_filename
+    target_owner.media_format = fmt
+    target_owner.media_type = source_owner.media_type
+    target_owner.media_duration_seconds = source_owner.media_duration_seconds
+    target_owner.media_is_vbr = source_owner.media_is_vbr
+    # Never copied: a conversation's offset aligns its TRANSCRIPT to the recording.
+    # On an observation the recording IS the timeline, so an inherited offset would
+    # shear every clip against it. A fresh attach resets it either way.
+    target_owner.media_offset_seconds = 0.0
+
+    log_action(
+        db,
+        action="media_copy",
+        entity_type=target_kind,
+        entity_id=target_owner.id,
+        user_id=user_id,
+        project_id=project_id,
+        details={
+            "filename": target_owner.media_filename,
+            "format": fmt,
+            "source_kind": source_kind,
+            "source_id": source_owner.id,
+        },
+    )
+    db.commit()
+    db.refresh(target_owner)
+
+
+def stream_recording(project_id: int, owner, owner_kind: str) -> FileResponse:
+    """Stream an owner's recording with HTTP Range support for seeking."""
+    if not owner.media_filename:
+        raise HTTPException(404, "No media file attached")
+
+    media_path = (
+        media_storage.media_owner_dir(project_id, owner_kind, owner.id)
+        / f"original.{owner.media_format}"
+    )
+    if not media_path.is_file():
+        raise HTTPException(404, "Media file not found on disk")
+
+    return FileResponse(
+        path=str(media_path),
+        media_type=MEDIA_MIME.get(owner.media_format, "application/octet-stream"),
+        filename=owner.media_filename,
+        headers={
+            # no-cache (revalidate, not no-store): a replaced recording must
+            # never serve stale bytes for up to a day (#549). NOTE Starlette's
+            # FileResponse sets an ETag but does NOT answer If-None-Match with
+            # 304, so revalidation is a refetch — negligible on the loopback
+            # deployment. The client additionally cache-busts via the
+            # media_version query param, so app-driven fetches never rely on
+            # revalidation at all. Revisit with real 304 support if a
+            # networked (VPS) deployment ships.
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "private, no-cache",
+        },
+    )
+
+
+def detach_recording(
+    db: Session, *, project_id: int, owner, owner_kind: str, user_id: int,
+) -> None:
+    """Remove an owner's recording from disk and clear its six media columns."""
+    if not owner.media_filename:
+        raise HTTPException(404, "No media file attached")
+
+    media_path = media_storage.media_owner_dir(project_id, owner_kind, owner.id)
+    try:
+        if media_path.is_dir():
+            shutil.rmtree(str(media_path))
+    except Exception:
+        logger.warning("Failed to clean up media files at %s", media_path)
+
+    old_filename = owner.media_filename
+    owner.media_filename = None
+    owner.media_format = None
+    owner.media_type = None
+    owner.media_duration_seconds = None
+    owner.media_offset_seconds = 0.0
+    owner.media_is_vbr = None
+
+    log_action(
+        db,
+        action="media_delete",
+        entity_type=owner_kind,
+        entity_id=owner.id,
+        user_id=user_id,
+        project_id=project_id,
+        details={"filename": old_filename},
+    )
+    db.commit()
+    db.refresh(owner)
+
+
+def media_upload_response(owner) -> MediaUploadResponse:
+    """The shared upload payload — the six media columns, same for every owner."""
+    return MediaUploadResponse(
+        media_filename=owner.media_filename,
+        media_format=owner.media_format,
+        media_type=owner.media_type,
+        media_duration_seconds=owner.media_duration_seconds,
+        media_offset_seconds=owner.media_offset_seconds,
+        media_is_vbr=owner.media_is_vbr,
+    )
 
 
 async def _stream_upload_to_temp(
@@ -282,70 +559,55 @@ async def upload_media(
     project_id: int,
     conversation_id: int,
     file: UploadFile,
+    duration_seconds: float | None = Form(None),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Upload an audio or video file for a conversation."""
+    """Upload an audio or video file for a conversation.
+
+    `duration_seconds` is the browser's own measurement, used only if the server
+    cannot read the length from the file (WebM has no reader here).
+    """
     conversation = _get_conversation(db, project_id, conversation_id, user.id)
-    media_path = _media_dir(project_id, conversation_id)
+    await attach_recording(
+        db, project_id=project_id, owner=conversation,
+        owner_kind=media_storage.CONVERSATION, file=file, user_id=user.id,
+        duration_hint=duration_seconds,
+    )
+    return media_upload_response(conversation)
 
-    # Stream to a temp file (bounded memory). Old audio is left untouched
-    # until the new file is fully written and validated.
-    fmt, tmp = await _stream_upload_to_temp(file, media_path, MAX_MEDIA_SIZE)
 
-    # Atomically swap the new file into place, then drop any stale original
-    # of a *different* prior format. os.replace is atomic within the dir, so
-    # a crash here can't leave a half-written original.
-    dest = media_path / f"original.{fmt}"
-    try:
-        os.replace(str(tmp), str(dest))
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    for stale in media_path.glob("original.*"):
-        if stale != dest:
-            try:
-                stale.unlink()
-            except OSError:
-                logger.warning("Could not remove stale media file %s", stale)
+@router.post("/from-observation/{observation_id}", response_model=MediaUploadResponse)
+async def reuse_observation_recording(
+    project_id: int,
+    conversation_id: int,
+    observation_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Re-use an observation's recording on this conversation (D17, reverse).
 
-    # Extract metadata
-    duration = _extract_duration(dest, fmt)
-    is_vbr = _detect_vbr(dest, fmt)
+    The mirror of the observation-side hatch: someone who coded a session's
+    timeline and now wants to code what was SAID imports the transcript as usual
+    and then attaches the recording they already uploaded, instead of sending the
+    same gigabytes twice.
 
-    # Update conversation
-    conversation.media_filename = file.filename or f"media.{fmt}"
-    conversation.media_format = fmt
-    conversation.media_type = "video" if fmt in VIDEO_FORMATS else "audio"
-    conversation.media_duration_seconds = duration
-    conversation.media_offset_seconds = 0.0  # Reset on new upload
-    conversation.media_is_vbr = is_vbr
+    Deliberately shaped as an ATTACH, not a "create a Conversation from this
+    observation". There is no bare conversation-create endpoint — a Conversation
+    is born from a transcript and cannot exist without segments — so a "create"
+    form of this would have to manufacture a transcript-less conversation, which
+    is precisely the dead-end state the importer already refuses to make.
+    """
+    conversation = _get_conversation(db, project_id, conversation_id, user.id)
+    observation = _get_observation_or_404(db, project_id, observation_id, user.id)
 
-    log_action(
-        db,
-        action="media_upload",
-        entity_type="conversation",
-        entity_id=conversation.id,
+    await copy_recording(
+        db, project_id=project_id,
+        source_owner=observation, source_kind=media_storage.OBSERVATION,
+        target_owner=conversation, target_kind=media_storage.CONVERSATION,
         user_id=user.id,
-        project_id=project_id,
-        details={
-            "filename": conversation.media_filename,
-            "format": fmt,
-            "duration_seconds": duration,
-            "is_vbr": is_vbr,
-        },
     )
-    db.commit()
-    db.refresh(conversation)
-
-    return MediaUploadResponse(
-        media_filename=conversation.media_filename,
-        media_format=conversation.media_format,
-        media_type=conversation.media_type,
-        media_duration_seconds=conversation.media_duration_seconds,
-        media_offset_seconds=conversation.media_offset_seconds,
-        media_is_vbr=conversation.media_is_vbr,
-    )
+    return media_upload_response(conversation)
 
 
 @router.get("/stream")
@@ -357,40 +619,7 @@ async def stream_media(
 ):
     """Stream the media file with HTTP Range support for seeking."""
     conversation = _get_conversation(db, project_id, conversation_id, user.id)
-
-    if not conversation.media_filename:
-        raise HTTPException(404, "No media file attached to this conversation")
-
-    media_path = _media_dir(project_id, conversation_id) / f"original.{conversation.media_format}"
-    if not media_path.is_file():
-        raise HTTPException(404, "Media file not found on disk")
-
-    media_types = {
-        "mp3": "audio/mpeg",
-        "m4a": "audio/mp4",
-        "wav": "audio/wav",
-        "mp4": "video/mp4",
-        "mov": "video/quicktime",
-        "webm": "video/webm",
-    }
-
-    return FileResponse(
-        path=str(media_path),
-        media_type=media_types.get(conversation.media_format, "application/octet-stream"),
-        filename=conversation.media_filename,
-        headers={
-            "Accept-Ranges": "bytes",
-            # no-cache (revalidate, not no-store): a replaced recording must
-            # never serve stale bytes for up to a day (#549). NOTE Starlette's
-            # FileResponse sets an ETag but does NOT answer If-None-Match with
-            # 304, so revalidation is a refetch — negligible on the loopback
-            # deployment. The client additionally cache-busts via the
-            # media_version query param, so app-driven fetches never rely on
-            # revalidation at all. Revisit with real 304 support if a
-            # networked (VPS) deployment ships.
-            "Cache-Control": "private, no-cache",
-        },
-    )
+    return stream_recording(project_id, conversation, media_storage.CONVERSATION)
 
 
 @router.delete("")
@@ -402,39 +631,10 @@ async def delete_media(
 ):
     """Remove the media file from a conversation."""
     conversation = _get_conversation(db, project_id, conversation_id, user.id)
-
-    if not conversation.media_filename:
-        raise HTTPException(404, "No media file attached to this conversation")
-
-    # Delete file from disk
-    media_path = _media_dir(project_id, conversation_id)
-    try:
-        if media_path.is_dir():
-            shutil.rmtree(str(media_path))
-    except Exception:
-        logger.warning("Failed to clean up media files at %s", media_path)
-
-    # Clear conversation fields
-    old_filename = conversation.media_filename
-    conversation.media_filename = None
-    conversation.media_format = None
-    conversation.media_type = None
-    conversation.media_duration_seconds = None
-    conversation.media_offset_seconds = 0.0
-    conversation.media_is_vbr = None
-
-    log_action(
-        db,
-        action="media_delete",
-        entity_type="conversation",
-        entity_id=conversation.id,
-        user_id=user.id,
-        project_id=project_id,
-        details={"filename": old_filename},
+    detach_recording(
+        db, project_id=project_id, owner=conversation,
+        owner_kind=media_storage.CONVERSATION, user_id=user.id,
     )
-    db.commit()
-    db.refresh(conversation)
-
     return conversation_to_response(conversation, db)
 
 

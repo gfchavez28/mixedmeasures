@@ -45,9 +45,34 @@ from ..models.user import User
 from ..routers.helpers import visible_segment_filter
 from .coding_layers import (
     build_effective_code_map,
+    consensus_eligible_segment_clause,
+    consensus_scoped_segments,
     non_consensus_filter,
     resolve_effective_code,
 )
+
+# Segment parent FK -> source-key tag. A MAP, never a ternary: the two-arm form
+# (`("conv", cid) if cid is not None else ("doc", did)`) silently produced
+# ("doc", None) for any clip, which then UNIONED coder engagement across every
+# observation in the project — a coder who touched observation A read as engaged
+# on observation B's clips, manufacturing spurious real 0s. Same shape as the
+# slab-4c prefix-map fix in code_analysis.py.
+_SEGMENT_SOURCE_TAGS = (("conv", "conversation_id"), ("doc", "document_id"),
+                        ("obs", "observation_id"))
+
+
+def _segment_source_key(conv_id: int | None, doc_id: int | None,
+                        obs_id: int | None) -> tuple[str, int]:
+    """The (tag, id) source key for a segment, from its three parent FKs.
+
+    Raises rather than guessing: exactly one parent is non-NULL by CHECK
+    constraint, so a fall-through means the caller's SELECT is missing a column —
+    a wiring bug that must fail loudly, not degrade into a phantom source.
+    """
+    for tag, value in (("conv", conv_id), ("doc", doc_id), ("obs", obs_id)):
+        if value is not None:
+            return (tag, value)
+    raise ValueError("segment has no parent FK — SELECT is missing a parent column")
 
 # Landis & Koch (1977) κ bands; Krippendorff (2004) α cutoffs. Echoed back in the
 # result so the frontend renders the band without hardcoding thresholds.
@@ -242,8 +267,9 @@ def gather_coder_applications(
     - ``multi_sources`` — sources engaged by ≥2 coders (the only contributors);
       empty set when none.
 
-    ``ukey`` is ``("seg", id)`` / ``("val", id)``; source keys ``("conv"|"doc", id)``
-    / ``("col", id)`` — tag-prefixed, so segment and dataset-value ids never collide.
+    ``ukey`` is ``("seg", id)`` / ``("val", id)``; source keys
+    ``("conv"|"doc"|"obs", id)`` / ``("col", id)`` — tag-prefixed, so ids drawn from
+    four independent sequences can never collide.
     """
     coder_q = db.query(User).filter(
         User.coder_type.notin_(SYSTEM_CODER_TYPES),
@@ -268,24 +294,34 @@ def gather_coder_applications(
         CodeApplication.user_id.in_(coder_id_list),
     ]
 
-    # Segment applications (conversations + documents).
+    # Segment applications — all THREE parents, but observation clips only when
+    # their segmentation is FROZEN (D18 / D43). `consensus_scoped_segments` is that
+    # rule: the shipped three-parent project scope composed with
+    # `consensus_eligible_segment_clause()`. Never hand-roll the scope here — D18
+    # single-sourced it precisely so a fourth copy can't drift.
+    #
+    # ⚠️ Open cuts must NEVER enter this gather. Option-B engagement is recorded at
+    # the SOURCE (`engaged[src]` below), and `Segment` has no creator column, so
+    # every coder's clips share one observation_id = one source key. The backfill
+    # then hands each coder a hard 0 on clips they never saw: Alice's clip reads
+    # [1,0], Bob's [0,1]. That is κ = -1.0 exactly when balanced, and α = -1 + 1/n
+    # — and `compute_irr` pools every code into one headline alpha, so a single
+    # open observation would corrupt a project whose transcripts agree perfectly.
     seg_app_rows = (
-        db.query(Segment.id, Segment.conversation_id, Segment.document_id,
-                 CodeApplication.user_id, CodeApplication.code_id)
-        .join(CodeApplication, CodeApplication.segment_id == Segment.id)
-        .outerjoin(Conversation, Segment.conversation_id == Conversation.id)
-        .outerjoin(Document, Segment.document_id == Document.id)
-        .join(Code, CodeApplication.code_id == Code.id)
-        .join(User, CodeApplication.user_id == User.id)
-        .filter(
-            or_(Conversation.project_id == project_id, Document.project_id == project_id),
-            *visible_segment_filter(),
-            *base_filters,
+        consensus_scoped_segments(
+            db.query(Segment.id, Segment.conversation_id, Segment.document_id,
+                     Segment.observation_id,
+                     CodeApplication.user_id, CodeApplication.code_id)
+            .join(CodeApplication, CodeApplication.segment_id == Segment.id)
+            .join(Code, CodeApplication.code_id == Code.id)
+            .join(User, CodeApplication.user_id == User.id),
+            project_id,
         )
+        .filter(*visible_segment_filter(), *base_filters)
         .all()
     )
-    for seg_id, conv_id, doc_id, uid, code_id in seg_app_rows:
-        src = ("conv", conv_id) if conv_id is not None else ("doc", doc_id)
+    for seg_id, conv_id, doc_id, obs_id, uid, code_id in seg_app_rows:
+        src = _segment_source_key(conv_id, doc_id, obs_id)
         ukey = ("seg", seg_id)
         unit_source[ukey] = src
         engaged[src].add(uid)
@@ -320,16 +356,28 @@ def gather_coder_applications(
     # (a blank survey response is not a codeable unit — asymmetry is deliberate).
     conv_ids = [sid for (t, sid) in multi_sources if t == "conv"]
     doc_ids = [sid for (t, sid) in multi_sources if t == "doc"]
+    obs_ids = [sid for (t, sid) in multi_sources if t == "obs"]
     col_ids = [sid for (t, sid) in multi_sources if t == "col"]
-    if conv_ids or doc_ids:
-        for seg_id, conv_id, doc_id in (
-            db.query(Segment.id, Segment.conversation_id, Segment.document_id)
+    if conv_ids or doc_ids or obs_ids:
+        # The eligibility clause rides here too. `multi_sources` can only contain a
+        # frozen observation (pass 1 filtered it), so this is belt-and-braces — but
+        # the two passes must agree on WHICH units exist, and an unfrozen clip
+        # entering only here would be a unit with no applications, i.e. an all-zero
+        # row of pure fabricated disagreement.
+        for seg_id, conv_id, doc_id, obs_id in (
+            db.query(Segment.id, Segment.conversation_id, Segment.document_id,
+                     Segment.observation_id)
             .filter(
                 *visible_segment_filter(),
-                or_(Segment.conversation_id.in_(conv_ids), Segment.document_id.in_(doc_ids)),
+                consensus_eligible_segment_clause(),
+                or_(
+                    Segment.conversation_id.in_(conv_ids),
+                    Segment.document_id.in_(doc_ids),
+                    Segment.observation_id.in_(obs_ids),
+                ),
             ).all()
         ):
-            src = ("conv", conv_id) if conv_id is not None else ("doc", doc_id)
+            src = _segment_source_key(conv_id, doc_id, obs_id)
             unit_source.setdefault(("seg", seg_id), src)
     if col_ids:
         for val_id, col_id in (

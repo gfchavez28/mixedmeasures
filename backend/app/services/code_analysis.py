@@ -17,12 +17,14 @@ from ..models.code_category import CodeCategory
 from ..models.segment import Segment
 from ..models.conversation import Conversation
 from ..models.document import Document
+from ..models.observation import Observation
 from ..models.speaker import Speaker
 from ..models.participant import Participant
 from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, ColumnType
-from ..models.excerpt import Excerpt
+from ..models.excerpt import Excerpt, segment_has_any_quote_filter
 from .coding_layers import LAYER_CONSENSUS, layer_origin_filter, non_consensus_filter
 from .grouping import order_value_labels
+from .missing_values import column_missing_rules, is_missing
 
 # ── Rounding precision constants ─────────────────────────────────────────────
 DISPLAY_PERCENTAGE_PRECISION = 1  # round(x, 1) for display percentages (e.g. 42.9%)
@@ -371,6 +373,90 @@ def _get_document_frequencies(
     }
 
 
+def _get_observation_frequencies(
+    db: Session,
+    project_id: int,
+    code_ids: list[int] | None = None,
+    observation_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
+) -> dict:
+    """Compute code frequency stats from observation clips only (slab 4c).
+
+    Mirrors ``_get_document_frequencies`` — clips have no speaker, so there is no
+    facilitator/participant dimension; the same ``_coder_filter`` threading gives
+    consensus-layer selection for free (a FROZEN observation's clips carry a
+    consensus layer since D18).
+    """
+    base = (
+        db.query(
+            CodeApplication.code_id,
+            func.count(func.distinct(CodeApplication.segment_id)).label("clip_count"),
+            func.count(func.distinct(Segment.observation_id)).label("obs_count"),
+        )
+        .filter(CodeApplication.segment_id.isnot(None))
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .join(Observation, Segment.observation_id == Observation.id)
+        .filter(
+            Observation.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+        )
+    )
+
+    if observation_ids:
+        base = base.filter(Segment.observation_id.in_(observation_ids))
+    if code_ids:
+        base = base.filter(CodeApplication.code_id.in_(code_ids))
+    base = _coder_filter(base, coder_ids, layer_scope)
+
+    freq_rows = base.group_by(CodeApplication.code_id).all()
+    freq_map = {row[0]: (row[1], row[2]) for row in freq_rows}
+
+    # Totals
+    universal_ids = _get_universal_code_ids(db, project_id)
+
+    coded_clip_query = (
+        db.query(func.count(func.distinct(CodeApplication.segment_id)))
+        .filter(CodeApplication.segment_id.isnot(None))
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .join(Observation, Segment.observation_id == Observation.id)
+        .filter(
+            Observation.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+        )
+    )
+    if universal_ids:
+        coded_clip_query = coded_clip_query.filter(~CodeApplication.code_id.in_(universal_ids))
+    if observation_ids:
+        coded_clip_query = coded_clip_query.filter(Segment.observation_id.in_(observation_ids))
+    coded_clip_query = _coder_filter(coded_clip_query, coder_ids, layer_scope)
+    total_coded_clips = coded_clip_query.scalar() or 0
+
+    total_obs_query = (
+        db.query(func.count(func.distinct(Segment.observation_id)))
+        .join(CodeApplication, CodeApplication.segment_id == Segment.id)
+        .join(Observation, Segment.observation_id == Observation.id)
+        .filter(
+            CodeApplication.segment_id.isnot(None),
+            Observation.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+        )
+    )
+    if observation_ids:
+        total_obs_query = total_obs_query.filter(Segment.observation_id.in_(observation_ids))
+    total_obs_query = _coder_filter(total_obs_query, coder_ids, layer_scope)
+    total_observations = total_obs_query.scalar() or 0
+
+    return {
+        "freq_map": freq_map,
+        "total_coded_clips": total_coded_clips,
+        "total_observations": total_observations,
+    }
+
+
 # ── Public: get_code_frequencies ─────────────────────────────────────────────
 
 def get_code_frequencies(
@@ -384,11 +470,13 @@ def get_code_frequencies(
     document_ids: list[int] | None = None,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    observation_ids: list[int] | None = None,
 ) -> dict:
     """Compute code frequency statistics.
 
     source: "conversations" | "text" | "all" (legacy "comments" coerced to "text")
-    When source is "conversations" or "all", document segments are included.
+    When source is "conversations" or "all", document segments and observation
+    clips are included (the segment-shaped sources travel together).
     """
     # Backward-compat: legacy callers may still pass "comments"
     if source == "comments":
@@ -409,6 +497,7 @@ def get_code_frequencies(
     conv_data = None
     comment_data = None
     doc_data = None
+    obs_data = None
 
     if source in ("conversations", "all"):
         conv_data = _get_conversation_frequencies(
@@ -427,6 +516,13 @@ def get_code_frequencies(
             coder_ids=coder_ids,
             layer_scope=layer_scope,
         )
+        obs_data = _get_observation_frequencies(
+            db, project_id,
+            code_ids=code_ids,
+            observation_ids=observation_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
+        )
 
     if source in ("text", "all"):
         comment_data = _get_comment_frequencies(
@@ -437,10 +533,16 @@ def get_code_frequencies(
             layer_scope=layer_scope,
         )
 
-    # Build frequencies
-    total_coded_segments = (conv_data["total_coded_segments"] if conv_data else 0) + (doc_data["total_coded_doc_segments"] if doc_data else 0)
+    # Build frequencies — coded clips fold into the segment total (a clip IS a
+    # segment; a per-code count that omitted it would disagree with "N uses").
+    total_coded_segments = (
+        (conv_data["total_coded_segments"] if conv_data else 0)
+        + (doc_data["total_coded_doc_segments"] if doc_data else 0)
+        + (obs_data["total_coded_clips"] if obs_data else 0)
+    )
     total_conversations = conv_data["total_conversations"] if conv_data else 0
     total_documents = doc_data["total_documents"] if doc_data else 0
+    total_observations = obs_data["total_observations"] if obs_data else 0
     total_participants = conv_data["total_participants"] if conv_data else 0
     unlinked_speaker_count = conv_data["unlinked_speaker_count"] if conv_data else 0
     total_coded_texts = comment_data["total_coded_texts"] if comment_data else 0
@@ -461,13 +563,16 @@ def get_code_frequencies(
         if conv_data:
             seg_c, conv_c, part_c = conv_data["freq_map"].get(code.id, (0, 0, 0))
             doc_seg_c, doc_c = doc_data["freq_map"].get(code.id, (0, 0)) if doc_data else (0, 0)
-            combined_seg = seg_c + doc_seg_c
+            obs_clip_c, obs_c = obs_data["freq_map"].get(code.id, (0, 0)) if obs_data else (0, 0)
+            combined_seg = seg_c + doc_seg_c + obs_clip_c
             entry["segment_count"] = combined_seg
             entry["segment_percentage"] = round(combined_seg / total_coded_segments * 100, DISPLAY_PERCENTAGE_PRECISION) if total_coded_segments else 0.0
             entry["conversation_count"] = conv_c
             entry["conversation_percentage"] = round(conv_c / total_conversations * 100, DISPLAY_PERCENTAGE_PRECISION) if total_conversations else 0.0
             entry["document_count"] = doc_c
             entry["document_percentage"] = round(doc_c / total_documents * 100, DISPLAY_PERCENTAGE_PRECISION) if total_documents else 0.0
+            entry["observation_count"] = obs_c
+            entry["observation_percentage"] = round(obs_c / total_observations * 100, DISPLAY_PERCENTAGE_PRECISION) if total_observations else 0.0
             entry["participant_count"] = part_c
             entry["participant_percentage"] = round(part_c / total_participants * 100, DISPLAY_PERCENTAGE_PRECISION) if total_participants else 0.0
         else:
@@ -477,6 +582,8 @@ def get_code_frequencies(
             entry["conversation_percentage"] = 0.0
             entry["document_count"] = 0
             entry["document_percentage"] = 0.0
+            entry["observation_count"] = 0
+            entry["observation_percentage"] = 0.0
             entry["participant_count"] = 0
             entry["participant_percentage"] = 0.0
 
@@ -499,6 +606,7 @@ def get_code_frequencies(
         "total_coded_segments": total_coded_segments,
         "total_conversations": total_conversations,
         "total_documents": total_documents,
+        "total_observations": total_observations,
         "total_participants": total_participants,
         "total_codes_active": len(frequencies),
         "unlinked_speaker_count": unlinked_speaker_count,
@@ -523,11 +631,14 @@ def get_segments_with_context(
     document_ids: list[int] | None = None,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    observation_ids: list[int] | None = None,
 ) -> dict:
-    """Get coded segments with surrounding context, grouped by conversation and document.
+    """Get coded segments with surrounding context, grouped by conversation,
+    document, and observation (D25 — once frequencies count clips, a Content
+    tab that omits them is a defect-shaped split-brain).
 
     Returns focal segments (those with the given code applied) plus
-    preceding/following context segments from the same conversation/document.
+    preceding/following context segments from the same parent.
     """
     code = (
         db.query(Code)
@@ -578,17 +689,11 @@ def get_segments_with_context(
     paged_apps = all_apps[offset:offset + limit]
     has_more = (offset + limit) < total_segments
 
-    if not paged_apps:
-        return {
-            "code_id": code.id,
-            "code_name": code.name,
-            "code_color": code.color,
-            "category_name": code.category.name if code.category else None,
-            "total_segments": total_segments,
-            "has_more": has_more,
-            "conversations": [],
-        }
-
+    # #618: NO early return on an empty conversation arm — the document and
+    # observation gathers below must still run (a doc-only or clip-only code
+    # used to render an EMPTY Content view while its frequency badge said N
+    # uses). The conversation block is empty-safe: every lookup is `.in_()` on
+    # an empty set or guarded, and `conversations` ends [].
     focal_by_conv: dict[int, list[int]] = defaultdict(list)
     focal_seg_ids = set()
     conv_ids_needed = set()
@@ -642,11 +747,12 @@ def get_segments_with_context(
     for seg_id, cid in focal_codes:
         codes_by_seg[seg_id].append(cid)
 
-    # Look up whole-segment excerpts (whole-segment excerpt lookup)
+    # Quote flag: shape-agnostic (whole OR time-range — slab 5 D32); char-range
+    # excerpts deliberately don't mark a segment quoted (pre-slab-5 behavior).
     quoted_seg_ids = set(
         eid for (eid,) in db.query(Excerpt.segment_id).filter(
             Excerpt.segment_id.in_(focal_seg_ids),
-            Excerpt.start_offset.is_(None),
+            segment_has_any_quote_filter(),
         ).all()
     )
 
@@ -805,7 +911,7 @@ def get_segments_with_context(
         doc_quoted_seg_ids = set(
             eid for (eid,) in db.query(Excerpt.segment_id).filter(
                 Excerpt.segment_id.in_(doc_focal_seg_ids),
-                Excerpt.start_offset.is_(None),
+                segment_has_any_quote_filter(),
             ).all()
         ) if doc_focal_seg_ids else set()
 
@@ -873,15 +979,178 @@ def get_segments_with_context(
                 "segments": segments_out,
             })
 
+    # ── Observation clips (D25) ──
+    obs_app_query = (
+        db.query(CodeApplication.segment_id, Segment.observation_id)
+        .filter(CodeApplication.segment_id.isnot(None))
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .join(Observation, Segment.observation_id == Observation.id)
+        .filter(
+            CodeApplication.code_id == code_id,
+            Observation.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+        )
+    )
+    if observation_ids:
+        obs_app_query = obs_app_query.filter(Segment.observation_id.in_(observation_ids))
+    obs_app_query = _coder_filter(obs_app_query, coder_ids, layer_scope)
+    obs_app_query = obs_app_query.order_by(Segment.observation_id, Segment.sequence_order)
+    # #491: distinct-segment grain (see the conversation branch above).
+    seen_clip_ids: set[int] = set()
+    all_obs_apps = [
+        (sid, oid) for sid, oid in obs_app_query.all()
+        if not (sid in seen_clip_ids or seen_clip_ids.add(sid))
+    ]
+
+    obs_total_clips = len(all_obs_apps)
+    # Same simple-pagination posture as documents (no shared pagination).
+    obs_paged_apps = all_obs_apps[:limit]
+
+    obs_focal_by_obs: dict[int, list[int]] = defaultdict(list)
+    obs_focal_seg_ids = set()
+    obs_ids_needed = set()
+    for seg_id, oid in obs_paged_apps:
+        obs_focal_by_obs[oid].append(seg_id)
+        obs_focal_seg_ids.add(seg_id)
+        obs_ids_needed.add(oid)
+
+    obs_results = []
+    if obs_ids_needed:
+        obs_all_segments = (
+            db.query(Segment)
+            .filter(
+                Segment.observation_id.in_(obs_ids_needed),
+                Segment.merged_into_id == None,
+                Segment.split_into_id == None,
+            )
+            .order_by(Segment.observation_id, Segment.sequence_order)
+            .all()
+        )
+
+        obs_segs_by_obs: dict[int, list] = defaultdict(list)
+        for seg in obs_all_segments:
+            obs_segs_by_obs[seg.observation_id].append(seg)
+
+        obs_focal_codes = (
+            db.query(CodeApplication.segment_id, CodeApplication.code_id)
+            .filter(
+                CodeApplication.segment_id.in_(obs_focal_seg_ids),
+                layer_origin_filter(layer_scope),
+            )
+            .distinct()
+            .all()
+        )
+        obs_codes_by_seg: dict[int, list[int]] = defaultdict(list)
+        for seg_id, cid in obs_focal_codes:
+            obs_codes_by_seg[seg_id].append(cid)
+
+        # ONE query answers both "is this clip quoted?" and "where are its
+        # sub-clip quotes?" (slab 5c). It already read these rows and threw the
+        # ranges away; keeping them is what lets the card show a quote's range
+        # without a second round-trip — and `list_quoted_excerpts`, the only
+        # alternative source, has no observation_ids param to scope it with.
+        obs_quoted_seg_ids: set[int] = set()
+        obs_quote_ranges: dict[int, list[dict]] = {}
+        if obs_focal_seg_ids:
+            for sid, q_start, q_end in db.query(
+                Excerpt.segment_id, Excerpt.start_time, Excerpt.end_time,
+            ).filter(
+                Excerpt.segment_id.in_(obs_focal_seg_ids),
+                segment_has_any_quote_filter(),
+            ).all():
+                obs_quoted_seg_ids.add(sid)
+                # A WHOLE-clip quote has no range of its own — it is the clip.
+                # Only sub-clip time ranges get a row, so the card can say
+                # "quoted 1:05.0–1:12.4" without lying about a whole-clip quote.
+                if q_start is not None:
+                    obs_quote_ranges.setdefault(sid, []).append(
+                        {"start_time": q_start, "end_time": q_end}
+                    )
+
+        obs_name_rows = db.query(
+            Observation.id, Observation.name, Observation.media_duration_seconds
+        ).filter(
+            Observation.id.in_(obs_ids_needed)
+        ).all()
+        obs_names = {oid: oname for oid, oname, _ in obs_name_rows}
+        # The occurrence-strip denominator (slab 5, D31). Nullable — pre-#574
+        # .mov/.webm rows hold NULL; the client degrades to max clip end.
+        obs_durations = {oid: dur for oid, _, dur in obs_name_rows}
+
+        def clip_to_context(seg) -> dict:
+            return {
+                "id": seg.id,
+                "sequence_order": seg.sequence_order,
+                "speaker_name": None,
+                "speaker_color_index": 0,
+                "speaker_color": None,
+                "is_facilitator": False,
+                "text": seg.text,  # the clip's LABEL ("" = unlabeled)
+                "start_time": seg.start_time,
+            }
+
+        def clip_to_focal(seg) -> dict:
+            return {
+                "id": seg.id,
+                "sequence_order": seg.sequence_order,
+                "speaker_name": None,
+                "speaker_color_index": 0,
+                "speaker_color": None,
+                "is_facilitator": False,
+                "text": seg.text,  # the clip's LABEL ("" = unlabeled)
+                "start_time": seg.start_time,
+                "end_time": seg.end_time,  # clips only — the timecode RANGE
+                "is_quoted": seg.id in obs_quoted_seg_ids,
+                "quote_ranges": obs_quote_ranges.get(seg.id, []),
+                "applied_code_ids": obs_codes_by_seg.get(seg.id, []),
+                "participant_id": None,
+                "participant_name": None,
+            }
+
+        for oid in obs_focal_by_obs:
+            o_segs = obs_segs_by_obs.get(oid, [])
+            seq_index = {seg.id: idx for idx, seg in enumerate(o_segs)}
+
+            segments_out = []
+            for seg_id in obs_focal_by_obs[oid]:
+                idx = seq_index.get(seg_id)
+                if idx is None:
+                    continue
+                seg = o_segs[idx]
+
+                preceding = []
+                for ci in range(max(0, idx - context_size), idx):
+                    preceding.append(clip_to_context(o_segs[ci]))
+
+                following = []
+                for ci in range(idx + 1, min(len(o_segs), idx + context_size + 1)):
+                    following.append(clip_to_context(o_segs[ci]))
+
+                focal = clip_to_focal(seg)
+                focal["preceding_context"] = preceding
+                focal["following_context"] = following
+                segments_out.append(focal)
+
+            obs_results.append({
+                "observation_id": oid,
+                "observation_name": obs_names.get(oid, "Unknown"),
+                "media_duration_seconds": obs_durations.get(oid),
+                "segment_count": len(segments_out),
+                "segments": segments_out,
+            })
+
     return {
         "code_id": code.id,
         "code_name": code.name,
         "code_color": code.color,
         "category_name": code.category.name if code.category else None,
-        "total_segments": total_segments + doc_total_segments,
+        # Clip-inclusive total (D25) — must agree with the frequencies count.
+        "total_segments": total_segments + doc_total_segments + obs_total_clips,
         "has_more": has_more,
         "conversations": conversations,
         "documents": doc_results,
+        "observations": obs_results,
     }
 
 
@@ -1151,6 +1420,51 @@ def _build_document_cooccurrence(
     return cooccur, len(segment_codes)
 
 
+def _build_observation_cooccurrence(
+    db: Session,
+    project_id: int,
+    code_ids: list[int] | None = None,
+    observation_ids: list[int] | None = None,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
+) -> tuple[dict, int]:
+    """Build co-occurrence matrix from observation clips (slab 4c — mirrors the
+    document builder; a clip is a Segment, so the unit is the clip)."""
+    query = (
+        db.query(CodeApplication.segment_id, CodeApplication.code_id)
+        .filter(CodeApplication.segment_id.isnot(None))
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .join(Observation, Segment.observation_id == Observation.id)
+        .filter(
+            Observation.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+        )
+    )
+
+    if observation_ids:
+        query = query.filter(Segment.observation_id.in_(observation_ids))
+    if code_ids:
+        query = query.filter(CodeApplication.code_id.in_(code_ids))
+    query = _coder_filter(query, coder_ids, layer_scope)
+
+    apps = query.all()
+
+    clip_codes = defaultdict(set)
+    for seg_id, code_id in apps:
+        clip_codes[seg_id].add(code_id)
+
+    cooccur = defaultdict(int)
+    for codes in clip_codes.values():
+        for c in codes:
+            cooccur[(c, c)] += 1
+        for a, b in combinations(codes, 2):
+            cooccur[(a, b)] += 1
+            cooccur[(b, a)] += 1
+
+    return cooccur, len(clip_codes)
+
+
 def build_code_cooccurrence_matrix(
     db: Session,
     project_id: int,
@@ -1163,11 +1477,15 @@ def build_code_cooccurrence_matrix(
     document_ids: list[int] | None = None,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    observation_ids: list[int] | None = None,
 ) -> tuple[dict, int, int, int, int]:
     """Returns (cooccur_dict, total_units, conv_total, text_total, doc_total).
 
     cooccur_dict: (code_id_a, code_id_b) -> count
-    total_units: combined total across sources
+    total_units: combined total across sources (incl. observation clips —
+        clips ride the matrix + this total exactly the way documents do; there
+        is deliberately no positional obs_total, matching the 5-tuple arity the
+        export_helpers wrapper unpacks)
     conv_total: conversation segment count (0 if source != conversations/all)
     text_total: text-column count (0 if source != text/all)
     doc_total: document segment count (0 if source != conversations/all)
@@ -1191,13 +1509,21 @@ def build_code_cooccurrence_matrix(
             coder_ids=coder_ids,
             layer_scope=layer_scope,
         )
-        # Merge conversation + document
+        obs_cooccur, obs_total = _build_observation_cooccurrence(
+            db, project_id, code_ids=code_ids,
+            observation_ids=observation_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
+        )
+        # Merge conversation + document + observation
         merged = defaultdict(int)
         for k, v in cooccur.items():
             merged[k] += v
         for k, v in doc_cooccur.items():
             merged[k] += v
-        return merged, conv_total + doc_total, conv_total, 0, doc_total
+        for k, v in obs_cooccur.items():
+            merged[k] += v
+        return merged, conv_total + doc_total + obs_total, conv_total, 0, doc_total
     elif source == "text":
         cooccur, total = _build_comment_cooccurrence(
             db, project_id, code_ids=code_ids,
@@ -1229,6 +1555,12 @@ def build_code_cooccurrence_matrix(
             coder_ids=coder_ids,
             layer_scope=layer_scope,
         )
+        obs_cooccur, obs_total = _build_observation_cooccurrence(
+            db, project_id, code_ids=code_ids,
+            observation_ids=observation_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
+        )
         # Merge
         merged = defaultdict(int)
         for k, v in conv_cooccur.items():
@@ -1237,7 +1569,9 @@ def build_code_cooccurrence_matrix(
             merged[k] += v
         for k, v in doc_cooccur.items():
             merged[k] += v
-        return merged, conv_total + comment_total + doc_total, conv_total, comment_total, doc_total
+        for k, v in obs_cooccur.items():
+            merged[k] += v
+        return merged, conv_total + comment_total + doc_total + obs_total, conv_total, comment_total, doc_total
 
 
 def get_coded_comments_with_context(
@@ -1473,6 +1807,7 @@ def get_code_cooccurrence(
     document_ids: list[int] | None = None,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    observation_ids: list[int] | None = None,
 ) -> dict:
     """Build a structured co-occurrence matrix with code metadata."""
     cooccur, _total, total_coded_segments, total_coded_texts, _doc_total = build_code_cooccurrence_matrix(
@@ -1485,6 +1820,7 @@ def get_code_cooccurrence(
         document_ids=document_ids,
         coder_ids=coder_ids,
         layer_scope=layer_scope,
+        observation_ids=observation_ids,
     )
 
     all_codes = _get_ordered_codes(db, project_id, code_ids)
@@ -1504,8 +1840,17 @@ def _build_participant_group_map(
     """Map participant_id → demographic group value for the given subtype.
 
     Reuses the same linkage logic as get_demographic_filter_options().
+
+    #598: dataset-sourced values apply the #384 missing rule — a "Decline to
+    state" respondent must not form a comparison / Compare-By group here
+    while every quantitative surface folds them into the missing bucket.
+    Participant-keyed (not row-keyed), so this applies the rule in place
+    rather than routing through ``grouping.load_grouping_values``. #592: the
+    rule is column-aware (a declared ``missing_values`` list wins).
     """
-    # Check participant.role first if subtype == "role"
+    # Check participant.role first if subtype == "role".
+    # Deliberately EXEMPT from the N/A rule: role is a curated participant
+    # field the researcher typed, not a survey answer (#598).
     mapping: dict[int, str] = {}
     if subtype == "role":
         rows = (
@@ -1539,6 +1884,8 @@ def _build_participant_group_map(
 
     target_col_ids = [c.id for c in target_cols]
     col_dataset = {c.id: c.dataset_id for c in target_cols}
+    # #592: column-aware missing rules (None = the _is_na defaults)
+    rules_by_col = {c.id: column_missing_rules(c) for c in target_cols}
 
     linked_rows = (
         db.query(DatasetRow.id, DatasetRow.participant_id, DatasetRow.dataset_id)
@@ -1564,6 +1911,9 @@ def _build_participant_group_map(
         )
         for row_id, col_id, val_text in values:
             if not val_text or not val_text.strip():
+                continue
+            if is_missing(val_text, rules_by_col.get(col_id)):
+                # missing never defines a group (#598; #592: column-aware)
                 continue
             pid = row_participant.get(row_id)
             if pid is None:
@@ -1797,6 +2147,7 @@ def get_source_frequencies(
     document_ids: list[int] | None = None,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    observation_ids: list[int] | None = None,
 ) -> dict:
     """Compute per-source, per-code frequencies with word counts."""
 
@@ -2252,6 +2603,140 @@ def get_source_frequencies(
         for doc_id, code_id, cnt, wc in doc_code_agg:
             doc_code_counts[doc_id][code_id] = (cnt, int(wc))
 
+    # ── Observations (slab 4c — the document posture: no speaker/participant
+    # spine, so no facilitator filter and groups stay None; a clip's
+    # word_count is its LABEL's, deliberately, so word metrics stay honest) ──
+    observations = (
+        db.query(Observation.id, Observation.name, Observation.created_at)
+        .filter(Observation.project_id == project_id)
+        .order_by(Observation.created_at.asc(), Observation.id.asc())
+        .all()
+    )
+    obs_map = {o.id: (o.name, idx) for idx, o in enumerate(observations)}
+    obs_ids_filter = set(observation_ids) if observation_ids is not None else None
+
+    # Per-observation totals (visible clips)
+    obs_totals_q = (
+        db.query(
+            Segment.observation_id,
+            func.count(Segment.id),
+            func.coalesce(func.sum(Segment.word_count), 0),
+        )
+        .join(Observation, Segment.observation_id == Observation.id)
+        .filter(
+            Observation.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+            Segment.observation_id.isnot(None),
+        )
+    )
+    if obs_ids_filter is not None:
+        obs_totals_q = obs_totals_q.filter(Segment.observation_id.in_(obs_ids_filter))
+    obs_totals_q = obs_totals_q.group_by(Segment.observation_id)
+    obs_totals = {r[0]: (r[1], int(r[2])) for r in obs_totals_q.all()}
+
+    # Per-observation coded clip count
+    obs_coded_q = (
+        db.query(
+            Segment.observation_id,
+            func.count(func.distinct(CodeApplication.segment_id)),
+        )
+        .filter(CodeApplication.segment_id.isnot(None))
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .join(Observation, Segment.observation_id == Observation.id)
+        .filter(
+            Observation.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+        )
+    )
+    if universal_ids:
+        obs_coded_q = obs_coded_q.filter(~CodeApplication.code_id.in_(universal_ids))
+    if obs_ids_filter is not None:
+        obs_coded_q = obs_coded_q.filter(Segment.observation_id.in_(obs_ids_filter))
+    obs_coded_q = _coder_filter(obs_coded_q, coder_ids, layer_scope)
+    obs_coded_q = obs_coded_q.group_by(Segment.observation_id)
+    obs_coded = {r[0]: r[1] for r in obs_coded_q.all()}
+
+    # Per-observation, per-code counts
+    if aggregation == "category":
+        obs_cat_subq = (
+            db.query(
+                Segment.observation_id.label("obs_id"),
+                effective_cat_id.label("eff_cat_id"),
+                Segment.id.label("seg_id"),
+                Segment.word_count.label("wc"),
+            )
+            .join(CodeApplication, CodeApplication.segment_id == Segment.id)
+            .join(Code, Code.id == CodeApplication.code_id)
+            .join(Observation, Segment.observation_id == Observation.id)
+            .filter(
+                Observation.project_id == project_id,
+                Segment.merged_into_id == None,
+                Segment.split_into_id == None,
+            )
+        )
+        if obs_ids_filter is not None:
+            obs_cat_subq = obs_cat_subq.filter(Segment.observation_id.in_(obs_ids_filter))
+        if code_ids is not None:
+            obs_cat_subq = obs_cat_subq.filter(CodeApplication.code_id.in_(code_ids))
+        obs_cat_subq = _coder_filter(obs_cat_subq, coder_ids, layer_scope)
+        obs_cat_subq = obs_cat_subq.distinct().subquery()
+
+        obs_cat_agg = (
+            db.query(
+                obs_cat_subq.c.obs_id,
+                obs_cat_subq.c.eff_cat_id,
+                func.count(obs_cat_subq.c.seg_id),
+                func.coalesce(func.sum(obs_cat_subq.c.wc), 0),
+            )
+            .group_by(obs_cat_subq.c.obs_id, obs_cat_subq.c.eff_cat_id)
+            .all()
+        )
+
+        obs_code_counts: dict[int, dict[int, tuple[int, int]]] = defaultdict(dict)
+        for obs_id, cat_id, cnt, wc in obs_cat_agg:
+            obs_code_counts[obs_id][cat_id] = (cnt, int(wc))
+    else:
+        # Track J · J2: DISTINCT (observation, code, segment) before count/sum.
+        obs_code_subq = (
+            db.query(
+                Segment.observation_id.label("obs_id"),
+                CodeApplication.code_id.label("code_id"),
+                Segment.id.label("seg_id"),
+                Segment.word_count.label("wc"),
+            )
+            .filter(CodeApplication.segment_id.isnot(None))
+            .join(Segment, CodeApplication.segment_id == Segment.id)
+            .join(Observation, Segment.observation_id == Observation.id)
+            .filter(
+                Observation.project_id == project_id,
+                Segment.merged_into_id == None,
+                Segment.split_into_id == None,
+            )
+        )
+        if obs_ids_filter is not None:
+            obs_code_subq = obs_code_subq.filter(Segment.observation_id.in_(obs_ids_filter))
+        if code_ids is not None:
+            obs_code_subq = obs_code_subq.filter(CodeApplication.code_id.in_(code_ids))
+        obs_code_subq = _coder_filter(obs_code_subq, coder_ids, layer_scope)  # + J2-B consensus exclusion
+        obs_code_subq = obs_code_subq.distinct().subquery()
+
+        obs_code_agg = (
+            db.query(
+                obs_code_subq.c.obs_id,
+                obs_code_subq.c.code_id,
+                func.count(obs_code_subq.c.seg_id),
+                func.coalesce(func.sum(obs_code_subq.c.wc), 0),
+            )
+            .group_by(obs_code_subq.c.obs_id, obs_code_subq.c.code_id)
+            .all()
+        )
+
+        obs_code_counts: dict[int, dict[int, tuple[int, int]]] = defaultdict(dict)
+        for obs_id, code_id, cnt, wc in obs_code_agg:
+            obs_code_counts[obs_id][code_id] = (cnt, int(wc))
+
     # Per-column totals
     col_totals_q = (
         db.query(
@@ -2348,6 +2833,7 @@ def get_source_frequencies(
     total_coded = 0
     conv_count = 0
     doc_count = 0
+    obs_count = 0
     col_count = 0
 
     for conv_id, (conv_name, import_order) in conv_map.items():
@@ -2415,6 +2901,39 @@ def get_source_frequencies(
         total_coded += coded
         doc_count += 1
 
+    for o_id, (obs_name, import_order) in obs_map.items():
+        if obs_ids_filter is not None and o_id not in obs_ids_filter:
+            continue
+        t_segs, t_wc = obs_totals.get(o_id, (0, 0))
+        coded = obs_coded.get(o_id, 0)
+        code_map = obs_code_counts.get(o_id, {})
+
+        cc = {
+            str(c["id"]): {"count": code_map.get(c["id"], (0, 0))[0], "word_count": code_map.get(c["id"], (0, 0))[1]}
+            for c in codes_info
+            if c["id"] in code_map
+        }
+
+        sources.append({
+            "source_type": "observation",
+            "source_id": o_id,
+            "source_label": obs_name,
+            "dataset_id": None,
+            "dataset_name": None,
+            "total_segments": t_segs,
+            "total_word_count": t_wc,
+            "coded_segments": coded,
+            "import_order": import_order,
+            "code_counts": cc,
+            # Observations have no participant spine — no demographic grouping
+            # (the document posture; _compute_source_groups untouched).
+            "groups": None,
+        })
+        total_segs += t_segs
+        total_wc += t_wc
+        total_coded += coded
+        obs_count += 1
+
     for col_id, meta in col_meta.items():
         if text_column_ids is not None and col_id not in text_column_ids:
             continue
@@ -2454,9 +2973,10 @@ def get_source_frequencies(
             "total_segments": total_segs,
             "total_word_count": total_wc,
             "coded_segments": total_coded,
-            "total_sources": conv_count + doc_count + col_count,
+            "total_sources": conv_count + doc_count + obs_count + col_count,
             "total_conversations": conv_count,
             "total_documents": doc_count,
+            "total_observations": obs_count,
             "total_text_columns": col_count,
         },
         "group_by": group_by_subtype,
@@ -2477,6 +2997,7 @@ def get_source_level_cooccurrence(
     document_ids: list[int] | None = None,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    observation_ids: list[int] | None = None,
 ) -> tuple[dict, int]:
     """Build binary co-occurrence at source level (conversation, document, or column).
 
@@ -2541,6 +3062,31 @@ def get_source_level_cooccurrence(
         doc_q = _coder_filter(doc_q, coder_ids, layer_scope)
         for _, sid, cid in doc_q.all():
             source_codes[f"doc_{sid}"].add(cid)
+
+        # Observations (clip-based; the source unit is the OBSERVATION —
+        # keyed obs_ per the established conv_/doc_/col_ convention)
+        obs_q = (
+            db.query(
+                literal("obs").label("stype"),
+                Segment.observation_id.label("sid"),
+                CodeApplication.code_id,
+            )
+            .filter(CodeApplication.segment_id.isnot(None))
+            .join(Segment, CodeApplication.segment_id == Segment.id)
+            .join(Observation, Segment.observation_id == Observation.id)
+            .filter(
+                Observation.project_id == project_id,
+                Segment.merged_into_id == None,
+                Segment.split_into_id == None,
+            )
+        )
+        if observation_ids:
+            obs_q = obs_q.filter(Segment.observation_id.in_(observation_ids))
+        if code_ids:
+            obs_q = obs_q.filter(CodeApplication.code_id.in_(code_ids))
+        obs_q = _coder_filter(obs_q, coder_ids, layer_scope)
+        for _, sid, cid in obs_q.all():
+            source_codes[f"obs_{sid}"].add(cid)
 
     # Text columns
     if source in ("text", "all"):
@@ -2805,8 +3351,12 @@ def get_saturation_data(
     document_ids: list[int] | None = None,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    observation_ids: list[int] | None = None,
 ) -> dict:
-    """Compute code saturation curve across conversations and documents in chronological order."""
+    """Compute code saturation curve across conversations, documents, and
+    observations in chronological (``created_at``) order — each source is one
+    x-axis step, so a coded clip is invisible on the curve until its
+    observation joins the interleave."""
 
     # Get conversations in chronological order
     conversations = (
@@ -2821,6 +3371,14 @@ def get_saturation_data(
         db.query(Document.id, Document.name, Document.created_at)
         .filter(Document.project_id == project_id)
         .order_by(Document.created_at.asc(), Document.id.asc())
+        .all()
+    )
+
+    # Get observations in chronological order
+    observations = (
+        db.query(Observation.id, Observation.name, Observation.created_at)
+        .filter(Observation.project_id == project_id)
+        .order_by(Observation.created_at.asc(), Observation.id.asc())
         .all()
     )
 
@@ -2861,6 +3419,23 @@ def get_saturation_data(
     doc_q = _coder_filter(doc_q, coder_ids, layer_scope)
     doc_code_pairs = doc_q.all()
 
+    # Get all (observation_id, code_id) pairs
+    obs_q = (
+        db.query(Segment.observation_id, CodeApplication.code_id)
+        .filter(CodeApplication.segment_id.isnot(None))
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .join(Observation, Segment.observation_id == Observation.id)
+        .filter(
+            Observation.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+        )
+    )
+    if observation_ids:
+        obs_q = obs_q.filter(Segment.observation_id.in_(observation_ids))
+    obs_q = _coder_filter(obs_q, coder_ids, layer_scope)
+    obs_code_pairs = obs_q.all()
+
     # Build source → set of code_ids (or category_ids)
     source_items: dict[str, set] = defaultdict(set)
 
@@ -2883,6 +3458,9 @@ def get_saturation_data(
         for doc_id, code_id in doc_code_pairs:
             cat_id = code_cats.get(code_id) or -1
             source_items[f"doc_{doc_id}"].add(cat_id)
+        for obs_id, code_id in obs_code_pairs:
+            cat_id = code_cats.get(code_id) or -1
+            source_items[f"obs_{obs_id}"].add(cat_id)
 
         item_names = cat_names
     else:
@@ -2898,9 +3476,11 @@ def get_saturation_data(
             source_items[f"conv_{conv_id}"].add(code_id)
         for doc_id, code_id in doc_code_pairs:
             source_items[f"doc_{doc_id}"].add(code_id)
+        for obs_id, code_id in obs_code_pairs:
+            source_items[f"obs_{obs_id}"].add(code_id)
         item_names = code_names
 
-    # Interleave conversations and documents chronologically
+    # Interleave conversations, documents, and observations chronologically
     all_sources = []
     for c in conversations:
         if conversation_ids and c.id not in conversation_ids:
@@ -2910,13 +3490,20 @@ def get_saturation_data(
         if document_ids and d.id not in document_ids:
             continue
         all_sources.append(("document", d.id, d.name, d.created_at))
+    for o in observations:
+        if observation_ids and o.id not in observation_ids:
+            continue
+        all_sources.append(("observation", o.id, o.name, o.created_at))
     all_sources.sort(key=lambda x: (x[3], x[0], x[1]))
 
-    # Build cumulative saturation curve
+    # Build cumulative saturation curve. The key MAP (not a two-way ternary):
+    # the old `conv if … else doc` shape would silently bucket a third source
+    # kind as doc_{id} — the §8i "source-key ternary" trap.
+    _KEY_PREFIX = {"conversation": "conv", "document": "doc", "observation": "obs"}
     seen: set = set()
     points = []
     for idx, (stype, sid, sname, _) in enumerate(all_sources):
-        key = f"conv_{sid}" if stype == "conversation" else f"doc_{sid}"
+        key = f"{_KEY_PREFIX[stype]}_{sid}"
         items = source_items.get(key, set())
         new_items = items - seen
         seen.update(new_items)

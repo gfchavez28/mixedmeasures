@@ -19,6 +19,8 @@ from sqlalchemy.orm import Session
 
 from ..models.code_application import CodeApplication
 from ..models.consensus_stale_target import ConsensusStaleTarget
+from ..models.segment import Segment
+from .coding_layers import consensus_eligible_segment_clause
 from .consensus import recompute_consensus_for_target
 
 
@@ -53,6 +55,29 @@ def mark_consensus_stale(
                 seg_ids.add(seg)
             elif val is not None:
                 val_ids.add(val)
+
+    # Observations track (D18 — supersedes D2's blanket exclusion): never enqueue
+    # a consensus recompute for a clip whose Observation is UNFROZEN. There, each
+    # coder marks their OWN time ranges, so a clip has one voter and voting is
+    # meaningless (unitizing-alpha is the reliability statistic instead). A FROZEN
+    # observation's clips ARE consensus-eligible — the team agreed the cuts, so
+    # every coder codes the same clips, exactly like transcript turns.
+    #
+    # ONE batched query (mirrors the `already`-dedup shape below) covering BOTH
+    # the direct segment_ids and the code_ids-cascade path, since both land in
+    # seg_ids here. Eligibility is the SHARED definition — never re-inlined —
+    # so this can't drift from the recompute gate or the rebuild's scope.
+    if seg_ids:
+        eligible = {
+            r[0]
+            for r in db.query(Segment.id)
+            .filter(
+                Segment.id.in_(list(seg_ids)),
+                consensus_eligible_segment_clause(),
+            )
+            .all()
+        }
+        seg_ids &= eligible
 
     if not seg_ids and not val_ids:
         return 0

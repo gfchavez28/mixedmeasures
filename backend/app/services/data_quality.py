@@ -10,7 +10,7 @@ import math
 from sqlalchemy.orm import Session
 
 from ..models.dataset import DatasetColumn, DatasetValue, DatasetRow, Dataset, VALUE_NUMERIC_TYPES
-from ..services.dataset_import import _is_na
+from ..services.missing_values import is_missing, parse_missing_rules
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +18,41 @@ logger = logging.getLogger(__name__)
 # ── Missingness classification ───────────────────────────────────────────────
 
 
-def _classify_value(value_text: str | None) -> str:
-    """Classify a value as 'empty', 'na', or 'valid'."""
+def _classify_value(
+    value_text: str | None,
+    missing_rules: list | None = None,
+    *,
+    value_numeric: float | None = None,
+    numeric_eligible: bool = False,
+) -> str:
+    """Classify a value as 'empty', 'na', or 'valid'.
+
+    **"Valid" means "analysis will actually use this cell" (#595, slab 5).**
+
+    That is the convergence. DQ used to answer a ``value_text`` question while
+    analysis answered a ``value_numeric IS NULL`` one, and the two agreed only at
+    the defaults — because ``_is_na`` was what NULLed ``value_numeric`` at import.
+    They diverged four ways as soon as anything else NULLed a cell: a recode's
+    ``exclude_values``, an unmapped label ("Refused" with no code), a failed
+    numeric parse. Each showed as DQ-"valid" while every mean silently dropped it.
+
+    So on a column whose analysis reads ``value_numeric``
+    (``VALUE_NUMERIC_TYPES``), a non-empty cell with NULL ``value_numeric`` is
+    reported missing — whatever emptied it. Scoping matters: **nominal and
+    open_text are deliberately NOT in that set**, and they keep the text
+    judgment, because their cells legitimately carry no ``value_numeric`` at all
+    (``_compute_value_numeric`` NULLs undeclared nominal codes by design) — the
+    numeric rule there would report every response as missing.
+
+    ``missing_rules`` is the column's parsed declaration (#592; None = the
+    recognized-N/A defaults), which still classifies the text so a DECLARED
+    column reports its refusals as missing even before any recode touches them.
+    """
     if value_text is None or value_text.strip() == "":
         return "empty"
-    if _is_na(value_text):
+    if is_missing(value_text, missing_rules):
+        return "na"
+    if numeric_eligible and value_numeric is None:
         return "na"
     return "valid"
 
@@ -53,7 +83,7 @@ def _load_raw_values(
     Returns:
         values: {col_id: {row_id: (value_text, value_numeric)}}
         column_meta: [{'id', 'column_name', 'column_text', 'dataset_id',
-                       'dataset_name', 'question_type'}, ...]
+                       'dataset_name', 'column_type'}, ...]
         dataset_rows: {dataset_id: set(row_ids)} — all rows per dataset
     """
     # Column metadata with project ownership validation
@@ -64,6 +94,7 @@ def _load_raw_values(
             DatasetColumn.column_text,
             DatasetColumn.dataset_id,
             DatasetColumn.column_type,
+            DatasetColumn.missing_values,
             Dataset.name.label("dataset_name"),
         )
         .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
@@ -86,6 +117,8 @@ def _load_raw_values(
                 "dataset_id": c.dataset_id,
                 "dataset_name": c.dataset_name,
                 "column_type": c.column_type,
+                # #592: parsed once here; every classify call is column-aware
+                "missing_rules": parse_missing_rules(c.missing_values),
             })
             valid_ids.append(c.id)
             dataset_ids_needed.add(c.dataset_id)
@@ -170,7 +203,11 @@ def compute_missing_summary(
                 # Row exists but no DatasetValue — treat as empty
                 cls = "empty"
             else:
-                cls = _classify_value(val[0])
+                cls = _classify_value(
+                    val[0], col["missing_rules"],
+                    value_numeric=val[1],
+                    numeric_eligible=col["column_type"] in VALUE_NUMERIC_TYPES,
+                )
 
             if cls == "empty":
                 n_empty += 1
@@ -247,6 +284,10 @@ def compute_missing_patterns(
     ds_id = next(iter(ds_ids))
     all_rows = dataset_rows.get(ds_id, set())
     ordered_col_ids = [col["id"] for col in column_meta]
+    rules_by_col = {col["id"]: col["missing_rules"] for col in column_meta}
+    numeric_by_col = {
+        col["id"]: col["column_type"] in VALUE_NUMERIC_TYPES for col in column_meta
+    }
 
     # Build binary matrix
     pattern_counts: dict[tuple[bool, ...], int] = {}
@@ -257,7 +298,11 @@ def compute_missing_patterns(
             if val is None:
                 cls = "empty"
             else:
-                cls = _classify_value(val[0])
+                cls = _classify_value(
+                    val[0], rules_by_col.get(cid),
+                    value_numeric=val[1],
+                    numeric_eligible=numeric_by_col.get(cid, False),
+                )
             pattern.append(_is_missing(cls, include_na, include_empty))
         key = tuple(pattern)
         pattern_counts[key] = pattern_counts.get(key, 0) + 1
@@ -345,6 +390,10 @@ def compute_littles_mcar(
     row_idx = {rid: i for i, rid in enumerate(all_rows)}
     data_matrix = np.full((n, p), np.nan)
 
+    rules_by_col = {col["id"]: col["missing_rules"] for col in column_meta}
+    numeric_by_col = {
+        col["id"]: col["column_type"] in VALUE_NUMERIC_TYPES for col in column_meta
+    }
     for j, cid in enumerate(ordered_col_ids):
         col_vals = values.get(cid, {})
         for row_id in all_rows:
@@ -352,12 +401,31 @@ def compute_littles_mcar(
             if val is None:
                 cls = "empty"
             else:
-                cls = _classify_value(val[0])
+                cls = _classify_value(
+                    val[0], rules_by_col.get(cid),
+                    value_numeric=val[1],
+                    numeric_eligible=numeric_by_col.get(cid, False),
+                )
 
             if _is_missing(cls, include_na, include_empty):
                 continue  # stays np.nan
 
-            # Use value_numeric if available, else try parsing value_text
+            # #592/#595: MCAR is a STATISTIC, so it obeys the column's missing
+            # DECLARATION, never the report toggles. The toggles govern how the
+            # DQ report CLASSIFIES a cell; they cannot put a value the
+            # researcher declared missing back into the covariance matrix.
+            #
+            # Without this the value_text fallback below silently resurrected
+            # declared sentinels: with "Count N/A as missing" off, a declared
+            # "99" classifies 'na' -> not skipped -> its value_numeric is NULL
+            # (the declaration NULLed it) -> the fallback parses float("99") and
+            # feeds 99.0 straight into MCAR. Invisible before #592 (99 carried
+            # value_numeric = 99.0 anyway); slab 3's NULL is what exposed it.
+            # Text N/A never hit this — only sentinels whose TEXT parses.
+            if cls == "na":
+                continue  # stays np.nan
+
+            # Use value_numeric if available, else try parsing value_text.
             if val is not None and val[1] is not None:
                 data_matrix[row_idx[row_id], j] = val[1]
             elif val is not None and val[0] is not None:

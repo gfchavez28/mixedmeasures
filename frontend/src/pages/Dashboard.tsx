@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router'
 import { Plus, FolderOpen, Archive, Trash2, Pencil, Moon, Sun, Settings, FileInput, Package, ChevronDown, Copy, UserPlus } from 'lucide-react'
 import { projectsApi, projectPortabilityApi, type Project } from '@/lib/api'
 import type { ImportValidationResult, ProjectImportMode } from '@/lib/api'
@@ -12,6 +12,7 @@ import { useCoders } from '@/hooks/useCoders'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
 import { useCreateCoder } from '@/hooks/useCreateCoder'
 import { coderColor } from '@/lib/coder-color'
+import { plural, countLabel } from '@/lib/format'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -443,12 +444,20 @@ export default function Dashboard() {
                   )}
                   {importPreview?.manifest?.project_summary && (
                     <div className="text-xs text-mm-text-muted grid grid-cols-2 gap-1 bg-mm-bg rounded-md p-3">
-                      <span>{importPreview.manifest.project_summary.conversation_count} conversations</span>
-                      <span>{importPreview.manifest.project_summary.document_count} documents</span>
-                      <span>{importPreview.manifest.project_summary.dataset_count} datasets</span>
-                      <span>{importPreview.manifest.project_summary.code_count} codes</span>
-                      <span>{importPreview.manifest.project_summary.participant_count} participants</span>
-                      <span>{importPreview.manifest.project_summary.memo_count} memos</span>
+                      {/* #639: observations belong here for the same reason as the
+                          project card — this is the "what's in the file" summary, and
+                          it undercounted an observations-bearing archive. The count
+                          reads 0 for a pre-observations (v1/v2) file rather than
+                          vanishing, because the backend schema defaults it.
+                          #640: phrasing goes through `countLabel` so none of these
+                          can read "1 conversations". */}
+                      <span>{countLabel(importPreview.manifest.project_summary.conversation_count, 'conversation', 'conversations')}</span>
+                      <span>{countLabel(importPreview.manifest.project_summary.document_count, 'document', 'documents')}</span>
+                      <span>{countLabel(importPreview.manifest.project_summary.dataset_count, 'dataset', 'datasets')}</span>
+                      <span>{countLabel(importPreview.manifest.project_summary.observation_count, 'observation', 'observations')}</span>
+                      <span>{countLabel(importPreview.manifest.project_summary.code_count, 'code', 'codes')}</span>
+                      <span>{countLabel(importPreview.manifest.project_summary.participant_count, 'participant', 'participants')}</span>
+                      <span>{countLabel(importPreview.manifest.project_summary.memo_count, 'memo', 'memos')}</span>
                     </div>
                   )}
                   {importPreview?.warnings && importPreview.warnings.length > 0 && (
@@ -668,12 +677,20 @@ function ProjectCard({
               startEditing={isEditingDescription}
               onEditEnd={onEditEnd}
             />
+            {/* The four SOURCE types, all unconditional — this row's job is "what
+                kind of material is in here", so a zero is information, not noise.
+                Observations was missing until #639, which meant an observation-only
+                project rendered "0 conversations 0 documents 0 datasets" on the
+                app's front door and read as empty. Peer concepts, peer treatment:
+                participants/coders below stay conditional because they are not
+                sources. Accents match TopRail's per-workspace colors. */}
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-mm-text-muted">
-              <span><strong className="text-mm-green-text">{project.conversation_count}</strong> {project.conversation_count === 1 ? 'conversation' : 'conversations'}</span>
-              <span><strong className="text-mm-purple-text">{project.document_count}</strong> {project.document_count === 1 ? 'document' : 'documents'}</span>
-              <span><strong className="text-mm-orange-text">{project.dataset_count}</strong> {project.dataset_count === 1 ? 'dataset' : 'datasets'}</span>
+              <span><strong className="text-mm-green-text">{project.conversation_count}</strong> {plural(project.conversation_count, 'conversation', 'conversations')}</span>
+              <span><strong className="text-mm-purple-text">{project.document_count}</strong> {plural(project.document_count, 'document', 'documents')}</span>
+              <span><strong className="text-mm-orange-text">{project.dataset_count}</strong> {plural(project.dataset_count, 'dataset', 'datasets')}</span>
+              <span><strong className="text-mm-teal-text">{project.observation_count}</strong> {plural(project.observation_count, 'observation', 'observations')}</span>
               {project.participant_count > 0 && (
-                <span><strong className="text-mm-text">{project.participant_count}</strong> {project.participant_count === 1 ? 'participant' : 'participants'}</span>
+                <span><strong className="text-mm-text">{project.participant_count}</strong> {plural(project.participant_count, 'participant', 'participants')}</span>
               )}
               {/* Track J · Group A (#1): only surfaces on multi-coder projects — a
                   solo "1 coder" on every project would just be noise. */}

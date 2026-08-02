@@ -45,11 +45,24 @@ vi.mock('@/lib/api', () => ({
   textCodingApi: { applyCode: vi.fn(), removeCode: vi.fn() },
   codesApi: { create: vi.fn() },
   authApi: { switchCoder: vi.fn().mockResolvedValue({ id: 2, username: 'Bob' }) },
+  // The source picker's option lists. The observation is FROZEN — an open clip
+  // set is never gathered for reliability, so offering it would narrow to an
+  // empty grid with no explanation.
+  conversationsApi: {
+    list: vi.fn().mockResolvedValue({ conversations: [{ id: 5, name: 'Interview 1' }], total: 1 }),
+  },
+  documentsApi: { list: vi.fn().mockResolvedValue([]) },
+  observationsApi: {
+    list: vi.fn().mockResolvedValue([
+      { id: 7, name: 'Playground', segmentation_frozen_at: '2026-07-19T12:00:00+00:00' },
+      { id: 8, name: 'Still cutting', segmentation_frozen_at: null },
+    ]),
+  },
 }))
 
 // useNavigate (#471b chip navigation) — spy so the deep-link target is assertable without
 // a router. useCoderSwitch needs the active coder (Alice) from auth-context.
-vi.mock('react-router-dom', async (orig) => ({
+vi.mock('react-router', async (orig) => ({
   ...(await orig() as object),
   useNavigate: () => navigateMock,
 }))
@@ -58,6 +71,9 @@ vi.mock('@/lib/auth-context', () => ({
 }))
 
 import ReconciliationGrid from './ReconciliationGrid'
+import {
+  selectableObservations, sourceParams, sourceQueryKey,
+} from '@/lib/reconciliation-source'
 import { isReconciliationTabVisible } from '@/lib/qual-analysis-types'
 import type { Code } from '@/lib/api'
 
@@ -187,5 +203,79 @@ describe('ReconciliationGrid', () => {
 
     expect(screen.getAllByRole('rowheader')[1]).toHaveAttribute('tabindex', '0')
     expect(screen.getAllByRole('rowheader')[0]).toHaveAttribute('tabindex', '-1')
+  })
+
+  it('renders a clip row by its TIME RANGE and deep-links with ?clip=', async () => {
+    // A clip's `text` is only its label and is routinely empty, so the range is
+    // the identity. The deep-link param is ?clip=, not ?segment= — without that
+    // arm the jump affordance was dead, and fixColleague was worse than dead
+    // (it switched the active coder, then navigated nowhere).
+    const { codeAnalysisApi } = await import('@/lib/api')
+    ;(codeAnalysisApi.reconciliation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      available: true, reason: null, n_coders: 2,
+      coders: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }],
+      codes: [{ id: 10, name: 'Positive', color: null }],
+      units: [{
+        unit_type: 'segment', unit_id: 300, source_type: 'observation', source_id: 7,
+        source_label: 'Playground', text: '',
+        start_time: 62.5, end_time: 91,
+        by_coder: { '1': [10], '2': [] }, engaged: [1, 2],
+        consensus: [], consensus_context: {}, has_disagreement: true,
+      }],
+      total: 1, has_more: false,
+    })
+    renderGrid()
+    await waitFor(() => screen.getByRole('grid', { name: /reconciliation/i }))
+
+    expect(screen.getByText('1:02.5 – 1:31.0')).toBeInTheDocument()
+    // An unlabelled clip is normal, not a defect — no "(no text)" placeholder.
+    expect(screen.queryByText('(no text)')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('rowheader')[0]).toHaveAttribute(
+      'aria-label', expect.stringContaining('Clip · Playground'))
+  })
+
+  it('omits source params until a source is chosen', async () => {
+    const { codeAnalysisApi } = await import('@/lib/api')
+    const spy = codeAnalysisApi.reconciliation as ReturnType<typeof vi.fn>
+    spy.mockClear()
+    renderGrid()
+    await waitFor(() => screen.getByRole('grid', { name: /reconciliation/i }))
+    expect(spy).toHaveBeenCalledWith(
+      42, expect.not.objectContaining({ source_type: expect.anything() }))
+  })
+
+  it('exposes the source picker as a labelled control', async () => {
+    renderGrid()
+    await waitFor(() => screen.getByRole('grid', { name: /reconciliation/i }))
+    expect(screen.getByRole('combobox', { name: /narrow reconciliation to one source/i }))
+      .toBeInTheDocument()
+  })
+})
+
+// The picker's mapping is unit-tested rather than driven through the UI: Radix
+// Select does not open under synthetic events in jsdom, and the behavior that
+// actually matters here is the key/params pair, not the menu mechanics.
+describe('ReconciliationSourcePicker mapping', () => {
+  it('keys the query on the chosen source, and on nothing when showing all', () => {
+    expect(sourceQueryKey(null)).toBeNull()
+    expect(sourceQueryKey({ type: 'observation', id: 7 })).toBe('observation:7')
+    // Distinct kinds sharing an id must not collide — the four id sequences are
+    // independent, so the tag is the only thing keeping them apart.
+    expect(sourceQueryKey({ type: 'document', id: 7 }))
+      .not.toBe(sourceQueryKey({ type: 'observation', id: 7 }))
+  })
+
+  it('sends no source params when showing all sources', () => {
+    expect(sourceParams(null)).toEqual({})
+    expect(sourceParams({ type: 'conversation', id: 5 }))
+      .toEqual({ source_type: 'conversation', source_id: 5 })
+  })
+
+  it('offers only FROZEN observations', () => {
+    const rows = [
+      { id: 7, segmentation_frozen_at: '2026-07-19T12:00:00+00:00' },
+      { id: 8, segmentation_frozen_at: null },
+    ]
+    expect(selectableObservations(rows).map(o => o.id)).toEqual([7])
   })
 })

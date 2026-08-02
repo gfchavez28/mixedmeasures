@@ -1,5 +1,5 @@
 import { lazy } from 'react'
-import { Routes, Route, Navigate, useParams } from 'react-router-dom'
+import { Routes, Route, Navigate, useParams } from 'react-router'
 import { Toaster } from 'sonner'
 import { AuthProvider, useAuth } from '@/lib/auth-context'
 import { ThemeProvider } from '@/lib/theme-context'
@@ -10,6 +10,7 @@ import OverviewPage from '@/pages/OverviewPage'
 import ConversationsListPage from '@/pages/ConversationsListPage'
 import DatasetsListPage from '@/pages/DatasetsListPage'
 import DocumentsListPage from '@/pages/DocumentsListPage'
+import ObservationsListPage from '@/pages/ObservationsListPage'
 import AnalysisHubPage from '@/pages/AnalysisHubPage'
 import ParticipantsPage from '@/pages/ParticipantsPage'
 import MemosNotesPage from '@/pages/MemosNotesPage'
@@ -25,6 +26,8 @@ const AppendImport = lazy(() => import('./pages/AppendImport'))
 const CrosswalkView = lazy(() => import('./pages/CrosswalkView'))
 const TextCodingView = lazy(() => import('./pages/TextCodingView'))
 const DocumentImport = lazy(() => import('./pages/DocumentImport'))
+const ObservationImport = lazy(() => import('./pages/ObservationImport'))
+const ObservationWorkbench = lazy(() => import('./pages/ObservationWorkbench'))
 const DocumentCodingWorkbench = lazy(() => import('./pages/DocumentCodingWorkbench'))
 const AnalysisView = lazy(() => import('./pages/AnalysisView'))
 const QualitativeAnalysisView = lazy(() => import('./pages/QualitativeAnalysisView'))
@@ -99,12 +102,21 @@ function AppRoutes() {
         <Route path="documents" element={<DocumentsListPage />} />
         <Route path="documents/import" element={<DocumentImport />} />
         <Route path="documents/:documentId" element={<DocumentCodingWorkbench />} />
+        {/* Observations — a recording coded on its own timeline (no transcript). */}
+        <Route path="observations" element={<ObservationsListPage />} />
+        <Route path="observations/import" element={<ObservationImport />} />
+        <Route path="observations/:observationId" element={<ObservationWorkbench />} />
         <Route path="analysis" element={<AnalysisHubPage />} />
         <Route path="analysis/qualitative" element={<QualitativeAnalysisView />} />
         <Route path="analysis/quantitative" element={<AnalysisView />} />
         <Route path="analysis/canvas" element={<CanvasView />} />
         <Route path="analysis/canvas/compare" element={<CanvasCompareView />} />
-        <Route path="analysis/integrated" element={<Navigate to="canvas" replace />} />
+        {/* Relative `to` resolves against the ROUTE, not the URL: a bare "canvas"
+            appends (→ .../analysis/integrated/canvas) and "../canvas" ascends one
+            whole route (→ /projects/:id/canvas). Both miss and fall through to the
+            `*` catch-all. Three segments is the working form — same shape as the
+            `starred` redirect below. #636 */}
+        <Route path="analysis/integrated" element={<Navigate to="../analysis/canvas" replace />} />
         <Route path="analysis/codebook" element={<CodebookView />} />
         <Route path="participants" element={<ParticipantsPage />} />
         <Route path="starred" element={<Navigate to="../analysis/qualitative?tab=quoteboard" replace />} />

@@ -1,8 +1,9 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
-import { useParams, useNavigate, Link } from 'react-router-dom'
+import { useParams, useNavigate, Link } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, Video, Volume2, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
+import { countLabel } from '@/lib/format'
 import { conversationsApi, participantsApi, mediaApi, type Participant } from '@/lib/api'
 import { validateMediaFile, MEDIA_ACCEPT, MEDIA_FORMAT_LABEL, describeMediaUploadError, isVideoFilename } from '@/lib/media-constants'
 import { formatBytes } from '@/lib/format'
@@ -35,7 +36,8 @@ import { cn, getContrastColor, hexToRowBg } from '@/lib/utils'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import { ColorDotButton } from '@/components/ColorDotButton'
-import { consumePendingImportFiles } from '@/lib/pending-import-files'
+import { consumePendingImportFiles, setPendingImportFiles } from '@/lib/pending-import-files'
+import SourceKindPanel from '@/components/SourceKindPanel'
 import {
   type PreviewData,
   type SpeakerMapping,
@@ -579,7 +581,7 @@ export default function ConversationImport() {
         setStep('importing')
         setIsLoading(false)
         try {
-          await mediaApi.upload(id, conversation.id, mediaFile)
+          await mediaApi.upload(id, 'conversation', conversation.id, mediaFile)
           // #543(c): the pre-attach invalidation above cached has_media=false —
           // refresh the list + workbench detail now that the recording exists.
           queryClient.invalidateQueries({ queryKey: ['conversations', id] })
@@ -626,7 +628,7 @@ export default function ConversationImport() {
     setAttach({ ...attach, status: 'attaching', error: undefined })
     setStep('importing')
     try {
-      await mediaApi.upload(id, attach.conversationId, mediaFile)
+      await mediaApi.upload(id, 'conversation', attach.conversationId, mediaFile)
       queryClient.invalidateQueries({ queryKey: ['conversations', id] })
       queryClient.invalidateQueries({ queryKey: ['conversation', id, attach.conversationId] })
       if (!mountedRef.current) {
@@ -1009,6 +1011,11 @@ export default function ConversationImport() {
         )}
 
         {/* Step 1: Upload */}
+        {/* The fork lives INSIDE step 1 of both wizards, not in an interstitial —
+          * conversation import has seven entry points and every one of them lands
+          * here, so there is nothing to wire and nothing to forget. */}
+        {step === 'upload' && <SourceKindPanel current="conversation" projectId={id} />}
+
         {step === 'upload' && (
           <Card>
             <CardHeader>
@@ -1148,14 +1155,42 @@ export default function ConversationImport() {
                   </p>
                 )}
 
-                {/* Recording staged but no transcript yet — point at transcription, don't dead-end */}
+                {/* Recording staged but no transcript.
+                  *
+                  * This used to say "a recording still needs a transcript to code
+                  * against" — which was true when a Conversation was the only home
+                  * for a recording, and became a LIE the day Observations shipped.
+                  * The person standing here, holding a video and no transcript, is
+                  * precisely the person Observations exist for; telling them to go
+                  * find a transcription tool while we quietly own a better answer is
+                  * the tool withholding what it has. The staged file rides along, so
+                  * taking the offer costs no re-upload. */}
                 {!isMultiFile && mediaFile && files.length === 0 && (
                   <div role="alert" className="mt-2 p-3 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 rounded-lg text-sm flex items-start gap-2">
                     <CircleAlert className="w-4 h-4 flex-shrink-0 mt-0.5" aria-hidden />
-                    <span>
-                      A recording still needs a transcript to code against. Add a transcript above, or export
-                      one with a free offline tool like aTrain (SRT) and import it here.
-                    </span>
+                    <div className="min-w-0">
+                      <p>
+                        A Conversation codes a transcript, and you haven’t added one yet.
+                      </p>
+                      <p className="mt-1">
+                        If you want to code what <em>happened</em> on this recording rather than what
+                        was said, it belongs in an Observation — you’ll mark clips on its timeline.{' '}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPendingImportFiles([mediaFile], 'observation')
+                            navigate(`/projects/${id}/observations/import`)
+                          }}
+                          className="underline underline-offset-2 font-medium"
+                        >
+                          Import this recording as an Observation
+                        </button>
+                      </p>
+                      <p className="mt-1">
+                        Otherwise, add a transcript above — or export one with a free offline tool
+                        like aTrain (SRT) and import it here.
+                      </p>
+                    </div>
                   </div>
                 )}
 
@@ -1371,7 +1406,10 @@ export default function ConversationImport() {
 
               <div className="mt-6">
                 <h4 className="font-medium mb-2">
-                  Preview ({firstPreview.total_rows} rows{isMultiFile ? ` — ${files[0].name}` : ''})
+                  {/* #640: "1 rows" is not an edge case here — a solo-speaker VTT
+                      merges to a single turn, so it is what a one-person Zoom
+                      recording shows by default. */}
+                  Preview ({countLabel(firstPreview.total_rows, 'row', 'rows')}{isMultiFile ? ` — ${files[0].name}` : ''})
                 </h4>
                 <div className="overflow-x-auto border rounded">
                   <table className="w-full text-sm">

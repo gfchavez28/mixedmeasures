@@ -24,9 +24,13 @@ from ..models.row_score import RowScore
 # #381: recognized N/A strings (e.g. "N/A", "Don't know") are preserved as
 # value_text but mean "missing" — exclude them from value_text-keyed computes
 # (frequency, proportion) so they match the Data Quality tab's missing handling.
-from .dataset_import import _is_na
+from .missing_values import is_missing, parse_missing_rules
 # #384: shared grouping-value loader (excludes recognized N/A from group keys).
-from .grouping import load_grouping_values, order_value_labels
+from .grouping import (
+    load_grouping_values,
+    load_grouping_values_for_columns,
+    order_value_labels,
+)
 
 # ── Rounding precision constants ─────────────────────────────────────────────
 PERCENTAGE_PRECISION = 2   # round(x, 2) for percentage values (e.g. 85.71%)
@@ -128,6 +132,13 @@ class ResolvedRow:
     value_numeric: float | None
     value_text: str | None
     excluded: bool = False
+    # #592 slab 2: pre-marked by the RESOLVERS (the only place col_id is in
+    # hand — the domain path pools rows and discards it, C2), column-aware via
+    # services/missing_values. The computers TRUST this mark and carry no
+    # missing logic of their own (§I.7 — one owner, or surfaces disagree).
+    # Distinct from `excluded` (metric-level exclude_values) on purpose so
+    # exports can tell "researcher excluded" from "missing".
+    missing: bool = False
 
 
 def _parse_json(text: str | None) -> Any:
@@ -462,6 +473,13 @@ def resolve_dataset_column(
     excludes = _parse_exclude_values(metric_def)
     column_id = metric_def.input_source_id
 
+    # #592: the column's missing declaration (None = the _is_na defaults)
+    missing_rules = parse_missing_rules(
+        db.query(DatasetColumn.missing_values)
+        .filter(DatasetColumn.id == column_id)
+        .scalar()
+    )
+
     # Load all values for this column
     values = (
         db.query(
@@ -482,6 +500,7 @@ def resolve_dataset_column(
             value_numeric=val_num,
             value_text=val_text,
             excluded=excluded,
+            missing=is_missing(val_text, missing_rules),
         )
 
     # If no grouping, return single group
@@ -929,6 +948,16 @@ def resolve_dataset_domain(
         .all()
     )
 
+    # #592: per-column missing declarations. Marked HERE, per column, because
+    # the pooled paths below merge rows and discard col_id (C2) — the resolver
+    # is the last place the right rules can be chosen.
+    missing_rules_by_col = {
+        cid: parse_missing_rules(mv)
+        for cid, mv in db.query(
+            DatasetColumn.id, DatasetColumn.missing_values,
+        ).filter(DatasetColumn.id.in_(all_column_ids)).all()
+    }
+
     # Query 4: Load ALL primary RecodeDefinitions for exclude_values
     # (we don't actually need recode defs for the metric's own exclude_values —
     #  the metric's exclude_values field is already parsed above)
@@ -954,15 +983,13 @@ def resolve_dataset_domain(
         )
         all_row_ids = list({v[1] for v in all_values})
         if all_row_ids:
-            grouping_values = (
-                db.query(DatasetValue.row_id, DatasetValue.value_text)
-                .filter(
-                    DatasetValue.column_id.in_(grouping_col_ids),
-                    DatasetValue.row_id.in_(all_row_ids),
-                )
-                .all()
+            # #593: route through the shared loader — this hand-rolled its own
+            # unfiltered value_text query and so skipped the #384 N/A rule, so a
+            # "Decline to state" formed a REAL group here while folding into the
+            # None bucket on the column path (resolve_dataset_column, below).
+            grouping_response_map_1 = load_grouping_values_for_columns(
+                db, grouping_col_ids, all_row_ids,
             )
-            grouping_response_map_1 = {r_id: val for r_id, val in grouping_values}
 
             if metric_def.grouping_column_id_2 is not None:
                 # Composite grouping: resolve second dimension siblings
@@ -970,15 +997,9 @@ def resolve_dataset_domain(
                     db, metric_def.grouping_column_id_2, all_column_ids,
                     _cache=_sibling_cache,
                 )
-                grouping_values_2 = (
-                    db.query(DatasetValue.row_id, DatasetValue.value_text)
-                    .filter(
-                        DatasetValue.column_id.in_(grouping_col_ids_2),
-                        DatasetValue.row_id.in_(all_row_ids),
-                    )
-                    .all()
+                grouping_response_map_2 = load_grouping_values_for_columns(
+                    db, grouping_col_ids_2, all_row_ids,
                 )
-                grouping_response_map_2 = {r_id: val for r_id, val in grouping_values_2}
 
                 # Build composite map
                 for r_id in all_row_ids:
@@ -1000,6 +1021,7 @@ def resolve_dataset_domain(
             value_numeric=val_num,
             value_text=val_text,
             excluded=excluded,
+            missing=is_missing(val_text, missing_rules_by_col.get(col_id)),
         )
 
         if col_id not in result:
@@ -1034,10 +1056,12 @@ def compute_frequency_distribution(
     result_data: {counts: {label: n}, percentages: {label: float}, scale_order: [...]}
     """
     total_n = len(rows)
-    # #381: exclude recognized N/A value_text (is-not-None short-circuits before _is_na)
+    # #381: exclude missing value_text. §I.7: the MARK is the resolver's
+    # (column-aware, #592) — no bare _is_na here, or a column that DECLARES
+    # its missing set would disagree with this computer's hardcoded default.
     valid_rows = [
         r for r in rows
-        if not r.excluded and r.value_text is not None and not _is_na(r.value_text)
+        if not r.excluded and not r.missing and r.value_text is not None
     ]
     valid_n = len(valid_rows)
 
@@ -1091,10 +1115,11 @@ def compute_proportion(
     if mode == "values":
         threshold_values = {v.lower() for v in (config.get("threshold_values") or [])}
         # Filter to rows with non-null text for valid count.
-        # #381: exclude recognized N/A so it doesn't inflate the denominator.
+        # #381: exclude missing so it doesn't inflate the denominator
+        # (§I.7: resolver-marked, column-aware — never a bare _is_na here).
         countable = [
             r for r in valid_rows
-            if r.value_text is not None and not _is_na(r.value_text)
+            if not r.missing and r.value_text is not None
         ]
         valid_n = len(countable)
         count_meeting = sum(
@@ -1105,7 +1130,10 @@ def compute_proportion(
         operator = config.get("operator", ">=")
         threshold_numeric = config.get("threshold_numeric", 0)
         # Filter to rows with non-null numeric values
-        countable = [r for r in valid_rows if r.value_numeric is not None]
+        countable = [
+            r for r in valid_rows
+            if not r.missing and r.value_numeric is not None
+        ]
         valid_n = len(countable)
         count_meeting = sum(
             1 for r in countable
@@ -1141,7 +1169,14 @@ def compute_mean(rows: list[ResolvedRow]) -> tuple[dict, int, int]:
     Returns (result_data, valid_n, total_n).
     """
     total_n = len(rows)
-    valid_rows = [r for r in rows if not r.excluded and r.value_numeric is not None]
+    # `not r.missing` is belt-and-suspenders: a missing cell's value_numeric
+    # is NULL at rest (write-time invariant), but a #594-class writer (recode
+    # mapping "N/A" → 99) can leave a numeric on a missing-text cell — the
+    # resolver's mark keeps it out of the mean either way.
+    valid_rows = [
+        r for r in rows
+        if not r.excluded and not r.missing and r.value_numeric is not None
+    ]
     valid_n = len(valid_rows)
 
     if valid_n == 0:
@@ -1266,7 +1301,7 @@ def _score_single_row(
 
     Returns None if the record is excluded or has missing data.
     """
-    if row.excluded:
+    if row.excluded or row.missing:
         return None
 
     if metric_type == "mean":
@@ -1475,7 +1510,11 @@ def compute_metric(
             # Non-aggregate domain metrics (frequency_distribution, proportion, mean):
             # pool all column values into one flat list per group
             if metric_def.metric_type == "frequency_distribution":
-                # Batch-load scale_labels from domain columns (single query)
+                # Batch-load scale_labels from domain columns (single query).
+                # NOTE (#592 §I.1): the FIRST member column with any labels
+                # wins — pre-existing arbitrariness that per-column
+                # declarations make more visible (members can legitimately
+                # disagree). Not changed in slab 2; recorded as intent.
                 domain_col_ids = list(column_groups.keys())
                 if domain_col_ids:
                     domain_cols = (
@@ -1738,13 +1777,19 @@ def resolve_input_source_labels(
     # Batch load column labels
     if column_ids:
         columns = (
-            db.query(DatasetColumn.id, DatasetColumn.column_text, Dataset.name)
+            db.query(
+                DatasetColumn.id, DatasetColumn.column_name,
+                DatasetColumn.column_text, Dataset.name,
+            )
             .join(Dataset)
             .filter(DatasetColumn.id.in_(column_ids))
             .all()
         )
-        for col_id, col_text, ds_name in columns:
-            label_map[("dataset_column", col_id)] = f"{ds_name}: {col_text}"
+        for col_id, col_name, col_text, ds_name in columns:
+            # #575: honor the short name so a user's column rename reaches chart /
+            # metric labels (this builder is the chart default), matching the
+            # sibling builders that already prefer column_name.
+            label_map[("dataset_column", col_id)] = f"{ds_name}: {col_name or col_text}"
 
     # Batch load domain labels
     if domain_ids:

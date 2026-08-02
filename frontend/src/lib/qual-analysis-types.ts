@@ -24,7 +24,7 @@ export function isIrrTabVisible(multiCoder: boolean, blind = false): boolean {
   return multiCoder && !blind
 }
 export type QualCodeMode = 'codes' | 'categories'
-export type QualChartType = 'heatmap' | 'bar' | 'stacked_bar' | 'summary' | 'saturation'
+export type QualChartType = 'heatmap' | 'bar' | 'stacked_bar' | 'summary' | 'saturation' | 'timeline'
 export type QualValueMode = 'count' | 'segment_proportion' | 'text_coverage'
 export type QualDenominatorMode = 'total' | 'coded'
 export type QualSortOrder = 'import' | 'alpha' | 'count_desc' | 'count_asc' | 'custom'

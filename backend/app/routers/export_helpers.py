@@ -6,12 +6,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from collections import defaultdict
 
-from ..models.conversation import Conversation
 from ..models.segment import Segment
 from ..models.code_application import CodeApplication
 from ..models.code_category import CodeCategory
 from ..services.code_analysis import build_code_cooccurrence_matrix as _build_cooccurrence
-from ..services.coding_layers import non_consensus_filter
+from ..services.coding_layers import non_consensus_filter, project_scoped_segments
+from .helpers import visible_segment_filter
 
 # ── Rounding precision constants ─────────────────────────────────────────────
 EXPORT_VALUE_PRECISION = 2  # round(x, 2) for metric values in Excel export
@@ -126,24 +126,88 @@ def _build_category_tree_and_chains(db: Session, project_id: int):
     return parent_chain_map, tree, categories
 
 
-def build_code_conversation_matrix(db: Session, project_id: int):
-    """Returns dict: (conversation_id, code_id) -> count (excludes soft-deleted segments).
+def segment_source_pair(segment) -> tuple[str, str]:
+    """(source kind, source name) for a segment, whatever its parent.
 
-    Track J · J2: distinct coded segments per (conversation, code), not raw
+    The three-parent equivalent of the old `conversation.name` cell, and the ONE
+    place an export decides what a row's source IS — it lived in two identical
+    copies (the Excel Coded Data sheet from #620, the coded-segments CSV from
+    #616) until #650 needed a third. Three exports agreeing by coincidence is the
+    drift seam, not the fix.
+
+    A parentless segment cannot exist — `ck_segment_exactly_one_parent` forbids
+    it — so the final blank pair is unreachable defence, not a supported state.
+
+    ⚠️ Object-based, so it needs the parents eager-loaded; the id-keyed variants
+    (`build_code_source_matrix` here, `services/irr.py::_segment_source_key`)
+    read raw FK columns instead and cannot share this.
+    """
+    if segment is None:  # pragma: no cover - defensive
+        return "", ""
+    if segment.conversation is not None:
+        return "conversation", segment.conversation.name
+    if segment.document is not None:
+        return "document", segment.document.name
+    if segment.observation is not None:
+        return "observation", segment.observation.name
+    return "", ""
+
+
+def build_code_source_matrix(db: Session, project_id: int):
+    """Returns dict: ((source_type, source_id), code_id) -> count.
+
+    Distinct coded segments per (source, code) across ALL THREE segment parents
+    — conversation, document, observation clip (#629). It inner-joined
+    `Conversation` until 2026-08-02, so a document-only or observation-only
+    project produced an empty matrix while the sheet still rendered.
+
+    ⚠️ **The key is a (type, id) PAIR and must stay one.** The three parents are
+    independent sequences, so conversation 5, document 5 and observation 5 all
+    exist at once; a bare `source_id` key silently SUMS unrelated sources into
+    one column. That is the trap that makes this class of bug pass every
+    single-parent test — the ids coincide on the happy path.
+
+    Track J · J2: distinct coded SEGMENTS per (source, code), not raw
     application rows (two coders on one segment are two rows), excluding the
-    consensus layer (J2-B)."""
-    results = db.query(
-        Segment.conversation_id,
-        CodeApplication.code_id,
-        func.count(func.distinct(CodeApplication.segment_id))
-    ).join(CodeApplication).join(Conversation).filter(
-        Conversation.project_id == project_id,
-        Segment.merged_into_id == None,  # Exclude soft-deleted
-        Segment.split_into_id == None,
+    consensus layer (J2-B).
+    """
+    results = project_scoped_segments(
+        db.query(
+            Segment.conversation_id,
+            Segment.document_id,
+            Segment.observation_id,
+            CodeApplication.code_id,
+            func.count(func.distinct(CodeApplication.segment_id)),
+        ),
+        project_id,
+    ).join(
+        # Explicit ON: CodeApplication is polymorphic (segment_id OR
+        # dataset_value_id), so never leave this to inference.
+        CodeApplication, CodeApplication.segment_id == Segment.id,
+    ).filter(
+        *visible_segment_filter(),
         non_consensus_filter(),
-    ).group_by(Segment.conversation_id, CodeApplication.code_id).all()
+    ).group_by(
+        Segment.conversation_id,
+        Segment.document_id,
+        Segment.observation_id,
+        CodeApplication.code_id,
+    ).all()
 
-    return {(r[0], r[1]): r[2] for r in results}
+    matrix = {}
+    for conv_id, doc_id, obs_id, code_id, count in results:
+        # Exactly one parent is non-NULL (`ck_segment_exactly_one_parent`).
+        if conv_id is not None:
+            source = ("conversation", conv_id)
+        elif doc_id is not None:
+            source = ("document", doc_id)
+        elif obs_id is not None:
+            source = ("observation", obs_id)
+        else:  # pragma: no cover - the CHECK constraint forbids it
+            continue
+        matrix[(source, code_id)] = count
+
+    return matrix
 
 
 def build_code_cooccurrence_matrix(db: Session, project_id: int):

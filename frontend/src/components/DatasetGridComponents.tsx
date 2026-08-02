@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, memo } from 'react'
 import { useListKeyboardNav } from '@/hooks/useListKeyboardNav'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Link2, X, Pencil, Trash2, Settings2, GripVertical, FunctionSquare, RefreshCw, Check, UserPlus, LoaderCircle } from 'lucide-react'
@@ -291,6 +291,8 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
   onDeleteComputed,
   onRecompute,
   onLinkByColumn,
+  onEditValueLabels,
+  onSwapNameLabel,
   isPopoverOpen,
   onPopoverOpenChange,
   activeField,
@@ -329,6 +331,10 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
   onRecompute?: (column: DatasetColumn) => void
   /** #414 (DEC-8): retro bulk-link by an identifier column. */
   onLinkByColumn?: (column: DatasetColumn) => void
+  /** #576/#577: open the value-labels editor. */
+  onEditValueLabels?: (column: DatasetColumn) => void
+  /** #575: swap column_name ↔ column_text. */
+  onSwapNameLabel?: (column: DatasetColumn) => void
   isPopoverOpen: boolean
   onPopoverOpenChange: (columnId: number, open: boolean) => void
   activeField: EditorField
@@ -403,6 +409,8 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
             onEditComputed={onEditComputed}
             onRecompute={onRecompute}
             onLinkByColumn={onLinkByColumn}
+            onEditValueLabels={onEditValueLabels}
+            onSwapNameLabel={onSwapNameLabel}
             projectId={projectId}
             datasetId={datasetId}
             columnIndex={columnIndex}

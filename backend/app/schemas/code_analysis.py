@@ -59,6 +59,12 @@ class ContextSegment(BaseModel):
     start_time: float | None
 
 
+class QuoteRange(BaseModel):
+    """A sub-clip quote's span, in absolute timeline seconds (slab 5c/D29)."""
+    start_time: float
+    end_time: float
+
+
 class CodedSegmentWithContext(BaseModel):
     id: int
     sequence_order: int
@@ -67,7 +73,16 @@ class CodedSegmentWithContext(BaseModel):
     is_facilitator: bool
     text: str
     start_time: float | None
+    # Observation clips only (D25): the clip's end — with start_time it makes
+    # the timecode RANGE. Declared here or Pydantic silently drops it (the
+    # splat trap); conv/doc rows leave it None.
+    end_time: float | None = None
     is_quoted: bool
+    # Observation clips only (slab 5c): the SUB-CLIP time ranges quoted on this
+    # clip, so a card can show which moment was quoted. A whole-clip quote is
+    # deliberately absent — it has no range of its own, and `is_quoted` already
+    # says so. Defaulted, or the splat drops it on conv/doc rows.
+    quote_ranges: list[QuoteRange] = []
     applied_code_ids: list[int]
     preceding_context: list[ContextSegment]
     following_context: list[ContextSegment]
@@ -89,6 +104,17 @@ class DocumentSegmentGroup(BaseModel):
     segments: list[CodedSegmentWithContext]
 
 
+class ObservationSegmentGroup(BaseModel):
+    observation_id: int
+    observation_name: str
+    # Occurrence-strip denominator (slab 5, D31). Declared or Pydantic drops
+    # it (the splat trap); NULL for pre-#574 .mov/.webm — client degrades to
+    # max clip end.
+    media_duration_seconds: float | None = None
+    segment_count: int
+    segments: list[CodedSegmentWithContext]
+
+
 class CodeSegmentsWithContextResponse(BaseModel):
     code_id: int
     code_name: str
@@ -98,6 +124,7 @@ class CodeSegmentsWithContextResponse(BaseModel):
     has_more: bool
     conversations: list[ConversationSegmentGroup]
     documents: list[DocumentSegmentGroup] = []
+    observations: list[ObservationSegmentGroup] = []
 
 
 class DemographicFilterValue(BaseModel):
@@ -176,6 +203,7 @@ class SourceFrequenciesRequest(BaseModel):
     conversation_ids: list[int] | None = None
     text_column_ids: list[int] | None = None
     document_ids: list[int] | None = None
+    observation_ids: list[int] | None = None
     exclude_facilitator: bool = True
     participant_ids: list[int] | None = None
     group_by_subtype: str | None = None
@@ -198,7 +226,7 @@ class SourceGroupData(BaseModel):
 
 
 class SourceEntry(BaseModel):
-    source_type: Literal["conversation", "text_column", "document"]
+    source_type: Literal["conversation", "text_column", "document", "observation"]
     source_id: int
     source_label: str
     dataset_id: int | None = None
@@ -218,6 +246,7 @@ class SourceFrequenciesTotals(BaseModel):
     total_sources: int
     total_conversations: int
     total_documents: int = 0
+    total_observations: int = 0
     total_text_columns: int
 
 
@@ -292,7 +321,7 @@ class DemographicComparisonResponse(BaseModel):
 class SaturationPoint(BaseModel):
     source_index: int
     source_label: str
-    source_type: str  # "conversation" or "document"
+    source_type: str  # "conversation" | "document" | "observation"
     cumulative_unique_codes: int
     new_codes_this_source: int
     new_code_names: list[str]
@@ -387,10 +416,17 @@ class ReconciliationUnit(BaseModel):
     minority/blank worth reviewing)."""
     unit_type: str  # "segment" | "dataset_value"
     unit_id: int
-    source_type: str  # "conversation" | "document" | "column"
+    source_type: str  # "conversation" | "document" | "observation" | "column"
     source_id: int
     source_label: str
     text: str
+    # An observation clip's identity is its time range — `text` holds only its
+    # label and is routinely empty, so the grid renders the range instead. NULL for
+    # dataset values and for transcript segments without timestamps. These MUST be
+    # declared here: the service returns a plain dict validated against the
+    # response_model, so an undeclared field is dropped silently (the #586 class).
+    start_time: float | None = None
+    end_time: float | None = None
     by_coder: dict[str, list[int]]  # str(coder_id) → effective code ids applied here
     engaged: list[int]  # source-engaged coder ids (reviewed the source)
     consensus: list[int]  # effective code ids in the derived consensus
@@ -427,3 +463,77 @@ class RevealRequest(BaseModel):
 
 class RevealResponse(BaseModel):
     logged: bool
+
+
+# ── Open-cut reliability (Observations slab 6b-A) ────────────────────────────
+
+
+class OpenCutDisclosureResponse(BaseModel):
+    """What the computation did to the data before measuring it.
+
+    Not diagnostics — REPRODUCIBILITY. Each field is a modelling decision that
+    moves the result, so a reader who cannot see them cannot check the number.
+    """
+    tick_ms: int
+    continuum_seconds: float
+    # "recording" | "marked_extent" — #622's lesson: a fallback denominator must
+    # never be presented as if it were the recording's true length.
+    extent_source: str
+    n_merged_overlaps: int
+    n_zero_length_dropped: int
+    n_clips_without_times: int
+    engaged_coder_ids: list[int]
+    excluded_coder_ids: list[int]
+
+
+class UnitizingCategoryResult(BaseModel):
+    code_id: int
+    code_name: str
+    n_units: int
+    alpha: float | None
+    interpretation: str | None
+    """Share of the continuum marked with this code — α_U's own prevalence
+    figure. Deliberately NOT the same denominator as binned κ's `prevalence`."""
+    coverage_fraction: float | None
+
+
+class UnitizingOverall(BaseModel):
+    alpha: float | None
+    interpretation: str | None
+
+
+class UnitizingAlphaResponse(BaseModel):
+    available: bool
+    reason: str | None = None
+    n_coders: int
+    coders: list[int]
+    overall: UnitizingOverall | None = None
+    per_category: list[UnitizingCategoryResult] = []
+    disclosure: OpenCutDisclosureResponse
+    interpretation_thresholds: dict = {}
+
+
+class BinnedKappaCodeResult(BaseModel):
+    code_id: int
+    code_name: str
+    n_bins: int
+    percent_agreement: float | None
+    cohens_kappa: float | None
+    krippendorff_alpha: float | None
+    """The base rate. Always displayed beside the coefficient: on a long
+    recording most bins are empty for everyone, so percent agreement can read
+    ~99% while κ collapses — the prevalence is what tells them apart."""
+    prevalence: float | None
+    interpretation: str | None
+
+
+class BinnedKappaResponse(BaseModel):
+    available: bool
+    reason: str | None = None
+    n_coders: int
+    coders: list[int]
+    bin_seconds: float = 0.0
+    n_bins: int = 0
+    per_code: list[BinnedKappaCodeResult] = []
+    disclosure: OpenCutDisclosureResponse
+    interpretation_thresholds: dict = {}

@@ -6,6 +6,7 @@ from ..database import get_db
 from ..models.user import User
 from ..models.conversation import Conversation
 from ..models.document import Document
+from ..models.observation import Observation
 from ..models.segment import Segment
 from ..models.code import Code
 from ..models.code_application import CodeApplication
@@ -13,7 +14,7 @@ from ..models.note import Note
 from ..models.memo import Memo
 from ..models.code_category import CodeCategory
 from ..models.materials import Material
-from ..models.excerpt import Excerpt
+from ..models.excerpt import Excerpt, segment_has_any_quote_filter
 from ..services.coding_layers import (
     code_usage_count_expr,
     non_consensus_filter,
@@ -33,6 +34,8 @@ from ..schemas.search import (
     MemoSearchResults,
     DocumentSearchResult,
     DocumentSearchResults,
+    ObservationSearchResult,
+    ObservationSearchResults,
     TextSearchResult,
     TextSearchResults,
     CanvasSearchResult,
@@ -71,7 +74,7 @@ async def search_study(
 
     # Parse requested types
     requested_types = set(t.strip().lower() for t in types.split(","))
-    valid_types = {"segments", "codes", "conversations", "notes", "memos", "documents", "text", "canvases"}
+    valid_types = {"segments", "codes", "conversations", "notes", "memos", "documents", "observations", "text", "canvases"}
     requested_types = requested_types & valid_types
 
     # If full_type is specified, only search that type
@@ -110,8 +113,7 @@ async def search_study(
                     db.query(Excerpt.segment_id)
                     .filter(
                         Excerpt.project_id == project_id,
-                        Excerpt.segment_id.isnot(None),
-                        Excerpt.start_offset.is_(None),
+                        segment_has_any_quote_filter(),
                     )
                 )
                 segment_query = segment_query.filter(Segment.id.in_(quoted_seg_subq))
@@ -129,7 +131,7 @@ async def search_study(
                 quoted_seg_ids = set(
                     eid for (eid,) in db.query(Excerpt.segment_id).filter(
                         Excerpt.segment_id.in_(seg_ids),
-                        Excerpt.start_offset.is_(None),
+                        segment_has_any_quote_filter(),
                     ).all()
                 )
 
@@ -144,7 +146,9 @@ async def search_study(
                         start_time=s.start_time,
                         text=s.text,
                         sequence_order=s.sequence_order,
-                        is_quoted=s.id in quoted_seg_ids
+                        is_quoted=s.id in quoted_seg_ids,
+                        source_kind="conversation",
+                        source_id=s.conversation_id,
                     )
                 )
 
@@ -167,8 +171,7 @@ async def search_study(
                     db.query(Excerpt.segment_id)
                     .filter(
                         Excerpt.project_id == project_id,
-                        Excerpt.segment_id.isnot(None),
-                        Excerpt.start_offset.is_(None),
+                        segment_has_any_quote_filter(),
                     )
                 )
                 doc_seg_query = doc_seg_query.filter(Segment.id.in_(quoted_seg_subq))
@@ -186,7 +189,7 @@ async def search_study(
                 doc_quoted_seg_ids = set(
                     eid for (eid,) in db.query(Excerpt.segment_id).filter(
                         Excerpt.segment_id.in_(doc_seg_ids),
-                        Excerpt.start_offset.is_(None),
+                        segment_has_any_quote_filter(),
                     ).all()
                 )
 
@@ -194,6 +197,9 @@ async def search_study(
                 all_segment_items.append(
                     SegmentSearchResult(
                         id=s.id,
+                        # #569 deprecation beat: the document id still rides the
+                        # overloaded conversation_id ONE release; honest consumers
+                        # read source_kind + source_id. Drop the overload next cut.
                         conversation_id=s.document_id,
                         conversation_name=s.document.name if s.document else "Unknown",
                         speaker_name=None,
@@ -203,6 +209,68 @@ async def search_study(
                         sequence_order=s.sequence_order,
                         is_quoted=s.id in doc_quoted_seg_ids,
                         source_type="document",
+                        source_kind="document",
+                        source_id=s.document_id,
+                    )
+                )
+
+        # Observation clips (slab 4b) — a clip's LABEL is its searchable text.
+        # No conversation_id lie for the new kind: clip hits carry
+        # conversation_id=None and the honest source_kind/source_id pair only.
+        # start_time rides for the client's timecode subtitle (4e).
+        observation_ids = [o.id for o in db.query(Observation.id).filter(Observation.project_id == project_id).all()]
+        if observation_ids:
+            clip_query = (
+                db.query(Segment)
+                .options(joinedload(Segment.observation))
+                .filter(
+                    Segment.observation_id.in_(observation_ids),
+                    Segment.merged_into_id.is_(None),
+                    Segment.split_into_id.is_(None),
+                    Segment.text.ilike(search_pattern)
+                )
+            )
+
+            if quoted:
+                quoted_seg_subq = (
+                    db.query(Excerpt.segment_id)
+                    .filter(
+                        Excerpt.project_id == project_id,
+                        segment_has_any_quote_filter(),
+                    )
+                )
+                clip_query = clip_query.filter(Segment.id.in_(quoted_seg_subq))
+
+            clips = clip_query.order_by(
+                Segment.observation_id,
+                Segment.sequence_order
+            ).limit(limit).all()
+
+            clip_ids = [s.id for s in clips]
+            clip_quoted_ids: set[int] = set()
+            if clip_ids:
+                clip_quoted_ids = set(
+                    eid for (eid,) in db.query(Excerpt.segment_id).filter(
+                        Excerpt.segment_id.in_(clip_ids),
+                        segment_has_any_quote_filter(),
+                    ).all()
+                )
+
+            for s in clips:
+                all_segment_items.append(
+                    SegmentSearchResult(
+                        id=s.id,
+                        conversation_id=None,
+                        conversation_name=s.observation.name if s.observation else "Unknown",
+                        speaker_name=None,
+                        is_facilitator=False,
+                        start_time=s.start_time,
+                        text=s.text,
+                        sequence_order=s.sequence_order,
+                        is_quoted=s.id in clip_quoted_ids,
+                        source_type="observation",
+                        source_kind="observation",
+                        source_id=s.observation_id,
                     )
                 )
 
@@ -341,6 +409,8 @@ async def search_study(
                         content=n.content,
                         sequence_number=n.sequence_number,
                         source_type="conversation",
+                        source_kind="conversation",
+                        source_id=n.conversation_id,
                     )
                 )
 
@@ -363,6 +433,7 @@ async def search_study(
             note_items.append(
                 NoteSearchResult(
                     id=n.id,
+                    # #569 deprecation beat — same as the doc-segment block above.
                     conversation_id=n.document_id,
                     conversation_name=n.document.name if n.document else "Unknown",
                     segment_id=n.segment_id,
@@ -373,6 +444,43 @@ async def search_study(
                     content=n.content,
                     sequence_number=n.sequence_number,
                     source_type="document",
+                    source_kind="document",
+                    source_id=n.document_id,
+                )
+            )
+
+        # Observation notes (slab 4b — the 4a create/list endpoints made these
+        # exist). No conversation_id lie for the new kind (None + honest pair).
+        obs_note_query = (
+            db.query(Note)
+            .options(joinedload(Note.observation), joinedload(Note.segment))
+            .filter(
+                Note.observation_id.isnot(None),
+                Note.is_archived == False,
+                Note.content.ilike(search_pattern)
+            )
+            .join(Observation, Note.observation_id == Observation.id)
+            .filter(Observation.project_id == project_id)
+            .order_by(Note.observation_id, Note.id)
+        )
+        obs_notes = obs_note_query.limit(limit).all()
+
+        for n in obs_notes:
+            note_items.append(
+                NoteSearchResult(
+                    id=n.id,
+                    conversation_id=None,
+                    conversation_name=n.observation.name if n.observation else "Unknown",
+                    segment_id=n.segment_id,
+                    segment_text_preview=(
+                        n.segment.text[:100] + "..." if n.segment and len(n.segment.text) > 100
+                        else n.segment.text if n.segment else None
+                    ),
+                    content=n.content,
+                    sequence_number=n.sequence_number,
+                    source_type="observation",
+                    source_kind="observation",
+                    source_id=n.observation_id,
                 )
             )
 
@@ -399,16 +507,20 @@ async def search_study(
         # Batch resolve entity names (avoid N+1)
         code_ids = [m.entity_id for m in memos if m.entity_type == "code"]
         conv_ids = [m.entity_id for m in memos if m.entity_type == "conversation"]
+        obs_ids = [m.entity_id for m in memos if m.entity_type == "observation"]
         cat_ids = [m.entity_id for m in memos if m.entity_type == "code_category"]
         analysis_ids = [m.entity_id for m in memos if m.entity_type == "analysis"]
         code_names = {}
         conv_names = {}
+        obs_names = {}
         cat_names = {}
         analysis_names = {}
         if code_ids:
             code_names = dict(db.query(Code.id, Code.name).filter(Code.id.in_(code_ids)).all())
         if conv_ids:
             conv_names = dict(db.query(Conversation.id, Conversation.name).filter(Conversation.id.in_(conv_ids)).all())
+        if obs_ids:
+            obs_names = dict(db.query(Observation.id, Observation.name).filter(Observation.id.in_(obs_ids)).all())
         if cat_ids:
             cat_names = dict(db.query(CodeCategory.id, CodeCategory.name).filter(CodeCategory.id.in_(cat_ids)).all())
         if analysis_ids:
@@ -425,6 +537,8 @@ async def search_study(
                 entity_name = code_names.get(m.entity_id)
             elif m.entity_type == "conversation":
                 entity_name = conv_names.get(m.entity_id)
+            elif m.entity_type == "observation":
+                entity_name = obs_names.get(m.entity_id)
             elif m.entity_type == "code_category":
                 entity_name = cat_names.get(m.entity_id)
             elif m.entity_type == "analysis":
@@ -490,10 +604,53 @@ async def search_study(
             ],
         )
 
+    # Search observations (by name — the 4th name block, slab 4b)
+    if "observations" in requested_types:
+        obs_query = (
+            db.query(Observation)
+            .filter(
+                Observation.project_id == project_id,
+                Observation.name.ilike(search_pattern),
+            )
+            .order_by(Observation.name)
+        )
+
+        total_obs = obs_query.count()
+        obs_hits = obs_query.limit(limit).all()
+
+        # Visible clip counts
+        obs_clip_counts = {}
+        if obs_hits:
+            obs_hit_ids = [o.id for o in obs_hits]
+            counts = (
+                db.query(Segment.observation_id, func.count(Segment.id))
+                .filter(
+                    Segment.observation_id.in_(obs_hit_ids),
+                    Segment.merged_into_id.is_(None),
+                    Segment.split_into_id.is_(None),
+                )
+                .group_by(Segment.observation_id)
+                .all()
+            )
+            obs_clip_counts = dict(counts)
+
+        response.observations = ObservationSearchResults(
+            count=total_obs,
+            items=[
+                ObservationSearchResult(
+                    id=o.id,
+                    name=o.name,
+                    segment_count=obs_clip_counts.get(o.id, 0),
+                    has_media=bool(o.media_filename),
+                )
+                for o in obs_hits
+            ],
+        )
+
     # Search comments (open-ended dataset values)
     if "text" in requested_types:
         text_query = (
-            db.query(DatasetValue, DatasetColumn.column_name, DatasetColumn.id.label("col_id"), DatasetRow.row_identifier)
+            db.query(DatasetValue, DatasetColumn.column_name, DatasetColumn.column_text, DatasetColumn.id.label("col_id"), DatasetRow.row_identifier)
             .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
             .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
             .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
@@ -537,13 +694,17 @@ async def search_study(
                 TextSearchResult(
                     id=dv.id,
                     value_text=dv.value_text or "",
-                    column_name=col_name or "",
+                    # #575: coalesce name→text so a comment column with no short
+                    # name (the common case for open-text) never renders a blank
+                    # subtitle. column_text isn't otherwise on the wire here, so
+                    # the frontend can't fall back — the coalesce must live here.
+                    column_name=col_name or col_text or "",
                     column_id=col_id,
                     row_identifier=resp_id,
                     is_quoted=dv.id in quoted_dv_ids,
                     applied_code_count=code_count_map.get(dv.id, 0),
                 )
-                for dv, col_name, col_id, resp_id in text_rows
+                for dv, col_name, col_text, col_id, resp_id in text_rows
             ],
         )
 

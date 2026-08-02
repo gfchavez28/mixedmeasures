@@ -25,7 +25,7 @@ landing it after would mean every surface silently inflates in the gap.
 so it splats into an existing ``.filter(...)``; it keeps every real coder layer
 (human AND ai-as-coder) and drops only the derived consensus layer.
 """
-from sqlalchemy import func
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models.code_application import CodeApplication
@@ -152,3 +152,108 @@ def layer_origin_filter(layer_scope: str | None = None):
     if layer_scope == LAYER_CONSENSUS:
         return CodeApplication.origin == CONSENSUS_ORIGIN
     return non_consensus_filter()
+
+
+# ── Consensus eligibility (D18: unit provenance, not parent type) ───────────
+
+
+def consensus_eligible_segment_clause():
+    """Which segments can carry a consensus layer — usable on ANY Segment-joined
+    query, no extra join required.
+
+    Eligibility is decided by **unit provenance**, NOT by parent type (D18 —
+    supersedes D2, which excluded every Observation outright):
+
+      * conversation + document segments — the MATERIAL dictates the units
+        (turns, paragraphs), so every coder codes the same ones.
+      * FROZEN observation clips — the TEAM agreed the units before coding, so
+        again every coder codes the same ones. CONSENSUS works here unchanged:
+        `_decide_consensus` is per-target and does not care whether a target is
+        a transcript turn or a slice of video.
+        NOTE (slab 6b-B, not yet built): reconciliation and ordinary kappa do
+        NOT reach a frozen clip yet. `irr.py`'s gather still scopes to
+        `or_(Conversation, Document)` with `("conv"|"doc")` source keys, and
+        `reconciliation.py` consumes that same gather — so a clip is dropped
+        before either sees it. The ENGINES are parent-indifferent; only their
+        gather is not. Widening it is the work, and the source-key ternary must
+        be fixed in the same change or a clip silently becomes `("doc", None)`.
+      * UNFROZEN observation clips — each coder marks their OWN time ranges, so a
+        clip has exactly one voter and `_decide_consensus` returns nothing anyway
+        (`n_voters < 2`). Excluded explicitly: the reliability question there is
+        "did we agree on the BOUNDARIES", which is unitizing-alpha's job, not a
+        per-target majority vote's.
+
+    Frozen-ness is read live rather than denormalized onto Segment, so freezing an
+    observation cannot leave its clips carrying a stale eligibility flag.
+    """
+    from ..models.observation import Observation  # local: avoids an import cycle
+
+    return or_(
+        Segment.observation_id.is_(None),
+        Segment.observation_id.in_(
+            select(Observation.id).where(Observation.segmentation_frozen_at.isnot(None))
+        ),
+    )
+
+
+def _join_all_segment_parents(query):
+    """Outerjoin Segment's three parents. Every scope below builds on this."""
+    from ..models.conversation import Conversation
+    from ..models.document import Document
+    from ..models.observation import Observation
+
+    return (
+        query
+        .outerjoin(Conversation, Segment.conversation_id == Conversation.id)
+        .outerjoin(Document, Segment.document_id == Document.id)
+        .outerjoin(Observation, Segment.observation_id == Observation.id)
+    )
+
+
+def project_scoped_segments(query, project_id: int):
+    """ALL of `project_id`'s segments, whatever their parent — the CLEANER's scope.
+
+    ⚠️ This is deliberately BROADER than `consensus_scoped_segments`, and the
+    asymmetry is load-bearing:
+
+        the cleaner must see EVERYTHING the writer can ever have written.
+
+    Consensus eligibility can be REVOKED (unfreezing an observation re-opens its
+    clips). If the rebuild's DELETE were scoped to eligible-only segments, then the
+    moment a team unfroze, the rebuild would stop producing that clip's consensus
+    row AND lose the ability to SEE the existing one — stranding it forever as an
+    invisible orphan no rebuild could ever reclaim. That is exactly the trap that
+    made D2 exclude observations wholesale; it is closed by scoping the WRITER
+    narrowly and the CLEANER widely, not by refusing to write at all.
+    """
+    from ..models.conversation import Conversation
+    from ..models.document import Document
+    from ..models.observation import Observation
+
+    return _join_all_segment_parents(query).filter(
+        or_(
+            Conversation.project_id == project_id,
+            Document.project_id == project_id,
+            Observation.project_id == project_id,
+        )
+    )
+
+
+def consensus_scoped_segments(query, project_id: int):
+    """`project_id`'s CONSENSUS-ELIGIBLE segments — the WRITER's scope.
+
+    Eligible = conversation/document segments (the material dictates the units) +
+    FROZEN observation clips (the team agreed the units). See
+    `consensus_eligible_segment_clause` for the reasoning.
+
+    Pair with `project_scoped_segments` for any DELETE/cleanup — never scope a
+    cleaner by this, or a revoked eligibility strands rows (see that docstring).
+
+    Composed as project-scope AND the eligibility clause, deliberately: the rule
+    for "which segments can carry consensus" then lives in exactly ONE place
+    (`consensus_eligible_segment_clause`), so the per-target write gate, the
+    staleness marker, and this gather can never drift apart.
+    """
+    return project_scoped_segments(query, project_id).filter(
+        consensus_eligible_segment_clause()
+    )

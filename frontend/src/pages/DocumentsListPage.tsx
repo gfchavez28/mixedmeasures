@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useCallback } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { FileInput, Trash2, Search, X, ArrowUpDown, FileText } from 'lucide-react'
 import { documentsApi, type DocumentListItem } from '@/lib/api'

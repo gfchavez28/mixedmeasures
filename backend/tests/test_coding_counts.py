@@ -211,3 +211,40 @@ def test_all_document_surfaces_agree(project_with_coded_document, db_session):
     assert set(counts.values()) == {EXPECTED_DOC_CODED}, (
         f"Document coded-count surfaces disagree (invariant J-A): {counts}"
     )
+
+
+class TestNextUncodedEndpointIsGone:
+    """#568 — resolved by REMOVAL (plan §8k.0.1/D37), not by fixing the predicate.
+
+    ``GET /conversations/{id}/next-uncoded`` disagreed with invariant J-A: it
+    treated a universal-only segment as CODED (any ``CodeApplication`` row
+    satisfied it) and never excluded the consensus layer, so it would have
+    skipped exactly the segments the gauge counts as uncoded.
+
+    It was never fixed because it had no callers. All three workbenches have
+    walked the loaded list client-side since Track J · J1 item 3c
+    (``isSegmentCodedVisible`` on the blind lens), which is strictly MORE correct
+    than any server fix could be — it is coder-aware, and J-A alone is not.
+    Fixing a dead endpoint's predicate would have shipped consumer-untestable
+    code and left the trap in place for the next API-driving script.
+
+    Asserted against the ROUTE TABLE rather than an HTTP status: with
+    ``frontend/dist`` present the GET-only SPA catch-all answers a removed API
+    path, so a status assertion measures the catch-all, not the route.
+    """
+
+    def test_the_route_is_not_registered(self):
+        from app.main import app
+
+        paths = {getattr(route, "path", None) for route in app.routes}
+        assert "/api/conversations/{conversation_id}/next-uncoded" not in paths
+
+    def test_the_sibling_coding_progress_route_still_exists(self):
+        # Deliberately KEPT (plan §8k.0.1): also caller-less, but it computes
+        # J-A-correct numbers, and removing it touches lib/api/segments.ts's
+        # stale `participant_coded` typing — a separate cleanup decision. This
+        # pin is what makes that "kept on purpose" rather than "overlooked".
+        from app.main import app
+
+        paths = {getattr(route, "path", None) for route in app.routes}
+        assert "/api/conversations/{conversation_id}/coding-progress" in paths

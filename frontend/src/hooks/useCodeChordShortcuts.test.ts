@@ -237,7 +237,10 @@ describe('useCodeChordShortcuts', () => {
       const { onArrowHorizontal } = setup()
       press('ArrowLeft')
       press('ArrowRight')
-      expect(onArrowHorizontal.mock.calls).toEqual([['left'], ['right']])
+      expect(onArrowHorizontal.mock.calls).toEqual([
+        ['left', { shift: false, alt: false }],
+        ['right', { shift: false, alt: false }],
+      ])
     })
   })
 
@@ -308,5 +311,69 @@ describe('useCodeChordShortcuts', () => {
       expect(onToggleCode).not.toHaveBeenCalled()
       expect(onJumpUncoded).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('slab-3d contract additions', () => {
+  it('onEscapeMode sits between the chord layer and the overlay layer', () => {
+    const order: string[] = []
+    const { view } = setup({
+      onEscapeMode: vi.fn(() => { order.push('mode'); return true }),
+      onEscapeOverlay: vi.fn(() => { order.push('overlay'); return true }),
+    })
+    // No pending chord → mode is the first live layer and consumes the press.
+    press('Escape')
+    expect(order).toEqual(['mode'])
+    view.unmount()
+  })
+
+  it('a chord still unwinds before the mode layer', () => {
+    const onEscapeMode = vi.fn(() => true)
+    const { view } = setup({ onEscapeMode })
+    press('2')          // arm a chord (category 100)
+    press('Escape')     // layer 1: clears the chord, never reaches the mode
+    expect(onEscapeMode).not.toHaveBeenCalled()
+    press('Escape')     // now the mode layer consumes it
+    expect(onEscapeMode).toHaveBeenCalledTimes(1)
+    view.unmount()
+  })
+
+  it('j falls through to extraKeys when the surface provides no onJumpUncoded (D4)', () => {
+    const shuttle = vi.fn(() => true)
+    const { view } = setup({ onJumpUncoded: undefined, extraKeys: { j: shuttle } })
+    press('j')
+    expect(shuttle).toHaveBeenCalledTimes(1)
+    view.unmount()
+  })
+
+  it('j stays jump-to-uncoded on surfaces that provide it', () => {
+    const shuttle = vi.fn(() => true)
+    const { view, onJumpUncoded } = setup({ extraKeys: { j: shuttle } })
+    press('j')
+    expect(onJumpUncoded).toHaveBeenCalledTimes(1)
+    expect(shuttle).not.toHaveBeenCalled()
+    view.unmount()
+  })
+
+  it('onArrowHorizontal receives the shift/alt modifiers (boundary nudges)', () => {
+    const { view, onArrowHorizontal } = setup()
+    press('ArrowRight', { shiftKey: true })
+    press('ArrowLeft', { altKey: true })
+    expect(onArrowHorizontal.mock.calls).toEqual([
+      ['right', { shift: true, alt: false }],
+      ['left', { shift: false, alt: true }],
+    ])
+    view.unmount()
+  })
+
+  it('extraKeys handlers receive the KeyboardEvent (Shift-variant steps)', () => {
+    const seen: boolean[] = []
+    const { view } = setup({
+      extraKeys: { ',': (e: KeyboardEvent) => { seen.push(e.shiftKey); return true } },
+    })
+    press(',')
+    press(',', { shiftKey: true })
+    expect(seen).toEqual([false, true])
+    view.unmount()
   })
 })

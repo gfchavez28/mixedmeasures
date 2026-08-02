@@ -52,7 +52,7 @@ export interface QualHeatmapCell {
 export interface QualHeatmapRow {
   label: string
   id: number
-  sourceType: 'conversation' | 'text_column' | 'document' | 'code'
+  sourceType: 'conversation' | 'text_column' | 'document' | 'observation' | 'code'
   cells: QualHeatmapCell[]
   totalN: number
 }
@@ -270,7 +270,7 @@ export interface QualCodeSummaryRow {
 export interface QualSourceSummaryRow {
   sourceId: number
   sourceLabel: string
-  sourceType: 'conversation' | 'text_column' | 'document'
+  sourceType: 'conversation' | 'text_column' | 'document' | 'observation'
   totalCodes: number
   uniqueCodes: number
   codedSegments: number

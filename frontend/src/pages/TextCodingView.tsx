@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { useParams, useSearchParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router'
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import {
   BookOpen, Shuffle, Eye, EyeOff, Quote, Search, Download, BarChart3, Undo2, Redo2,
@@ -925,6 +925,7 @@ export default function TextCodingView() {
               size="icon"
               disabled={!history.canUndo}
               onClick={() => history.undo()}
+              aria-label="Undo"
               title="Undo (Ctrl+Z)"
             >
               <Undo2 className="w-4 h-4" />
@@ -934,6 +935,7 @@ export default function TextCodingView() {
               size="icon"
               disabled={!history.canRedo}
               onClick={() => history.redo()}
+              aria-label="Redo"
               title="Redo (Ctrl+Y)"
             >
               <Redo2 className="w-4 h-4" />
@@ -1049,7 +1051,7 @@ export default function TextCodingView() {
               value={searchInput}
               onChange={e => handleSearchInput(e.target.value)}
               className="h-8 w-40 pl-8 text-sm border-orange-200 dark:border-orange-800 focus-visible:ring-orange-500"
-              aria-label="Search comments"
+              aria-label="Search responses"
               title="Search within the displayed responses"
             />
           </div>

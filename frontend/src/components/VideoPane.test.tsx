@@ -17,7 +17,8 @@ function renderPane(overrides: Partial<React.ComponentProps<typeof VideoPane>> =
   const mediaRef = createRef<HTMLVideoElement | HTMLAudioElement | null>()
   const props: React.ComponentProps<typeof VideoPane> = {
     projectId: 1,
-    conversationId: 7,
+    ownerKind: 'conversation' as const,
+    ownerId: 7,
     mediaRef,
     mediaVersion: '1700000000-1234',
     segments: [],

@@ -5,7 +5,7 @@ export interface Memo {
   id: number
   project_id: number
   numeric_id: number  // Human-friendly ID (M-1, M-2, etc.)
-  entity_type: 'project' | 'conversation' | 'document' | 'code' | 'code_category' | 'analysis' | 'dataset' | 'dataset_row' | 'dataset_column' | 'canvas'
+  entity_type: 'project' | 'conversation' | 'document' | 'observation' | 'code' | 'code_category' | 'analysis' | 'dataset' | 'dataset_row' | 'dataset_column' | 'canvas'
   entity_id: number
   title: string | null
   content: string

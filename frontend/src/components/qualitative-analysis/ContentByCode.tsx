@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { SELECTED_ROW } from '@/lib/selection'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import {
   ChevronDown,
   ChevronRight,
@@ -20,9 +20,10 @@ import {
   type Code,
   type CodeFrequencyItem,
   type CodeAnalysisFilterParams,
+  type ObservationSegmentGroup,
 } from '@/lib/api'
 import { getSpeakerInitials } from '@/lib/conversation-import-utils'
-import { getCodeColor, getUnfocusedStyle } from '@/lib/utils'
+import { formatTimecode, getCodeColor, getUnfocusedStyle } from '@/lib/utils'
 import CodeChip from './CodeChip'
 import InlineCodeActions from './InlineCodeActions'
 import { highlightText } from './highlight-text'
@@ -42,6 +43,7 @@ interface ContentByCodeProps {
   hasCommentColumns?: boolean
   /** Whether any documents are selected in the Sources sidebar. When false, documents section is hidden. */
   hasDocuments?: boolean
+  hasObservations?: boolean
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
@@ -65,6 +67,7 @@ export default function ContentByCode({
   hasConversations = true,
   hasCommentColumns = true,
   hasDocuments = false,
+  hasObservations = false,
   focusedCodeId,
   onFocusCode,
   onCodeChange,
@@ -175,6 +178,7 @@ export default function ContentByCode({
   const showSegments = source !== 'text' && hasConversations
   const showComments = source !== 'conversations' && hasCommentColumns
   const showDocuments = source !== 'text' && hasDocuments
+  const showObservations = source !== 'text' && hasObservations
 
   // Build count summary for header
   const countParts: string[] = []
@@ -316,6 +320,29 @@ export default function ContentByCode({
         </div>
       )}
 
+      {/* Observation Clips section (D25 — minimal rows; rich cards are slab 5) */}
+      {showObservations && (
+        <div>
+          {(showSegments || showComments || showDocuments) && (
+            <div className="flex items-center gap-3 mb-3 mt-2">
+              <span className="text-xs font-medium text-mm-text-muted uppercase tracking-wide">Observation Clips</span>
+              <div className="flex-1 border-b border-mm-border-subtle" />
+            </div>
+          )}
+          <ObservationClipsSection
+            projectId={projectId}
+            codeId={selectedContentCodeId}
+            codeMap={codeMap}
+            allCodes={chipCodes}
+            filterParams={filterParams}
+            search={search}
+            focusedCodeId={focusedCodeId}
+            onFocusCode={onFocusCode}
+            onCodeChange={onCodeChange}
+          />
+        </div>
+      )}
+
       {/* Code navigation bar at bottom */}
       <CodeNavBar
         codes={activeCodes}
@@ -408,6 +435,7 @@ function SegmentsSection({
       filterParams.participant_ids,
       filterParams.text_column_ids,
       filterParams.document_ids,
+      filterParams.observation_ids,
       filterParams.coder_ids,
       filterParams.layer_scope,
       loadedLimit, 0,
@@ -843,6 +871,7 @@ function DocumentSegmentsSection({
       filterParams.participant_ids,
       filterParams.text_column_ids,
       filterParams.document_ids,
+      filterParams.observation_ids,
       filterParams.coder_ids,
       filterParams.layer_scope,
       200, 0,
@@ -929,7 +958,7 @@ function DocumentSegmentsSection({
                           <p className="text-sm">{searchLower ? highlightText(seg.text, search ?? '') : seg.text}</p>
                           <div className="flex items-center gap-2 mt-1 flex-wrap">
                             {seg.is_quoted && (
-                              <Quote className="w-3 h-3 text-amber-400 fill-amber-400" />
+                              <Quote role="img" aria-label="Quoted" className="w-3 h-3 text-amber-400 fill-amber-400" />
                             )}
                             {onCodeChange ? (
                               <InlineCodeActions
@@ -1038,6 +1067,270 @@ function CodeNavBar({
       ) : (
         <div />
       )}
+    </div>
+  )
+}
+
+// ── Observation Clips section (D25) ──────────────────────────────────────
+//
+// The MINIMAL clip row: timecode range + label (italic placeholder when
+// unlabeled) + chips + the ?clip= deep-link, grouped per observation. Rich
+// cards (thumbnails, excerpt anchoring) stay slab 5 — this section exists so
+// "N uses" (frequencies count clips since 4c) and Content can never disagree.
+
+/**
+ * The occurrence strip (D12/D31): where this code's clips fall along the
+ * observation's timeline, as a thin track of marks in the code's own color.
+ *
+ * DENOMINATOR degrades in TWO steps, not the workbench ruler's three — Content
+ * has no media element by design (D12's one-media-element invariant), so the
+ * ruler's middle rung (the element's runtime duration) is unavailable here:
+ * server duration → the farthest clip end. The ruler's `, 60` floor is
+ * deliberately omitted too: it exists so an EMPTY timeline still renders, and
+ * on the strip clips always exist, where a floor would only compress the marks.
+ *
+ * `aria-hidden` with the count/duration text beside it carrying the meaning —
+ * the house rule for a decorative bar (ClipTimeline states it outright).
+ */
+function stripDenominator(obs: ObservationSegmentGroup): number {
+  const maxEnd = obs.segments.reduce((m, s) => Math.max(m, s.end_time ?? 0), 0)
+  return Math.max(obs.media_duration_seconds ?? 0, maxEnd)
+}
+
+function OccurrenceStrip({ observation, color }: { observation: ObservationSegmentGroup; color: string }) {
+  const total = stripDenominator(observation)
+  if (total <= 0) return null
+  return (
+    <span
+      aria-hidden
+      className="relative hidden sm:block w-[120px] h-[9px] rounded-sm bg-mm-bg border border-mm-border-subtle overflow-hidden shrink-0"
+    >
+      {observation.segments.map(seg => {
+        if (seg.start_time === null) return null
+        const start = Math.max(0, Math.min(1, seg.start_time / total))
+        const end = Math.max(0, Math.min(1, (seg.end_time ?? seg.start_time) / total))
+        // A point event has zero width — give it a visible minimum so a mark
+        // never disappears entirely (it marks, it doesn't cover — D7).
+        const width = Math.max(end - start, 0.008)
+        return (
+          <span
+            key={seg.id}
+            className="absolute top-[1px] bottom-[1px] rounded-[1.5px]"
+            style={{ left: `${start * 100}%`, width: `${width * 100}%`, backgroundColor: color }}
+          />
+        )
+      })}
+    </span>
+  )
+}
+
+function ObservationClipsSection({
+  projectId,
+  codeId,
+  codeMap,
+  allCodes,
+  filterParams,
+  search,
+  focusedCodeId,
+  onFocusCode,
+  onCodeChange,
+}: {
+  projectId: number
+  codeId: number
+  codeMap: Map<number, Code>
+  allCodes: Code[]
+  filterParams: CodeAnalysisFilterParams
+  search?: string
+  focusedCodeId?: number | null
+  onFocusCode?: (codeId: number) => void
+  onCodeChange?: () => void
+}) {
+  const [collapsedObs, setCollapsedObs] = useState<Set<number>>(new Set())
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset collapsed state on code change
+    setCollapsedObs(new Set())
+  }, [codeId])
+
+  // Reuse the same segments query — the backend returns observations alongside
+  // conversations/documents (4c), so this shares the cache entry with them.
+  const { data, isLoading } = useQuery({
+    queryKey: [
+      'code-segments-context', projectId, codeId,
+      filterParams.exclude_facilitator,
+      filterParams.conversation_ids,
+      filterParams.participant_ids,
+      filterParams.text_column_ids,
+      filterParams.document_ids,
+      filterParams.observation_ids,
+      filterParams.coder_ids,
+      filterParams.layer_scope,
+      200, 0,
+    ],
+    queryFn: () => codeAnalysisApi.segmentsWithContext(projectId, codeId, {
+      ...filterParams,
+      context_size: 1,
+      limit: 200,
+      offset: 0,
+    }),
+    enabled: !!codeId,
+  })
+
+  const toggleObs = useCallback((obsId: number) => {
+    setCollapsedObs(prev => {
+      const next = new Set(prev)
+      if (next.has(obsId)) next.delete(obsId)
+      else next.add(obsId)
+      return next
+    })
+  }, [])
+
+  const searchLower = (search ?? '').toLowerCase()
+  const filteredObservations = useMemo(() => {
+    if (!data?.observations) return []
+    if (!searchLower) return data.observations
+    return data.observations.map(obs => ({
+      ...obs,
+      segments: obs.segments.filter(seg => seg.text.toLowerCase().includes(searchLower)),
+    })).filter(obs => obs.segments.length > 0)
+  }, [data, searchLower])
+
+  if (isLoading) return <div className="text-center py-8 text-mm-text-muted">Loading observation clips...</div>
+  if (!data?.observations || data.observations.length === 0) {
+    return <div className="text-center py-8 text-mm-text-muted">
+      {searchLower ? 'No clips match your search.' : 'No coded clips found for this code with current filters.'}
+    </div>
+  }
+
+  const sortedObservations = [...filteredObservations].sort(
+    (a, b) => b.segments.length - a.segments.length,
+  )
+
+  if (sortedObservations.length === 0) {
+    return <div className="text-center py-8 text-mm-text-muted">No clips match your search.</div>
+  }
+
+  // The strip's marks carry the CODE's color — the mockup's rule; the strip
+  // answers "where does THIS code occur", not "where are the clips".
+  const code = codeMap.get(codeId)
+  const stripColor = code ? getCodeColor(code) : 'currentColor'
+
+  return (
+    <div className="space-y-2">
+      {sortedObservations.map(obs => {
+        const collapsed = collapsedObs.has(obs.observation_id)
+        return (
+          <div key={obs.observation_id} className="border rounded-lg overflow-hidden bg-mm-surface">
+            <button
+              className="w-full flex items-center justify-between px-4 py-2 bg-mm-bg hover:bg-mm-surface-hover transition-colors text-left"
+              onClick={() => toggleObs(obs.observation_id)}
+              aria-expanded={!collapsed}
+            >
+              <span className="flex items-center gap-2">
+                {collapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                <span className="font-medium text-sm">{obs.observation_name}</span>
+              </span>
+              <span className="flex items-center gap-2">
+                <OccurrenceStrip
+                  observation={obs}
+                  color={stripColor}
+                />
+                <span
+                  className="text-xs text-mm-text-muted whitespace-nowrap"
+                  title={
+                    stripDenominator(obs) > 0 && obs.media_duration_seconds == null
+                      ? 'Recording length unknown — showing how far the clips reach'
+                      : undefined
+                  }
+                >
+                  {obs.segments.length} clip{obs.segments.length !== 1 ? 's' : ''}
+                  {stripDenominator(obs) > 0
+                    ? ` · ${formatTimecode(stripDenominator(obs))}${obs.media_duration_seconds == null ? ' marked' : ''}`
+                    : ''}
+                </span>
+              </span>
+            </button>
+            {!collapsed && (
+              <div className="px-3 py-2 space-y-3 border-t border-mm-border-subtle">
+                {obs.segments.map(seg => {
+                  const isFocused = focusedCodeId == null || seg.applied_code_ids.includes(focusedCodeId)
+                  const timecode = seg.start_time !== null
+                    ? (seg.end_time !== null && seg.end_time !== seg.start_time
+                        ? `${formatTimecode(seg.start_time)}–${formatTimecode(seg.end_time)}`
+                        : formatTimecode(seg.start_time))
+                    : null
+                  // A point event has no duration to state (D7).
+                  const duration = seg.start_time !== null && seg.end_time !== null && seg.end_time !== seg.start_time
+                    ? formatTimecode(seg.end_time - seg.start_time)
+                    : null
+                  return (
+                    <div
+                      key={seg.id}
+                      className="border border-mm-border-subtle rounded-md overflow-hidden bg-mm-surface"
+                      style={getUnfocusedStyle(isFocused)}
+                    >
+                      <div className="flex items-start gap-2 py-2.5 px-3 bg-mm-surface border-l-[3px] border-l-teal-400 group">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm">
+                            {timecode && (
+                              <span className="tabular-nums text-mm-text-muted mr-2">
+                                {timecode}{duration ? ` · ${duration}` : ''}
+                              </span>
+                            )}
+                            {seg.text
+                              ? <span>{searchLower ? highlightText(seg.text, search ?? '') : seg.text}</span>
+                              : <span className="italic text-mm-text-faint">Unlabeled clip</span>}
+                          </p>
+                          <div className="flex items-center gap-2 mt-1 flex-wrap">
+                            {seg.is_quoted && (
+                              <Quote
+                                role="img"
+                                aria-label={seg.quote_ranges.length > 0
+                                  ? `Quoted ${seg.quote_ranges.map(q => `${formatTimecode(q.start_time)}–${formatTimecode(q.end_time)}`).join(', ')}`
+                                  : 'Quoted clip'}
+                                className="w-3 h-3 text-amber-400 fill-amber-400"
+                              />
+                            )}
+                            {onCodeChange ? (
+                              <InlineCodeActions
+                                projectId={projectId}
+                                itemType="segment"
+                                itemId={seg.id}
+                                appliedCodeIds={seg.applied_code_ids}
+                                codeMap={codeMap}
+                                allCodes={allCodes}
+                                onCodeChange={onCodeChange}
+                                excludeCodeId={codeId}
+                                onFocusCode={onFocusCode}
+                              />
+                            ) : (
+                              seg.applied_code_ids
+                                .filter(cid => cid !== codeId)
+                                .map(cid => {
+                                  const c = codeMap.get(cid)
+                                  if (!c) return null
+                                  return <CodeChip key={cid} code={c} size="xs" onClick={onFocusCode} />
+                                })
+                            )}
+                            <Link
+                              to={`/projects/${projectId}/observations/${obs.observation_id}?clip=${seg.id}${seg.start_time !== null ? `&t=${seg.start_time}` : ''}`}
+                              aria-label={`Open in ${obs.observation_name}${timecode ? ` at ${timecode}` : ''}`}
+                              className="text-[11px] text-mm-blue-text hover:underline opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center gap-0.5"
+                            >
+                              <ExternalLink className="w-3 h-3" aria-hidden />
+                              View in observation
+                            </Link>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }

@@ -39,6 +39,19 @@ export function isVideoFilename(name: string): boolean {
 }
 
 /**
+ * Is this filename one the backend can accept as a recording?
+ *
+ * The name-only sibling of `validateMediaFile` (which is size-aware and takes a
+ * `File`). A drop filter has only names to work with, and it must not re-derive
+ * the extension list — that divergence between a page's filter and its wizard's
+ * accept IS #552.
+ */
+export function isSupportedMediaFile(filename: string): boolean {
+  const ext = filename.split('.').pop()?.toLowerCase()
+  return !!ext && (MEDIA_EXTENSIONS as readonly string[]).includes(ext)
+}
+
+/**
  * `accept` attribute for a media `<input type="file">` — MIME types AND dotted
  * extensions (different OS file pickers match one or the other).
  */
@@ -60,8 +73,8 @@ export function validateMediaFile(file: File): MediaValidationResult {
   if (file.size > MAX_MEDIA_SIZE) {
     return { ok: false, error: 'Recording exceeds 4GB limit' }
   }
-  const ext = file.name.split('.').pop()?.toLowerCase()
-  if (!ext || !(MEDIA_EXTENSIONS as readonly string[]).includes(ext)) {
+  // Delegates, so the extension decision has exactly one owner.
+  if (!isSupportedMediaFile(file.name)) {
     return { ok: false, error: `Accepted formats: ${MEDIA_FORMAT_LABEL}` }
   }
   return { ok: true }

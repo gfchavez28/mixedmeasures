@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { useSearchParams, useNavigate } from 'react-router-dom'
+import { useSearchParams, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { DndContext, useDroppable, type DragEndEvent } from '@dnd-kit/core'
 import { canvasApi, excerptsApi, materialsApi, memosApi, type CanvasListItem, type CanvasDetail, type CanvasTheme, type CanvasSnapshot, type PendingItem } from '@/lib/api'
@@ -38,6 +38,7 @@ import { toast } from 'sonner'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { cn } from '@/lib/utils'
+import { excerptEmbedAttrs } from '@/lib/canvas-excerpt'
 import { formatRelativeTime } from '@/lib/format'
 import { exportCanvasMarkdown, exportCanvasHtml, exportCanvasPdf, captureCanvasChartPngs, downloadFile } from '@/lib/canvas-export'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
@@ -725,12 +726,7 @@ export default function CanvasView() {
     setInsertingId(excerptId)
     try {
       const e = await excerptsApi.get(projectId, excerptId)
-      ref.insertNode.insertExcerpt({
-        excerptId: e.id,
-        displayText: e.excerpt_text,
-        sourceContext: e.conversation_name ?? '',
-        conversationId: e.conversation_id,
-      })
+      ref.insertNode.insertExcerpt(excerptEmbedAttrs(e))
       invalidateCanvas()
     } catch { toast.error('Failed to load excerpt') }
     finally { setInsertingId(null) }
@@ -789,7 +785,7 @@ export default function CanvasView() {
     try {
       if (item.item_type === 'excerpt') {
         const e = await excerptsApi.get(projectId, item.source_id)
-        ref.insertNode.insertExcerpt({ excerptId: e.id, displayText: e.excerpt_text, sourceContext: e.conversation_name ?? '', conversationId: e.conversation_id })
+        ref.insertNode.insertExcerpt(excerptEmbedAttrs(e))
       } else if (item.item_type === 'material') {
         const materials = await materialsApi.listAllMaterials(projectId)
         const m = materials?.find(x => x.id === item.source_id)

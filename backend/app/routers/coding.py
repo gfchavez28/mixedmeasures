@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
+from sqlalchemy import func
 
 from ..database import get_db
 from ..models.user import User
@@ -9,7 +9,7 @@ from ..models.code import Code
 from ..models.code_application import CodeApplication
 from ..models.conversation import Conversation
 from ..models.document import Document
-from ..models.speaker import Speaker
+from ..models.observation import Observation
 from ..schemas.coding import (
     ApplyCodeRequest,
     BulkCodeRequest,
@@ -25,19 +25,30 @@ from ..services.coding_counts import (
 )
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
+from ..services.coding_layers import project_scoped_segments
 from .helpers import _get_project_or_404, _verify_segment_ownership, _verify_conversation_ownership
 
 router = APIRouter(prefix="/api", tags=["coding"])
 
 
 def _get_segment_project_id(db: Session, segment: Segment) -> int | None:
-    """Get project_id for a segment via its parent (conversation or document)."""
+    """Get project_id for a segment via its parent (conversation, document, or
+    observation).
+
+    A missing parent arm here does NOT fail open — it returns None, and the callers
+    turn that into a 400 "same project" refusal. But it is a helper that LIES about
+    a perfectly valid segment, and it was masking the (now-fixed) fail-open in
+    `_verify_segment_ownership`. Every Segment parent gets an arm.
+    """
     if segment.conversation_id:
         conv = db.query(Conversation).filter(Conversation.id == segment.conversation_id).first()
         return conv.project_id if conv else None
     elif segment.document_id:
         doc = db.query(Document).filter(Document.id == segment.document_id).first()
         return doc.project_id if doc else None
+    elif segment.observation_id:
+        obs = db.query(Observation).filter(Observation.id == segment.observation_id).first()
+        return obs.project_id if obs else None
     return None
 
 
@@ -249,18 +260,14 @@ async def bulk_code(
     if data.action == "apply" and not code.is_active:
         raise HTTPException(status_code=400, detail="Code is inactive")
 
-    # Batch fetch all segments in one query, verify same project as code
-    segments = db.query(Segment).outerjoin(
-        Conversation, Segment.conversation_id == Conversation.id
-    ).outerjoin(
-        Document, Segment.document_id == Document.id
-    ).filter(
-        Segment.id.in_(data.segment_ids),
-        or_(
-            Conversation.project_id == code.project_id,
-            Document.project_id == code.project_id,
-        ),
-    ).all()
+    # Batch fetch all segments in one query, verify same project as code.
+    # project_scoped_segments spans all THREE parents (conversation/document/
+    # observation) — the old two-parent outerjoin silently dropped clips from the
+    # map, so every multi-clip chord commit came back applied=False inside a 200
+    # (D23; the first thing the coding surface does on a clip selection).
+    segments = project_scoped_segments(
+        db.query(Segment), code.project_id
+    ).filter(Segment.id.in_(data.segment_ids)).all()
     segment_map = {s.id: s for s in segments}
 
     # Batch check existing code applications by THIS coder (per-coder dedup;
@@ -324,10 +331,23 @@ async def bulk_code(
                 CodeApplication.user_id == user.id
             ).delete(synchronize_session=False)
 
-    if consensus_enabled(db):
-        affected = [sid for sid in data.segment_ids if sid in segment_map]
-        if affected:
-            mark_consensus_stale(db, code.project_id, segment_ids=affected)
+    affected_ids = [sid for sid in data.segment_ids if sid in segment_map]
+
+    if consensus_enabled(db) and affected_ids:
+        mark_consensus_stale(db, code.project_id, segment_ids=affected_ids)
+
+    # Audit the bulk operation. The single apply/remove paths each log_action; the
+    # bulk path never did — a coding-provenance gap (conv/doc too) closed here. One
+    # row per operation; entity_id is N/A for a batch.
+    if affected_ids:
+        log_action(
+            db,
+            action="code_applied" if data.action == "apply" else "code_removed",
+            entity_type="code_application",
+            user_id=user.id,
+            project_id=code.project_id,
+            details={"code_id": data.code_id, "segment_ids": affected_ids, "bulk": True},
+        )
 
     db.commit()
 
@@ -381,55 +401,3 @@ async def get_coding_progress(
         participant_coded=participant_coded,
         progress_percent=round(progress, 1)
     )
-
-
-@router.get("/conversations/{conversation_id}/next-uncoded")
-async def get_next_uncoded_segment(
-    conversation_id: int,
-    current_segment_id: int = 0,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get the next uncoded participant segment after the current position (excludes soft-deleted)."""
-    _verify_conversation_ownership(db, conversation_id, user.id)
-
-    # Get current segment's sequence order
-    current_order = 0
-    if current_segment_id:
-        current = db.query(Segment).filter(Segment.id == current_segment_id).first()
-        if current:
-            current_order = current.sequence_order
-
-    # Find next uncoded participant segment (exclude soft-deleted)
-    # Uses LEFT JOIN instead of NOT IN subquery for efficiency
-    next_segment = db.query(Segment).outerjoin(
-        CodeApplication, CodeApplication.segment_id == Segment.id
-    ).outerjoin(
-        Speaker, Speaker.id == Segment.speaker_id
-    ).filter(
-        Segment.conversation_id == conversation_id,
-        Segment.merged_into_id == None,  # Exclude soft-deleted
-        Segment.split_into_id == None,
-        Segment.sequence_order > current_order,
-        (Speaker.is_facilitator == 0) | (Segment.speaker_id == None),
-        CodeApplication.id == None  # No code applications = uncoded
-    ).order_by(Segment.sequence_order).first()
-
-    # If nothing found after current, wrap to beginning
-    if not next_segment:
-        next_segment = db.query(Segment).outerjoin(
-            CodeApplication, CodeApplication.segment_id == Segment.id
-        ).outerjoin(
-            Speaker, Speaker.id == Segment.speaker_id
-        ).filter(
-            Segment.conversation_id == conversation_id,
-            Segment.merged_into_id == None,  # Exclude soft-deleted
-            Segment.split_into_id == None,
-            (Speaker.is_facilitator == 0) | (Segment.speaker_id == None),
-            CodeApplication.id == None  # No code applications = uncoded
-        ).order_by(Segment.sequence_order).first()
-
-    if not next_segment:
-        return {"segment_id": None, "message": "All participant segments are coded"}
-
-    return {"segment_id": next_segment.id, "sequence_order": next_segment.sequence_order}

@@ -8,22 +8,30 @@ interface DocumentOption {
   name: string
 }
 
+interface ObservationOption {
+  id: number
+  name: string
+}
+
 interface QuoteBoardFiltersProps {
   codes: Code[]
   categories: CodeCategory[]
   conversations: ConversationOption[]
   textColumns: TextColumnInfo[]
   documents?: DocumentOption[]
+  observations?: ObservationOption[]
   hiddenCodeIds: Set<number>
   hideUncoded: boolean
   hiddenConversationIds: Set<number>
   hiddenTextColumnIds: Set<number>
   hiddenDocumentIds?: Set<number>
+  hiddenObservationIds?: Set<number>
   onHiddenCodeIdsChange: (ids: Set<number>) => void
   onHideUncodedChange: (v: boolean) => void
   onHiddenConversationIdsChange: (ids: Set<number>) => void
   onHiddenTextColumnIdsChange: (ids: Set<number>) => void
   onHiddenDocumentIdsChange?: (ids: Set<number>) => void
+  onHiddenObservationIdsChange?: (ids: Set<number>) => void
   onClearAll: () => void
   hasActiveFilters: boolean
 }
@@ -45,16 +53,19 @@ export default function QuoteBoardFilters({
   conversations,
   textColumns,
   documents,
+  observations,
   hiddenCodeIds,
   hideUncoded,
   hiddenConversationIds,
   hiddenTextColumnIds,
   hiddenDocumentIds,
+  hiddenObservationIds,
   onHiddenCodeIdsChange,
   onHideUncodedChange,
   onHiddenConversationIdsChange,
   onHiddenTextColumnIdsChange,
   onHiddenDocumentIdsChange,
+  onHiddenObservationIdsChange,
   onClearAll,
   hasActiveFilters,
 }: QuoteBoardFiltersProps) {
@@ -119,6 +130,14 @@ export default function QuoteBoardFilters({
     if (next.has(docId)) next.delete(docId)
     else next.add(docId)
     onHiddenDocumentIdsChange(next)
+  }
+
+  const toggleObservation = (obsId: number) => {
+    if (!hiddenObservationIds || !onHiddenObservationIdsChange) return
+    const next = new Set(hiddenObservationIds)
+    if (next.has(obsId)) next.delete(obsId)
+    else next.add(obsId)
+    onHiddenObservationIdsChange(next)
   }
 
   return (
@@ -191,7 +210,7 @@ export default function QuoteBoardFilters({
       )}
 
       {/* Sources section */}
-      {(conversations.length > 0 || textColumns.length > 0 || (documents && documents.length > 0)) && (
+      {(conversations.length > 0 || textColumns.length > 0 || (documents && documents.length > 0) || (observations && observations.length > 0)) && (
         <div>
           <div className="text-[10px] font-semibold text-mm-text-faint uppercase tracking-wider mb-1.5">Sources</div>
           <div className="space-y-0.5">
@@ -235,6 +254,24 @@ export default function QuoteBoardFilters({
                     />
                     <span className={`text-mm-text-secondary truncate ${hiddenDocumentIds.has(doc.id) ? 'line-through text-mm-text-faint' : ''}`}>
                       {doc.name}
+                    </span>
+                  </label>
+                ))}
+              </>
+            )}
+            {observations && observations.length > 0 && hiddenObservationIds && (
+              <>
+                {(conversations.length > 0 || textColumns.length > 0 || (documents && documents.length > 0)) && (
+                  <div className="text-[10px] text-mm-text-faint mt-1.5 mb-0.5 pl-1">Observations</div>
+                )}
+                {observations.map(obs => (
+                  <label key={`obs-${obs.id}`} className="flex items-center gap-1.5 py-0.5 cursor-pointer pl-2">
+                    <Checkbox
+                      checked={hiddenObservationIds.has(obs.id)}
+                      onCheckedChange={() => toggleObservation(obs.id)}
+                    />
+                    <span className={`text-mm-text-secondary truncate ${hiddenObservationIds.has(obs.id) ? 'line-through text-mm-text-faint' : ''}`}>
+                      {obs.name}
                     </span>
                   </label>
                 ))}

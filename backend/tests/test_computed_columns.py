@@ -678,6 +678,75 @@ class TestBulkEvaluator:
         assert vals[1].value_numeric == 140.0  # 20 * 7
 
 
+class TestMissingTextEvaluatesNull:
+    """#599: a recognized-missing text cell (value_text "N/A"/"Prefer not to
+    say", value_numeric NULL) evaluates as SQL NULL at the ColumnRef seam, not
+    as TEXT.
+
+    Pre-fix, ONE refusal cell in a dependency column made arithmetic raise
+    ExpressionError — and evaluate_computed_column has no per-row isolation, so
+    the WHOLE recompute aborted (the router maps it to a 400: the computed
+    column could be neither created nor recomputed); and IF([A] == 3, 1, 0)
+    counted the refusal as FALSE where the language's documented SQL-NULL
+    semantics propagate NULL. Reproduced by execution before fixing
+    (the internal design notes).
+
+    NOT covered here: the declared-missing shape (value_text "99",
+    value_numeric NULL after #592 slab 3) — that needs #592's column-aware
+    declaration; this seam only knows the ``_is_na`` default rule today.
+    """
+
+    def test_arithmetic_over_missing_cell_is_null_not_error(self):
+        # Pre-fix: ExpressionError("Arithmetic '*' requires numeric operands").
+        assert _eval_expr("[A] * 2", {1: ("N/A", None)}) == (None, None)
+
+    def test_if_equality_over_missing_cell_is_null_not_false(self):
+        # Pre-fix: ("0", 0.0) — the refusal was counted as FALSE.
+        assert _eval_expr("IF([A] == 3, 1, 0)", {1: ("N/A", None)}) == (None, None)
+
+    def test_refusal_label_is_missing_too(self):
+        assert _eval_expr("[A] + 1", {1: ("Prefer not to say", None)}) == (None, None)
+
+    def test_genuine_text_keeps_text_fallback(self):
+        # The TXT fallback is load-bearing for == on text columns — only
+        # recognized-missing text becomes NULL.
+        assert _eval_expr('[type] == "Hourly"', {4: ("Hourly", None)}) == ("TRUE", 1.0)
+        assert _eval_expr('[type] == "Hourly"', {4: ("Salary", None)}) == ("FALSE", 0.0)
+
+    def test_bulk_recompute_survives_missing_cell(self, db_session):
+        """The whole-column abort: one N/A cell must not prevent creating or
+        recomputing a computed column over that dependency."""
+        project, dataset, col_a, col_b, row_ids = _setup_computed_data(db_session)
+        # Turn row 3's col_a cell into a recognized-missing answer, stored the
+        # way import stores them: text kept, numeric NULL.
+        dv = (
+            db_session.query(DatasetValue)
+            .filter(DatasetValue.row_id == 3, DatasetValue.column_id == 1)
+            .one()
+        )
+        dv.value_text = "N/A"
+        dv.value_numeric = None
+        db_session.flush()
+
+        comp_col = DatasetColumn(
+            id=10, dataset_id=1, column_code="C1", column_text="Doubled",
+            column_type="numeric", sequence_order=2, display_order=2,
+            source="computed", expression="[A] * 2",
+            depends_on_column_ids=json.dumps([1]),
+        )
+        db_session.add(comp_col)
+        db_session.flush()
+
+        count = evaluate_computed_column(db_session, comp_col)  # pre-fix: raised
+        assert count == 3
+        vals = {
+            v.row_id: (v.value_text, v.value_numeric)
+            for v in db_session.query(DatasetValue).filter(DatasetValue.column_id == 10)
+        }
+        assert vals[1] == ("20", 20.0)
+        assert vals[3] == (None, None)
+
+
 class TestComputedStaleness:
     def test_source_change_marks_computed_stale(self, db_session):
         project, dataset, col_a, col_b, row_ids = _setup_computed_data(db_session)
@@ -1247,3 +1316,63 @@ class TestComputedColumnDeletionGuard:
         _run_dataset(delete_computed_column(
             project_id=1, dataset_id=1, column_id=12, user=user, db=db))
         assert db.query(DatasetColumn).filter(DatasetColumn.id == 12).first() is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #581 — R factor mapping must ignore a category_group primary
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGetFactorMappingTypeFilter:
+    """`_get_factor_mapping` (export_r) must read ONLY numeric-output recodes.
+
+    A category_group primary maps {label: group_name}; reading it as {label:
+    numeric} put the group-name strings into the R factor `levels =` slot (bare,
+    unquoted → invalid R) with levels/labels inverted. It must be ignored and fall
+    through to the column's scale_labels (or None).
+    """
+
+    def _col(self, **kw):
+        from app.models.dataset import DatasetColumn
+        return DatasetColumn(id=1, dataset_id=1, column_code="Q1", column_text="Q1",
+                             column_type="ordinal", sequence_order=0, display_order=0, **kw)
+
+    def _recode(self, rtype, mapping, output_type="numeric"):
+        from app.models.recode import RecodeDefinition, RecodeType, OutputType
+        return RecodeDefinition(
+            id=1, column_id=1, name="d", recode_type=RecodeType(rtype),
+            output_type=OutputType(output_type), mapping=json.dumps(mapping),
+            is_primary=True, sequence_order=0,
+        )
+
+    def test_category_group_primary_is_ignored(self):
+        from app.routers.export_r import _get_factor_mapping
+        col = self._col()  # no scale_labels
+        cg = self._recode("category_group", {"None": "Low", "A lot": "High"}, "categorical")
+        # Must NOT return the group-name strings as factor levels — falls to None.
+        assert _get_factor_mapping(col, cg) is None
+
+    def test_category_group_primary_falls_through_to_scale_labels(self):
+        from app.routers.export_r import _get_factor_mapping
+        col = self._col(scale_labels=json.dumps(["Poor", "Fair", "Good"]),
+                        scale_values=json.dumps([1, 2, 3]))
+        cg = self._recode("category_group", {"1": "Low", "2": "Low", "3": "High"}, "categorical")
+        result = _get_factor_mapping(col, cg)
+        # Priority 2 (scale_labels), NOT the group names.
+        assert result == {"values": [1, 2, 3], "labels": ["Poor", "Fair", "Good"]}
+
+    def test_scale_map_primary_still_used(self):
+        from app.routers.export_r import _get_factor_mapping
+        col = self._col()
+        sm = self._recode("scale_map", {"Poor": 1, "Good": 3, "Excellent": 5})
+        result = _get_factor_mapping(col, sm)
+        assert result is not None
+        assert result["values"] == [1, 3, 5]
+        assert result["labels"] == ["Poor", "Good", "Excellent"]
+
+    def test_category_group_with_numeric_output_type_still_ignored(self):
+        # Guard keys on recode_type, not output_type (schema doesn't constrain them).
+        from app.routers.export_r import _get_factor_mapping
+        col = self._col()
+        cg = self._recode("category_group", {"None": "Low"}, output_type="numeric")
+        assert _get_factor_mapping(col, cg) is None

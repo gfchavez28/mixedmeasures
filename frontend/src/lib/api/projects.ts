@@ -16,6 +16,7 @@ export interface Project {
   code_count: number
   dataset_count: number
   document_count: number
+  observation_count: number
   participant_count: number
   /** Track J · Group A (#1): distinct real coders who have coded in this project
    *  (includes archived; excludes system coders). Surfaced on the card when > 1. */
@@ -51,15 +52,28 @@ export interface RecentDocument {
   coded_segment_count: number
 }
 
+export interface RecentObservation {
+  id: number
+  name: string
+  updated_at: string
+  /** clips (D9 — the UI word); the model calls them Segments */
+  segment_count: number
+  coded_segment_count: number
+  has_media: boolean
+}
+
 export interface ProjectSummary {
   conversations: number
   datasets: number
   documents: number
+  observations: number
   participants: number
   codes: number
   categories: number
   coded_segments: number
   document_segments: number
+  /** Project-wide clip total (#627) — recent_observations covers only the 4 most recent. */
+  observation_clips: number
   materials: number
   statistical_tests: number
   memos: number
@@ -71,6 +85,7 @@ export interface ProjectSummary {
   recent_conversations: RecentConversation[]
   recent_datasets: RecentDataset[]
   recent_documents: RecentDocument[]
+  recent_observations: RecentObservation[]
 }
 
 /** On-disk footprint (slab 5). media_bytes includes video_bytes. */

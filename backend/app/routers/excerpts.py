@@ -10,12 +10,14 @@ from ..models.user import User
 from ..models.segment import Segment
 from ..models.conversation import Conversation
 from ..models.document import Document
+from ..models.observation import Observation
 from ..models.speaker import Speaker
 from ..models.excerpt import Excerpt
 from ..models.note import Note
 from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from ..models.code_application import CodeApplication
 from ..models.code import Code
+from ..models.excerpt import whole_segment_excerpt_filter
 from ..models.participant import Participant
 from ..schemas.excerpt import (
     ExcerptCreate,
@@ -29,6 +31,8 @@ from ..schemas.excerpt import (
 )
 from ..auth import get_current_user
 from ..services.audit import log_action
+from ..services.coding_layers import project_scoped_segments
+from ..services.timestamp import format_timecode
 from .helpers import _get_project_or_404, parse_int_list, TEXT_TYPES, visible_segment_filter as _visible_segment_filter
 from .export_helpers import csv_safe
 from ..schemas.common import utc_wire
@@ -41,6 +45,8 @@ def _excerpt_to_response(excerpt: Excerpt) -> ExcerptResponse:
     excerpt_text = ""
     conversation_id = None
     conversation_name = None
+    observation_id = None
+    observation_name = None
     speaker_name = None
     segment_timestamp = None
 
@@ -49,11 +55,17 @@ def _excerpt_to_response(excerpt: Excerpt) -> ExcerptResponse:
         if excerpt.start_offset is not None and excerpt.end_offset is not None:
             excerpt_text = seg.text[excerpt.start_offset:excerpt.end_offset]
         else:
+            # Whole-segment AND time-range shapes: the segment's text. For a
+            # clip that is the LABEL — a time excerpt's identity is its RANGE
+            # (start_time/end_time on the response), never a text slice.
             excerpt_text = seg.text
 
         conversation_id = seg.conversation_id
         if seg.conversation:
             conversation_name = seg.conversation.name
+        observation_id = seg.observation_id
+        if seg.observation:
+            observation_name = seg.observation.name
         if seg.speaker:
             speaker_name = seg.speaker.name
         segment_timestamp = seg.start_time
@@ -76,15 +88,70 @@ def _excerpt_to_response(excerpt: Excerpt) -> ExcerptResponse:
         dataset_value_id=excerpt.dataset_value_id,
         start_offset=excerpt.start_offset,
         end_offset=excerpt.end_offset,
+        start_time=excerpt.start_time,
+        end_time=excerpt.end_time,
         excerpt_text=excerpt_text,
         conversation_id=conversation_id,
         conversation_name=conversation_name,
+        observation_id=observation_id,
+        observation_name=observation_name,
         speaker_name=speaker_name,
         segment_timestamp=segment_timestamp,
         note=note_info,
         has_note=note_info is not None,
         created_at=excerpt.created_at,
     )
+
+
+def _segment_excerpt_shape_error(segment: Segment, item: ExcerptCreate) -> str | None:
+    """Validate an excerpt's SHAPE against its target segment (slab 5, D29).
+
+    Shared by the single create (raises 400) and bulk create (skips) so the
+    two paths cannot drift. Pydantic already guarantees internal consistency
+    (both-or-neither, XOR, >= 0, ordering); this owns what needs the SEGMENT:
+
+    - char offsets only on conversation/document segments, bounded by text
+      length (on a clip, `text` is a label — offsets there are nonsense and
+      are refused going forward)
+    - a time range only on observation clips, CONTAINED in the clip's own
+      range at create time (absolute timeline seconds; a later boundary edit
+      may strand the quote and that's legal — validation is create-only)
+    """
+    is_clip = segment.observation_id is not None
+    if item.start_offset is not None:
+        if is_clip:
+            return "Character offsets don't apply to observation clips — use a time range (start_time/end_time)"
+        if item.start_offset < 0:
+            return "start_offset must be non-negative"
+        if item.end_offset > len(segment.text):
+            return "end_offset exceeds segment text length"
+    if item.start_time is not None:
+        if not is_clip:
+            return "Time ranges apply only to observation clips"
+        if segment.start_time is None or segment.end_time is None:
+            return "This clip has no time range"
+        if item.start_time < segment.start_time or item.end_time > segment.end_time:
+            return "The quote's time range must sit inside the clip"
+    return None
+
+
+def _segment_excerpt_dup_query(db: Session, item: ExcerptCreate):
+    """The per-shape duplicate lookup — one shape's duplicate never blocks
+    another shape's create. The whole-shape arm routes through the single-
+    sourced predicate (§8j.0.2): a bare `start_offset IS NULL` here would
+    match time-range excerpts too and 409 legitimate creates."""
+    q = db.query(Excerpt).filter(Excerpt.segment_id == item.segment_id)
+    if item.start_offset is not None:
+        return q.filter(
+            Excerpt.start_offset == item.start_offset,
+            Excerpt.end_offset == item.end_offset,
+        )
+    if item.start_time is not None:
+        return q.filter(
+            Excerpt.start_time == item.start_time,
+            Excerpt.end_time == item.end_time,
+        )
+    return q.filter(whole_segment_excerpt_filter())
 
 
 def _base_excerpt_query(db: Session, project_id: int):
@@ -94,11 +161,33 @@ def _base_excerpt_query(db: Session, project_id: int):
     ).options(
         joinedload(Excerpt.segment).joinedload(Segment.conversation),
         joinedload(Excerpt.segment).joinedload(Segment.document),
+        joinedload(Excerpt.segment).joinedload(Segment.observation),
         joinedload(Excerpt.segment).joinedload(Segment.speaker),
         joinedload(Excerpt.note),
         joinedload(Excerpt.dataset_value).joinedload(DatasetValue.column).joinedload(DatasetColumn.dataset),
         joinedload(Excerpt.dataset_value).joinedload(DatasetValue.row),
     )
+
+
+def _same_parent_segment_filter(seg: Segment):
+    """A filter selecting segments that share `seg`'s parent — exactly one of
+    conversation/document/observation (ck_segment_exactly_one_parent).
+
+    Used for surrounding-context lookups (#617). Keying context on
+    `conversation_id == seg.conversation_id` alone compiled to `conversation_id
+    IS NULL` for a document/observation excerpt — matching EVERY document segment
+    and clip in the database, unscoped and cross-project (cross-tenant under
+    multiuser). Scoping to the actual non-NULL parent id closes that, and for a
+    clip the same sequence_order ordering yields the prev/next clip by time.
+    Returns None only if the segment somehow has no parent (CHECK forbids it).
+    """
+    if seg.conversation_id is not None:
+        return Segment.conversation_id == seg.conversation_id
+    if seg.document_id is not None:
+        return Segment.document_id == seg.document_id
+    if seg.observation_id is not None:
+        return Segment.observation_id == seg.observation_id
+    return None
 
 
 @router.get("", response_model=ExcerptListResponse)
@@ -173,41 +262,21 @@ async def create_excerpt(
     _get_project_or_404(db, project_id, user.id)
 
     if data.segment_id is not None:
-        # Validate segment belongs to project (via conversation or document)
-        segment = (
-            db.query(Segment)
-            .outerjoin(Conversation, Segment.conversation_id == Conversation.id)
-            .outerjoin(Document, Segment.document_id == Document.id)
-            .filter(
-                Segment.id == data.segment_id,
-                or_(
-                    Conversation.project_id == project_id,
-                    Document.project_id == project_id,
-                ),
-            )
-            .first()
-        )
+        # Validate segment belongs to project via ANY parent (conversation,
+        # document, or observation) — "mark this clip as a quote" (D24).
+        segment = project_scoped_segments(
+            db.query(Segment), project_id
+        ).filter(Segment.id == data.segment_id).first()
         if not segment:
             raise HTTPException(status_code=404, detail="Segment not found in this project")
 
-        # Validate offsets against segment text
-        if data.start_offset is not None:
-            if data.start_offset < 0:
-                raise HTTPException(status_code=400, detail="start_offset must be non-negative")
-            if data.end_offset > len(segment.text):
-                raise HTTPException(status_code=400, detail="end_offset exceeds segment text length")
+        # Validate the shape against the target segment (offsets vs times)
+        shape_error = _segment_excerpt_shape_error(segment, data)
+        if shape_error:
+            raise HTTPException(status_code=400, detail=shape_error)
 
-        # Check for duplicate
-        dup_filters = [Excerpt.segment_id == data.segment_id]
-        if data.start_offset is not None:
-            dup_filters.extend([
-                Excerpt.start_offset == data.start_offset,
-                Excerpt.end_offset == data.end_offset,
-            ])
-        else:
-            dup_filters.append(Excerpt.start_offset == None)
-
-        existing = db.query(Excerpt).filter(and_(*dup_filters)).first()
+        # Check for duplicate (per shape)
+        existing = _segment_excerpt_dup_query(db, data).first()
         if existing:
             raise HTTPException(status_code=409, detail="Excerpt already exists")
 
@@ -241,6 +310,8 @@ async def create_excerpt(
         dataset_value_id=data.dataset_value_id,
         start_offset=data.start_offset,
         end_offset=data.end_offset,
+        start_time=data.start_time,
+        end_time=data.end_time,
     )
     db.add(excerpt)
     db.flush()
@@ -257,6 +328,8 @@ async def create_excerpt(
             "dataset_value_id": data.dataset_value_id,
             "start_offset": data.start_offset,
             "end_offset": data.end_offset,
+            "start_time": data.start_time,
+            "end_time": data.end_time,
         },
     )
     db.commit()
@@ -288,36 +361,24 @@ async def bulk_create_excerpts(
     # ── Segment items ──
     if segment_items:
         segment_ids = list({item.segment_id for item in segment_items})
-        segments = (
-            db.query(Segment)
-            .outerjoin(Conversation, Segment.conversation_id == Conversation.id)
-            .outerjoin(Document, Segment.document_id == Document.id)
-            .filter(
-                Segment.id.in_(segment_ids),
-                or_(
-                    Conversation.project_id == project_id,
-                    Document.project_id == project_id,
-                ),
-            )
-            .all()
-        )
-        valid_segment_ids = {s.id for s in segments}
+        segments = project_scoped_segments(
+            db.query(Segment), project_id
+        ).filter(Segment.id.in_(segment_ids)).all()
+        segments_by_id = {s.id: s for s in segments}
 
         for item in segment_items:
-            if item.segment_id not in valid_segment_ids:
+            segment = segments_by_id.get(item.segment_id)
+            if segment is None:
                 skipped_count += 1
                 continue
 
-            dup_filters = [Excerpt.segment_id == item.segment_id]
-            if item.start_offset is not None:
-                dup_filters.extend([
-                    Excerpt.start_offset == item.start_offset,
-                    Excerpt.end_offset == item.end_offset,
-                ])
-            else:
-                dup_filters.append(Excerpt.start_offset == None)
+            # Same shape rules as the single create (bulk posture: skip, not
+            # error) — one shared validator so the two paths cannot drift.
+            if _segment_excerpt_shape_error(segment, item):
+                skipped_count += 1
+                continue
 
-            existing = db.query(Excerpt).filter(and_(*dup_filters)).first()
+            existing = _segment_excerpt_dup_query(db, item).first()
             if existing:
                 skipped_count += 1
                 continue
@@ -327,6 +388,8 @@ async def bulk_create_excerpts(
                 segment_id=item.segment_id,
                 start_offset=item.start_offset,
                 end_offset=item.end_offset,
+                start_time=item.start_time,
+                end_time=item.end_time,
             ))
             created_count += 1
 
@@ -432,16 +495,47 @@ async def export_excerpts_csv(
 
     output = io.StringIO()
     writer = csv.writer(output)
+    # #616 sibling: "Source" now says the segment's ACTUAL parent kind (the old
+    # code hardcoded "conversation" for every segment excerpt — document
+    # excerpts were mislabeled since documents shipped), and the name column is
+    # "Source Name" because it names whichever parent the row has.
     writer.writerow([
-        "Excerpt ID", "Source", "Conversation", "Speaker", "Timestamp",
+        "Excerpt ID", "Source", "Source Name", "Speaker", "Timestamp",
+        "Start Time", "End Time", "Duration",
         "Excerpt Text", "Type", "Note", "Created At",
     ])
 
     for exc in excerpts:
         resp = _excerpt_to_response(exc)
+        source_name = resp.conversation_name or ""
+        # Time-range columns (slab 5, D32): a time excerpt emits its OWN range;
+        # a whole-clip excerpt emits the CLIP's range (its label is often "",
+        # so without the range the row would be blank where it matters most);
+        # conv/doc/text rows leave them empty.
+        range_start = range_end = duration = ""
         if exc.segment_id is not None:
-            excerpt_type = "sub-segment" if exc.start_offset is not None else "whole-segment"
-            source = "conversation"
+            seg = exc.segment
+            if exc.start_offset is not None:
+                excerpt_type = "sub-segment"
+            elif exc.start_time is not None:
+                excerpt_type = "time-range"
+                range_start = format_timecode(exc.start_time)
+                range_end = format_timecode(exc.end_time)
+                duration = format_timecode(exc.end_time - exc.start_time)
+            else:
+                excerpt_type = "whole-segment"
+            if seg is not None and seg.document_id is not None:
+                source = "document"
+                source_name = seg.document.name if seg.document else ""
+            elif seg is not None and seg.observation_id is not None:
+                source = "observation"
+                source_name = seg.observation.name if seg.observation else ""
+                if exc.start_time is None and seg.start_time is not None and seg.end_time is not None:
+                    range_start = format_timecode(seg.start_time)
+                    range_end = format_timecode(seg.end_time)
+                    duration = format_timecode(seg.end_time - seg.start_time)
+            else:
+                source = "conversation"
         else:
             excerpt_type = "text"
             source = "text"
@@ -449,9 +543,12 @@ async def export_excerpts_csv(
         writer.writerow([
             exc.id,
             source,
-            csv_safe(resp.conversation_name or ""),
+            csv_safe(source_name),
             csv_safe(resp.speaker_name or ""),
             resp.segment_timestamp or "",
+            range_start,
+            range_end,
+            duration,
             csv_safe(resp.excerpt_text),
             excerpt_type,
             csv_safe(note_text),
@@ -512,10 +609,12 @@ async def list_quoted_excerpts(
             .filter(*_visible_segment_filter())
             .outerjoin(Conversation, Segment.conversation_id == Conversation.id)
             .outerjoin(Document, Segment.document_id == Document.id)
+            .outerjoin(Observation, Segment.observation_id == Observation.id)
             .outerjoin(Speaker, Segment.speaker_id == Speaker.id)
             .options(
                 contains_eager(Excerpt.segment).contains_eager(Segment.conversation),
                 contains_eager(Excerpt.segment).contains_eager(Segment.document),
+                contains_eager(Excerpt.segment).contains_eager(Segment.observation),
                 contains_eager(Excerpt.segment).contains_eager(Segment.speaker).joinedload(Speaker.participant),
                 contains_eager(Excerpt.segment).selectinload(Segment.code_applications),
                 joinedload(Excerpt.note),
@@ -604,10 +703,21 @@ async def list_quoted_excerpts(
 
             conv = seg.conversation
             doc = seg.document
+            obs = seg.observation
             if conv:
                 source_name = conv.name
             elif doc:
                 source_name = doc.name
+            elif obs:
+                # The bare observation name (slab 5c). It used to carry a
+                # ` · {timecode}` suffix so a clip excerpt had SOME identity
+                # before the card could render one — but a per-clip suffix made
+                # `source_name` unique per clip, which shattered the
+                # group-by-source view into one bucket per clip. The timecode is
+                # now real data on the card (`start_time`/`end_time` ride the
+                # wire) and the grouping keys `observation_id`, so the suffix's
+                # two jobs are both done properly elsewhere.
+                source_name = obs.name
             else:
                 source_name = ""
 
@@ -651,6 +761,10 @@ async def list_quoted_excerpts(
                 is_sub_segment=is_sub,
                 start_offset=exc.start_offset,
                 end_offset=exc.end_offset,
+                start_time=exc.start_time,
+                end_time=exc.end_time,
+                segment_start_time=seg.start_time,
+                segment_end_time=seg.end_time,
                 speaker_name=speaker_name,
                 speaker_is_facilitator=speaker_is_fac,
                 participant_id=part_id,
@@ -662,6 +776,8 @@ async def list_quoted_excerpts(
                 conversation_sort_key=conv.id if conv else None,
                 document_id=doc.id if doc else None,
                 document_name=doc.name if doc else None,
+                observation_id=obs.id if obs else None,
+                observation_name=obs.name if obs else None,
                 applied_code_ids=ca_ids,
                 applied_codes=codes_detail,
                 excerpt_note=note_content,
@@ -764,6 +880,7 @@ async def list_quoted_excerpts(
 
     conv_count = sum(1 for r in results if r.source_type == "segment" and r.conversation_id is not None)
     doc_count = sum(1 for r in results if r.source_type == "segment" and r.document_id is not None)
+    obs_count = sum(1 for r in results if r.source_type == "segment" and r.observation_id is not None)
     cmt_count = sum(1 for r in results if r.source_type == "text")
 
     return QuotedExcerptsResponse(
@@ -772,6 +889,7 @@ async def list_quoted_excerpts(
         total_conversation_excerpts=conv_count,
         total_comment_excerpts=cmt_count,
         total_document_excerpts=doc_count,
+        total_observation_excerpts=obs_count,
     )
 
 
@@ -802,21 +920,28 @@ async def get_excerpt(
         seg = excerpt.segment
         segment_text = seg.text
 
-        prev_seg = db.query(Segment).filter(
-            Segment.conversation_id == seg.conversation_id,
-            Segment.sequence_order < seg.sequence_order,
-            *_visible_segment_filter(),
-        ).order_by(Segment.sequence_order.desc()).first()
-        if prev_seg:
-            context_before = prev_seg.text
+        # Context = the prev/next VISIBLE sibling within the SAME parent, by
+        # sequence_order (#617 — the pre-fix `conversation_id == seg.conversation_id`
+        # compiled to `IS NULL` for a doc/observation excerpt and bled context
+        # across every project). For a clip, sequence_order is time-ordered, so
+        # this is the prev/next clip by time.
+        parent_filter = _same_parent_segment_filter(seg)
+        if parent_filter is not None and seg.sequence_order is not None:
+            prev_seg = db.query(Segment).filter(
+                parent_filter,
+                Segment.sequence_order < seg.sequence_order,
+                *_visible_segment_filter(),
+            ).order_by(Segment.sequence_order.desc()).first()
+            if prev_seg:
+                context_before = prev_seg.text
 
-        next_seg = db.query(Segment).filter(
-            Segment.conversation_id == seg.conversation_id,
-            Segment.sequence_order > seg.sequence_order,
-            *_visible_segment_filter(),
-        ).order_by(Segment.sequence_order.asc()).first()
-        if next_seg:
-            context_after = next_seg.text
+            next_seg = db.query(Segment).filter(
+                parent_filter,
+                Segment.sequence_order > seg.sequence_order,
+                *_visible_segment_filter(),
+            ).order_by(Segment.sequence_order.asc()).first()
+            if next_seg:
+                context_after = next_seg.text
 
     return ExcerptDetailResponse(
         **base.model_dump(),

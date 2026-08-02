@@ -17,7 +17,7 @@
  */
 
 import { useEffect, useRef } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router'
 import { parseFocusRow } from './navigation'
 
 interface UseCrosswalkNavigationOptions {

@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useRef, useEffect, memo } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link } from 'react-router'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Settings2, Plus, FileInput, GripVertical, Layers, Undo2, Redo2, MessageSquareText, FunctionSquare } from 'lucide-react'
@@ -50,6 +50,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { ColumnFormDialog } from '@/components/ColumnFormDialog'
+import { ValueLabelsDialog } from '@/components/ValueLabelsDialog'
 import { SortableColumnHeader, DataRow } from '@/components/DatasetGridComponents'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
@@ -126,6 +127,8 @@ const DataGridHead = memo(function DataGridHead({
   handleRemoveFromGroup,
   handleToggleParticipantVisibility,
   handleLinkByColumn,
+  handleEditValueLabels,
+  handleSwapNameLabel,
   handlePopoverOpenChange, setActiveField, goNextColumn, goPrevColumn,
 }: {
   columns: DatasetColumn[]
@@ -152,6 +155,8 @@ const DataGridHead = memo(function DataGridHead({
   handleRemoveFromGroup: (columnId: number, domainId: number) => void
   handleToggleParticipantVisibility: (column: DatasetColumn) => void
   handleLinkByColumn: (column: DatasetColumn) => void
+  handleEditValueLabels: (column: DatasetColumn) => void
+  handleSwapNameLabel: (column: DatasetColumn) => void
   handlePopoverOpenChange: (columnId: number, open: boolean) => void
   setActiveField: (field: EditorField) => void
   goNextColumn: (field: EditorField) => void
@@ -186,6 +191,8 @@ const DataGridHead = memo(function DataGridHead({
             onDeleteComputed={handleDeleteComputed}
             onRecompute={handleRecompute}
             onLinkByColumn={handleLinkByColumn}
+            onEditValueLabels={handleEditValueLabels}
+            onSwapNameLabel={handleSwapNameLabel}
             isPopoverOpen={activeColumnId === q.id}
             onPopoverOpenChange={handlePopoverOpenChange}
             activeField={activeColumnId === q.id ? activeField : null}
@@ -278,6 +285,9 @@ export default function DatasetView() {
   // Edit Column dialog
   const [editColumnTarget, setEditColumnTarget] = useState<DatasetColumn | null>(null)
   const [editColumnError, setEditColumnError] = useState<string | null>(null)
+
+  // Value-labels editor (#576/#577)
+  const [valueLabelsTarget, setValueLabelsTarget] = useState<DatasetColumn | null>(null)
 
   // Delete Column confirmation
   const [deleteColumnTarget, setDeleteColumnTarget] = useState<DatasetColumn | null>(null)
@@ -388,6 +398,33 @@ export default function DatasetView() {
       undo: async () => { await updateHeaderMutation.mutateAsync({ columnId, data: { column_text: oldText } }) },
     })
   }, [data, pid, iid, queryClient, executeHistory, updateHeaderMutation])
+
+  // #575: swap column_name ↔ column_text. column_text is NOT NULL, so when there's
+  // no short name we PROMOTE the label into the name (leaving the label) rather
+  // than blanking it. Renaming column_text is a data change (it's the machine
+  // identifier append/computed/suggest match on) — the header PATCH marks metrics
+  // stale and this rides undo/redo like any other header edit.
+  const handleSwapNameLabel = useCallback((column: DatasetColumn) => {
+    const name = (column.column_name || '').trim()
+    const text = (column.column_text || '').trim()
+    if (!text) return
+    const columnId = column.id
+    const oldName = column.column_name ?? null
+    const oldText = column.column_text
+    const newName = text
+    const newText = name || text  // promote when no short name (never empty column_text)
+    if (newName === oldName && newText === oldText) return
+    queryClient.setQueryData<DatasetDataResponse>(['dataset-data', pid, iid], old => {
+      if (!old) return old
+      return { ...old, columns: old.columns.map(c => c.id === columnId ? { ...c, column_name: newName, column_text: newText } : c) }
+    })
+    executeHistory({
+      type: 'column_swap_name_label',
+      description: `Swap name and label for "${text}"`,
+      redo: async () => { await updateHeaderMutation.mutateAsync({ columnId, data: { column_name: newName, column_text: newText } }) },
+      undo: async () => { await updateHeaderMutation.mutateAsync({ columnId, data: { column_name: oldName, column_text: oldText } }) },
+    })
+  }, [pid, iid, queryClient, executeHistory, updateHeaderMutation])
 
   // ── Column editor popover state ───────────────────────────────────────
   const [activeColumnId, setActiveColumnId] = useState<number | null>(null)
@@ -1108,6 +1145,8 @@ export default function DatasetView() {
                     handleRemoveFromGroup={handleRemoveFromGroup}
                     handleToggleParticipantVisibility={handleToggleParticipantVisibility}
                     handleLinkByColumn={handleLinkByColumn}
+                    handleEditValueLabels={setValueLabelsTarget}
+                    handleSwapNameLabel={handleSwapNameLabel}
                     handlePopoverOpenChange={handlePopoverOpenChange}
                     setActiveField={setActiveField}
                     goNextColumn={goNextColumn}
@@ -1199,7 +1238,7 @@ export default function DatasetView() {
           const col = columns.find(c => c.id === selectedCell.columnId)
           return col ? (
             <>
-              <span className="font-medium text-mm-text-secondary">{col.column_name || col.column_code}</span>
+              <span className="font-medium text-mm-text-secondary">{col.column_name || col.column_code || col.column_text.slice(0, 30)}</span>
               <span className={`px-1 py-0.5 rounded text-[10px] font-medium ${TYPE_BADGE_CLASSES[col.column_type] || 'bg-mm-bg text-mm-text-muted'}`}>
                 {col.column_type}
               </span>
@@ -1287,6 +1326,17 @@ export default function DatasetView() {
         projectId={pid}
         datasetId={iid}
       />
+
+      {/* Value-labels editor (#576/#577) */}
+      {valueLabelsTarget && (
+        <ValueLabelsDialog
+          column={valueLabelsTarget}
+          open={!!valueLabelsTarget}
+          projectId={pid}
+          datasetId={iid}
+          onClose={() => setValueLabelsTarget(null)}
+        />
+      )}
 
       {/* Delete Column confirmation */}
       <AlertDialog open={!!deleteColumnTarget} onOpenChange={(o) => { if (!o) setDeleteColumnTarget(null) }}>

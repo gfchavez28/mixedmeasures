@@ -14,7 +14,17 @@ pyreadstat 1.3.5 (see ``tests/test_sav_import.py``):
   silently import "Refused" as a valid 6th point of a 5-point scale — shifting
   every mean computed on that variable, with nothing on screen to show for it.
   We take raw codes, the label map, and the missing ranges in ONE pass, then
-  apply labels ourselves, blanking anything inside a missing range.
+  apply labels ourselves.
+
+* **User-missing codes are PRESERVED, not blanked (#596, #592 slab 5).** They
+  used to be emitted as "" — which ``dataset_import`` skips entirely, storing no
+  row at all — so "99 = Refused" and a genuinely blank cell became
+  indistinguishable, discarding the one thing SPSS's user-missing exists to
+  record, ~60 lines after we parsed it. The declaration now rides
+  ``SavColumnMeta.missing_rules`` and the import persists it on the column, so
+  ``.sav`` and a CSV-declared column mean the same thing.
+  **Already-imported ``.sav`` data cannot be recovered** — those cells were
+  blanked at import and no ``DatasetValue`` row exists to repair.
 
 * **``output_format="dict"`` avoids importing pandas.** pandas is already an
   installed transitive (statsmodels pulls it), but nothing on a hot path
@@ -33,6 +43,7 @@ from __future__ import annotations
 import csv
 import datetime as _dt
 import io
+import math
 import logging
 from dataclasses import dataclass, field
 
@@ -75,6 +86,10 @@ class SavColumnMeta:
     # Observed codes OUTSIDE the scale (or non-integer) — #536: these import as
     # missing, so the preview must WARN (#364), never stay silent.
     stray_values: list[str] = field(default_factory=list)
+    # #596: SPSS's user-missing declaration, translated to MM's rule shape.
+    # The import PERSISTS these on the column, so a refusal stays a refusal
+    # instead of being blanked into an ordinary empty cell.
+    missing_rules: list[dict] = field(default_factory=list)
 
     @property
     def is_labelled_ordinal(self) -> bool:
@@ -143,6 +158,101 @@ def _in_missing_range(value, ranges: list[dict]) -> bool:
     if isinstance(value, str):
         return any(isinstance(r["lo"], str) and value == r["lo"] == r["hi"] for r in ranges)
     return False
+
+
+def _norm_bound(bound):
+    """A pyreadstat range bound → MM's rule shape (#592 slab 5).
+
+    ``±inf`` becomes ``None`` = unbounded, which is exactly what SPSS's
+    ``LOWEST THRU x`` / ``x THRU HIGHEST`` mean and what our rule shape already
+    expresses. Measured: pyreadstat emits ``-inf``/``inf`` for those (NOT NaN —
+    an earlier scope claimed NaN and a live round-trip disproved it). NaN is
+    folded in defensively for the same reason.
+
+    This normalization is not cosmetic: ``json.dumps`` writes a bare
+    ``Infinity``, and starlette's ``JSONResponse`` uses ``allow_nan=False`` — so
+    storing a raw inf bound would make ``GET /data`` 500 for the WHOLE dataset
+    the moment one SPSS file declared a THRU-HIGHEST range.
+    """
+    if isinstance(bound, bool) or not isinstance(bound, (int, float)):
+        return bound  # strings pass through for the degenerate-string branch
+    return float(bound) if math.isfinite(bound) else None
+
+
+def _discrete_rule(code, labels: dict) -> dict:
+    """One discrete missing rule, carrying the code's label when it has one."""
+    rule = {"value": code if isinstance(code, str) else _sav_cell_to_str(code)}
+    label = labels.get(code)
+    if label:
+        rule["label"] = str(label)
+    return rule
+
+
+def _sav_missing_rules(ranges: list[dict], labels: dict | None, suppress: bool) -> list[dict]:
+    """SPSS user-missing declarations → MM's ``missing_values`` rules (#596).
+
+    pyreadstat reports EVERYTHING as ``{lo, hi}``: a discrete missing value is a
+    degenerate ``lo == hi``, and a string user-missing value is a degenerate
+    ``lo == hi`` of strings (#541b). A 1:1 translation to range rules would fail
+    twice, both silently:
+
+    - **Every degenerate ``lo == hi``** — numeric OR string — becomes a DISCRETE
+      rule. This is what saves string user-missing values: the range shape takes
+      numeric bounds only, ``_validate_rule`` rejects a string one, and
+      ``parse_missing_rules`` is whole-or-nothing — so a single string missing
+      value taking the range branch would discard the column's ENTIRE
+      declaration with nothing but a log line. (The explicit string branch below
+      is belt-and-braces for a MIXED pair, which pyreadstat does not emit;
+      mutation-testing confirmed the degenerate check is the load-bearing one.)
+    - **A range rule can never match a substituted label.** The predicate matches
+      a range numerically against the cell text, but a labelled missing code's
+      cell holds "Refused" after substitution. So every LABELLED code inside a
+      range is ALSO expanded into its own discrete rule (which carries the label
+      channel); the range itself stays, covering the unlabelled codes. SPSS's
+      canonical shape — several labelled codes plus a range — needs both.
+
+    Labels come from the DEDUPED map (#541a): the cell carries "Refused (99)"
+    after disambiguation, so a rule labelled "Refused" would never match it.
+    ``suppress`` mirrors the cell loop — a demoted (#536) or single-label
+    (#555c) column emits RAW codes, so its rules must carry no label or an
+    appended "99" would substitute to "Refused" while every imported cell says
+    "99" (the two display forms trap).
+    """
+    labels = {} if suppress else (labels or {})
+    rules: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(rule: dict) -> None:
+        key = rule.get("value") if "value" in rule else f"{rule['lo']}..{rule['hi']}"
+        if key not in seen:
+            seen.add(str(key))
+            rules.append(rule)
+
+    for r in ranges or []:
+        lo_raw, hi_raw = r.get("lo"), r.get("hi")
+
+        # String user-missing (#541b): only the degenerate form exists — SPSS
+        # declares discrete string values, never a lexicographic range.
+        if isinstance(lo_raw, str) or isinstance(hi_raw, str):
+            if isinstance(lo_raw, str) and lo_raw == hi_raw:
+                _add(_discrete_rule(lo_raw, labels))
+            continue
+
+        lo, hi = _norm_bound(lo_raw), _norm_bound(hi_raw)
+        if lo is None and hi is None:
+            continue  # unbounded both ways would swallow the column; refuse it
+        if lo is not None and hi is not None and lo == hi:
+            _add(_discrete_rule(lo, labels))
+            continue
+
+        _add({"lo": lo, "hi": hi})
+        for code, label in labels.items():
+            if isinstance(code, bool) or not isinstance(code, (int, float)):
+                continue
+            if (lo is None or code >= lo) and (hi is None or code <= hi) and label:
+                _add(_discrete_rule(code, labels))
+
+    return rules
 
 
 def _dedupe_labels(labels_by_code: dict) -> dict:
@@ -238,6 +348,12 @@ def apply_sav_metadata(
         col["suggested_column_name"] = meta.name
         if meta.column_label:
             col["suggested_column_text"] = meta.column_label
+        # #596: SPSS's user-missing declaration, for the wizard to display.
+        # Set for EVERY variable that declares one — a continuous `age` with
+        # `-99 THRU -1` has no labels and never reaches the ordinal branch below,
+        # and it is exactly the case the declaration matters most for.
+        if meta.missing_rules:
+            col["suggested_missing_values"] = list(meta.missing_rules)
 
         if not meta.is_labelled_ordinal:
             continue
@@ -417,6 +533,10 @@ def sav_to_csv_text(content: bytes) -> tuple[str, dict[str, SavColumnMeta]]:
             ordered_labels=ordered_labels,
             ordered_values=ordered_values,
             stray_values=stray_values,
+            missing_rules=_sav_missing_rules(
+                missing.get(name, []), value_labels.get(name),
+                name in suppress_labels,
+            ),
         )
 
     out = io.StringIO()
@@ -427,9 +547,16 @@ def sav_to_csv_text(content: bytes) -> tuple[str, dict[str, SavColumnMeta]]:
         row: list[str] = []
         for name in names:
             raw = data[name][i]
-            if _in_missing_range(raw, missing.get(name, [])):
-                row.append("")  # a user-missing code is missing, not a scale point
-                continue
+            # #596: a user-missing code is PRESERVED, not blanked. It used to
+            # emit "" here, which dataset_import skips entirely (`if not cell:
+            # continue`) — so no DatasetValue row existed and "99 = Refused" and
+            # a genuinely blank cell became indistinguishable, throwing away the
+            # very thing SPSS's user-missing exists to record. The declaration
+            # rides `SavColumnMeta.missing_rules` instead and the import NULLs
+            # value_numeric from it, which is exactly what the CSV-declared path
+            # does (parity — the same concept must not behave two ways by
+            # format). Falls through so a LABELLED missing code substitutes to
+            # its label below, like every other labelled code.
             # A demoted column (#536) emits raw codes throughout — substituting
             # its two endpoint labels would leave mixed text/number cells.
             labels = None if name in suppress_labels else value_labels.get(name)

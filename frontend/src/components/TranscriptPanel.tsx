@@ -3,7 +3,6 @@ import { mergeArchivedIntoCoderMap, chipHiddenWithArchived } from '@/lib/coder-c
 import { createPortal } from 'react-dom'
 import { Virtuoso, VirtuosoHandle, type Components } from 'react-virtuoso'
 import { Search, X, Filter, Merge, Play, Pause, Quote, Users } from 'lucide-react'
-import { useDroppable } from '@dnd-kit/core'
 import { Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { type Segment, type Code, type Coder, type Speaker, type Conversation, mediaApi } from '@/lib/api'
@@ -141,7 +140,6 @@ interface TranscriptPanelProps {
   onDeleteExcerpt?: (excerptId: number) => void
   onAddNoteToExcerpt?: (excerptId: number, segmentId: number) => void
   // Drag-and-drop (Issue 110)
-  isDragActive?: boolean
   // Group props (Phase 8)
   onGroupSegments?: (segmentIds: number[]) => void
   onUngroupSegments?: (groupId: number, memberSegmentIds: number[]) => void
@@ -218,7 +216,6 @@ export default function TranscriptPanel({
   onSaveExcerpt,
   onDeleteExcerpt,
   onAddNoteToExcerpt,
-  isDragActive = false,
   onGroupSegments,
   onUngroupSegments,
   onContextCodeApply,
@@ -323,7 +320,7 @@ export default function TranscriptPanel({
     isBuffering,
     mediaError,
     isTranscriptOnly,
-  } = usePlayback({ segments, selectedSegments, onSelectionChange, mediaRef: mediaElementRef, conversation })
+  } = usePlayback({ segments, selectedSegments, onSelectionChange, mediaRef: mediaElementRef, source: conversation })
 
   // Show toast on media error
   useEffect(() => {
@@ -562,15 +559,12 @@ export default function TranscriptPanel({
       const groupMemberIds = segIsGrouped ? (groupMembersMap.get(segment.group_id!) || []) : []
 
       return (
-        <DroppableSegmentWrapper segmentId={segment.id} isDragActive={isDragActive}>
-          {(isDragOver) => (
-            // #436: presentation so the listbox(List)→option(SegmentRow) ownership isn't
-            // broken by this decorative border wrapper.
-            <div className="border-b border-mm-border-subtle" role="presentation">
+        // #436: presentation so the listbox(List)→option(SegmentRow) ownership isn't
+        // broken by this decorative border wrapper.
+        <div className="border-b border-mm-border-subtle" role="presentation">
               <SegmentRow
                 segment={segment}
                 isSelected={isSelected}
-                isDragOver={isDragOver}
                 onClick={(e) => handleSegmentClick(segment, e)}
                 conversationId={conversationId}
                 codes={codes}
@@ -651,12 +645,10 @@ export default function TranscriptPanel({
                 hiddenCoderIds={chipHidden}
                 activeCoderId={activeCoderId}
               />
-            </div>
-          )}
-        </DroppableSegmentWrapper>
+        </div>
       )
     },
-    [segments, selectedSegments, handleSegmentClick, conversationId, codes, areSelectedAdjacent, onMergeSegments, onUnmergeSegment, onUnsplitSegment, onNoteClick, editingSegmentId, editField, onStartEdit, onCancelEdit, onSaveEdit, onToggleQuote, onSaveExcerpt, onDeleteExcerpt, onAddNoteToExcerpt, speakers, textFilter, isDragActive, canGroupSelected, noneSelectedGrouped, onGroupSegments, onUngroupSegments, groupMembersMap, onContextCodeApply, onContextCreateCode, onContextCreateNote, splitSelection, handleSplit, onSplitSegment, showTimestamps, showNotes, showCodes, projectId, allCodes, codeMap, onCodeChange, onFocusCode, chipCoderMap, chipHidden, onSelectionChange, getTextSelectionForSegment, activeCoderId]
+    [segments, selectedSegments, handleSegmentClick, conversationId, codes, areSelectedAdjacent, onMergeSegments, onUnmergeSegment, onUnsplitSegment, onNoteClick, editingSegmentId, editField, onStartEdit, onCancelEdit, onSaveEdit, onToggleQuote, onSaveExcerpt, onDeleteExcerpt, onAddNoteToExcerpt, speakers, textFilter, canGroupSelected, noneSelectedGrouped, onGroupSegments, onUngroupSegments, groupMembersMap, onContextCodeApply, onContextCreateCode, onContextCreateNote, splitSelection, handleSplit, onSplitSegment, showTimestamps, showNotes, showCodes, projectId, allCodes, codeMap, onCodeChange, onFocusCode, chipCoderMap, chipHidden, onSelectionChange, getTextSelectionForSegment, activeCoderId]
   )
 
   // Handle scrubber position change (for live scroll during drag)
@@ -757,7 +749,8 @@ export default function TranscriptPanel({
             key={conversationId}
             ref={videoPaneHandleRef}
             projectId={projectId}
-            conversationId={conversationId}
+            ownerKind="conversation"
+            ownerId={conversationId}
             mediaRef={mediaElementRef}
             mediaVersion={conversation.media_version}
             segments={allSegments}
@@ -788,7 +781,7 @@ export default function TranscriptPanel({
           // media_version in the URL (#549): a replaced recording changes the
           // src, which per spec re-runs the media load algorithm — the element
           // reloads in place with fresh (never HTTP-cache-stale) bytes.
-          src={mediaApi.getStreamUrl(projectId, conversationId, conversation.media_version)}
+          src={mediaApi.getStreamUrl(projectId, 'conversation', conversationId, conversation.media_version)}
           preload="metadata"
         />
       )}
@@ -1122,15 +1115,3 @@ export default function TranscriptPanel({
   )
 }
 
-// Droppable wrapper for segments (Issue 110: drag-and-drop codes/notes onto segments)
-function DroppableSegmentWrapper({ segmentId, isDragActive, children }: { segmentId: number; isDragActive: boolean; children: (isDragOver: boolean) => React.ReactNode }) {
-  const { setNodeRef, isOver } = useDroppable({ id: `segment-${segmentId}` })
-
-  if (!isDragActive) return <>{children(false)}</>
-
-  return (
-    <div ref={setNodeRef} role="presentation">
-      {children(isOver)}
-    </div>
-  )
-}

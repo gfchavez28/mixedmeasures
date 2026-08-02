@@ -1,20 +1,10 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
+import { useParams, useNavigate, useSearchParams } from 'react-router'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { BookOpen, ChevronLeft, ChevronRight, Check, Undo2, Redo2, Eye, EyeOff, Pencil, Mic, Volume2, Trash2, RefreshCw, AlertCircle, Video, Tags, StickyNote, NotebookPen, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { toast } from 'sonner'
 import { validateMediaFile, MEDIA_ACCEPT, describeMediaUploadError } from '@/lib/media-constants'
-import {
-  DndContext,
-  DragOverlay,
-  useSensors,
-  useSensor,
-  PointerSensor,
-  pointerWithin,
-  type DragStartEvent,
-  type DragEndEvent,
-} from '@dnd-kit/core'
 import {
   projectsApi,
   conversationsApi,
@@ -27,7 +17,6 @@ import {
   excerptsApi,
   type Segment,
   type Code,
-  type Note,
   mediaApi,
 } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -63,11 +52,6 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import FloatingCreateCode, { type FloatingCoords } from '@/components/FloatingCreateCode'
 import FloatingCreateNote from '@/components/FloatingCreateNote'
 import { coordsFromElement, selectionPrefill } from '@/lib/floating-utils'
-import { getCodeColor } from '@/lib/utils'
-
-type DragItemData =
-  | { type: 'code'; code: Code; shortcutLabel: string }
-  | { type: 'note'; note: Note }
 
 const COLUMN_TOGGLE_COLORS = {
   timestamps: 'bg-teal-50 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300',
@@ -188,7 +172,7 @@ export default function CodingWorkbench() {
 
   // Audio upload mutation
   const uploadAudioMutation = useMutation({
-    mutationFn: (file: File) => mediaApi.upload(pid, cid, file),
+    mutationFn: (file: File) => mediaApi.upload(pid, 'conversation', cid, file),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['conversation', pid, cid] })
       queryClient.invalidateQueries({ queryKey: ['conversations', pid] })
@@ -200,7 +184,7 @@ export default function CodingWorkbench() {
   })
 
   const deleteAudioMutation = useMutation({
-    mutationFn: () => mediaApi.remove(pid, cid),
+    mutationFn: () => mediaApi.remove(pid, 'conversation', cid),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['conversation', pid, cid] })
       queryClient.invalidateQueries({ queryKey: ['conversations', pid] })
@@ -404,8 +388,6 @@ export default function CodingWorkbench() {
   // `codes` via the shared buildShortcutCategories helper — #388 P2.4).
 
   // Drag-and-drop state (Issue 110)
-  const [activeDragItem, setActiveDragItem] = useState<DragItemData | null>(null)
-  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
   // Chord state is owned by useCodeChordShortcuts (wired after the handlers below).
 
@@ -967,77 +949,6 @@ export default function CodingWorkbench() {
     [selectedSegments, segmentMap, history, queryClient, pid, cid, showSaved]
   )
 
-  // Drag-and-drop handlers (Issue 110)
-  const handleDragStart = useCallback((event: DragStartEvent) => {
-    const data = event.active.data.current as DragItemData | undefined
-    if (data) setActiveDragItem(data)
-  }, [])
-
-  const handleDragEnd = useCallback((event: DragEndEvent) => {
-    const { active, over } = event
-    setActiveDragItem(null)
-
-    if (!over) return
-
-    const overId = String(over.id)
-    const segmentIdMatch = overId.match(/^segment-(\d+)$/)
-    if (!segmentIdMatch) return
-    const targetSegmentId = parseInt(segmentIdMatch[1])
-
-    const data = active.data.current as DragItemData | undefined
-    if (!data) return
-
-    if (data.type === 'code') {
-      const code = data.code
-      // Apply code to target segment (and all selected segments if multi-selected)
-      const targetIds = selectedSegments.length > 1 && selectedSegments.includes(targetSegmentId)
-        ? [...selectedSegments]
-        : [targetSegmentId]
-
-      // Check if already applied to all targets
-      const allHaveCode = targetIds.every(id => {
-        const seg = segmentMap.get(id)
-        if (!seg) return false
-        // INV-6 (#446): "do I have it?", not "does anyone?" — so the toggle applies
-        // my code when only a colleague has it, instead of taking the remove branch.
-        return isCodeAppliedByActiveCoder(seg.applied_code_details, seg.applied_codes ?? [], code.id, user?.id ?? null)
-      })
-      if (allHaveCode) return
-
-      const codeId = code.id
-      const codeName = code.name
-
-      if (targetIds.length === 1) {
-        history.execute({
-          type: 'code_apply',
-          description: `Apply code "${codeName}" (drag)`,
-          redo: () => runOptimisticCode([targetIds[0]], codeId, 'apply', true, () => codingApi.applyCode(targetIds[0], codeId)),
-          undo: () => runOptimisticCode([targetIds[0]], codeId, 'remove', true, () => codingApi.removeCode(targetIds[0], codeId)),
-        })
-      } else {
-        history.execute({
-          type: 'code_apply',
-          description: `Apply code "${codeName}" to ${targetIds.length} segments (drag)`,
-          redo: () => runOptimisticCode(targetIds, codeId, 'apply', false, () => codingApi.bulkCode(targetIds, codeId, 'apply')),
-          undo: () => runOptimisticCode(targetIds, codeId, 'remove', false, () => codingApi.bulkCode(targetIds, codeId, 'remove')),
-        })
-      }
-      showSaved()
-    } else if (data.type === 'note') {
-      const note = data.note
-      // Link note to segment
-      notesApi.update(pid, note.id, { segment_id: targetSegmentId }).then(() => {
-        queryClient.invalidateQueries({ queryKey: ['notes', cid] })
-        queryClient.invalidateQueries({ queryKey: ['segments', cid] })
-        showSaved()
-      })
-    }
-  }, [selectedSegments, segmentMap, history, runOptimisticCode, showSaved, cid, queryClient, pid, user?.id])
-
-  const handleDragCancel = useCallback(() => {
-    setActiveDragItem(null)
-  }, [])
-
   // Handle inline segment editing with undo support (Issues 101 & 102)
   const handleSegmentEdit = useCallback(
     (segmentId: number, update: { text?: string; speaker_id?: number }) => {
@@ -1511,7 +1422,8 @@ export default function CodingWorkbench() {
             size="icon"
             disabled={!history.canUndo}
             onClick={() => history.undo()}
-            title="Undo (Ctrl+Z)"
+            aria-label="Undo"
+              title="Undo (Ctrl+Z)"
           >
             <Undo2 className="w-4 h-4" />
           </Button>
@@ -1520,7 +1432,8 @@ export default function CodingWorkbench() {
             size="icon"
             disabled={!history.canRedo}
             onClick={() => history.redo()}
-            title="Redo (Ctrl+Y)"
+            aria-label="Redo"
+              title="Redo (Ctrl+Y)"
           >
             <Redo2 className="w-4 h-4" />
           </Button>
@@ -1785,13 +1698,6 @@ export default function CodingWorkbench() {
       )}
 
       {/* Main Content */}
-      <DndContext
-        sensors={dndSensors}
-        collisionDetection={pointerWithin}
-        onDragStart={handleDragStart}
-        onDragEnd={handleDragEnd}
-        onDragCancel={handleDragCancel}
-      >
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Transcript */}
         <div className="flex-1 flex flex-col border-r bg-mm-surface">
@@ -1823,7 +1729,6 @@ export default function CodingWorkbench() {
             onSaveExcerpt={handleSaveExcerpt}
             onDeleteExcerpt={handleDeleteExcerpt}
             onAddNoteToExcerpt={handleAddNoteToExcerpt}
-            isDragActive={!!activeDragItem}
             onGroupSegments={handleGroupSegments}
             onUngroupSegments={handleUngroupSegments}
             onContextCodeApply={handleContextCodeApply}
@@ -2011,27 +1916,6 @@ export default function CodingWorkbench() {
         )}
       </div>
 
-      {/* Drag overlay ghost (Issue 110) */}
-      <DragOverlay dropAnimation={null}>
-        {activeDragItem?.type === 'code' && (
-          <div
-            className="h-6 px-2.5 rounded-full text-[11px] font-medium flex items-center justify-center shadow-lg max-w-[100px] truncate"
-            style={{
-              backgroundColor: getCodeColor(activeDragItem.code),
-              color: '#ffffff',
-            }}
-          >
-            {activeDragItem.code.name}
-          </div>
-        )}
-        {activeDragItem?.type === 'note' && (
-          <div className="relative w-7 h-7 bg-orange-200 rounded-sm flex items-center justify-center shadow-lg">
-            <div className="absolute top-0 right-0 w-2 h-2 bg-orange-300 rounded-bl-sm" />
-            <span className="text-xs font-medium text-orange-800">{activeDragItem.note.sequence_number}</span>
-          </div>
-        )}
-      </DragOverlay>
-      </DndContext>
 
       {/* Status bar */}
       <div className="px-4 py-1.5 border-t bg-mm-surface text-xs text-muted-foreground flex items-center gap-4 shrink-0">

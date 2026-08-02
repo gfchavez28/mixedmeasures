@@ -43,10 +43,12 @@ from ..models.code import Code
 from ..models.code_application import CodeApplication
 from ..models.conversation import Conversation
 from ..models.document import Document
+from ..models.observation import Observation
 from ..models.segment import Segment
 from ..models.speaker import Speaker
 from ..routers.helpers import visible_segment_filter
 from .coding_layers import layer_origin_filter
+from .observation_segmentation import covered_seconds, union_intervals
 
 
 def _participant_predicate():
@@ -127,9 +129,10 @@ def coded_segment_count_for_project(
 ) -> int:
     """Project-wide coded participant-segment count for one source type.
 
-    ``source`` is ``"conversation"`` or ``"document"``. Joins through the parent
-    table (so it does not materialize a parent-id list) — used by the overview
-    totals. Documents skip the participant dimension (no speakers).
+    ``source`` is ``"conversation"``, ``"document"``, or ``"observation"``.
+    Joins through the parent table (so it does not materialize a parent-id list)
+    — used by the overview totals. Documents and observations skip the
+    participant dimension (no speakers).
     """
     query = (
         db.query(func.count(func.distinct(CodeApplication.segment_id)))
@@ -154,8 +157,17 @@ def coded_segment_count_for_project(
             Code.is_universal == False,  # noqa: E712
             layer_origin_filter(layer_scope),
         )
+    elif source == "observation":
+        query = query.join(Observation, Segment.observation_id == Observation.id).filter(
+            Observation.project_id == project_id,
+            *visible_segment_filter(),
+            Code.is_universal == False,  # noqa: E712
+            layer_origin_filter(layer_scope),
+        )
     else:
-        raise ValueError(f"source must be 'conversation' or 'document', got {source!r}")
+        raise ValueError(
+            f"source must be 'conversation', 'document', or 'observation', got {source!r}"
+        )
     return query.scalar() or 0
 
 
@@ -187,3 +199,59 @@ def participant_segment_counts(
 def participant_segment_count(db: Session, parent_col: Column, parent_id: int) -> int:
     """Scalar visible participant-segment count for a single conversation/document."""
     return participant_segment_counts(db, parent_col, [parent_id]).get(parent_id, 0)
+
+
+# --------------------------------------------------------------------------- #
+# Timeline coverage (6a — the Observations list's all-coder percentage)
+# --------------------------------------------------------------------------- #
+
+def timeline_coverage_by_observation(
+    db: Session,
+    extents: dict[int, float],
+    *,
+    layer_scope: str | None = None,
+) -> dict[int, float]:
+    """Map ``{observation_id: seconds covered by ≥1 non-universal code}``.
+
+    The J-A trio, same as ``coded_segment_counts``: visible clips only, at least
+    one NON-universal application, consensus layer excluded (J2-B). Observations
+    have no participant spine, so no Speaker dimension.
+
+    Overlap is the whole reason this is not ``SUM(end - start)``: clips POINT at
+    a timeline rather than partition it (D6), so two coders coding the same
+    minute must not report two minutes covered. SQLite has no interval union, and
+    the row counts here are small (``MAX_CLIPS`` = 2,000 per observation), so the
+    union runs in Python — in the ONE place that math lives server-side.
+
+    ``extents`` maps observation id → its D34 denominator
+    (``observation_segmentation.coverage_extent``), and is what the coverage is
+    CLAMPED to: an observation absent from it is not measured at all. The caller
+    owns that derivation because it already holds the observation rows.
+
+    Observations with nothing coded are omitted (callers use ``.get(id, 0.0)``).
+    """
+    ids = list(extents)
+    if not ids:
+        return {}
+    rows = (
+        db.query(Segment.observation_id, Segment.start_time, Segment.end_time)
+        .join(CodeApplication, CodeApplication.segment_id == Segment.id)
+        .join(Code, Code.id == CodeApplication.code_id)
+        .filter(
+            Segment.observation_id.in_(ids),
+            *visible_segment_filter(),
+            Code.is_universal == False,  # noqa: E712
+            layer_origin_filter(layer_scope),
+        )
+        .distinct()
+        .all()
+    )
+    by_observation: dict[int, list[tuple[float, float]]] = {}
+    for observation_id, start, end in rows:
+        if start is None or end is None:
+            continue
+        by_observation.setdefault(observation_id, []).append((float(start), float(end)))
+    return {
+        observation_id: covered_seconds(union_intervals(intervals), extents[observation_id])
+        for observation_id, intervals in by_observation.items()
+    }

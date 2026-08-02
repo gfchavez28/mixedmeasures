@@ -3,6 +3,7 @@ import { SELECTED_SEGMENT } from '@/lib/selection'
 import {
   Grid3x3,
   BarChart3,
+  GanttChart,
   Layers,
   Table2,
   TrendingUp,
@@ -19,6 +20,9 @@ interface QualChartTypeToolbarProps {
   onChartTypeChange: (type: QualChartType) => void
   selectedCodeCount: number
   conversationSourceCount: number
+  observationSourceCount: number
+  /** false under the consensus layer scope — the timeline reads the human layer (§8q DEC-6c-7). */
+  humanLayer: boolean
   categoryMode?: boolean
 }
 
@@ -35,6 +39,8 @@ export default function QualChartTypeToolbar({
   onChartTypeChange,
   selectedCodeCount,
   conversationSourceCount,
+  observationSourceCount,
+  humanLayer,
   categoryMode,
 }: QualChartTypeToolbarProps) {
   const buttons: ChartTypeButton[] = useMemo(() => [
@@ -43,7 +49,8 @@ export default function QualChartTypeToolbar({
     { type: 'stacked_bar', icon: Layers, label: 'Stacked Bar', applicable: selectedCodeCount >= 2 && !categoryMode, disabledReason: categoryMode ? 'Not available for categories' : 'Select 2+ codes' },
     { type: 'summary', icon: Table2, label: 'Summary Table', applicable: true },
     { type: 'saturation', icon: TrendingUp, label: 'Saturation', applicable: conversationSourceCount >= 2, disabledReason: 'Needs 2+ conversations' },
-  ], [selectedCodeCount, conversationSourceCount, categoryMode])
+    { type: 'timeline', icon: GanttChart, label: 'Timeline', applicable: observationSourceCount >= 1 && humanLayer, disabledReason: !humanLayer ? 'Timeline reads the human coding layer' : 'Needs an observation' },
+  ], [selectedCodeCount, conversationSourceCount, observationSourceCount, humanLayer, categoryMode])
 
   const toolbarRef = useRef<HTMLDivElement>(null)
 

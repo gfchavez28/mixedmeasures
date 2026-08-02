@@ -26,6 +26,7 @@ from ..schemas.conversation import (
     ConversationImportResponse
 )
 from ..auth import get_current_user
+from ..services import media_storage
 from ..services.audit import log_action
 from ..services.csv_import import preview_csv, import_csv_to_segments
 from ..services.subtitle_import import (
@@ -126,24 +127,12 @@ def conversation_to_response(
             non_consensus_filter(),  # J2-B: the derived consensus layer must not inflate the card count
         ).scalar() or 0
 
-    # On-disk recording size (slab 5 storage visibility) — one stat per
-    # conversation; None when nothing attached or the file is missing.
-    # media_version (#549) rides the same stat: an opaque mtime_ns+size token
-    # that changes on every replace (os.replace refreshes mtime), so the
-    # client can cache-bust the stream URL even for a same-name re-export.
-    media_size_bytes = None
-    media_version = None
-    if conversation.media_filename and conversation.media_format:
-        media_path = (
-            get_media_dir() / str(conversation.project_id) / str(conversation.id)
-            / f"original.{conversation.media_format}"
-        )
-        try:
-            media_stat = media_path.stat()
-            media_size_bytes = media_stat.st_size
-            media_version = f"{media_stat.st_mtime_ns}-{media_stat.st_size}"
-        except OSError:
-            media_size_bytes = None
+    # On-disk recording size + cache token (slab 5 storage / #549), single-
+    # sourced with the media router + the observation response builder.
+    media_size_bytes, media_version = media_storage.media_file_stat(
+        conversation.project_id, media_storage.CONVERSATION,
+        conversation.id, conversation.media_format,
+    ) if conversation.media_filename else (None, None)
 
     return ConversationResponse(
         id=conversation.id,

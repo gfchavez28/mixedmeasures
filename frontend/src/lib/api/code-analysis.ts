@@ -44,6 +44,12 @@ export interface ContextSegment {
   start_time: number | null
 }
 
+/** A sub-clip quote's span, in absolute timeline seconds (slab 5c/D29). */
+export interface QuoteRange {
+  start_time: number
+  end_time: number
+}
+
 export interface CodedSegmentWithContext {
   id: number
   sequence_order: number
@@ -53,7 +59,13 @@ export interface CodedSegmentWithContext {
   is_facilitator: boolean
   text: string
   start_time: number | null
+  /** Observation clips only (D25): start_time+end_time = the timecode RANGE; conv/doc rows carry null. */
+  end_time: number | null
   is_quoted: boolean
+  /** Observation clips only (slab 5c): the SUB-CLIP quote ranges on this clip.
+   * A whole-clip quote contributes nothing here — it has no range of its own,
+   * and `is_quoted` already carries it. */
+  quote_ranges: QuoteRange[]
   applied_code_ids: number[]
   preceding_context: ContextSegment[]
   following_context: ContextSegment[]
@@ -75,6 +87,16 @@ export interface DocumentSegmentGroup {
   segments: CodedSegmentWithContext[]
 }
 
+export interface ObservationSegmentGroup {
+  observation_id: number
+  observation_name: string
+  /** The recording's length — the occurrence strip's denominator. Nullable:
+   * pre-#574 .mov/.webm rows hold NULL, so consumers degrade to max clip end. */
+  media_duration_seconds: number | null
+  segment_count: number
+  segments: CodedSegmentWithContext[]
+}
+
 export interface CodeSegmentsWithContextResponse {
   code_id: number
   code_name: string
@@ -84,6 +106,7 @@ export interface CodeSegmentsWithContextResponse {
   has_more: boolean
   conversations: ConversationSegmentGroup[]
   documents: DocumentSegmentGroup[]
+  observations: ObservationSegmentGroup[]
 }
 
 export interface DemographicFilterValue {
@@ -161,6 +184,7 @@ export interface CodeAnalysisFilterParams {
   participant_ids?: string
   text_column_ids?: string
   document_ids?: string
+  observation_ids?: string
   source?: 'conversations' | 'text' | 'all'
   level?: 'segment' | 'source'
   /** Track J · J1 item 4 — comma-separated coder (user) IDs; omit = all coders. */
@@ -175,6 +199,7 @@ export interface SourceFrequenciesRequest {
   conversation_ids?: number[] | null
   text_column_ids?: number[] | null
   document_ids?: number[] | null
+  observation_ids?: number[] | null
   exclude_facilitator?: boolean
   participant_ids?: number[] | null
   group_by_subtype?: string | null
@@ -198,7 +223,7 @@ export interface SourceGroupData {
 }
 
 export interface SourceEntry {
-  source_type: 'conversation' | 'text_column' | 'document'
+  source_type: 'conversation' | 'text_column' | 'document' | 'observation'
   source_id: number
   source_label: string
   dataset_id: number | null
@@ -218,6 +243,7 @@ export interface SourceFrequenciesTotals {
   total_sources: number
   total_conversations: number
   total_documents: number
+  total_observations: number
   total_text_columns: number
 }
 
@@ -322,13 +348,89 @@ export interface ReconciliationConsensusContext {
   voters: number
 }
 
+
+// ── Open-cut reliability (Observations slab 6b-A) ────────────────────────────
+
+/**
+ * What the computation did to the data before measuring it. Not diagnostics —
+ * REPRODUCIBILITY: each field is a modelling choice that moves the result.
+ */
+export interface OpenCutDisclosure {
+  tick_ms: number
+  continuum_seconds: number
+  /** 'recording' | 'marked_extent' — a fallback denominator must never be shown
+   *  as if it were the recording's true length (#622's lesson). */
+  extent_source: string
+  n_merged_overlaps: number
+  n_zero_length_dropped: number
+  n_clips_without_times: number
+  engaged_coder_ids: number[]
+  excluded_coder_ids: number[]
+}
+
+export interface UnitizingCategoryResult {
+  code_id: number
+  code_name: string
+  n_units: number
+  alpha: number | null
+  interpretation: string | null
+  /** Share of the continuum marked with this code — alpha's own prevalence.
+   *  Deliberately NOT the same denominator as binned kappa's `prevalence`. */
+  coverage_fraction: number | null
+}
+
+export interface UnitizingAlphaResponse {
+  available: boolean
+  reason: string | null
+  n_coders: number
+  coders: number[]
+  overall: { alpha: number | null; interpretation: string | null } | null
+  per_category: UnitizingCategoryResult[]
+  disclosure: OpenCutDisclosure
+  interpretation_thresholds: Record<string, number>
+}
+
+export interface BinnedKappaCodeResult {
+  code_id: number
+  code_name: string
+  n_bins: number
+  percent_agreement: number | null
+  cohens_kappa: number | null
+  krippendorff_alpha: number | null
+  /** Always rendered beside the coefficient: most bins are empty on a long
+   *  recording, so percent agreement can read ~99% while kappa collapses. */
+  prevalence: number | null
+  interpretation: string | null
+}
+
+export interface BinnedKappaResponse {
+  available: boolean
+  reason: string | null
+  n_coders: number
+  coders: number[]
+  bin_seconds: number
+  n_bins: number
+  per_code: BinnedKappaCodeResult[]
+  disclosure: OpenCutDisclosure
+  interpretation_thresholds: Record<string, number>
+}
+
 export interface ReconciliationUnit {
+  /** A clip IS a Segment, so an observation unit is still 'segment'. */
   unit_type: 'segment' | 'dataset_value'
   unit_id: number
-  source_type: 'conversation' | 'document' | 'column'
+  source_type: 'conversation' | 'document' | 'observation' | 'column'
   source_id: number
   source_label: string
   text: string
+  /**
+   * Observation clips only in practice: a clip's identity is its time range,
+   * because `text` holds just its label and is routinely empty. Note the backend
+   * field is a plain `str`, so an unknown kind arriving here fails SILENTLY at
+   * runtime (types erase) rather than 500ing — the inverse of the Literal trap.
+   */
+  start_time: number | null
+  end_time: number | null
   /** coderId → effective code ids they applied here (an engaged coder who left it blank → []). */
   by_coder: Record<string, number[]>
   /** source-engaged coder ids (Option B: reviewed the source). */
@@ -352,7 +454,7 @@ export interface ReconciliationResponse {
 }
 
 export interface ReconciliationParams {
-  source_type?: 'conversation' | 'document' | 'column'
+  source_type?: 'conversation' | 'document' | 'observation' | 'column'
   source_id?: number
   disagreements_only?: boolean
   coder_ids?: string
@@ -462,6 +564,7 @@ export const codeAnalysisApi = {
   coderCoverage: (projectId: number, params?: {
     conversation_id?: number
     document_id?: number
+    observation_id?: number
     text_column_ids?: string
   }) =>
     api.get<CoderCoverageResponse>(
@@ -493,7 +596,7 @@ export const codeAnalysisApi = {
     api.post<DemographicComparisonResponse>(`/projects/${projectId}/code-analysis/demographic-comparison`, data)
       .then(r => r.data),
 
-  saturation: (projectId: number, params?: { exclude_facilitator?: boolean; category_level?: boolean; conversation_ids?: string; document_ids?: string; coder_ids?: string; layer_scope?: 'human' | 'consensus' }) =>
+  saturation: (projectId: number, params?: { exclude_facilitator?: boolean; category_level?: boolean; conversation_ids?: string; document_ids?: string; observation_ids?: string; coder_ids?: string; layer_scope?: 'human' | 'consensus' }) =>
     api.get<SaturationResponse>(`/projects/${projectId}/code-analysis/saturation`, { params })
       .then(r => r.data),
 
@@ -516,6 +619,20 @@ export const codeAnalysisApi = {
   // Track J · J2-4/J2-5 — inter-rater reliability (κ / α / % agreement) over the human roster.
   irr: (projectId: number, params?: IrrParams) =>
     api.get<IrrResponse>(`/projects/${projectId}/code-analysis/irr`, { params }).then(r => r.data),
+
+  /** Unitizing agreement for ONE observation with open cuts (slab 6b-A). */
+  unitizingAlpha: (projectId: number, observationId: number, params?: { coder_ids?: string }) =>
+    api.get<UnitizingAlphaResponse>(
+      `/projects/${projectId}/code-analysis/unitizing-alpha`,
+      { params: { observation_id: observationId, ...params } },
+    ).then(r => r.data),
+
+  /** Time-binned agreement for ONE observation with open cuts (slab 6b-A). */
+  binnedKappa: (projectId: number, observationId: number, params?: { bin_seconds?: number; coder_ids?: string }) =>
+    api.get<BinnedKappaResponse>(
+      `/projects/${projectId}/code-analysis/binned-kappa`,
+      { params: { observation_id: observationId, ...params } },
+    ).then(r => r.data),
 
   // Track J · J2-5 blind mode (DEC-G) — log that a coder broke blindness (audit trail).
   revealBlindMode: (projectId: number, body: { surface?: string }) =>

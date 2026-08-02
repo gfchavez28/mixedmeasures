@@ -1,5 +1,5 @@
 import { memo, useCallback, useMemo, type JSX, type KeyboardEvent, type Ref } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { Copy, ExternalLink, Quote, GripVertical } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -12,6 +12,8 @@ import {
 import CodeChip from '@/components/qualitative-analysis/CodeChip'
 import InlineCodeActions from '@/components/qualitative-analysis/InlineCodeActions'
 import { type Code, type QuotedExcerptItem } from '@/lib/api'
+import { formatTimecode } from '@/lib/utils'
+import { isTimeExcerpt } from '@/lib/excerpt-shape'
 import type { QuoteDensity } from '@/lib/qual-analysis-types'
 import SendToCanvasMenu from '@/components/canvas/SendToCanvasMenu'
 
@@ -38,6 +40,26 @@ interface QuoteCardProps {
   isDragging?: boolean
 }
 
+/** The CLIP's own span as `m:ss.d–m:ss.d`, or a single timecode for a point
+ * event (D7). Empty when the clip carries no times (it always should). */
+function clipRangeLabel(e: QuotedExcerptItem): string {
+  const s = e.segment_start_time
+  const end = e.segment_end_time
+  if (s === null) return ''
+  if (end === null || end === s) return formatTimecode(s)
+  return `${formatTimecode(s)}–${formatTimecode(end)}`
+}
+
+/** What a clip card SHOWS as its quote text. A clip's `text` is its label, and
+ * labels are routinely empty — which rendered a pair of empty quote marks and,
+ * worse, an accessible name of exactly "Quoted excerpt: ". ContentBySource has
+ * carried an 'Unlabeled clip' fallback all along; this is the same rule. */
+function clipQuoteText(e: QuotedExcerptItem): string {
+  if (e.text.trim()) return e.text
+  const range = clipRangeLabel(e)
+  return range ? `Unlabeled clip (${range})` : 'Unlabeled clip'
+}
+
 function formatAttribution(e: QuotedExcerptItem, showSpeaker: boolean, showSource: boolean = true): string {
   if (e.source_type === 'segment') {
     if (e.document_id) {
@@ -45,6 +67,19 @@ function formatAttribution(e: QuotedExcerptItem, showSpeaker: boolean, showSourc
       const parts: string[] = []
       if (showSource && e.document_name) parts.push(e.document_name)
       if (e.sequence_order !== null) parts.push(`\u00B6${e.sequence_order + 1}`)
+      return parts.join(', ')
+    }
+    if (e.observation_id) {
+      // A clip, so the unit word is "Clip" (the NAMING LAW) and the timecode is
+      // real data rather than the ` · {timecode}` suffix source_name used to
+      // carry. The RANGE shown is the CLIP's — a whole-clip quote has no range
+      // of its own, and for a sub-clip quote the card states its range
+      // separately rather than overloading the attribution line.
+      const parts: string[] = []
+      if (showSource) parts.push(e.source_name)
+      const range = clipRangeLabel(e)
+      if (range) parts.push(range)
+      if (e.sequence_order !== null) parts.push(`Clip ${e.sequence_order + 1}`)
       return parts.join(', ')
     }
     const parts: string[] = []
@@ -91,6 +126,27 @@ function renderQuoteText(
       </>
     )
   }
+  if (excerpt.observation_id) {
+    // A clip has no text to quote \u2014 its label is a name, not words that were
+    // said \u2014 so the card states the label (or an honest placeholder) and, for
+    // a sub-clip quote, WHICH MOMENT was marked. Quote marks are dropped:
+    // wrapping a label in them claims someone uttered it.
+    return (
+      <>
+        <p className="text-sm text-mm-text leading-relaxed">
+          {clipQuoteText(excerpt)}
+        </p>
+        {isTimeExcerpt(excerpt) && excerpt.start_time !== null && (
+          <p className="text-xs text-mm-text-muted tabular-nums mt-1">
+            Quoted {formatTimecode(excerpt.start_time)}
+            {excerpt.end_time !== null && excerpt.end_time !== excerpt.start_time
+              ? `\u2013${formatTimecode(excerpt.end_time)}` : ''}
+          </p>
+        )}
+      </>
+    )
+  }
+
   return (
     <>
       {contextBlock}
@@ -128,6 +184,16 @@ const QuoteCard = memo(function QuoteCard({
       navigate(`/projects/${projectId}/documents/${excerpt.document_id}?segment=${excerpt.segment_id}`)
     } else if (excerpt.source_type === 'segment' && excerpt.conversation_id) {
       navigate(`/projects/${projectId}/conversations/${excerpt.conversation_id}?segment=${excerpt.segment_id}`)
+    } else if (excerpt.source_type === 'segment' && excerpt.observation_id) {
+      // Without this arm every clip quote's "Go to source" was a SILENT no-op —
+      // a clip has neither conversation_id nor document_id, so all three
+      // branches fell through and navigate() was never called. Three
+      // affordances route through here: the toolbar button, the context-menu
+      // item, and the Enter key. `&t=` lands on the quote's own start when it
+      // has one; a whole-clip quote falls back to the clip's start.
+      const t = excerpt.start_time ?? excerpt.segment_start_time
+      const at = t !== null ? `&t=${t}` : ''
+      navigate(`/projects/${projectId}/observations/${excerpt.observation_id}?clip=${excerpt.segment_id}${at}`)
     } else if (excerpt.source_type === 'text' && excerpt.column_id) {
       navigate(`/projects/${projectId}/datasets/text-coding?columns=${excerpt.column_id}`)
     }
@@ -158,7 +224,12 @@ const QuoteCard = memo(function QuoteCard({
       tabIndex={0}
       onKeyDown={handleKeyDown}
       role="article"
-      aria-label={`Quoted excerpt: ${excerpt.text.slice(0, 60)}${excerpt.text.length > 60 ? '...' : ''}`}
+      // Routed through clipQuoteText so an unlabeled clip announces "Unlabeled
+      // clip (1:05.0–1:12.4)" instead of the bare "Quoted excerpt: " it used to.
+      aria-label={(() => {
+        const t = excerpt.observation_id ? clipQuoteText(excerpt) : excerpt.text
+        return `Quoted excerpt: ${t.slice(0, 60)}${t.length > 60 ? '...' : ''}`
+      })()}
       aria-roledescription={isDraggable ? 'sortable quote' : undefined}
     >
       {/* Drag handle + Quote text */}

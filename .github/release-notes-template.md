@@ -2,11 +2,12 @@ Mixed Measures **__VERSION__** — a local-first desktop workspace for mixed-met
 
 **What's new in this release**
 
-- **Video coding** — attach a video recording (`.mp4`/`.mov`/`.webm`) to a conversation and code with the player right beside the transcript, timestamp-synced like audio. Recordings can be attached directly in the import wizard.
-- **SPSS import** — `.sav` datasets import directly, keeping SPSS's own value labels, scale order, and user-missing codes.
-- **Participant-ID linking** — identifier columns ("Participant ID", "Respondent", …) now link dataset rows to participants automatically at import, append, or retroactively.
-- **Automatic updates** — the app now keeps itself current: quiet background download, install only when you restart (with a fresh backup first), and an off switch in Settings. This is the last release you'll need to download by hand.
-- Full details in the [changelog](https://github.com/__REPO__/blob/main/CHANGELOG.md).
+- **Observations — code a recording without a transcript.** For recordings of *events* rather than conversations (a classroom, a clinic visit, a usability session): mark clips directly on the recording's own timeline with keyboard in/out points and J-K-L transport. Clips carry codes, notes and quotes, and flow into search, the Canvas and your qualitative analysis.
+- **Reliability for video, both ways of cutting.** Let each coder mark their own boundaries and get unitizing agreement (Krippendorff's alpha at 100 ms) plus time-binned kappa — or freeze the clip set once the team agrees the cuts, and the ordinary kappa, side-by-side reconciliation and consensus layer all work on video unchanged.
+- **Timed analytics** — duration, frequency, rate per minute, share of session airtime, bout length, and a stacked codeline of the whole session.
+- **Declared value labels and missing values.** Give a numbers-only column a code-to-label dictionary, and tell any column which of its values mean "missing" (individual codes or a range like `-99 THRU -1`). Every analysis, chart and export honours it consistently.
+- ⚠️ **If you have imported SPSS `.sav` data before, please re-import it** — earlier versions discarded values SPSS flagged as user-missing, and the data already imported cannot be repaired in place. A few other numbers change in this release too.
+- Full details, and the upgrade notes, in the [changelog](https://github.com/__REPO__/blob/main/CHANGELOG.md).
 
 ## Which file should I download?
 

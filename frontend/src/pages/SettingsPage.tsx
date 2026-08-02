@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Sun, Moon, Monitor, Download, FileInput, ChevronDown, ChevronUp, LoaderCircle, ArrowLeft, Clock, Info, Lock, Unlock, Archive, ArchiveRestore, UserPlus, Copy, Quote } from 'lucide-react'
 import { toast } from 'sonner'
@@ -622,7 +622,7 @@ function BackupSection() {
                             <li key={i} className="text-mm-text text-xs">
                               {p.name}
                               <span className="text-mm-text-faint ml-1">
-                                ({p.conversation_count} conv, {p.dataset_count} ds, {p.document_count} doc)
+                                ({p.conversation_count} conv, {p.dataset_count} ds, {p.document_count} doc, {p.observation_count} obs)
                               </span>
                             </li>
                           ))}

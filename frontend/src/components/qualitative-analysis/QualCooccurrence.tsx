@@ -33,6 +33,9 @@ export default function QualCooccurrence({
   }), [filterParams, cooccurrenceLevel])
 
   const { data, isLoading } = useQuery({
+    // #454 rule: the key carries EVERY param the fn sends. document_ids was
+    // missing (a pre-existing violation found wiring observation_ids — a doc
+    // filter change could serve a stale matrix); both ride the key now.
     queryKey: [
       'code-cooccurrence', projectId,
       filterParams.exclude_facilitator,
@@ -41,6 +44,8 @@ export default function QualCooccurrence({
       filterParams.source,
       cooccurrenceLevel,
       filterParams.text_column_ids,
+      filterParams.document_ids,
+      filterParams.observation_ids,
       filterParams.coder_ids,
       filterParams.layer_scope,
     ],

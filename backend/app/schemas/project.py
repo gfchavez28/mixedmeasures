@@ -49,6 +49,7 @@ class ProjectResponse(BaseModel):
     code_count: int = 0
     dataset_count: int = 0
     document_count: int = 0
+    observation_count: int = 0
     participant_count: int = 0
     # Distinct real coders who have coded in this project (Track J · Group A — #1).
     # Surfaced on the Dashboard card only when > 1; includes archived coders.
@@ -94,15 +95,33 @@ class RecentDocument(BaseModel):
     coded_segment_count: int = 0
 
 
+class RecentObservation(BaseModel):
+    id: int
+    name: str
+    updated_at: UTCTimestamp
+    segment_count: int = 0          # clips (D9 — the UI word)
+    coded_segment_count: int = 0
+    has_media: bool = False
+
+
 class ProjectSummaryResponse(BaseModel):
     conversations: int = 0
     datasets: int = 0
     documents: int = 0
+    # `coded_segments` has counted observation clips since slab 1b. Without this
+    # sibling, a project whose only source is an Observation reported coded
+    # segments while claiming zero sources — and the Overview's empty-state check
+    # would still tell the researcher to import something to begin.
+    observations: int = 0
     participants: int = 0
     codes: int = 0
     categories: int = 0
     coded_segments: int = 0
     document_segments: int = 0
+    # #627: project-wide clip total, for the Overview stat cell's sub-label.
+    # Sibling of document_segments; recent_observations only covers the four
+    # most recent, so it cannot supply a project-wide figure.
+    observation_clips: int = 0
     materials: int = 0
     statistical_tests: int = 0
     memos: int = 0
@@ -114,6 +133,7 @@ class ProjectSummaryResponse(BaseModel):
     recent_conversations: list[RecentConversation] = []
     recent_datasets: list[RecentDataset] = []
     recent_documents: list[RecentDocument] = []
+    recent_observations: list[RecentObservation] = []
 
 
 class ProjectStorageResponse(BaseModel):

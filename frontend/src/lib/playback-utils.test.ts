@@ -6,6 +6,7 @@ import { describe, it, expect } from 'vitest'
 import {
   SEEK_END_GUARD_SECONDS,
   clampMediaSeek,
+  findClipsAtTime,
   isBeyondRecording,
   recordingEndsAtTimelineTime,
   scrubberPlayheadTime,
@@ -239,5 +240,29 @@ describe('recordingEndsAtTimelineTime / isBeyondRecording (#564)', () => {
   it('with NO recording, nothing is "beyond" it (a transcript-only conversation)', () => {
     expect(isBeyondRecording(9999, null)).toBe(false)
     expect(isBeyondRecording(9999, NaN)).toBe(false)
+  })
+})
+
+describe('findClipsAtTime — interval containment for overlapping clips (D27)', () => {
+  const u = (id: number, start: number, end: number) => ({ id, start_time: start, end_time: end })
+  const clips = [u(1, 0, 30), u(2, 10, 50), u(3, 40, 60), u(4, 45, 45)] // 4 = point event
+
+  it('returns ALL clips containing the playhead — overlap selects together', () => {
+    expect(findClipsAtTime(clips, 15).map(c => c.id)).toEqual([1, 2])
+    expect(findClipsAtTime(clips, 42).map(c => c.id)).toEqual([2, 3])
+  })
+
+  it('is half-open: a clip stops matching AT its end, so the abutting next clip takes over', () => {
+    const abut = [u(1, 0, 30), u(2, 30, 60)]
+    expect(findClipsAtTime(abut, 30).map(c => c.id)).toEqual([2])
+  })
+
+  it('a GAP matches nothing — the follow selection honestly empties', () => {
+    expect(findClipsAtTime([u(1, 0, 10), u(2, 20, 30)], 15)).toEqual([])
+  })
+
+  it('a point event matches only at exact equality (a half-open empty interval would never match)', () => {
+    expect(findClipsAtTime(clips, 45).map(c => c.id)).toEqual([2, 3, 4])
+    expect(findClipsAtTime(clips, 45.01).map(c => c.id)).toEqual([2, 3])
   })
 })

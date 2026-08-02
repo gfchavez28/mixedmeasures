@@ -12,6 +12,14 @@ export interface ProjectSummary {
   memo_count: number
   participant_count: number
   excerpt_count: number
+  /**
+   * Observations (#639). Always present on the wire — the backend schema
+   * declares it with a default, so a pre-observations (v1/v2) archive reads 0
+   * rather than dropping the key. Required here for that reason; if it ever
+   * reads `undefined`, the backend schema lost its declaration and is silently
+   * filtering the field again.
+   */
+  observation_count: number
 }
 
 export interface ProjectExportManifest {
@@ -120,8 +128,20 @@ export interface MergeReport {
 /** Track J · J3-2c: structured 409 body when a merge is refused for divergence. */
 export interface MergeDivergenceDetail {
   error: 'merge_divergence'
-  kind: 'segmentation' | 'codebook'
-  diverged_sources?: { name: string; file_segments: number; local_segments: number }[]
+  /**
+   * `segmentation_freeze` (#572) is a DIFFERENT refusal from `segmentation`: the
+   * clip sets were never compared, because the two sides disagree about whether
+   * the segmentation is settled at all. It needs its own copy — "re-segment to
+   * match" is the wrong instruction in both of its directions.
+   */
+  kind: 'segmentation' | 'segmentation_freeze' | 'codebook'
+  diverged_sources?: {
+    name: string
+    file_segments?: number
+    local_segments?: number
+    /** `segmentation_freeze` only: which side had frozen its segmentation. */
+    frozen_side?: 'local' | 'file'
+  }[]
   diverged_codes?: string[]
 }
 

@@ -6,6 +6,7 @@ from ..database import get_db
 from ..models.user import User
 from ..models.conversation import Conversation
 from ..models.document import Document
+from ..models.observation import Observation
 from ..models.dataset import Dataset, DatasetColumn, DatasetValue
 from ..models.segment import Segment
 from ..models.note import Note
@@ -30,6 +31,11 @@ def _validate_note_parent(db: Session, note: Note) -> int:
         if not doc:
             raise HTTPException(status_code=404, detail="Note's parent document not found")
         return doc.project_id
+    elif note.observation_id:
+        obs = db.query(Observation).filter(Observation.id == note.observation_id).first()
+        if not obs:
+            raise HTTPException(status_code=404, detail="Note's parent observation not found")
+        return obs.project_id
     elif note.dataset_value_id:
         dataset = (
             db.query(Dataset)

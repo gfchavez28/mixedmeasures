@@ -329,14 +329,20 @@ export default function QualSummaryTable({
             </thead>
             <tbody>
               {sortedSourceRows.map(row => (
-                <tr key={row.sourceId} className="hover:bg-mm-surface-hover transition-colors">
+                // Composite key: ids come from INDEPENDENT sequences per source
+                // type, so a clip Segment id can equal a conversation id (the
+                // #454-family collision the Observations merge made likely).
+                <tr key={`${row.sourceType}:${row.sourceId}`} className="hover:bg-mm-surface-hover transition-colors">
                   <td className="px-3 py-2 border-b">
                     <span className="truncate block max-w-[240px]" title={row.sourceLabel}>
                       {row.sourceLabel}
                     </span>
                   </td>
                   <td className="px-3 py-2 border-b text-mm-text-muted capitalize">
-                    {row.sourceType === 'text_column' ? 'Comments' : 'Conversation'}
+                    {row.sourceType === 'text_column' ? 'Comments'
+                      : row.sourceType === 'document' ? 'Document'
+                      : row.sourceType === 'observation' ? 'Observation'
+                      : 'Conversation'}
                   </td>
                   <td className="px-3 py-2 border-b text-right tabular-nums font-medium">
                     {row.totalCodes}

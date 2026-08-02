@@ -73,7 +73,6 @@ from ..services.dataset_import import (
     preview_dataset_csv,
     import_dataset_csv,
     parse_header,
-    _is_na,
     _strip_bom,
     _compute_value_numeric,
     is_xlsx_upload,
@@ -87,12 +86,15 @@ from ..services.sav_import import (
     SavColumnMeta,
     SavImportError,
 )
+from ..services.value_labels import build_code_to_label, resolve_labelled_cell
+from ..services.missing_values import is_missing, parse_missing_rules  # #592
 from ..models.equivalence_group import EquivalenceGroup
 from ..schemas.equivalence import ProjectColumnInfo, ProjectColumnListResponse
 from ..services.recode import (
     apply_definition_to_column,
     clear_value_numeric,
     compute_value,
+    effective_reverse_offset,
 )
 from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
 from ..models.metric import MetricDefinition
@@ -144,6 +146,14 @@ def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
             logger.warning("Failed to parse scale_labels JSON for column %s: %s", q.id, e)
             scale_labels = None
 
+    scale_values = None
+    if q.scale_values:
+        try:
+            scale_values = json.loads(q.scale_values)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("Failed to parse scale_values JSON for column %s: %s", q.id, e)
+            scale_values = None
+
     eq_group = getattr(q, 'equivalence_group', None)
     return DatasetColumnResponse(
         id=q.id,
@@ -156,10 +166,13 @@ def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
         sequence_order=q.sequence_order,
         display_order=q.display_order,
         scale_labels=scale_labels,
+        scale_values=scale_values,
         scale_points=q.scale_points,
         numeric_min=q.numeric_min,
         numeric_max=q.numeric_max,
         numeric_format=q.numeric_format,
+        missing_values=parse_missing_rules(q.missing_values),  # #592
+
         source=q.source,
         expression=q.expression,
         depends_on_column_ids=_safe_json_loads(q.depends_on_column_ids) if q.depends_on_column_ids else None,
@@ -190,7 +203,18 @@ async def preview_dataset(
     text, sheet_names, sav_meta = await _upload_to_csv_text(file, encoding, sheet_name)
 
     try:
-        result = preview_dataset_csv(text)
+        # #596: .sav carries its user-missing declaration, and the preview must
+        # judge cells by it BEFORE inferring — type detection, na_count and
+        # numeric_min/max all read the substantive set, so an overlay afterwards
+        # cannot reach them. Without this, a preserved "Refused" reads as real
+        # text and flips a column's suggested type.
+        result = preview_dataset_csv(
+            text,
+            missing_rules_by_column=(
+                {n: m.missing_rules for n, m in sav_meta.items() if m.missing_rules}
+                if sav_meta else None
+            ),
+        )
     except (ValueError, csv.Error, TypeError) as e:
         logger.warning("CSV parse failed: %s", e)
         raise HTTPException(status_code=400, detail="Unable to parse CSV file. Check the file format and try again.")
@@ -206,6 +230,46 @@ async def preview_dataset(
         columns=[DatasetColumnPreview(**col) for col in result["columns"]],
         sheet_names=sheet_names,
     )
+
+
+def _inject_sav_missing_rules(
+    column_configs: list[dict], sav_meta: dict, csv_text: str,
+) -> None:
+    """Seed each column config with SPSS's user-missing declaration (#596).
+
+    In place. The configs key on ``column_index``; ``sav_meta`` keys on the SPSS
+    variable NAME, which is the CSV header the adapter just wrote — so the header
+    row is the join. An explicit config value wins (the wizard may override SPSS
+    once it offers the control, and an empty list `[]` is a real declaration
+    meaning "nothing is missing", so only `None` counts as absent).
+
+    Injection happens AFTER the config's pydantic validation (the configs are
+    plain dicts here), so the rules route through the same shared payload
+    validator the schemas use (#614 — no second unguarded write path). Per
+    column and fail-safe: a pathological declaration (e.g. a label colliding
+    with another rule's value) is dropped WITH a warning — for that column the
+    behavior degrades to pre-#596, never a whole-import 400 over one weird
+    variable's metadata.
+    """
+    from ..services.missing_values import normalize_missing_rules_payload
+
+    header = next(csv.reader(io.StringIO(csv_text)), [])
+    for cfg in column_configs:
+        idx = cfg.get("column_index")
+        if not isinstance(idx, int) or not (0 <= idx < len(header)):
+            continue
+        if cfg.get("missing_values") is not None:
+            continue
+        meta = sav_meta.get(header[idx])
+        if meta is not None and meta.missing_rules:
+            try:
+                cfg["missing_values"] = normalize_missing_rules_payload(
+                    list(meta.missing_rules))
+            except ValueError as e:
+                logger.warning(
+                    "Dropping .sav missing declaration for %r: %s",
+                    header[idx], e,
+                )
 
 
 @router.post("/import", response_model=DatasetImportResponse)
@@ -229,10 +293,23 @@ async def import_dataset(
             status_code=400, detail=f"Invalid import config: {e}",
         )
 
-    text, _sheet_names, _sav_meta = await _upload_to_csv_text(file, encoding, config.sheet_name)
+    text, _sheet_names, sav_meta = await _upload_to_csv_text(file, encoding, config.sheet_name)
 
     # Convert Pydantic models to dicts for the service
     column_configs = [cfg.model_dump() for cfg in config.column_configs]
+
+    # #596: SPSS's own user-missing declaration is injected HERE, server-side,
+    # from the metadata this endpoint re-reads anyway — NOT threaded through the
+    # wizard. The adapter now preserves user-missing codes instead of blanking
+    # them (they used to vanish entirely), so if the declaration failed to
+    # arrive, every "99 = Refused" would import as ordinary data and feed the
+    # means — strictly worse than the old destructive blank. Owning it on the
+    # server makes that impossible: it cannot be lost by a client that omits the
+    # field, and a direct API caller gets it too. Same "the import must protect
+    # itself" logic as the format gate. An explicit config value still wins, so
+    # the wizard can override SPSS once it offers the control.
+    if sav_meta:
+        _inject_sav_missing_rules(column_configs, sav_meta, text)
 
     try:
         result = import_dataset_csv(
@@ -902,16 +979,32 @@ async def get_dataset_data(
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning("Failed to parse exclude_values JSON for recode definition %s: %s", d.id, e)
 
+            # #600: the authoritative reflection offset — over the mapping's
+            # REAL scale points, using the same null set the cells use. Sent so
+            # the grid displays exactly what apply_definition_to_column wrote;
+            # the client cannot compute this (it has neither the recognized-N/A
+            # rule nor the declaration), and a client mirror would be the #578
+            # display-vs-storage drift class.
+            rtype = d.recode_type.value if hasattr(d.recode_type, "value") else str(d.recode_type)
+            rev_offset = None
+            if rtype == "reverse":
+                rev_offset = effective_reverse_offset(
+                    mapping,
+                    {v.lower() for v in (exclude_values or [])},
+                    parse_missing_rules(q.missing_values),
+                )
+
             defs.append(RecodeDefinitionSummary(
                 id=d.id,
                 name=d.name,
-                recode_type=d.recode_type.value if hasattr(d.recode_type, "value") else str(d.recode_type),
+                recode_type=rtype,
                 output_type=d.output_type.value if hasattr(d.output_type, "value") else str(d.output_type),
                 mapping=mapping,
                 exclude_values=exclude_values,
                 is_primary=bool(d.is_primary),
                 is_auto_detected=bool(d.is_auto_detected),
                 source_definition_id=d.source_definition_id,
+                reverse_offset=rev_offset,
             ))
 
         data_columns.append(DatasetDataColumnResponse(
@@ -1230,6 +1323,11 @@ async def get_linkable_rows(
     # #414: identifier columns are the BEST row label — they exist to name rows.
     identifying_types = {ColumnType.IDENTIFIER, ColumnType.OPEN_TEXT, ColumnType.NOMINAL, ColumnType.DEMOGRAPHIC}
     identifying_col_ids = [c.id for c in all_cols if c.column_type in identifying_types]
+    # #592: per-column missing rules for the label skip below (parsed once)
+    linkable_rules_by_col = {
+        c.id: parse_missing_rules(c.missing_values)
+        for c in all_cols if c.column_type in identifying_types
+    }
 
     # 2. Get all rows with optional participant
     rows = (
@@ -1281,13 +1379,14 @@ async def get_linkable_rows(
                 "value": values.get((row.id, col.id)),
             })
 
-        # #418: up to 3 identifying values for the row label — skip
-        # recognized-N/A values (a slot spent on "N/A" identifies nothing)
-        # and truncate long open-text values so notes don't flood the label.
+        # #418: up to 3 identifying values for the row label — skip missing
+        # values (a slot spent on "N/A" identifies nothing; #592:
+        # column-aware) and truncate long open-text values so notes don't
+        # flood the label.
         display_values: list[str] = []
         for col_id in identifying_col_ids:
             val = values.get((row.id, col_id))
-            if val and val.strip() and not _is_na(val):
+            if val and val.strip() and not is_missing(val, linkable_rules_by_col.get(col_id)):
                 cleaned = val.strip()
                 if len(cleaned) > 40:
                     cleaned = cleaned[:39].rstrip() + "…"
@@ -2477,6 +2576,10 @@ async def update_value(
     # Compute value_numeric if there's a primary recode definition
     value.value_numeric = None
     if new_value:
+        # #592: the column's missing declaration governs BOTH arms — a
+        # declared "99" typed into a cell must encode NULL, and a declared-[]
+        # column's "N/A" must encode as data (REPLACE semantics).
+        col_missing_rules = parse_missing_rules(value.column.missing_values)
         primary_def = (
             db.query(RecodeDefinition)
             .filter(
@@ -2486,12 +2589,30 @@ async def update_value(
             .first()
         )
         if primary_def:
-            computed = compute_value(new_value, primary_def)
+            computed = compute_value(new_value, primary_def,
+                                     missing_rules=col_missing_rules)
             if computed is not None:
                 try:
                     value.value_numeric = float(computed)
                 except (ValueError, TypeError):
                     pass
+        else:
+            # #582: no primary recode — populate value_numeric directly, mirroring
+            # import (`_compute_value_numeric`). A manual numeric/ordinal/binary
+            # column otherwise lost its value_numeric on EVERY cell edit (it was
+            # unconditionally nulled and only re-derived from a primary recode),
+            # silently dropping it out of means/correlations/scale scores. Text
+            # types return None here, as at import.
+            col = value.column
+            try:
+                scale_labels = json.loads(col.scale_labels) if col.scale_labels else None
+                scale_values = json.loads(col.scale_values) if col.scale_values else None
+            except (json.JSONDecodeError, TypeError):
+                scale_labels = scale_values = None
+            value.value_numeric = _compute_value_numeric(
+                new_value, col.column_type.value, scale_labels, scale_values,
+                missing_rules=col_missing_rules,
+            )
 
     mark_metrics_stale(db, project_id, column_ids=[value.column_id])
 
@@ -2903,6 +3024,14 @@ async def append_import(
             "column_type": qtype,
             "scale_labels": scale_labels,
             "scale_values": scale_values,
+            # #575 append parity: {code: label} lets a code-format file appended to
+            # a value-labelled column substitute code→label so value_text (and the
+            # dedup fingerprint) match the existing label rows. Empty for non-scale
+            # columns → resolve_labelled_cell leaves them untouched.
+            "code_to_label": build_code_to_label(scale_labels, scale_values),
+            # #592: the column's missing declaration (None = the defaults) —
+            # drives the append missing channel in resolve_labelled_cell.
+            "missing_rules": parse_missing_rules(q.missing_values),
         }
 
     # Generate batch ID
@@ -2916,13 +3045,30 @@ async def append_import(
     values_created = 0
     duplicates_skipped = 0
     new_row_ids: list[int] = []
+    # #575: value_texts of appended cells per scale column, so we can report which
+    # appended values did NOT map to a numeric code (unknown labels / undeclared
+    # codes → NULL) — the append analog of the wizard's unmatched-scale-values note.
+    appended_texts: dict[int, set[str]] = {}
 
     for row_idx, row in enumerate(csv_rows):
-        # Build fingerprint
-        fp_parts: list[tuple[int, str]] = []
+        # Resolve every mapped cell ONCE (value-labelled columns substitute a
+        # code-format cell → its declared label). Done before the fingerprint so
+        # the dedup key uses the SAME text the existing rows were fingerprinted
+        # from — else a code-format append never dup-matches a label row (#575).
+        resolved: dict[int, tuple[str, float | None]] = {}
         for col_idx, q in col_mapping.items():
             cell = row[col_idx].strip() if col_idx < len(row) else ""
-            fp_parts.append((q.id, cell.lower()))
+            meta = col_meta[q.id]
+            resolved[col_idx] = resolve_labelled_cell(
+                cell, meta["column_type"], meta["scale_labels"],
+                meta["scale_values"], meta["code_to_label"],
+                missing_rules=meta["missing_rules"],
+            )
+
+        # Build fingerprint from the resolved text.
+        fp_parts: list[tuple[int, str]] = [
+            (q.id, resolved[col_idx][0].lower()) for col_idx, q in col_mapping.items()
+        ]
         fp = tuple(sorted(fp_parts))
 
         if config.skip_duplicates and fp in existing_fingerprints:
@@ -2948,23 +3094,21 @@ async def append_import(
         # Add to fingerprint set to detect dupes within this batch
         existing_fingerprints.add(fp)
 
-        # Create values
+        # Create values from the resolved (text, numeric) pair.
         for col_idx, q in col_mapping.items():
-            cell = row[col_idx].strip() if col_idx < len(row) else ""
-            if not cell:
+            value_text, value_numeric = resolved[col_idx]
+            if not value_text:
                 continue
 
             meta = col_meta[q.id]
-            value_numeric = _compute_value_numeric(
-                cell, meta["column_type"], meta["scale_labels"], meta["scale_values"],
-            )
-
-            wc = len(cell.split()) if meta["column_type"] == "open_text" and cell.strip() else None
+            wc = len(value_text.split()) if meta["column_type"] == "open_text" else None
+            if meta["code_to_label"] and not is_missing(value_text, meta["missing_rules"]):
+                appended_texts.setdefault(q.id, set()).add(value_text)
 
             db.add(DatasetValue(
                 row_id=new_row.id,
                 column_id=q.id,
-                value_text=cell,
+                value_text=value_text,
                 value_numeric=value_numeric,
                 word_count=wc,
             ))
@@ -2979,6 +3123,7 @@ async def append_import(
     # row was reversed — same label, two numbers in one column; and a
     # category_group primary means the column carries NO numeric encoding, so
     # new rows must be cleared, not stamped with the raw scale codes.
+    unmapped_values: set[str] = set()
     if new_row_ids:
         primary_defs = (
             db.query(RecodeDefinition)
@@ -2990,7 +3135,13 @@ async def append_import(
         )
         for defn in primary_defs:
             if defn.recode_type in (RecodeType.SCALE_MAP, RecodeType.REVERSE):
-                apply_definition_to_column(db, defn, row_ids=new_row_ids)
+                result = apply_definition_to_column(db, defn, row_ids=new_row_ids)
+                # #575: warn about APPENDED values (not pre-existing ones) that the
+                # primary couldn't map to a numeric code → they land NULL.
+                appended = appended_texts.get(defn.column_id, set())
+                for v in result["unmapped"]:
+                    if v in appended and len(unmapped_values) < 25:
+                        unmapped_values.add(v)
             else:  # category_group → categorical output only
                 clear_value_numeric(db, defn.column_id, row_ids=new_row_ids)
 
@@ -3072,4 +3223,5 @@ async def append_import(
         batch_id=batch_id,
         next_row_id=final_next_rid,
         participant_link_report=participant_link_report,
+        unmapped_values=sorted(unmapped_values),
     )

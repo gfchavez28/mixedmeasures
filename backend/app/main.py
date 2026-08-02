@@ -13,12 +13,65 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from .config import get_settings, get_documents_dir, get_media_dir, get_backup_dir, dist_dir
 
+def configure_app_logging() -> None:
+    """Own the `app.*` logging configuration instead of inheriting Alembic's (#631).
+
+    Two separate problems, both fixed here:
+
+    1. **No handler of our own.** Nothing in `app/` or `electron/` configured
+       logging at all, so the only configuration in effect was the one
+       `alembic/env.py` installs via `fileConfig` when migrations run. That made
+       our diagnostics a side effect of a migration tool's config file.
+    2. **Root sits at WARN** (`alembic.ini` `[logger_root] level = WARN`), and
+       `app.*` loggers have no level of their own, so they inherit it and every
+       `logger.info` is dropped — including the #574 media-duration backfill
+       summary, whose stated purpose is to make "why is my recording still
+       lengthless?" answerable from the log.
+
+    `basicConfig` is a no-op if root already has handlers, and a later
+    `fileConfig` REPLACES root's handlers rather than appending, so this cannot
+    double-emit in either ordering. The explicit level on the `app` namespace is
+    what survives that replacement — root goes back to WARN, `app.*` stays INFO.
+
+    Companion fix: `alembic/env.py` passes `disable_existing_loggers=False`.
+    Without it this function's work is undone on the next boot, because
+    `fileConfig` would disable all 31 already-created `app.*` loggers outright.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)-5.5s [%(name)s] %(message)s",
+    )
+    logging.getLogger("app").setLevel(logging.INFO)
+
+
+configure_app_logging()
+
 logger = logging.getLogger(__name__)
 from .database import run_migrations, SessionLocal
 from .models.user import Session as SessionModel
 from slowapi.errors import RateLimitExceeded
 from starlette.responses import JSONResponse
-from .routers import auth, projects, conversations, segments, codes, coding, notes, memos, export, search, participants, dataset, recode, equivalence, code_equivalence, analysis_domains, crosswalk, metrics, materials, code_analysis, statistical_tests, text_coding, text_analysis, excerpts, all_notes, correlations, comparisons, scratchpad, data_quality, quote_board, codebook, documents, backup, project_portability, canvas, media
+from .routers import auth, projects, conversations, segments, codes, coding, notes, memos, export, search, participants, dataset, recode, equivalence, code_equivalence, analysis_domains, crosswalk, metrics, materials, code_analysis, statistical_tests, text_coding, text_analysis, excerpts, all_notes, correlations, comparisons, scratchpad, data_quality, quote_board, codebook, documents, backup, project_portability, canvas, media, observations
+
+
+def repair_reverse_recodes():
+    """One-time idempotent repair of the #578 reverse double-flip on startup.
+
+    Reverse recodes created through the (buggy) Recode Workbench stored flipped
+    codes that the backend then re-flipped at apply time, so value_numeric kept
+    its forward (un-reversed) value. This rewrites those mappings to forward codes
+    and re-applies primaries. Self-terminating: once forward, subsequent startups
+    find nothing to do. Bounded (reverse defs are few); never fails startup.
+    """
+    from .services.recode import repair_reverse_recode_mappings
+    db = SessionLocal()
+    try:
+        repair_reverse_recode_mappings(db)
+    except Exception:
+        db.rollback()
+        logger.exception("Reverse recode repair (#578) failed; skipping")
+    finally:
+        db.close()
 
 
 def cleanup_expired_sessions():
@@ -177,6 +230,13 @@ async def lifespan(app: FastAPI):
     get_media_dir().mkdir(parents=True, exist_ok=True)
     get_backup_dir().mkdir(parents=True, exist_ok=True)
     cleanup_expired_sessions()
+    repair_reverse_recodes()
+    # File IO, unlike the DB-only pass above, so it goes to a thread — the same
+    # reason `copy_recording` does (media IO on the event loop is what stalls
+    # Electron's /health probe). Bounded: the IS NULL filter means a settled
+    # install does one query and opens nothing.
+    from .services.media_backfill import run_media_duration_backfill
+    await asyncio.to_thread(run_media_duration_backfill, SessionLocal)
     _check_production_safety()
 
     # Start periodic auto-backup + consensus staleness sweep
@@ -200,7 +260,7 @@ _startup_settings = get_settings()
 app = FastAPI(
     title="Mixed Measures",
     description="Mixed-methods research analysis platform",
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan,
     docs_url="/docs" if _startup_settings.enable_api_docs else None,
     redoc_url="/redoc" if _startup_settings.enable_api_docs else None,
@@ -241,6 +301,7 @@ async def _enospc_handler(request: Request, exc: OSError):
     raise exc
 
 app.add_exception_handler(OSError, _enospc_handler)
+
 
 # CORS configuration
 _settings = get_settings()
@@ -366,6 +427,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(projects.router)
 app.include_router(conversations.router)
+app.include_router(observations.router)
 app.include_router(segments.router)
 app.include_router(codes.router)
 app.include_router(codes.category_router)

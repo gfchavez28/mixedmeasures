@@ -1,4 +1,4 @@
-type ImportType = 'conversation' | 'dataset' | 'document'
+export type ImportType = 'conversation' | 'dataset' | 'document' | 'observation'
 
 let pending: { files: File[]; type: ImportType; timestamp: number } | null = null
 

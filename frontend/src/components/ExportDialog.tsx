@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { FileOutput, ChevronDown, ChevronRight, Package, BookOpen } from 'lucide-react'
-import { exportApi, metricsApi, projectPortabilityApi, projectsApi } from '@/lib/api'
+import { exportApi, metricsApi, projectPortabilityApi, projectsApi, extractApiError } from '@/lib/api'
 import type { ExportOptions } from '@/lib/api'
 import { defaultIncludeMedia } from '@/lib/api/project-portability'
 import { formatBytes } from '@/lib/format'
@@ -36,6 +36,7 @@ interface ExportState {
   codebook: boolean
   memos: boolean
   notes: boolean
+  quotes: boolean
   summaries: boolean
   audit: boolean
   // Datasets
@@ -60,6 +61,7 @@ const defaultState: ExportState = {
   codebook: true,
   memos: true,
   notes: true,
+  quotes: true,
   summaries: true,
   audit: true,
   datasetsExcel: true,
@@ -130,6 +132,7 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
           codebook: state.codebook,
           memos: state.memos,
           notes: state.notes,
+          quotes: state.quotes,
           summaries: state.summaries,
           audit: state.audit,
         }
@@ -316,8 +319,10 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
                     try {
                       await projectPortabilityApi.exportCodebook(projectId, 'qdc')
                       toast.success('QDC codebook exported')
-                    } catch {
-                      toast.error('QDC export failed')
+                    } catch (err) {
+                      // #633: an empty codebook is refused with an actionable
+                      // 400 — the schema requires at least one code.
+                      toast.error(extractApiError(err, 'QDC export failed'))
                     } finally {
                       setExporting(false)
                     }
@@ -333,10 +338,17 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
             </div>
           </section>
 
-          {/* Conversations */}
+          {/* Project-wide qualitative exports — NOT conversation-scoped. The
+              heading said "Conversations" until #629, which was true when the
+              workbook was conversation-only and stopped being true at #620:
+              Coded Data, Notes, Quotes and now the Code-Source Matrix all span
+              conversations, documents AND observation clips. A researcher
+              reading the old heading had every reason to look elsewhere for
+              their document coding. ("CSV (segments)" below IS still
+              conversation-only — see its own note.) */}
           <section>
             <h3 className="text-xs font-semibold uppercase tracking-wider text-mm-text-secondary mb-2">
-              Conversations
+              Full project
             </h3>
             <div className="space-y-2 ml-1">
               {/* Full Export with expandable sub-options */}
@@ -375,6 +387,7 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
                       ['codebook', 'Codebook'],
                       ['memos', 'Memos'],
                       ['notes', 'Notes'],
+                      ['quotes', 'Quotes'],
                       ['summaries', 'Summaries'],
                       ['audit', 'Audit'],
                     ] as [keyof ExportState, string][]).map(([key, label]) => (
@@ -402,11 +415,18 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
                   checked={state.csv}
                   onCheckedChange={() => toggle('csv')}
                 />
+                {/* #650: this and "Coded Segments (CSV)" below are the two
+                    shapes of the same data, and users kept having to guess.
+                    This one is WIDE — a row per segment, a 1/0 column per code,
+                    uncoded segments included — i.e. the case-by-variable matrix
+                    you load into SPSS/R. The other is LONG (a row per code
+                    application) and cannot contain an uncoded unit. Naming the
+                    shape is the only way the choice is makeable from here. */}
                 <Label
                   htmlFor="csv"
                   className="text-sm text-mm-text cursor-pointer select-none"
                 >
-                  CSV (segments)
+                  CSV (segment × code matrix, wide)
                 </Label>
               </div>
 
@@ -474,11 +494,14 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
                   checked={state.codedSegments}
                   onCheckedChange={() => toggle('codedSegments')}
                 />
+                {/* "long" pairs with the wide matrix above (#650) — same data,
+                    the other shape. One row per code application, so only coded
+                    units appear. */}
                 <Label
                   htmlFor="codedSegments"
                   className="text-sm text-mm-text cursor-pointer select-none"
                 >
-                  Coded Segments (CSV)
+                  Coded Segments (CSV, long)
                 </Label>
               </div>
 

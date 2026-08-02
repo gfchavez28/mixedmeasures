@@ -11,7 +11,9 @@ from ..database import get_db
 from ..models.user import User
 from ..auth import get_current_user
 from .auth import limiter
-from .helpers import parse_int_list, _get_project_or_404, sanitize_csv_filename
+from .helpers import (
+    parse_int_list, _get_observation_or_404, _get_project_or_404, sanitize_csv_filename,
+)
 from .export_helpers import csv_safe
 from ..services.code_analysis import (
     get_code_frequencies,
@@ -28,8 +30,13 @@ from ..services.code_analysis import (
     _build_cooccurrence_response,
 )
 from ..services.irr import compute_irr
+from ..services.open_cut_reliability import (
+    DEFAULT_BIN_SECONDS,
+    compute_binned_kappa,
+    compute_unitizing_alpha,
+)
 from ..services.coding_coverage import source_coder_coverage, project_coder_coverage
-from ..services.reconciliation import build_reconciliation
+from ..services.reconciliation import RECONCILIATION_SOURCE_TYPES, build_reconciliation
 from ..services.consensus import consensus_enabled, consensus_exists_for_project
 from ..services.consensus_staleness import sweep_stale_consensus
 from ..services.audit import log_action
@@ -46,7 +53,9 @@ from ..schemas.code_analysis import (
     DemographicComparisonResponse,
     SaturationResponse,
     TextColumnInfo,
+    BinnedKappaResponse,
     IrrResponse,
+    UnitizingAlphaResponse,
     ConsensusStatusResponse,
     ReconciliationResponse,
     RecomputeConsensusResponse,
@@ -74,6 +83,7 @@ async def coder_coverage(
     conversation_id: int | None = None,
     document_id: int | None = None,
     text_column_ids: str | None = None,
+    observation_id: int | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -83,17 +93,23 @@ async def coder_coverage(
     The #444-safe "who coded HERE" surface: derived from codings, NOT the
     instance-global roster. Includes archived coders (flagged ``archived``);
     excludes the consensus/Unattributed system coders and null-applier rows.
-    Pass exactly one of ``conversation_id`` / ``document_id`` / ``text_column_ids``
-    for per-source coverage; omit all for project-wide coverage.
+    Pass exactly one of ``conversation_id`` / ``document_id`` / ``observation_id`` /
+    ``text_column_ids`` for per-source coverage; omit all for project-wide coverage.
     """
     _get_project_or_404(db, project_id, user.id)
     col_ids = parse_int_list(text_column_ids)
-    if conversation_id is not None or document_id is not None or col_ids:
+    if (
+        conversation_id is not None
+        or document_id is not None
+        or observation_id is not None
+        or col_ids
+    ):
         coverage = source_coder_coverage(
             db,
             project_id,
             conversation_id=conversation_id,
             document_id=document_id,
+            observation_id=observation_id,
             text_column_ids=col_ids,
         )
     else:
@@ -123,10 +139,12 @@ async def code_frequencies(
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
     layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default — all non-consensus coders, optionally narrowed by coder_ids) or 'consensus' (the derived consensus layer)"),
     source: str = Query("conversations", description="Source: all, conversations, or text (legacy 'comments' is coerced to 'text')"),
+    # Appended LAST (bare-default convention) — 4c: observation scoping.
+    observation_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get code frequency statistics across all conversations, documents, and/or text columns."""
+    """Get code frequency statistics across conversations, documents, observations, and/or text columns."""
     _get_project_or_404(db, project_id, user.id)
 
     # Backward-compat: legacy callers may still pass "comments"
@@ -147,6 +165,7 @@ async def code_frequencies(
         document_ids=parse_int_list(document_ids),
         coder_ids=parse_int_list(coder_ids),
         layer_scope=layer_scope,
+        observation_ids=parse_int_list(observation_ids),
     )
     return result
 
@@ -164,6 +183,8 @@ async def code_segments_with_context(
     layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default — all non-consensus coders, optionally narrowed by coder_ids) or 'consensus' (the derived consensus layer)"),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    # Appended LAST (bare-default convention) — 4c: observation scoping.
+    observation_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -183,6 +204,7 @@ async def code_segments_with_context(
         document_ids=parse_int_list(document_ids),
         coder_ids=parse_int_list(coder_ids),
         layer_scope=layer_scope,
+        observation_ids=parse_int_list(observation_ids),
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Code not found")
@@ -236,10 +258,12 @@ async def code_cooccurrence(
     layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default — all non-consensus coders, optionally narrowed by coder_ids) or 'consensus' (the derived consensus layer)"),
     source: str = Query("conversations", description="Source: all, conversations, or text (legacy 'comments' is coerced to 'text')"),
     level: str = Query("segment", description="Level: segment or source"),
+    # Appended LAST (bare-default convention) — 4c: observation scoping.
+    observation_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get code co-occurrence matrix across all conversations, documents, and/or text columns."""
+    """Get code co-occurrence matrix across conversations, documents, observations, and/or text columns."""
     _get_project_or_404(db, project_id, user.id)
 
     # Backward-compat: legacy callers may still pass "comments"
@@ -257,6 +281,7 @@ async def code_cooccurrence(
     parsed_col_ids = parse_int_list(text_column_ids)
     parsed_doc_ids = parse_int_list(document_ids)
     parsed_coder_ids = parse_int_list(coder_ids)
+    parsed_obs_ids = parse_int_list(observation_ids)
 
     if level == "source":
         cooccur, total_units = get_source_level_cooccurrence(
@@ -270,6 +295,7 @@ async def code_cooccurrence(
             document_ids=parsed_doc_ids,
             coder_ids=parsed_coder_ids,
             layer_scope=layer_scope,
+            observation_ids=parsed_obs_ids,
         )
         all_codes = _get_ordered_codes(db, project_id, parsed_code_ids)
         return _build_cooccurrence_response(
@@ -286,6 +312,7 @@ async def code_cooccurrence(
             document_ids=parsed_doc_ids,
             coder_ids=parsed_coder_ids,
             layer_scope=layer_scope,
+            observation_ids=parsed_obs_ids,
         )
         return result
 
@@ -314,6 +341,7 @@ async def source_frequencies(
         document_ids=body.document_ids,
         coder_ids=body.coder_ids,
         layer_scope=body.layer_scope,
+        observation_ids=body.observation_ids,
     )
     return result
 
@@ -351,10 +379,12 @@ async def saturation(
     document_ids: str | None = Query(None, description="Comma-separated document IDs"),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
     layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default — all non-consensus coders, optionally narrowed by coder_ids) or 'consensus' (the derived consensus layer)"),
+    # Appended LAST (bare-default convention) — 4c: observation scoping.
+    observation_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get code saturation curve across conversations and documents."""
+    """Get code saturation curve across conversations, documents, and observations."""
     _get_project_or_404(db, project_id, user.id)
 
     result = get_saturation_data(
@@ -365,6 +395,7 @@ async def saturation(
         document_ids=parse_int_list(document_ids),
         coder_ids=parse_int_list(coder_ids),
         layer_scope=layer_scope,
+        observation_ids=parse_int_list(observation_ids),
     )
     return result
 
@@ -395,6 +426,68 @@ async def inter_rater_reliability(
     return compute_irr(db, project_id, coder_ids=parse_int_list(coder_ids))
 
 
+@router.get("/unitizing-alpha", response_model=UnitizingAlphaResponse)
+async def unitizing_alpha_endpoint(
+    project_id: int,
+    observation_id: int,
+    coder_ids: str | None = Query(None, description="Comma-separated coder IDs; omit = all roster coders"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Unitizing agreement (α_U) for ONE observation with OPEN cuts.
+
+    Scoped to a single observation because the continuum is one recording — there
+    is no meaningful project-wide α_U. Frozen observations are refused rather than
+    computed: their clips are shared units, so ordinary κ applies and the
+    Reliability tab has a better answer for them.
+
+    ⚠️ SECOND ENTITY ID. `_get_observation_or_404` is what verifies the
+    observation lives in THIS project — `_get_project_or_404` alone would let a
+    caller name another tenant's observation and read its coding back. The
+    ownership AST sweep passes on any gate token and is structurally blind to
+    that, so the guarantee is the behavioural cross-tenant test, not the scan.
+    """
+    observation = _get_observation_or_404(db, project_id, observation_id, user.id)
+    if observation.segmentation_frozen_at is not None:
+        raise HTTPException(
+            400,
+            "This observation's clips are frozen, so every coder codes the same "
+            "units — use inter-rater reliability instead of unitizing agreement.",
+        )
+    return compute_unitizing_alpha(
+        db, project_id, observation, coder_ids=parse_int_list(coder_ids))
+
+
+@router.get("/binned-kappa", response_model=BinnedKappaResponse)
+async def binned_kappa_endpoint(
+    project_id: int,
+    observation_id: int,
+    bin_seconds: float = Query(DEFAULT_BIN_SECONDS, gt=0, description="Bin width in seconds — a reported parameter; it changes the result"),
+    coder_ids: str | None = Query(None, description="Comma-separated coder IDs; omit = all roster coders"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Time-binned agreement for ONE observation with OPEN cuts.
+
+    Slices the timeline into fixed bins and scores each code per bin, which is
+    what the dedicated video tools report — parity, not novelty. The bin width is
+    echoed back because it MOVES the answer: wider bins absorb boundary
+    disagreements and read as more agreement.
+
+    Same second-entity-id gate as the sibling above.
+    """
+    observation = _get_observation_or_404(db, project_id, observation_id, user.id)
+    if observation.segmentation_frozen_at is not None:
+        raise HTTPException(
+            400,
+            "This observation's clips are frozen, so every coder codes the same "
+            "units — use inter-rater reliability instead of time-binned agreement.",
+        )
+    return compute_binned_kappa(
+        db, project_id, observation, bin_seconds=bin_seconds,
+        coder_ids=parse_int_list(coder_ids))
+
+
 @router.get("/consensus-status", response_model=ConsensusStatusResponse)
 async def consensus_status(
     project_id: int,
@@ -422,7 +515,7 @@ async def consensus_status(
 @router.get("/reconciliation", response_model=ReconciliationResponse)
 async def reconciliation(
     project_id: int,
-    source_type: str | None = Query(None, description="Narrow to one source: conversation|document|column"),
+    source_type: str | None = Query(None, description="Narrow to one source: conversation|document|observation|column"),
     source_id: int | None = Query(None, description="Source id paired with source_type"),
     disagreements_only: bool = Query(False, description="Only units where engaged coders disagree"),
     coder_ids: str | None = Query(None, description="Comma-separated coder IDs; omit = all roster coders"),
@@ -438,6 +531,20 @@ async def reconciliation(
     server-derived here, never written from the grid. `available=False` when <2
     roster coders share a source. Disagreements-first + paginated to keep it small."""
     _get_project_or_404(db, project_id, user.id)
+    # Fail LOUD on an unknown kind. The service resolves an unrecognized tag to a
+    # sentinel that matches nothing, so without this a client narrowing to a source
+    # kind the backend does not yet know gets an EMPTY grid reported as
+    # `available: true` — indistinguishable from "these coders agree on everything".
+    # `isinstance(str)`, not `is not None`: a `Query(...)` default leaks its SENTINEL
+    # OBJECT into direct-call tests (FastAPI only resolves it on a real request), and
+    # that sentinel is both truthy and `is not None` — so an `is not None` check
+    # would 400 every direct caller that simply omitted the parameter.
+    if isinstance(source_type, str) and source_type not in RECONCILIATION_SOURCE_TYPES:
+        raise HTTPException(
+            400,
+            f"Unknown source_type {source_type!r}. Expected one of: "
+            f"{', '.join(sorted(RECONCILIATION_SOURCE_TYPES))}.",
+        )
     return build_reconciliation(
         db,
         project_id,
@@ -529,6 +636,8 @@ async def source_frequencies_csv(
     group_by_subtype: str | None = Query(None),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
     layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default) or 'consensus'"),
+    # Appended LAST (bare-default convention) — 4c: observation scoping.
+    observation_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -548,6 +657,7 @@ async def source_frequencies_csv(
         document_ids=parse_int_list(document_ids),
         coder_ids=parse_int_list(coder_ids),
         layer_scope=layer_scope,
+        observation_ids=parse_int_list(observation_ids),
     )
 
     output = io.StringIO()

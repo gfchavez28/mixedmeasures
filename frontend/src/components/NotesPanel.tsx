@@ -1,7 +1,6 @@
 import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Search, Plus, Trash2, Link2, Link2Off, Paperclip, X } from 'lucide-react'
-import { useDraggable } from '@dnd-kit/core'
 import { toast } from 'sonner'
 import { notesApi, type Note } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -495,16 +494,8 @@ function NoteItem({
   onDisassociate: () => void
   onArchive: () => void
 }) {
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
-    id: `note-${note.id}`,
-    data: { type: 'note' as const, note },
-  })
-
   return (
     <div
-      ref={setNodeRef}
-      {...listeners}
-      {...attributes}
       data-note-item
       className={cn(
         'px-3 py-2 border-b border-mm-border-subtle hover:bg-mm-surface-hover group',
@@ -512,7 +503,6 @@ function NoteItem({
         isSelected && 'bg-emerald-100 dark:bg-emerald-900/40',
         isFocused && 'ring-2 ring-inset ring-emerald-500 bg-emerald-50 dark:bg-emerald-900/30',
         note.segment_id && 'cursor-pointer',
-        isDragging && 'opacity-40'
       )}
       onClick={note.segment_id ? onNoteClick : undefined}
     >

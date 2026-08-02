@@ -13,14 +13,34 @@ export interface ExcerptResponse {
   dataset_value_id: number | null
   start_offset: number | null
   end_offset: number | null
+  /** Absolute TIMELINE seconds — the time-range shape (observation clips only,
+   * slab 5a/D29). Never clip-relative: a clip boundary edit must not re-anchor
+   * the quote. Both-or-neither with `end_time`, and mutually exclusive with the
+   * char offsets — read the shape through `lib/excerpt-shape.ts`, never a bare
+   * `start_offset === null` (that predicate matches TWO shapes now). */
+  start_time: number | null
+  end_time: number | null
   excerpt_text: string
   conversation_id: number | null
   conversation_name: string | null
+  observation_id: number | null
+  observation_name: string | null
   speaker_name: string | null
   segment_timestamp: number | null
   note: ExcerptNoteInfo | null
   has_note: boolean
   created_at: string
+}
+
+/** The create payload, named rather than re-inlined — slab 5b widened it for
+ * the time shape, and three call sites had each carried their own copy. */
+export interface ExcerptCreatePayload {
+  segment_id?: number
+  dataset_value_id?: number
+  start_offset?: number | null
+  end_offset?: number | null
+  start_time?: number | null
+  end_time?: number | null
 }
 
 export interface ExcerptDetailResponse extends ExcerptResponse {
@@ -45,9 +65,18 @@ export interface QuotedExcerptItem {
   dataset_value_id: number | null
   text: string
   full_segment_text: string
+  /** char-shape only — deliberately NOT overloaded to mean "time-range"
+   * (the #569 type-overloading lesson). Renderers branch on the shape helpers. */
   is_sub_segment: boolean
   start_offset: number | null
   end_offset: number | null
+  start_time: number | null
+  end_time: number | null
+  /** The SEGMENT's own span — a different question from the two above, which
+   * are the EXCERPT's. A whole-clip quote has no range of its own, so this is
+   * the only timecode a clip card can show for one. */
+  segment_start_time: number | null
+  segment_end_time: number | null
   speaker_name: string | null
   speaker_is_facilitator: boolean
   participant_id: number | null
@@ -59,6 +88,8 @@ export interface QuotedExcerptItem {
   conversation_sort_key: number | null
   document_id: number | null
   document_name: string | null
+  observation_id: number | null
+  observation_name: string | null
   dataset_id: number | null
   dataset_name: string | null
   column_id: number | null
@@ -77,6 +108,7 @@ export interface QuotedExcerptsResponse {
   total_conversation_excerpts: number
   total_comment_excerpts: number
   total_document_excerpts: number
+  total_observation_excerpts: number
 }
 
 export interface QuotedExcerptsParams {
@@ -93,9 +125,13 @@ export interface QuotedExcerptsParams {
 export const excerptsApi = {
   list: (projectId: number, params?: { conversation_id?: number; has_note?: boolean; search?: string; speaker?: string }) =>
     api.get<{ excerpts: ExcerptResponse[]; total: number }>(`/projects/${projectId}/excerpts`, { params }).then(res => res.data),
-  create: (projectId: number, data: { segment_id?: number; dataset_value_id?: number; start_offset?: number | null; end_offset?: number | null }) =>
+  /** Single create — 400s on a shape/containment failure and 409s on a
+   * duplicate. Use THIS (never `bulkCreate`) whenever the researcher must hear
+   * why a quote was refused: bulk counts the same failures into `skipped_count`
+   * inside a 200, so the reason never reaches the UI (§8j.6.3). */
+  create: (projectId: number, data: ExcerptCreatePayload) =>
     api.post<ExcerptResponse>(`/projects/${projectId}/excerpts`, data).then(res => res.data),
-  bulkCreate: (projectId: number, items: { segment_id?: number; dataset_value_id?: number; start_offset?: number | null; end_offset?: number | null }[]) =>
+  bulkCreate: (projectId: number, items: ExcerptCreatePayload[]) =>
     api.post<{ created_count: number; skipped_count: number }>(`/projects/${projectId}/excerpts/bulk`, { items }).then(res => res.data),
   delete: (projectId: number, excerptId: number) =>
     api.delete(`/projects/${projectId}/excerpts/${excerptId}`).then(res => res.data),

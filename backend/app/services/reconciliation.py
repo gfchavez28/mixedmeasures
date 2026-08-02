@@ -27,16 +27,27 @@ from ..models.code import Code
 from ..models.conversation import Conversation
 from ..models.dataset import Dataset, DatasetColumn, DatasetValue
 from ..models.document import Document
+from ..models.observation import Observation
 from ..models.segment import Segment
 from ..models.user import User
 from .consensus import _decide_consensus, has_disagreement
 from .irr import gather_coder_applications
 
-# Frontend source_type ←→ the gather's source-key tag.
-_SOURCE_TAG = {"conversation": "conv", "document": "doc", "column": "col"}
-_SOURCE_TYPE = {"conv": "conversation", "doc": "document", "col": "column"}
+# Frontend source_type ←→ the gather's source-key tag. All four maps move together:
+# an "obs" tag missing from _SOURCE_TYPE raised KeyError → 500, while the same
+# missing key in _SOURCE_RANK degraded silently — two failure modes for one
+# omission, in one file. _UNIT_TYPE deliberately stays 2-valued: a clip IS a
+# Segment, so its unit key is ("seg", id) like any other.
+_SOURCE_TAG = {"conversation": "conv", "document": "doc",
+               "observation": "obs", "column": "col"}
+_SOURCE_TYPE = {"conv": "conversation", "doc": "document",
+                "obs": "observation", "col": "column"}
 _UNIT_TYPE = {"seg": "segment", "val": "dataset_value"}
-_SOURCE_RANK = {"conv": 0, "doc": 1, "col": 2}
+_SOURCE_RANK = {"conv": 0, "doc": 1, "obs": 2, "col": 3}
+
+# The router validates against this so an unknown kind 400s instead of silently
+# resolving to a sentinel that matches nothing.
+RECONCILIATION_SOURCE_TYPES = frozenset(_SOURCE_TAG)
 
 _UNAVAILABLE_REASON = (
     "Reconciliation needs at least 2 coders with coding on a shared source."
@@ -138,14 +149,23 @@ def build_reconciliation(
     # Batch text + source labels + code legend for THE PAGE ONLY.
     page_seg = [uid for r in page for (t, uid) in [r["u"]] if t == "seg"]
     page_val = [uid for r in page for (t, uid) in [r["u"]] if t == "val"]
-    seg_text = dict(db.query(Segment.id, Segment.text).filter(Segment.id.in_(page_seg)).all()) if page_seg else {}
+    # Times ride the SAME query as the text — a clip's identity is its range, and
+    # fetching it separately would be a round-trip for data already in flight.
+    seg_rows = (
+        db.query(Segment.id, Segment.text, Segment.start_time, Segment.end_time)
+        .filter(Segment.id.in_(page_seg)).all() if page_seg else []
+    )
+    seg_text = {sid: text for sid, text, _s, _e in seg_rows}
+    seg_times = {sid: (start, end) for sid, _t, start, end in seg_rows}
     val_text = dict(db.query(DatasetValue.id, DatasetValue.value_text).filter(DatasetValue.id.in_(page_val)).all()) if page_val else {}
 
     page_convs = [sid for r in page for (t, sid) in [r["src"]] if t == "conv"]
     page_docs = [sid for r in page for (t, sid) in [r["src"]] if t == "doc"]
+    page_obs = [sid for r in page for (t, sid) in [r["src"]] if t == "obs"]
     page_cols = [sid for r in page for (t, sid) in [r["src"]] if t == "col"]
     conv_names = dict(db.query(Conversation.id, Conversation.name).filter(Conversation.id.in_(page_convs)).all()) if page_convs else {}
     doc_names = dict(db.query(Document.id, Document.name).filter(Document.id.in_(page_docs)).all()) if page_docs else {}
+    obs_names = dict(db.query(Observation.id, Observation.name).filter(Observation.id.in_(page_obs)).all()) if page_obs else {}
     col_labels: dict[int, str] = {}
     if page_cols:
         for col_id, col_name, col_text, ds_name in (
@@ -157,12 +177,19 @@ def build_reconciliation(
             col_labels[col_id] = f"{ds_name} › {label}" if label else ds_name
 
     def _source_label(src) -> str:
+        # Every kind gets an EXPLICIT branch. `col` used to be the fall-through
+        # default, so a tag nobody had handled yet rendered a silently blank
+        # source name instead of failing.
         t, sid = src
         if t == "conv":
             return conv_names.get(sid, "")
         if t == "doc":
             return doc_names.get(sid, "")
-        return col_labels.get(sid, "")
+        if t == "obs":
+            return obs_names.get(sid, "")
+        if t == "col":
+            return col_labels.get(sid, "")
+        raise KeyError(f"unhandled source tag: {t!r}")
 
     # Code legend: the EFFECTIVE codes referenced on the page. Effective ids are real
     # canonical Code ids, so naming them directly gives the group's canonical label.
@@ -182,6 +209,10 @@ def build_reconciliation(
         tag, uid = r["u"]
         src_t, src_id = r["src"]
         text = seg_text.get(uid) if tag == "seg" else val_text.get(uid)
+        # A clip's identity to a researcher is its TIME RANGE — `Segment.text` on a
+        # clip holds only its label, routinely empty. Conversation segments carry
+        # times too, so these are not observation-only fields.
+        start_time, end_time = seg_times.get(uid, (None, None)) if tag == "seg" else (None, None)
         units.append({
             "unit_type": _UNIT_TYPE[tag],
             "unit_id": uid,
@@ -189,6 +220,8 @@ def build_reconciliation(
             "source_id": src_id,
             "source_label": _source_label(r["src"]),
             "text": text or "",
+            "start_time": start_time,
+            "end_time": end_time,
             "by_coder": r["by_coder"],
             "engaged": r["engaged"],
             "consensus": r["consensus"],

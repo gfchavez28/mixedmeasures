@@ -4,7 +4,7 @@ import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 /**
  * Track J · Group A (#3) — "N coders" for the current source, shown beside the
  * blind-mode pill. Derived from CODINGS (not the instance-global roster — the #444
- * trap), so it answers "who actually coded THIS conversation/document/dataset."
+ * trap), so it answers "who actually coded THIS conversation/document/observation/dataset."
  * Includes archived coders, labeled "(archived)" in the tooltip.
  *
  * Renders nothing unless > 1 coder has coded the source (a solo "1 coder" is noise).
@@ -14,6 +14,7 @@ interface CoderCountBadgeProps {
   projectId: number
   conversationId?: number
   documentId?: number
+  observationId?: number
   textColumnIds?: number[]
   /** Gate on multiCoder — never render in single-coder instances. */
   enabled?: boolean
@@ -24,13 +25,14 @@ export default function CoderCountBadge({
   projectId,
   conversationId,
   documentId,
+  observationId,
   textColumnIds,
   enabled = true,
   className = '',
 }: CoderCountBadgeProps) {
   const { coders, count } = useCoderCoverage(
     projectId,
-    { conversationId, documentId, textColumnIds },
+    { conversationId, documentId, observationId, textColumnIds },
     { enabled },
   )
 

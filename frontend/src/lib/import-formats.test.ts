@@ -31,6 +31,16 @@ import {
   DOCUMENT_FORMAT_LABEL,
   isSupportedDocumentFile,
 } from './document-import-formats'
+import {
+  CUE_FILE_ACCEPT,
+  OBSERVATION_MEDIA_ACCEPT,
+  isSupportedCueFile,
+  isSupportedObservationMedia,
+} from './observation-import-formats'
+// The media gate keeps its OWN agreement test in media-constants.test.ts:
+// MEDIA_ACCEPT mixes MIME types with dotted extensions, so the dotted-only
+// helper below cannot check it (it would test predicate('fileaudio/mpeg')).
+import { MEDIA_ACCEPT, isSupportedMediaFile } from './media-constants'
 
 /** `accept=".a,.b"` and the predicate must agree — that pairing IS the module. */
 function acceptAgreesWithPredicate(accept: string, predicate: (f: string) => boolean) {
@@ -104,16 +114,68 @@ describe('the three format families stay disjoint', () => {
   })
 })
 
+describe('observation formats (the Observations import — two gates, not one)', () => {
+  it('re-exports the media gate rather than re-declaring it', () => {
+    // The whole point of the module: no second copy of the media extension list
+    // (that copy IS #552). Identity, not equality.
+    expect(OBSERVATION_MEDIA_ACCEPT).toBe(MEDIA_ACCEPT)
+    expect(isSupportedObservationMedia).toBe(isSupportedMediaFile)
+  })
+
+  it('the cue gate is NARROWER than the transcript gate', () => {
+    // A .csv is a legal transcript but NOT a legal cue file: it carries no timed
+    // in/out points, so there is nothing to cut clips from. Accepting one would
+    // let a user pick a file that can only fail.
+    expect(isSupportedTranscriptFile('interview.csv')).toBe(true)
+    expect(isSupportedCueFile('interview.csv')).toBe(false)
+
+    expect(isSupportedCueFile('chapters.vtt')).toBe(true)
+    expect(isSupportedCueFile('chapters.srt')).toBe(true)
+    expect(CUE_FILE_ACCEPT).not.toContain('.csv')
+  })
+
+  it('cue accept and predicate agree', () => {
+    acceptAgreesWithPredicate(CUE_FILE_ACCEPT, isSupportedCueFile)
+  })
+
+  it('rejects a recording as a cue file and vice versa', () => {
+    expect(isSupportedCueFile('session.mp4')).toBe(false)
+    expect(isSupportedObservationMedia('chapters.vtt')).toBe(false)
+  })
+})
+
 // ── The fail-closed guard ───────────────────────────────────────────────────
 
 const PAGES_DIR = join(__dirname, '..', 'pages')
+const COMPONENTS_DIR = join(__dirname, '..', 'components')
 
 /** Extension literals that must only ever appear inside the format modules. */
 const OWNED_EXTENSIONS = [
-  'csv', 'xlsx', 'sav',     // dataset-import-formats.ts
-  'vtt', 'srt',             // conversation-import-formats.ts
-  'docx', 'pdf', 'txt',     // document-import-formats.ts
+  'csv', 'xlsx', 'sav',                       // dataset-import-formats.ts
+  'vtt', 'srt',                               // conversation-import-formats.ts
+  'docx', 'pdf', 'txt',                       // document-import-formats.ts
+  'mp3', 'm4a', 'wav', 'mp4', 'mov', 'webm',  // media-constants.ts (#571)
+  'mmproject', 'mmcodebook', 'mmbackup', 'qdc',  // mm-formats.ts (#571)
 ]
+
+/**
+ * Every .tsx under a directory, recursively.
+ *
+ * #571: this scan used to read `pages/` ONLY, so every upload surface in
+ * `components/` could drift freely — and one already had
+ * (`CodebookToolbar.tsx` inlined `accept=".mmcodebook,.qdc"` while
+ * `lib/mm-formats.ts` existed to own exactly that list; they agreed at the time,
+ * which is precisely the pre-drift state #552 describes). The Observations
+ * dropzone lands in `components/`, so a pages-only guard would have gone blind
+ * exactly where it was being extended to help.
+ */
+function tsxFilesUnder(dir: string, base = dir): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) return tsxFilesUnder(full, base)
+    return entry.name.endsWith('.tsx') && !entry.name.endsWith('.test.tsx') ? [full] : []
+  })
+}
 
 /**
  * Strip comments before scanning. A comment EXPLAINING the old inlined check
@@ -128,27 +190,31 @@ function code(src: string): string {
     .replace(/([^:])\/\/.*$/gm, '$1')   // trailing // comments (spare `https://`)
 }
 
-describe('no page re-inlines an upload-format list (fail-closed)', () => {
-  const pageFiles = readdirSync(PAGES_DIR).filter(f => f.endsWith('.tsx'))
+describe('no page or component re-inlines an upload-format list (fail-closed)', () => {
+  const files = [...tsxFilesUnder(PAGES_DIR), ...tsxFilesUnder(COMPONENTS_DIR)]
+  const rel = (f: string) => f.slice(f.indexOf('/src/') + 5)
 
-  it('scans a real, non-trivial set of pages', () => {
+  it('scans a real, non-trivial set of pages AND components', () => {
     // Guard the guard: a broken path would make every assertion below vacuous.
-    expect(pageFiles.length).toBeGreaterThan(15)
+    expect(files.length).toBeGreaterThan(60)
+    expect(files.some(f => f.includes('/pages/'))).toBe(true)
+    expect(files.some(f => f.includes('/components/'))).toBe(true)
   })
 
-  it.each(pageFiles)('%s has no literal accept="..." attribute', (file) => {
-    const src = code(readFileSync(join(PAGES_DIR, file), 'utf8'))
+  it.each(files)('%s has no literal accept="..." attribute', (file) => {
+    const src = code(readFileSync(file, 'utf8'))
     // `accept="..."` (a string literal) re-inlines the list. The correct form is
     // `accept={SOME_ACCEPT}` — a reference to a format module's constant.
     const literalAccepts = src.match(/accept="[^"]*"/g) ?? []
     expect(
       literalAccepts,
-      `${file} inlines an accept string. Import the constant from lib/*-import-formats.ts instead.`,
+      `${rel(file)} inlines an accept string. Import the constant from lib/*-import-formats.ts `
+      + '(or lib/media-constants.ts / lib/mm-formats.ts) instead.',
     ).toEqual([])
   })
 
-  it.each(pageFiles)('%s does not hand-roll an extension test', (file) => {
-    const src = code(readFileSync(join(PAGES_DIR, file), 'utf8'))
+  it.each(files)('%s does not hand-roll an extension test', (file) => {
+    const src = code(readFileSync(file, 'utf8'))
     const offenders: string[] = []
     for (const ext of OWNED_EXTENSIONS) {
       // `.endsWith('.csv')` / `/\.(csv|vtt)$/` — the two shapes that drifted.
@@ -161,8 +227,9 @@ describe('no page re-inlines an upload-format list (fail-closed)', () => {
     }
     expect(
       offenders,
-      `${file} hand-rolls an extension check (${offenders.join(', ')}). `
-      + 'Use isSupportedDatasetFile / isSupportedTranscriptFile / isSupportedDocumentFile.',
+      `${rel(file)} hand-rolls an extension check (${offenders.join(', ')}). `
+      + 'Use the format modules\' predicates (isSupportedDatasetFile / isSupportedTranscriptFile / '
+      + 'isSupportedDocumentFile / isSupportedMediaFile / isSupportedCueFile).',
     ).toEqual([])
   })
 })

@@ -24,6 +24,7 @@ from app.models.code_application import CodeApplication
 from app.models.participant import Participant
 from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from app.services.code_analysis import (
+    _build_participant_group_map,
     get_demographic_comparison,
     get_demographic_filter_options,
     get_source_frequencies,
@@ -128,3 +129,63 @@ def test_source_frequencies_groups_absent_without_request(demographic_project, d
     conv = next(s for s in result["sources"] if s["source_type"] == "conversation")
     assert conv["groups"] is None
     assert conv["code_counts"] is not None
+
+
+# ── #598: recognized N/A never forms a demographic group ─────────────────────
+
+def _add_declined_participant(db):
+    """Rider fixture (#598): a third participant whose Grade answer is the
+    recognized-missing "Decline to state", with their own coded segment.
+    Pre-fix, they formed a real third comparison / Compare-By group."""
+    db.add(Participant(id=7503, project_id=750, identifier="Pat"))
+    db.flush()
+    db.add(Speaker(id=7503, project_id=750, name="Pat", is_facilitator=0,
+                   color_index=3, participant_id=7503))
+    db.flush()
+    db.add(Segment(id=7504, conversation_id=750, sequence_order=3, text="g h",
+                   word_count=2, speaker_id=7503))
+    row = DatasetRow(id=7503, dataset_id=750, row_identifier="R3",
+                     participant_id=7503)
+    db.add(row)
+    db.flush()
+    db.add(DatasetValue(row_id=7503, column_id=7500,
+                        value_text="Decline to state"))
+    db.add(CodeApplication(segment_id=7504, code_id=7500, user_id=1))
+    db.flush()
+
+
+def test_demographic_comparison_excludes_recognized_na(demographic_project, db_session):
+    """#598: a "Decline to state" respondent joins NO group and forms NO
+    comparison column — matching the dataset-side comparison on the same
+    demographic column (#384). Reproduced by execution before fixing
+    (the internal design notes)."""
+    _add_declined_participant(db_session)
+    pmap = _build_participant_group_map(db_session, 750, "Grade")
+    assert 7503 not in pmap, "N/A-valued participant must join no group"
+    result = get_demographic_comparison(db_session, 750, group_by_subtype="Grade")
+    assert result["groups"] == ["8", "10"]
+
+
+def test_compare_by_source_groups_exclude_recognized_na(demographic_project, db_session):
+    """#598, second consumer: the #498 Compare-By source groups read the same
+    participant map."""
+    _add_declined_participant(db_session)
+    result = get_source_frequencies(db_session, 750, group_by_subtype="Grade")
+    conv = next(s for s in result["sources"] if s["source_type"] == "conversation")
+    assert set(conv["groups"].keys()) == {"8", "10"}
+
+
+def test_role_groups_exempt_from_na_rule(db_session):
+    """#598: ``Participant.role`` is a curated researcher-entered field, not a
+    survey answer — the N/A rule deliberately does NOT apply to it."""
+    db = db_session
+    db.add(Project(id=751, name="Roles", user_id=1))
+    db.flush()
+    db.add_all([
+        Participant(id=7511, project_id=751, identifier="A", role="Teacher"),
+        Participant(id=7512, project_id=751, identifier="B",
+                    role="Prefer not to say"),
+    ])
+    db.flush()
+    pmap = _build_participant_group_map(db, 751, "role")
+    assert pmap == {7511: "Teacher", 7512: "Prefer not to say"}

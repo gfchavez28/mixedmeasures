@@ -7,12 +7,15 @@ materialized consensus layer, while by_coder + has_disagreement use SOURCE-level
 engagement (Option B). Fixtures mirror test_consensus.py.
 """
 import json
+import pytest
+from datetime import datetime
 
 from app.models.code import Code
 from app.models.code_application import CodeApplication
 from app.models.code_equivalence_group import CodeEquivalenceGroup
 from app.models.conversation import Conversation
 from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
+from app.models.observation import Observation
 from app.models.project import Project
 from app.models.segment import Segment
 from app.models.user import User
@@ -313,3 +316,166 @@ def test_dataset_value_units(db_session):
     assert u["source_type"] == "column" and u["consensus"] == [901]
     assert u["text"] == "alpha"
     assert "Survey" in u["source_label"]
+
+
+# ── Observation clips (slab 6b-B) ────────────────────────────────────────────
+
+
+def _obs_with_clips(db, pid, oid, clip_ids, *, frozen, name="Classroom"):
+    db.add(Observation(
+        id=oid, project_id=pid, name=name,
+        segmentation_frozen_at=datetime(2026, 7, 19, 12, 0, 0) if frozen else None,
+    ))
+    db.flush()
+    for i, sid in enumerate(clip_ids):
+        db.add(Segment(id=sid, conversation_id=None, observation_id=oid,
+                       sequence_order=i, start_time=i * 30.0, end_time=i * 30.0 + 12.5,
+                       text=""))
+    db.flush()
+
+
+class TestReconciliationClips:
+
+    def test_a_frozen_clip_renders_with_its_source_and_time_range(self, db_session):
+        """Before the maps gained an "obs" entry this did not degrade — it 500ed:
+        `_SOURCE_TYPE[src_t]` is a bare subscript. And `_source_label` used to fall
+        through to the column branch, so the source name came back silently blank.
+        """
+        db = db_session
+        pid, _cid = _conv(db, cid=920, name="Interview")
+        _coder(db, 2, "B")
+        _obs_with_clips(db, pid, 920, [9201, 9202], frozen=True, name="Playground")
+        _code(db, 920, pid, 1, name="Off-task")
+        for sid in (9201, 9202):
+            _apply(db, 920, 1, segment_id=sid)
+            _apply(db, 920, 2, segment_id=sid)
+
+        resp = build_reconciliation(db, pid)
+        clip = next(u for u in resp["units"] if u["unit_id"] == 9201)
+
+        assert clip["source_type"] == "observation"
+        assert clip["source_id"] == 920
+        assert clip["source_label"] == "Playground", "not a silently blank label"
+        assert clip["unit_type"] == "segment", "a clip IS a Segment — unit type is unchanged"
+        assert clip["start_time"] == 0.0 and clip["end_time"] == 12.5
+
+    def test_open_clips_never_reach_the_grid(self, db_session):
+        """Two-sided in one project: frozen in, open out. A one-sided fixture
+        cannot distinguish "frozen only" from "all clips"."""
+        db = db_session
+        pid, _cid = _conv(db, cid=921, name="Interview")
+        _coder(db, 2, "B")
+        _obs_with_clips(db, pid, 921, [9211, 9212], frozen=True, name="Frozen")
+        _obs_with_clips(db, pid, 1921, [9221, 9222, 9223], frozen=False, name="Open")
+        _code(db, 921, pid, 1, name="X")
+        for sid in (9211, 9212, 9221, 9222, 9223):
+            _apply(db, 921, 1, segment_id=sid)
+            _apply(db, 921, 2, segment_id=sid)
+
+        resp = build_reconciliation(db, pid)
+        by_source = {u["source_id"] for u in resp["units"] if u["source_type"] == "observation"}
+        assert by_source == {921}
+        assert {u["unit_id"] for u in resp["units"] if u["source_type"] == "observation"} \
+            == {9211, 9212}
+
+    def test_source_filter_narrows_to_one_observation(self, db_session):
+        db = db_session
+        pid, _cid = _conv(db, cid=922, name="Interview")
+        _coder(db, 2, "B")
+        _obs_with_clips(db, pid, 922, [9231, 9232], frozen=True, name="A")
+        _obs_with_clips(db, pid, 1922, [9241], frozen=True, name="B")
+        _code(db, 922, pid, 1, name="X")
+        for sid in (9231, 9232, 9241):
+            _apply(db, 922, 1, segment_id=sid)
+            _apply(db, 922, 2, segment_id=sid)
+
+        resp = build_reconciliation(db, pid, source_type="observation", source_id=922)
+        assert {u["unit_id"] for u in resp["units"]} == {9231, 9232}
+
+    def test_clip_consensus_matches_the_materialized_layer(self, db_session):
+        """The contract reconciliation's docstring promises. It holds only because
+        the gather is frozen-only — reconciliation itself never applies the
+        eligibility clause, so an open clip reaching here would be live-derived a
+        consensus the materializer refuses to store."""
+        db = db_session
+        pid, _cid = _conv(db, cid=923, name="Interview")
+        _coder(db, 2, "B")
+        _obs_with_clips(db, pid, 923, [9251, 9252], frozen=True)
+        _code(db, 923, pid, 1, name="X")
+        for sid in (9251, 9252):
+            _apply(db, 923, 1, segment_id=sid)
+            _apply(db, 923, 2, segment_id=sid)
+
+        materialize_consensus_for_project(db, pid)
+        db.flush()
+        stored = {
+            (ca.segment_id, ca.code_id)
+            for ca in db.query(CodeApplication).filter(CodeApplication.origin == "consensus").all()
+        }
+        resp = build_reconciliation(db, pid)
+        live = {
+            (u["unit_id"], code)
+            for u in resp["units"] if u["source_type"] == "observation"
+            for code in u["consensus"]
+        }
+        assert live == {(9251, 923), (9252, 923)}
+        assert live <= stored, "live-derived consensus must match what was materialized"
+
+    def test_clip_times_survive_schema_validation(self, db_session):
+        """Pins the field against the SCHEMA, not just the service dict.
+
+        `build_reconciliation` returns a plain dict; the response_model only applies
+        on a real HTTP request, so a direct endpoint call returns that dict
+        unvalidated and would pass whether or not `ReconciliationUnit` declares the
+        times. Validating explicitly is what actually proves they survive — an
+        undeclared field is dropped silently (the #586 class, arriving through the
+        response_model rather than a splat).
+        """
+        import asyncio
+        from app.routers.code_analysis import reconciliation as reconciliation_endpoint
+        from app.schemas.code_analysis import ReconciliationResponse
+
+        db = db_session
+        pid, _cid = _conv(db, cid=924, name="Interview")
+        _coder(db, 2, "B")
+        _obs_with_clips(db, pid, 924, [9261], frozen=True, name="Yard")
+        _code(db, 924, pid, 1, name="X")
+        _apply(db, 924, 1, segment_id=9261)
+        _apply(db, 924, 2, segment_id=9261)
+
+        user = db.get(User, 1)
+        # Every Query() param is passed explicitly: their defaults are SENTINEL
+        # OBJECTS in a direct call (FastAPI resolves them only on a real request),
+        # and downstream code that does `value.split(",")` chokes on one.
+        resp = asyncio.run(reconciliation_endpoint(
+            project_id=pid, source_type=None, source_id=None,
+            disagreements_only=False, coder_ids=None, limit=50, offset=0,
+            user=user, db=db,
+        ))
+        validated = ReconciliationResponse(**resp)
+        clip = next(u for u in validated.units if u.unit_id == 9261)
+
+        assert clip.source_type == "observation"
+        assert clip.start_time == 0.0 and clip.end_time == 12.5, \
+            "declared on the schema, or the response_model drops them without a word"
+
+    def test_an_unknown_source_type_is_refused_not_silently_empty(self, db_session):
+        """Failing open here is indistinguishable from "these coders agree on
+        everything" — the service resolves an unrecognized tag to a sentinel that
+        matches nothing, so the grid came back empty with available: true."""
+        import asyncio
+        from fastapi import HTTPException
+        from app.routers.code_analysis import reconciliation as reconciliation_endpoint
+
+        db = db_session
+        pid, _cid = _conv(db, cid=925, name="Interview")
+        _coder(db, 2, "B")
+        user = db.get(User, 1)
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(reconciliation_endpoint(
+                project_id=pid, source_type="recording", source_id=1,
+                disagreements_only=False, coder_ids=None, limit=50, offset=0,
+                user=user, db=db))
+        assert exc.value.status_code == 400
+        assert "observation" in str(exc.value.detail), "the message names the valid kinds"

@@ -22,13 +22,24 @@ from ..schemas.recode import (
     BulkTypeUpdateRequest,
     ValueFrequency,
     ColumnFrequenciesResponse,
+    ApplyValueLabelsRequest,
+    ApplyValueLabelsResponse,
+    MissingValuesUpdate,
+    MissingValuesResponse,
 )
-from ..services.dataset_import import _coerce_scale_codes
+from ..services.value_labels import apply_value_labels, ValueLabelsBlockedError
+from ..services.missing_declaration import (
+    MissingRuleCollisionError,
+    apply_missing_declaration,
+)
+from ..services.missing_values import parse_missing_rules
 from ..services.recode import (
     apply_definition_to_column,
     get_value_frequencies,
     get_unmapped_values,
     clear_value_numeric,
+    recompute_primary_value_numeric as _recompute_primary_value_numeric,
+    write_back_scale_metadata as _write_back_scale_metadata,
 )
 from ..services.audit import log_action
 
@@ -122,72 +133,10 @@ def _definition_to_response(
     )
 
 
-def _write_back_scale_metadata(
-    db: Session, definition: RecodeDefinition, column_id: int,
-) -> None:
-    """Keep ``column.scale_labels``/``scale_values`` in step with the primary
-    mapping on ordinal columns (#542a — owner-2 of the #28 three-owner
-    invariant).
-
-    Every consumer prefers the primary mapping while it exists (append re-apply,
-    R export priority 1), so a stale copy is invisible — until the definition is
-    DELETED and consumers fall back to the column metadata, which then carries
-    the pre-edit codes while ``value_numeric`` carries the post-edit ones.
-
-    The mapping is ``{label: code}``; for REVERSE those are the FORWARD codes
-    (reversal happens at apply time), which is exactly what the append stamp and
-    R export expect. Non-numeric values are skipped per value (#542b semantics);
-    if no numeric pairs remain the existing metadata is left alone rather than
-    destroyed. Codes store as ints when integral (the #28 int/float parity rule
-    — ``_coerce_scale_codes``).
-    """
-    column = db.query(DatasetColumn).filter(DatasetColumn.id == column_id).first()
-    if column is None or column.column_type != ColumnType.ORDINAL:
-        return
-    try:
-        mapping = json.loads(definition.mapping) if definition.mapping else {}
-    except (json.JSONDecodeError, TypeError):
-        return
-    pairs: list[tuple[str, float]] = []
-    for label, code in mapping.items():
-        try:
-            pairs.append((str(label), float(code)))
-        except (ValueError, TypeError):
-            continue
-    if not pairs:
-        return
-    pairs.sort(key=lambda p: p[1])
-    column.scale_labels = json.dumps([label for label, _ in pairs])
-    column.scale_values = json.dumps(_coerce_scale_codes([code for _, code in pairs]))
-    column.scale_points = len(pairs)
-
-
-def _recompute_primary_value_numeric(
-    db: Session, definition: RecodeDefinition, column_id: int,
-) -> None:
-    """Recompute (or clear) ``value_numeric`` for a column from its primary recode.
-
-    SCALE_MAP and REVERSE both produce numeric output and must be *applied* to the
-    column's stored values — REVERSE carries its own ``{label: numeric}`` mapping and
-    performs the reversal internally (``services/recode.py::apply_definition_to_column``).
-    CATEGORY_GROUP produces categorical output, so ``value_numeric`` is cleared.
-
-    Centralized here so every primary-changing callsite (create, update, set-primary,
-    delete-then-promote) shares one apply-vs-clear decision. The #359 bug was exactly
-    these callsites drifting apart — REVERSE was applied in none of them, silently
-    leaving reverse-scored subscales un-reversed (e.g. Cronbach's α collapsing because
-    negatively-worded items were never flipped). #542a: applying a numeric primary
-    also writes the mapping back to the column's scale metadata (see
-    ``_write_back_scale_metadata``).
-    """
-    rtype = definition.recode_type
-    if hasattr(rtype, "value"):
-        rtype = rtype.value
-    if rtype in ("scale_map", "reverse"):
-        apply_definition_to_column(db, definition)
-        _write_back_scale_metadata(db, definition, column_id)
-    else:  # category_group → no numeric output
-        clear_value_numeric(db, column_id)
+# ``_recompute_primary_value_numeric`` / ``_write_back_scale_metadata`` moved to
+# services/recode.py (2026-07-14, #578) so the service layer owns the apply-vs-clear
+# decision and the startup reverse-mapping repair can reuse it. Imported (aliased to
+# the old private names) at the top of this module — every callsite below is unchanged.
 
 
 # ── CRUD endpoints ───────────────────────────────────────────────────────────
@@ -634,6 +583,135 @@ async def column_frequencies(
         column_id=column_id,
         frequencies=[ValueFrequency(**f) for f in freqs],
         total=sum(f["count"] for f in freqs),
+    )
+
+
+# ── Value labels (#576/#577) ─────────────────────────────────────────────────
+
+
+@router.post(
+    "/api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/value-labels",
+    response_model=ApplyValueLabelsResponse,
+)
+async def apply_value_labels_endpoint(
+    project_id: int,
+    dataset_id: int,
+    column_id: int,
+    data: ApplyValueLabelsRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Declare a code→label dictionary for a numbers-only column (#576/#577).
+
+    Substitutes the label into ``value_text`` (keeping the code in
+    ``value_numeric``), sets the column's scale metadata + a primary scale_map,
+    and optionally the column type — making the column byte-identical to a
+    labelled SPSS import, so every analysis surface shows labels with no other
+    change. Returns any observed codes the researcher did not label.
+    """
+    col = _get_column_or_404(db, project_id, dataset_id, column_id, user.id)
+
+    if col.source == "computed":
+        raise HTTPException(
+            status_code=403, detail="Value labels cannot be applied to computed columns",
+        )
+    if col.column_type in (ColumnType.OPEN_TEXT, ColumnType.IDENTIFIER):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Value labels cannot be applied to {col.column_type.value} columns",
+        )
+
+    pairs = [(p.value, p.label.strip()) for p in data.labels]
+    target_type = ColumnType(data.column_type) if data.column_type else None
+
+    try:
+        result = apply_value_labels(db, col, pairs, target_type)
+    except ValueLabelsBlockedError as e:
+        # A REVERSE primary means value_numeric is a reflected score, not the
+        # code — relabelling would rewrite every response to its opposite.
+        raise HTTPException(status_code=400, detail=str(e))
+
+    mark_metrics_stale(db, project_id, column_ids=[column_id])
+    log_action(
+        db,
+        action="applied_value_labels",
+        entity_type="dataset_column",
+        entity_id=column_id,
+        user_id=user.id,
+        project_id=project_id,
+        details={"count": len(pairs), "updated": result["updated"]},
+    )
+    db.commit()
+
+    return ApplyValueLabelsResponse(column_id=column_id, **result)
+
+
+@router.put(
+    "/api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/missing-values",
+    response_model=MissingValuesResponse,
+)
+async def set_missing_values(
+    project_id: int,
+    dataset_id: int,
+    column_id: int,
+    data: MissingValuesUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Declare (or clear) which values are MISSING for this column (#592).
+
+    The labels-optional path (§I.6b): a missing-only declaration on a numeric
+    column touches NO scale metadata, NO primary recode, and never the column
+    type. ``rules: null`` un-declares (the recognized-N/A defaults apply
+    again); ``rules: []`` declares that NOTHING is missing. Cells re-align in
+    the same transaction: newly-missing values NULL their ``value_numeric``,
+    newly-substantive values recover theirs (a labelled-missing pair reverts
+    to its raw code text — J-D3), and a numeric primary re-applies so a
+    reverse recode's stored scores track the new offset (#603). A rule whose
+    LABEL collides with text that means something else on the column — another
+    rule, a different code's scale label, an observed response — is refused
+    (400) before any write (#606). (The old reverse-mapping-intersection
+    refusal is GONE — dropped with #600/#601; the offset filter made that
+    state unwritable.)
+    """
+    col = _get_column_or_404(db, project_id, dataset_id, column_id, user.id)
+
+    if col.source == "computed":
+        raise HTTPException(
+            status_code=403,
+            detail="Missing values cannot be declared on computed columns",
+        )
+    if col.column_type in (ColumnType.OPEN_TEXT, ColumnType.IDENTIFIER):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing values cannot be declared on {col.column_type.value} columns",
+        )
+
+    try:
+        result = apply_missing_declaration(db, col, data.rules)
+    except MissingRuleCollisionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    mark_metrics_stale(db, project_id, column_ids=[column_id])
+    log_action(
+        db,
+        action="set_missing_values",
+        entity_type="dataset_column",
+        entity_id=column_id,
+        user_id=user.id,
+        project_id=project_id,
+        details={
+            "rules": len(data.rules) if data.rules is not None else None,
+            "nulled_rows": result["nulled_rows"],
+            "recovered_rows": result["recovered_rows"],
+        },
+    )
+    db.commit()
+
+    return MissingValuesResponse(
+        column_id=column_id,
+        missing_values=parse_missing_rules(col.missing_values),
+        **result,
     )
 
 

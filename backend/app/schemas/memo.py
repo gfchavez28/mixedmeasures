@@ -4,7 +4,7 @@ from .common import UTCTimestamp
 
 
 class MemoCreate(BaseModel):
-    entity_type: str = Field(..., pattern=r'^(project|conversation|document|code|code_category|analysis|dataset|dataset_row|dataset_column|canvas)$')
+    entity_type: str = Field(..., pattern=r'^(project|conversation|observation|document|code|code_category|analysis|dataset|dataset_row|dataset_column|canvas)$')
     entity_id: int
     title: str | None = Field(None, max_length=255)
     content: str = ""

@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from 'react'
 import { toast } from 'sonner'
 
 export interface HistoryAction {
-  type: 'code_apply' | 'code_remove' | 'note_create' | 'note_associate' | 'note_delete' | 'segment_merge' | 'segment_split' | 'segment_edit' | 'quote_create' | 'quote_delete' | 'segment_group' | 'column_name_edit' | 'column_text_edit' | 'text_code_apply' | 'text_code_remove' | 'text_note_create' | 'text_note_delete' | 'canvas_theme_create' | 'canvas_theme_delete' | 'canvas_relationship_create' | 'canvas_relationship_delete' | 'computed_column_create' | 'computed_column_update'
+  type: 'code_apply' | 'code_remove' | 'note_create' | 'note_associate' | 'note_delete' | 'segment_merge' | 'segment_split' | 'segment_edit' | 'quote_create' | 'quote_delete' | 'segment_group' | 'column_name_edit' | 'column_text_edit' | 'column_swap_name_label' | 'text_code_apply' | 'text_code_remove' | 'text_note_create' | 'text_note_delete' | 'canvas_theme_create' | 'canvas_theme_delete' | 'canvas_relationship_create' | 'canvas_relationship_delete' | 'computed_column_create' | 'computed_column_update' | 'clip_create' | 'clip_edit' | 'clip_delete' | 'clip_split' | 'clip_merge'
   description: string
   undo: () => Promise<void>
   redo: () => Promise<void>

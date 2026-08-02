@@ -1,4 +1,7 @@
-"""Shared segment split/merge operations for both conversations and documents."""
+"""Shared segment split/merge operations for both conversations and documents,
+plus the observation-clip TIME operations (slab 3b)."""
+
+import math
 
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import func
@@ -14,6 +17,8 @@ from .audit import log_action
 from .staleness import mark_metrics_stale
 from .consensus import consensus_enabled
 from .consensus_staleness import mark_consensus_stale
+from .coding_layers import CONSENSUS_ORIGIN
+from .observation_segmentation import resequence_observation_clips
 
 
 def _mark_consensus_stale_for_parent(db: Session, project_id: int, parent_type: str, parent_id: int) -> None:
@@ -45,11 +50,58 @@ def _mark_consensus_stale_for_parent(db: Session, project_id: int, parent_type: 
         mark_consensus_stale(db, project_id, segment_ids=seg_ids)
 
 
+# The ONE place a segment's parent_type maps to its FK column — single-sourced
+# so the parent-dispatch sites (this map, _make_segment_fields, and every
+# _parent_filter caller incl. _mark_consensus_stale_for_parent) cannot drift.
+#
+# ⚠️ 'observation' joined in slab 3b for the TIME ops + the reused unmerge —
+# which silently made the TEXT forward ops (merge_segments / split_segment)
+# accept clips too. They must not: text-joining and char-offset splitting are
+# nonsense on a time range, so both carry an explicit observation refusal
+# (_refuse_text_op_on_observation). Removing that guard re-legalizes char-
+# splitting a clip label without any test noticing the map entry did it.
+_PARENT_FK: dict[str, str] = {
+    'conversation': 'conversation_id',
+    'document': 'document_id',
+    'observation': 'observation_id',
+}
+
+
+def _refuse_text_op_on_observation(parent_type: str) -> None:
+    """The symmetric fail-closed guard for the TEXT forward ops (slab 3b).
+
+    parent_type comes from router literals, so an observation reaching a text
+    op is a WIRING BUG (raise → 500, matching _require_parent_type's posture),
+    not user input. The time ops (split_clip_at_time / merge_clips /
+    unsplit_clip) are observation-keyed by construction and cannot mis-target;
+    unmerge_segment is deliberately parent-generic (its merged_into_id
+    discovery is structurally sound for clips).
+    """
+    if parent_type == 'observation':
+        raise ValueError(
+            "Text merge/split cannot operate on observation clips — use the "
+            "time ops (split_clip_at_time / merge_clips)."
+        )
+
+
+def _require_parent_type(parent_type: str) -> None:
+    """Fail closed on an unrecognized segment parent_type.
+
+    parent_type is set by ROUTER code as a literal, never from user input, so an
+    unknown value is a WIRING BUG (raise → 500), not bad input (not a 400). This
+    replaces two fail-OPEN defaults that silently corrupted data for any value
+    other than 'conversation'/'document': _parent_filter fell through to the
+    DOCUMENT filter (querying the wrong parent), and _make_segment_fields left
+    BOTH FKs NULL (→ ck_segment_exactly_one_parent violation at flush).
+    """
+    if parent_type not in _PARENT_FK:
+        raise ValueError(f"Unknown segment parent_type: {parent_type!r}")
+
+
 def _parent_filter(parent_type: str, parent_id: int):
-    """Return SQLAlchemy filter clause for segment parent."""
-    if parent_type == 'conversation':
-        return Segment.conversation_id == parent_id
-    return Segment.document_id == parent_id
+    """Return the SQLAlchemy filter clause selecting a parent's segments."""
+    _require_parent_type(parent_type)
+    return getattr(Segment, _PARENT_FK[parent_type]) == parent_id
 
 
 def _visible():
@@ -119,11 +171,15 @@ def _build_combined_speaker(db: Session, segments: list[Segment], project_id: in
 
 
 def _make_segment_fields(parent_type: str, parent_id: int, **kwargs) -> dict:
-    """Build dict of fields for a new segment with correct parent FK set."""
-    fields = {
-        'conversation_id': parent_id if parent_type == 'conversation' else None,
-        'document_id': parent_id if parent_type == 'document' else None,
-    }
+    """Build dict of fields for a new segment with the correct parent FK set.
+
+    Every parent FK the model knows about is set explicitly (the chosen one to
+    parent_id, the rest to None) so exactly one is non-null — exhaustive by
+    construction via _PARENT_FK, no fail-open path that leaves them all NULL.
+    """
+    _require_parent_type(parent_type)
+    fields: dict = {col: None for col in _PARENT_FK.values()}
+    fields[_PARENT_FK[parent_type]] = parent_id
     fields.update(kwargs)
     return fields
 
@@ -147,6 +203,30 @@ def _carried_app_fields(ca: CodeApplication) -> dict:
     }
 
 
+def _carried_back_fields(
+    db: Session, from_segment_ids: list[int], existing_keys: set
+) -> list[dict]:
+    """The J2-0 project-back recovery, shared by unmerge / unsplit / unsplit_clip.
+
+    Capture — as plain data — the application layers on ``from_segment_ids``
+    that are not already present in ``existing_keys`` ((code_id, user_id)
+    tuples; mutated in place). Capture BEFORE deleting the source segments so
+    the fresh inserts can't be swept by their delete-orphan cascade.
+    """
+    carried: list[dict] = []
+    for ca in (
+        db.query(CodeApplication)
+        .filter(CodeApplication.segment_id.in_(from_segment_ids))
+        .all()
+    ):
+        key = (ca.code_id, ca.user_id)
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        carried.append(_carried_app_fields(ca))
+    return carried
+
+
 # ---------------------------------------------------------------------------
 # Merge
 # ---------------------------------------------------------------------------
@@ -163,6 +243,7 @@ def merge_segments(
 
     The returned segment is eagerly loaded for response conversion.
     """
+    _refuse_text_op_on_observation(parent_type)
     if len(segment_ids) < 2:
         raise HTTPException(status_code=400, detail="At least 2 segments required for merging")
 
@@ -311,13 +392,7 @@ def unmerge_segment(
         (ca.code_id, ca.user_id) for orig in originals for ca in orig.code_applications
     }
     first_original = originals[0]
-    carried_back: list[dict] = []
-    for ca in db.query(CodeApplication).filter(CodeApplication.segment_id == segment_id).all():
-        key = (ca.code_id, ca.user_id)
-        if key in existing_keys:
-            continue
-        existing_keys.add(key)
-        carried_back.append(_carried_app_fields(ca))
+    carried_back = _carried_back_fields(db, [segment_id], existing_keys)
 
     # Delete the merged segment's notes, then the segment itself — its
     # code_applications (loaded above) go via the relationship's
@@ -348,6 +423,14 @@ def unmerge_segment(
     for i, orig in enumerate(originals):
         orig.sequence_order = merged_order + i
 
+    if parent_type == 'observation':
+        # Clips order by TIME, not by the shift arithmetic above (a time-merge
+        # takes non-adjacent clips, so the restored originals' true positions
+        # interleave with everything else) — re-derive (slab 3b). The arithmetic
+        # still ran so conv/doc behavior is untouched.
+        db.flush()
+        resequence_observation_clips(db, parent_id)
+
     log_action(
         db, action="unmerged", entity_type="segment", entity_id=segment_id,
         user_id=user_id, project_id=project_id,
@@ -377,6 +460,7 @@ def split_segment(
     user_id: int,
 ) -> tuple[list[Segment], list[int]]:
     """Split segment(s). Returns (new_segments, deleted_segment_ids)."""
+    _refuse_text_op_on_observation(parent_type)
     if len(ranges) == 1:
         return _split_single(db, ranges[0], parent_type, parent_id, project_id, user_id)
     return _split_multi(db, ranges, parent_type, parent_id, project_id, user_id)
@@ -801,13 +885,7 @@ def unsplit_segment(
     existing_keys: set[tuple[int, int | None]] = {
         (ca.code_id, ca.user_id) for ca in original.code_applications
     }
-    carried_back: list[dict] = []
-    for ca in db.query(CodeApplication).filter(CodeApplication.segment_id.in_(split_ids)).all():
-        key = (ca.code_id, ca.user_id)
-        if key in existing_keys:
-            continue
-        existing_keys.add(key)
-        carried_back.append(_carried_app_fields(ca))
+    carried_back = _carried_back_fields(db, split_ids, existing_keys)
 
     # Delete the split children — their code_applications (loaded above) go via
     # the relationship's delete-orphan cascade, so no explicit bulk delete is
@@ -848,3 +926,435 @@ def unsplit_segment(
     ).options(*_eager_load_options()).first()
 
     return restored, num_split
+
+
+# ---------------------------------------------------------------------------
+# Time operations (Observations slab 3b)
+# ---------------------------------------------------------------------------
+#
+# Clips are POINTERS at a timeline, not a partition of text, so their ops are a
+# NEW pair rather than a parameterization of the text ops above: split is by a
+# TIME inside the range (not a char offset), merge takes ANY set of clips (no
+# adjacency — the merged range spans gaps), and every op ends with
+# resequence_observation_clips (clips order by (start_time, end_time, id), and
+# nothing else reconciles sequence_order against time). They mirror the text
+# ops' soft-delete machinery exactly (merged_into_id / split_into_id +
+# is_*_result) so visibility, portability, and the REUSED unmerge_segment work
+# identically. Frozen-ness (D22) is enforced at the ROUTER (409), like the cut.
+# No mark_metrics_stale here (deliberate): no metric reads clip structure — the
+# text ops' call serves transcript-fed surfaces observations don't have.
+
+
+def _clip_or_404(db: Session, observation_id: int, segment_id: int) -> Segment:
+    segment = (
+        db.query(Segment)
+        .filter(
+            Segment.id == segment_id,
+            Segment.observation_id == observation_id,
+            *_visible(),
+        )
+        .options(
+            selectinload(Segment.code_applications),
+            selectinload(Segment.attached_notes),
+            # #621: the split reads the clip's quotes to place them.
+            selectinload(Segment.excerpts),
+        )
+        .first()
+    )
+    if not segment:
+        raise HTTPException(status_code=404, detail="Clip not found in this observation")
+    return segment
+
+
+def _human_app_fields(segment: Segment) -> list[dict]:
+    """The layers a time op carries forward: every coder's HUMAN applications.
+
+    origin='consensus' rows are deliberately NOT carried: time ops run only on
+    UNFROZEN observations (D22), where clips are consensus-INELIGIBLE — a
+    carried consensus row would be a stranded orphan no sweep revisits (the
+    #615 shape). At rest there are none anyway (unfreeze drops the layer);
+    this filter makes that true by construction.
+    """
+    return [
+        _carried_app_fields(ca)
+        for ca in segment.code_applications
+        if ca.origin != CONSENSUS_ORIGIN
+    ]
+
+
+def _clip_excerpt_carry_plan(
+    excerpts: list[Excerpt], at_time: float,
+) -> tuple[list[Excerpt], list[Excerpt], list[tuple[Excerpt, float, float]]]:
+    """Decide where each of a clip's quotes goes when it is split at `at_time`.
+
+    Returns (to_first, to_second, to_divide) where `to_divide` carries the
+    explicit (excerpt, start, end) pieces for a quote that STRADDLES the cut —
+    it becomes two quotes, one per half (#621).
+
+    The rules, and why (all three shapes are handled; nothing is ever dropped):
+
+    - **whole-clip quote → BOTH halves.** It asserts "this clip is notable",
+      and both halves inherit that claim — the same reasoning that makes the
+      LABEL copy to both. It is also what the text split already does
+      (`had_whole_excerpt` re-creates the excerpt on the selected part).
+    - **time-range quote → the half that CONTAINS it.** Its times are ABSOLUTE
+      (D29), so the range itself never changes; only which clip owns it does.
+    - **a time quote straddling the cut → DIVIDED at the cut.** Dropping it or
+      picking a side would silently discard part of a marked moment.
+
+    Two edges that look like corner cases and are not:
+
+    1. **A point quote exactly AT the cut is contained by both halves** (the
+       time CHECK allows `end_time >= start_time`, D7). The ordering below is
+       the tie-break — `end <= at_time` wins first, so it lands on the FIRST
+       half, matching where notes go.
+    2. **A quote can legitimately sit OUTSIDE the clip's current range.** Times
+       are absolute and a later boundary edit re-anchors nothing (D29), so
+       create-time containment is not an at-rest invariant. The branches are
+       therefore TOTAL: anything ending at-or-before the cut goes first,
+       anything starting at-or-after goes second, and only a genuine straddle
+       divides. A quote outside the clip is carried verbatim rather than
+       clamped — editing a researcher's mark to fit our boundaries would be
+       the bug, not the fix.
+    """
+    to_first: list[Excerpt] = []
+    to_second: list[Excerpt] = []
+    to_divide: list[tuple[Excerpt, float, float]] = []
+
+    for ex in excerpts:
+        if ex.start_time is None:
+            # Whole-clip (char ranges cannot exist on a clip — the router
+            # refuses that shape on an observation parent).
+            to_first.append(ex)
+            to_second.append(ex)
+        elif ex.end_time <= at_time:
+            to_first.append(ex)
+        elif ex.start_time >= at_time:
+            to_second.append(ex)
+        else:
+            to_divide.append((ex, ex.start_time, ex.end_time))
+
+    return to_first, to_second, to_divide
+
+
+def _copy_clip_excerpt(
+    ex: Excerpt, segment_id: int, start: float | None = None, end: float | None = None,
+) -> Excerpt:
+    """A carried quote is a NEW row on the new clip, never a moved one.
+
+    Copying (rather than re-pointing `segment_id`) is what makes the inverse
+    ops free: the original keeps its own excerpt while it is soft-deleted, and
+    unsplit/unmerge DELETE the new clips — whose copies go with them via
+    `Segment.excerpts`' delete-orphan cascade — so the original's quote simply
+    reappears. Re-pointing would need an explicit, order-sensitive move back.
+
+    Deliberately NOT carried: the excerpt's `uuid` (a distinct row IS a
+    distinct entity for the J3-2 merge spine) and its one-to-one `note`
+    (`ix_notes_excerpt_unique` allows exactly one, so a quote copied to two
+    halves could not keep it on both; the note stays with the original, which
+    an undo restores). No clip surface can attach a note to a quote today —
+    `notesApi.createForObservation` takes `segment_id` only — so this is a
+    documented boundary rather than a live loss.
+    """
+    return Excerpt(
+        project_id=ex.project_id,
+        segment_id=segment_id,
+        start_time=ex.start_time if start is None else start,
+        end_time=ex.end_time if end is None else end,
+    )
+
+
+def _clip_reload(db: Session, segment_ids: list[int]) -> list[Segment]:
+    return (
+        db.query(Segment)
+        .filter(Segment.id.in_(segment_ids))
+        .options(
+            selectinload(Segment.code_applications).joinedload(CodeApplication.code),
+            selectinload(Segment.attached_notes),
+        )
+        .order_by(Segment.sequence_order)
+        .all()
+    )
+
+
+def split_clip_at_time(
+    db: Session,
+    segment_id: int,
+    at_time: float,
+    observation_id: int,
+    project_id: int,
+    user_id: int,
+) -> list[Segment]:
+    """Split one clip into [start, t] + [t, end]. Returns the two new clips.
+
+    t must fall STRICTLY inside the range — a point event (start == end) has no
+    interior and is refused. The label copies to BOTH halves (there is no char
+    offset to derive from; each half remains the thing the label named). Notes
+    move to the FIRST (earlier) half — the deterministic analog of the text
+    split's "selected part". **Quotes are carried per `_clip_excerpt_carry_plan`
+    (#621)**: a whole-clip quote goes to BOTH halves, a time-range quote to the
+    half containing it, and one straddling the cut is DIVIDED at the cut.
+    """
+    if not math.isfinite(at_time):
+        raise HTTPException(status_code=400, detail="Split time must be a finite number of seconds.")
+    segment = _clip_or_404(db, observation_id, segment_id)
+    if not (segment.start_time < at_time < segment.end_time):
+        raise HTTPException(
+            status_code=400,
+            detail="The split time must fall strictly inside the clip's range.",
+        )
+
+    original_apps = _human_app_fields(segment)
+    original_note_ids = [n.id for n in segment.attached_notes if not n.is_archived]
+    to_first, to_second, to_divide = _clip_excerpt_carry_plan(
+        list(segment.excerpts), at_time,
+    )
+    carried_quotes = (to_first, to_second)
+
+    halves: list[Segment] = []
+    for i, (start, end) in enumerate(
+        ((segment.start_time, at_time), (at_time, segment.end_time))
+    ):
+        half = Segment(**_make_segment_fields(
+            'observation', observation_id,
+            sequence_order=segment.sequence_order,  # provisional; resequenced below
+            start_time=start,
+            end_time=end,
+            text=segment.text,
+            is_split_result=1,
+        ))
+        db.add(half)
+        db.flush()
+        for app in original_apps:
+            db.add(CodeApplication(segment_id=half.id, **app))
+        for ex in carried_quotes[i]:
+            db.add(_copy_clip_excerpt(ex, half.id))
+        halves.append(half)
+
+    # A straddling quote becomes two — the piece before the cut on the first
+    # half, the piece after it on the second.
+    for ex, ex_start, ex_end in to_divide:
+        db.add(_copy_clip_excerpt(ex, halves[0].id, start=ex_start, end=at_time))
+        db.add(_copy_clip_excerpt(ex, halves[1].id, start=at_time, end=ex_end))
+
+    if original_note_ids:
+        db.query(Note).filter(Note.id.in_(original_note_ids)).update(
+            {Note.segment_id: halves[0].id}, synchronize_session='fetch',
+        )
+
+    segment.split_into_id = halves[0].id
+    db.flush()
+    resequence_observation_clips(db, observation_id)
+
+    log_action(
+        db, action="clip_split", entity_type="segment", entity_id=segment.id,
+        user_id=user_id, project_id=project_id,
+        details={"at_time": at_time, "new_segment_ids": [h.id for h in halves]},
+    )
+    _mark_consensus_stale_for_parent(db, project_id, 'observation', observation_id)
+    db.commit()
+
+    return _clip_reload(db, [h.id for h in halves])
+
+
+def merge_clips(
+    db: Session,
+    segment_ids: list[int],
+    observation_id: int,
+    project_id: int,
+    user_id: int,
+) -> Segment:
+    """Merge ≥2 clips into one spanning [min(start), max(end)]. Returns it.
+
+    NO adjacency requirement (§0.7): clips overlap and gap freely, and merging
+    non-overlapping clips SPANS the gap — documented behavior, undoable via the
+    reused unmerge_segment (its merged_into_id discovery is parent-agnostic).
+    Label = distinct non-empty labels in temporal order, joined " / ". Notes
+    stay on the hidden originals (mirrors the text merge; unmerge restores
+    them). Codes dedup on the per-coder key (code_id, user_id).
+
+    **Quotes carry forward (#621), and BOTH shapes need deduplication** — not
+    as tidiness but because the partial unique indexes make the naive version
+    an IntegrityError:
+
+    - N whole-clip quotes across the inputs COLLAPSE to one on the merged clip
+      (`ix_excerpt_segment_whole` permits exactly one per segment).
+    - time-range quotes carry verbatim — their times are absolute (D29) and the
+      merged range spans every input, so containment survives by construction —
+      but two inputs may hold the SAME range (overlapping clips quoting one
+      moment), and `ix_excerpt_segment_time_range` is unique on
+      (segment_id, start_time, end_time). Dedup on that pair.
+    """
+    distinct_ids = set(segment_ids)
+    if len(distinct_ids) < 2:
+        raise HTTPException(status_code=400, detail="At least 2 clips are required for merging")
+
+    segments = (
+        db.query(Segment)
+        .filter(
+            Segment.id.in_(distinct_ids),
+            Segment.observation_id == observation_id,
+            *_visible(),
+        )
+        .options(
+            selectinload(Segment.code_applications),
+            # #621: without this the quote carry lazy-loads once PER input clip.
+            selectinload(Segment.excerpts),
+        )
+        .order_by(Segment.start_time, Segment.end_time, Segment.id)
+        .all()
+    )
+    if len(segments) != len(distinct_ids):
+        raise HTTPException(status_code=400, detail="Some clips were not found or are already merged")
+
+    labels: list[str] = []
+    for seg in segments:
+        label = seg.text.strip()
+        if label and label not in labels:
+            labels.append(label)
+
+    merged = Segment(**_make_segment_fields(
+        'observation', observation_id,
+        sequence_order=segments[0].sequence_order,  # provisional; resequenced below
+        start_time=segments[0].start_time,  # min — the list is time-ordered
+        end_time=max(seg.end_time for seg in segments),
+        text=" / ".join(labels),
+        is_merge_result=1,
+    ))
+    db.add(merged)
+    db.flush()
+
+    seen: set[tuple[int, int | None]] = set()
+    for seg in segments:
+        for app in _human_app_fields(seg):
+            key = (app["code_id"], app["user_id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            db.add(CodeApplication(segment_id=merged.id, **app))
+
+    # Quotes (#621) — deduped against the two partial unique indexes.
+    seen_quotes: set[tuple[float, float] | None] = set()
+    for seg in segments:
+        for ex in seg.excerpts:
+            key = None if ex.start_time is None else (ex.start_time, ex.end_time)
+            if key in seen_quotes:
+                continue
+            seen_quotes.add(key)
+            db.add(_copy_clip_excerpt(ex, merged.id))
+
+    for seg in segments:
+        seg.merged_into_id = merged.id
+
+    db.flush()
+    resequence_observation_clips(db, observation_id)
+
+    log_action(
+        db, action="clip_merge", entity_type="segment", entity_id=merged.id,
+        user_id=user_id, project_id=project_id,
+        details={"merged_segment_ids": [seg.id for seg in segments]},
+    )
+    _mark_consensus_stale_for_parent(db, project_id, 'observation', observation_id)
+    db.commit()
+
+    return _clip_reload(db, [merged.id])[0]
+
+
+def unsplit_clip(
+    db: Session,
+    child_ids: list[int],
+    observation_id: int,
+    project_id: int,
+    user_id: int,
+) -> Segment:
+    """Rejoin a time-split's two halves, restoring the original clip.
+
+    Takes BOTH child ids EXPLICITLY (the split response / undo entry carries
+    them) — deliberately NOT unsplit_segment, whose sibling discovery is the
+    _find_split_siblings contiguous-sequence heuristic: sound for text (split
+    children stay textually adjacent) and UNSOUND for clips, whose time-based
+    resequencing can interleave different splits' children into one contiguous
+    run (§0.7). Validates the pair TILES the original's range exactly — the
+    floats were written verbatim at split time, so equality is exact; a
+    boundary-edited half legitimately refuses (an undo whose target was edited
+    since is not an undo).
+    """
+    if len(set(child_ids)) != 2:
+        raise HTTPException(
+            status_code=400, detail="Exactly the split's two clips are required to rejoin"
+        )
+
+    original = (
+        db.query(Segment)
+        .filter(
+            Segment.split_into_id.in_(child_ids),
+            Segment.observation_id == observation_id,
+        )
+        .options(selectinload(Segment.code_applications))
+        .first()
+    )
+    if not original:
+        raise HTTPException(status_code=400, detail="No split original found for these clips")
+
+    children = (
+        db.query(Segment)
+        .filter(
+            Segment.id.in_(child_ids),
+            Segment.observation_id == observation_id,
+            Segment.is_split_result == 1,
+            *_visible(),
+        )
+        .order_by(Segment.start_time)
+        .all()
+    )
+    if len(children) != 2:
+        raise HTTPException(
+            status_code=400, detail="Some clips were not found or are not split halves"
+        )
+
+    first, second = children
+    tiles = (
+        first.start_time == original.start_time
+        and second.end_time == original.end_time
+        and first.end_time == second.start_time
+    )
+    if not tiles:
+        raise HTTPException(
+            status_code=400,
+            detail="These clips no longer tile the original's range — it can't be rejoined.",
+        )
+
+    child_id_list = [c.id for c in children]
+
+    original.split_into_id = None
+
+    # Notes on the halves move (back) to the restored original.
+    db.query(Note).filter(Note.segment_id.in_(child_id_list)).update(
+        {Note.segment_id: original.id}, synchronize_session='fetch',
+    )
+
+    # Project-back recovery (J2-0) via the shared helper.
+    existing_keys: set[tuple[int, int | None]] = {
+        (ca.code_id, ca.user_id) for ca in original.code_applications
+    }
+    carried_back = _carried_back_fields(db, child_id_list, existing_keys)
+
+    for seg in children:
+        db.delete(seg)
+    db.flush()
+
+    for fields in carried_back:
+        db.add(CodeApplication(segment_id=original.id, **fields))
+
+    db.flush()
+    resequence_observation_clips(db, observation_id)
+
+    log_action(
+        db, action="clip_unsplit", entity_type="segment", entity_id=original.id,
+        user_id=user_id, project_id=project_id,
+        details={"restored_segment_id": original.id, "deleted_split_ids": child_id_list},
+    )
+    _mark_consensus_stale_for_parent(db, project_id, 'observation', observation_id)
+    db.commit()
+
+    return _clip_reload(db, [original.id])[0]

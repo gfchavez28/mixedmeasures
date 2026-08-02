@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { Search, TrendingUp, BookOpen, Palette } from 'lucide-react'
 import { projectsApi } from '@/lib/api'

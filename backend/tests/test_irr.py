@@ -6,7 +6,7 @@ check, gated on Rscript+irr); (3) a DB-integration test proving the Option-B
 source-level engagement semantics + the roster/universal/consensus exclusions.
 """
 import re
-import shutil
+from datetime import datetime
 import subprocess
 
 import pytest
@@ -17,6 +17,7 @@ from app.models.code_equivalence_group import CodeEquivalenceGroup
 from app.models.conversation import Conversation
 from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from app.models.project import Project
+from app.models.observation import Observation
 from app.models.segment import Segment
 from app.models.user import User
 from app.services.irr import (
@@ -28,8 +29,10 @@ from app.services.irr import (
     _interpret_alpha,
     build_irr_matrices,
     compute_irr,
+    gather_coder_applications,
 )
 from app.services.consensus import materialize_consensus_for_project
+from tests import r_support
 
 
 # ── 1. Pure math (hand-computed) ──────────────────────────────────────────────
@@ -65,23 +68,10 @@ def test_interpretation_bands():
 
 # ── 2. R round-trip (authoritative — irr::kripp.alpha / kappa2 / agree) ────────
 
-_RSCRIPT = shutil.which("Rscript")
-
-
-def _r_has_irr() -> bool:
-    if not _RSCRIPT:
-        return False
-    try:
-        out = subprocess.run(
-            [_RSCRIPT, "-e", 'cat(requireNamespace("irr", quietly=TRUE))'],
-            capture_output=True, text=True, timeout=60,
-        )
-        return "TRUE" in out.stdout
-    except Exception:
-        return False
-
-
-_HAS_IRR = _r_has_irr()
+# R availability is single-sourced in tests/r_support.py (#642) — three files
+# carried a copy-pasted `_r_has_irr()` and drifted from a fourth shape.
+_RSCRIPT = r_support.RSCRIPT
+_HAS_IRR = r_support.HAS_IRR
 
 
 def _r_irr(rows: list[list], n: int, method: str = "nominal") -> dict:
@@ -350,3 +340,155 @@ def test_equivalence_group_codes_agree(db_session):
     assert {c["code_id"] for c in res["per_code"]} == {7590}
     code = res["per_code"][0]
     assert code["percent_agreement"] == 1.0
+
+
+# ── 4. Observation clips (slab 6b-B) ─────────────────────────────────────────
+#
+# Frozen clips are AGREED units — every coder codes the same ones — so the
+# existing engines work on them unchanged. OPEN cuts must never enter: Segment has
+# no creator column, so all coders' clips share one observation_id = one source
+# key, and Option-B engagement would hand each coder a hard 0 on clips they never
+# saw (κ = -1.0 exactly when balanced, α = -1 + 1/n, pooled into the headline).
+
+
+def _obs(db, oid, pid, name, *, frozen):
+    db.add(Observation(
+        id=oid, project_id=pid, name=name,
+        segmentation_frozen_at=datetime(2026, 7, 19, 12, 0, 0) if frozen else None,
+    ))
+    db.flush()
+
+
+def _clip(db, sid, obs_id, order, start, end):
+    db.add(Segment(id=sid, conversation_id=None, observation_id=obs_id,
+                   sequence_order=order, start_time=start, end_time=end, text=""))
+    db.flush()
+
+
+def _seed_clips(db, pid):
+    """One project, one frozen observation and one open one, plus a conversation.
+
+    Returns the ids rather than letting each test recompute them — deriving them
+    twice is how a fixture and its assertions silently drift apart.
+
+    Deliberately three different unit counts (2 conv segments, 3 frozen clips,
+    4 open clips) so a count assertion cannot coincide — equal-sized groups make
+    the frozen/open mutants indistinguishable.
+    """
+    frozen_obs, open_obs = pid, pid + 100
+    base = pid * 100
+    segs = [base + 1, base + 2]
+    frozen_clips = [base + 11, base + 12, base + 13]
+    open_clips = [base + 21, base + 22, base + 23, base + 24]
+    code_id = base + 90
+
+    db.add_all([Project(id=pid, name="P", user_id=1),
+                Conversation(id=pid, project_id=pid, name="Interview")])
+    db.flush()
+    _coder(db, 2, "Bob")
+    _obs(db, frozen_obs, pid, "Frozen classroom", frozen=True)
+    _obs(db, open_obs, pid, "Open playground", frozen=False)
+    for i, sid in enumerate(segs):
+        _seg(db, sid, pid, i)
+    for i, sid in enumerate(frozen_clips):
+        _clip(db, sid, frozen_obs, i, i * 10.0, i * 10.0 + 5.0)
+    for i, sid in enumerate(open_clips):
+        _clip(db, sid, open_obs, i, i * 10.0, i * 10.0 + 5.0)
+    db.add(Code(id=code_id, project_id=pid, name="Off-task", numeric_id=2,
+                is_active=True, is_universal=False))
+    db.flush()
+    return {"code": code_id, "frozen_obs": frozen_obs, "open_obs": open_obs,
+            "segs": segs, "frozen_clips": frozen_clips, "open_clips": open_clips}
+
+
+class TestObservationClipsInIrr:
+
+    def test_gather_tags_clip_sources_and_never_emits_a_null_source(self, db_session):
+        """The assertion the R round-trip structurally CANNOT make.
+
+        Export and app read the same gather, so a corrupted gather yields a wrong
+        number that R faithfully reproduces — the round-trip proves R ≡ tool, never
+        that the tool is right. A `(_, None)` key is the specific corruption: the
+        old two-arm ternary sent every clip to ("doc", None), unioning coder
+        engagement across every observation in the project.
+        """
+        db = db_session
+        ids = _seed_clips(db, 80)
+        for sid in ids["frozen_clips"][:2]:
+            _apply(db, ids["code"], 1, segment_id=sid)
+            _apply(db, ids["code"], 2, segment_id=sid)
+
+        _coders, _applied, unit_source, _engaged, _multi = gather_coder_applications(db, 80)
+
+        assert unit_source[("seg", ids["frozen_clips"][0])] == ("obs", ids["frozen_obs"])
+        assert all(sid is not None for (_tag, sid) in unit_source.values()), \
+            "a source key with a NULL id is a phantom that pools unrelated sources"
+        assert {t for (t, _s) in unit_source.values()} <= {"conv", "doc", "obs", "col"}
+
+    def test_frozen_clips_are_included_and_open_clips_are_not(self, db_session):
+        """Two-sided in ONE project: a one-sided fixture cannot tell 'frozen only'
+        from 'all clips'. The three unit counts differ (2 / 3 / 4) so the numbers
+        themselves discriminate."""
+        db = db_session
+        ids = _seed_clips(db, 81)
+        for sid in ids["frozen_clips"]:          # frozen clips, both coders
+            _apply(db, ids["code"], 1, segment_id=sid)
+            _apply(db, ids["code"], 2, segment_id=sid)
+        for sid in ids["open_clips"][:2]:        # open clips, both coders
+            _apply(db, ids["code"], 1, segment_id=sid)
+            _apply(db, ids["code"], 2, segment_id=sid)
+
+        _c, _a, unit_source, _e, multi = gather_coder_applications(db, 81)
+
+        assert ("obs", ids["frozen_obs"]) in multi, "the frozen observation is a shared source"
+        assert ("obs", ids["open_obs"]) not in multi, "the OPEN observation must not be a source"
+        frozen_units = {u for u, s in unit_source.items() if s == ("obs", ids["frozen_obs"])}
+        open_units = {u for u, s in unit_source.items() if s == ("obs", ids["open_obs"])}
+        assert len(frozen_units) == len(ids["frozen_clips"]) == 3
+        assert open_units == set(), "open cuts collapse alpha toward -1; never gather them"
+
+    def test_unfreezing_removes_clips_from_irr(self, db_session):
+        """Eligibility is REVOCABLE and IRR is computed on demand, never persisted,
+        so unfreezing must simply stop contributing units."""
+        db = db_session
+        ids = _seed_clips(db, 82)
+        for sid in ids["frozen_clips"]:
+            _apply(db, ids["code"], 1, segment_id=sid)
+            _apply(db, ids["code"], 2, segment_id=sid)
+
+        before = compute_irr(db, 82)
+        code_before = next(c for c in before["per_code"] if c["code_id"] == ids["code"])
+        assert code_before["n_units"] == 3
+
+        db.query(Observation).filter(Observation.id == ids["frozen_obs"]).update(
+            {"segmentation_frozen_at": None})
+        db.flush()
+
+        after = compute_irr(db, 82)
+        assert not [c for c in after["per_code"] if c["code_id"] == ids["code"]], \
+            "with its clips gone the code has no shared source left"
+
+    def test_conversation_only_projects_are_unchanged(self, db_session):
+        """The reason this widening is safe to ship: the eligibility clause's first
+        arm passes every non-clip segment, so a project with no observations is
+        byte-identical to before."""
+        db = db_session
+        pid = 83
+        db.add_all([Project(id=pid, name="P", user_id=1),
+                    Conversation(id=pid, project_id=pid, name="T")])
+        db.flush()
+        _coder(db, 2, "Bob")
+        for i, sid in enumerate((8301, 8302, 8303)):
+            _seg(db, sid, pid, i)
+        db.add(Code(id=8390, project_id=pid, name="F", numeric_id=2,
+                    is_active=True, is_universal=False))
+        db.flush()
+        for sid in (8301, 8302, 8303):
+            _apply(db, 8390, 1, segment_id=sid)
+        _apply(db, 8390, 2, segment_id=8301)
+
+        res = compute_irr(db, pid)
+        code = next(c for c in res["per_code"] if c["code_id"] == 8390)
+        assert code["n_units"] == 3
+        assert code["percent_agreement"] == pytest.approx(1 / 3, abs=1e-9)
+        assert code["cohens_kappa"] == pytest.approx(0.0, abs=1e-9)

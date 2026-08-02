@@ -1,8 +1,8 @@
 {
   "name": "mixedmeasures-frontend",
   "private": true,
-  "version": "1.2.0",
-  "releaseDate": "2026-07-11",
+  "version": "1.3.0",
+  "releaseDate": "2026-08-02",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -47,11 +47,11 @@
     "html-to-image": "1.11.13",
     "jszip": "3.10.1",
     "lucide-react": "^1.11.0",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "react-hook-form": "^7.74.0",
     "react-resizable-panels": "^4.10.0",
-    "react-router-dom": "^7.15.0",
+    "react-router": "^8.3.0",
     "react-virtuoso": "4.18.6",
     "recharts": "^3.7.0",
     "sonner": "2.0.7",

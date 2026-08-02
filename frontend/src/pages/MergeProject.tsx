@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   GitMerge, Check, ChevronRight, Users, TriangleAlert, Sparkles, Info,
@@ -830,11 +830,31 @@ function DivergedStep({ divergence, onBack }: { divergence: MergeDivergenceDetai
         <div className="flex items-center gap-2 text-mm-text">
           <TriangleAlert className="w-5 h-5 text-amber-600 dark:text-amber-400" />
           <h2 className="text-lg font-medium">
-            {divergence.kind === 'segmentation' ? "Can't merge yet — segmentation differs" : "Can't merge yet — codebooks differ"}
+            {divergence.kind === 'segmentation'
+              ? "Can't merge yet — segmentation differs"
+              : divergence.kind === 'segmentation_freeze'
+                ? "Can't merge yet — one side's clips are frozen"
+                : "Can't merge yet — codebooks differ"}
           </h2>
         </div>
 
-        {divergence.kind === 'segmentation' ? (
+        {divergence.kind === 'segmentation_freeze' ? (
+          <>
+            <p className="text-sm text-mm-text-muted">
+              {divergence.diverged_sources?.[0]?.frozen_side === 'local'
+                ? 'You froze the clips on these observations after this copy was shared, so the file was coded against an older, open set. Merging would add clips the freeze was meant to settle.'
+                : 'This copy froze its clips and yours are still open. Their clips are an agreed set and yours are not, so there is nothing to line them up against.'}
+            </p>
+            <ul className="text-sm text-mm-text list-disc pl-5 space-y-0.5">
+              {(divergence.diverged_sources ?? []).map((s, i) => <li key={i}>{s.name}</li>)}
+            </ul>
+            <p className="text-sm text-mm-text-muted">
+              {divergence.diverged_sources?.[0]?.frozen_side === 'local'
+                ? 'Unfreeze to accept their clips as part of an open set, or ask for a copy re-cut against the frozen clips.'
+                : 'Freeze to the same clips first, or merge a copy that was cut from yours.'}
+            </p>
+          </>
+        ) : divergence.kind === 'segmentation' ? (
           <>
             <p className="text-sm text-mm-text-muted">
               Merging needs the same segments on both sides so codings line up. These sources were split differently:

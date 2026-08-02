@@ -10,7 +10,7 @@ export type { User, AuthStatus, Coder } from './auth'
 
 // Projects
 export { projectsApi } from './projects'
-export type { Project, ProjectSummary, RecentConversation, RecentDataset, RecentDocument } from './projects'
+export type { Project, ProjectSummary, RecentConversation, RecentDataset, RecentDocument, RecentObservation } from './projects'
 
 // Conversations
 export { conversationsApi } from './conversations'
@@ -18,7 +18,19 @@ export type { Conversation } from './conversations'
 
 // Media (audio/video)
 export { mediaApi } from './media'
-export type { MediaUploadResponse } from './media'
+export type { MediaUploadResponse, MediaOwnerKind } from './media'
+
+// Observations (a recording coded on its own timeline — no transcript)
+export { observationsApi } from './observations'
+export type {
+  Observation,
+  ObservationSegment,
+  SegmentationMode,
+  SegmentationRequest,
+  ClipPreview,
+  ClipPreviewResponse,
+  ClipCutResponse,
+} from './observations'
 
 // Segments
 export { segmentsApi } from './segments'
@@ -50,6 +62,7 @@ export type {
 export { notesApi, allNotesApi } from './notes'
 export type {
   Note,
+  ObservationNote,
   AllNotesConvNote,
   AllNotesSpeaker,
   AllNotesConversation,
@@ -227,6 +240,8 @@ export type {
   ContextSegment,
   CodedSegmentWithContext,
   ConversationSegmentGroup,
+  ObservationSegmentGroup,
+  QuoteRange,
   CodeSegmentsWithContextResponse,
   DemographicFilterValue,
   DemographicFilter,
@@ -259,6 +274,11 @@ export type {
   ReconciliationCodeInfo,
   ReconciliationConsensusContext,
   ReconciliationUnit,
+  OpenCutDisclosure,
+  UnitizingAlphaResponse,
+  UnitizingCategoryResult,
+  BinnedKappaResponse,
+  BinnedKappaCodeResult,
   ReconciliationResponse,
   ReconciliationParams,
   RecomputeConsensusResponse,
@@ -307,6 +327,7 @@ export type {
   NoteSearchResult,
   MemoSearchResult,
   DocumentSearchResult,
+  ObservationSearchResult,
   TextSearchResult,
   CanvasSearchResult,
   SearchResults,

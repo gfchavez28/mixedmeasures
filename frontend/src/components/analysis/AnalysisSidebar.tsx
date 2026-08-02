@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback } from 'react'
-import type { SetURLSearchParams } from 'react-router-dom'
+import type { SetURLSearchParams } from 'react-router'
 import { SELECTED_ROW } from '@/lib/selection'
 import {
   ChevronDown,

@@ -6,7 +6,7 @@
  *   ?canvas={id}&canvas2={id}   — side-by-side (no diff highlighting)
  */
 import { useMemo } from 'react'
-import { useSearchParams, useNavigate } from 'react-router-dom'
+import { useSearchParams, useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { EditorContent } from '@tiptap/react'
 import type { AnyExtension } from '@tiptap/core'

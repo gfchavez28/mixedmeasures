@@ -20,6 +20,12 @@ from ..models.dataset import (
     DatasetValue,
 )
 from ..models.recode import RecodeDefinition, RecodeType, OutputType
+from .missing_values import (  # noqa: F401 — _NA_PREFIXES/_is_na re-export (#592 slab 1)
+    _NA_PREFIXES,
+    _is_na,
+    is_missing,
+    matched_missing_label,
+)
 
 # ── Rounding precision constants ─────────────────────────────────────────────
 PREVIEW_STATS_PRECISION = 1  # round(x, 1) for import preview statistics
@@ -700,23 +706,12 @@ def _strip_bom(text: str) -> str:
 
 
 # -- N/A detection ------------------------------------------------------------
-
-_NA_PREFIXES = [
-    "not applicable", "n/a", "don't know", "do not know",
-    "i don't know", "no answer", "no response", "prefer not",
-    "decline to", "unable to", "cannot assess", "not enough",
-    "i don't have enough",
-]
-
-
-def _is_na(value: str) -> bool:
-    """Check if a value is a Not Applicable / Don't Know response."""
-    lower = value.strip().lower()
-    if not lower:
-        return False
-    if lower in ("na", "n/a"):
-        return True
-    return any(lower.startswith(p) for p in _NA_PREFIXES)
+# #592 slab 1: _NA_PREFIXES/_is_na MOVED to services/missing_values.py — the
+# declared-missing predicate module, where they are the DEFAULT rule set for
+# columns with no declaration. Re-exported here under the old names (imported
+# at the top of this file) so the many existing importers (grouping,
+# code_analysis, computed_columns, data_quality, export_r, …) are unchanged;
+# slab 2 migrates call sites to the column-aware predicate.
 
 
 # -- LimeSurvey header parsing ------------------------------------------------
@@ -729,7 +724,7 @@ def parse_header(header: str) -> dict:
     """
     Parse a LimeSurvey-style header into structured parts.
 
-    Returns dict with question_code, group_code, column_text, raw_code.
+    Returns dict with column_code, group_code, column_text, raw_code.
     """
     header = header.strip()
     m = _LS_QUESTION_RE.match(header)
@@ -1004,7 +999,7 @@ def _analyze_numeric(values: list[str], header: str | None = None) -> dict | Non
     """
     Analyze values for numeric patterns.
 
-    Returns dict with question_type (ColumnType), numeric_format, numeric_min,
+    Returns dict with column_type (ColumnType), numeric_format, numeric_min,
     numeric_max -- or None if values are not all numeric.
 
     The ``header`` parameter (#358) gates percentage classification: a column
@@ -1160,6 +1155,7 @@ def _compute_value_numeric(
     question_type: str,
     scale_labels: list[str] | None,
     scale_values: list[float] | None = None,
+    missing_rules: list | None = None,
 ) -> float | None:
     """Compute the numeric encoding for a cell value.
 
@@ -1168,8 +1164,14 @@ def _compute_value_numeric(
     0-based, or skip codes); CSV imports do not and pass None, which keeps the
     historical positional 1..N encoding byte-for-byte. A length mismatch falls
     back to positional rather than silently mis-encoding.
+
+    ``missing_rules`` (#592) is the COLUMN's parsed missing declaration —
+    None = undeclared, the recognized-N/A defaults (behavior unchanged for
+    every caller that doesn't pass it). A declared column's rules REPLACE the
+    defaults, so a declared "99" encodes NULL and a declared-[] column's
+    "N/A" encodes as data.
     """
-    if _is_na(raw_value):
+    if is_missing(raw_value, missing_rules):
         return None
 
     if question_type == ColumnType.ORDINAL.value:
@@ -1180,7 +1182,16 @@ def _compute_value_numeric(
                 codes = [float(i + 1) for i in range(len(scale_labels))]
             label_map = {l.lower(): codes[i] for i, l in enumerate(scale_labels)}
             return label_map.get(raw_value.strip().lower())
-        return None
+        # #580: an ordinal column with NO scale labels (a bare-numeric Likert item
+        # the user overrode to ordinal — inference only ever suggests ORDINAL when
+        # a known TEXT scale matches) used to return None here, so value_numeric was
+        # NULL in every cell and the column silently vanished from every numeric
+        # analysis — violating the VALUE_NUMERIC_TYPES/SCALE_SCORE_ELIGIBLE_TYPES
+        # contract that ordinal's value_numeric is reliably populated. A bare number
+        # IS its own code, so fall back to the numeric parse (identical to how a
+        # NUMERIC column encodes the same cell). A non-numeric cell in such a column
+        # still yields None, exactly as an out-of-scale label would.
+        return _strip_numeric(raw_value)
 
     if question_type in (ColumnType.NUMERIC.value, ColumnType.PERCENTAGE.value):
         return _strip_numeric(raw_value)
@@ -1210,6 +1221,10 @@ def _compute_value_numeric(
 # uniqueness ratio is the primary discriminator; avg length is the backstop.
 # Tuned against the scenario-4 Family Leave Survey (Industry_Sector: 18 unique,
 # ratio 0.045, avg len 16) and a genuine-comment control that must stay open_text.
+# #575: a numbers-only column with more distinct values than this is treated as a
+# continuous measure, not a labellable scale — the wizard won't seed a code editor.
+VALUE_LABEL_SEED_MAX_CODES = 30
+
 NOMINAL_MAX_CARDINALITY = 100        # ceiling — beyond this, default to open_text
 NOMINAL_MAX_UNIQUENESS_RATIO = 0.5   # unique/n must be below this (labels repeat)
 NOMINAL_MAX_AVG_LABEL_LEN = 30       # avg label length (chars) — prose runs longer
@@ -1462,12 +1477,27 @@ def xlsx_to_csv_text(content: bytes, sheet_name: str | None = None) -> tuple[str
     return out.getvalue(), sheet_names
 
 
-def preview_dataset_csv(file_contents: str) -> dict:
+def preview_dataset_csv(
+    file_contents: str,
+    missing_rules_by_column: dict[str, list] | None = None,
+) -> dict:
     """
     Parse a survey CSV and return per-column analysis with auto-detected types.
 
     Args:
         file_contents: The CSV file as a decoded string (BOM handled internally).
+        missing_rules_by_column: #592 slab 5 — declared missing rules keyed by
+            HEADER name, known before import only for formats that carry their
+            own declaration (``.sav``). Columns absent from the map fall back to
+            the recognized-N/A defaults, which is every CSV/XLSX column: at
+            preview time no DatasetColumn exists, so there is nothing to declare
+            on yet. This is a PRE-pass, not an overlay: type detection,
+            ``na_count`` and ``numeric_min``/``max`` all consume the substantive
+            set, so a post-hoc fix cannot reach them. Without it, preserving
+            .sav's user-missing codes (#596) makes a "Refused" cell read as real
+            text and flips `suggested_type` ordinal→nominal — and for a
+            non-ordinal column nothing downstream corrects it, so the flip
+            persists into the imported column.
 
     Returns:
         Dict with ``total_rows`` and ``columns`` list.  Each column entry
@@ -1499,8 +1529,15 @@ def preview_dataset_csv(file_contents: str) -> dict:
         # Unique values preserving first-seen order
         unique_ordered = list(dict.fromkeys(non_empty))
 
-        # Substantive = non-empty AND non-N/A (used for type detection)
-        substantive_list = [v for v in non_empty if not _is_na(v)]
+        # Substantive = non-empty AND non-missing (drives type detection,
+        # na_count, and the numeric min/max below).
+        # #592 slab 5: column-aware when the FORMAT carried a declaration
+        # (.sav's user-missing), else the recognized-N/A defaults — which is
+        # every text-format column, since no DatasetColumn exists to declare on
+        # until import. This is the one remaining bare-`_is_na` site and it is
+        # allowlisted in the fail-closed scan for exactly that reason.
+        preview_rules = (missing_rules_by_column or {}).get(header)
+        substantive_list = [v for v in non_empty if not is_missing(v, preview_rules)]
         substantive_set = set(substantive_list)
         na_count = len(non_empty) - len(substantive_list)
 
@@ -1518,6 +1555,14 @@ def preview_dataset_csv(file_contents: str) -> dict:
             if non_empty
             else 0.0
         )
+
+        # #575: the complete sorted distinct code set for a likely scale (all
+        # numeric + bounded cardinality), so the wizard's value-labels editor can
+        # seed every code, not just the 5 sample_values. Skip continuous measures.
+        distinct_numeric_values = None
+        if all_numeric and unique_count <= VALUE_LABEL_SEED_MAX_CODES:
+            parsed_codes = {_strip_numeric(v) for v in substantive_set}
+            distinct_numeric_values = sorted(c for c in parsed_codes if c is not None)
 
         # Parse header
         parsed = parse_header(header)
@@ -1542,6 +1587,7 @@ def preview_dataset_csv(file_contents: str) -> dict:
             "suggested_scale_labels": detection["suggested_scale_labels"],
             "suggested_scale_values": detection["suggested_scale_values"],
             "suggested_scale_unmatched": detection["suggested_scale_unmatched"],
+            "distinct_numeric_values": distinct_numeric_values,
             "suggested_column_code": parsed["column_code"],
             "suggested_group_code": parsed["group_code"],
             "suggested_column_text": parsed["column_text"],
@@ -1643,7 +1689,11 @@ def import_dataset_csv(
         scale_labels_json = None
         scale_values_json = None
         scale_pts = None
-        if qtype == ColumnType.ORDINAL and scale_labels:
+        # #575: a cells-are-codes column defers ALL scale handling (metadata +
+        # recode + substitution) to the apply_value_labels post-pass, so it's
+        # created bare here and the cell loop stores the raw numeric code.
+        cells_are_codes = bool(cfg.get("cells_are_codes"))
+        if qtype == ColumnType.ORDINAL and scale_labels and not cells_are_codes:
             scale_labels_json = json.dumps(scale_labels)
             scale_values_json = json.dumps(
                 _coerce_scale_codes(scale_values)
@@ -1651,6 +1701,10 @@ def import_dataset_csv(
                 else list(range(1, len(scale_labels) + 1))
             )
             scale_pts = len(scale_labels)
+
+        # #592: the column's declared missing rules (config-borne — the wizard
+        # in slab 4, .sav in slab 5). None = the recognized-N/A defaults.
+        col_missing_rules = cfg.get("missing_values")
 
         # Numeric metadata (computed from data)
         n_fmt: str | None = None
@@ -1662,7 +1716,7 @@ def import_dataset_csv(
                 for row in data_rows
                 if col_idx < len(row)
                 and row[col_idx].strip()
-                and not _is_na(row[col_idx].strip())
+                and not is_missing(row[col_idx].strip(), col_missing_rules)
             ]
             # #358: pass the CSV header (not column_text override) so the
             # percentage keyword check uses the original column name.
@@ -1692,6 +1746,12 @@ def import_dataset_csv(
             numeric_max=n_max,
             numeric_format=n_fmt,
             demographic_subtype=cfg.get("demographic_subtype"),
+            # `is not None` — an explicit [] declaration ("nothing is missing")
+            # must persist, never fold into the NULL default (the falsy-zero rule).
+            missing_values=(
+                json.dumps(col_missing_rules)
+                if col_missing_rules is not None else None
+            ),
         )
         db.add(column)
         columns[col_idx] = column
@@ -1705,7 +1765,9 @@ def import_dataset_csv(
         qtype_str = cfg.get("column_type", "")
         scale_labels = cfg.get("scale_labels")
 
-        if qtype_str != ColumnType.ORDINAL.value or not scale_labels:
+        # #575: cells-are-codes columns get their primary scale_map from the
+        # apply_value_labels post-pass, not here.
+        if qtype_str != ColumnType.ORDINAL.value or not scale_labels or cfg.get("cells_are_codes"):
             continue
 
         # Build mapping: label -> code. The primary scale_map recode is a SECOND
@@ -1720,12 +1782,14 @@ def import_dataset_csv(
             codes = list(range(1, len(scale_labels) + 1))
         mapping = {label: codes[i] for i, label in enumerate(scale_labels)}
 
-        # Pre-scan data rows for N/A values
+        # Pre-scan data rows for missing values (#592: column-aware — the
+        # exclude channel seeds FROM the effective rule, §J.2)
+        col_missing_rules = cfg.get("missing_values")
         na_values = set()
         for row in data_rows:
             if col_idx < len(row):
                 cell = row[col_idx].strip()
-                if cell and _is_na(cell):
+                if cell and is_missing(cell, col_missing_rules):
                     na_values.add(cell)
 
         exclude_values_json = json.dumps(sorted(na_values)) if na_values else None
@@ -1777,34 +1841,85 @@ def import_dataset_csv(
             if not cell:
                 continue
 
+            cfg = cfg_by_idx.get(col_idx, {})
+            col_missing_rules = cfg.get("missing_values")
+
             # #415: recognized-missing accounting. Mirrors the per-column
             # na_count in preview_dataset_csv and the value-keyed compute rule
-            # (_is_na == missing everywhere). value_text still stores the raw
-            # label; value_numeric is set to None by _compute_value_numeric.
-            if _is_na(cell):
+            # (missing everywhere; #592: column-aware when the config declares).
+            # value_text still stores the raw label; value_numeric lands None.
+            if is_missing(cell, col_missing_rules):
                 recognized_missing_count += 1
                 if len(recognized_missing_labels) < 25:
                     recognized_missing_labels.add(cell)
 
-            cfg = cfg_by_idx.get(col_idx, {})
-            value_numeric = _compute_value_numeric(
-                cell, cfg.get("column_type", ""), cfg.get("scale_labels"),
-                cfg.get("scale_values"),
-            )
+            if cfg.get("cells_are_codes"):
+                # #575: the cell IS the numeric code; keep it (value_text stays the
+                # raw code). apply_value_labels substitutes the label + owns the
+                # scale metadata/recode in the post-pass below. Passing scale_labels
+                # to _compute here would route to label→code and NULL a bare code.
+                # #592: a declared-missing code stores NULL, never its number.
+                value_numeric = (
+                    None if is_missing(cell, col_missing_rules)
+                    else _strip_numeric(cell)
+                )
+            else:
+                value_numeric = _compute_value_numeric(
+                    cell, cfg.get("column_type", ""), cfg.get("scale_labels"),
+                    cfg.get("scale_values"),
+                    missing_rules=col_missing_rules,
+                )
 
             col_type = cfg.get("column_type", "")
             wc = len(cell.split()) if col_type == "open_text" and cell.strip() else None
 
+            # #607: a labelled missing rule substitutes its label into the cell,
+            # exactly as the declare endpoint, the append channel, and the .sav
+            # adapter do — otherwise the same code renders two ways in one
+            # column ("99" here, "Refused" everywhere else) and the append
+            # dedup fingerprint misses precisely the rows it exists to match.
+            # `recognized_missing_labels` above records the RAW cell (the
+            # disclosure lists what the file carried).
             db.add(DatasetValue(
                 row_id=ds_row.id,
                 column_id=column.id,
-                value_text=cell,
+                value_text=matched_missing_label(cell, col_missing_rules) or cell,
                 value_numeric=value_numeric,
                 word_count=wc,
             ))
             values_created += 1
 
     db.flush()
+
+    # -- 3b. Declared value labels (#575) --------------------------------------
+    # For each cells-are-codes column, apply the authored code→label dictionary
+    # the SAME way the retro path and .sav import do — substitute the label into
+    # value_text, keep the code in value_numeric, set scale metadata + a primary
+    # scale_map. Reusing apply_value_labels (vs re-implementing inline) keeps
+    # undeclared codes numeric and handles nominal, which _compute_value_numeric
+    # would silently NULL. Lazy import: value_labels imports from this module.
+    value_label_unlabeled: dict[int, list[float]] = {}
+    codes_columns = [
+        (idx, col) for idx, col in columns.items()
+        if cfg_by_idx.get(idx, {}).get("cells_are_codes")
+    ]
+    if codes_columns:
+        from .value_labels import apply_value_labels
+
+        for col_idx, column in codes_columns:
+            cfg = cfg_by_idx.get(col_idx, {})
+            labels = cfg.get("scale_labels")
+            values = cfg.get("scale_values")
+            if not labels or not values or len(labels) != len(values):
+                logger.warning(
+                    "cells_are_codes column %s missing/mismatched labels/values — "
+                    "skipping value-label substitution", col_idx,
+                )
+                continue
+            pairs = [(float(code), label) for code, label in zip(values, labels)]
+            result = apply_value_labels(db, column, pairs, target_type=column.column_type)
+            if result["unlabeled_codes"]:
+                value_label_unlabeled[col_idx] = result["unlabeled_codes"]
 
     # -- 4. Participant linking (#414, DEC-6) ------------------------------------
     # `is not None` is load-bearing: column index 0 is a valid link column.
@@ -1834,4 +1949,5 @@ def import_dataset_csv(
         "recognized_missing_count": recognized_missing_count,
         "recognized_missing_labels": sorted(recognized_missing_labels),
         "participant_link_report": participant_link_report,
+        "value_label_unlabeled": value_label_unlabeled,
     }

@@ -1,14 +1,19 @@
 import { forwardRef, useCallback, useImperativeHandle, useRef, useState, type RefObject } from 'react'
 import { ChevronDown, Loader2, Maximize2, Pause, PictureInPicture2, Play, Undo2, Video, Volume2, VolumeX } from 'lucide-react'
-import { type Segment, mediaApi } from '@/lib/api'
+import { mediaApi, type MediaOwnerKind } from '@/lib/api'
+import { type TimelineUnit } from '@/lib/playback-utils'
 import { SELECTED_SEGMENT } from '@/lib/selection'
-import { cn } from '@/lib/utils'
+import { cn, formatTimecode } from '@/lib/utils'
 import TimelineScrubber from '@/components/TimelineScrubber'
 
 /**
- * Video pane for the conversation workbench (V1 slab 4 — Layout A per the
- * 2026-07-05 mockup): docks at the top of the LEFT/transcript column,
- * height-capped, code panel untouched in every state.
+ * Video pane (V1 slab 4 — Layout A per the 2026-07-05 mockup): docks at the top
+ * of the LEFT column, height-capped, code panel untouched in every state.
+ *
+ * ⚠️ Its only consumer is the OBSERVATION workbench — this docstring said
+ * "conversation workbench" until 2026-08-02, which is where video coding was
+ * first scoped, not where the pane landed. Conversations reach
+ * `TimelineScrubber` directly through `TranscriptPanel`.
  *
  * Load-bearing DOM invariant: the <video> element is NEVER unmounted or
  * reparented across state changes — Chromium pauses a media element moved
@@ -28,13 +33,19 @@ type DockedSize = 's' | 'm' | 'l'
 const WELL_HEIGHTS: Record<DockedSize, number> = { s: 282, m: 342, l: 412 }
 const PERSISTABLE = new Set<VideoPaneMode>(['s', 'm', 'l', 'collapsed'])
 
-function storageKey(conversationId: number) {
-  return `mm-video-pane-${conversationId}`
+function storageKey(ownerKind: MediaOwnerKind, ownerId: number) {
+  // The kind is part of the key (slab 3c): conversation and observation ids are
+  // independent sequences, so a bare id would share one persisted size across
+  // two unrelated sources. Conversations keep the historical un-prefixed key so
+  // existing preferences survive.
+  return ownerKind === 'observation'
+    ? `mm-video-pane-obs-${ownerId}`
+    : `mm-video-pane-${ownerId}`
 }
 
-function readPersistedMode(conversationId: number): VideoPaneMode {
+function readPersistedMode(ownerKind: MediaOwnerKind, ownerId: number): VideoPaneMode {
   try {
-    const v = localStorage.getItem(storageKey(conversationId))
+    const v = localStorage.getItem(storageKey(ownerKind, ownerId))
     if (v && PERSISTABLE.has(v as VideoPaneMode)) return v as VideoPaneMode
   } catch {
     // private mode — default below
@@ -49,13 +60,17 @@ export interface VideoPaneHandle {
 
 interface VideoPaneProps {
   projectId: number
-  conversationId: number
+  /** The media owner. Kind is EXPLICIT (never inferred): conversation and
+   * observation ids are bare numbers from independent sequences, so a
+   * mis-wired call would stream a VALID but WRONG source. */
+  ownerKind: MediaOwnerKind
+  ownerId: number
   /** Media element ref shared with usePlayback (the pane's <video> assigns into it). */
   mediaRef: RefObject<HTMLVideoElement | HTMLAudioElement | null>
   /** Cache token for the stream URL (#549) — conversation.media_version. */
   mediaVersion: string | null
-  /** All segments (unfiltered) — drives the scrubber's segment tick marks. */
-  segments: Segment[]
+  /** All timeline units (unfiltered) — drives the scrubber's bounds. */
+  segments: TimelineUnit[]
   mediaDuration: number | null
   /** Media sync offset (#564) — the scrubber needs it to know where the recording ends. */
   mediaOffset?: number
@@ -75,12 +90,25 @@ interface VideoPaneProps {
   /** Scrubber seek (transcript-domain) — same contract as the toolbar scrubber. */
   onTimeChange: (time: number) => void
   onPositionChange?: (position: number) => void
+  /**
+   * The host renders its own, wider seek surface directly below the pane (#662
+   * — the Observations ClipTimeline). The DOCKED transport strip then shows a
+   * time readout instead of a second slider, and the strip's remaining controls
+   * keep their places.
+   *
+   * ⚠️ Scoped to the docked sizes on purpose. THEATER expands the well and
+   * pushes the host's timeline out of reach, PiP floats free of it, and
+   * COLLAPSED hides the video entirely — in all three the pane's own scrubber
+   * is the only way to seek, so it stays.
+   */
+  hasExternalScrubber?: boolean
 }
 
 const VideoPane = forwardRef<VideoPaneHandle, VideoPaneProps>(function VideoPane(
   {
     projectId,
-    conversationId,
+    ownerKind,
+    ownerId,
     mediaRef,
     mediaVersion,
     segments,
@@ -98,10 +126,11 @@ const VideoPane = forwardRef<VideoPaneHandle, VideoPaneProps>(function VideoPane
     onCycleSpeed,
     onTimeChange,
     onPositionChange,
+    hasExternalScrubber = false,
   },
   ref,
 ) {
-  const [mode, setModeState] = useState<VideoPaneMode>(() => readPersistedMode(conversationId))
+  const [mode, setModeState] = useState<VideoPaneMode>(() => readPersistedMode(ownerKind, ownerId))
   const prevSizeRef = useRef<DockedSize>('m')
   const [muted, setMuted] = useState(false)
   // PiP drag offset from the anchored bottom-right position.
@@ -116,17 +145,17 @@ const VideoPane = forwardRef<VideoPaneHandle, VideoPaneProps>(function VideoPane
       })
       if (PERSISTABLE.has(next)) {
         try {
-          localStorage.setItem(storageKey(conversationId), next)
+          localStorage.setItem(storageKey(ownerKind, ownerId), next)
         } catch {
           // session-only
         }
       }
       if (next !== 'pip') setPipOffset({ x: 0, y: 0 })
     },
-    [conversationId],
+    [ownerKind, ownerId],
   )
 
-  // NOTE: the mounting surface keys this component by conversationId, so a
+  // NOTE: the mounting surface keys this component by owner id, so a
   // conversation switch remounts it — the useState initializer re-reads the
   // persisted size and theater/PiP state naturally drops.
 
@@ -189,6 +218,24 @@ const VideoPane = forwardRef<VideoPaneHandle, VideoPaneProps>(function VideoPane
     />
   )
 
+  /**
+   * What the docked strip shows in the scrubber's place when the host owns a
+   * wider one (#662). It keeps the two things the slider was really carrying —
+   * where you are, and how long the recording is — and keeps `flex-1` so the
+   * controls to its right do not slide leftward.
+   */
+  const timeReadout = (
+    <span className="flex-1 flex items-center gap-1.5 text-[11px] tabular-nums text-mm-text-secondary">
+      <span className="font-medium text-mm-text">{formatTimecode(currentTime ?? 0)}</span>
+      {mediaDuration != null && (
+        <>
+          <span className="text-mm-text-faint">/</span>
+          <span className="text-mm-text-faint">{formatTimecode(mediaDuration)}</span>
+        </>
+      )}
+    </span>
+  )
+
   const playButton = (extraClass?: string) => (
     <button
       type="button"
@@ -238,7 +285,7 @@ const VideoPane = forwardRef<VideoPaneHandle, VideoPaneProps>(function VideoPane
           * size/PiP state survive a replace). */}
         <video
           ref={mediaRef as RefObject<HTMLVideoElement>}
-          src={mediaApi.getStreamUrl(projectId, conversationId, mediaVersion)}
+          src={mediaApi.getStreamUrl(projectId, ownerKind, ownerId, mediaVersion)}
           preload="metadata"
           playsInline
           muted={muted}
@@ -317,7 +364,10 @@ const VideoPane = forwardRef<VideoPaneHandle, VideoPaneProps>(function VideoPane
       {!isCollapsed && !isPip && (
         <div className="flex items-center gap-2 h-[38px] px-2.5">
           {playButton()}
-          {scrubber}
+          {/* #662: two seek surfaces at different scales invite reading one and
+            * clicking the other. Theater keeps its slider — it pushes the
+            * host's timeline out of reach. */}
+          {hasExternalScrubber && mode !== 'theater' ? timeReadout : scrubber}
           <button
             type="button"
             onClick={onCycleSpeed}

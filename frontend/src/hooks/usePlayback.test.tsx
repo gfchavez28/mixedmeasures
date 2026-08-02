@@ -16,6 +16,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { usePlayback } from './usePlayback'
+import { findClipsAtTime } from '@/lib/playback-utils'
 import type { Segment, Conversation } from '@/lib/api'
 
 function makeFakeAudio({ duration = NaN }: { duration?: number } = {}) {
@@ -77,14 +78,19 @@ interface HookProps {
 
 function setup(
   selectedSegments: number[],
-  opts: { conversation?: Conversation; segments?: Segment[] } = {},
+  opts: {
+    source?: Conversation
+    segments?: Segment[]
+    followPlayhead?: boolean
+    findUnitsAtTime?: (units: Segment[], time: number) => number[]
+  } = {},
 ) {
   const onSelectionChange = vi.fn()
   const mediaRef = { current: audio as unknown as HTMLMediaElement }
   let props: HookProps = {
     sel: selectedSegments,
     segs: opts.segments ?? SEGMENTS,
-    conv: opts.conversation ?? CONVERSATION,
+    conv: opts.source ?? CONVERSATION,
   }
   const view = renderHook(
     ({ sel, segs, conv }: HookProps) =>
@@ -93,7 +99,9 @@ function setup(
         selectedSegments: sel,
         onSelectionChange,
         mediaRef,
-        conversation: conv,
+        source: conv,
+        followPlayhead: opts.followPlayhead,
+        findUnitsAtTime: opts.findUnitsAtTime,
       }),
     { initialProps: props },
   )
@@ -290,7 +298,7 @@ describe('usePlayback — #549: a replaced recording resets readiness', () => {
 describe('usePlayback — #551 player half: missing file ≠ codec failure', () => {
   it('element error with media_size_bytes null reports the missing-file message', () => {
     const { result } = setup([1], {
-      conversation: { ...(CONVERSATION as object), media_size_bytes: null } as Conversation,
+      source: { ...(CONVERSATION as object), media_size_bytes: null } as Conversation,
     })
     act(() => audio.emit('error'))
     expect(result.current.mediaError).toMatch(/isn’t on this computer/)
@@ -384,7 +392,7 @@ describe('usePlayback — #563: seeking past the end of the recording', () => {
 
   it('the offset is applied BEFORE the clamp (a positive offset can push past the end)', () => {
     const conv = { ...CONVERSATION, media_offset_seconds: 10 } as unknown as Conversation
-    const { result } = setup([], { segments: LONG_TRANSCRIPT, conversation: conv })
+    const { result } = setup([], { segments: LONG_TRANSCRIPT, source: conv })
     act(() => { result.current.seekToTime(110) }) // 110 + 10 = 120 > 113.2
     expect(audio.currentTime).toBeLessThan(SHORT_MEDIA)
   })
@@ -515,5 +523,124 @@ describe('usePlayback — #564: past the end of the recording', () => {
     act(() => { rerender({ conv: replaced }) })
 
     expect(result.current.isTranscriptOnly).toBe(false)
+  })
+})
+
+describe('usePlayback — followPlayhead (slab 3c / D14): playback must not drive selection when off', () => {
+  it('followPlayhead: false suppresses selection-follow from the timeupdate driver', () => {
+    const { result, onSelectionChange } = setup([2], { followPlayhead: false })
+
+    act(() => result.current.togglePlayback())
+    expect(result.current.isPlaying).toBe(true)
+
+    // Playhead crosses into segment 3 — with follow OFF the editing selection
+    // must be left alone (it is a boundary-edit target on the observation
+    // workbench, not a reading position).
+    act(() => {
+      audio.currentTime = 20
+      audio.emit('timeupdate')
+    })
+    expect(onSelectionChange).not.toHaveBeenCalled()
+    // The clock still advanced — only the selection coupling is off.
+    expect(result.current.currentPlaybackTime).toBeCloseTo(20, 3)
+  })
+
+  it('followPlayhead: false makes Play roll from the current position instead of auto-selecting the first unit', () => {
+    const { result, onSelectionChange } = setup([], { followPlayhead: false })
+
+    act(() => result.current.togglePlayback())
+
+    // No selection seeding, no seek-to-first-clip: the element plays from
+    // wherever it stands.
+    expect(onSelectionChange).not.toHaveBeenCalled()
+    expect(audio.currentTime).toBe(0)
+    expect(audio.play).toHaveBeenCalledTimes(1)
+  })
+
+  it('the default (true) still follows — the conversation workbenches are unchanged', () => {
+    const { result, onSelectionChange } = setup([1])
+    act(() => result.current.togglePlayback())
+    act(() => {
+      audio.currentTime = 9
+      audio.emit('timeupdate')
+    })
+    expect(onSelectionChange).toHaveBeenLastCalledWith([2])
+  })
+})
+
+describe('usePlayback — seekWithoutPausing (slab 3d, J-K-L transport)', () => {
+  it('keeps a playing element playing and updates the clock (within the recording)', () => {
+    const { result } = setup([1])
+    act(() => result.current.togglePlayback())
+    audio.paused = false // reflect the play()
+
+    act(() => result.current.seekWithoutPausing(42))
+
+    expect(audio.pause).not.toHaveBeenCalled()
+    expect(result.current.isPlaying).toBe(true)
+    expect(result.current.currentPlaybackTime).toBe(42)
+    expect(audio.currentTime).toBe(42) // offset 0; duration NaN → clamp passthrough
+  })
+
+  it('parks and pauses honestly on a seek beyond the recording', () => {
+    audio = makeFakeAudio({ duration: 100 })
+    const { result } = setup([1])
+    act(() => result.current.togglePlayback())
+    audio.paused = false
+
+    act(() => result.current.seekWithoutPausing(500)) // recording ends at 100
+
+    expect(result.current.isTranscriptOnly).toBe(true)
+    expect(audio.pause).toHaveBeenCalled()
+    expect(result.current.isPlaying).toBe(false)
+  })
+})
+
+describe('usePlayback — D27 Follow: findUnitsAtTime writes the FULL containment set', () => {
+  // Overlapping clips + a gap: [0–30] and [10–50] overlap; 50–60 is a gap.
+  const CLIPS = [seg(1, 0, 30), seg(2, 10, 50), seg(3, 60, 80)]
+  const containment = (units: Segment[], t: number) =>
+    findClipsAtTime(units, t).map(u => u.id)
+
+  it('writes ALL overlapping ids while playing (never the floor-single one)', () => {
+    const { onSelectionChange } = setup([], {
+      segments: CLIPS, followPlayhead: true, findUnitsAtTime: containment,
+    })
+    act(() => audio.emit('play'))
+    audio.currentTime = 15
+    act(() => audio.emit('timeupdate'))
+    expect(onSelectionChange).toHaveBeenCalledWith([1, 2])
+  })
+
+  it('writes [] in a gap — the follow selection honestly empties', () => {
+    const { onSelectionChange } = setup([1, 2], {
+      segments: CLIPS, followPlayhead: true, findUnitsAtTime: containment,
+    })
+    act(() => audio.emit('play'))
+    audio.currentTime = 55
+    act(() => audio.emit('timeupdate'))
+    expect(onSelectionChange).toHaveBeenCalledWith([])
+  })
+
+  it('skips the write while the containment set is unchanged (no setState churn)', () => {
+    const { onSelectionChange, rerender } = setup([], {
+      segments: CLIPS, followPlayhead: true, findUnitsAtTime: containment,
+    })
+    act(() => audio.emit('play'))
+    audio.currentTime = 15
+    act(() => audio.emit('timeupdate'))
+    expect(onSelectionChange).toHaveBeenCalledTimes(1)
+    rerender({ sel: [1, 2] }) // the workbench applied the follow write
+    audio.currentTime = 16 // still inside both
+    act(() => audio.emit('timeupdate'))
+    expect(onSelectionChange).toHaveBeenCalledTimes(1)
+  })
+
+  it('conversations stay byte-identical without findUnitsAtTime (floor-single)', () => {
+    const { onSelectionChange } = setup([], { followPlayhead: true })
+    act(() => audio.emit('play'))
+    audio.currentTime = 9 // inside segment 2 (8.5–17) by floor semantics
+    act(() => audio.emit('timeupdate'))
+    expect(onSelectionChange).toHaveBeenCalledWith([2])
   })
 })

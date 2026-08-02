@@ -19,11 +19,12 @@ os.environ["MM_DATABASE_PATH"] = ":memory:"
 import asyncio
 import io
 import json
-import shutil
 import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
+
+import pytest
 
 from app.models.project import Project
 from app.models.user import User
@@ -33,6 +34,7 @@ from app.models.metric import MetricDefinition
 from app.models.statistical_test import StatisticalTest
 from app.models.materials import MaterialCollection, Material
 from app.routers.export_r import export_r_data
+from tests import r_support
 
 
 async def _export_r_text(project_id, user, db) -> str:
@@ -152,11 +154,12 @@ class TestExportRRunnable:
         assert " seg)" not in codebook
         assert "segments)" not in codebook
 
+    # #642: this was an INLINE `pytest.skip()` — the one R gate in the suite that
+    # no decorator scan could see. A marker keeps it visible to `--collect-only`
+    # and to anything that reasons about which tests R switches off.
+    @pytest.mark.skipif(not r_support.HAS_R, reason=r_support.SKIP_REASON_R)
     def test_script_parses_in_R(self, db_session):
-        rscript = shutil.which("Rscript")
-        if not rscript:
-            import pytest
-            pytest.skip("Rscript not available")
+        rscript = r_support.RSCRIPT
         r = _build(db_session)
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "setup.R"

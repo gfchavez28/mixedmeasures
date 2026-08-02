@@ -12,9 +12,28 @@ export function getCodeColor(code: { color: string | null; category_color?: stri
 }
 
 /**
- * Compute readable text color (black or white) for a given hex background.
- * Uses WCAG relative luminance. Threshold 0.35 biases toward white text
- * on mid-tone backgrounds for better readability on colored chips.
+ * Readable text colour (black or white) for a given hex background — the ONE
+ * decision behind every code chip, codebook node, clip bar, coder badge and
+ * participant tag, so it is worth getting exactly right.
+ *
+ * 0.179 is not a taste threshold: it is where contrast-against-white and
+ * contrast-against-BLACK cross, `(L+0.05)² = 1.05 × 0.05`. Picking the better
+ * side of it guarantees **≥ 4.58:1 for every possible background** — above the
+ * 4.5:1 AA floor, with no colour able to fall through.
+ *
+ * ⚠️ It returned `#1a1a1a`, not black, until 2026-08-02, and that one nudge
+ * cost the guarantee: a near-black floor of L≈0.0103 drops the worst case to
+ * **3.80:1**, below AA, and moves the true crossover to 0.2016 — so the
+ * threshold was also mis-paired with the colour it shipped. **Measured, not
+ * reasoned: 3 of the app's own 16 code swatches failed AA** — `#8b5cf6`
+ * (4.11:1), `#6366f1` (3.90:1), `#a855f7` (4.40:1), the whole indigo/violet
+ * band, which is exactly where researchers reported unreadable code labels.
+ * Pure black clears all 16. `utils.test.ts` pins the ≥4.5:1 floor across the
+ * palette AND a dense sweep of the colour cube, so a future palette addition
+ * or a re-softened text colour fails the suite rather than shipping.
+ *
+ * The docstring also claimed a threshold of 0.35 while the code used 0.179;
+ * both numbers are now the one the code applies.
  */
 export function getContrastColor(hex: string): string {
   const h = hex.replace('#', '')
@@ -26,7 +45,8 @@ export function getContrastColor(hex: string): string {
     0.2126 * (r <= 0.03928 ? r / 12.92 : ((r + 0.055) / 1.055) ** 2.4) +
     0.7152 * (g <= 0.03928 ? g / 12.92 : ((g + 0.055) / 1.055) ** 2.4) +
     0.0722 * (b <= 0.03928 ? b / 12.92 : ((b + 0.055) / 1.055) ** 2.4)
-  return luminance > 0.179 ? '#1a1a1a' : '#ffffff'
+  // Pure black, deliberately — see getContrastColor's ⚠️. Softening re-breaks AA.
+  return luminance > 0.179 ? '#000000' : '#ffffff'
 }
 
 /** Return black or white text for an HSL background using WCAG relative luminance. */
@@ -43,7 +63,8 @@ export function getHslTextColor(h: number, s: number, l: number): string {
   // WCAG relative luminance
   const toLinear = (c: number) => c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
   const luminance = 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b)
-  return luminance > 0.179 ? '#1a1a1a' : '#ffffff'
+  // Pure black, deliberately — see getContrastColor's ⚠️. Softening re-breaks AA.
+  return luminance > 0.179 ? '#000000' : '#ffffff'
 }
 
 /** Style for unfocused items in focus mode (dimmed + desaturated). */
@@ -63,6 +84,47 @@ export function formatTimestamp(seconds: number | null | undefined): string {
     return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
   }
   return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+}
+
+/**
+ * Sub-second timecode for the observation workbench (slab 3c): `m:ss.d`
+ * (tenths), `h:mm:ss.d` over an hour. `formatTimestamp` above stays the
+ * second-granular transcript formatter; clips are cut at sub-second boundaries,
+ * so their display must not round two distinct boundaries to one string.
+ * Works in integer TENTHS so float dust can't render "0:03.10".
+ */
+export function formatTimecode(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return ''
+  const tenths = Math.round(Math.max(0, seconds) * 10)
+  const frac = tenths % 10
+  const whole = Math.floor(tenths / 10)
+  const hours = Math.floor(whole / 3600)
+  const minutes = Math.floor((whole % 3600) / 60)
+  const secs = whole % 60
+  const mmss = `${String(secs).padStart(2, '0')}.${frac}`
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${mmss}`
+  return `${minutes}:${mmss}`
+}
+
+/**
+ * Parse a researcher-typed timecode into seconds (the clip time inputs — the
+ * keyboard/a11y editing path, slab 3c). Accepts `225`, `3:45`, `3:45.2`,
+ * `1:03:45.2`, `.5`. Returns null for anything else — the inputs treat null as
+ * "invalid, keep editing", never as 0.
+ */
+export function parseTimecode(text: string): number | null {
+  const match = text.trim().match(/^(?:(\d+):)?(?:(\d+):)?(\d+(?:\.\d+)?|\.\d+)$/)
+  if (!match) return null
+  const [, first, second, last] = match
+  const secs = parseFloat(last)
+  if (!Number.isFinite(secs)) return null
+  if (first !== undefined && second !== undefined) {
+    return Number(first) * 3600 + Number(second) * 60 + secs
+  }
+  if (first !== undefined) {
+    return Number(first) * 60 + secs
+  }
+  return secs
 }
 
 /** Parse a URL search param as an integer. Returns null for missing, empty, or non-finite values. */

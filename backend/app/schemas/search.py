@@ -6,15 +6,22 @@ from datetime import datetime
 
 class SegmentSearchResult(BaseModel):
     id: int
+    # ⚠️ DEPRECATED PAIR (#569, one-release beat): `conversation_id` is overloaded
+    # with the DOCUMENT id on doc hits (kept populated so existing consumers keep
+    # working); `source_type` is superseded by `source_kind`. New consumers read
+    # source_kind + source_id — observation hits carry conversation_id=None (a new
+    # kind never repeats the lie). Retire both after the beat.
     conversation_id: int | None = None
-    conversation_name: str = ""
+    conversation_name: str = ""  # the SOURCE display name (conv/doc/observation)
     speaker_name: str | None = None
     is_facilitator: bool = False
-    start_time: float | None = None
+    start_time: float | None = None  # clip hits: the clip's start (timecode subtitle)
     text: str
     sequence_order: int
     is_quoted: bool = False
-    source_type: str = "conversation"  # "conversation" or "document"
+    source_type: str = "conversation"  # deprecated alias of source_kind
+    source_kind: str = "conversation"  # "conversation" | "document" | "observation"
+    source_id: int | None = None  # the id in source_kind's namespace — the honest pair
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -44,13 +51,19 @@ class ConversationSearchResult(BaseModel):
 
 class NoteSearchResult(BaseModel):
     id: int
-    conversation_id: int
+    # Optional since 4b (#569): observation notes carry None here — the field was
+    # a REQUIRED int overloaded with the document id on doc hits. Same deprecation
+    # beat as SegmentSearchResult: conv/doc hits keep it populated one release;
+    # new consumers read source_kind + source_id.
+    conversation_id: int | None = None
     conversation_name: str
     segment_id: int | None
     segment_text_preview: str | None  # First ~100 chars of attached segment
     content: str
     sequence_number: int
-    source_type: str = "conversation"  # "conversation" or "document"
+    source_type: str = "conversation"  # deprecated alias of source_kind
+    source_kind: str = "conversation"  # "conversation" | "document" | "observation"
+    source_id: int | None = None  # the id in source_kind's namespace — the honest pair
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -60,6 +73,16 @@ class DocumentSearchResult(BaseModel):
     name: str
     segment_count: int
     source_format: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ObservationSearchResult(BaseModel):
+    """Observation NAME hit (the 4th name block — conv/doc each had one)."""
+    id: int
+    name: str
+    segment_count: int  # visible clip count
+    has_media: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -120,6 +143,11 @@ class DocumentSearchResults(BaseModel):
     items: list[DocumentSearchResult]
 
 
+class ObservationSearchResults(BaseModel):
+    count: int
+    items: list[ObservationSearchResult]
+
+
 class TextSearchResults(BaseModel):
     count: int
     items: list[TextSearchResult]
@@ -152,5 +180,6 @@ class SearchResponse(BaseModel):
     notes: NoteSearchResults | None = None
     memos: MemoSearchResults | None = None
     documents: DocumentSearchResults | None = None
+    observations: ObservationSearchResults | None = None
     text: TextSearchResults | None = None
     canvases: CanvasSearchResults | None = None

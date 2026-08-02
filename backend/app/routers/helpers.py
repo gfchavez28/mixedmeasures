@@ -7,6 +7,7 @@ from ..models.project import Project
 from ..models.segment import Segment
 from ..models.conversation import Conversation
 from ..models.document import Document
+from ..models.observation import Observation
 from ..models.dataset import Dataset, DatasetColumn, ColumnType
 
 # 50 MB file upload limit
@@ -66,6 +67,29 @@ def _get_project_or_404(db: Session, project_id: int, user_id: int) -> Project:
     return project
 
 
+def _get_observation_or_404(
+    db: Session, project_id: int, observation_id: int, user_id: int
+) -> Observation:
+    """Load an observation, folding the ownership gate in (REQUIRED user_id —
+    do not add a user-less overload; the signature is what stops a new endpoint
+    from forgetting, #553).
+
+    Lives here rather than in observations.py so the media router can gate an
+    observation too (the recording-reuse endpoints cross both source types, and
+    observations.py already imports FROM media.py — the other direction would be
+    a cycle). The name is what tests/test_ownership_gate_sweep.py's AST scan
+    matches, so moving the definition does not weaken the guard.
+    """
+    _get_project_or_404(db, project_id, user_id)
+    observation = db.query(Observation).filter(
+        Observation.id == observation_id,
+        Observation.project_id == project_id,
+    ).first()
+    if not observation:
+        raise HTTPException(status_code=404, detail="Observation not found")
+    return observation
+
+
 def _verify_conversation_ownership(db: Session, conversation_id: int, user_id: int) -> Conversation:
     """Load conversation and verify its project belongs to user."""
     conversation = db.query(Conversation).filter(Conversation.id == conversation_id).first()
@@ -76,7 +100,13 @@ def _verify_conversation_ownership(db: Session, conversation_id: int, user_id: i
 
 
 def _verify_segment_ownership(db: Session, segment_id: int, user_id: int) -> Segment:
-    """Load segment and verify its parent project belongs to user."""
+    """Load segment and verify its parent project belongs to user.
+
+    FAILS CLOSED: a segment whose parent this function does not recognise is
+    REFUSED, never returned. Every ``Segment`` parent must have a branch here —
+    the old two-branch form fell through to an unconditional ``return segment``,
+    so a third-parent segment was handed back with no ownership check at all.
+    """
     segment = db.query(Segment).filter(Segment.id == segment_id).first()
     if not segment:
         raise HTTPException(status_code=404, detail="Segment not found")
@@ -90,6 +120,16 @@ def _verify_segment_ownership(db: Session, segment_id: int, user_id: int) -> Seg
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
         _get_project_or_404(db, doc.project_id, user_id)
+    elif segment.observation_id:
+        obs = db.query(Observation).filter(Observation.id == segment.observation_id).first()
+        if not obs:
+            raise HTTPException(status_code=404, detail="Observation not found")
+        _get_project_or_404(db, obs.project_id, user_id)
+    else:
+        # Unreachable while ck_segment_exactly_one_parent holds. If it is ever
+        # reached, a parent was added without a branch above — refuse rather than
+        # hand back an unowned row.
+        raise HTTPException(status_code=404, detail="Segment has no valid parent")
     return segment
 
 

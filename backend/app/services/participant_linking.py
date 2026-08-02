@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from ..models.participant import Participant
 from ..models.dataset import DatasetColumn, DatasetRow, DatasetValue, Dataset, ColumnType
-from .dataset_import import _is_na
+from .missing_values import column_missing_rules, is_missing
 
 
 IDENTIFIER_MAX_LENGTH = 100  # Participant.identifier is String(100)
@@ -75,12 +75,17 @@ def link_rows_by_identifier_column(
         if v.value_text is not None
     } if candidates else {}
 
+    # #592: column-aware, though benign under the invariant that identifier
+    # columns can't carry a declaration — this keeps the linking rule on the
+    # ONE missing predicate rather than a private _is_na copy.
+    missing_rules = column_missing_rules(column)
+
     skipped_missing = 0
     rows_by_value: dict[str, list[DatasetRow]] = {}
     for row in candidates:
         raw = value_by_row_id.get(row.id)
         value = raw.strip() if raw else ""
-        if not value or _is_na(value) or len(value) > IDENTIFIER_MAX_LENGTH:
+        if not value or is_missing(value, missing_rules) or len(value) > IDENTIFIER_MAX_LENGTH:
             skipped_missing += 1
             continue
         rows_by_value.setdefault(value, []).append(row)

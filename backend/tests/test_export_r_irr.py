@@ -10,7 +10,6 @@ the `irr` package, mirroring test_irr.py).
 import asyncio
 import io
 import re
-import shutil
 import subprocess
 import tempfile
 import zipfile
@@ -27,29 +26,15 @@ from app.models.code_application import CodeApplication
 from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from app.routers.export_r import export_r_data
 from app.services.irr import compute_irr
+from tests import r_support
 
 PID = 950
 DSID = 950
 
 
-# ── R irr gate (ported from test_irr.py) ──────────────────────────────────────
-_RSCRIPT = shutil.which("Rscript")
-
-
-def _r_has_irr() -> bool:
-    if not _RSCRIPT:
-        return False
-    try:
-        out = subprocess.run(
-            [_RSCRIPT, "-e", 'cat(requireNamespace("irr", quietly=TRUE))'],
-            capture_output=True, text=True, timeout=60,
-        )
-        return "TRUE" in out.stdout
-    except Exception:
-        return False
-
-
-_HAS_IRR = _r_has_irr()
+# ── R irr gate — single-sourced in tests/r_support.py (#642) ──────────────────
+_RSCRIPT = r_support.RSCRIPT
+_HAS_IRR = r_support.HAS_IRR
 
 
 def _seed(db):

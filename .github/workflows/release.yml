@@ -23,8 +23,11 @@
 # ⚠️  THREE THINGS TO DO BEFORE THIS SHIPS A REAL SIGNED RELEASE:
 #
 #   (1) SHA-PIN EVERY ACTION. ✅ DONE 2026-06-14 — every `uses:` below is pinned to its
-#       v6 commit SHA (trailing `# v6` comment). Re-resolve when intentionally bumping:
-#         curl -s https://api.github.com/repos/actions/checkout/commits/v6 | grep -m1 '"sha"'
+#       release commit SHA (trailing `# vN` comment). Actions are NOT all on the same
+#       major: checkout is v7 since 2026-08-02, the others v6. Re-resolve when bumping:
+#         curl -s https://api.github.com/repos/<owner>/<action>/commits/<tag> | grep -m1 '"sha"'
+#       Cross-check the moving tag against the pointed release (`/commits/v7` and
+#       `/commits/v7.0.1` must agree) — pinning the wrong commit defeats the control.
 #
 #   (2) ADD THE SIGNING SECRETS (repo → Settings → Secrets and variables → Actions):
 #       macOS  (Apple Developer ID Application cert + notarization):
@@ -71,9 +74,9 @@ jobs:
   # schema drift must stop a release, not just warn.
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30          # +5 for the R toolchain install (#642)
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
@@ -90,8 +93,33 @@ jobs:
         working-directory: backend
         run: python scripts/schema_diff_harness.py
 
+      # #642 — THIS is the step the finding is about. It is a HARD gate (no
+      # continue-on-error), and it reported green for months while every R
+      # correctness oracle silently skipped, because neither workflow installed
+      # R. Ubuntu's archive gives R 4.3.3 (the version the project's numbers are
+      # anchored to) + four of the five packages as ABI-matched binaries — no
+      # third-party action to SHA-pin inside a `contents: write` workflow.
+      #
+      # ⚠️ `irr` is NOT in Debian/Ubuntu at all; assuming it was is what made
+      # this step exit 100 on its first real run (2026-08-02, ci.yml — this copy
+      # had not been exercised, because release.yml only fires on a tag, so the
+      # rc cut would have hit it at the gate). It comes from CRAN: pure R
+      # (`NeedsCompilation: no`), sole dependency lpSolve, which IS an archive
+      # binary. See the fuller note in ci.yml; keep the two in step.
+      - name: Install R + the correctness-oracle packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            r-base-core r-cran-readr r-cran-dplyr r-cran-psych \
+            r-cran-ggplot2 r-cran-lpsolve
+          sudo Rscript -e 'install.packages("irr", repos = "https://cloud.r-project.org")'
+          Rscript -e 'for (p in c("readr","dplyr","psych","ggplot2","irr")) if (!requireNamespace(p, quietly = TRUE)) stop("R oracle package missing: ", p)'
+
       - name: Backend tests
         working-directory: backend
+        env:
+          # A release must never ship on a run where the oracles skipped.
+          MM_REQUIRE_R: "1"
         run: python -m pytest tests/ -q
 
       - name: Backend dependency audit (HARD gate, production deps)
@@ -112,9 +140,18 @@ jobs:
           npm run lint
           npm test
           npm run build
-      - name: Frontend dependency audit (HARD gate)
+      # #632: --omit=dev, matching the electron gate below and for the same
+      # reason. Full-tree here flags the dev-only eslint/minimatch/
+      # brace-expansion chain, whose only fix is ESLint 10 — a major the ROADMAP
+      # deferred deliberately. Those packages run on a developer machine and on
+      # this runner; they are not in the app a researcher installs, so they are
+      # not production exposure. Same triage the backend already applies by
+      # auditing `-r requirements.txt` rather than the whole venv.
+      # ci.yml deliberately keeps the FULL-TREE audit (advisory) so dev-tree
+      # advisories stay visible without blocking; this gate blocks on what ships.
+      - name: Frontend dependency audit (HARD gate, production deps)
         working-directory: frontend
-        run: npm audit --audit-level=high
+        run: npm audit --omit=dev --audit-level=high
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
         with:
@@ -175,7 +212,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
@@ -578,7 +615,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Merge per-arch manifests → latest-mac.yml
         env:

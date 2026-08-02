@@ -31,9 +31,19 @@ from app import models  # noqa: F401
 # this is the Alembic Config object
 config = context.config
 
-# Interpret the config file for Python logging
+# Interpret the config file for Python logging.
+#
+# `disable_existing_loggers=False` is LOAD-BEARING (#631). Python's default for
+# that argument is True, and `run_migrations()` runs on EVERY boot — after
+# `app.main` and its router/service imports have already created their
+# module-level loggers. With the default, all 31 `app.*` loggers end up
+# `disabled=True`, so every deliberate caught-log-and-continue diagnostic
+# vanishes: a failed auto-backup, the #578 reverse-recode repair, the consensus
+# sweep, the #574 media-duration backfill. Unhandled exceptions still surface
+# (uvicorn configures `uvicorn.error` separately) — what is lost is exactly the
+# non-fatal failures that leave no other trace.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Target metadata for 'autogenerate' support
 target_metadata = Base.metadata

@@ -1,6 +1,7 @@
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -26,14 +27,47 @@ const SHORTCUT_GROUPS = [
       { keys: ['c'], label: 'Create code' },
       { keys: ['n'], label: 'Create note' },
       { keys: ['s'], label: 'Toggle quote' },
-      { keys: ['j'], label: 'Next uncoded' },
+      // #644: `j` is claimed by useCodeChordShortcuts ONLY when the surface
+      // passes onJumpUncoded. The observation workbench deliberately omits it
+      // so `J` can shuttle backward (D4) — so "all views" was false here, and
+      // this dialog was telling the researcher the wrong thing about a key that
+      // does something else on that page.
+      { keys: ['j'], label: 'Next uncoded (not in Observations)' },
       { keys: ['0', '-', '9'], label: 'Apply code (chord shortcut)' },
       { keys: ['cat', '.', 'code'], label: 'Category chord (requires categories)' },
       { keys: ['F2'], label: 'Edit / rename' },
       { keys: ['\u2191', '\u2193'], label: 'Navigate' },
       { keys: ['Shift', '\u2191\u2193'], label: 'Multi-select' },
-      { keys: ['\u2190', '\u2192'], label: 'Switch panel' },
+      // Same correction as `j`: the observation workbench supplies
+      // onArrowHorizontal, so \u2190/\u2192 nudge the selected clip's boundary there and
+      // never move panel focus. The audit named only `j`; this one was found by
+      // reading the hook's contract against the workbench's options.
+      { keys: ['\u2190', '\u2192'], label: 'Switch panel (not in Observations)' },
       { keys: ['Esc'], label: 'Clear selection' },
+    ],
+  },
+  {
+    // #644: v1.3.0's headline surface had the densest keyboard layer in the app
+    // and no entry here at all. Verified against ObservationWorkbench's
+    // `extraKeys` + `onArrowHorizontal`, not from the issue text.
+    title: 'Observations',
+    shortcuts: [
+      { keys: ['Space'], label: 'Play / pause (clip list focused)' },
+      { keys: ['i', 'o'], label: 'Mark clip in / out' },
+      { keys: ['p'], label: 'Point event' },
+      // Audited against the live hook options 2026-08-02. `s` is ONE verb over
+      // two states, and naming only the armed one implied a mark was required.
+      { keys: ['s'], label: 'Quote clip — or the marked range, while marking' },
+      { keys: ['u'], label: 'Next gap or uncoded clip' },
+      // `c`/`n` are listed under "Coding (all views)" and that claim was FALSE
+      // here until #660: the workbench never passed onCreateCode, and the hook
+      // preventDefaults `c` before calling it, so the key was swallowed.
+      { keys: ['c'], label: 'Create a code and apply it to the selected clips' },
+      { keys: ['n'], label: 'Add note (opens the rail’s note box)' },
+      { keys: ['j', 'k', 'l'], label: 'Shuttle back / play-pause / faster' },
+      { keys: [',', '.'], label: 'Step frame (Shift: 1s)' },
+      { keys: ['\u2190', '\u2192'], label: 'Nudge boundary (Shift: 1s)' },
+      { keys: ['Esc'], label: 'Cancel mark, then exit Follow' },
     ],
   },
   {
@@ -90,8 +124,20 @@ export default function KeyboardHelpDialog({ open, onOpenChange }: KeyboardHelpD
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Keyboard Shortcuts</DialogTitle>
+          {/* #648: without this Radix logs "Missing Description or
+              aria-describedby" on every open and a screen reader announces the
+              title with nothing after it. */}
+          <DialogDescription>
+            Shortcuts by area. Coding keys work in every coding view unless an
+            entry says otherwise.
+          </DialogDescription>
         </DialogHeader>
-        <div className="grid grid-cols-2 gap-6 mt-2">
+        {/* DialogContent is `top-1/2 -translate-y-1/2` with NO max-height and no
+            overflow, so a tall dialog centres and runs off BOTH edges of the
+            viewport with nothing to scroll. Adding the Observations section made
+            that reachable at 1280x720 (the tool's stated minimum), so the
+            content area is height-bounded here rather than growing forever. */}
+        <div className="grid grid-cols-2 gap-6 mt-2 max-h-[65vh] overflow-y-auto pr-1">
           {SHORTCUT_GROUPS.map(group => (
             <div key={group.title}>
               <h3 className="text-xs font-semibold text-mm-text-secondary uppercase tracking-wider mb-2">

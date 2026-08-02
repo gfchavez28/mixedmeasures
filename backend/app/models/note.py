@@ -25,6 +25,7 @@ class Note(Base):
     segment_id = Column(Integer, ForeignKey("segments.id", ondelete="SET NULL"), nullable=True, index=True)
     dataset_value_id = Column(Integer, ForeignKey("dataset_values.id", ondelete="CASCADE"), nullable=True, index=True)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=True, index=True)
+    observation_id = Column(Integer, ForeignKey("observations.id", ondelete="CASCADE"), nullable=True, index=True)
     excerpt_id = Column(Integer, ForeignKey("excerpt.id", ondelete="SET NULL"), nullable=True)
     content = Column(Text, nullable=False)
     sequence_number = Column(Integer, nullable=False)
@@ -37,13 +38,15 @@ class Note(Base):
     # Relationships
     conversation = relationship("Conversation", back_populates="attached_notes")
     document = relationship("Document", back_populates="notes")
+    observation = relationship("Observation", back_populates="notes")
     segment = relationship("Segment", back_populates="attached_notes")
     dataset_value = relationship("DatasetValue", back_populates="attached_notes")
     excerpt = relationship("Excerpt", back_populates="note")
 
     __table_args__ = (
         CheckConstraint(
-            'conversation_id IS NOT NULL OR dataset_value_id IS NOT NULL OR document_id IS NOT NULL',
+            'conversation_id IS NOT NULL OR dataset_value_id IS NOT NULL OR '
+            'document_id IS NOT NULL OR observation_id IS NOT NULL',
             name='ck_note_at_least_one_parent'
         ),
         Index('ix_notes_excerpt_unique', 'excerpt_id',

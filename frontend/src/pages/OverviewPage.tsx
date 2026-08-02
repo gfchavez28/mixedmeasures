@@ -1,15 +1,14 @@
 import { useState, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { formatBytes } from '@/lib/format'
-import { useNavigate } from 'react-router-dom'
-import { Quote, FileInput, ChevronRight, Layers, MessageSquareText, Package, Pencil, MessageSquare, Table2, FileText, BarChart3, Users, StickyNote } from 'lucide-react'
+import { formatBytes, plural } from '@/lib/format'
+import { useNavigate } from 'react-router'
+import { Quote, FileInput, ChevronRight, Layers, MessageSquareText, Package, Pencil, MessageSquare, Table2, FileText, BarChart3, Users, StickyNote, Video } from 'lucide-react'
 import { projectsApi, projectPortabilityApi } from '@/lib/api'
 import { toast } from 'sonner'
-import type { RecentConversation, RecentDataset, RecentDocument } from '@/lib/api'
+import type { RecentConversation, RecentDataset, RecentDocument, RecentObservation } from '@/lib/api'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import InlineEditableText from '@/components/InlineEditableText'
-
-const plural = (n: number, one: string, many: string) => (n === 1 ? one : many)
+import { OBSERVATION_CARD_DESCRIPTION, SOURCE_KIND_ONE_LINER } from '@/lib/source-kind-copy'
 
 const ACCENT = {
   green: {
@@ -43,6 +42,16 @@ const ACCENT = {
     border: 'hover:border-[hsl(var(--mm-blue)/0.5)]',
     iconBorder: 'border-[hsl(var(--mm-blue)/0.18)]',
     leftBar: 'border-l-[hsl(var(--mm-blue)/0.5)]',
+  },
+  // Observations (#627). Teal matches the TopRail tab accent — the utility
+  // classes only became real in #628, which registered --color-mm-teal*.
+  teal: {
+    text: 'text-mm-teal-text',
+    bg: 'bg-[hsl(var(--mm-teal)/0.12)]',
+    icon: 'text-mm-teal',
+    border: 'hover:border-[hsl(var(--mm-teal)/0.5)]',
+    iconBorder: 'border-[hsl(var(--mm-teal)/0.18)]',
+    leftBar: 'border-l-[hsl(var(--mm-teal)/0.5)]',
   },
   canvas: {
     text: 'text-mm-canvas-text',
@@ -99,7 +108,12 @@ export default function OverviewPage() {
   })
 
   const s = summary
-  const isEmpty = s && s.conversations === 0 && s.datasets === 0 && s.documents === 0
+  // #627: observations MUST be part of this predicate. An observation-only
+  // project is not empty — it holds the researcher's entire dataset — and
+  // omitting it told them to "import something to begin" while also hiding the
+  // stats bar and secondary links, which are gated on the same flag.
+  const isEmpty =
+    s && s.conversations === 0 && s.datasets === 0 && s.documents === 0 && s.observations === 0
 
   if (isLoading) {
     return (
@@ -211,41 +225,72 @@ export default function OverviewPage() {
         <div className="rounded-lg border border-mm-surface-border bg-mm-surface p-8 mb-3.5 text-center">
           <h2 className="text-lg font-semibold text-mm-text mb-2">Get started</h2>
           <p className="text-sm text-mm-text-muted mb-3.5">
-            Import conversations, documents, or datasets to begin your analysis.
+            Import conversations, recordings, documents, or datasets to begin your analysis.
           </p>
-          <div className="flex items-center justify-center gap-3">
+          {/* #627: four paths, in the SAME order as the source cards
+            * (Conversations · Datasets · Documents · Observations). The old
+            * three ran Conversations · Documents · Datasets, which never
+            * matched the grid. Labels drop the repeated "Import" verb — four
+            * copies of it wrap the row at the 1280×720 minimum viewport, and
+            * the heading above already says it. */}
+          <div className="flex items-center justify-center gap-3 flex-wrap">
             <button
               onClick={() => navigate(`/projects/${projectId}/conversations/import`)}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-green))] hover:opacity-90 transition-opacity"
             >
-              <FileInput className="w-4 h-4" />
-              Import Conversations
-            </button>
-            <button
-              onClick={() => navigate(`/projects/${projectId}/documents/import`)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 transition-colors dark:bg-purple-700 dark:hover:bg-purple-600"
-            >
-              <FileInput className="w-4 h-4" />
-              Import Documents
+              <FileInput className="w-4 h-4" aria-hidden="true" />
+              Conversations
             </button>
             <button
               onClick={() => navigate(`/projects/${projectId}/datasets/import`)}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-orange))] hover:opacity-90 transition-opacity"
             >
-              <FileInput className="w-4 h-4" />
-              Import Datasets
+              <FileInput className="w-4 h-4" aria-hidden="true" />
+              Datasets
+            </button>
+            <button
+              onClick={() => navigate(`/projects/${projectId}/documents/import`)}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 transition-colors dark:bg-purple-700 dark:hover:bg-purple-600"
+            >
+              <FileInput className="w-4 h-4" aria-hidden="true" />
+              Documents
+            </button>
+            <button
+              onClick={() => navigate(`/projects/${projectId}/observations/import`)}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-teal))] hover:opacity-90 transition-opacity"
+            >
+              <FileInput className="w-4 h-4" aria-hidden="true" />
+              Observations
             </button>
           </div>
+          {/* The Conversation/Observation choice is the one routing decision a
+            * researcher holding a recording gets wrong. This surface can afford
+            * exactly one line, so it gets THE one line — `SOURCE_KIND_ONE_LINER`
+            * exists for precisely this case, and using it means the empty state
+            * can never drift from the import fork's wording. */}
+          <p className="mt-3.5 mx-auto max-w-[62ch] text-xs text-mm-text-muted leading-relaxed">
+            {SOURCE_KIND_ONE_LINER}
+          </p>
         </div>
       )}
 
       {/* Stats bar */}
       {s && !isEmpty && (
         <div className="rounded-lg border border-mm-surface-border bg-mm-surface shadow-mm-card mb-3.5">
-          <div className="grid grid-cols-4 sm:grid-cols-8 divide-x divide-mm-border-subtle">
+          {/* #627: nine cells. The narrow fallback is grid-cols-3 (9 = 3+3+3)
+            * rather than grid-cols-4, which would orphan a single cell on a
+            * third row. */}
+          <div className="grid grid-cols-3 sm:grid-cols-9 divide-x divide-mm-border-subtle">
             <StatCell label={plural(s.conversations, 'Conversation', 'Conversations')} value={s.conversations} accent="green" />
             <StatCell label={plural(s.datasets, 'Dataset', 'Datasets')} value={s.datasets} accent="orange" sub={s.total_records > 0 ? `${s.total_records} ${plural(s.total_records, 'record', 'records')}` : undefined} />
             <StatCell label={plural(s.documents, 'Document', 'Documents')} value={s.documents} accent="purple" sub={s.document_segments > 0 ? `${s.document_segments} ${plural(s.document_segments, 'segment', 'segments')}` : undefined} />
+            <StatCell
+              label={plural(s.observations, 'Observation', 'Observations')}
+              value={s.observations}
+              accent="teal"
+              sub={s.observation_clips > 0 ? `${s.observation_clips} ${plural(s.observation_clips, 'clip', 'clips')}` : undefined}
+              title="Recordings coded on their own timeline. Clips are the time ranges you mark on them."
+            />
             <StatCell label={plural(s.participants, 'Participant', 'Participants')} value={s.participants} />
             <StatCell label={plural(s.codes, 'Code', 'Codes')} value={s.codes} accent="purple" sub={s.categories > 0 ? `${s.categories} ${plural(s.categories, 'category', 'categories')}` : undefined} />
             {/* #351/#352: stat tile now reflects participant-only count
@@ -404,7 +449,51 @@ export default function OverviewPage() {
           )}
         </WorkspaceCard>
 
-        {/* Analysis */}
+        {/* Observations (#627) — the fourth SOURCE card. The backend has
+          * carried `observations` + `recent_observations` since slab 1b; this
+          * page was the last consumer missing. */}
+        <WorkspaceCard
+          icon={<Video className="w-4 h-4" aria-hidden="true" />}
+          title="Observations"
+          summary={s ? `${s.observations} observations${s.observation_clips > 0 ? ` · ${s.observation_clips} clips` : ''}` : undefined}
+          description={OBSERVATION_CARD_DESCRIPTION}
+          accent="teal"
+          onClick={() => navigate(`/projects/${projectId}/observations`)}
+          headerAction={{
+            icon: <FileInput className="w-3 h-3" />,
+            label: 'Import',
+            onClick: () => navigate(`/projects/${projectId}/observations/import`),
+          }}
+        >
+          {s && s.recent_observations && s.recent_observations.length > 0 && (
+            <CardItems>
+              {s.recent_observations.map((o: RecentObservation) => (
+                <ItemRow
+                  key={o.id}
+                  label={o.name}
+                  /* "#/# coded" matches the conversations + documents cards.
+                   * NOTE: this is the FROZEN-branch statistic — for an open-cut
+                   * observation the workbench gauge reports % of timeline
+                   * covered (D33), so the two surfaces read differently by
+                   * design. The card is an inventory, not a reliability
+                   * surface. */
+                  detail={`${o.coded_segment_count}/${o.segment_count} coded`}
+                  onClick={() => navigate(`/projects/${projectId}/observations/${o.id}`)}
+                  accent="teal"
+                />
+              ))}
+            </CardItems>
+          )}
+          {s && s.observations === 0 && (
+            <p className="text-[12px] text-mm-text-faint mt-3 italic">No observations yet</p>
+          )}
+        </WorkspaceCard>
+      </div>
+
+      {/* Analysis — full width beneath the four SOURCE cards (#627). The grid
+        * above is "what is in this project"; Analysis is "where you go to work
+        * on it", so it gets its own row rather than a fifth source slot. */}
+      <div className="grid grid-cols-1 gap-2.5 mb-3.5">
         <WorkspaceCard
           icon={<BarChart3 className="w-4 h-4" aria-hidden="true" />}
           title="Analysis"
@@ -413,8 +502,10 @@ export default function OverviewPage() {
           accent="blue"
           onClick={() => navigate(`/projects/${projectId}/analysis`)}
         >
+          {/* 2×2 rather than a vertical stack (#627) — full width, a stack of
+            * four would make this card a tall band of stretched buttons. */}
           <div
-            className="mt-3 space-y-1.5"
+            className="mt-3 grid grid-cols-2 gap-1.5"
             onClick={e => e.stopPropagation()}
             onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation() }}
           >

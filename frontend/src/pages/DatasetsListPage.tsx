@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { FileInput, ChevronRight, SlidersHorizontal, Pencil, Trash2, Palette, Package, MessageSquareText, Table2 } from 'lucide-react'
 import { datasetsApi, domainsApi, textCodingApi, extractApiError } from '@/lib/api'

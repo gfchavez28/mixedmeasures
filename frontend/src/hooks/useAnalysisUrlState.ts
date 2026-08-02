@@ -1,5 +1,5 @@
 import { useMemo, useCallback } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router'
 import type { ChartType, SortOrder } from '@/lib/chart-data'
 import { parseIntParam } from '@/lib/utils'
 

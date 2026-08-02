@@ -31,6 +31,7 @@ function config(overrides: Partial<FileConfig> = {}): FileConfig {
     sheetName: null,
     linkParticipants: true,
     linkColumnIndex: null,
+    valueLabels: {},
     ...overrides,
   }
 }

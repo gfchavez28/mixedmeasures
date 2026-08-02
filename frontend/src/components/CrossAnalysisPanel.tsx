@@ -178,7 +178,6 @@ export default function CrossAnalysisPanel({
     textAnalysisApi.exportCrossAnalysis(projectId, {
       column_ids: columnIdsStr,
       filters: debouncedFilters.length > 0 ? JSON.stringify(debouncedFilters) : undefined,
-      cross_column_id: crossColumnId ?? undefined,
       coder_ids: coderIncludeCsv,
       layer_scope: layerScope,
     })

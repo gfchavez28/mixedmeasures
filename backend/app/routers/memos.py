@@ -5,6 +5,7 @@ from ..database import get_db
 from ..models.user import User
 from ..models.project import Project
 from ..models.conversation import Conversation
+from ..models.observation import Observation
 from ..models.code import Code
 from ..models.code_category import CodeCategory
 from ..models.materials import MaterialCollection, Material
@@ -84,6 +85,7 @@ async def create_memo(
     entity_models = {
         "project": (Project, Project.id == data.entity_id),
         "conversation": (Conversation, Conversation.id == data.entity_id, Conversation.project_id == project_id),
+        "observation": (Observation, Observation.id == data.entity_id, Observation.project_id == project_id),
         "code": (Code, Code.id == data.entity_id, Code.project_id == project_id),
         "code_category": (CodeCategory, CodeCategory.id == data.entity_id, CodeCategory.project_id == project_id),
     }

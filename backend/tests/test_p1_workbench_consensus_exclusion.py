@@ -15,9 +15,12 @@ exist there), so the single-layer suites stay green.
 """
 import asyncio
 
+from datetime import datetime
+
 from app.models.project import Project
 from app.models.conversation import Conversation
 from app.models.document import Document
+from app.models.observation import Observation
 from app.models.segment import Segment
 from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from app.models.code import Code
@@ -28,6 +31,7 @@ from app.services.consensus import materialize_consensus_for_project
 from app.services.coding_layers import CONSENSUS_ORIGIN
 from app.routers.segments import segment_to_response, list_segments
 from app.routers.documents import _segment_to_doc_response
+from app.routers.observations import _clip_to_response
 from app.routers.text_coding import coding_progress
 
 
@@ -110,6 +114,39 @@ def test_document_segment_payload_excludes_consensus(db_session):
     resp = _segment_to_doc_response(db.get(Segment, 7100))
     assert len(resp.codes) == 1, "document workbench payload excludes the consensus row"
     assert consensus.id not in [c.user_id for c in resp.codes]
+
+
+def test_observation_clip_payload_excludes_consensus(db_session):
+    """Slab 4a arm: a FROZEN observation's clips ARE consensus-eligible (D18), so
+    the sweep materializes a consensus row on a clip coded by ≥2 humans. The clip
+    payload (which 4d's chips consume) must surface only the human layer."""
+    db = db_session
+    db.add_all([
+        Project(id=73, name="P", user_id=1),
+        User(id=2, username="Coder B", password_hash=None, coder_type="human"),
+    ])
+    db.flush()
+    consensus = get_or_create_consensus_user(db)
+    db.add_all([
+        # FROZEN -> the clips carry a consensus layer, like transcript turns.
+        Observation(id=73, project_id=73, name="Obs", segmentation_frozen_at=datetime(2026, 7, 17)),
+        Code(id=7310, project_id=73, name="O", numeric_id=2, is_active=True, is_universal=False),
+        Segment(id=7300, observation_id=73, conversation_id=None, sequence_order=0,
+                text="clip", start_time=0.0, end_time=5.0),
+    ])
+    db.flush()
+    db.add_all([
+        CodeApplication(code_id=7310, user_id=1, segment_id=7300),
+        CodeApplication(code_id=7310, user_id=2, segment_id=7300),  # 2 humans agree
+    ])
+    db.flush()
+    materialize_consensus_for_project(db, 73)  # -> 1 consensus row on the clip
+    db.flush()
+
+    resp = _clip_to_response(db.get(Segment, 7300))
+    assert len(resp.applied_code_details) == 2, "clip payload excludes the consensus row"
+    assert consensus.id not in [d.user_id for d in resp.applied_code_details]
+    assert resp.applied_codes == [7310, 7310], "bare ID list also excludes consensus"
 
 
 def test_text_coding_progress_excludes_consensus(db_session):

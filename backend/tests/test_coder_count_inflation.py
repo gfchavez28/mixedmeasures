@@ -24,6 +24,8 @@ import asyncio
 from app.models.project import Project
 from app.models.user import User
 from app.models.conversation import Conversation
+from app.models.document import Document
+from app.models.observation import Observation
 from app.models.segment import Segment
 from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from app.models.code import Code
@@ -39,7 +41,7 @@ from app.services.code_analysis import (
     get_code_frequencies,
     get_text_columns_with_coding,
 )
-from app.routers.export_helpers import build_code_conversation_matrix
+from app.routers.export_helpers import build_code_source_matrix
 
 
 def _run(coro):
@@ -424,8 +426,8 @@ def test_get_text_columns_with_coding_distinct_and_consensus(db_session):
     assert cols[9510]["coded_count"] == 1, "1 distinct human-coded value (not 2 rows, not the consensus value)"
 
 
-def test_build_code_conversation_matrix_distinct_and_consensus(db_session):
-    """The export conversation×code matrix counts distinct human-coded segments."""
+def test_build_code_source_matrix_distinct_and_consensus(db_session):
+    """The export source×code matrix counts distinct human-coded segments."""
     db = db_session
     _add_coder_b(db)
     db.add_all([
@@ -444,5 +446,56 @@ def test_build_code_conversation_matrix_distinct_and_consensus(db_session):
     ])
     db.flush()
 
-    matrix = build_code_conversation_matrix(db, 952)
-    assert matrix[(952, 9525)] == 1, "1 distinct human-coded segment (not 2 rows, not consensus)"
+    matrix = build_code_source_matrix(db, 952)
+    assert matrix[(("conversation", 952), 9525)] == 1, \
+        "1 distinct human-coded segment (not 2 rows, not consensus)"
+
+
+def test_build_code_source_matrix_spans_all_three_parents(db_session):
+    """#629: documents and observation clips ride the matrix, keyed by TYPE+id.
+
+    The fixture is deliberately the shape the old code could not survive: the
+    three sources share the id 977, which is legal because the three parents are
+    independent sequences. A matrix keyed by bare source id sums them into one
+    column reading 3 — and every conversation-only fixture in the suite passes
+    either way, which is exactly how this stayed conversation-only through #616
+    and #620.
+    """
+    db = db_session
+    db.add_all([
+        Project(id=977, name="Three parents", user_id=1),
+        Conversation(id=977, project_id=977, name="Interview"),
+        Document(id=977, project_id=977, name="Field notes",
+                 source_filename="f.docx", source_format="docx"),
+        Observation(id=977, project_id=977, name="Site visit"),
+        Code(id=9775, project_id=977, name="Theme", color="#111111",
+             numeric_id=1, is_active=True, is_universal=False),
+    ])
+    db.flush()
+    db.add_all([
+        Segment(id=9770, conversation_id=977, sequence_order=0, text="turn"),
+        Segment(id=9771, document_id=977, sequence_order=0, text="paragraph"),
+        Segment(id=9772, observation_id=977, sequence_order=0, text="clip",
+                start_time=0.0, end_time=5.0),
+        # Soft-deleted on the document: must not reach the matrix.
+        Segment(id=9773, document_id=977, sequence_order=1, text="merged away",
+                merged_into_id=9771),
+    ])
+    db.flush()
+    db.add_all([
+        CodeApplication(segment_id=9770, code_id=9775, user_id=1),
+        CodeApplication(segment_id=9771, code_id=9775, user_id=1),
+        CodeApplication(segment_id=9772, code_id=9775, user_id=1),
+        CodeApplication(segment_id=9773, code_id=9775, user_id=1),
+    ])
+    db.flush()
+
+    matrix = build_code_source_matrix(db, 977)
+
+    assert matrix[(("conversation", 977), 9775)] == 1
+    assert matrix[(("document", 977), 9775)] == 1, "document segments ride the matrix (#629)"
+    assert matrix[(("observation", 977), 9775)] == 1, "observation clips ride the matrix (#629)"
+    assert len(matrix) == 3, (
+        "three DISTINCT source keys — a bare-id key would collapse them to one "
+        "entry counting 3, since the parents are independent sequences"
+    )

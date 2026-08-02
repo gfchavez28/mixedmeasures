@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { Search, EyeOff, X, Plus, FileOutput, FileInput, BookOpen, SlidersHorizontal, ArrowUpRight } from 'lucide-react'
 import type { CodebookState } from '@/hooks/useCodebookState'
 import type { CodebookTreeResponse } from '@/lib/api'
 import type { Diagnostics } from '@/lib/codebook-utils'
 import SegmentedControl from '@/components/ui/segmented-control'
 import FreezeCodebookButton from '@/components/codebook/FreezeCodebookButton'
+import { MMCODEBOOK_ACCEPT } from '@/lib/mm-formats'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -185,7 +186,7 @@ export default function CodebookToolbar({
             <input
               ref={importFileRef}
               type="file"
-              accept=".mmcodebook,.qdc"
+              accept={MMCODEBOOK_ACCEPT}
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0]

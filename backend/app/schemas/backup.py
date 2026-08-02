@@ -6,6 +6,14 @@ class ProjectBackupSummary(BaseModel):
     conversation_count: int
     dataset_count: int
     document_count: int
+    # Observations track (v1.3.0). The default is LOAD-BEARING, not tidiness:
+    # `validate_backup` parses a stored `manifest.json` straight into this model
+    # (`BackupManifest(**manifest_data)`), so a pre-1.3.0 backup carries no such
+    # key and a required field would make every existing backup fail validation
+    # — i.e. unrestorable. 0 is also semantically TRUE for those backups: the
+    # entity did not exist when they were written. Same reasoning as
+    # `media_file_count` / `video_excluded` below.
+    observation_count: int = 0
 
 
 class BackupManifest(BaseModel):

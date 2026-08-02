@@ -40,6 +40,7 @@ class Project(Base):
     user = relationship("User", back_populates="projects")
     documents = relationship("Document", back_populates="project", cascade="all, delete-orphan")
     conversations = relationship("Conversation", back_populates="project", cascade="all, delete-orphan")
+    observations = relationship("Observation", back_populates="project", cascade="all, delete-orphan")
     codes = relationship("Code", back_populates="project", cascade="all, delete-orphan")
     categories = relationship("CodeCategory", back_populates="project", cascade="all, delete-orphan")
     memos = relationship("Memo", back_populates="project", cascade="all, delete-orphan")

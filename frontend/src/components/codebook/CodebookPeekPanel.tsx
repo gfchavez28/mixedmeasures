@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { X, ChevronRight, ChevronDown, ExternalLink, Power, PowerOff, FolderInput, Trash2, StickyNote, Merge, FolderPlus } from 'lucide-react'
 import { toast } from 'sonner'

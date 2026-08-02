@@ -10,7 +10,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { act, cleanup, render } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import { useCrosswalkNavigation } from './useCrosswalkNavigation'
 
 beforeEach(() => {

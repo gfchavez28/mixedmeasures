@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest'
 import { renderHook, act, cleanup } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import type { ReactNode } from 'react'
 import type { MaterialResponse } from '@/lib/api'
 import { useQualitativeAnalysis } from './useQualitativeAnalysis'

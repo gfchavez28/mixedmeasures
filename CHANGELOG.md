@@ -5,6 +5,144 @@ All notable changes to Mixed Measures are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-02
+
+### Upgrade notes
+
+Please read these before updating. Several of them change numbers you may
+already have written down or reported.
+
+- **SPSS `.sav` data imported before this release should be re-imported.**
+  v1.2.0 correctly kept values SPSS had flagged as user-missing (for example
+  "99 = Refused") out of your statistics — but it did so by discarding them
+  outright rather than storing them as missing, so a refusal and a genuinely
+  unanswered question became indistinguishable, and you could no longer count how
+  many people declined to answer. This release stores them, marked as missing.
+  **Data already imported cannot be repaired in place** — those cells were never
+  written, so there is nothing to recover from. Re-import the `.sav` file to get
+  the full record. Datasets imported from CSV or Excel are unaffected.
+- **Coverage percentages will drop for recordings whose length was previously
+  unknown.** `.mov` and `.webm` recordings never had their duration read, so
+  coverage was measured against the end of your last clip rather than the end of
+  the recording — which the coding itself defines, so it always read close to
+  100%. The app now reads the true length on startup and coverage is measured
+  against it. On one test project this moved a recording from 50.0% to 26.4%.
+  Nothing about your coding changed; the denominator was wrong and now isn't.
+- **Project-wide intercoder reliability changes if you have a frozen, coded
+  observation.** Frozen clips now count toward the project's kappa and
+  Krippendorff's alpha alongside conversations and documents. Reliability figures
+  from v1.2.0 are not directly comparable — recompute before quoting them.
+- **The study CSV export replaces one column with two.** `conversation_name`
+  becomes `source_type` + `source_name`, because that file now includes document
+  segments (silently missing since documents shipped) and observation clips
+  alongside conversation turns. Every other column keeps its name, so a script
+  reading `segment_id`, `text` or `code_3` still works — only the source column
+  moves.
+- **Dragging a code or a note onto a segment has been removed.** It worked, but
+  it was mouse-only with no keyboard equivalent, screen readers announced it as
+  meaningless ids, and in three of the four coding surfaces codes advertised
+  themselves as draggable with nowhere to drop. Dragging a note also could not be
+  undone. Every gesture it offered has a better equivalent, all unchanged: click
+  a code in the rail, use its number/chord shortcut, or attach a note from the
+  Notes panel (which is undoable, and has a keyboard path).
+- **Code text is now pure black on light-coloured codes.** Three of the sixteen
+  code colours previously rendered their label below the WCAG AA contrast
+  minimum. Every code chip, node and clip bar is affected, so your codebook will
+  look slightly different.
+
+**Known limitation:** qualitative charts (code frequency, co-occurrence, and the
+other qualitative material types) still cannot be embedded in a Canvas. They are
+correctly labelled as such rather than silently rendering as something else, and
+the full set is planned for a following release.
+
+### Added
+
+- **Observations — code a recording with no transcript.** A recording of an
+  *event* rather than a conversation — a classroom, a clinic visit, a home visit,
+  a usability session — is now a source in its own right, coded directly on its
+  own timeline. Import a recording on its own and start from an empty timeline,
+  cut it into fixed intervals for interval-style coding, or seed labelled clips
+  from a `.vtt`/`.srt` cue file; the wizard shows the clip count, the first clips
+  and any warnings before writing anything. Mark and adjust clips from the
+  keyboard (**I/O** for in/out points, **J-K-L** transport with frame stepping,
+  0.1 s boundary nudges, typed timecodes, split and merge by time), with a follow
+  mode that keeps the view on the playhead. Clips carry codes, notes and
+  time-range quotes, and reach search, the Canvas and the qualitative analysis
+  surfaces like any other source.
+- **Coverage for observations** — what share of the timeline you have marked,
+  with a jump to the next unmarked gap.
+- **Reliability for observations, both ways of cutting.** Leave the clip set
+  **open** and each coder marks their own boundaries — agreement is then a
+  unitizing problem, reported as Krippendorff's alpha at 100 ms resolution plus
+  time-binned kappa, with the bin size shown as part of the result and per-code
+  prevalence beside every kappa. **Freeze** the clip set once the team agrees the
+  cuts and every coder codes the same clips, which brings the ordinary kappa,
+  side-by-side reconciliation and the consensus layer to video unchanged.
+- **Timed analytics per code** — duration, frequency, rate per minute, share of
+  session airtime, bout length, and a stacked codeline of the whole session.
+  Because clips can overlap, per-code airtimes don't sum to covered time, and the
+  table says so.
+- **Re-use a recording across source types.** "Also code this as an observation"
+  (and the reverse) copies the file rather than re-uploading it, leaving the
+  original source and all of its coding untouched.
+- **Declared value labels for numbers-only columns.** A CSV whose cells are bare
+  codes (`1`–`5`) can now be given a code-to-label dictionary — during import or
+  afterwards — and the column behaves exactly as if it had arrived from SPSS with
+  labels attached. Appending a code-format file to a labelled column maps it
+  correctly.
+- **Declared missing values.** Any column can declare which of its values mean
+  "missing" — individual codes, or a numeric range such as `-99 THRU -1` —
+  through a three-way choice in the column dictionary: use the built-in defaults,
+  declare that nothing is missing, or list your own values. Every analysis,
+  grouping, chart, data-quality check and R export honours the declaration
+  consistently, so a "Prefer not to say" no longer counts as a real response
+  anywhere. SPSS files bring their own declaration with them.
+- **Observations appear across the app** — a card and stat on the project
+  Overview, a fourth import path, a search filter, and inclusion in the
+  qualitative analysis surfaces.
+
+### Changed
+
+- Code and note drag-and-drop was removed from the coding workbenches; see the
+  upgrade notes above.
+- Code label text now uses pure black or white for contrast, whichever the code's
+  colour requires; see the upgrade notes above.
+- The Excel study export spans all three source types and gains a **Quotes**
+  sheet. On one real project this added 68 document rows that had never reached
+  the workbook.
+- REFI-QDA codebook exchange (`.qdc`) now uses the namespace the standard
+  actually specifies. Files exported by earlier versions used a malformed
+  namespace and would not open in other QDA software; import accepts both, so
+  existing files still work.
+
+### Fixed
+
+- **Value labels could invert a reverse-scored column**, rewriting every response
+  to its opposite. This is now refused rather than applied.
+- **Reverse-scored recodes reflected around the wrong midpoint** when a column
+  contained a missing code — a mapping like `{Never: 1, Always: 5, Prefer not to
+  say: 99}` was reflected around 100, silently scoring "Never" as 99. Missing
+  values no longer define the scale, and affected recodes repair themselves on
+  startup.
+- `.mov` and `.webm` recordings now have their duration read correctly; existing
+  recordings are filled in on startup.
+- Descriptives were unreachable in projects that contained only observations.
+- The project Overview no longer describes an observation-only project as empty.
+- A clip quote is no longer lost when its clip is split or merged.
+- The Canvas Materials drawer no longer renders a clip quote as a blank, nameless
+  row.
+- Diagnostic logging was silently disabled in the packaged app, so failures that
+  were caught and logged — a failed automatic backup, for instance — left no
+  trace. Logging works again.
+- `/analysis/integrated` reaches the Canvas again instead of redirecting to the
+  project list.
+- Merging a colleague's copy of a project now respects a frozen clip set from
+  both directions: their clips can no longer be silently added to an observation
+  you have frozen, and you are no longer told to "re-segment to match" when your
+  own cuts are legitimately still open.
+- Dependency updates clearing four advisories, including one in the shipped
+  desktop tree.
+
 ## [1.2.0] - 2026-07-11
 
 ### Added
@@ -223,7 +361,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.0.1...v1.1.0

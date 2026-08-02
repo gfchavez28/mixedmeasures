@@ -1,5 +1,5 @@
 import { memo, useCallback, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { TriangleAlert, Check, RotateCw, Clock, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -8,9 +8,13 @@ import SegmentedControl from '@/components/ui/segmented-control'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import CodeChip from './CodeChip'
 import InlineCodeActions from './InlineCodeActions'
+import ReconciliationSourcePicker from './ReconciliationSourcePicker'
+import {
+  sourceParams, sourceQueryKey, type ReconciliationSource,
+} from '@/lib/reconciliation-source'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
 import { codeAnalysisApi, type Code, type ReconciliationUnit, type ReconciliationCodeInfo } from '@/lib/api'
-import { cn } from '@/lib/utils'
+import { cn, formatTimecode } from '@/lib/utils'
 
 const RENDER_CAP = 200 // matches the backend limit; disagreements-first keeps the set small
 
@@ -30,14 +34,19 @@ export default function ReconciliationGrid({
 }: ReconciliationGridProps) {
   const queryClient = useQueryClient()
   const [disagreementsOnly, setDisagreementsOnly] = useState(true)
+  const [source, setSource] = useState<ReconciliationSource | null>(null)
   const [focus, setFocus] = useState<{ r: number; c: number }>({ r: 0, c: 0 })
   const gridRef = useRef<HTMLDivElement>(null)
 
+  // Key and params come from ONE pure pair so they cannot drift: the slot held a
+  // literal `null` while the endpoint had accepted source_type/source_id all
+  // along, so narrowing would have served the previous source's page from cache.
   const { data, isLoading } = useQuery({
-    queryKey: ['reconciliation', projectId, null, disagreementsOnly],
+    queryKey: ['reconciliation', projectId, sourceQueryKey(source), disagreementsOnly],
     queryFn: () => codeAnalysisApi.reconciliation(projectId, {
       disagreements_only: disagreementsOnly,
       limit: RENDER_CAP,
+      ...sourceParams(source),
     }),
     enabled: !!projectId,
     staleTime: 60_000,
@@ -74,6 +83,10 @@ export default function ReconciliationGrid({
   const routeForUnit = useCallback((unit: ReconciliationUnit): string | null => {
     if (unit.source_type === 'conversation') return `/projects/${projectId}/conversations/${unit.source_id}?segment=${unit.unit_id}`
     if (unit.source_type === 'document') return `/projects/${projectId}/documents/${unit.source_id}?segment=${unit.unit_id}`
+    // The observation workbench's deep-link param is `?clip=`, NOT `?segment=`.
+    // Without this arm a clip row's jump affordance is dead, and `fixColleague`
+    // is worse than dead: it switches the active coder and then navigates nowhere.
+    if (unit.source_type === 'observation') return `/projects/${projectId}/observations/${unit.source_id}?clip=${unit.unit_id}`
     return null
   }, [projectId])
   // Consensus / read-only jump: go straight to the source segment (no identity change).
@@ -193,6 +206,14 @@ export default function ReconciliationGrid({
           onChange={(v) => { setDisagreementsOnly(v === 'dis'); setSrAnnouncement(v === 'dis' ? 'Showing units that need review' : 'Showing all units') }}
           ariaLabel="Which units to show"
           idPrefix="recon-filter"
+        />
+        <ReconciliationSourcePicker
+          projectId={projectId}
+          value={source}
+          onChange={(s) => {
+            setSource(s)
+            setSrAnnouncement(s ? 'Narrowed to one source' : 'Showing all sources')
+          }}
         />
         <div className="flex-1" />
         {staleCount > 0 && (
@@ -333,7 +354,14 @@ const ReconciliationRow = memo(function ReconciliationRow({
   const engaged = useMemo(() => new Set(unit.engaged), [unit.engaged])
   const cols = coders.length + 2
 
-  const rowheaderLabel = `${unit.unit_type === 'segment' ? 'Segment' : 'Response'} · ${unit.source_label}: ${unit.text.slice(0, 80)} · ${unit.has_disagreement ? 'needs review' : 'agreement'}`
+  // A clip's identity is its TIME RANGE: `text` holds only its label, which is
+  // routinely empty, so the range is the primary line and the label secondary.
+  const isClip = unit.source_type === 'observation'
+  const timeRange = isClip && unit.start_time != null && unit.end_time != null
+    ? `${formatTimecode(unit.start_time)} – ${formatTimecode(unit.end_time)}`
+    : null
+  const unitWord = isClip ? 'Clip' : unit.unit_type === 'segment' ? 'Segment' : 'Response'
+  const rowheaderLabel = `${unitWord} · ${unit.source_label}: ${timeRange ?? unit.text.slice(0, 80)} · ${unit.has_disagreement ? 'needs review' : 'agreement'}`
 
   return (
     <div role="row" className="grid border-b last:border-b-0 hover:bg-mm-surface-hover/40" style={{ gridTemplateColumns: 'var(--recon-cols)' }}>
@@ -357,7 +385,18 @@ const ReconciliationRow = memo(function ReconciliationRow({
             : <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"><Check className="w-3 h-3" aria-hidden="true" />Agree</span>}
           <span className="text-[10px] text-mm-text-faint truncate" title={unit.source_label}>{unit.source_label}</span>
         </div>
-        <p className="text-xs text-mm-text-secondary line-clamp-3" title={unit.text || undefined}>{unit.text || <span className="italic text-mm-text-faint">(no text)</span>}</p>
+        {timeRange ? (
+          <>
+            <p className="text-xs font-mono tabular-nums text-mm-text-secondary">{timeRange}</p>
+            {/* No "(no text)" fallback for a clip: an unlabelled clip is normal,
+                not a defect, and the range above already identifies it. */}
+            {unit.text && (
+              <p className="text-xs text-mm-text-faint line-clamp-2 mt-0.5" title={unit.text}>{unit.text}</p>
+            )}
+          </>
+        ) : (
+          <p className="text-xs text-mm-text-secondary line-clamp-3" title={unit.text || undefined}>{unit.text || <span className="italic text-mm-text-faint">(no text)</span>}</p>
+        )}
       </div>
 
       {/* One cell per coder. */}

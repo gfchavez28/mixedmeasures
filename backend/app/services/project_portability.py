@@ -8,8 +8,10 @@ import enum
 import io
 import json
 import logging
+import math
 import os
 import re
+import shutil
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -19,7 +21,9 @@ from fastapi import HTTPException
 from sqlalchemy import inspect as sa_inspect, func
 from sqlalchemy.orm import Session
 
+from . import media_storage
 from .text_similarity import similarity_ratio
+from .media_duration import MAX_MEDIA_OFFSET_SECONDS, sane_duration
 
 from ..models import (
     AnalysisDomain,
@@ -47,6 +51,7 @@ from ..models import (
     Memo,
     MetricDefinition,
     Note,
+    Observation,
     Participant,
     Project,
     QuoteBoardConfig,
@@ -76,7 +81,24 @@ logger = logging.getLogger(__name__)
 # constructing ColumnType("identifier") at import would crash mid-write with a
 # LookupError, so files exported from ≥2 must be refused cleanly by the gate
 # below rather than half-imported. Version-1 files still import (warning only).
-CURRENT_FORMAT_VERSION = 2
+#
+# Version 3 (2026-07-12, Observations): Segment gained a THIRD parent
+# (observation_id). An older build has no such column, so `_build_entity` drops it
+# and inserts the segment with all parents NULL — which violates that build's
+# two-parent ck_segment_exactly_one_parent and dies mid-write with an opaque
+# IntegrityError. Same shape as #414: bump so the gate refuses cleanly instead.
+# Version-1 and -2 files still import.
+#
+# v4 (2026-07-16, #592 slab 3): DatasetColumn.missing_values — a per-column
+# declared-missing rule list that DECIDES STATISTICS (which cells are NULL,
+# which values form groups). An older build's _build_entity silently DROPS the
+# unknown column on import, so the declaration would vanish without a word and
+# every analysis on that column silently changes — the silent-wrongness class
+# v2 (#414) and v3 (Observations) bumped for. Bumped with the slab-3 endpoint,
+# the first production write path (the slab-1 decision: until something could
+# WRITE a declaration, refusing old builds bought nothing). v1–v3 files still
+# import.
+CURRENT_FORMAT_VERSION = 4
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
 
 
@@ -146,7 +168,7 @@ def export_project(
     cols = {
         m: _get_columns(m)
         for m in [
-            Project, Participant, Speaker, Conversation, Document,
+            Project, Participant, Speaker, Conversation, Document, Observation,
             SegmentGroup, Segment, CodeCategory, Code, CodeEquivalenceGroup,
             CodeApplication,
             Note, Memo, Excerpt, Dataset, DatasetColumn, DatasetRow,
@@ -182,10 +204,19 @@ def export_project(
     ).all()
     doc_ids = [d.id for d in documents]
 
+    observations = db.query(Observation).filter(
+        Observation.project_id == project_id
+    ).all()
+    obs_ids = [o.id for o in observations]
+
     segment_groups = db.query(SegmentGroup).filter(
         SegmentGroup.conversation_id.in_(conv_ids)
     ).all() if conv_ids else []
 
+    # Segment has no project_id — it is gathered through its parents, so EVERY
+    # Segment parent needs a branch here. A missing one is silent data loss that
+    # cascades: segment_ids below is the root of the code_applications, coders,
+    # and (via segment_id) excerpt/note dependency chains.
     segments = []
     if conv_ids:
         segments.extend(
@@ -194,6 +225,10 @@ def export_project(
     if doc_ids:
         segments.extend(
             db.query(Segment).filter(Segment.document_id.in_(doc_ids)).all()
+        )
+    if obs_ids:
+        segments.extend(
+            db.query(Segment).filter(Segment.observation_id.in_(obs_ids)).all()
         )
     segment_ids = [s.id for s in segments]
 
@@ -254,6 +289,8 @@ def export_project(
     coder_ids = {ca.user_id for ca in code_applications if ca.user_id is not None}
     coders = db.query(User).filter(User.id.in_(coder_ids)).all() if coder_ids else []
 
+    # Note has no project_id either — same rule as segments: every Note parent
+    # needs a branch or those notes silently never leave the project.
     notes = []
     if conv_ids:
         notes.extend(
@@ -266,6 +303,10 @@ def export_project(
     if doc_ids:
         notes.extend(
             db.query(Note).filter(Note.document_id.in_(doc_ids)).all()
+        )
+    if obs_ids:
+        notes.extend(
+            db.query(Note).filter(Note.observation_id.in_(obs_ids)).all()
         )
 
     memos = db.query(Memo).filter(
@@ -357,6 +398,7 @@ def export_project(
         "speakers": _serialize_all(speakers, cols[Speaker]),
         "conversations": _serialize_all(conversations, cols[Conversation]),
         "documents": _serialize_all(documents, cols[Document]),
+        "observations": _serialize_all(observations, cols[Observation]),
         "segment_groups": _serialize_all(segment_groups, cols[SegmentGroup]),
         "segments": _serialize_all(segments, cols[Segment]),
         "code_categories": _serialize_all(code_categories, cols[CodeCategory]),
@@ -413,6 +455,16 @@ def export_project(
             "conversation_count": len(conversations),
             "dataset_count": len(datasets),
             "document_count": len(documents),
+            # Declared on the ProjectSummary schema WITH A DEFAULT (#639). It was
+            # omitted originally on the reasoning that the schema's fields are
+            # required, so adding one would fail to parse every v1/v2 manifest —
+            # true of a required field, but omission has its own cost: the schema
+            # is reached through a response_model, which DROPS undeclared fields,
+            # so this count never reached the import preview. A default satisfies
+            # both (old manifests read 0; new ones carry the real count).
+            # `canvas_count`/`canvas_theme_count` below are still undeclared —
+            # nothing renders them today; declare them the same way if that changes.
+            "observation_count": len(observations),
             "code_count": len(codes),
             "category_count": len(code_categories),
             "memo_count": len(memos),
@@ -447,23 +499,29 @@ def export_project(
                     zf.write(str(file_path), arcname)
 
         # Add media files. Canvas images (media/{pid}/canvas/) are canvas
-        # CONTENT and always travel; conversation recordings (numeric dirs)
-        # are skipped when include_media=False — the media-less export.
-        # The import side clears the orphaned media_* metadata so the
-        # workbench shows a clean re-attach state, not a dead player (§8 of
-        # the video scoping doc). Recordings are already-compressed
-        # containers, so ZIP_STORED skips a pointless deflate pass.
+        # CONTENT and always travel; RECORDINGS — a conversation's (numeric dir)
+        # or an observation's (obs-{id} dir, media_storage.media_owner_segment) —
+        # are skipped when include_media=False, the media-less export. The import
+        # side clears the orphaned media_* metadata for BOTH owner kinds so the
+        # workbench shows a clean re-attach state, not a dead player (§8 of the
+        # video scoping doc). Recordings are already-compressed containers, so
+        # ZIP_STORED skips a pointless deflate pass.
+        #
+        # The walk is DIRECTORY-driven, not entity-driven, so a new media owner
+        # travels for free — but note the arcname deliberately STRIPS project_id
+        # (the importer re-prepends the NEW pid), which is why the owner dir name
+        # is the only thing carrying owner identity across the archive.
         if media_dir is not None:
             project_media_dir = media_dir / str(project_id)
             if project_media_dir.is_dir():
-                for conv_id_dir in project_media_dir.iterdir():
-                    if not conv_id_dir.is_dir():
+                for owner_dir in project_media_dir.iterdir():
+                    if not owner_dir.is_dir():
                         continue
-                    if conv_id_dir.name != "canvas" and not include_media:
+                    if owner_dir.name != "canvas" and not include_media:
                         continue
-                    for file_path in conv_id_dir.rglob("*"):
+                    for file_path in owner_dir.rglob("*"):
                         if file_path.is_file():
-                            arcname = f"media/{conv_id_dir.name}/{file_path.relative_to(conv_id_dir)}"
+                            arcname = f"media/{owner_dir.name}/{file_path.relative_to(owner_dir)}"
                             zf.write(str(file_path), arcname, compress_type=zipfile.ZIP_STORED)
 
     buf.seek(0)
@@ -553,6 +611,11 @@ MEMO_ENTITY_REMAP = {
     "project": "projects",
     "conversation": "conversations",
     "document": "documents",
+    # Memo.entity_id carries NO ForeignKey, so an entity_type missing from this map
+    # is copied verbatim and points at whatever row happens to own that id locally —
+    # silent cross-project corruption with no IntegrityError and no warning. Every
+    # new memo-able entity MUST be registered here.
+    "observation": "observations",
     "code": "codes",
     "code_category": "code_categories",
     "analysis": "materials",
@@ -911,7 +974,7 @@ def _assert_merge_compatible(
     # the version gate can't catch it) would skip every match and fall to the insert path,
     # colliding on e.g. ix_codes_project_numeric mid-write AFTER the safety export. Refuse
     # early (before any write) with an actionable message instead.
-    for _spine_key in ("codes", "segments", "conversations", "documents"):
+    for _spine_key in ("codes", "segments", "conversations", "documents", "observations"):
         if any(not _item.get("uuid") for _item in data.get(_spine_key, [])):
             raise ValueError(
                 "This file was exported by a version of Mixed Measures that predates merge "
@@ -946,6 +1009,80 @@ def _assert_merge_compatible(
     # ── Segmentation gate (§10.2: frozen segmentation) ──────────────
     conv_uuid_by_oldid = {c["_original_id"]: c.get("uuid") for c in data.get("conversations", [])}
     doc_uuid_by_oldid = {d["_original_id"]: d.get("uuid") for d in data.get("documents", [])}
+    # D18: an OPEN observation's clips are each coder's own, so their sets legitimately
+    # differ and the gate must not compare them. A FROZEN one's clips are the AGREED
+    # units — a colleague who re-cut them has diverged exactly as if they had
+    # re-segmented a transcript, so it goes through the gate like any other source.
+    #
+    # #572: the exemption is computed from BOTH sides, not just the file's. Reading
+    # only the file (the original shape) meant a lead who froze AFTER distributing
+    # copies silently accepted a colleague's still-open clips INTO the frozen local
+    # observation — expanding the very unit set the freeze declared agreed. Those
+    # clips then have exactly one voter, so `_decide_consensus` yields nothing and
+    # they sit permanently unresolved while any κ already reported was computed on a
+    # unit set that no longer exists. Nothing downstream catches it: every D22 frozen
+    # 409 lives in the observations router, and merge never calls a router.
+    file_obs = data.get("observations", [])
+    local_frozen_by_uuid: dict[str, bool] = {}
+    file_obs_uuids = [o.get("uuid") for o in file_obs if o.get("uuid")]
+    if file_obs_uuids:
+        local_frozen_by_uuid = {
+            uuid: frozen_at is not None
+            for uuid, frozen_at in db.query(
+                Observation.uuid, Observation.segmentation_frozen_at
+            ).filter(Observation.uuid.in_(file_obs_uuids)).all()
+        }
+
+    open_obs_oldids: set = set()
+    obs_uuid_by_oldid: dict = {}
+    freeze_conflicts: list[tuple[str, str]] = []
+    for o in file_obs:
+        oldid, uuid = o["_original_id"], o.get("uuid")
+        file_frozen = bool(o.get("segmentation_frozen_at"))
+        # No local counterpart = a new source the colleague added: additive, and the
+        # parent lookup below would find nothing anyway.
+        local_frozen = local_frozen_by_uuid.get(uuid) if uuid else None
+        if local_frozen is None or file_frozen == local_frozen:
+            if file_frozen:
+                obs_uuid_by_oldid[oldid] = uuid  # both frozen → gate normally
+            else:
+                open_obs_oldids.add(oldid)       # both open → additive, exempt
+            continue
+        # The sides disagree. Neither direction can be resolved by comparing clip
+        # sets, and each needs its OWN instruction — "re-segment to match" is wrong
+        # for both, so these never fall through to the segmentation message.
+        freeze_conflicts.append((o.get("name") or "?", "local" if local_frozen else "file"))
+
+    if freeze_conflicts:
+        local_side = [n for n, side in freeze_conflicts if side == "local"]
+        if local_side:
+            detail = ", ".join(f"'{n}'" for n in local_side[:5])
+            message = (
+                f"Segmentation was frozen here after this copy was shared: {detail}"
+                f"{'…' if len(local_side) > 5 else ''}. Merging would add clips that "
+                "were cut before the freeze, expanding the unit set the freeze marked "
+                "as agreed. Unfreeze to accept their clips as part of an open set, or "
+                "ask for a copy re-cut against the frozen clips."
+            )
+        else:
+            file_side = [n for n, side in freeze_conflicts if side == "file"]
+            detail = ", ".join(f"'{n}'" for n in file_side[:5])
+            message = (
+                f"This copy froze its segmentation and yours is still open: {detail}"
+                f"{'…' if len(file_side) > 5 else ''}. Their clips are an agreed set "
+                "and yours are not, so the two cannot be reconciled by merging. Freeze "
+                "to the same clips first, or merge a copy that was cut from yours."
+            )
+        raise MergeDivergenceError(
+            message,
+            {
+                "error": "merge_divergence",
+                "kind": "segmentation_freeze",
+                "diverged_sources": [
+                    {"name": n, "frozen_side": side} for n, side in freeze_conflicts
+                ],
+            },
+        )
     # File: parent uuid -> set of VISIBLE (non-soft-deleted) segment uuids.
     file_segs: dict[str, set] = {}
     for s in data.get("segments", []):
@@ -953,9 +1090,30 @@ def _assert_merge_compatible(
             continue
         if not s.get("uuid"):
             continue
+        # Observations: exempt from the frozen-segmentation gate iff the source
+        # Observation is UNFROZEN (D18 — the exemption is by UNIT PROVENANCE, not
+        # parent type).
+        #
+        # Frozen segmentation exists because text units PARTITION the material: two
+        # coders must agree on the turns, or their codings can't line up. An OPEN
+        # observation's clips partition nothing — each coder marks their OWN time
+        # ranges, and that divergence is the SUBJECT of the reliability statistic
+        # (unitizing-α), not a defect to refuse. Requiring identical clip-uuid sets
+        # there would refuse every real multi-coder observation merge, so an open
+        # observation merges purely ADDITIVELY: both coders' clips coexist.
+        #
+        # A FROZEN observation is the opposite: the team AGREED the clips, every
+        # coder codes the same ones, and consensus/reconciliation/κ run on them —
+        # so a colleague who re-cut them HAS diverged, exactly as if they had
+        # re-segmented a transcript, and the gate must refuse. Falling through to
+        # the parent lookups below does that (the observation branch resolves its
+        # uuid like any other source).
+        if s.get("observation_id") is not None and s["observation_id"] in open_obs_oldids:
+            continue
         parent_uuid = (
             conv_uuid_by_oldid.get(s.get("conversation_id"))
             or doc_uuid_by_oldid.get(s.get("document_id"))
+            or obs_uuid_by_oldid.get(s.get("observation_id"))
         )
         if parent_uuid:
             file_segs.setdefault(parent_uuid, set()).add(s["uuid"])
@@ -963,17 +1121,30 @@ def _assert_merge_compatible(
     diverged = []
     for parent_uuid, file_set in file_segs.items():
         local_conv = db.query(Conversation).filter(Conversation.uuid == parent_uuid).first()
-        local_parent = local_conv or db.query(Document).filter(Document.uuid == parent_uuid).first()
+        local_doc = (
+            None if local_conv is not None
+            else db.query(Document).filter(Document.uuid == parent_uuid).first()
+        )
+        local_obs = (
+            None if (local_conv is not None or local_doc is not None)
+            else db.query(Observation).filter(Observation.uuid == parent_uuid).first()
+        )
+        local_parent = local_conv or local_doc or local_obs
         if local_parent is None:
             continue  # a NEW source the colleague added — additive, not divergence
         seg_q = db.query(Segment.uuid).filter(
             Segment.merged_into_id.is_(None), Segment.split_into_id.is_(None)
         )
-        seg_q = (
-            seg_q.filter(Segment.conversation_id == local_parent.id)
-            if local_conv is not None
-            else seg_q.filter(Segment.document_id == local_parent.id)
-        )
+        # The FK column MUST be chosen by the parent's KIND. The three tables have
+        # independent id sequences, so filtering an observation parent by
+        # `Segment.document_id == 7` would silently compare against a DIFFERENT
+        # source's segments.
+        if local_conv is not None:
+            seg_q = seg_q.filter(Segment.conversation_id == local_parent.id)
+        elif local_doc is not None:
+            seg_q = seg_q.filter(Segment.document_id == local_parent.id)
+        else:
+            seg_q = seg_q.filter(Segment.observation_id == local_parent.id)
         local_set = {u for (u,) in seg_q.all() if u}
         if file_set != local_set:
             diverged.append((getattr(local_parent, "name", "?"), len(file_set), len(local_set)))
@@ -1141,6 +1312,21 @@ def build_merge_code_preview(
     return previews
 
 
+def _extract_zip_member(zf: zipfile.ZipFile, member: str, target_path: Path) -> None:
+    """Stream one archive member to target_path in fixed-size chunks.
+
+    #567: media files can be up to 4 GB (MAX_MEDIA_SIZE) against a <256 MB
+    backend memory target, so NEVER buffer the whole member in RAM
+    (``dst.write(src.read())`` would). ``shutil.copyfileobj`` reads in 1 MiB
+    slices — matching the upload path's streaming (``_stream_upload_to_temp``).
+    Callers resolve target_path; the top-of-import zip-slip scan guarantees no
+    member escapes the project dir before we reach here.
+    """
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with zf.open(member) as src, open(target_path, "wb") as dst:
+        shutil.copyfileobj(src, dst, length=1024 * 1024)
+
+
 def import_project(
     db: Session,
     file_path: Path,
@@ -1224,7 +1410,8 @@ def import_project(
 
         remap: dict[str, dict[int, int]] = {
             "projects": {}, "participants": {}, "speakers": {},
-            "conversations": {}, "documents": {}, "segment_groups": {},
+            "conversations": {}, "documents": {}, "observations": {},
+            "segment_groups": {},
             "segments": {}, "code_categories": {}, "codes": {},
             "code_equivalence_groups": {},
             "datasets": {}, "equivalence_groups": {}, "dataset_columns": {},
@@ -1254,7 +1441,9 @@ def import_project(
                     existing = _merge_uuid_match(db, model, incoming_uuid, pid).first()
                     if existing is not None:
                         remap[remap_key][item["_original_id"]] = existing.id
-                        if report is not None and remap_key in ("conversations", "documents"):
+                        if report is not None and remap_key in (
+                            "conversations", "documents", "observations",
+                        ):
                             report["sources_matched"] += 1
                         return existing
             obj = _build_entity(model, item, overrides, fresh_uuid=(import_mode == "new"))
@@ -1426,6 +1615,13 @@ def import_project(
         for item in data.get("documents", []):
             _add(Document, item, {"project_id": pid}, "documents")
 
+        # ── e2. Observations (the third Segment parent) ────────────
+        # MUST precede segments (g), notes (r) and memos (s) — they all remap
+        # through remap["observations"]. A merge matches them by uuid like any
+        # other source, so a colleague's clips land on the shared Observation.
+        for item in data.get("observations", []):
+            _add(Observation, item, {"project_id": pid}, "observations")
+
         # ── f. SegmentGroups ───────────────────────────────────────
         for item in data.get("segment_groups", []):
             _add(SegmentGroup, item, {
@@ -1448,9 +1644,17 @@ def import_project(
 
         segment_self_refs = []
         for item in data.get("segments", []):
+            # EVERY parent FK must be remapped here. `_build_entity` copies any column
+            # NOT in this overrides dict verbatim from the file, so a missing parent
+            # is not a null — it is the SOURCE instance's raw id written into this
+            # database. With PRAGMA foreign_keys=ON that either attaches the segment
+            # to an unrelated project's row (silent cross-project corruption) or dies
+            # on an opaque IntegrityError. It can never be a harmless NULL, because
+            # ck_segment_exactly_one_parent forbids all-three-NULL.
             _add(Segment, item, {
                 "conversation_id": _remap_id(remap, "conversations", item.get("conversation_id")),
                 "document_id": _remap_id(remap, "documents", item.get("document_id")),
+                "observation_id": _remap_id(remap, "observations", item.get("observation_id")),
                 "speaker_id": _remap_id(remap, "speakers", item.get("speaker_id")),
                 "group_id": _remap_id(remap, "segment_groups", item.get("group_id")),
                 "merged_into_id": None,
@@ -1706,11 +1910,13 @@ def import_project(
 
         # ── r. Notes ───────────────────────────────────────────────
         for item in data.get("notes", []):
+            # Same verbatim-copy rule as segments above — every Note parent remaps.
             _add(Note, item, {
                 "conversation_id": _remap_id(remap, "conversations", item.get("conversation_id")),
                 "segment_id": _remap_id(remap, "segments", item.get("segment_id")),
                 "dataset_value_id": _remap_id(remap, "dataset_values", item.get("dataset_value_id")),
                 "document_id": _remap_id(remap, "documents", item.get("document_id")),
+                "observation_id": _remap_id(remap, "observations", item.get("observation_id")),
                 "excerpt_id": _remap_id(remap, "excerpts", item.get("excerpt_id")),
             }, "notes")
 
@@ -2132,10 +2338,7 @@ def import_project(
 
                 relative_path = parts[2]
                 target_path = new_project_docs_dir / str(new_doc_id) / relative_path
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-
-                with zf.open(member) as src, open(target_path, "wb") as dst:
-                    dst.write(src.read())
+                _extract_zip_member(zf, member, target_path)
 
         # ── Copy media files (audio) ──────────────────────────────
         if media_dir is not None:
@@ -2152,26 +2355,34 @@ def import_project(
                     # Canvas images: media/canvas/{uuid}.{ext} — no ID remapping
                     if parts[1] == "canvas":
                         target_path = new_project_media_dir / "canvas" / parts[2]
-                        target_path.parent.mkdir(parents=True, exist_ok=True)
-                        with zf.open(member) as src, open(target_path, "wb") as dst:
-                            dst.write(src.read())
+                        _extract_zip_member(zf, member, target_path)
                         continue
 
-                    # Audio: media/{old_conv_id}/{filename} — remap conversation ID
-                    try:
-                        old_conv_id = int(parts[1])
-                    except ValueError:
+                    # Recordings: media/{owner_dir}/{filename}, where owner_dir is a
+                    # conversation id or `obs-{observation_id}`. Parse through the
+                    # media_storage convention so the archive layout and the on-disk
+                    # layout cannot drift — a bare int() here is what silently dropped
+                    # every observation recording on import (obs-7 → ValueError → skip).
+                    owner = media_storage.parse_media_owner_segment(parts[1])
+                    if owner is None:
                         continue
-                    new_conv_id = remap["conversations"].get(old_conv_id)
-                    if new_conv_id is None:
+                    owner_kind, old_owner_id = owner
+                    remap_table = (
+                        "conversations"
+                        if owner_kind == media_storage.CONVERSATION
+                        else "observations"
+                    )
+                    new_owner_id = remap[remap_table].get(old_owner_id)
+                    if new_owner_id is None:
                         continue
 
                     relative_path = parts[2]
-                    target_path = new_project_media_dir / str(new_conv_id) / relative_path
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    with zf.open(member) as src, open(target_path, "wb") as dst:
-                        dst.write(src.read())
+                    target_path = (
+                        new_project_media_dir
+                        / media_storage.media_owner_segment(owner_kind, new_owner_id)
+                        / relative_path
+                    )
+                    _extract_zip_member(zf, member, target_path)
 
         # Media-less archives (include_media=False exports, or trimmed files):
         # clear orphaned media metadata for any conversation whose recording
@@ -2180,22 +2391,67 @@ def import_project(
         # degradation is the point of the media-less export). Stat-based, so
         # merge-matched conversations whose local files exist are untouched.
         if media_dir is not None:
-            for conv in (
-                db.query(Conversation)
-                .filter(Conversation.project_id == pid, Conversation.media_filename.isnot(None))
-                .all()
+            for owner_kind, model in (
+                (media_storage.CONVERSATION, Conversation),
+                (media_storage.OBSERVATION, Observation),
             ):
-                expected = media_dir / str(pid) / str(conv.id) / f"original.{conv.media_format}"
-                if not expected.is_file():
-                    conv.media_filename = None
-                    conv.media_format = None
-                    conv.media_type = None
-                    conv.media_duration_seconds = None
-                    conv.media_offset_seconds = 0.0
-                    conv.media_is_vbr = None
+                for owner in (
+                    db.query(model)
+                    .filter(model.project_id == pid, model.media_filename.isnot(None))
+                    .all()
+                ):
+                    expected = (
+                        media_dir / str(pid)
+                        / media_storage.media_owner_segment(owner_kind, owner.id)
+                        / f"original.{owner.media_format}"
+                    )
+                    if not expected.is_file():
+                        owner.media_filename = None
+                        owner.media_format = None
+                        owner.media_type = None
+                        owner.media_duration_seconds = None
+                        owner.media_offset_seconds = 0.0
+                        owner.media_is_vbr = None
             db.flush()
 
+    _sanitize_imported_media_numbers(db, pid)
+
     return pid, project_name
+
+
+def _sanitize_imported_media_numbers(db: Session, pid: int) -> None:
+    """Bound the media numbers an archive restored (#625 sibling).
+
+    `_build_entity` copies every column by reflection, so `media_duration_seconds`
+    and `media_offset_seconds` arrive from the archive's JSON verbatim — they pass
+    through NONE of the guards the live paths enforce. Two consequences, and the
+    first is a crash rather than a cosmetic:
+
+    1. **`json.loads` accepts `Infinity` and `NaN`** (Python extends JSON here,
+       and `import_project` reads the archive with the stdlib default). So an
+       archive carrying `"media_duration_seconds": Infinity` lands a non-finite
+       float in the DB — VERIFIED by execution, not inferred. Downstream,
+       `cut_clips` guards `is None or <= 0`, which **inf passes (inf > 0) and NaN
+       passes too (NaN <= 0 is False)**, reaching `math.ceil` as an OverflowError.
+       That is exactly the #573 crash class arriving through a different door.
+    2. `MediaOffsetUpdate` constrains the offset to ±300 s at the API, and an
+       import must not accept what the API refuses — an absurd offset shears the
+       transcript against its recording for every playback surface at once.
+
+    `.mmproject` is an interchange format users hand to each other (the
+    distribute-and-merge workflow), so "the file is ours" is not a safety
+    argument — the same reasoning that makes the format gate and the zip-slip
+    scan run inside `import_project` rather than trusting `/validate-import`.
+    """
+    for model in (Conversation, Observation):
+        for owner in db.query(model).filter(model.project_id == pid).all():
+            owner.media_duration_seconds = sane_duration(owner.media_duration_seconds)
+            offset = owner.media_offset_seconds
+            if offset is None or not math.isfinite(offset) or abs(offset) > MAX_MEDIA_OFFSET_SECONDS:
+                # NOT NULL on Observation and defaulted 0.0 on Conversation, so
+                # the fallback is 0.0 (= "aligned"), never None.
+                owner.media_offset_seconds = 0.0
+    db.flush()
 
 
 # ── Import sub-helpers ──────────────────────────────────────────────────

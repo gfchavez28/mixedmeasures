@@ -36,3 +36,29 @@ export const SELECTED_CARD = `${SELECTED_TINT} ${SELECTED_TEXT} ring-1 ring-[hsl
  * selected cells in sticky/virtualized tables. Pair the row's left bar separately.
  */
 export const SELECTED_CELL = 'bg-mm-blue-cell'
+
+// ── NOT selection: "now playing" (Observations D27) ─────────────────────────
+// The playhead-containment state — "the playhead is inside this clip right
+// now" — is a PLAYBACK fact, not a selection. It lives beside the selection
+// recipes so nobody reinvents it as another blue, keyed to the playhead's own
+// mm-green family so it visually reads "at the playhead" (the playhead line is
+// bg-mm-green). Selection still wins when both apply — a selected clip shows
+// the blue recipe, and follow-mode clips are usually both.
+
+/** Now-playing list ROW — green tint + left bar (the SELECTED_ROW geometry). */
+export const NOW_PLAYING_ROW =
+  'bg-[hsl(var(--mm-green)/0.10)] dark:bg-[hsl(var(--mm-green)/0.16)] shadow-[inset_3px_0_0_0_hsl(var(--mm-green)/0.6)]'
+/** Now-playing timeline BAR — a green ring over the clip bar. */
+export const NOW_PLAYING_BAR = 'ring-2 ring-[hsl(var(--mm-green)/0.75)]'
+
+/**
+ * Selected timeline BAR — a blue RING, deliberately not the tint (#656).
+ *
+ * A clip bar carries its code's own colour as an inline `backgroundColor`, and
+ * an inline style beats a Tailwind `bg-*` class — so `SELECTED_SEGMENT`'s tint
+ * would silently paint nothing there and selection would vanish from the
+ * timeline the moment bars stopped being uniformly teal. Ring geometry matches
+ * NOW_PLAYING_BAR beside it; hue keeps the roles apart (blue = selection,
+ * green = playhead), and selection still wins when both apply.
+ */
+export const SELECTED_BAR = 'ring-2 ring-[hsl(var(--mm-blue))]'

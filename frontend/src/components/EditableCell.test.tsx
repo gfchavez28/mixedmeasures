@@ -68,3 +68,38 @@ describe('computeDisplayValue — #561 double-parenthesis suppression', () => {
     expect(out.titleText).toBe('raw Agree (1) → recoded 1')
   })
 })
+
+describe('computeDisplayValue — #578 reverse reflects the stored forward code', () => {
+  // A REVERSE def stores FORWARD codes; the displayed/scored value is the
+  // reflection (min+max − code), matching value_numeric. offset = 1+5 = 6.
+  const rev = def({ 'Strongly Disagree': 1, 'Neutral': 3, 'Strongly Agree': 5 }, 'reverse')
+
+  it('reflects the highest response to the lowest score', () => {
+    const out = computeDisplayValue(cell('Strongly Agree'), column, rev)
+    expect(out.numericValue).toBe(1)   // 6 − 5
+    expect(out.display).toBe('Strongly Agree (1)')
+  })
+
+  it('reflects the lowest response to the highest score', () => {
+    const out = computeDisplayValue(cell('Strongly Disagree'), column, rev)
+    expect(out.numericValue).toBe(5)   // 6 − 1
+    expect(out.display).toBe('Strongly Disagree (5)')
+  })
+
+  it('leaves the midpoint unchanged', () => {
+    expect(computeDisplayValue(cell('Neutral'), column, rev).numericValue).toBe(3)
+  })
+
+  it('a scale_map with the SAME mapping is NOT reflected (verbatim)', () => {
+    const sm = def({ 'Strongly Disagree': 1, 'Strongly Agree': 5 }, 'scale_map')
+    expect(computeDisplayValue(cell('Strongly Agree'), column, sm).numericValue).toBe(5)
+  })
+
+  it('reflects a bare-numeric reverse cell and keeps the disambiguating annotation', () => {
+    // 0-based/gapped codes: offset = 2+10 = 12; "10" scores 2.
+    const bare = def({ '2': 2, '6': 6, '10': 10 }, 'reverse')
+    const out = computeDisplayValue(cell('10'), column, bare)
+    expect(out.numericValue).toBe(2)
+    expect(out.display).toBe('10 (2)')
+  })
+})

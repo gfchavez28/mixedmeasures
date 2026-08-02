@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo, type RefObject } from 'react'
-import { type Segment, type Conversation } from '@/lib/api'
 import {
+  type PlayableSource,
+  type TimelineUnit,
   PLAYBACK_SPEEDS,
   SEEK_LEAD_IN_SECONDS,
   clampMediaSeek,
@@ -16,18 +17,41 @@ import {
 
 export { PLAYBACK_SPEEDS }
 
-interface UsePlaybackOptions {
-  /** Filtered segments (after speaker/text filter) */
-  segments: Segment[]
+interface UsePlaybackOptions<S extends TimelineUnit> {
+  /** Filtered timeline units (transcript segments / observation clips). */
+  segments: S[]
   selectedSegments: number[]
   onSelectionChange: (ids: number[]) => void
   /**
    * Media element ref (<audio> today, <video> once the pane ships) — when
-   * present and the conversation has playable media, drives real playback.
+   * present and the source has playable media, drives real playback.
    */
   mediaRef?: RefObject<HTMLMediaElement | null>
-  /** Conversation with media metadata — used for offset and the playback gate */
-  conversation?: Conversation
+  /** The playable source (Conversation or Observation) — offset + playback gate. */
+  source?: PlayableSource
+  /**
+   * Should PLAYBACK drive the SELECTION (slab 3c / D14)? Default true — the
+   * conversation workbenches' always-on follow, unchanged. The observation
+   * workbench passes false: its selection is an EDITING target (boundary
+   * nudges, F2 label), and an advancing playhead must not stomp it. Slab 4's
+   * Follow toggle drives it per-surface. Gates ONLY the playback→selection
+   * direction; a manual selection still seeks the media (selection→playback).
+   */
+  followPlayhead?: boolean
+  /**
+   * D27 (Observations Follow): which units the playhead is "in" right now.
+   * When supplied, BOTH clock drivers write the FULL returned array as the
+   * selection — all overlapping clips select together, and a GAP yields []
+   * (the selection honestly empties; chords then no-op via the selection
+   * gate). Default = the floor-single behavior (`findPlayingSegment`, one id,
+   * never empties) — conversations byte-identical without it.
+   */
+  findUnitsAtTime?: (units: S[], time: number) => number[]
+}
+
+/** Order-sensitive id equality — the follow drivers' write-skip guard. */
+function sameIds(a: readonly number[], b: readonly number[]): boolean {
+  return a.length === b.length && a.every((id, i) => id === b[i])
 }
 
 interface TimeSeekResult {
@@ -35,11 +59,11 @@ interface TimeSeekResult {
   segmentIndex: number
 }
 
-export interface UsePlaybackReturn {
+export interface UsePlaybackReturn<S extends TimelineUnit> {
   isPlaying: boolean
   playbackSpeed: number
   currentPlaybackTime: number | null
-  segmentsWithTime: Segment[]
+  segmentsWithTime: S[]
   /**
    * The playback gate (lib/playback-utils::isPlayableMedia) — true when the
    * conversation has media the player can mount. Consumers must use THIS to
@@ -52,13 +76,21 @@ export interface UsePlaybackReturn {
   /** Stop playback and update the current time (e.g. from a scrubber drag). */
   seekToTime: (time: number) => void
   /**
+   * Seek WITHOUT stopping playback (slab 3d — J-K-L transport, timeline
+   * clicks). Within the recording a playing element keeps playing from the new
+   * position; a seek BEYOND the recording parks the element and pauses honestly
+   * (the interval driver's baseline cannot absorb a live seek, and rolling the
+   * parked tail would be the #564 bug). Still routed through clampMediaSeek.
+   */
+  seekWithoutPausing: (time: number) => void
+  /**
    * Stop playback, seek to time, find the nearest segment, and select it.
    * Returns the segment info so the caller can scroll to it, or null if no
    * segment was found.
    */
   handleTimeSeek: (time: number) => TimeSeekResult | null
   /** Seek media to a segment's start_time with lead-in buffer */
-  seekToSegment: (segment: Segment) => void
+  seekToSegment: (segment: S) => void
   /** True after the media element's loadedmetadata fires */
   isMediaReady: boolean
   /** True between waiting and playing events */
@@ -73,13 +105,15 @@ export interface UsePlaybackReturn {
   isTranscriptOnly: boolean
 }
 
-export function usePlayback({
+export function usePlayback<S extends TimelineUnit>({
   segments,
   selectedSegments,
   onSelectionChange,
   mediaRef,
-  conversation,
-}: UsePlaybackOptions): UsePlaybackReturn {
+  source,
+  followPlayhead = true,
+  findUnitsAtTime,
+}: UsePlaybackOptions<S>): UsePlaybackReturn<S> {
   const [isPlaying, setIsPlaying] = useState(false)
   const [playbackSpeed, setPlaybackSpeed] = useState(1)
   const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null)
@@ -104,10 +138,33 @@ export function usePlayback({
   onSelectionChangeRef.current = onSelectionChange
   const isPlayingRef = useRef(isPlaying)
   isPlayingRef.current = isPlaying
-  const conversationRef = useRef(conversation)
-  conversationRef.current = conversation
+  const sourceRef = useRef(source)
+  sourceRef.current = source
+  // Read via ref inside the long-lived drivers, like every volatile input.
+  const followPlayheadRef = useRef(followPlayhead)
+  followPlayheadRef.current = followPlayhead
+  const findUnitsAtTimeRef = useRef(findUnitsAtTime)
+  findUnitsAtTimeRef.current = findUnitsAtTime
 
-  const hasPlayableMedia = isPlayableMedia(conversation)
+  // The follow write, shared by both clock drivers (D27): the multi-unit
+  // finder writes the FULL array (including an honest []); the floor-single
+  // default keeps the conversation behavior byte-identical.
+  const followSelection = useCallback((segs: S[], time: number) => {
+    const finder = findUnitsAtTimeRef.current
+    if (finder) {
+      const ids = finder(segs, time)
+      if (!sameIds(ids, selectedSegmentsRef.current)) {
+        onSelectionChangeRef.current(ids)
+      }
+      return
+    }
+    const targetSegment = findPlayingSegment(segs, time)
+    if (targetSegment && targetSegment.id !== selectedSegmentsRef.current[0]) {
+      onSelectionChangeRef.current([targetSegment.id])
+    }
+  }, [])
+
+  const hasPlayableMedia = isPlayableMedia(source)
 
   /**
    * THE media seek (#563). Every `currentTime` write in this hook goes through
@@ -125,7 +182,7 @@ export function usePlayback({
     media.currentTime = clampMediaSeek(target, media.duration)
   }, [])
 
-  const offset = conversation?.media_offset_seconds ?? 0
+  const offset = source?.media_offset_seconds ?? 0
   const offsetRef = useRef(offset)
   offsetRef.current = offset
 
@@ -159,7 +216,7 @@ export function usePlayback({
     (media: HTMLMediaElement | null | undefined, timelineTime: number) => {
       const duration = media && Number.isFinite(media.duration) && media.duration > 0
         ? media.duration
-        : conversationRef.current?.media_duration_seconds ?? null
+        : sourceRef.current?.media_duration_seconds ?? null
       return isBeyondRecording(timelineTime, duration, offsetRef.current)
     },
     [],
@@ -169,7 +226,7 @@ export function usePlayback({
   // element's backing resource changes (conversation switch, attach, remove,
   // replace — media_version catches same-name re-exports). The media-owning
   // effects key on this, never on churning data.
-  const mediaKey = mediaInstanceKey(conversation)
+  const mediaKey = mediaInstanceKey(source)
 
   // Get segments with timestamps sorted by start_time
   const segmentsWithTime = useMemo(() =>
@@ -187,7 +244,7 @@ export function usePlayback({
   // diagnosis at the worst moment. Reads the conversation via ref so the
   // listener effect stays instance-keyed.
   const reportPlaybackError = useCallback(() => {
-    const conv = conversationRef.current
+    const conv = sourceRef.current
     setMediaError(
       isMediaFileMissing(conv)
         ? missingMediaMessage(conv?.media_type ?? null)
@@ -203,7 +260,7 @@ export function usePlayback({
     setMediaError(null)
     setIsBuffering(false)
     setTranscriptOnly(false) // #564: a new media instance re-attaches the clock
-  }, [conversation?.id, mediaKey, setTranscriptOnly])
+  }, [source?.id, mediaKey, setTranscriptOnly])
 
   // ── Media element event listeners ──────────────────────────────────
   useEffect(() => {
@@ -229,11 +286,8 @@ export function usePlayback({
       // seek effect and cascading the selection backward to 0. Gating on
       // isPlaying breaks that loop while preserving live playhead-following.
       const segs = segmentsWithTimeRef.current
-      if (isPlayingRef.current && segs.length > 0) {
-        const targetSegment = findPlayingSegment(segs, transcriptTime)
-        if (targetSegment && targetSegment.id !== selectedSegmentsRef.current[0]) {
-          onSelectionChangeRef.current([targetSegment.id])
-        }
+      if (followPlayheadRef.current && isPlayingRef.current && segs.length > 0) {
+        followSelection(segs, transcriptTime)
       }
     }
 
@@ -336,7 +390,7 @@ export function usePlayback({
     // re-run this effect on refetch churn and pause playback (#557: every
     // code apply refetches segments; the offset popover refetches the
     // conversation).
-  }, [hasPlayableMedia, mediaRef, mediaKey, reportPlaybackError, setTranscriptOnly])
+  }, [hasPlayableMedia, mediaRef, mediaKey, reportPlaybackError, setTranscriptOnly, followSelection])
 
   // ── The interval driver: the timeline clock without a media element ───────
   //
@@ -396,9 +450,8 @@ export function usePlayback({
       currentPlaybackTimeRef.current = t
       setCurrentPlaybackTime(t)
 
-      const targetSegment = findPlayingSegment(segmentsWithTime, t)
-      if (targetSegment && targetSegment.id !== selectedSegmentsRef.current[0]) {
-        onSelectionChangeRef.current([targetSegment.id])
+      if (followPlayheadRef.current) {
+        followSelection(segmentsWithTime, t)
       }
     }, 100)
 
@@ -409,7 +462,8 @@ export function usePlayback({
       }
     }
     // selectedSegments / onSelectionChange read via refs — see media effect.
-  }, [isPlaying, playbackSpeed, segmentsWithTime, segments, hasPlayableMedia, isTranscriptOnly])
+    // followSelection is a stable [] useCallback — listing it adds no churn.
+  }, [isPlaying, playbackSpeed, segmentsWithTime, segments, hasPlayableMedia, isTranscriptOnly, followSelection])
 
   // Seek when the PRIMARY selection actually changes to a different segment
   // while paused (a manual segment click). Guarded by a previous-id ref so it
@@ -476,8 +530,11 @@ export function usePlayback({
       // researcher has already left behind. The interval driver rolls the
       // transcript on instead.
       if (media && hasPlayableMedia && !transcriptOnlyRef.current) {
-        // If no current time set, start from selection or beginning
-        if (selectedSegments.length === 0 && segmentsWithTime.length > 0) {
+        // If no current time set, start from selection or beginning. Gated on
+        // followPlayhead: with follow off (observations) Play must simply roll
+        // from the current position — auto-selecting the first clip and seeking
+        // to it is the same playback→selection coupling D14 makes opt-in.
+        if (followPlayhead && selectedSegments.length === 0 && segmentsWithTime.length > 0) {
           onSelectionChange([segmentsWithTime[0].id])
           const startTime = (segmentsWithTime[0].start_time ?? 0) + offset
           seekMedia(media, startTime)
@@ -494,7 +551,8 @@ export function usePlayback({
         // resume must continue from where the researcher scrubbed to, not jump back
         // to the first segment.
         if (
-          selectedSegments.length === 0
+          followPlayhead
+          && selectedSegments.length === 0
           && segmentsWithTime.length > 0
           && currentPlaybackTimeRef.current === null
         ) {
@@ -506,7 +564,7 @@ export function usePlayback({
       }
       setIsPlaying(true)
     }
-  }, [isPlaying, selectedSegments, segmentsWithTime, onSelectionChange, mediaRef, hasPlayableMedia, isMediaReady, offset, reportPlaybackError, seekMedia])
+  }, [isPlaying, selectedSegments, segmentsWithTime, onSelectionChange, mediaRef, hasPlayableMedia, isMediaReady, offset, reportPlaybackError, seekMedia, followPlayhead])
 
   const cyclePlaybackSpeed = useCallback(() => {
     setPlaybackSpeed(current => {
@@ -531,6 +589,36 @@ export function usePlayback({
     currentPlaybackTimeRef.current = time
     setCurrentPlaybackTime(time)
   }, [mediaRef, hasPlayableMedia, offset, seekMedia, setTranscriptOnly, timelineOutrunsRecording])
+
+  const seekWithoutPausing = useCallback((time: number) => {
+    const t = Math.max(0, time)
+    const media = mediaRef?.current
+    if (media && hasPlayableMedia) {
+      const beyond = timelineOutrunsRecording(media, t)
+      // Flip the driver flag BEFORE touching the element, so the pause below is
+      // recognized as OUR parking pause (handlePause ignores it) and a resumed
+      // element's timeupdate is trusted again immediately.
+      setTranscriptOnly(beyond)
+      seekMedia(media, t + offsetRef.current)
+      if (beyond) {
+        // Park + pause honestly: the interval driver captures its wall-clock
+        // baseline when it starts and cannot absorb a mid-flight seek, so a
+        // "non-pausing" overhang seek would snap back on the next tick.
+        media.pause()
+        setIsPlaying(false)
+      } else if (isPlayingRef.current && media.paused) {
+        // The element was parked (or the clock was interval-driven) and the
+        // seek came back INSIDE the recording — re-attach it. Guarded play():
+        // this is the one legal wake-up, a position the element can honor.
+        media.play().catch(() => {
+          setIsPlaying(false)
+          reportPlaybackError()
+        })
+      }
+    }
+    currentPlaybackTimeRef.current = t
+    setCurrentPlaybackTime(t)
+  }, [mediaRef, hasPlayableMedia, seekMedia, setTranscriptOnly, timelineOutrunsRecording, reportPlaybackError])
 
   const handleTimeSeek = useCallback((time: number): TimeSeekResult | null => {
     const media = mediaRef?.current
@@ -559,7 +647,7 @@ export function usePlayback({
     return null
   }, [segments, onSelectionChange, mediaRef, hasPlayableMedia, offset, seekMedia, setTranscriptOnly, timelineOutrunsRecording])
 
-  const seekToSegment = useCallback((segment: Segment) => {
+  const seekToSegment = useCallback((segment: S) => {
     const media = mediaRef?.current
     const targetTime = (segment.start_time ?? 0) + offset
     const seekTime = Math.max(0, targetTime - SEEK_LEAD_IN_SECONDS)
@@ -583,6 +671,7 @@ export function usePlayback({
     togglePlayback,
     cyclePlaybackSpeed,
     seekToTime,
+    seekWithoutPausing,
     handleTimeSeek,
     seekToSegment,
     isMediaReady,

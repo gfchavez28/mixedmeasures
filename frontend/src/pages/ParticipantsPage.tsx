@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { SELECTED_ROW } from '@/lib/selection'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {

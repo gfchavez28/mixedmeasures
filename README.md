@@ -81,8 +81,21 @@ mean anything is wrong:
   e.g. exports from common transcription tools) or as **VTT/SRT subtitle files**
   (Zoom and Teams transcript exports import directly), with an optional
   **recording** attached for synchronized playback while you code.
+- **Observations** — import a recording on its own, with **no transcript**, and
+  code what happens on the timeline itself. Start from an empty timeline, slice it
+  into fixed intervals, or seed the first clips from a cue file.
 
 ### Work with recordings (audio & video)
+
+Two ways to work with a recording, and the choice is about what you are coding:
+**what was *said*** → a **conversation** (a transcript, with the recording attached
+for synchronized playback); **what *happened*** → an **observation** (the recording
+coded directly on its own timeline, no transcript involved). Formats are the same
+either way: **audio** `.mp3`, `.m4a`, `.wav`; **video** `.mp4`, `.mov`, `.webm`.
+One recording can serve both — "also code this as an observation" copies the file
+across, leaving the original and its coding untouched.
+
+**With a transcript — conversations**
 - Attach **audio** (`.mp3`, `.m4a`, `.wav`) or **video** (`.mp4`, `.mov`, `.webm`)
   to any conversation. Video docks above the transcript in a resizable pane
   (small/medium/large, a temporary theater mode, and a floating mini-player) —
@@ -91,17 +104,51 @@ mean anything is wrong:
   preserved.
 - **Zoom:** cloud recordings download as an MP4 plus a speaker-labeled `.vtt`
   transcript — import the `.vtt` as a conversation, then attach the MP4.
-- **No transcript?** (Zoom *local* recordings don't produce one.) Free offline
-  transcription tools such as [aTrain](https://github.com/JuergenFleiss/aTrain)
-  export `.srt` files you can import directly; speakers can be assigned to
-  segments after import. Recordings never leave your machine either way.
+- **Need a transcript and don't have one?** (Zoom *local* recordings don't produce
+  one.) Free offline transcription tools such as
+  [aTrain](https://github.com/JuergenFleiss/aTrain) export `.srt` files you can
+  import directly; speakers can be assigned to segments after import. Recordings
+  never leave your machine either way. (If you don't need one at all, code the
+  recording as an observation instead — below.)
 - **Codec note:** the player decodes H.264/AAC MP4, MOV, and WebM (VP8/VP9).
   HEVC video (the iPhone camera default) uploads but won't play in-app —
   re-export it as H.264 (most tools call this "MP4 (H.264)").
 
+**Without a transcript — observations**
+- Code a recording of an event — a classroom, a clinic visit, a home visit, a
+  usability session — by marking **clips** on its timeline. The recording is the
+  spine; there is no transcript to code against, and none is required.
+- Start the timeline **empty** (mark clips yourself as you watch), cut it into
+  **fixed intervals** for interval-style coding, or seed labelled clips **from a
+  cue file** (`.vtt`/`.srt` chapters or subtitles). The wizard previews the cut —
+  clip count, the first clips, and any warnings — before anything is written.
+- Mark and adjust clips from the keyboard: **I/O** for in/out points, **J-K-L**
+  transport with frame stepping, 0.1 s boundary nudges (1 s with Shift), typed
+  timecodes, and split/merge by time. A follow mode keeps the view on the playhead
+  as it runs.
+- Clips carry **codes**, **notes**, and **time-range quotes**, and reach the
+  Canvas, search, and the qualitative analysis surfaces like any other source.
+- **Coverage** shows what share of the timeline you have marked, with a jump to
+  the next unmarked gap.
+- **Timed analytics** per code: duration, frequency, rate per minute, share of
+  session airtime, bout length, and a stacked codeline of the whole session.
+  Overlapping clips mean per-code airtimes don't sum to covered time — the table
+  says so rather than quietly implying otherwise.
+- **Reliability** works either way you cut. Leave the clip set **open** and each
+  coder marks their own boundaries — agreement is then a unitizing problem
+  (Krippendorff's α<sub>U</sub> at a 100 ms resolution, plus time-binned kappa).
+  **Freeze** the clip set once the team agrees the cuts, and every coder codes the
+  same clips — which brings the ordinary kappa, side-by-side reconciliation and
+  consensus layer to video unchanged. The bin size is a visible control shown with
+  the number it produced (a wider bin absorbs timing differences and reads as more
+  agreement, so it is part of the result), and per-code prevalence sits beside
+  every kappa — sparse clips on a long recording make agreement look near-perfect
+  while kappa collapses.
+
 ### Code and analyze qualitatively
-- Three coding surfaces — for **conversations**, **documents**, and **open-ended
-  text columns** in datasets — sharing one keyboard-driven coding layer.
+- Four coding surfaces — for **conversations**, **documents**, **open-ended text
+  columns** in datasets, and **observations** (a recording's timeline) — sharing
+  one keyboard-driven coding layer.
 - A structured **codebook** (codes, categories, universal codes), coded-segment
   tracking, **excerpts** and a **Quote Board**, **memos**, **notes**, and a
   quick-capture **Scratchpad**.
@@ -151,23 +198,28 @@ mean anything is wrong:
 
 Being honest about scope:
 
-- **Not collaborative.** A project is owned by exactly one researcher. There is
-  no project sharing, no real-time co-editing, and no team workspace. For
-  separate researchers on one shared computer, use separate operating-system
-  accounts — each gets its own fully separate data. Multi-coder support with
-  intercoder reliability (Cohen's kappa, Krippendorff's alpha) is on the roadmap.
+- **Not real-time collaborative.** There is no cloud workspace, no accounts, and
+  no live co-editing. Team coding works asynchronously instead: colleagues code
+  separate **copies** of a project and merge them back together, with per-coder
+  attribution, blind coding, intercoder reliability (Cohen's kappa, Krippendorff's
+  alpha, percent agreement), side-by-side reconciliation, and a derived consensus
+  layer. Several coders can also take turns on one computer under named
+  identities. (Separate researchers with unrelated projects on a shared computer
+  should still use separate operating-system accounts.)
 - **Not cloud-based.** Everything runs locally against a local database. Moving a
   project between machines is a manual file transfer (`.mmproject` / backup).
-- **No AI in the product.** The shipping tool currently has no AI/LLM features — it
-  doesn't analyze your data, write your findings, or send anything anywhere. Every
-  result comes from a conventional, documented method you can inspect and check
-  (classical statistics via SciPy / statsmodels, not ML inference). AI assistance may
-  be considered later, but not in v1.0. *(AI coding tools did assist in **building**
-  Mixed Measures — an honest note about development, distinct from what the product
-  does.)*
+- **No generative AI, and nothing leaves your computer.** Mixed Measures 1.x sends
+  your data nowhere and contains no generative AI — it doesn't analyze your data,
+  write your findings, or upload anything. Every result comes from a conventional,
+  documented method you can inspect and check, computed locally and
+  deterministically, and reproducible in the exported R script; that holds for any
+  statistical method added to the 1.x line. A future 2.x will introduce generative
+  AI — local-first, off by default, and separable from the build.
+  *(AI coding tools did assist in **building** Mixed Measures — an honest note about
+  development, distinct from what the product does.)*
 - **Not a full statistical-modeling suite.** Regression and factor analysis are not
-  in v1.0; for analysis beyond the built-in descriptives and comparisons, export
-  the R script and continue there.
+  currently included; for analysis beyond the built-in descriptives and comparisons,
+  export the R script and continue there.
 
 ## Privacy & your data
 

@@ -1,13 +1,13 @@
 import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
 import { Info } from 'lucide-react'
-import { type Segment } from '@/lib/api'
+import { type TimelineUnit } from '@/lib/playback-utils'
 import { formatTimestamp } from '@/lib/utils'
 import { isBeyondRecording, recordingEndsAtTimelineTime } from '@/lib/playback-utils'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 
 interface TimelineScrubberProps {
-  segments: Segment[]
+  segments: TimelineUnit[]
   currentTime: number | null
   onTimeChange: (time: number) => void
   onPositionChange?: (position: number) => void  // 0-1 for scroll sync

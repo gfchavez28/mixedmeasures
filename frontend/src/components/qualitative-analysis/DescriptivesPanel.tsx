@@ -18,6 +18,10 @@ import QualBarChart from '@/components/qualitative-analysis/QualBarChart'
 import QualSummaryTable from '@/components/qualitative-analysis/QualSummaryTable'
 import QualStackedBar from '@/components/qualitative-analysis/QualStackedBar'
 import SaturationCurve from '@/components/qualitative-analysis/SaturationCurve'
+import TimedAnalytics, {
+  type TimedCodeLite, type TimedCoderLite, type TimedObservationLite,
+} from '@/components/qualitative-analysis/TimedAnalytics'
+import type { CoderInclude } from '@/lib/timed-analytics'
 import type { QualValueMode, QualDenominatorMode } from '@/lib/qual-analysis-types'
 
 function getMetricDescription(
@@ -126,6 +130,14 @@ export interface DescriptivesContentProps {
   saturationLoading: boolean
   freqData: CodeFrequencySummary | undefined
   onChartTypeChange: (type: QualitativeAnalysisState['chartType']) => void
+  // ── Timeline chart type (slab 6c, §8q) ──
+  projectId: number
+  timedObservations: TimedObservationLite[]
+  timedCodes: TimedCodeLite[]
+  timedCategories: { id: number; name: string }[]
+  coderInclude: CoderInclude
+  multiCoder: boolean
+  coderMap: ReadonlyMap<number, TimedCoderLite>
 }
 
 export function DescriptivesContent(props: DescriptivesContentProps) {
@@ -136,6 +148,8 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
     sourceFreqData, sourceFreqLoading,
     saturationData, saturationLoading,
     freqData, onChartTypeChange,
+    projectId, timedObservations, timedCodes, timedCategories,
+    coderInclude, multiCoder, coderMap,
   } = props
 
   return (
@@ -145,11 +159,13 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
         onChartTypeChange={onChartTypeChange}
         selectedCodeCount={qa.selectedCodeIds.size > 0 ? qa.selectedCodeIds.size : codes.filter(c => c.is_active).length}
         conversationSourceCount={conversationSourceCount}
+        observationSourceCount={timedObservations.length}
+        humanLayer={qa.layerScope !== 'consensus'}
         categoryMode={qa.codeMode === 'categories'}
       />
 
-      {/* Metric context line */}
-      {hasQualSelection && qa.chartType !== 'saturation' && (
+      {/* Metric context line — timeline states its own denominators per block */}
+      {hasQualSelection && qa.chartType !== 'saturation' && qa.chartType !== 'timeline' && (
         <p className="text-xs text-mm-text-muted px-1">
           {getMetricDescription(qa.valueMode, qa.denominatorMode, qa.source, qa.excludeFacilitator)}
         </p>
@@ -175,14 +191,26 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
         <ChartExportWrapper
           formatting={qa.formatting}
           filename={`qual-${qa.chartType}`}
-          supportsSvg={qa.chartType !== 'heatmap' && qa.chartType !== 'summary'}
+          supportsSvg={qa.chartType !== 'heatmap' && qa.chartType !== 'summary' && qa.chartType !== 'timeline'}
           title={qa.descTitle}
           subtitle={qa.descSubtitle}
           footnote={qa.descFootnote}
-          chartN={descriptivesN ?? undefined}
+          // The descriptives N counts segments/texts — not this chart's unit.
+          chartN={qa.chartType === 'timeline' ? undefined : descriptivesN ?? undefined}
           showChartN={qa.showChartN}
         >
-        {qa.chartType === 'saturation' ? (
+        {qa.chartType === 'timeline' ? (
+          <TimedAnalytics
+            projectId={projectId}
+            observations={timedObservations}
+            codes={timedCodes}
+            categories={timedCategories}
+            include={coderInclude}
+            multiCoder={multiCoder}
+            coderMap={coderMap}
+            consensusScope={qa.layerScope === 'consensus'}
+          />
+        ) : qa.chartType === 'saturation' ? (
           saturationLoading ? (
             <div className="text-center py-8 text-mm-text-muted">Loading saturation data...</div>
           ) : saturationData ? (

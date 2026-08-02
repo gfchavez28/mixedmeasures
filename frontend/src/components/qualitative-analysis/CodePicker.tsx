@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { Search, Check, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import type { Code, CodeCategory, CodeFrequencyItem } from '@/lib/api'

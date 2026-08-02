@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
-import { useParams, useNavigate, Link } from 'react-router-dom'
+import { useParams, useNavigate, Link } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert } from 'lucide-react'
+import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert, Tags } from 'lucide-react'
 import { datasetsApi, participantsApi, type DatasetPreviewResponse, type DatasetColumnPreview, type DatasetColumnConfig, type ParticipantLinkReport } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -9,6 +9,8 @@ import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { Progress } from '@/components/ui/progress'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { ValueLabelRows, buildValueLabelPayload, type ValueLabelRow } from '@/components/ValueLabelRows'
 import { cn } from '@/lib/utils'
 import { consumePendingImportFiles } from '@/lib/pending-import-files'
 import { COLUMN_TYPES, TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
@@ -48,6 +50,9 @@ export interface FileConfig {
   /** #414: user-picked identifier column when several exist; null = auto
    *  (first identifier column). Compare with `??` — index 0 is valid. */
   linkColumnIndex: number | null
+  /** #575: per-column authored value labels (code→label) for numbers-only scale
+   *  columns. Keyed by column_index. Present ⇒ import as cells_are_codes. */
+  valueLabels: Record<number, { type: 'ordinal' | 'nominal'; rows: ValueLabelRow[] }>
 }
 
 interface ImportResult {
@@ -60,6 +65,8 @@ interface ImportResult {
   valuesCreated?: number
   recognizedMissingCount?: number
   recognizedMissingLabels?: string[]
+  /** #575: total observed codes left unlabeled across cells-are-codes columns. */
+  valueLabelUnlabeledCount?: number
   linkReport?: ParticipantLinkReport | null
   error?: string
 }
@@ -210,6 +217,97 @@ function ParticipantLinkNote({
 const MAX_FILES = 50
 const PREVIEW_CONCURRENCY = 5
 
+/** #575: per-column value-labels authoring in the import wizard — the cells are
+ * numeric codes, so declare a code→label dictionary to substitute at import (the
+ * wizard analog of a .sav import). Rendered as a sibling BELOW the column row, not
+ * nested in its <label> (#560). Seeds the complete observed code set. */
+function ColumnValueLabelsControl({
+  col,
+  authored,
+  onChange,
+}: {
+  col: DatasetColumnPreview
+  authored: { type: 'ordinal' | 'nominal'; rows: ValueLabelRow[] } | undefined
+  onChange: (v: { type: 'ordinal' | 'nominal'; rows: ValueLabelRow[] } | null) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const observedCodes = useMemo<number[]>(() => (
+    col.distinct_numeric_values
+      ?? Array.from(new Set(col.sample_values.map(v => Number(v)).filter(Number.isFinite))).sort((a, b) => a - b)
+  ), [col.distinct_numeric_values, col.sample_values])
+  const seedRows = useMemo<ValueLabelRow[]>(
+    () => observedCodes.map(c => ({ code: String(c), label: '' })),
+    [observedCodes],
+  )
+
+  const [type, setType] = useState<'ordinal' | 'nominal'>(authored?.type ?? 'ordinal')
+  const [rows, setRows] = useState<ValueLabelRow[]>(authored?.rows ?? seedRows)
+
+  // Reset the draft from the authored value (or the seed) each time it opens.
+  useEffect(() => {
+    if (open) {
+      setType(authored?.type ?? 'ordinal')
+      setRows(authored?.rows ?? seedRows)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  const validation = useMemo(() => buildValueLabelPayload(rows), [rows])
+  const undeclared = useMemo(() => {
+    const labelled = new Set((validation.payload ?? []).map(p => p.value))
+    return observedCodes.filter(c => !labelled.has(c))
+  }, [validation.payload, observedCodes])
+
+  const labelledCount = authored?.rows.filter(r => r.label.trim() !== '').length ?? 0
+
+  return (
+    <div className="px-4 pb-2 -mt-1">
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button variant="ghost" size="sm" className="h-6 text-xs text-mm-blue-text gap-1">
+            <Tags className="w-3 h-3" aria-hidden="true" />
+            {authored ? `Value labels (${labelledCount})` : 'Add value labels…'}
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-96 p-3">
+          <p className="text-xs text-mm-text-muted mb-2">
+            These cells are numeric codes. Give each code a label — charts and tables will show
+            the label; means and other statistics keep using the code.
+          </p>
+          <ValueLabelRows
+            rows={rows}
+            onRowsChange={setRows}
+            colType={type}
+            onColTypeChange={setType}
+            validation={validation}
+            idPrefix="wizard-vl"
+          />
+          {undeclared.length > 0 && (
+            <p role="note" className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+              {undeclared.length} observed code{undeclared.length === 1 ? '' : 's'} still unlabeled:{' '}
+              {undeclared.slice(0, 6).join(', ')}{undeclared.length > 6 ? '…' : ''}
+            </p>
+          )}
+          <div className="flex justify-end gap-2 mt-2">
+            {authored && (
+              <Button variant="ghost" size="sm" onClick={() => { onChange(null); setOpen(false) }}>
+                Remove
+              </Button>
+            )}
+            <Button
+              size="sm"
+              disabled={!validation.ok}
+              onClick={() => { onChange({ type, rows }); setOpen(false) }}
+            >
+              Apply labels
+            </Button>
+          </div>
+        </PopoverContent>
+      </Popover>
+    </div>
+  )
+}
+
 export default function DatasetImport() {
   const { projectId } = useParams<{ projectId: string }>()
   const navigate = useNavigate()
@@ -317,6 +415,7 @@ export default function DatasetImport() {
         sheetName: null,
         linkParticipants: true,
         linkColumnIndex: null,
+        valueLabels: {},
       })
     }
     setFileConfigs(newConfigs)
@@ -440,6 +539,7 @@ export default function DatasetImport() {
           previewError: null,
           sheetName,
           linkColumnIndex: null,
+          valueLabels: {},
         }
         return copy
       })
@@ -478,6 +578,23 @@ export default function DatasetImport() {
     })
   }, [])
 
+  const setValueLabels = useCallback((
+    fileIndex: number,
+    columnIndex: number,
+    value: { type: 'ordinal' | 'nominal'; rows: ValueLabelRow[] } | null,
+  ) => {
+    setFileConfigs(prev => {
+      const copy = [...prev]
+      const config = { ...copy[fileIndex] }
+      const vl = { ...config.valueLabels }
+      if (value === null) delete vl[columnIndex]
+      else vl[columnIndex] = value
+      config.valueLabels = vl
+      copy[fileIndex] = config
+      return copy
+    })
+  }, [])
+
   const setColumnType = useCallback((fileIndex: number, columnIndex: number, newType: string) => {
     setFileConfigs(prev => {
       const copy = [...prev]
@@ -487,6 +604,19 @@ export default function DatasetImport() {
       if (newType !== 'demographic') {
         const { [columnIndex]: _, ...rest } = config.subtypeOverrides
         config.subtypeOverrides = rest
+      }
+      // #575: authored value labels apply only to ordinal/nominal — keep them
+      // (retyped) when switching between those, drop them for any other type.
+      if (config.valueLabels[columnIndex]) {
+        if (newType === 'ordinal' || newType === 'nominal') {
+          config.valueLabels = {
+            ...config.valueLabels,
+            [columnIndex]: { ...config.valueLabels[columnIndex], type: newType },
+          }
+        } else {
+          const { [columnIndex]: _vl, ...restVL } = config.valueLabels
+          config.valueLabels = restVL
+        }
       }
       copy[fileIndex] = config
       return copy
@@ -525,6 +655,27 @@ export default function DatasetImport() {
 
   const buildColumnConfigs = useCallback((config: FileConfig): DatasetColumnConfig[] => {
     return config.previewColumns.map(col => {
+      // #575: authored value labels drive both the scale metadata AND the column
+      // type (ordinal/nominal) — a single source, so the type dropdown and the
+      // editor's choice can't disagree. Only a VALID authored dict takes effect.
+      const authored = config.valueLabels[col.column_index]
+      const authoredPayload = authored && buildValueLabelPayload(authored.rows)
+      if (authored && authoredPayload && authoredPayload.ok && authoredPayload.payload) {
+        return {
+          column_index: col.column_index,
+          skip: config.skippedIndices.has(col.column_index),
+          column_type: authored.type,
+          column_text: col.suggested_column_text,
+          column_code: col.suggested_column_code,
+          column_name: col.suggested_column_name || null,
+          group_code: col.suggested_group_code,
+          group_label: null,
+          scale_labels: authoredPayload.payload.map(p => p.label),
+          scale_values: authoredPayload.payload.map(p => p.value),
+          cells_are_codes: true,
+          demographic_subtype: null,
+        }
+      }
       const effectiveType = config.typeOverrides[col.column_index] || col.suggested_type
       return {
         column_index: col.column_index,
@@ -596,6 +747,7 @@ export default function DatasetImport() {
             valuesCreated: result.values_created,
             recognizedMissingCount: result.recognized_missing_count,
             recognizedMissingLabels: result.recognized_missing_labels,
+            valueLabelUnlabeledCount: Object.values(result.value_label_unlabeled ?? {}).reduce((a, v) => a + v.length, 0),
             linkReport: result.participant_link_report,
           }],
         })
@@ -664,6 +816,7 @@ export default function DatasetImport() {
           valuesCreated: result.values_created,
           recognizedMissingCount: result.recognized_missing_count,
           recognizedMissingLabels: result.recognized_missing_labels,
+          valueLabelUnlabeledCount: Object.values(result.value_label_unlabeled ?? {}).reduce((a, v) => a + v.length, 0),
           linkReport: result.participant_link_report,
         })
       } catch (err: unknown) {
@@ -801,7 +954,9 @@ export default function DatasetImport() {
             <div className="divide-y max-h-[400px] overflow-y-auto">
               {config.previewColumns.map((col) => {
                 const isSkipped = config.skippedIndices.has(col.column_index)
-                const effectiveType = config.typeOverrides[col.column_index] || col.suggested_type
+                // #575: authored value labels own the column type (ordinal/nominal).
+                const authoredVL = config.valueLabels[col.column_index]
+                const effectiveType: string = authoredVL?.type || config.typeOverrides[col.column_index] || col.suggested_type
                 const isAutoSkip = col.suggested_type === 'skip'
                 const typeBadgeClass = TYPE_BADGE_CLASSES[effectiveType] || 'bg-mm-bg text-mm-text-muted'
                 // #364: stray values not in the matched scale import as blank.
@@ -876,6 +1031,14 @@ export default function DatasetImport() {
                       </select>
                     )}
                   </label>
+                  {/* #575: value-labels authoring for a numbers-only scale column. */}
+                  {col.all_numeric && !isSkipped && (
+                    <ColumnValueLabelsControl
+                      col={col}
+                      authored={authoredVL}
+                      onChange={(v) => setValueLabels(fileIndex, col.column_index, v)}
+                    />
+                  )}
                   {unmatchedScaleValues.length > 0 && (
                     <div
                       role="note"
@@ -1367,6 +1530,14 @@ export default function DatasetImport() {
                     labels={importProgress.results[0].recognizedMissingLabels}
                     projectId={id}
                   />
+                  {(importProgress.results[0].valueLabelUnlabeledCount ?? 0) > 0 && (
+                    <div role="note" className="pt-1 text-xs text-amber-700 dark:text-amber-400">
+                      {importProgress.results[0].valueLabelUnlabeledCount} observed code
+                      {importProgress.results[0].valueLabelUnlabeledCount === 1 ? '' : 's'} had no
+                      label and imported as plain numbers — add value labels for them from the
+                      dataset's column menu.
+                    </div>
+                  )}
                   <ParticipantLinkNote
                     report={importProgress.results[0].linkReport}
                     projectId={id}

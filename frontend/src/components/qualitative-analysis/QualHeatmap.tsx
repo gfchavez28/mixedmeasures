@@ -102,7 +102,7 @@ export default function QualHeatmap({
               {displayLabels.map((label, j) => (
                 <th
                   scope="col"
-                  key={columnIds[j]}
+                  key={`${j}:${columnIds[j]}`}
                   className="border-b font-medium text-center"
                   style={
                     useAbbreviatedLabels
@@ -153,7 +153,7 @@ export default function QualHeatmap({
                 </th>
                 {row.cells.map((cell, j) => (
                   <td
-                    key={columnIds[j]}
+                    key={`${j}:${columnIds[j]}`}
                     className="px-1 py-1 text-center tabular-nums cursor-pointer hover:ring-1 hover:ring-mm-blue hover:ring-inset"
                     style={getHeatmapCellStyle(cell.displayValue, maxValue, isDark, heatmapPreset)}
                     title={`${row.label} \u00D7 ${cell.columnLabel}: ${cell.rawCount} segment${cell.rawCount !== 1 ? 's' : ''}${cell.wordCount > 0 ? `, ${cell.wordCount} words` : ''}`}
@@ -181,7 +181,7 @@ export default function QualHeatmap({
                   Total
                 </th>
                 {summaryRow.map((total, j) => (
-                  <td key={columnIds[j]} className="px-1 py-1 text-center tabular-nums">
+                  <td key={`${j}:${columnIds[j]}`} className="px-1 py-1 text-center tabular-nums">
                     {total > 0 ? total : '\u2013'}
                   </td>
                 ))}

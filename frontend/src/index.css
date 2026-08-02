@@ -101,6 +101,16 @@
   --color-mm-blue: hsl(var(--mm-blue));
   --color-mm-blue-text: hsl(var(--mm-blue-text));
   --color-mm-blue-cell: hsl(var(--mm-blue-cell));
+  /* #628: teal is the Observations accent. The raw --mm-teal properties have
+   * existed in :root/.dark since the track began, but WITHOUT these two
+   * registrations Tailwind v4 generates no utility at all — `text-mm-teal-text`
+   * and `bg-mm-teal` compiled to nothing across TopRail, ClipTimeline,
+   * ObservationImport and ObservationsListPage. Only the arbitrary-value form
+   * (`bg-[hsl(var(--mm-teal))]`, used by Canvas) ever worked, which is why the
+   * token looked healthy. Adding an accent colour is TWO edits: the :root/.dark
+   * pair AND the registration here. */
+  --color-mm-teal: hsl(var(--mm-teal));
+  --color-mm-teal-text: hsl(var(--mm-teal-text));
   --color-mm-canvas: hsl(var(--mm-canvas));
   --color-mm-canvas-text: hsl(var(--mm-canvas-text));
 }
@@ -217,7 +227,12 @@
     --mm-card-shadow: 0 1px 3px 0 rgba(0,0,0,0.25), 0 1px 2px -1px rgba(0,0,0,0.15);
     --mm-chrome: 180 30% 9%;
     --mm-chrome-text: 0 0% 92%;
-    --mm-chrome-text-muted: 172 12% 52%;
+    /* #645: was 52%, which is 4.41:1 on the rail's bg-white/[0.06] action chips
+       and only 3.88:1 on the bg-white/10 count badge — the badge being the worse
+       node, and the one Lighthouse did NOT report (badges render only when the
+       count is non-zero). 60% clears AA on every rail background the token meets:
+       6.57 bare / 5.58 chip / 4.92 badge. Pinned by chrome-contrast.test.ts. */
+    --mm-chrome-text-muted: 172 12% 60%;
     --mm-text: 40 12% 90%;
     --mm-text-secondary: 40 8% 72%;
     --mm-text-muted: 200 6% 56%;

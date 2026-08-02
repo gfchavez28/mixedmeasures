@@ -1,6 +1,6 @@
 import { NodeViewWrapper } from '@tiptap/react'
 import type { NodeViewProps } from '@tiptap/core'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router'
 import { Trash2, ExternalLink } from 'lucide-react'
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
@@ -9,7 +9,14 @@ import MaterialsTagInline from '../MaterialsTagInline'
 export default function ExcerptEmbedView({ node, updateAttributes, deleteNode, selected }: NodeViewProps) {
   const { projectId } = useProjectLayout()
   const navigate = useNavigate()
-  const { displayText, sourceContext, conversationId, materialTag, tagNote } = node.attrs
+  const { displayText, sourceContext, conversationId, observationId, materialTag, tagNote } = node.attrs
+  // The embed is a static SNAPSHOT (like displayText/sourceContext), so the
+  // source link is the only live part. A clip embed carries observationId.
+  const sourceHref = conversationId
+    ? `/projects/${projectId}/conversations/${conversationId}`
+    : observationId
+      ? `/projects/${projectId}/observations/${observationId}`
+      : null
 
   return (
     <NodeViewWrapper
@@ -46,9 +53,9 @@ export default function ExcerptEmbedView({ node, updateAttributes, deleteNode, s
             </p>
 
             {sourceContext && (
-              conversationId ? (
+              sourceHref ? (
                 <Link
-                  to={`/projects/${projectId}/conversations/${conversationId}`}
+                  to={sourceHref}
                   className="text-xs text-mm-accent hover:underline mt-1.5 block"
                 >
                   {sourceContext}
@@ -60,9 +67,9 @@ export default function ExcerptEmbedView({ node, updateAttributes, deleteNode, s
           </div>
         </ContextMenuTrigger>
         <ContextMenuContent>
-          {conversationId && (
+          {sourceHref && (
             <>
-              <ContextMenuItem onSelect={() => navigate(`/projects/${projectId}/conversations/${conversationId}`)}>
+              <ContextMenuItem onSelect={() => navigate(sourceHref)}>
                 <ExternalLink className="w-4 h-4 mr-2" />View Source
               </ContextMenuItem>
               <ContextMenuSeparator />

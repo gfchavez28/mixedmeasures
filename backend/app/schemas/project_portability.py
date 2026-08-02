@@ -12,6 +12,19 @@ class ProjectSummary(BaseModel):
     memo_count: int
     participant_count: int
     excerpt_count: int
+    # Observations (format v3+). DEFAULTED, not omitted — and the distinction is
+    # the whole point (#639). The exporter writes this key, but a schema that
+    # does not DECLARE it drops it on the way out: this model is reached through
+    # `ImportValidationResult`, and a response_model silently discards undeclared
+    # fields. So the count sat in every v3+ archive and could never reach the
+    # import preview, which went on showing "0 datasets, 0 documents" for a file
+    # full of observations.
+    #
+    # A REQUIRED field would indeed fail to parse every v1/v2 manifest ever
+    # exported (they predate observations) — which is why this carries a default
+    # instead. Old manifests parse and read 0; new ones carry the real count.
+    # Any future additive summary field belongs here on the same terms.
+    observation_count: int = 0
 
 
 class ProjectExportManifest(BaseModel):

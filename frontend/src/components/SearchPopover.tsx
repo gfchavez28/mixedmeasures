@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
-import { Search, FileText, Tag, Users, StickyNote, MessageSquare, MessageCircle, Layers, X, LoaderCircle, ChevronDown, Quote, ArrowUpRight } from 'lucide-react'
+import { Search, FileText, Tag, Users, StickyNote, MessageSquare, MessageCircle, Layers, Video, X, LoaderCircle, ChevronDown, Quote, ArrowUpRight } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
@@ -20,11 +20,19 @@ import {
   type NoteSearchResult,
   type MemoSearchResult,
   type DocumentSearchResult,
+  type ObservationSearchResult,
   type TextSearchResult,
   type CanvasSearchResult,
 } from '@/lib/api'
 import { getSpeakerInitials, getInitialsBadgeColors } from '@/lib/conversation-import-utils'
 import { displayCountAfterLocalFilter } from '@/lib/search-display'
+import {
+  type FilterCategory,
+  SOURCE_FILTERS,
+  ANNOTATION_FILTERS,
+  DEFAULT_FILTERS,
+  filtersToBackendTypes,
+} from '@/lib/search-filters'
 
 interface SearchPopoverProps {
   open: boolean
@@ -34,17 +42,12 @@ interface SearchPopoverProps {
   onOpenMemos?: () => void
 }
 
-// UI filter categories (what the user sees)
-type FilterCategory = 'conversations' | 'documents' | 'text' | 'canvases' | 'codes' | 'notes' | 'memos'
-const ALL_FILTERS: FilterCategory[] = ['conversations', 'documents', 'text', 'canvases', 'codes', 'notes', 'memos']
-const DEFAULT_FILTERS: FilterCategory[] = [...ALL_FILTERS]
-
 // All backend entity types (for prefix parsing)
-const ALL_BACKEND_TYPES: SearchEntityType[] = ['codes', 'segments', 'documents', 'text', 'canvases', 'notes', 'memos', 'conversations']
+const ALL_BACKEND_TYPES: SearchEntityType[] = ['codes', 'segments', 'documents', 'observations', 'text', 'canvases', 'notes', 'memos', 'conversations']
 
 // ── Flat result item for keyboard nav ──
 
-type FlatItemType = 'segment' | 'code' | 'conversation' | 'note' | 'memo' | 'document' | 'text' | 'canvas'
+type FlatItemType = 'segment' | 'code' | 'conversation' | 'note' | 'memo' | 'document' | 'observation' | 'text' | 'canvas'
 
 type FlatResultItem =
   | { type: 'segment'; data: SegmentSearchResult }
@@ -53,6 +56,7 @@ type FlatResultItem =
   | { type: 'note'; data: NoteSearchResult }
   | { type: 'memo'; data: MemoSearchResult }
   | { type: 'document'; data: DocumentSearchResult }
+  | { type: 'observation'; data: ObservationSearchResult }
   | { type: 'text'; data: TextSearchResult }
   | { type: 'canvas'; data: CanvasSearchResult }
 
@@ -69,18 +73,11 @@ function SourceBadge({ sourceType }: { sourceType?: string }) {
   if (sourceType === 'conversation') {
     return <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400">Conv</span>
   }
-  return null
-}
-
-/** Map UI filter selections → backend SearchEntityType[] for the API request. */
-function filtersToBackendTypes(filters: FilterCategory[]): SearchEntityType[] {
-  const types = new Set<SearchEntityType>()
-  for (const f of filters) {
-    types.add(f as SearchEntityType)
-    // Conversations/Documents imply segment text search
-    if (f === 'conversations' || f === 'documents') types.add('segments')
+  if (sourceType === 'observation') {
+    // Teal = the observation accent (TopRail tab, clip bars).
+    return <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium bg-teal-100 text-teal-600 dark:bg-teal-900/30 dark:text-teal-400">Obs</span>
   }
-  return Array.from(types)
+  return null
 }
 
 export default function SearchPopover({
@@ -103,6 +100,7 @@ export default function SearchPopover({
   // Which sources are checked (for filtering displayed segment results)
   const showConvSegments = selectedFilters.includes('conversations')
   const showDocSegments = selectedFilters.includes('documents')
+  const showObsSegments = selectedFilters.includes('observations')
 
   // Reset state when closing
   useEffect(() => {
@@ -131,7 +129,7 @@ export default function SearchPopover({
     const trimmed = rawQuery.trim()
     if (!trimmed) return { searchTerm: '', parsedTypes: null }
 
-    const prefixMatch = trimmed.match(/^(codes?|segments?|notes?|memos?|conversations?|documents?|comments?|canvases?):(.+)$/i)
+    const prefixMatch = trimmed.match(/^(codes?|segments?|notes?|memos?|conversations?|documents?|observations?|comments?|canvases?):(.+)$/i)
     if (prefixMatch) {
       let typeName = prefixMatch[1].toLowerCase()
       if (!typeName.endsWith('s')) typeName += 's'
@@ -141,7 +139,7 @@ export default function SearchPopover({
       }
     }
 
-    const exclusionPattern = /\s+-(codes?|segments?|notes?|memos?|conversations?|documents?|comments?|canvases?)(?:\s|$)/gi
+    const exclusionPattern = /\s+-(codes?|segments?|notes?|memos?|conversations?|documents?|observations?|comments?|canvases?)(?:\s|$)/gi
     const exclusions: SearchEntityType[] = []
     let searchTerm = trimmed
     let match
@@ -155,7 +153,7 @@ export default function SearchPopover({
     }
 
     if (exclusions.length > 0) {
-      searchTerm = trimmed.replace(/\s+-(codes?|segments?|notes?|memos?|conversations?|documents?|comments?|canvases?)(?=\s|$)/gi, '').trim()
+      searchTerm = trimmed.replace(/\s+-(codes?|segments?|notes?|memos?|conversations?|documents?|observations?|comments?|canvases?)(?=\s|$)/gi, '').trim()
       const backendTypes = filtersToBackendTypes(selectedFilters)
       const remainingTypes = backendTypes.filter(t => !exclusions.includes(t))
       if (remainingTypes.length > 0) {
@@ -214,6 +212,7 @@ export default function SearchPopover({
     const items = fetched.filter(s => {
       if (s.source_type === 'conversation' && showConvSegments) return true
       if (s.source_type === 'document' && showDocSegments) return true
+      if (s.source_type === 'observation' && showObsSegments) return true
       return false
     })
     if (items.length === 0) return null
@@ -221,7 +220,24 @@ export default function SearchPopover({
       count: displayCountAfterLocalFilter(searchResults.segments.count, fetched.length, items.length),
       items,
     }
-  }, [searchResults?.segments, showConvSegments, showDocSegments])
+  }, [searchResults?.segments, showConvSegments, showDocSegments, showObsSegments])
+
+  // Notes: the same whitelist posture as segments — a kind this popover can't
+  // navigate must not render a row that clicks through to /conversations/null.
+  // All three source kinds navigate since 4e; the whitelist stays fail-closed
+  // against a FUTURE kind.
+  const displayNotes = useMemo(() => {
+    if (!searchResults?.notes) return null
+    const fetched = searchResults.notes.items
+    const items = fetched.filter(n =>
+      n.source_type === 'conversation' || n.source_type === 'document'
+      || n.source_type === 'observation' || n.source_type === undefined)
+    if (items.length === 0) return null
+    return {
+      count: displayCountAfterLocalFilter(searchResults.notes.count, fetched.length, items.length),
+      items,
+    }
+  }, [searchResults?.notes])
 
   // Comments: filter by is_quoted when quotedOnly is on
   const displayTexts = useMemo(() => {
@@ -241,6 +257,12 @@ export default function SearchPopover({
     if (quotedOnly) return null
     return searchResults?.conversations ?? null
   }, [searchResults?.conversations, quotedOnly])
+
+  // Observation name matches (the 4th name block, slab 4b) — same posture.
+  const displayObservations = useMemo(() => {
+    if (quotedOnly) return null
+    return searchResults?.observations ?? null
+  }, [searchResults?.observations, quotedOnly])
 
   const displayDocuments = useMemo(() => {
     if (quotedOnly) return null
@@ -316,7 +338,11 @@ export default function SearchPopover({
 
   const handleSegmentClick = (segment: SegmentSearchResult) => {
     const term = parsedSearchTerm
-    if (segment.source_type === 'document') {
+    if (segment.source_kind === 'observation' && segment.source_id != null) {
+      // Clip hit → the workbench ?clip= deep-link (D26). Keyed on the honest
+      // source_id pair — conversation_id is NULL on observation hits (#569).
+      closeAndNavigate(`/projects/${projectId}/observations/${segment.source_id}?clip=${segment.id}`)
+    } else if (segment.source_type === 'document') {
       closeAndNavigate(`/projects/${projectId}/documents/${segment.conversation_id}`)
     } else {
       const params = new URLSearchParams({ segment: String(segment.id) })
@@ -344,7 +370,12 @@ export default function SearchPopover({
   }
 
   const handleNoteClick = (note: NoteSearchResult) => {
-    if (note.source_type === 'document') {
+    if (note.source_kind === 'observation' && note.source_id != null) {
+      // Clip-anchored notes deep-link to their clip; observation-level notes
+      // land on the workbench plain.
+      const suffix = note.segment_id != null ? `?clip=${note.segment_id}` : ''
+      closeAndNavigate(`/projects/${projectId}/observations/${note.source_id}${suffix}`)
+    } else if (note.source_type === 'document') {
       closeAndNavigate(`/projects/${projectId}/documents/${note.conversation_id}`)
     } else {
       closeAndNavigate(`/projects/${projectId}/conversations/${note.conversation_id}`)
@@ -358,6 +389,10 @@ export default function SearchPopover({
 
   const handleDocumentClick = (doc: DocumentSearchResult) => {
     closeAndNavigate(`/projects/${projectId}/documents/${doc.id}`)
+  }
+
+  const handleObservationClick = (obs: ObservationSearchResult) => {
+    closeAndNavigate(`/projects/${projectId}/observations/${obs.id}`)
   }
 
   const handleTextClick = (comment: TextSearchResult) => {
@@ -382,7 +417,8 @@ export default function SearchPopover({
     (displaySegments && displaySegments.count > 0) ||
     (searchResults?.codes?.count || 0) > 0 ||
     (displayConversations?.count || 0) > 0 ||
-    (searchResults?.notes?.count || 0) > 0 ||
+    (displayObservations?.count || 0) > 0 ||
+    (displayNotes?.count || 0) > 0 ||
     (searchResults?.memos?.count || 0) > 0 ||
     (displayDocuments?.count || 0) > 0 ||
     (displayTexts?.count || 0) > 0 ||
@@ -396,17 +432,23 @@ export default function SearchPopover({
     if (!searchResults || !hasResults) return []
     const items: FlatResultItem[] = []
 
-    // Map SearchEntityType (plural) → FlatItemType (singular)
-    const typeMap: Record<SearchEntityType, FlatItemType> = {
+    // Map SearchEntityType (plural) → FlatItemType (singular). Partial stays as
+    // the fail-closed posture for a FUTURE wire type this popover can't render.
+    const typeMap: Partial<Record<SearchEntityType, FlatItemType>> = {
       codes: 'code', segments: 'segment', documents: 'document', text: 'text',
-      conversations: 'conversation', notes: 'note', memos: 'memo', canvases: 'canvas',
+      conversations: 'conversation', observations: 'observation',
+      notes: 'note', memos: 'memo', canvases: 'canvas',
     }
 
     if (expandedType) {
       const flatType = typeMap[expandedType]
-      if (expandedType === 'segments' && displaySegments) {
+      if (!flatType) {
+        // A wire type this popover can't render (fail-closed for future kinds).
+      } else if (expandedType === 'segments' && displaySegments) {
         for (const item of displaySegments.items) items.push({ type: flatType, data: item } as FlatResultItem)
-      } else {
+      } else if (expandedType === 'notes' && displayNotes) {
+        for (const item of displayNotes.items) items.push({ type: flatType, data: item } as FlatResultItem)
+      } else if (expandedType !== 'notes') {
         const resultSet = searchResults[expandedType]
         if (resultSet) {
           for (const item of resultSet.items) items.push({ type: flatType, data: item } as FlatResultItem)
@@ -419,11 +461,12 @@ export default function SearchPopover({
       if (displayTexts) for (const c of displayTexts.items) items.push({ type: 'text', data: c })
       if (displayCanvases) for (const c of displayCanvases.items) items.push({ type: 'canvas', data: c })
       if (displayConversations) for (const c of displayConversations.items) items.push({ type: 'conversation', data: c })
-      if (searchResults.notes) for (const n of searchResults.notes.items) items.push({ type: 'note', data: n })
+      if (displayObservations) for (const o of displayObservations.items) items.push({ type: 'observation', data: o })
+      if (displayNotes) for (const n of displayNotes.items) items.push({ type: 'note', data: n })
       if (searchResults.memos) for (const m of searchResults.memos.items) items.push({ type: 'memo', data: m })
     }
     return items
-  }, [searchResults, hasResults, expandedType, displaySegments, displayTexts, displayConversations, displayDocuments, displayCanvases])
+  }, [searchResults, hasResults, expandedType, displaySegments, displayNotes, displayTexts, displayConversations, displayObservations, displayDocuments, displayCanvases])
 
   // Total result count for footer
   const totalResultCount = useMemo(() => {
@@ -431,12 +474,13 @@ export default function SearchPopover({
     return (displaySegments?.count || 0) +
       (searchResults.codes?.count || 0) +
       (displayConversations?.count || 0) +
-      (searchResults.notes?.count || 0) +
+      (displayObservations?.count || 0) +
+      (displayNotes?.count || 0) +
       (searchResults.memos?.count || 0) +
       (displayDocuments?.count || 0) +
       (displayTexts?.count || 0) +
       (displayCanvases?.count || 0)
-  }, [searchResults, displaySegments, displayConversations, displayDocuments, displayTexts, displayCanvases])
+  }, [searchResults, displaySegments, displayNotes, displayConversations, displayObservations, displayDocuments, displayTexts, displayCanvases])
 
   const activeTypeCount = useMemo(() => {
     if (!searchResults) return 0
@@ -444,13 +488,14 @@ export default function SearchPopover({
     if ((displaySegments?.count || 0) > 0) count++
     if ((searchResults.codes?.count || 0) > 0) count++
     if ((displayConversations?.count || 0) > 0) count++
-    if ((searchResults.notes?.count || 0) > 0) count++
+    if ((displayObservations?.count || 0) > 0) count++
+    if ((displayNotes?.count || 0) > 0) count++
     if ((searchResults.memos?.count || 0) > 0) count++
     if ((displayDocuments?.count || 0) > 0) count++
     if ((displayTexts?.count || 0) > 0) count++
     if ((displayCanvases?.count || 0) > 0) count++
     return count
-  }, [searchResults, displaySegments, displayConversations, displayDocuments, displayTexts, displayCanvases])
+  }, [searchResults, displaySegments, displayNotes, displayConversations, displayObservations, displayDocuments, displayTexts, displayCanvases])
 
   // Activate the focused item
   const activateItem = useCallback((item: FlatResultItem) => {
@@ -461,6 +506,7 @@ export default function SearchPopover({
       case 'note': handleNoteClick(item.data as NoteSearchResult); break
       case 'memo': handleMemoClick(item.data as MemoSearchResult); break
       case 'document': handleDocumentClick(item.data as DocumentSearchResult); break
+      case 'observation': handleObservationClick(item.data as ObservationSearchResult); break
       case 'text': handleTextClick(item.data as TextSearchResult); break
       case 'canvas': handleCanvasClick(item.data as CanvasSearchResult); break
     }
@@ -703,6 +749,19 @@ export default function SearchPopover({
     </>)
   }
 
+  const renderObservation = (obs: ObservationSearchResult, item: FlatResultItem) => {
+    const idx = globalIdx++
+    return renderResultButton(item, idx, <>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm">{highlightMatch(obs.name, debouncedQuery)}</p>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          {obs.segment_count} clip{obs.segment_count === 1 ? '' : 's'}
+          {obs.has_media && ' · recording attached'}
+        </p>
+      </div>
+    </>)
+  }
+
   const renderComment = (comment: TextSearchResult, item: FlatResultItem) => {
     const idx = globalIdx++
     return renderResultButton(item, idx, <>
@@ -804,8 +863,8 @@ export default function SearchPopover({
             {!hasOperator && (
               <>
                 {/* Sources cluster */}
-                <div className="flex items-center gap-2.5">
-                  {(['conversations', 'documents', 'text', 'canvases'] as FilterCategory[]).map(f => (
+                <div className="flex items-center gap-2.5" role="group" aria-label="Filter by source">
+                  {SOURCE_FILTERS.map(f => (
                     <div key={f} className="flex items-center gap-1.5">
                       <Checkbox
                         id={`search-filter-${f}`}
@@ -822,8 +881,8 @@ export default function SearchPopover({
                 <div className="w-px h-4 bg-mm-border-subtle" />
 
                 {/* Annotations cluster */}
-                <div className="flex items-center gap-2.5">
-                  {(['codes', 'notes', 'memos'] as FilterCategory[]).map(f => (
+                <div className="flex items-center gap-2.5" role="group" aria-label="Filter by annotation">
+                  {ANNOTATION_FILTERS.map(f => (
                     <div key={f} className="flex items-center gap-1.5">
                       <Checkbox
                         id={`search-filter-${f}`}
@@ -967,14 +1026,28 @@ export default function SearchPopover({
                   </ResultSection>
                 )}
 
+                {/* Observations */}
+                {displayObservations && displayObservations.count > 0 && (
+                  <ResultSection
+                    title="Observations" icon={<Video className="w-4 h-4" />}
+                    count={displayObservations.count} showingCount={displayObservations.items.length}
+                    onShowAll={() => handleShowAll('observations')}
+                  >
+                    {displayObservations.items.map((obs) => {
+                      const item: FlatResultItem = { type: 'observation', data: obs }
+                      return renderObservation(obs, item)
+                    })}
+                  </ResultSection>
+                )}
+
                 {/* Notes */}
-                {searchResults!.notes && searchResults!.notes.count > 0 && (
+                {displayNotes && displayNotes.count > 0 && (
                   <ResultSection
                     title="Notes" icon={<StickyNote className="w-4 h-4" />}
-                    count={searchResults!.notes.count} showingCount={searchResults!.notes.items.length}
+                    count={displayNotes.count} showingCount={displayNotes.items.length}
                     onShowAll={() => handleShowAll('notes')}
                   >
-                    {searchResults!.notes.items.map((note) => {
+                    {displayNotes.items.map((note) => {
                       const item: FlatResultItem = { type: 'note', data: note }
                       return renderNote(note, item)
                     })}
@@ -1040,7 +1113,11 @@ export default function SearchPopover({
                     const item: FlatResultItem = { type: 'conversation', data: conv }
                     return renderConversation(conv, item)
                   })}
-                  {expandedType === 'notes' && searchResults?.notes?.items.map(note => {
+                  {expandedType === 'observations' && searchResults?.observations?.items.map(obs => {
+                    const item: FlatResultItem = { type: 'observation', data: obs }
+                    return renderObservation(obs, item)
+                  })}
+                  {expandedType === 'notes' && displayNotes?.items.map(note => {
                     const item: FlatResultItem = { type: 'note', data: note }
                     return renderNote(note, item)
                   })}

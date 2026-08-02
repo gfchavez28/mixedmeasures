@@ -54,8 +54,11 @@ export interface UseCodeChordShortcutsOptions<T extends ShortcutCodeInput> {
 
   /** Up/Down list navigation. `extend` = Shift (range), `jump` = Ctrl/Cmd (to far end). */
   onArrowNav?: (direction: 1 | -1, opts: { extend: boolean; jump: boolean }) => void
-  /** Left/Right panel focus. Return true if handled → the hook preventDefaults. */
-  onArrowHorizontal?: (direction: 'left' | 'right') => boolean
+  /** Left/Right. Return true if handled → the hook preventDefaults. Conversation/
+   * document workbenches use it for panel focus (and ignore the modifiers); the
+   * observation workbench reads them for boundary nudges (slab 3d: plain ±0.1 s,
+   * shift ±1 s, alt = the start edge). */
+  onArrowHorizontal?: (direction: 'left' | 'right', mods: { shift: boolean; alt: boolean }) => boolean
 
   /**
    * Workbench-specific keys (e.g. CodingWorkbench Space/`g`, TextCodingView `[`/`]`).
@@ -64,17 +67,35 @@ export interface UseCodeChordShortcutsOptions<T extends ShortcutCodeInput> {
    * ALL its own gating (focus, viewMode, …) and returns `true` if it acted — only then does
    * the hook `preventDefault` and stop. Returning `false` lets the key fall through.
    */
-  extraKeys?: Record<string, () => boolean>
+  extraKeys?: Record<string, (event: KeyboardEvent) => boolean>
 
   /** Clear the current selection (Escape: list-focused layer). */
   clearSelection?: () => void
   /**
+   * Escape layer for a transient surface MODE (slab 3d: the armed I/O mark on
+   * the observation timeline). Checked right after the pending-chord layer and
+   * BEFORE the overlay layer — a mode is the most recent thing the user armed,
+   * and cancelling it must not also drop them out of theater. Return true if a
+   * mode was dismissed (the press is consumed). extraKeys cannot carry Escape:
+   * the ladder runs before the extraKeys dispatch, by design.
+   */
+  onEscapeMode?: () => boolean
+  /**
    * Escape layer for a temporary media overlay state (video theater / PiP —
-   * V1 slab 4). Checked right after the pending-chord layer; return true if an
+   * V1 slab 4). Checked after the mode layer; return true if an
    * overlay was exited (the press is consumed), false to fall through to the
    * panel/selection layers.
    */
   onEscapeOverlay?: () => boolean
+  /**
+   * Escape layer for a persistent surface STATE that outranks panel/selection
+   * but must NOT pre-empt an open overlay (Observations D27: exit Follow —
+   * §8i.0.8's slot). Checked AFTER overlay-dismiss, BEFORE panel/selection —
+   * exiting follow from inside theater would be the wrong layer order, which
+   * is why this cannot ride `onEscapeMode` (that slot runs before overlay).
+   * Return true if the state was dismissed (the press is consumed).
+   */
+  onEscapePostOverlay?: () => boolean
   /** Escape layer when a side panel is focused (dismiss it) and the final fallback. */
   onEscapeFallback?: () => void
 
@@ -180,7 +201,9 @@ export function useCodeChordShortcuts<T extends ShortcutCodeInput>(
       // unambiguous: chord → (panel focused ⇒ dismiss it) → (list focused ⇒ clear selection).
       if (e.key === 'Escape') {
         if (chordPrefixRef.current !== null) { clearChord(); return }            // layer 1: chord
+        if (o.onEscapeMode?.()) return                                           // layer 1b: surface mode (armed mark)
         if (o.onEscapeOverlay?.()) return                                        // layer 2: media overlay (theater/PiP)
+        if (o.onEscapePostOverlay?.()) return                                    // layer 2b: surface state (Follow — D27)
         if (!o.arrowNavEnabled) { o.onEscapeFallback?.(); return }               // side panel → dismiss
         if (o.selectionCount > 0) { o.clearSelection?.(); return }               // list → clear selection
         return
@@ -211,20 +234,27 @@ export function useCodeChordShortcuts<T extends ShortcutCodeInput>(
         return
       }
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-        const handled = o.onArrowHorizontal?.(e.key === 'ArrowLeft' ? 'left' : 'right')
+        const handled = o.onArrowHorizontal?.(e.key === 'ArrowLeft' ? 'left' : 'right', {
+          shift: e.shiftKey,
+          alt: e.altKey,
+        })
         if (handled) e.preventDefault()
         return
       }
 
       // ── Verbs that work with no selection ──
-      if (e.key === 'j') { e.preventDefault(); o.onJumpUncoded?.(); return }
+      // `j` is claimed ONLY when the surface provides jump-to-uncoded (D4): the
+      // observation workbench deliberately omits it so the letter is free for
+      // J-K-L transport via extraKeys below. An unconditional claim here would
+      // silently eat the shuttle key.
+      if (e.key === 'j' && o.onJumpUncoded) { e.preventDefault(); o.onJumpUncoded(); return }
       if (e.key === 'F2') { e.preventDefault(); o.onEditOrRename?.(); return } // no selection gate (G-H)
 
       // ── Workbench-specific keys (plan H-B; before the selection gate) ──
       // Ungated: the handler self-gates and returns true if it acted (→ preventDefault + stop);
       // a false return lets the key fall through to the rest of the handler.
       if (o.extraKeys && e.key in o.extraKeys) {
-        if (o.extraKeys[e.key]()) { e.preventDefault(); return }
+        if (o.extraKeys[e.key](e)) { e.preventDefault(); return }
       }
 
       // ── Everything below requires a selection ──

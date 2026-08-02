@@ -24,6 +24,7 @@ from ..schemas.project_portability import (
     ProjectImportResult,
 )
 from ..services.codebook_exchange import (
+    EmptyCodebookError,
     export_codebook_native,
     export_codebook_qdc,
     import_codebook_native,
@@ -412,6 +413,10 @@ async def export_codebook_endpoint(
     if format == "qdc":
         try:
             xml_content = export_codebook_qdc(db, project_id)
+        except EmptyCodebookError as e:
+            # 400, not 404 — the project exists, the request is just not
+            # satisfiable in a format whose schema requires at least one code.
+            raise HTTPException(400, str(e))
         except ValueError as e:
             raise HTTPException(404, str(e))
 

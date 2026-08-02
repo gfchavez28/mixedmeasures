@@ -1,12 +1,14 @@
 import { useState, useMemo, useRef, useCallback } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { FileInput, Trash2, Pencil, Search, X, ArrowUpDown, Volume2, Video, Mic, BookOpen, MessageSquare } from 'lucide-react'
+import { FileInput, Trash2, Pencil, Search, X, ArrowUpDown, Volume2, Video, Mic, BookOpen, MessageSquare, Film } from 'lucide-react'
 import { toast } from 'sonner'
 import { validateMediaFile, MEDIA_ACCEPT, describeMediaUploadError } from '@/lib/media-constants'
-import { conversationsApi, mediaApi, type Conversation } from '@/lib/api'
+import { conversationsApi, mediaApi, observationsApi, type Conversation } from '@/lib/api'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
-import { isSupportedTranscriptFile, TRANSCRIPT_FORMAT_LABEL } from '@/lib/conversation-import-formats'
+import { TRANSCRIPT_FORMAT_LABEL } from '@/lib/conversation-import-formats'
+import { routeDroppedFiles } from '@/lib/import-routing'
+import { DROPPED_RECORDING_TITLE, DROPPED_RECORDING_DETAIL } from '@/lib/source-kind-copy'
 import { formatBytes } from '@/lib/format'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
@@ -91,7 +93,7 @@ export default function ConversationsListPage() {
 
   const uploadAudioMutation = useMutation({
     mutationFn: ({ conversationId, file }: { conversationId: number; file: File }) =>
-      mediaApi.upload(projectId, conversationId, file),
+      mediaApi.upload(projectId, 'conversation', conversationId, file),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['conversations', projectId] })
       toast.success('Recording uploaded')
@@ -102,7 +104,7 @@ export default function ConversationsListPage() {
   })
 
   const removeAudioMutation = useMutation({
-    mutationFn: (conversationId: number) => mediaApi.remove(projectId, conversationId),
+    mutationFn: (conversationId: number) => mediaApi.remove(projectId, 'conversation', conversationId),
     onSuccess: () => {
       setRemoveAudioConversationId(null)
       queryClient.invalidateQueries({ queryKey: ['conversations', projectId] })
@@ -110,6 +112,44 @@ export default function ConversationsListPage() {
     },
     onError: () => {
       toast.error('Failed to remove recording')
+    },
+  })
+
+  /**
+   * D17 — "also code this as an Observation".
+   *
+   * Creates a NEW source and COPIES the recording server-side (never shares the
+   * path: each owner rmtrees its own media dir on delete). It carries no codes —
+   * this is not a migration, it is re-use of the file, which is why the affordance
+   * never says "convert".
+   *
+   * A same-disk copy of a multi-GB file is another long await, so it obeys the
+   * #543 rule: NEVER auto-navigate on success. A toast with an "Open" action works
+   * whether or not the user is still on this page.
+   */
+  const [alsoObserveTarget, setAlsoObserveTarget] = useState<Conversation | null>(null)
+
+  const alsoObserveMutation = useMutation({
+    mutationFn: async (conversation: Conversation) => {
+      const obs = await observationsApi.create(projectId, { name: conversation.name })
+      return observationsApi.reuseConversationRecording(projectId, obs.id, conversation.id)
+    },
+    onSuccess: (obs) => {
+      setAlsoObserveTarget(null)
+      queryClient.invalidateQueries({ queryKey: ['observations', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['project-summary', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['project', projectId] })
+      toast.success(`"${obs.name}" created as an Observation`, {
+        description: 'The recording was re-used. No codes were carried over.',
+        action: {
+          label: 'Open',
+          onClick: () => navigate(`/projects/${projectId}/observations/${obs.id}`),
+        },
+      })
+    },
+    onError: (err) => {
+      setAlsoObserveTarget(null)
+      toast.error(describeMediaUploadError(err))
     },
   })
 
@@ -170,13 +210,32 @@ export default function ConversationsListPage() {
       e.preventDefault()
       dragCounterRef.current = 0
       setIsDragOver(false)
-      const droppedFiles = Array.from(e.dataTransfer.files)
-      // #552: was `.endsWith('.csv')` — it silently refused the VTT/SRT subtitles
-      // the wizard has accepted since #524, so a dropped Zoom transcript no-op'd.
-      const transcriptFiles = droppedFiles.filter(f => isSupportedTranscriptFile(f.name))
-      if (transcriptFiles.length === 0) return
-      setPendingImportFiles(transcriptFiles, 'conversation')
-      navigate(`/projects/${projectId}/conversations/import`)
+      // #552: the filter was once `.endsWith('.csv')` and silently refused the
+      // VTT/SRT the wizard had accepted since #524. The decision now lives in ONE
+      // pure, tested place — and it ROUTES rather than refusing: a recording
+      // dropped here belongs in an Observation, and telling the user so beats the
+      // silent `return` they used to get.
+      const route = routeDroppedFiles(Array.from(e.dataTransfer.files), 'conversation')
+
+      if (route.kind === 'conversation') {
+        setPendingImportFiles(route.files, 'conversation')
+        navigate(`/projects/${projectId}/conversations/import`)
+        return
+      }
+      if (route.kind === 'observation') {
+        setPendingImportFiles(route.files, 'observation')
+        toast.info(DROPPED_RECORDING_TITLE, { description: DROPPED_RECORDING_DETAIL })
+        navigate(`/projects/${projectId}/observations/import`)
+        return
+      }
+      if (route.kind === 'document') {
+        setPendingImportFiles(route.files, 'document')
+        toast.info('That looks like a document — importing it as a Document.')
+        navigate(`/projects/${projectId}/documents/import`)
+        return
+      }
+
+      toast.error(`Drop a transcript (${TRANSCRIPT_FORMAT_LABEL}) or a recording here.`)
     },
   }), [projectId, navigate])
 
@@ -319,6 +378,7 @@ export default function ConversationsListPage() {
               onEditEnd={() => setEditingConversationId(null)}
               onAttachAudio={() => triggerAudioAttach(conversation.id)}
               onRemoveAudio={() => setRemoveAudioConversationId(conversation.id)}
+              onAlsoObserve={() => setAlsoObserveTarget(conversation)}
             />
           ))}
         </div>
@@ -335,6 +395,26 @@ export default function ConversationsListPage() {
       />
 
       {/* Remove audio confirmation */}
+      <ConfirmDialog
+        open={alsoObserveTarget !== null}
+        onOpenChange={(open: boolean) => !open && setAlsoObserveTarget(null)}
+        title="Also code this as an Observation?"
+        description={
+          alsoObserveTarget
+            ? 'This creates a NEW source that re-uses the same recording — a second copy of the file '
+              + `on disk${alsoObserveTarget.media_size_bytes != null ? ` (${formatBytes(alsoObserveTarget.media_size_bytes)})` : ''}. `
+              + 'Your conversation and all its coding stay exactly as they are, and no codes are '
+              + 'carried over. You’ll mark clips and code the timeline in the Observation.'
+            : ''
+        }
+        // Additive, not destructive — the default red styling would read as a warning.
+        destructive={false}
+        confirmLabel="Create Observation"
+        loading={alsoObserveMutation.isPending}
+        loadingLabel="Copying recording…"
+        onConfirm={() => alsoObserveTarget && alsoObserveMutation.mutate(alsoObserveTarget)}
+      />
+
       <ConfirmDialog
         open={removeAudioConversationId !== null}
         onOpenChange={(open) => { if (!open) setRemoveAudioConversationId(null) }}
@@ -381,6 +461,7 @@ function ConversationCard({
   onEditEnd,
   onAttachAudio,
   onRemoveAudio,
+  onAlsoObserve,
 }: {
   conversation: Conversation
   projectId: number
@@ -391,6 +472,7 @@ function ConversationCard({
   onEditEnd: () => void
   onAttachAudio: () => void
   onRemoveAudio: () => void
+  onAlsoObserve: () => void
 }) {
   const progress =
     conversation.segment_count > 0
@@ -531,6 +613,27 @@ function ConversationCard({
             Attach Recording
           </ContextMenuItem>
         )}
+        <ContextMenuSeparator />
+        {/* D17 — the escape hatch. Never "convert": nothing moves. It re-uses the
+          * FILE and carries no codes, and saying "convert" would imply the coding
+          * comes with it.
+          *
+          * Disabled-with-a-reason rather than hidden, and the reason lives in the
+          * accessible NAME, not a conditional title — a conditional title leaves a
+          * control NAMELESS in exactly the disabled state, which is how the
+          * workbench chevrons shipped unnamed (#559). */}
+        <ContextMenuItem
+          onClick={onAlsoObserve}
+          disabled={!conversation.has_media}
+          aria-label={
+            conversation.has_media
+              ? 'Also code this as an Observation'
+              : 'Also code this as an Observation — unavailable: this conversation has no recording'
+          }
+        >
+          <Film className="w-4 h-4 mr-2" aria-hidden />
+          Also code this as an Observation
+        </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onClick={onDelete} className="text-red-600">
           <Trash2 className="w-4 h-4 mr-2" />

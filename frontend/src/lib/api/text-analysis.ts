@@ -88,11 +88,10 @@ export const textAnalysisApi = {
   responseLength: (pid: number, params: { column_ids: string; coder_ids?: string; layer_scope?: LayerScope }) =>
     api.get<ResponseLengthResponse>(`/projects/${pid}/text-analysis/response-length-by-code`, { params }).then(r => r.data),
 
-  exportCrossAnalysis: (pid: number, params: { column_ids: string; filters?: string; cross_column_id?: number; coder_ids?: string; layer_scope?: LayerScope }) => {
+  exportCrossAnalysis: (pid: number, params: { column_ids: string; filters?: string; coder_ids?: string; layer_scope?: LayerScope }) => {
     const searchParams = new URLSearchParams()
     searchParams.append('column_ids', params.column_ids)
     if (params.filters) searchParams.append('filters', params.filters)
-    if (params.cross_column_id) searchParams.append('cross_column_id', String(params.cross_column_id))
     if (params.coder_ids) searchParams.append('coder_ids', params.coder_ids)
     if (params.layer_scope) searchParams.append('layer_scope', params.layer_scope)
     const qs = searchParams.toString()

@@ -7,7 +7,15 @@ recognizes as N/A (in `_NA_PREFIXES` / "na"/"n/a", e.g. "N/A") is preserved as
 exclude it so they match the Data Quality tab, which counts it as missing
 (`include_na_as_missing=True`).
 
-Fixed 2026-05-24: both computes now exclude `_is_na()`-recognized value_text.
+Fixed 2026-05-24: both computes excluded `_is_na()`-recognized value_text.
+
+CONTRACT MOVED (#592 slab 2, §I.7): the missing decision now lives in the
+RESOLVERS (column-aware — a declared `missing_values` list replaces the
+defaults), which pre-mark `ResolvedRow.missing`; the computers TRUST the mark
+and carry no `_is_na` of their own. These unit fixtures therefore set the
+mark the way the resolvers would. The end-to-end #381 behavior (resolver +
+computer together, over real columns) is pinned in
+`test_missing_values_read_paths.py` and `test_metrics_compute.py`.
 """
 from app.services.metrics import (
     ResolvedRow,
@@ -20,7 +28,7 @@ def test_frequency_excludes_recognized_na_strings():
     rows = [
         ResolvedRow(1, None, "Yes"),
         ResolvedRow(2, None, "No"),
-        ResolvedRow(3, None, "N/A"),   # importer-recognized missing
+        ResolvedRow(3, None, "N/A", missing=True),  # resolver-marked missing
         ResolvedRow(4, None, "Yes"),
     ]
     result_data, valid_n, total_n = compute_frequency_distribution(rows)
@@ -41,7 +49,7 @@ def test_proportion_values_mode_excludes_na_from_denominator():
         ResolvedRow(1, None, "Yes"),
         ResolvedRow(2, None, "Yes"),
         ResolvedRow(3, None, "No"),
-        ResolvedRow(4, None, "Don't know"),  # recognized N/A → excluded
+        ResolvedRow(4, None, "Don't know", missing=True),  # resolver-marked
     ]
     result_data, valid_n, total_n = compute_proportion(
         rows, {"mode": "values", "threshold_values": ["Yes"]}

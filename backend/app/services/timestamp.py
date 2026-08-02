@@ -1,3 +1,4 @@
+import math
 import re
 
 
@@ -133,3 +134,29 @@ def format_timestamp(seconds: float | None) -> str:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     else:
         return f"{minutes:02d}:{secs:02d}"
+
+
+def format_timecode(seconds: float | None) -> str:
+    """Sub-second timecode: `m:ss.d`, `h:mm:ss.d` over an hour (slab 5, D32).
+
+    The Python mirror of `frontend/src/lib/utils.ts::formatTimecode` — keep the
+    two in lockstep. Works in integer TENTHS so float dust can't render
+    "0:03.10", and rounds halves UP via floor(x + 0.5) because JS `Math.round`
+    does (Python's bare `round()` is banker's rounding — 0.25 s would format
+    "0:00.2" here and "0:00.3" in the client). `format_timestamp` above stays
+    the second-granular transcript formatter; clips and time-range excerpts
+    are cut at sub-second boundaries, so their display must not round two
+    distinct boundaries to one string.
+    """
+    if seconds is None or not math.isfinite(seconds):
+        return ""
+    tenths = math.floor(max(0.0, seconds) * 10 + 0.5)
+    frac = tenths % 10
+    whole = tenths // 10
+    hours = whole // 3600
+    minutes = (whole % 3600) // 60
+    secs = whole % 60
+    mmss = f"{secs:02d}.{frac}"
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{mmss}"
+    return f"{minutes}:{mmss}"

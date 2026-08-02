@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
-import { useParams, useSearchParams, Link } from 'react-router-dom'
+import { useParams, useSearchParams, Link } from 'react-router'
 import { SELECTED_ROW, SELECTED_TINT, SELECTED_SEGMENT } from '@/lib/selection'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
@@ -18,11 +18,19 @@ import { COLUMN_TYPES, TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
 import { TypeBadge } from '@/components/TypeBadge'
 import { CopyToDialog } from '@/components/CopyToDialog'
 import { CopyToEquivalentsDialog } from '@/components/CopyToEquivalentsDialog'
+import { compareValueLabels } from '@/lib/chart-data'
+import { mappingNumericValues, reverseOffset } from '@/lib/recode-utils'
 
 const RECODE_DISALLOWED_TYPES = new Set(['open_text', 'identifier'])
 
-/** Determine labels for a draft mapping preview, in priority order */
-function getLabels(
+// Column types where a numeric encoding (value_numeric) is meaningful — used to
+// warn before a category_group primary clears it (#581).
+const NUMERIC_ENCODED_TYPES = new Set(['ordinal', 'numeric', 'percentage', 'binary'])
+
+/** Determine labels for a draft mapping preview, in priority order.
+ *  Exported for #579 ordering tests. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function getLabels(
   existingDefinitions: RecodeDefinition[],
   selectedColumn: DatasetColumn | undefined,
   frequenciesData: { frequencies: ValueFrequency[] } | undefined,
@@ -35,12 +43,17 @@ function getLabels(
   if (selectedColumn?.scale_labels && selectedColumn.scale_labels.length > 0) {
     return selectedColumn.scale_labels
   }
-  // 3. Non-NA frequency values
+  // 3. Non-NA frequency values, ordered by VALUE (#579). get_value_frequencies
+  //    returns count-descending order; consuming that as a scale order assigned
+  //    codes 1..N by response popularity (e.g. the modal answer got code 1).
+  //    compareValueLabels is the #406 numeric-aware comparator. ONLY priority 3
+  //    is sorted — priorities 1 & 2 already carry an authored/scale order that
+  //    sorting would alphabetize.
   if (frequenciesData?.frequencies) {
     const vals = frequenciesData.frequencies
       .filter(f => !f.is_na)
       .map(f => f.value_text)
-    if (vals.length > 0) return vals
+    if (vals.length > 0) return [...vals].sort(compareValueLabels)
   }
   return []
 }
@@ -318,31 +331,46 @@ function ReverseEditor({
 
   if (!sourceDef) {
     return (
-      <div className="text-sm text-amber-600 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-300 rounded p-3">
+      <div role="alert" className="text-sm text-amber-600 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-300 rounded p-3">
         Source definition not found or deleted.
       </div>
     )
   }
 
+  // #578: the mapping now holds the source's FORWARD codes; the reversed SCORE
+  // (what lands in value_numeric) is the reflection about the scale midpoint.
+  // Show both so the researcher sees exactly what each response will score.
+  const offset = reverseOffset(mappingNumericValues(mapping))
+
   return (
     <div>
-      <span className="text-xs text-mm-text-muted font-medium block mb-2">
+      <span className="text-xs text-mm-text-muted font-medium block mb-1">
         Reversed from: {sourceDef.name}
       </span>
+      <p className="text-xs text-mm-text-faint mb-2">
+        Scores are reflected about the scale midpoint (min + max − code), so the
+        highest response scores lowest.
+      </p>
       <table className="w-full text-sm border-collapse">
         <thead>
           <tr className="text-xs text-mm-text-muted">
             <th scope="col" className="text-left py-1 pr-2">Label</th>
-            <th scope="col" className="text-center py-1 px-2 w-20">Value</th>
+            <th scope="col" className="text-center py-1 px-2 w-24">Source code</th>
+            <th scope="col" className="text-center py-1 px-2 w-24">Reversed score</th>
           </tr>
         </thead>
         <tbody>
-          {Object.entries(mapping).map(([label, val]) => (
-            <tr key={label} className="border-t">
-              <td className="py-1.5 pr-2 text-mm-text">{label}</td>
-              <td className="py-1.5 px-2 text-center text-mm-text-muted">{String(val)}</td>
-            </tr>
-          ))}
+          {Object.entries(mapping).map(([label, val]) => {
+            const code = Number(val)
+            const reversed = Number.isFinite(code) ? offset - code : val
+            return (
+              <tr key={label} className="border-t">
+                <td className="py-1.5 pr-2 text-mm-text">{label}</td>
+                <td className="py-1.5 px-2 text-center text-mm-text-muted">{String(val)}</td>
+                <td className="py-1.5 px-2 text-center text-mm-text font-medium">{String(reversed)}</td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -538,6 +566,18 @@ function NewDefinitionForm({
     [existingDefinitions, selectedColumn, frequenciesData],
   )
 
+  // #581: a new def with no existing primary becomes primary server-side
+  // (recode.py:277). A category_group primary CLEARS value_numeric column-wide,
+  // silently killing means/correlations/scale scores/R-export for a column whose
+  // numeric encoding is meaningful. Warn before that happens and steer toward
+  // Scale Map (which keeps the numbers AND adds labels).
+  const willBePrimary = !existingDefinitions.some(d => d.is_primary)
+  const categoryGroupWillClearNumeric =
+    type === 'category_group' &&
+    willBePrimary &&
+    !!selectedColumn &&
+    NUMERIC_ENCODED_TYPES.has(selectedColumn.column_type)
+
   // Rebuild draft mapping when type, source, or label inputs change
   /* eslint-disable react-hooks/set-state-in-effect -- rebuild draft mapping from recode type/source */
   useEffect(() => {
@@ -551,19 +591,14 @@ function NewDefinitionForm({
       if (sourceDefId) {
         const sourceDef = existingDefinitions.find(d => d.id === sourceDefId)
         if (sourceDef) {
-          const excludes = sourceDef.exclude_values || []
-          const numericEntries = Object.entries(sourceDef.mapping).filter(([label]) => !excludes.includes(label))
-          const values = numericEntries.map(([, v]) => Number(v))
-          const max = Math.max(...values)
-          const min = Math.min(...values)
-          setDraftMapping(
-            Object.fromEntries(
-              Object.entries(sourceDef.mapping).map(([label, val]) =>
-                excludes.includes(label) ? [label, val] : [label, max + min - Number(val)]
-              )
-            )
-          )
-          setDraftExcludeValues(excludes)
+          // #578: store the source's FORWARD codes verbatim. The backend reflects
+          // about the scale midpoint at APPLY time (services/recode.py::reverse_offset);
+          // pre-flipping the codes here made it flip twice and cancel, so
+          // value_numeric silently kept its forward (un-reversed) value while the
+          // grid displayed the flipped one. The reflection is now shown only for
+          // DISPLAY (ReverseEditor / EditableCell), never baked into the stored mapping.
+          setDraftMapping({ ...sourceDef.mapping })
+          setDraftExcludeValues(sourceDef.exclude_values || [])
         } else {
           setDraftMapping({})
           setDraftExcludeValues([])
@@ -605,10 +640,13 @@ function NewDefinitionForm({
           placeholder="Definition name..."
           className="h-8 text-sm"
         />
-        <div className="flex gap-2 flex-wrap">
+        <div role="radiogroup" aria-label="Recode type" className="flex gap-2 flex-wrap">
           {(['scale_map', 'category_group', 'reverse'] as const).map(t => (
             <button
               key={t}
+              type="button"
+              role="radio"
+              aria-checked={type === t}
               onClick={() => setType(t)}
               className={`px-2 py-1 rounded text-xs font-medium border ${
                 type === t ? SELECTED_SEGMENT : 'bg-mm-surface border-mm-border-subtle text-mm-text-muted'
@@ -620,6 +658,7 @@ function NewDefinitionForm({
         </div>
         {type === 'reverse' && scaleMapDefs.length > 0 && (
           <select
+            aria-label="Source definition to reverse"
             value={sourceDefId || ''}
             onChange={e => setSourceDefId(e.target.value ? Number(e.target.value) : null)}
             className="w-full h-8 text-sm border rounded px-2 bg-mm-surface text-mm-text border-mm-border-subtle"
@@ -629,6 +668,18 @@ function NewDefinitionForm({
               <option key={d.id} value={d.id}>{d.name}</option>
             ))}
           </select>
+        )}
+
+        {categoryGroupWillClearNumeric && (
+          <div
+            role="note"
+            className="text-xs text-amber-700 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-300 rounded p-2 border border-amber-200 dark:border-amber-900/50"
+          >
+            A category group has no numeric value, so making this the primary recode
+            will clear this column's numeric coding — means, correlations and scale
+            scores will use the raw responses, not the group names. To keep the
+            numbers <em>and</em> add readable labels, use a <strong>Scale Map</strong> instead.
+          </div>
         )}
 
         {/* Live draft preview */}

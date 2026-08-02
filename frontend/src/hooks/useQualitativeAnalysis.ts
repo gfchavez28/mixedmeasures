@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router'
 import { parseIntParam } from '@/lib/utils'
 import type {
   QualTab,
@@ -52,6 +52,7 @@ function getDefaultForKey(key: string): string {
     case 'qbHideConvs': return ''
     case 'qbHideCcols': return ''
     case 'qbHideDocs': return ''
+    case 'qbHideObs': return ''
     default: return ''
   }
 }
@@ -69,6 +70,7 @@ export interface QualitativeAnalysisState {
   selectedConversationIds: Set<number>
   selectedTextColumnIds: Set<number>
   selectedDocumentIds: Set<number>
+  selectedObservationIds: Set<number>
 
   // Filters
   excludeFacilitator: boolean
@@ -112,6 +114,7 @@ export interface QualitativeAnalysisState {
   qbHiddenConversationIds: Set<number>
   qbHiddenTextColumnIds: Set<number>
   qbHiddenDocumentIds: Set<number>
+  qbHiddenObservationIds: Set<number>
 
   // Text annotations (not URL-persisted — saved via palette only)
   descTitle: string
@@ -144,7 +147,8 @@ export interface QualitativeAnalysisActions {
   setSelectedConversationIds: (ids: Set<number>) => void
   setSelectedTextColumnIds: (ids: Set<number>) => void
   setSelectedDocumentIds: (ids: Set<number>) => void
-  setAllSourceIds: (convIds: Set<number>, ccolIds: Set<number>, docIds: Set<number>) => void
+  setSelectedObservationIds: (ids: Set<number>) => void
+  setAllSourceIds: (convIds: Set<number>, ccolIds: Set<number>, docIds: Set<number>, obsIds: Set<number>) => void
   setExcludeFacilitator: (exclude: boolean) => void
   setParticipantIds: (ids: number[]) => void
   setCoderIds: (ids: number[]) => void
@@ -183,6 +187,7 @@ export interface QualitativeAnalysisActions {
   setQbHiddenConversationIds: (ids: Set<number>) => void
   setQbHiddenTextColumnIds: (ids: Set<number>) => void
   setQbHiddenDocumentIds: (ids: Set<number>) => void
+  setQbHiddenObservationIds: (ids: Set<number>) => void
   clearQbFilters: () => void
   setFormatting: (f: ChartFormatting) => void
   onFormattingChange: (patch: Partial<ChartFormatting>) => void
@@ -224,6 +229,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
   const convsRaw = searchParams.get('convs') ?? ''
   const ccolsRaw = searchParams.get('ccols') ?? ''
   const docsRaw = searchParams.get('docs') ?? ''
+  const obsRaw = searchParams.get('obs') ?? ''
   const exclRaw = searchParams.get('excl')
   const pidsRaw = searchParams.get('pids') ?? ''
   const codersRaw = searchParams.get('coders') ?? ''
@@ -259,6 +265,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
   const qbHideConvsRaw = searchParams.get('qbHideConvs') ?? ''
   const qbHideCcolsRaw = searchParams.get('qbHideCcols') ?? ''
   const qbHideDocsRaw = searchParams.get('qbHideDocs') ?? ''
+  const qbHideObsRaw = searchParams.get('qbHideObs') ?? ''
 
   // ── Derived state ────────────────────────────────────────────────────
 
@@ -270,6 +277,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
   const selectedConversationIds = useMemo(() => parseIds(convsRaw), [convsRaw])
   const selectedTextColumnIds = useMemo(() => parseIds(ccolsRaw), [ccolsRaw])
   const selectedDocumentIds = useMemo(() => parseIds(docsRaw), [docsRaw])
+  const selectedObservationIds = useMemo(() => parseIds(obsRaw), [obsRaw])
   const excludeFacilitator = exclRaw !== '0'
   const participantIds = useMemo(() => {
     if (!pidsRaw) return [] as number[]
@@ -308,6 +316,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
   const qbHiddenConversationIds = useMemo(() => parseIds(qbHideConvsRaw), [qbHideConvsRaw])
   const qbHiddenTextColumnIds = useMemo(() => parseIds(qbHideCcolsRaw), [qbHideCcolsRaw])
   const qbHiddenDocumentIds = useMemo(() => parseIds(qbHideDocsRaw), [qbHideDocsRaw])
+  const qbHiddenObservationIds = useMemo(() => parseIds(qbHideObsRaw), [qbHideObsRaw])
   const customOrder = useMemo(() => {
     if (!customOrderRaw) return [] as number[]
     return customOrderRaw.split(',').map(Number).filter(n => !isNaN(n) && n > 0)
@@ -383,15 +392,27 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     }, { replace: true })
   }, [setSearchParams])
 
-  const setAllSourceIds = useCallback((convIds: Set<number>, ccolIds: Set<number>, docIds: Set<number>) => {
+  const setSelectedObservationIds = useCallback((ids: Set<number>) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      const str = serializeIds(ids)
+      if (!str) next.delete('obs')
+      else next.set('obs', str)
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+
+  const setAllSourceIds = useCallback((convIds: Set<number>, ccolIds: Set<number>, docIds: Set<number>, obsIds: Set<number>) => {
     setSearchParams(prev => {
       const next = new URLSearchParams(prev)
       const cs = serializeIds(convIds)
       const cc = serializeIds(ccolIds)
       const ds = serializeIds(docIds)
+      const os = serializeIds(obsIds)
       if (!cs) next.delete('convs'); else next.set('convs', cs)
       if (!cc) next.delete('ccols'); else next.set('ccols', cc)
       if (!ds) next.delete('docs'); else next.set('docs', ds)
+      if (!os) next.delete('obs'); else next.set('obs', os)
       return next
     }, { replace: true })
   }, [setSearchParams])
@@ -503,6 +524,16 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     }, { replace: true })
   }, [setSearchParams])
 
+  const setQbHiddenObservationIds = useCallback((ids: Set<number>) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      const str = serializeIds(ids)
+      if (!str) next.delete('qbHideObs')
+      else next.set('qbHideObs', str)
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+
   const clearQbFilters = useCallback(() => {
     setSearchParams(prev => {
       const next = new URLSearchParams(prev)
@@ -511,6 +542,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
       next.delete('qbHideConvs')
       next.delete('qbHideCcols')
       next.delete('qbHideDocs')
+      next.delete('qbHideObs')
       return next
     }, { replace: true })
   }, [setSearchParams])
@@ -546,6 +578,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
       conversation_ids: Array.from(selectedConversationIds),
       text_column_ids: Array.from(selectedTextColumnIds),
       document_ids: Array.from(selectedDocumentIds),
+      observation_ids: Array.from(selectedObservationIds),
       exclude_facilitator: excludeFacilitator,
       participant_ids: participantIds,
       coder_ids: coderIds,
@@ -592,7 +625,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     return config
   }, [
     tab, source, codeMode, selectedCodeIds, selectedConversationIds,
-    selectedTextColumnIds, selectedDocumentIds, excludeFacilitator, participantIds, coderIds, layerScope,
+    selectedTextColumnIds, selectedDocumentIds, selectedObservationIds, excludeFacilitator, participantIds, coderIds, layerScope,
     chartType, valueMode, denominatorMode, sortOrder, orientRaw,
     relView, cooccurrenceLevel, showProportion, cooccurrencePreset, comparisonChartMode, comparisonPalette, showEffectSize, showSummaryRow, showRowN, showChartN, groupBy, contentMode, contentCodeId, contentSource,
     descTitle, descSubtitle, descFootnote, relTitle, relSubtitle, relFootnote,
@@ -631,6 +664,9 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
 
       if (config.document_ids?.length > 0) next.set('docs', config.document_ids.join(','))
       else next.delete('docs')
+
+      if (config.observation_ids?.length > 0) next.set('obs', config.observation_ids.join(','))
+      else next.delete('obs')
 
       // Filters
       if (config.exclude_facilitator === false) next.set('excl', '0')
@@ -755,6 +791,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     selectedConversationIds,
     selectedTextColumnIds,
     selectedDocumentIds,
+    selectedObservationIds,
     excludeFacilitator,
     participantIds,
     coderIds,
@@ -793,6 +830,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     qbHiddenConversationIds,
     qbHiddenTextColumnIds,
     qbHiddenDocumentIds,
+    qbHiddenObservationIds,
     formatting,
     customOrder,
     activeMaterialId,
@@ -804,6 +842,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     setSelectedConversationIds,
     setSelectedTextColumnIds,
     setSelectedDocumentIds,
+    setSelectedObservationIds,
     setAllSourceIds,
     setExcludeFacilitator,
     setParticipantIds,
@@ -843,6 +882,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     setQbHiddenConversationIds,
     setQbHiddenTextColumnIds,
     setQbHiddenDocumentIds,
+    setQbHiddenObservationIds,
     clearQbFilters,
     setFormatting,
     onFormattingChange,

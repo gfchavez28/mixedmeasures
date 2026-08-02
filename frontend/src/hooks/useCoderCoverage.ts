@@ -4,9 +4,9 @@ import { codeAnalysisApi, type Coder } from '@/lib/api'
 
 /**
  * Track J · Group A (#3/#13) — coder coverage for ONE source (conversation /
- * document / text columns). Derived from CODINGS (not the instance-global roster —
- * the #444 trap). Single fetch shared by the "N coders" badge (#456) and the
- * picklist "active here" markers (#457).
+ * document / observation / text columns). Derived from CODINGS (not the
+ * instance-global roster — the #444 trap). Single fetch shared by the
+ * "N coders" badge (#456) and the picklist "active here" markers (#457).
  *
  * Returns:
  *  - `coders` — raw coverage items (incl. archived, flagged)
@@ -19,6 +19,7 @@ import { codeAnalysisApi, type Coder } from '@/lib/api'
 export interface CoderCoverageSource {
   conversationId?: number
   documentId?: number
+  observationId?: number
   textColumnIds?: number[]
 }
 
@@ -28,16 +29,18 @@ export function useCoderCoverage(
   opts?: { enabled?: boolean; rosterCoderIds?: number[] },
 ) {
   const colIds = source.textColumnIds ?? []
-  const hasSource = source.conversationId != null || source.documentId != null || colIds.length > 0
+  const hasSource = source.conversationId != null || source.documentId != null
+    || source.observationId != null || colIds.length > 0
   const enabled = (opts?.enabled ?? true) && hasSource
   const rosterKey = (opts?.rosterCoderIds ?? []).join(',')
 
   const { data } = useQuery({
-    queryKey: ['coder-coverage', projectId, source.conversationId ?? null, source.documentId ?? null, colIds.join(',')],
+    queryKey: ['coder-coverage', projectId, source.conversationId ?? null, source.documentId ?? null, source.observationId ?? null, colIds.join(',')],
     queryFn: () =>
       codeAnalysisApi.coderCoverage(projectId, {
         conversation_id: source.conversationId,
         document_id: source.documentId,
+        observation_id: source.observationId,
         text_column_ids: colIds.length ? colIds.join(',') : undefined,
       }),
     enabled,

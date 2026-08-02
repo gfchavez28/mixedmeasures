@@ -157,19 +157,24 @@ export default function InlineCodeActions({
               title={`Remove ${c.name}`}
               aria-label={`Remove code ${c.name}`}
             >
-              <X className="w-2.5 h-2.5 text-mm-text-muted" />
+              <X aria-hidden className="w-2.5 h-2.5 text-mm-text-muted" />
             </button>
           </span>
         )
       })}
       <Popover open={addCodeOpen} onOpenChange={v => { setAddCodeOpen(v); if (!v) setCodeSearch('') }}>
         <PopoverTrigger asChild>
+          {/* #647: 20x20 -> 24x24, the WCAG 2.5.8 floor. Safe to grow because
+              this control is standalone at the END of the chip row — unlike the
+              chips and their remove buttons, which are packed at gap-1 and whose
+              enlarged targets would overlap and steal each other's clicks (see
+              the #647 entry). The icon stays 12px; only the hit area moves. */}
           <button
-            className="w-5 h-5 rounded-full border border-dashed border-mm-border-subtle flex items-center justify-center opacity-0 group-hover/actions:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity hover:border-mm-accent hover:text-mm-accent"
+            className="w-6 h-6 rounded-full border border-dashed border-mm-border-subtle flex items-center justify-center opacity-0 group-hover/actions:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity hover:border-mm-accent hover:text-mm-accent"
             title="Add code"
             aria-label="Add code"
           >
-            <Plus className="w-3 h-3" />
+            <Plus aria-hidden className="w-3 h-3" />
           </button>
         </PopoverTrigger>
         <PopoverContent

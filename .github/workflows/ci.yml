@@ -14,9 +14,12 @@
 # ✅ ACTIONS SHA-PINNED 2026-06-14. Project policy (ROADMAP "Build pipeline") requires
 # every `uses:` action pinned to a FULL COMMIT SHA, never a mutable tag like `@v4`, so a
 # compromised upstream tag can't silently alter our build. Each `uses:` below is pinned to
-# its v6 commit SHA with a trailing `# v6` for readability. When you intentionally bump a
-# major, re-resolve the SHA and update both the pin and the comment:
-#     curl -s https://api.github.com/repos/actions/checkout/commits/v6 | grep -m1 '"sha"'
+# its release commit SHA with a trailing `# vN` for readability (actions are NOT all on the
+# same major — checkout is v7 since 2026-08-02, the others v6). When you intentionally bump
+# a major, re-resolve the SHA and update both the pin and the comment:
+#     curl -s https://api.github.com/repos/<owner>/<action>/commits/<tag> | grep -m1 '"sha"'
+# Cross-check the moving tag against the pointed release (`/commits/v7` and `/commits/v7.0.1`
+# must return the SAME sha) — pinning the wrong commit defeats the whole control.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: CI
@@ -40,12 +43,12 @@ jobs:
   # ── Backend: pytest + schema-drift gate + production-dep audit ──────────────
   backend:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25          # +5 for the R toolchain install (#642)
     defaults:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
@@ -65,7 +68,49 @@ jobs:
       - name: Schema-drift gate (models ↔ baseline migration)
         run: python scripts/schema_diff_harness.py
 
+      # #642: the R oracles are the ONLY external check that the tool's
+      # statistics agree with an independent implementation — the whole #402
+      # export round-trip and the sole oracle for time-binned kappa. They are
+      # skipif-gated on Rscript, and R was installed in NEITHER workflow, so 21
+      # tests silently skipped here for months while the run reported green.
+      #
+      # Ubuntu's own archive is used deliberately over r-lib/actions/setup-r:
+      # noble ships r-base-core 4.3.3 — the exact version this project's numbers
+      # are anchored to — plus FOUR of the five packages as BINARIES built
+      # against it. No new third-party action to SHA-pin, and the r-cran-*
+      # binaries are ABI-matched to that R by construction.
+      #
+      # ⚠️ `irr` is the exception, and assuming otherwise broke this step the
+      # first time it ever ran (2026-08-02): **Debian/Ubuntu do not package it**
+      # — there is no `r-cran-irr` in any noble component, so apt exited 100 on
+      # "Unable to locate package" before a single test ran. It went unnoticed
+      # locally because a developer machine gets `irr` from install.packages()
+      # into ~/R/..., where the apt name is never exercised. So `irr` comes from
+      # CRAN — cheap and safe to do here, because it is PURE R
+      # (`NeedsCompilation: no`) and its ONLY dependency is lpSolve, which IS in
+      # the archive as a binary. No compiler, no source build of C code.
+      #
+      # All five packages are required, not just irr: the exported .R bootstraps
+      # anything missing with install.packages(), so a gap here turns into a
+      # CRAN source build INSIDE a test — slow, network-bound, timeout-prone.
+      #
+      # The verify line is the point of the whole step: an apt name that does not
+      # resolve, or a CRAN install that half-fails, must fail HERE rather than as
+      # a confusing MM_REQUIRE_R error two steps later.
+      - name: Install R + the correctness-oracle packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            r-base-core r-cran-readr r-cran-dplyr r-cran-psych \
+            r-cran-ggplot2 r-cran-lpsolve
+          sudo Rscript -e 'install.packages("irr", repos = "https://cloud.r-project.org")'
+          Rscript -e 'for (p in c("readr","dplyr","psych","ggplot2","irr")) if (!requireNamespace(p, quietly = TRUE)) stop("R oracle package missing: ", p)'
+
       - name: Tests
+        env:
+          # Turns "R is missing" from 21 silent skips into one loud failure.
+          # See backend/tests/test_r_oracle_availability.py.
+          MM_REQUIRE_R: "1"
         run: python -m pytest tests/ -q
 
       # Advisory here (won't block a push on a freshly-disclosed CVE); the release
@@ -83,7 +128,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
         with:
@@ -104,7 +149,12 @@ jobs:
       - name: Build
         run: npm run build                # = tsc && vite build
 
-      - name: Dependency audit
+      # Deliberately FULL-TREE (no --omit=dev) and advisory: this surfaces
+      # dev-toolchain advisories without blocking normal work. release.yml's
+      # hard gate is the scoped one (--omit=dev) — it blocks on what ships.
+      # Keep the asymmetry; flattening it either hides dev advisories or blocks
+      # every push on them. See #632.
+      - name: Dependency audit (full tree, advisory)
         run: npm audit --audit-level=high
         continue-on-error: true
 
@@ -116,7 +166,7 @@ jobs:
       run:
         working-directory: electron
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
         with:

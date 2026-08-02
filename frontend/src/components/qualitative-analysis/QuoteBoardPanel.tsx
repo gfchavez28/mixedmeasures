@@ -25,6 +25,11 @@ import QuoteBoardFilters from '@/components/qualitative-analysis/QuoteBoardFilte
 
 // ── Sidebar ──────────────────────────────────────────────────────────────────
 
+interface ObservationOption {
+  id: number
+  name: string
+}
+
 interface DocumentOption {
   id: number
   name: string
@@ -37,6 +42,7 @@ export interface QuoteBoardSidebarProps {
   qbConversations: ConversationOption[]
   qbTextColumns: TextColumnInfo[]
   qbDocuments?: DocumentOption[]
+  qbObservations?: ObservationOption[]
   hasActiveQbFilters: boolean
   qbFilterCount: number
   // Board display options (owned by parent, shared with content)
@@ -52,7 +58,7 @@ export interface QuoteBoardSidebarProps {
 
 export function QuoteBoardSidebar(props: QuoteBoardSidebarProps) {
   const {
-    qa, codes, categories, qbConversations, qbTextColumns, qbDocuments,
+    qa, codes, categories, qbConversations, qbTextColumns, qbDocuments, qbObservations,
     hasActiveQbFilters, qbFilterCount,
     showBoardNotes, showBoardCodes, showBoardSpeaker, showBoardSource,
     setShowBoardNotes, setShowBoardCodes, setShowBoardSpeaker, setShowBoardSource,
@@ -88,16 +94,19 @@ export function QuoteBoardSidebar(props: QuoteBoardSidebarProps) {
               conversations={qbConversations}
               textColumns={qbTextColumns}
               documents={qbDocuments}
+              observations={qbObservations}
               hiddenCodeIds={qa.qbHiddenCodeIds}
               hideUncoded={qa.qbHideUncoded}
               hiddenConversationIds={qa.qbHiddenConversationIds}
               hiddenTextColumnIds={qa.qbHiddenTextColumnIds}
               hiddenDocumentIds={qa.qbHiddenDocumentIds}
+              hiddenObservationIds={qa.qbHiddenObservationIds}
               onHiddenCodeIdsChange={qa.setQbHiddenCodeIds}
               onHideUncodedChange={qa.setQbHideUncoded}
               onHiddenConversationIdsChange={qa.setQbHiddenConversationIds}
               onHiddenTextColumnIdsChange={qa.setQbHiddenTextColumnIds}
               onHiddenDocumentIdsChange={qa.setQbHiddenDocumentIds}
+              onHiddenObservationIdsChange={qa.setQbHiddenObservationIds}
               onClearAll={qa.clearQbFilters}
               hasActiveFilters={hasActiveQbFilters}
             />

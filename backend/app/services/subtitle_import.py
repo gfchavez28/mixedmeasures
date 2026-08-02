@@ -110,12 +110,13 @@ def merge_same_speaker_cues(cues: list[dict]) -> list[dict]:
     return turns
 
 
-def subtitles_to_csv_bytes(content: bytes, encoding: str = "utf-8") -> bytes:
-    """Convert a VTT/SRT upload into conversation-CSV bytes (UTF-8).
+def parse_cue_bytes(content: bytes, encoding: str = "utf-8") -> list[dict]:
+    """Decode a VTT/SRT upload and parse it to cues — THE decode path.
 
-    Headers ``Speaker,Text,Start,End`` match the conversation wizard's column
-    auto-detection keywords, so the mapping step arrives pre-mapped. The caller
-    must treat the RESULT as UTF-8 regardless of the upload's encoding.
+    Extracted so the observation cue-list importer and the conversation CSV
+    adapter share one decode and one error type. Note the cue list is returned
+    RAW: `merge_same_speaker_cues` is conversation turn-merging and must not run
+    here — an observation's clips are cue in/out points, not speaker turns.
     """
     try:
         raw = content.decode(encoding)
@@ -123,8 +124,17 @@ def subtitles_to_csv_bytes(content: bytes, encoding: str = "utf-8") -> bytes:
         raise SubtitleImportError(
             "Unable to decode the subtitle file. Ensure it uses UTF-8 or the specified encoding."
         ) from e
+    return parse_subtitle_cues(raw)
 
-    turns = merge_same_speaker_cues(parse_subtitle_cues(raw))
+
+def subtitles_to_csv_bytes(content: bytes, encoding: str = "utf-8") -> bytes:
+    """Convert a VTT/SRT upload into conversation-CSV bytes (UTF-8).
+
+    Headers ``Speaker,Text,Start,End`` match the conversation wizard's column
+    auto-detection keywords, so the mapping step arrives pre-mapped. The caller
+    must treat the RESULT as UTF-8 regardless of the upload's encoding.
+    """
+    turns = merge_same_speaker_cues(parse_cue_bytes(content, encoding))
     if not turns:
         raise SubtitleImportError(
             "No transcript cues found. Expected a WebVTT (.vtt) or SubRip (.srt) "

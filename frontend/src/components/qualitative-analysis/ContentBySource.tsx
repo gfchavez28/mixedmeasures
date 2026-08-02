@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import {
   ChevronRight,
   ArrowLeft,
@@ -8,6 +8,7 @@ import {
   FileText,
   MessageSquare,
   Search,
+  Video,
   X,
 } from 'lucide-react'
 import { Input } from '@/components/ui/input'
@@ -15,11 +16,14 @@ import {
   segmentsApi,
   textCodingApi,
   documentsApi,
+  observationsApi,
   type Code,
   type ConversationOption,
   type TextColumnInfo,
   type DocumentListItem,
+  type Observation,
 } from '@/lib/api'
+import { formatTimecode } from '@/lib/utils'
 import { getSpeakerInitials } from '@/lib/conversation-import-utils'
 import { getUnfocusedStyle } from '@/lib/utils'
 import CodeChip from './CodeChip'
@@ -33,6 +37,7 @@ interface ContentBySourceProps {
   conversations: ConversationOption[]
   textColumns: TextColumnInfo[]
   documents?: DocumentListItem[]
+  observations?: Observation[]
   selectedSourceId: string | null // 'c:123', 'cc:456', or 'd:789'
   onSourceSelect: (source: string | null) => void
   onCodeClick?: (codeId: number) => void
@@ -43,11 +48,12 @@ interface ContentBySourceProps {
   onCodeChange?: () => void
 }
 
-function parseSourceId(raw: string | null): { type: 'conversation' | 'comment_column' | 'document'; id: number } | null {
+function parseSourceId(raw: string | null): { type: 'conversation' | 'comment_column' | 'document' | 'observation'; id: number } | null {
   if (!raw) return null
   if (raw.startsWith('c:')) return { type: 'conversation', id: Number(raw.slice(2)) }
   if (raw.startsWith('cc:')) return { type: 'comment_column', id: Number(raw.slice(3)) }
   if (raw.startsWith('d:')) return { type: 'document', id: Number(raw.slice(2)) }
+  if (raw.startsWith('o:')) return { type: 'observation', id: Number(raw.slice(2)) }
   return null
 }
 
@@ -58,6 +64,7 @@ export default function ContentBySource({
   conversations,
   textColumns,
   documents = [],
+  observations = [],
   selectedSourceId,
   onSourceSelect,
   onCodeClick,
@@ -161,6 +168,29 @@ export default function ContentBySource({
             </div>
           )}
 
+          {/* Observations section (D25 — clips browse like documents) */}
+          {source !== 'text' && observations.length > 0 && (
+            <div>
+              <div className="px-3 py-1.5 bg-mm-bg text-xs font-medium text-mm-text-muted">
+                Observations ({observations.length})
+              </div>
+              {observations.map(obs => (
+                <button
+                  key={obs.id}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-mm-surface-hover transition-colors"
+                  onClick={() => onSourceSelect(`o:${obs.id}`)}
+                >
+                  <Video className="w-3.5 h-3.5 text-mm-text-faint flex-shrink-0" />
+                  <span className="text-sm flex-1 truncate">{obs.name}</span>
+                  <span className="text-xs text-mm-text-faint tabular-nums">
+                    {obs.segment_count} clip{obs.segment_count !== 1 ? 's' : ''}
+                  </span>
+                  <ChevronRight className="w-3.5 h-3.5 text-mm-text-faint" />
+                </button>
+              ))}
+            </div>
+          )}
+
           {/* Empty state */}
           {((source === 'conversations' && conversations.length === 0 && documents.length === 0) ||
             (source === 'text' && textColumns.length === 0) ||
@@ -225,6 +255,19 @@ export default function ContentBySource({
           projectId={projectId}
           documentId={parsedSource.id}
           documentName={documents.find(d => d.id === parsedSource.id)?.name ?? 'Document'}
+          codeMap={codeMap}
+          allCodes={allCodes ?? codes}
+          onCodeClick={onCodeClick}
+          search={search}
+          focusedCodeId={focusedCodeId}
+          onFocusCode={onFocusCode}
+          onCodeChange={onCodeChange}
+        />
+      ) : parsedSource.type === 'observation' ? (
+        <ObservationReader
+          projectId={projectId}
+          observationId={parsedSource.id}
+          observationName={observations.find(o => o.id === parsedSource.id)?.name ?? 'Observation'}
           codeMap={codeMap}
           allCodes={allCodes ?? codes}
           onCodeClick={onCodeClick}
@@ -654,6 +697,123 @@ function CommentColumnReader({
         {allComments.length} comment{allComments.length !== 1 ? 's' : ''}
         {columnInfo && ` \u00B7 ${columnInfo.coded_count} coded`}
       </p>
+    </div>
+  )
+}
+
+// ── Observation Reader (D25 — clips browse like a document's paragraphs) ──
+
+function ObservationReader({
+  projectId,
+  observationId,
+  observationName,
+  codeMap,
+  allCodes,
+  onCodeClick,
+  search,
+  focusedCodeId,
+  onFocusCode,
+  onCodeChange,
+}: {
+  projectId: number
+  observationId: number
+  observationName: string
+  codeMap: Map<number, Code>
+  allCodes: Code[]
+  onCodeClick?: (codeId: number) => void
+  search?: string
+  focusedCodeId?: number | null
+  onFocusCode?: (codeId: number) => void
+  onCodeChange?: () => void
+}) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['observation-segments', projectId, observationId],
+    queryFn: () => observationsApi.listSegments(projectId, observationId),
+    enabled: !!observationId,
+  })
+
+  if (isLoading) return <div className="text-center py-8 text-mm-text-muted">Loading observation...</div>
+  if (!data) return <div className="text-center py-8 text-mm-text-muted">No data available.</div>
+
+  const searchLower = (search ?? '').toLowerCase()
+  const clips = searchLower ? data.filter(c => c.text.toLowerCase().includes(searchLower)) : data
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-lg font-semibold">{observationName}</h3>
+        <Link
+          to={`/projects/${projectId}/observations/${observationId}`}
+          className="text-sm text-mm-blue-text hover:underline flex items-center gap-1"
+        >
+          <ExternalLink className="w-3.5 h-3.5" />
+          Open in workspace
+        </Link>
+      </div>
+
+      {searchLower && clips.length === 0 && (
+        <div className="text-center py-8 text-mm-text-muted text-sm">No clips match your search.</div>
+      )}
+
+      <div className="border rounded-lg overflow-hidden divide-y divide-mm-border-subtle bg-mm-surface">
+        {clips.map((clip) => {
+          // Distinct codes (per-coder rows collapse): one chip per code (#441).
+          const appliedCodeIds = [...new Set(clip.applied_codes)]
+          const isFocused = focusedCodeId == null || appliedCodeIds.includes(focusedCodeId)
+          const timecode = clip.start_time === clip.end_time
+            ? formatTimecode(clip.start_time)
+            : `${formatTimecode(clip.start_time)}–${formatTimecode(clip.end_time)}`
+          return (
+            <div
+              key={clip.id}
+              className="flex items-start gap-3 px-4 py-3"
+              style={getUnfocusedStyle(isFocused)}
+            >
+              <span className="text-[11px] text-mm-text-faint tabular-nums flex-shrink-0 pt-0.5 w-24">
+                {timecode}
+              </span>
+              <div className="flex-1 min-w-0">
+                <p className={`text-sm ${clip.text ? 'text-mm-text' : 'italic text-mm-text-faint'}`}>
+                  {clip.text
+                    ? (searchLower ? highlightText(clip.text, search ?? '') : clip.text)
+                    : 'Unlabeled clip'}
+                </p>
+                {(appliedCodeIds.length > 0 || onCodeChange) && (
+                  <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                    {onCodeChange ? (
+                      <InlineCodeActions
+                        projectId={projectId}
+                        itemType="segment"
+                        itemId={clip.id}
+                        appliedCodeIds={appliedCodeIds}
+                        codeMap={codeMap}
+                        allCodes={allCodes}
+                        onCodeChange={onCodeChange}
+                        onFocusCode={onFocusCode ?? onCodeClick}
+                      />
+                    ) : (
+                      appliedCodeIds.map(cid => {
+                        const code = codeMap.get(cid)
+                        if (!code) return null
+                        return (
+                          <CodeChip key={cid} code={code} size="xs" onClick={onCodeClick} />
+                        )
+                      })
+                    )}
+                  </div>
+                )}
+              </div>
+              <Link
+                to={`/projects/${projectId}/observations/${observationId}?clip=${clip.id}`}
+                className="text-xs text-mm-blue-text hover:underline flex-shrink-0 pt-0.5"
+                title="Open this clip in the observation workspace"
+              >
+                View
+              </Link>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }

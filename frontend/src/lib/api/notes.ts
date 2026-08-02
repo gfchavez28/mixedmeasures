@@ -79,6 +79,23 @@ export interface AllNotesResponse {
   documents: AllNotesDocument[]
 }
 
+/**
+ * A note on an Observation (slab 4a wire) — observation-level, or anchored to a
+ * clip via `segment_id`. Mirrors the document-note response shape; the clip's
+ * timecode is resolved client-side from the workbench's clip list (the wire
+ * carries the clip's sequence_order + label snippet only).
+ */
+export interface ObservationNote {
+  id: number
+  observation_id: number
+  segment_id: number | null
+  content: string
+  segment_sequence_order: number | null
+  segment_text_snippet: string | null
+  created_at: string
+  updated_at: string
+}
+
 // API functions - Notes
 export const notesApi = {
   listForConversation: (conversationId: number, includeArchived = false) =>
@@ -87,6 +104,16 @@ export const notesApi = {
     }).then(res => res.data),
   create: (conversationId: number, data: { content: string; segment_id?: number; excerpt_id?: number }) =>
     api.post<Note>(`/conversations/${conversationId}/notes`, data).then(res => res.data),
+  listForObservation: (projectId: number, observationId: number) =>
+    api.get<ObservationNote[]>(`/projects/${projectId}/observations/${observationId}/notes`)
+      .then(res => res.data),
+  createForObservation: (
+    projectId: number,
+    observationId: number,
+    data: { content: string; segment_id?: number },
+  ) =>
+    api.post<ObservationNote>(`/projects/${projectId}/observations/${observationId}/notes`, data)
+      .then(res => res.data),
   update: (projectId: number, noteId: number, data: { content?: string; segment_id?: number }) =>
     api.patch<Note>(`/projects/${projectId}/notes/${noteId}`, data).then(res => res.data),
   archive: (projectId: number, noteId: number, permanent = false) =>

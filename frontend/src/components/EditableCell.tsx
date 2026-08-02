@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, type CSSProperties } from 'react'
 import type { DatasetColumn, DatasetValueCell, RecodeDefinitionSummary } from '@/lib/api'
 import { useTheme } from '@/lib/theme-context'
+import { reflectReverseValue } from '@/lib/recode-utils'
 
 // ── Ordinal color helper ─────────────────────────────────────────────────────
 
@@ -62,7 +63,15 @@ export function computeDisplayValue(
   }
 
   if (activeDef.recode_type === 'scale_map' || activeDef.recode_type === 'reverse') {
-    const numVal = Number(mappedValue)
+    // #578: a REVERSE mapping stores FORWARD codes; the score is the reflection
+    // (offset − code), exactly what the backend writes to value_numeric. Reflect
+    // here too or the grid would show the raw code while every analysis uses the
+    // reversed one. scale_map is verbatim.
+    // #600: reflect using the server's authoritative offset — it excludes
+    // missing/excluded mapping keys, which this client cannot identify.
+    const numVal = activeDef.recode_type === 'reverse'
+      ? reflectReverseValue(Number(mappedValue), activeDef.mapping, activeDef.reverse_offset)
+      : Number(mappedValue)
     const maxVal = Math.max(...Object.values(activeDef.mapping).map(Number).filter(n => !isNaN(n)))
     // #561: the .sav dedupe suffix (#541a) bakes the code into the label —
     // "Agree (1)" — and appending our own annotation renders "Agree (1) (1)".

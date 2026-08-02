@@ -396,6 +396,95 @@ class TestReverseRecode:
         assert vals[2].value_numeric == 5.0   # Poor: (5+1)-1 = 5
 
 
+class TestReverseRepair:
+    """#578: the startup repair un-breaks the reverse double-flip.
+
+    The Recode Workbench stored FLIPPED codes and the backend re-flipped at apply
+    time, so value_numeric silently kept its forward (un-reversed) value.
+    `repair_reverse_recode_mappings` rewrites a flipped reverse mapping back to the
+    source scale map's forward codes and re-applies primaries.
+    """
+
+    def _scale(self):
+        # Multi-digit + a 10 so a positional-vs-value confusion would surface
+        # (degenerate-fixture rule — a 1..5 scale can't distinguish the two).
+        return {"A": 2, "B": 4, "C": 6, "D": 8, "E": 10}
+
+    def _setup(self, db_session, reverse_mapping, *, source=True, primary=True):
+        from app.services.recode import repair_reverse_recode_mappings  # noqa: F401
+        project = Project(id=1, name="P", user_id=1)
+        db_session.add(project); db_session.flush()
+        ds = Dataset(id=1, project_id=1, name="D")
+        db_session.add(ds); db_session.flush()
+        col = DatasetColumn(id=1, dataset_id=1, column_code="Q1", column_text="Q1",
+                            column_type="ordinal", sequence_order=0, display_order=0)
+        db_session.add(col); db_session.flush()
+        forward = self._scale()
+        for i, lab in enumerate(forward, start=1):
+            row = DatasetRow(id=i, dataset_id=1)
+            db_session.add(row); db_session.flush()
+            # simulate the buggy no-op state: value_numeric == forward code
+            db_session.add(DatasetValue(row_id=i, column_id=1, value_text=lab,
+                                        value_numeric=float(forward[lab])))
+        src_id = None
+        if source:
+            sm = RecodeDefinition(id=10, column_id=1, name="SM",
+                recode_type=RecodeType.SCALE_MAP, output_type=OutputType.NUMERIC,
+                mapping=json.dumps(forward), is_primary=False, sequence_order=0)
+            db_session.add(sm); db_session.flush()
+            src_id = 10
+        rev = RecodeDefinition(id=11, column_id=1, name="REV",
+            recode_type=RecodeType.REVERSE, output_type=OutputType.NUMERIC,
+            mapping=json.dumps(reverse_mapping), source_definition_id=src_id,
+            is_primary=primary, sequence_order=1)
+        db_session.add(rev); db_session.flush()
+        return forward, rev
+
+    def test_flipped_primary_reverse_is_repaired(self, db_session):
+        from app.services.recode import repair_reverse_recode_mappings
+        forward, rev = self._setup(
+            db_session, {lab: 12 - c for lab, c in self._scale().items()})  # flipped (min+max=12)
+        n = repair_reverse_recode_mappings(db_session)
+        assert n == 1
+        # mapping is now FORWARD
+        assert json.loads(rev.mapping) == forward
+        # value_numeric is now REVERSED (offset 12 − forward)
+        vals = (db_session.query(DatasetValue)
+                .filter(DatasetValue.column_id == 1)
+                .order_by(DatasetValue.row_id).all())
+        assert [v.value_numeric for v in vals] == [10.0, 8.0, 6.0, 4.0, 2.0]
+
+    def test_repair_is_idempotent(self, db_session):
+        from app.services.recode import repair_reverse_recode_mappings
+        self._setup(db_session, {lab: 12 - c for lab, c in self._scale().items()})
+        assert repair_reverse_recode_mappings(db_session) == 1
+        assert repair_reverse_recode_mappings(db_session) == 0  # second run is a no-op
+
+    def test_already_forward_reverse_is_left_alone(self, db_session):
+        from app.services.recode import repair_reverse_recode_mappings
+        # A correctly-authored (forward) reverse def — e.g. via API / portability.
+        forward, rev = self._setup(db_session, self._scale())
+        assert repair_reverse_recode_mappings(db_session) == 0
+        assert json.loads(rev.mapping) == forward
+
+    def test_orphan_reverse_without_source_is_skipped(self, db_session):
+        from app.services.recode import repair_reverse_recode_mappings
+        # No source_definition_id → indistinguishable from correct-forward → skip.
+        self._setup(db_session, {lab: 12 - c for lab, c in self._scale().items()},
+                    source=False)
+        assert repair_reverse_recode_mappings(db_session) == 0
+
+    def test_hand_edited_reverse_is_left_alone(self, db_session):
+        from app.services.recode import repair_reverse_recode_mappings
+        # A mapping that is neither the source's forward codes NOR a clean
+        # reflection of them — the repair must NOT touch it (guards the
+        # detect-and-flip check against blindly rewriting).
+        hand = {"A": 3, "B": 4, "C": 6, "D": 9, "E": 1}
+        _, rev = self._setup(db_session, hand)
+        assert repair_reverse_recode_mappings(db_session) == 0
+        assert json.loads(rev.mapping) == hand
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tier 3 Session A — Router-level tests
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -901,6 +990,88 @@ class TestAppendReappliesPrimaryRecode:
             "a category_group-primary column carries no numeric encoding — the "
             "raw scale code must not be stamped onto appended rows"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #575 — append parity: a CODE-format file appended to a value-labelled column
+# must substitute code→label (value_text) AND keep the code (value_numeric), and
+# dedup against the existing label rows. Gapped/multi-digit codes [2,4,6,10] so a
+# positional-vs-code confusion fails.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_VL_LABELS = ["Low", "Mid", "High", "Top"]
+_VL_CODES = [2, 4, 6, 10]
+
+
+def _setup_labelled_column(db):
+    from app.models.user import User
+    from app.services.dataset_import import import_dataset_csv
+
+    db.add(Project(id=538, name="VL Append", user_id=1)); db.flush()
+    import_dataset_csv(
+        db=db, project_id=538, name="DS",
+        column_configs=[{
+            "column_index": 0, "column_type": "ordinal",
+            "column_text": "q", "column_name": "q",
+            "scale_labels": list(_VL_LABELS), "scale_values": list(_VL_CODES),
+        }],
+        file_contents="q\n" + "\n".join(_VL_LABELS) + "\n",  # cells are LABELS
+    )
+    db.flush()
+    dataset = db.query(Dataset).filter_by(project_id=538).one()
+    column = db.query(DatasetColumn).filter_by(dataset_id=dataset.id).one()
+    return dataset, column, db.query(User).filter(User.id == 1).one()
+
+
+def _append_cell(db, dataset, column, user, cell, *, skip_duplicates=False):
+    import asyncio, io as _io
+    from starlette.datastructures import UploadFile as StarletteUploadFile
+    from app.routers.dataset import append_import
+
+    upload = StarletteUploadFile(filename="more.csv", file=_io.BytesIO(f"q\n{cell}\n".encode()))
+    config = json.dumps({
+        "column_mapping": [{"csv_column_index": 0, "column_id": column.id}],
+        "skip_duplicates": skip_duplicates,
+    })
+    return asyncio.run(append_import(
+        project_id=538, dataset_id=dataset.id, file=upload,
+        import_config=config, encoding="utf-8", user=user, db=db,
+    ))
+
+
+class TestAppendValueLabelParity:
+    def test_code_format_append_substitutes_label_and_keeps_code(self, db_session):
+        dataset, column, user = _setup_labelled_column(db_session)
+        pre = {v.id for v in db_session.query(DatasetValue).filter_by(column_id=column.id)}
+        _append_cell(db_session, dataset, column, user, "6")  # a CODE, not a label
+        db_session.flush()
+        new = [v for v in db_session.query(DatasetValue).filter_by(column_id=column.id)
+               if v.id not in pre]
+        assert len(new) == 1
+        assert new[0].value_text == "High", "code 6 must be substituted to its label"
+        assert new[0].value_numeric == 6.0, "the gapped code must be kept, not NULL"
+
+    def test_label_format_append_unchanged(self, db_session):
+        dataset, column, user = _setup_labelled_column(db_session)
+        pre = {v.id for v in db_session.query(DatasetValue).filter_by(column_id=column.id)}
+        _append_cell(db_session, dataset, column, user, "Mid")  # a LABEL
+        db_session.flush()
+        new = [v for v in db_session.query(DatasetValue).filter_by(column_id=column.id)
+               if v.id not in pre]
+        assert new[0].value_text == "Mid" and new[0].value_numeric == 4.0
+
+    def test_code_format_append_dedups_against_existing_label_row(self, db_session):
+        # "High" (code 6) already exists as a label row from the import; appending
+        # the CODE "6" with skip_duplicates must recognize it as a duplicate.
+        dataset, column, user = _setup_labelled_column(db_session)
+        resp = _append_cell(db_session, dataset, column, user, "6", skip_duplicates=True)
+        assert resp.rows_created == 0 and resp.duplicates_skipped == 1
+
+    def test_unmapped_appended_value_is_reported(self, db_session):
+        dataset, column, user = _setup_labelled_column(db_session)
+        resp = _append_cell(db_session, dataset, column, user, "99")  # not a code
+        assert resp.rows_created == 1
+        assert "99" in resp.unmapped_values
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

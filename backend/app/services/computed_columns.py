@@ -17,6 +17,7 @@ from dataclasses import dataclass, replace
 from typing import Union
 
 from ..models.dataset import VALUE_NUMERIC_TYPES
+from .missing_values import is_missing, parse_missing_rules
 
 logger = logging.getLogger(__name__)
 
@@ -518,7 +519,11 @@ def _format_number(v: float) -> str:
     return str(v)
 
 
-def _eval(node: Expr, row: dict[int, tuple[str | None, float | None]]) -> _Val:
+def _eval(
+    node: Expr,
+    row: dict[int, tuple[str | None, float | None]],
+    missing_rules: dict[int, list | None] | None = None,
+) -> _Val:
     """Recursively evaluate an AST node against one row of data."""
 
     if isinstance(node, Literal):
@@ -533,6 +538,21 @@ def _eval(node: Expr, row: dict[int, tuple[str | None, float | None]]) -> _Val:
         if pair is None:
             return (_NULL, None)
         vt, vn = pair
+        # #599/#592: missing text is SQL NULL. Missingness is decided by the
+        # column's declared rules when present, else the recognized-N/A
+        # defaults (`is_missing`), and is checked BEFORE the numeric branch,
+        # keyed on value_text (§I.4) — a #594-class writer (recode mapping
+        # "N/A" → 99) can leave a numeric on a missing-text cell, and it must
+        # not evaluate. Pre-fix, missing text made arithmetic abort the WHOLE
+        # recompute on one refusal cell, and IF([Q7] == 3, …) counted the
+        # refusal as FALSE. Genuine text keeps the TXT fallback (load-bearing
+        # for `==` comparisons on text columns). This also converges with the
+        # R export, which blanks missing cells (#495b) so R already computes
+        # NA where this used to raise.
+        if vt is not None and is_missing(
+            vt, missing_rules.get(node.column_id) if missing_rules else None
+        ):
+            return (_NULL, None)
         if vn is not None:
             return (_NUM, float(vn))
         if vt is not None:
@@ -540,7 +560,7 @@ def _eval(node: Expr, row: dict[int, tuple[str | None, float | None]]) -> _Val:
         return (_NULL, None)
 
     if isinstance(node, UnaryOp):
-        val = _eval(node.operand, row)
+        val = _eval(node.operand, row, missing_rules)
         if node.op == "-":
             if val[0] == _NULL:
                 return (_NULL, None)
@@ -555,27 +575,29 @@ def _eval(node: Expr, row: dict[int, tuple[str | None, float | None]]) -> _Val:
             return (_BOOL, not val[1])
 
     if isinstance(node, BinaryOp):
-        return _eval_binary(node, row)
+        return _eval_binary(node, row, missing_rules)
 
     if isinstance(node, IfExpr):
-        cond = _eval(node.condition, row)
+        cond = _eval(node.condition, row, missing_rules)
         if cond[0] == _NULL:
             return (_NULL, None)
         if cond[0] != _BOOL:
             raise ExpressionError("IF condition must be boolean")
         if cond[1]:
-            return _eval(node.then_expr, row)
-        return _eval(node.else_expr, row)
+            return _eval(node.then_expr, row, missing_rules)
+        return _eval(node.else_expr, row, missing_rules)
 
     if isinstance(node, FunctionCall):
-        return _eval_function(node, row)
+        return _eval_function(node, row, missing_rules)
 
     raise ExpressionError(f"Unknown AST node type: {type(node)}")  # pragma: no cover
 
 
-def _eval_binary(node: BinaryOp, row: dict) -> _Val:
-    left = _eval(node.left, row)
-    right = _eval(node.right, row)
+def _eval_binary(
+    node: BinaryOp, row: dict, missing_rules: dict[int, list | None] | None = None,
+) -> _Val:
+    left = _eval(node.left, row, missing_rules)
+    right = _eval(node.right, row, missing_rules)
 
     # Boolean operators
     if node.op == "AND":
@@ -649,21 +671,23 @@ def _eval_binary(node: BinaryOp, row: dict) -> _Val:
     raise ExpressionError(f"Unknown operator '{node.op}'")  # pragma: no cover
 
 
-def _eval_function(node: FunctionCall, row: dict) -> _Val:
+def _eval_function(
+    node: FunctionCall, row: dict, missing_rules: dict[int, list | None] | None = None,
+) -> _Val:
     name = node.name
 
     if name == "IS_MISSING":
-        val = _eval(node.args[0], row)
+        val = _eval(node.args[0], row, missing_rules)
         return (_BOOL, val[0] == _NULL)
 
     if name == "COALESCE":
-        val = _eval(node.args[0], row)
+        val = _eval(node.args[0], row, missing_rules)
         if val[0] == _NULL:
-            return _eval(node.args[1], row)
+            return _eval(node.args[1], row, missing_rules)
         return val
 
     if name == "ABS":
-        val = _eval(node.args[0], row)
+        val = _eval(node.args[0], row, missing_rules)
         if val[0] == _NULL:
             return (_NULL, None)
         if val[0] != _NUM:
@@ -671,8 +695,8 @@ def _eval_function(node: FunctionCall, row: dict) -> _Val:
         return (_NUM, abs(val[1]))
 
     if name == "ROUND":
-        val = _eval(node.args[0], row)
-        digits_val = _eval(node.args[1], row)
+        val = _eval(node.args[0], row, missing_rules)
+        digits_val = _eval(node.args[1], row, missing_rules)
         if val[0] == _NULL:
             return (_NULL, None)
         if val[0] != _NUM:
@@ -685,7 +709,7 @@ def _eval_function(node: FunctionCall, row: dict) -> _Val:
     if name in ("MEAN", "SUM", "MIN", "MAX", "COUNT_VALID"):
         values: list[float] = []
         for arg in node.args:
-            v = _eval(arg, row)
+            v = _eval(arg, row, missing_rules)
             # Treat a missing cell (_NULL) OR an unmappable text cell (_TXT) as
             # missing and skip it (#360). A _TXT here means a column reference
             # resolved to a value that has value_text but no value_numeric — e.g.
@@ -721,17 +745,21 @@ def _eval_function(node: FunctionCall, row: dict) -> _Val:
 def evaluate(
     ast: Expr,
     row_data: dict[int, tuple[str | None, float | None]],
+    missing_rules: dict[int, list | None] | None = None,
 ) -> tuple[str | None, float | None]:
     """Evaluate a validated AST against one row of data.
 
     Args:
         ast: Validated AST (ColumnRef nodes must have column_id set).
         row_data: {column_id: (value_text, value_numeric)} for this row.
+        missing_rules: per-column parsed missing declarations (#592) —
+            {column_id: rules-or-None}. Omitted/None = every column uses the
+            recognized-N/A defaults (a column absent from the map likewise).
 
     Returns:
         (value_text, value_numeric) result tuple.
     """
-    result = _eval(ast, row_data)
+    result = _eval(ast, row_data, missing_rules)
     tag, val = result
 
     if tag == _NULL:
@@ -880,6 +908,14 @@ def evaluate_computed_column(
     resolved_ast = result.resolved_ast
     dep_ids = result.dependency_ids
 
+    # #592: per-column missing declarations for the ColumnRef seam, parsed
+    # once from the already-loaded siblings (dependency columns are siblings).
+    dep_id_set = set(dep_ids)
+    missing_rules = {
+        c.id: parse_missing_rules(c.missing_values)
+        for c in siblings if c.id in dep_id_set
+    }
+
     # Load source values for dependency columns
     value_query = (
         db.query(DatasetValue.row_id, DatasetValue.column_id,
@@ -922,7 +958,7 @@ def evaluate_computed_column(
     count = 0
     for row_id in target_row_ids:
         rd = row_data.get(row_id, {})
-        vt, vn = evaluate(resolved_ast, rd)
+        vt, vn = evaluate(resolved_ast, rd, missing_rules)
 
         if row_id in existing_values:
             dv = existing_values[row_id]

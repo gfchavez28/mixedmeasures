@@ -13,6 +13,7 @@ from ..models.code_application import CodeApplication
 from ..models.segment import Segment
 from ..models.conversation import Conversation
 from ..models.document import Document
+from ..models.observation import Observation
 from ..models.speaker import Speaker
 from ..models.dataset import Dataset, DatasetColumn, DatasetValue, ColumnType
 from ..models.excerpt import Excerpt
@@ -230,6 +231,48 @@ async def get_codebook_tree(
     for code_id, doc_id in doc_source_query.all():
         code_doc_sources[code_id].add(("doc", doc_id))
 
+    # 2h. Observation clip counts per code (slab 4c — brings the tree's counts
+    # up to the parent-agnostic standard 2e/#500 already set; layer-scope-only,
+    # like every sibling count here — the tree takes no coder_ids by design)
+    obs_seg_query = (
+        db.query(CodeApplication.code_id, func.count(func.distinct(CodeApplication.segment_id)))
+        .filter(
+            CodeApplication.code_id.in_(code_ids),
+            CodeApplication.segment_id.isnot(None),
+            layer_origin_filter(layer_scope),
+        )
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .join(Observation, Segment.observation_id == Observation.id)
+        .filter(
+            Observation.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+        )
+    )
+    obs_seg_counts = dict(obs_seg_query.group_by(CodeApplication.code_id).all())
+
+    # 2i. Observation source IDs per code (for set-union at category level)
+    obs_source_query = (
+        db.query(CodeApplication.code_id, Segment.observation_id)
+        .filter(
+            CodeApplication.code_id.in_(code_ids),
+            CodeApplication.segment_id.isnot(None),
+            layer_origin_filter(layer_scope),  # J2-5 L — see 2c
+        )
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .join(Observation, Segment.observation_id == Observation.id)
+        .filter(
+            Observation.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+        )
+        .distinct()
+    )
+
+    code_obs_sources: dict[int, set[tuple[str, int]]] = defaultdict(set)
+    for code_id, obs_id in obs_source_query.all():
+        code_obs_sources[code_id].add(("obs", obs_id))
+
     # 2e. Excerpt counts per code (segment-based + comment-based)
     excerpt_seg_query = (
         db.query(CodeApplication.code_id, func.count(func.distinct(Excerpt.id)))
@@ -257,8 +300,8 @@ async def get_codebook_tree(
 
     # 3. Build code nodes
     def make_code_node(code: Code) -> CodebookCodeNode:
-        seg_count = conv_seg_counts.get(code.id, 0) + comment_seg_counts.get(code.id, 0) + doc_seg_counts.get(code.id, 0)
-        sources = code_conv_sources.get(code.id, set()) | code_col_sources.get(code.id, set()) | code_doc_sources.get(code.id, set())
+        seg_count = conv_seg_counts.get(code.id, 0) + comment_seg_counts.get(code.id, 0) + doc_seg_counts.get(code.id, 0) + obs_seg_counts.get(code.id, 0)
+        sources = code_conv_sources.get(code.id, set()) | code_col_sources.get(code.id, set()) | code_doc_sources.get(code.id, set()) | code_obs_sources.get(code.id, set())
         exc_count = excerpt_seg_counts.get(code.id, 0) + excerpt_comment_counts.get(code.id, 0)
         return CodebookCodeNode(
             id=code.id,
@@ -280,7 +323,7 @@ async def get_codebook_tree(
     code_source_sets: dict[int, set] = {}
     cat_code_ids: dict[int, list[int]] = defaultdict(list)
     for code in codes:
-        code_source_sets[code.id] = code_conv_sources.get(code.id, set()) | code_col_sources.get(code.id, set()) | code_doc_sources.get(code.id, set())
+        code_source_sets[code.id] = code_conv_sources.get(code.id, set()) | code_col_sources.get(code.id, set()) | code_doc_sources.get(code.id, set()) | code_obs_sources.get(code.id, set())
         if code.category_id is not None:
             cat_code_ids[code.category_id].append(code.id)
 

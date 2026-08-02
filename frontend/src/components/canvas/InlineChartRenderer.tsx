@@ -37,6 +37,7 @@ import StackedHorizontalBarChart from '@/components/charts/StackedHorizontalBarC
 import VerticalBarChart from '@/components/charts/VerticalBarChart'
 import LineChartComponent from '@/components/charts/LineChart'
 import { extractComputeParams, buildRequest } from './inline-chart-params'
+import { isQualitativeMaterialConfig } from '@/lib/material-kind'
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -82,7 +83,14 @@ export default function InlineChartRenderer({
     staleTime: 5 * 60 * 1000,
   })
 
-  const autoName = (content.auto_name as string) ?? 'Untitled'
+  // #652: `content.auto_name` was read here and is NEVER populated — on ANY
+  // path. `auto_name` is a sibling field in the create-material payload
+  // (AnalysisView:1093 / QualitativeAnalysisView:737) and a sibling COLUMN on
+  // the material row; it is not a config key. So this rendered the literal
+  // string "Untitled" in every failure state, for quantitative charts too — a
+  // quant chart whose column was deleted showed "Untitled / Chart unavailable".
+  // The real title is rendered by ChartEmbedView directly above this component
+  // (the only mount site), so the fallbacks below carry no name at all.
   const chartTitle = (content.chart_title as string) ?? (content.title as string) ?? ''
   const chartSubtitle = (content.chart_subtitle as string) ?? (content.subtitle as string) ?? ''
 
@@ -100,9 +108,22 @@ export default function InlineChartRenderer({
   // ── Empty / loading / error states ──────────────────────────────────────
 
   if (!hasSelection) {
+    // A qualitative material is not "unconfigured" — it is fully configured and
+    // this renderer cannot read it (#652: it only understands dataset_column /
+    // dataset_domain sources). Saying "No data configured" about a chart the
+    // researcher just built and saved is the misleading half of the bug; the
+    // link immediately below now routes correctly, so point at it.
+    if (isQualitativeMaterialConfig(content)) {
+      return (
+        <div className="text-sm text-mm-text-faint py-4 text-center" role="status">
+          Qualitative charts can&rsquo;t be drawn on the canvas yet.
+          <br />
+          Open it in Analysis to view this chart.
+        </div>
+      )
+    }
     return (
-      <div className="text-sm text-mm-text-faint py-4 text-center">
-        <div className="font-medium text-mm-text mb-1">{autoName}</div>
+      <div className="text-sm text-mm-text-faint py-4 text-center" role="status">
         No data configured
       </div>
     )
@@ -119,8 +140,7 @@ export default function InlineChartRenderer({
 
   if (isError || metrics.length === 0) {
     return (
-      <div className="text-sm text-mm-text-faint py-4 text-center">
-        <div className="font-medium text-mm-text mb-1">{autoName}</div>
+      <div className="text-sm text-mm-text-faint py-4 text-center" role="status">
         Chart unavailable
       </div>
     )
@@ -166,7 +186,6 @@ export default function InlineChartRenderer({
         metricType={params.metricType}
         formatting={formatting}
         content={content}
-        autoName={autoName}
       />
     </div>
   )
@@ -180,10 +199,9 @@ interface ChartRouterProps {
   metricType: string
   formatting: ChartFormatting
   content: Record<string, unknown>
-  autoName: string
 }
 
-function ChartRouter({ chartType, metrics, metricType, formatting, content, autoName }: ChartRouterProps) {
+function ChartRouter({ chartType, metrics, metricType, formatting, content }: ChartRouterProps) {
   const display = (content.display as 'percentage' | 'count') ?? 'percentage'
   const scaling = (content.scaling as 'relative' | 'absolute') ?? 'relative'
   const hiddenResponseOptions = (content.hiddenResponseOptions as string[]) ?? []
@@ -192,8 +210,7 @@ function ChartRouter({ chartType, metrics, metricType, formatting, content, auto
 
   if (!chartType) {
     return (
-      <div className="text-sm text-mm-text-faint py-4 text-center">
-        <div className="font-medium text-mm-text mb-1">{autoName}</div>
+      <div className="text-sm text-mm-text-faint py-4 text-center" role="status">
         {metricType} chart
       </div>
     )
@@ -298,8 +315,7 @@ function ChartRouter({ chartType, metrics, metricType, formatting, content, auto
     default:
       // Fallback for unsupported chart types (dumbbell, table, frequency_table, cross_tab)
       return (
-        <div className="text-sm text-mm-text-faint py-4 text-center">
-          <div className="font-medium text-mm-text mb-1">{autoName}</div>
+        <div className="text-sm text-mm-text-faint py-4 text-center" role="status">
           {chartType} chart
         </div>
       )

@@ -1,11 +1,12 @@
 import React, { useState, useRef, useCallback, useEffect, isValidElement, cloneElement } from 'react'
-import { Link, useNavigate, useLocation, matchPath } from 'react-router-dom'
+import { Link, useNavigate, useLocation, matchPath } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
   Sun,
   Moon,
   ChevronRight,
   FileInput,
+  Video,
   Settings,
 } from 'lucide-react'
 import { ChevronDown, Clock, Users, UserPlus } from 'lucide-react'
@@ -70,7 +71,7 @@ interface WorkspaceTab {
 const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--mm-green)/0.5)] focus-visible:ring-offset-1'
 
 // Tabs that have dropdown menus
-const TABS_WITH_DROPDOWNS = new Set(['conversations', 'datasets', 'documents', 'analysis'])
+const TABS_WITH_DROPDOWNS = new Set(['conversations', 'datasets', 'documents', 'observations', 'analysis'])
 
 export default function TopRail({
   project,
@@ -100,6 +101,7 @@ export default function TopRail({
     { id: 'conversations', label: 'Conversations', icon: MessageSquare, path: 'conversations', accent: 'text-mm-green-text', count: project?.conversation_count },
     { id: 'datasets', label: 'Datasets', icon: Table2, path: 'datasets', accent: 'text-mm-orange-text', count: project?.dataset_count },
     { id: 'documents', label: 'Documents', icon: FileText, path: 'documents', accent: 'text-mm-purple-text', count: project?.document_count },
+    { id: 'observations', label: 'Observations', icon: Video, path: 'observations', accent: 'text-mm-teal-text', count: project?.observation_count },
     { id: 'analysis', label: 'Analysis', icon: BarChart3, path: 'analysis', accent: 'text-mm-blue-text' },
   ]
 
@@ -519,6 +521,9 @@ function TabDropdown({
             {tabId === 'documents' && (
               <DocumentsDropdown projectBase={projectBase} summary={summary} go={go} />
             )}
+            {tabId === 'observations' && (
+              <ObservationsDropdown projectBase={projectBase} summary={summary} go={go} />
+            )}
             {tabId === 'analysis' && (
               <AnalysisDropdown projectBase={projectBase} go={go} />
             )}
@@ -660,6 +665,48 @@ function DocumentsDropdown({
               <span className="truncate flex-1">{d.name}</span>
               <span className="text-[11px] text-white/30 font-mono tabular-nums shrink-0">
                 {d.coded_segment_count}/{d.segment_count}
+              </span>
+            </button>
+          ))}
+        </>
+      )}
+    </>
+  )
+}
+
+function ObservationsDropdown({
+  projectBase,
+  summary,
+  go,
+}: {
+  projectBase: string
+  summary: ProjectSummary | undefined
+  go: (path: string) => void
+}) {
+  return (
+    <>
+      <button role="menuitem" className={DROPDOWN_ITEM} onClick={() => go(`${projectBase}/observations`)}>
+        <Video className="w-3 h-3" /> All Observations
+      </button>
+      <button role="menuitem" className={DROPDOWN_ITEM} onClick={() => go(`${projectBase}/observations/import`)}>
+        <FileInput className="w-3 h-3" /> Import
+      </button>
+      {summary && summary.recent_observations && summary.recent_observations.length > 0 && (
+        <>
+          <div className={DROPDOWN_SEPARATOR} role="separator" />
+          <div className="px-3 py-1 text-[11px] font-medium text-white/30 uppercase tracking-wider" role="presentation">
+            Recent
+          </div>
+          {summary.recent_observations.map(o => (
+            <button
+              key={o.id}
+              role="menuitem"
+              className={DROPDOWN_ITEM}
+              onClick={() => go(`${projectBase}/observations/${o.id}`)}
+            >
+              <span className="truncate flex-1">{o.name}</span>
+              <span className="text-[11px] text-white/30 font-mono tabular-nums shrink-0">
+                {o.coded_segment_count}/{o.segment_count}
               </span>
             </button>
           ))}
@@ -832,6 +879,15 @@ function UserMenu() {
     { enabled: open && inSource && multiCoder && !blind, rosterCoderIds: coders.map(c => c.id) },
   )
   const showCoverage = !blind && inSource && multiCoder && coverage.isLoaded
+  // SLAB 3 OBLIGATION (Observations workbench): this is a TWO-way ternary, and an
+  // observation route would fall through it and announce "this document". It
+  // cannot lie today only because no observation DETAIL route exists yet — the
+  // matchPath above simply never fires. When the workbench lands, this needs a
+  // third arm AND `useCoderCoverage` needs an `observationId` (the service
+  // `source_coder_coverage` already accepts one; the code-analysis ROUTER does
+  // not expose it, so the arg is unreachable today). The query key must take it
+  // too, or observations 5 and 9 collide on `[…, null, null, '']` and serve each
+  // other's coverage (#454 family).
   const sourceNoun = conversationId != null ? 'this conversation' : 'this document'
   const rosterCodedCount = coders.filter(c => coverage.activeCoderIds.has(c.id)).length
 

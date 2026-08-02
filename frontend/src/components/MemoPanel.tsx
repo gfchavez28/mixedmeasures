@@ -16,7 +16,7 @@ interface MemoPanelProps {
   projectId: number
   conversationId?: number  // Deprecated — use entityId instead
   entityId?: number        // ID of the conversation or document
-  entityType?: 'conversation' | 'document' | null  // null = no entity context (e.g. comment coding)
+  entityType?: 'conversation' | 'document' | 'observation' | null  // null = no entity context (e.g. comment coding)
   codes?: Code[]  // For displaying code names on code-type memos
   conversations?: Conversation[]  // For displaying conversation names on conversation-type memos
   // Create memo for a specific code (passed from CodePanel)
@@ -49,7 +49,9 @@ const MemoPanel = forwardRef<MemoPanelHandle, MemoPanelProps>(function MemoPanel
   const entityType = entityTypeProp
   const entityId = entityIdProp ?? conversationId ?? 0
   const hasEntityContext = entityType != null && entityId > 0
-  const entityLabel = entityType === 'document' ? 'Document' : 'Conversation'
+  const entityLabel = entityType === 'document' ? 'Document'
+    : entityType === 'observation' ? 'Observation'
+    : 'Conversation'
 
   const queryClient = useQueryClient()
   const [searchQuery, setSearchQuery] = useState('')

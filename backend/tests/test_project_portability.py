@@ -1,9 +1,14 @@
 """Tests for project portability (export/import) and codebook exchange."""
 
+import io
 import json
 import os
+import re
 import tempfile
+import uuid as uuid_module
+import xml.etree.ElementTree as ET
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -37,6 +42,7 @@ from app.models import (
     Memo,
     MetricDefinition,
     Note,
+    Observation,
     Participant,
     Project,
     QuoteBoardConfig,
@@ -49,11 +55,17 @@ from app.models import (
     StatisticalTest,
 )
 from app.services.project_portability import (
+    MergeDivergenceError,
+    _assert_merge_compatible,
     export_project,
     import_project,
     validate_project_file,
 )
 from app.services.codebook_exchange import (
+    LEGACY_QDC_NAMESPACE,
+    MAX_QDC_DEPTH,
+    QDC_NAMESPACE,
+    EmptyCodebookError,
     export_codebook_native,
     export_codebook_qdc,
     import_codebook_native,
@@ -116,6 +128,16 @@ def populated_project(db_session: Session):
     db.add(doc)
     db.flush()
 
+    # Observation (Observations track — a recording coded on its own timeline)
+    obs = Observation(
+        project_id=pid, name="Classroom session 1",
+        description="Period 3, small-group work",
+        media_filename="session1.mp4", media_format="mp4", media_type="video",
+        media_duration_seconds=600.0, media_offset_seconds=0.0, media_is_vbr=False,
+    )
+    db.add(obs)
+    db.flush()
+
     # SegmentGroup
     sg = SegmentGroup(conversation_id=conv.id)
     db.add(sg)
@@ -135,7 +157,14 @@ def populated_project(db_session: Session):
         document_id=doc.id, sequence_order=0, text="Document text",
         word_count=2, page_number=1,
     )
-    db.add_all([seg1, seg2, doc_seg])
+    # Observation (the THIRD Segment parent) + a clip on its timeline. Deliberately
+    # carries an attached recording so the media arcname (`media/obs-{id}/…`) and the
+    # orphan-metadata clearing pass are exercised by the shared round-trip tests.
+    obs_seg = Segment(
+        observation_id=obs.id, sequence_order=0, text="Small-group transition",
+        word_count=3, start_time=12.5, end_time=48.25,
+    )
+    db.add_all([seg1, seg2, doc_seg, obs_seg])
     db.flush()
 
     # Set self-ref: seg1 merged into seg2
@@ -171,7 +200,10 @@ def populated_project(db_session: Session):
 
     # CodeApplications
     ca1 = CodeApplication(segment_id=seg1.id, code_id=code2.id, user_id=None)
-    db.add(ca1)
+    # A code on an observation CLIP — this is the row that vanished from every
+    # export before the segments gather learned the third parent.
+    ca_obs = CodeApplication(segment_id=obs_seg.id, code_id=code2.id, user_id=None)
+    db.add_all([ca1, ca_obs])
     db.flush()
 
     # Dataset
@@ -238,6 +270,15 @@ def populated_project(db_session: Session):
     db.add(exc)
     db.flush()
 
+    # Time-range excerpt on the observation clip (slab 5, D29). POPULATED times
+    # on purpose — the columns ride export/import by reflection, so a NULL→NULL
+    # round-trip would certify nothing (the degenerate-fixture rule).
+    time_exc = Excerpt(
+        project_id=pid, segment_id=obs_seg.id, start_time=20.0, end_time=31.5,
+    )
+    db.add(time_exc)
+    db.flush()
+
     # Note (on conversation, with excerpt)
     note1 = Note(
         conversation_id=conv.id, segment_id=seg1.id, excerpt_id=exc.id,
@@ -253,7 +294,12 @@ def populated_project(db_session: Session):
         dataset_value_id=val2.id,
         content="Comment note", sequence_number=0,
     )
-    db.add_all([note1, note2, note3])
+    # Note on an observation clip (Note's third parent FK)
+    note4 = Note(
+        observation_id=obs.id, segment_id=obs_seg.id,
+        content="Teacher circulates here", sequence_number=0,
+    )
+    db.add_all([note1, note2, note3, note4])
     db.flush()
 
     # Memos across multiple entity types
@@ -281,7 +327,14 @@ def populated_project(db_session: Session):
         project_id=pid, numeric_id=6, entity_type="dataset",
         entity_id=ds.id, title="DS Memo", content="Data notes",
     )
-    db.add_all([memo_project, memo_conv, memo_doc, memo_code, memo_cat, memo_ds])
+    # Memo on an observation. Memo.entity_id has NO ForeignKey, so an entity_type
+    # missing from MEMO_ENTITY_REMAP is copied verbatim and silently points at a
+    # foreign row — this memo is what makes that regression visible.
+    memo_obs = Memo(
+        project_id=pid, numeric_id=9, entity_type="observation",
+        entity_id=obs.id, title="Obs Memo", content="Session context",
+    )
+    db.add_all([memo_project, memo_conv, memo_doc, memo_code, memo_cat, memo_ds, memo_obs])
     db.flush()
 
     # AnalysisDomain
@@ -468,8 +521,10 @@ def populated_project(db_session: Session):
         "speaker": s1,
         "conversation": conv,
         "document": doc,
+        "observation": obs,
         "segment_group": sg,
-        "segments": [seg1, seg2, doc_seg],
+        "segments": [seg1, seg2, doc_seg, obs_seg],
+        "obs_segment": obs_seg,
         "categories": [cat1, cat2],
         "codes": [code1, code2, code3],
         "dataset": ds,
@@ -479,8 +534,8 @@ def populated_project(db_session: Session):
         "values": [val1, val2, val_comp],
         "recode": recode,
         "excerpt": exc,
-        "notes": [note1, note2, note3],
-        "memos": [memo_project, memo_conv, memo_doc, memo_code, memo_cat, memo_ds, memo_analysis, memo_canvas],
+        "notes": [note1, note2, note3, note4],
+        "memos": [memo_project, memo_conv, memo_doc, memo_code, memo_cat, memo_ds, memo_obs, memo_analysis, memo_canvas],
         "domain": domain,
         "domain_member": adm,
         "metric": metric,
@@ -533,13 +588,17 @@ class TestExportProject:
         assert len(data["speakers"]) == 1
         assert len(data["conversations"]) == 1
         assert len(data["documents"]) == 1
-        assert len(data["segments"]) == 3
+        assert len(data["observations"]) == 1
+        # 2 conversation + 1 document + 1 observation clip. Segment has no
+        # project_id, so it is gathered per-parent — a parent without a branch in
+        # the export gather is silent data loss.
+        assert len(data["segments"]) == 4
         assert len(data["code_categories"]) == 2
         assert len(data["codes"]) == 3
-        assert len(data["code_applications"]) == 2
-        assert len(data["notes"]) == 3
-        assert len(data["memos"]) == 8
-        assert len(data["excerpts"]) == 1
+        assert len(data["code_applications"]) == 3  # incl. the code on the clip
+        assert len(data["notes"]) == 4              # incl. the observation note
+        assert len(data["memos"]) == 9              # incl. the observation memo
+        assert len(data["excerpts"]) == 2  # whole-segment + the clip time-range
         assert len(data["datasets"]) == 1
         assert len(data["dataset_columns"]) == 3
         assert len(data["dataset_rows"]) == 1
@@ -620,6 +679,608 @@ class TestValidateProject:
             zf.writestr("project.json", "{}")
         with pytest.raises(ValueError, match="newer version"):
             validate_project_file(file_path)
+
+
+class TestImportZipSlipGuard:
+    """A crafted .mmproject whose member name escapes the extraction root must
+    be refused BEFORE anything is written to disk.
+
+    import_project builds on-disk target paths (docs + media copies) from
+    archive member names, so a member like ``media/1/../../../x`` or an absolute
+    ``/x`` would otherwise let a shared .mmproject write outside the project's
+    data dir. The guard lives in import_project ITSELF (not only in
+    validate_project_file) because scripts and direct API calls skip
+    /validate-import — the exact same reason the format-version gate is enforced
+    there (see _read_manifest_and_check_format's docstring / the
+    .mmproject-gate rule in the internal design notes). This test is the
+    fail-closed guard on the guard: it existed untested, so a future refactor
+    could silently drop it. Two guard arms: parent-traversal and absolute path.
+    """
+
+    def _minimal_evil(self, path: Path, member: str) -> None:
+        """A hand-built .mmproject carrying only a malicious member — enough to
+        prove the namelist scan rejects it (validate path)."""
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("manifest.json", json.dumps(
+                {"format_type": "mmproject", "format_version": 1, "app_version": "1.0.0"}))
+            zf.writestr("project.json", json.dumps(
+                {"project": {"name": "evil", "uuid": "00000000-0000-0000-0000-000000000001"}}))
+            zf.writestr(member, b"PWNED-BY-ZIPSLIP")
+
+    def _tampered_export(self, db, pid: int, out_path: Path, member: str, tmp_path: Path) -> None:
+        """A VALID exported .mmproject with one malicious member spliced in.
+
+        Non-vacuity matters here: the escape assertion is only meaningful if,
+        absent the guard, execution actually REACHES the media-copy phase and
+        writes the sentinel. A hand-built minimal file crashes in DB import
+        first (nothing to copy), so mutation-removing the guard would let the
+        test 'pass' for the wrong reason. Splicing the member into a real export
+        — keyed to a conversation id that survives into the import remap — means
+        a guard-less import runs to the copy phase and the sentinel escapes.
+        """
+        buf = export_project(db, pid, tmp_path / "export_docs")
+        base = tmp_path / "base.mmproject"
+        base.write_bytes(buf.getvalue())
+        with zipfile.ZipFile(base, "r") as zin, zipfile.ZipFile(out_path, "w") as zout:
+            for item in zin.namelist():
+                zout.writestr(item, zin.read(item))
+            zout.writestr(member, b"PWNED-BY-ZIPSLIP")
+
+    def test_validate_rejects_traversal(self, tmp_path):
+        file_path = tmp_path / "evil.mmproject"
+        self._minimal_evil(file_path, "media/1/../../../ESCAPED.txt")
+        with pytest.raises(ValueError, match="suspicious path"):
+            validate_project_file(file_path)
+
+    def test_import_rejects_and_writes_nothing_outside(self, db_session, populated_project, tmp_path):
+        """The security assertion: the guard fires AND no file escapes.
+
+        The traversal member is keyed to the exported conversation's real id so
+        that, without the guard, the media-copy loop would remap it and write
+        the sentinel OUTSIDE the project media dir (into tmp_path). With the
+        guard, import raises before any DB or file work. Mutation-verified: both
+        assertions fail when either guard is removed.
+        """
+        pid = populated_project["project"].id
+        conv = db_session.query(Conversation).filter(Conversation.project_id == pid).first()
+
+        media_dir = tmp_path / "data" / "media"
+        docs_dir = tmp_path / "data" / "documents"
+        media_dir.mkdir(parents=True)
+        docs_dir.mkdir(parents=True)
+        escape_sentinel = tmp_path / "ESCAPED.txt"
+
+        # Escape relative to where THIS member would land: media/<pid>/<conv>/…
+        member = f"media/{conv.id}/../../../../ESCAPED.txt"
+        file_path = tmp_path / "evil.mmproject"
+        self._tampered_export(db_session, pid, file_path, member, tmp_path)
+
+        # Decoupled so BOTH properties are independently exercised: a mutation
+        # that drops the guard must trip the containment assertion (the file
+        # escapes) regardless of the raise. Asserting only via pytest.raises
+        # would let the escape check go unrun (it fails at the raise first).
+        raised = False
+        try:
+            import_project(db_session, file_path, docs_dir, media_dir, user_id=1)
+        except ValueError as e:
+            raised = "suspicious path" in str(e)
+        assert not escape_sentinel.exists(), (
+            "SECURITY: a traversal member escaped the project media directory")
+        assert raised, "guard did not raise 'suspicious path'"
+
+
+class TestChunkedMemberCopy:
+    """#567: media files (up to 4 GB) must stream to disk in chunks, never be
+    read whole into RAM. _extract_zip_member is the single copy path for docs +
+    media + canvas. A payload larger than the 1 MiB chunk exercises multiple
+    copyfileobj iterations, so byte-identity here proves the chunk boundaries
+    are handled — a tiny payload (like the docs round-trip fixture) can't."""
+
+    def test_extract_is_byte_identical_across_chunk_boundaries(self, tmp_path):
+        from app.services.project_portability import _extract_zip_member
+
+        # 1.5 MiB → one full 1 MiB chunk + a partial remainder
+        payload = (b"MixedMeasures" * 121_000)[:1_500_000]
+        assert len(payload) > 1024 * 1024
+
+        archive = tmp_path / "big.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("media/1/original.mp4", payload)
+
+        target = tmp_path / "out" / "nested" / "original.mp4"
+        with zipfile.ZipFile(archive, "r") as zf:
+            _extract_zip_member(zf, "media/1/original.mp4", target)
+
+        assert target.exists()
+        assert target.read_bytes() == payload
+
+
+class TestImportedMediaNumbersAreBounded:
+    """#625 sibling: `_build_entity` copies media numbers straight from the JSON.
+
+    An imported duration/offset passes through NONE of the guards the live paths
+    enforce — `sane_duration` on the probe, `MediaOffsetUpdate`'s ±300 on the API.
+    And `.mmproject` is an interchange format users hand each other (the
+    distribute-and-merge workflow), so "the file is ours" is not a safety
+    argument; it is the same reasoning that makes the format gate and the
+    zip-slip scan run INSIDE `import_project` rather than trusting the UI.
+
+    The inf case is a CRASH, not a cosmetic: `cut_clips` guards
+    `is None or <= 0`, which inf passes (inf > 0) and NaN passes
+    (NaN <= 0 is False), reaching `math.ceil` as an OverflowError.
+    """
+
+    def _import_with_patched_media(self, db, pid, patch):
+        """Export, rewrite the archive's media numbers, re-import."""
+        buf = export_project(db, pid, Path("/nonexistent"))
+        with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as zf:
+            names = zf.namelist()
+            blobs = {n: zf.read(n) for n in names}
+        data = json.loads(blobs["project.json"])
+        for key in ("conversations", "observations"):
+            for row in data.get(key, []):
+                patch(row)
+        # `allow_nan=True` is the default and is the point — Python's json
+        # EMITS and ACCEPTS bare Infinity/NaN, which is how the value survives
+        # a round-trip through a file at all.
+        blobs["project.json"] = json.dumps(data).encode()
+
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as zf:
+            for n in names:
+                zf.writestr(n, blobs[n])
+        tmp = tempfile.NamedTemporaryFile(suffix=".mmproject", delete=False)
+        try:
+            tmp.write(out.getvalue())
+            tmp.close()
+            new_id, _ = import_project(
+                db, Path(tmp.name), Path("/tmp/docs_test"), user_id=1,
+            )
+            db.flush()
+            return new_id
+        finally:
+            os.unlink(tmp.name)
+
+    def _durations(self, db, pid):
+        return [
+            o.media_duration_seconds
+            for model in (Conversation, Observation)
+            for o in db.query(model).filter(model.project_id == pid).all()
+        ]
+
+    def test_an_infinite_duration_does_not_survive_the_import(self, db_session, populated_project):
+        db = db_session
+        new_pid = self._import_with_patched_media(
+            db, populated_project["project"].id,
+            lambda row: row.__setitem__("media_duration_seconds", float("inf")),
+        )
+        assert all(d is None for d in self._durations(db, new_pid))
+
+    def test_a_nan_duration_is_neutralised_by_STORAGE_not_by_the_guard(self, db_session, populated_project):
+        """⚠️ This one passes with the sanitizer REMOVED — verified by mutation.
+
+        SQLite has no NaN representation for REAL and silently stores it as
+        NULL (measured: `inf` round-trips as `inf`, `1e12` as `1e12`, `nan` as
+        `None`). So from THIS door NaN was never the live risk — **inf was**, and
+        it persists faithfully. Kept, labelled, because the asymmetry is the
+        useful fact: a future reader must not conclude the guard is what handles
+        NaN here, nor that "we tested NaN" means this path is proven.
+        """
+        db = db_session
+        new_pid = self._import_with_patched_media(
+            db, populated_project["project"].id,
+            lambda row: row.__setitem__("media_duration_seconds", float("nan")),
+        )
+        assert all(d is None for d in self._durations(db, new_pid))
+
+    def test_an_absurd_finite_duration_does_not_survive_the_import(self, db_session, populated_project):
+        """The value a `[inf, nan]`-only fixture would miss."""
+        db = db_session
+        new_pid = self._import_with_patched_media(
+            db, populated_project["project"].id,
+            lambda row: row.__setitem__("media_duration_seconds", 1e12),
+        )
+        assert all(d is None for d in self._durations(db, new_pid))
+
+    def test_a_real_duration_is_preserved(self, db_session, populated_project):
+        """The sanitizer must not be a filter that eats legitimate values."""
+        db = db_session
+        new_pid = self._import_with_patched_media(
+            db, populated_project["project"].id,
+            lambda row: row.__setitem__("media_duration_seconds", 612.5),
+        )
+        assert self._durations(db, new_pid) and all(
+            d == pytest.approx(612.5) for d in self._durations(db, new_pid)
+        )
+
+    def test_an_out_of_range_offset_is_reset_to_aligned(self, db_session, populated_project):
+        """An import must not accept what `MediaOffsetUpdate` refuses (±300 s)."""
+        db = db_session
+        new_pid = self._import_with_patched_media(
+            db, populated_project["project"].id,
+            lambda row: row.__setitem__("media_offset_seconds", 99999.0),
+        )
+        offsets = [
+            o.media_offset_seconds
+            for model in (Conversation, Observation)
+            for o in db.query(model).filter(model.project_id == new_pid).all()
+        ]
+        assert offsets and all(o == 0.0 for o in offsets)
+
+    def test_a_legitimate_offset_is_preserved(self, db_session, populated_project):
+        db = db_session
+        new_pid = self._import_with_patched_media(
+            db, populated_project["project"].id,
+            lambda row: row.__setitem__("media_offset_seconds", -12.5),
+        )
+        offsets = [
+            o.media_offset_seconds
+            for model in (Conversation, Observation)
+            for o in db.query(model).filter(model.project_id == new_pid).all()
+        ]
+        assert offsets and all(o == pytest.approx(-12.5) for o in offsets)
+
+
+class TestObservationPortability:
+    """Observations track: the third Segment parent must survive .mmproject.
+
+    Segment and Note have NO project_id — they are gathered through their parents,
+    so a parent the export gather doesn't know about is SILENT data loss (the clip,
+    every code on it, and its notes simply never leave the project). And because
+    `_build_entity` copies any column the import doesn't explicitly remap, the
+    inverse failure is worse than loss: the source instance's raw observation_id
+    gets written into THIS database, attaching the clip to an unrelated project's
+    observation (or dying on an opaque IntegrityError).
+
+    The shared `populated_project` fixture carries an Observation + a coded clip +
+    a note + a memo, so the generic round-trip tests (notably `test_roundtrip_
+    fidelity`, which walks every key in project.json) cover observations too. This
+    class pins what the shared fixture cannot reach: the on-disk media namespace,
+    the merge posture, and the polymorphic memo remap.
+    """
+
+    def _export_import(self, db, pid, media_dir=None):
+        buf = export_project(db, pid, Path("/nonexistent"), media_dir=media_dir)
+        tmp = tempfile.NamedTemporaryFile(suffix=".mmproject", delete=False)
+        try:
+            tmp.write(buf.getvalue())
+            tmp.close()
+            new_id, _ = import_project(
+                db, Path(tmp.name), Path("/tmp/docs_test"),
+                media_dir=media_dir, user_id=1,
+            )
+            db.flush()
+            return new_id
+        finally:
+            os.unlink(tmp.name)
+
+    def test_manifest_observation_count_survives_the_response_schema(self):
+        """#639: the exporter wrote this count; the SCHEMA threw it away.
+
+        `ProjectSummary` is reached through `ImportValidationResult`, and a
+        response_model silently drops undeclared fields — so `observation_count`
+        sat in every v3+ archive and could never reach the import preview, which
+        went on reporting only conversations/documents/datasets for a file full
+        of observations.
+
+        It was left undeclared on the reasoning that the schema's fields are
+        REQUIRED, so adding one would fail to parse every v1/v2 manifest. True of
+        a *required* field — hence the default. Both arms are pinned here because
+        fixing either one alone reintroduces the other bug.
+        """
+        from app.schemas.project_portability import ProjectExportManifest
+
+        base = {
+            "format_version": 4, "format_type": "mmproject", "app_version": "9.9.9",
+            "created_at": "2026-08-01", "project_name": "X",
+        }
+        counts = {
+            "conversation_count": 1, "dataset_count": 0, "document_count": 0,
+            "code_count": 2, "category_count": 0, "memo_count": 0,
+            "participant_count": 1, "excerpt_count": 3,
+        }
+
+        # (a) A v3+ manifest: the real count must reach the client.
+        v4 = ProjectExportManifest(
+            **base,
+            project_summary={**counts, "observation_count": 7,
+                             "canvas_count": 0, "canvas_theme_count": 0},
+        )
+        assert v4.project_summary.model_dump()["observation_count"] == 7
+
+        # (b) A pre-observations manifest: still parses, reads 0 — never raises.
+        v2 = ProjectExportManifest(**{**base, "format_version": 2}, project_summary=counts)
+        assert v2.project_summary.model_dump()["observation_count"] == 0
+
+    def test_export_manifest_carries_the_observation_count(self, db_session, populated_project):
+        """End-to-end companion to the schema pin: a real export states the count."""
+        db = db_session
+        pid = populated_project["project"].id
+        buf = export_project(db, pid, Path("/nonexistent"))
+        with zipfile.ZipFile(buf) as zf:
+            manifest = json.loads(zf.read("manifest.json"))
+        summary = manifest["project_summary"]
+        observations = db.query(Observation).filter(Observation.project_id == pid).count()
+        assert observations > 0, "fixture must carry an observation for this to mean anything"
+        assert summary["observation_count"] == observations
+
+    def test_observation_and_coded_clip_survive_roundtrip(self, db_session, populated_project):
+        """The whole observation spine round-trips: source, clip, code, note, memo."""
+        db = db_session
+        old_pid = populated_project["project"].id
+        new_pid = self._export_import(db, old_pid)
+
+        obs = db.query(Observation).filter(Observation.project_id == new_pid).one()
+        assert obs.name == "Classroom session 1"
+        assert obs.media_filename == "session1.mp4"
+        assert obs.media_type == "video"
+        assert obs.media_duration_seconds == 600.0
+
+        clip = db.query(Segment).filter(Segment.observation_id == obs.id).one()
+        assert clip.text == "Small-group transition"
+        assert (clip.start_time, clip.end_time) == (12.5, 48.25)
+        # The clip must belong to the NEW observation, not the source's.
+        assert clip.observation_id == obs.id
+        assert clip.conversation_id is None and clip.document_id is None
+
+        # The code on the clip travelled (it hangs off segment_ids in the gather).
+        app = db.query(CodeApplication).filter(CodeApplication.segment_id == clip.id).one()
+        assert db.query(Code).filter(Code.id == app.code_id).one().project_id == new_pid
+
+        note = db.query(Note).filter(Note.observation_id == obs.id).one()
+        assert note.content == "Teacher circulates here"
+        assert note.segment_id == clip.id
+
+        # The time-range excerpt round-trips with POPULATED times (slab 5).
+        # Reflection carries the columns automatically — this pin is what makes
+        # that claim non-vacuous (a NULL fixture would pass with the columns
+        # dropped entirely).
+        time_exc = db.query(Excerpt).filter(
+            Excerpt.segment_id == clip.id, Excerpt.start_time.isnot(None),
+        ).one()
+        assert (time_exc.start_time, time_exc.end_time) == (20.0, 31.5)
+        assert time_exc.start_offset is None and time_exc.end_offset is None
+
+        memo = db.query(Memo).filter(
+            Memo.project_id == new_pid, Memo.entity_type == "observation",
+        ).one()
+        # Memo.entity_id has no FK — an unregistered entity_type is copied verbatim
+        # and silently points at the SOURCE project's observation.
+        assert memo.entity_id == obs.id
+        assert memo.entity_id != populated_project["observation"].id
+
+    def test_export_with_observations_declares_format_v3(self, db_session, populated_project):
+        """An observation-bearing file MUST declare format_version >= 3.
+
+        An older build has no `segments.observation_id` column, so `_build_entity`
+        silently DROPS the field and inserts the clip with all three parents NULL —
+        violating that build's two-parent ck_segment_exactly_one_parent and dying
+        mid-write on an opaque IntegrityError. The version gate is what turns that
+        into a clean "created by a newer version" refusal, and the gate only fires
+        if we actually declare the bump. Downgrading the constant re-arms the trap.
+        """
+        db = db_session
+        buf = export_project(db, populated_project["project"].id, Path("/nonexistent"))
+        with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as zf:
+            manifest = json.loads(zf.read("manifest.json"))
+
+        assert manifest["format_version"] >= 3
+        assert manifest["project_summary"]["observation_count"] == 1
+
+    def test_observation_recording_roundtrips_under_obs_namespace(
+        self, db_session, populated_project, tmp_path
+    ):
+        """The recording lands under `media/obs-{id}/` on disk, on BOTH sides.
+
+        A bare `int(parts[1])` on the import side raises ValueError on "obs-7" and
+        silently `continue`s — the file is exported correctly and then dropped on
+        the way back in, with no log line. That is the regression this pins.
+        """
+        db = db_session
+        old_pid = populated_project["project"].id
+        old_obs = populated_project["observation"]
+
+        media_dir = tmp_path / "media"
+        src = media_dir / str(old_pid) / f"obs-{old_obs.id}"
+        src.mkdir(parents=True)
+        (src / "original.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"payload" * 100)
+
+        new_pid = self._export_import(db, old_pid, media_dir=media_dir)
+        new_obs = db.query(Observation).filter(Observation.project_id == new_pid).one()
+
+        landed = media_dir / str(new_pid) / f"obs-{new_obs.id}" / "original.mp4"
+        assert landed.is_file(), "observation recording did not survive the round-trip"
+        assert landed.read_bytes() == (src / "original.mp4").read_bytes()
+
+        # The media metadata must SURVIVE (the orphan-clearing pass must not treat a
+        # present obs recording as missing — it looked at Conversation rows only).
+        assert new_obs.media_filename == "session1.mp4"
+        assert new_obs.media_format == "mp4"
+
+    def test_missing_observation_recording_clears_metadata(
+        self, db_session, populated_project, tmp_path
+    ):
+        """A media-less archive must leave a clean re-attach state, not a dead player.
+
+        The orphan-metadata sweep queried Conversation only, so an imported
+        Observation kept media_filename pointing at a file that never landed.
+        """
+        db = db_session
+        old_pid = populated_project["project"].id
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+
+        # No file on disk for the observation → nothing to carry across.
+        new_pid = self._export_import(db, old_pid, media_dir=media_dir)
+        new_obs = db.query(Observation).filter(Observation.project_id == new_pid).one()
+
+        assert new_obs.media_filename is None
+        assert new_obs.media_format is None
+        assert new_obs.media_type is None
+        assert new_obs.media_duration_seconds is None
+        assert new_obs.media_is_vbr is None
+        assert new_obs.media_offset_seconds == 0.0
+
+    def test_import_as_new_fresh_stamps_observation_uuid(self, db_session, populated_project):
+        """Import-as-new must FRESH-stamp the uuid or re-importing collides on the
+        unique index (the J3-2-0 spine trap). Rides `_add`'s fresh_uuid — verify it
+        actually reaches Observation."""
+        db = db_session
+        old_obs = populated_project["observation"]
+        old_uuid = old_obs.uuid
+        assert old_uuid
+
+        new_pid = self._export_import(db, populated_project["project"].id)
+        new_obs = db.query(Observation).filter(Observation.project_id == new_pid).one()
+
+        assert new_obs.uuid and new_obs.uuid != old_uuid
+
+    def test_merge_exempts_observations_from_the_segmentation_gate(
+        self, db_session, populated_project
+    ):
+        """Clips are DELIBERATELY exempt from the frozen-segmentation gate.
+
+        Frozen segmentation exists because text units PARTITION the material — two
+        coders must agree on the turns. Clips don't partition anything: each coder
+        marks their OWN ranges, and that divergence is the SUBJECT of unitizing-α,
+        not a defect. Requiring identical clip uuid sets would refuse every real
+        multi-coder observation merge. So a colleague's extra clip must MERGE IN
+        additively, not raise MergeDivergenceError.
+        """
+        db = db_session
+        pid = populated_project["project"].id
+        obs = populated_project["observation"]
+
+        buf = export_project(db, pid, Path("/nonexistent"))
+        data = json.loads(zipfile.ZipFile(io.BytesIO(buf.getvalue())).read("project.json"))
+
+        # The colleague marked a SECOND clip on the same observation — a clip-set
+        # divergence that would refuse if observations went through the gate.
+        obs_item = next(o for o in data["observations"] if o["_original_id"] == obs.id)
+        template = next(s for s in data["segments"] if s.get("observation_id") == obs.id)
+        extra = dict(template)
+        extra["_original_id"] = max(s["_original_id"] for s in data["segments"]) + 1
+        extra["uuid"] = str(uuid_module.uuid4())
+        extra["sequence_order"] = 1
+        extra["text"] = "Colleague's clip"
+        extra["start_time"], extra["end_time"] = 100.0, 140.0
+        data["segments"].append(extra)
+        assert obs_item["uuid"]
+
+        # Sanity: a divergent CONVERSATION segmentation still refuses, so this test
+        # can't pass just because the gate stopped working.
+        _assert_merge_compatible(db, data, target_project_id=pid)  # must not raise
+
+        conv_seg = next(
+            s for s in data["segments"]
+            if s.get("conversation_id") and s.get("merged_into_id") is None
+            and s.get("split_into_id") is None
+        )
+        diverged = json.loads(json.dumps(data))
+        conv_extra = dict(conv_seg)
+        conv_extra["_original_id"] = 9999
+        conv_extra["uuid"] = str(uuid_module.uuid4())
+        diverged["segments"].append(conv_extra)
+        with pytest.raises(Exception, match="[Ss]egmentation diverged"):
+            _assert_merge_compatible(db, diverged, target_project_id=pid)
+
+    def _export_with_extra_clip(self, db, pid, obs):
+        """An export of this project plus one clip the colleague added."""
+        buf = export_project(db, pid, Path("/nonexistent"))
+        data = json.loads(zipfile.ZipFile(io.BytesIO(buf.getvalue())).read("project.json"))
+        template = next(s for s in data["segments"] if s.get("observation_id") == obs.id)
+        extra = dict(template)
+        extra["_original_id"] = max(s["_original_id"] for s in data["segments"]) + 1
+        extra["uuid"] = str(uuid_module.uuid4())
+        extra["sequence_order"] = 1
+        extra["text"] = "Colleague's clip"
+        extra["start_time"], extra["end_time"] = 100.0, 140.0
+        data["segments"].append(extra)
+        return data
+
+    def test_merge_refuses_when_only_the_LOCAL_observation_is_frozen(
+        self, db_session, populated_project
+    ):
+        """#572: the lead froze AFTER distributing copies.
+
+        The colleague's file honestly reports an OPEN segmentation — it is the
+        posture they coded under — so reading only the file exempts the merge and
+        inserts their clips into a frozen observation, expanding the very unit set
+        the freeze declared agreed. Those clips get exactly one voter, so consensus
+        can never resolve them.
+        """
+        db = db_session
+        pid = populated_project["project"].id
+        obs = populated_project["observation"]
+
+        data = self._export_with_extra_clip(db, pid, obs)  # file: open
+        obs.segmentation_frozen_at = datetime(2026, 7, 19, 12, 0, 0)
+        db.flush()
+
+        with pytest.raises(MergeDivergenceError) as exc:
+            _assert_merge_compatible(db, data, target_project_id=pid)
+        assert exc.value.payload["kind"] == "segmentation_freeze"
+        assert exc.value.payload["diverged_sources"][0]["frozen_side"] == "local"
+        # Never the generic message: "re-segment to match" is wrong here — the
+        # colleague's cuts predate the freeze and are not the thing to change.
+        assert "re-segment to match" not in str(exc.value)
+
+    def test_merge_refuses_when_only_the_FILE_observation_is_frozen(
+        self, db_session, populated_project
+    ):
+        """The mirror direction, found while verifying #572.
+
+        This case already refused before the fix — but through the clip-set
+        comparison, which told the local coder to "re-segment to match" while their
+        own open cuts were legitimate. Same one-sided read, opposite direction.
+        """
+        db = db_session
+        pid = populated_project["project"].id
+        obs = populated_project["observation"]
+
+        data = self._export_with_extra_clip(db, pid, obs)
+        obs_item = next(o for o in data["observations"] if o["_original_id"] == obs.id)
+        obs_item["segmentation_frozen_at"] = "2026-07-19T12:00:00"  # file: frozen
+
+        with pytest.raises(MergeDivergenceError) as exc:
+            _assert_merge_compatible(db, data, target_project_id=pid)
+        assert exc.value.payload["kind"] == "segmentation_freeze"
+        assert exc.value.payload["diverged_sources"][0]["frozen_side"] == "file"
+
+    def test_merge_still_gates_two_frozen_observations_on_their_clip_sets(
+        self, db_session, populated_project
+    ):
+        """Both frozen = the D18 agreed-units case: compare clips, as before."""
+        db = db_session
+        pid = populated_project["project"].id
+        obs = populated_project["observation"]
+
+        data = self._export_with_extra_clip(db, pid, obs)
+        obs_item = next(o for o in data["observations"] if o["_original_id"] == obs.id)
+        obs_item["segmentation_frozen_at"] = "2026-07-19T12:00:00"
+        obs.segmentation_frozen_at = datetime(2026, 7, 19, 12, 0, 0)
+        db.flush()
+
+        with pytest.raises(MergeDivergenceError) as exc:
+            _assert_merge_compatible(db, data, target_project_id=pid)
+        assert exc.value.payload["kind"] == "segmentation"
+
+    def test_merge_accepts_two_frozen_observations_with_identical_clips(
+        self, db_session, populated_project
+    ):
+        """The frozen happy path: same agreed clips on both sides, additive codings."""
+        db = db_session
+        pid = populated_project["project"].id
+        obs = populated_project["observation"]
+
+        buf = export_project(db, pid, Path("/nonexistent"))
+        data = json.loads(zipfile.ZipFile(io.BytesIO(buf.getvalue())).read("project.json"))
+        obs_item = next(o for o in data["observations"] if o["_original_id"] == obs.id)
+        obs_item["segmentation_frozen_at"] = "2026-07-19T12:00:00"
+        obs.segmentation_frozen_at = datetime(2026, 7, 19, 12, 0, 0)
+        db.flush()
+
+        _assert_merge_compatible(db, data, target_project_id=pid)  # must not raise
 
 
 # ── Import tests ───────────────────────────────────────────────────────
@@ -1255,7 +1916,7 @@ class TestCodebookExport:
         xml_str = export_codebook_qdc(db_session, pid)
 
         assert '<?xml' in xml_str
-        assert 'origin="Mixed Measures"' in xml_str
+        assert 'origin="Mixed Measures' in xml_str
         assert 'isCodable="false"' in xml_str  # categories
         assert 'isCodable="true"' in xml_str   # codes
 
@@ -1263,6 +1924,180 @@ class TestCodebookExport:
         pid = populated_project["project"].id
         xml_str = export_codebook_qdc(db_session, pid)
         assert "Inactive Code" not in xml_str
+
+    # ── #633: REFI-QDA schema conformance ──────────────────────────────
+
+    def test_qdc_export_uses_the_standards_namespace(self, db_session, populated_project):
+        """The exported namespace is the standard's, NOT MM's pre-#633 one.
+
+        REFI-QDA 1.5 §5.2 declares targetNamespace="urn:QDA-XML:codebook:1.0".
+        MM shipped "…:1:0" (a COLON for the DOT) from 2026-03-16, which is why
+        no other tool ever accepted our file. Asserted on the PARSED tree, not
+        on a substring — the point is what a validating parser resolves.
+        """
+        xml_str = export_codebook_qdc(db_session, populated_project["project"].id)
+        root = ET.fromstring(xml_str)
+
+        assert root.tag == f"{{{QDC_NAMESPACE}}}CodeBook"
+        assert QDC_NAMESPACE == "urn:QDA-XML:codebook:1.0"
+        assert LEGACY_QDC_NAMESPACE not in xml_str
+
+        # Children inherit the root's default namespace on reparse — this is
+        # what makes the unqualified serialization correct rather than a second
+        # bug hiding behind the first.
+        for el in root.iter():
+            assert el.tag.startswith(f"{{{QDC_NAMESPACE}}}"), el.tag
+
+    def test_qdc_export_guid_prefers_the_uuid_spine(self, db_session, populated_project):
+        """A code's GUID is its Track J uuid, so .qdc and .mmproject agree."""
+        pid = populated_project["project"].id
+        leadership = db_session.query(Code).filter(
+            Code.project_id == pid, Code.name == "Leadership"
+        ).first()
+        assert leadership.uuid  # spine populated by the model default
+
+        root = ET.fromstring(export_codebook_qdc(db_session, pid))
+        guids = {
+            el.get("name"): el.get("guid")
+            for el in root.iter(f"{{{QDC_NAMESPACE}}}Code")
+        }
+        assert guids["Leadership"] == leadership.uuid
+
+    def test_qdc_export_falls_back_when_the_spine_is_null(self, db_session, populated_project):
+        """Pre-spine rows hold uuid=NULL and still get a schema-legal GUID."""
+        pid = populated_project["project"].id
+        leadership = db_session.query(Code).filter(
+            Code.project_id == pid, Code.name == "Leadership"
+        ).first()
+        leadership.uuid = None
+        db_session.flush()
+
+        root = ET.fromstring(export_codebook_qdc(db_session, pid))
+        guid = next(
+            el.get("guid") for el in root.iter(f"{{{QDC_NAMESPACE}}}Code")
+            if el.get("name") == "Leadership"
+        )
+        # The schema's GUIDType pattern.
+        assert re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            guid,
+        )
+
+    def test_qdc_export_omits_a_schema_illegal_colour(self, db_session, populated_project):
+        """RGBType is #RGB or #RRGGBB — anything else is dropped, not emitted."""
+        pid = populated_project["project"].id
+        leadership = db_session.query(Code).filter(
+            Code.project_id == pid, Code.name == "Leadership"
+        ).first()
+        leadership.color = "rebecca"  # fits String(7); is not a legal RGB
+        db_session.flush()
+
+        root = ET.fromstring(export_codebook_qdc(db_session, pid))
+        el = next(
+            e for e in root.iter(f"{{{QDC_NAMESPACE}}}Code")
+            if e.get("name") == "Leadership"
+        )
+        assert el.get("color") is None
+        assert "rebecca" not in export_codebook_qdc(db_session, pid)
+
+    def test_qdc_export_satisfies_every_schema_constraint(self, db_session, populated_project):
+        """Assert the XSD's actual rules, not just the namespace string.
+
+        The official Codebook.xsd sits behind a Tresorit link and is not
+        vendorable here, so these are the constraints transcribed from
+        REFI-QDA 1.5 §5.2 rather than a live schema validation:
+
+            CodeBookType : sequence(Codes, Sets?) + optional @origin
+            CodesType    : Code, maxOccurs=unbounded (implicit minOccurs=1)
+            CodeType     : sequence(Description?, Code*)
+                           @guid, @name, @isCodable REQUIRED; @color optional
+            GUIDType     : hyphenated hex, optionally brace-wrapped
+            RGBType      : #RGB or #RRGGBB
+
+        Matching the namespace alone would not catch a missing required
+        attribute or an out-of-order child.
+        """
+        xml_str = export_codebook_qdc(db_session, populated_project["project"].id)
+        root = ET.fromstring(xml_str)
+        q = lambda n: f"{{{QDC_NAMESPACE}}}{n}"  # noqa: E731
+
+        assert root.tag == q("CodeBook")
+        # CodeBookType's only attribute is the optional `origin`.
+        assert set(root.attrib) <= {"origin"}
+
+        children = list(root)
+        assert [c.tag for c in children][:1] == [q("Codes")]
+        assert all(c.tag in (q("Codes"), q("Sets")) for c in children)
+
+        codes_container = children[0]
+        assert len(codes_container) >= 1, "CodesType requires at least one Code"
+
+        guid_re = re.compile(
+            r"^\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+            r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?$"
+        )
+        rgb_re = re.compile(r"^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$")
+
+        seen = 0
+        for el in root.iter(q("Code")):
+            seen += 1
+            for required in ("guid", "name", "isCodable"):
+                assert el.get(required) is not None, f"{required} missing"
+            assert guid_re.match(el.get("guid")), el.get("guid")
+            assert el.get("isCodable") in ("true", "false")
+            if el.get("color") is not None:
+                assert rgb_re.match(el.get("color")), el.get("color")
+            assert set(el.attrib) <= {"guid", "name", "isCodable", "color"}
+
+            # sequence(Description?, Code*) — Description may appear at most
+            # once and must precede any nested Code.
+            tags = [c.tag for c in el]
+            assert tags.count(q("Description")) <= 1
+            assert all(t in (q("Description"), q("Code")) for t in tags)
+            if q("Description") in tags:
+                assert tags.index(q("Description")) == 0
+
+        assert seen >= 1
+
+    def test_qdc_export_refuses_an_empty_codebook(self, db_session):
+        """CodesType has an implicit minOccurs=1, so <Codes /> is invalid.
+
+        Refusing beats handing the researcher a file no tool will open.
+        """
+        project = Project(name="No codes", status="active", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+
+        with pytest.raises(EmptyCodebookError):
+            export_codebook_qdc(db_session, project.id)
+
+        # .mmcodebook is MM's own format and has no such constraint.
+        assert export_codebook_native(db_session, project.id)["codes"] == []
+
+    def test_empty_codebook_answers_400_not_404_at_the_router(self, db_session):
+        """EmptyCodebookError subclasses ValueError, which the router already
+        maps to 404 for "project not found". Without its own arm it would tell
+        the caller the PROJECT does not exist — a misdiagnosis. The project is
+        there; the request is just unsatisfiable in this format.
+        """
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from app.models.user import User
+        from app.routers.project_portability import export_codebook_endpoint
+
+        project = Project(name="Empty at the wire", status="active", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+        user = db_session.query(User).filter(User.id == 1).first()
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(export_codebook_endpoint(
+                project_id=project.id, format="qdc", db=db_session, user=user,
+            ))
+        assert exc.value.status_code == 400
+        assert "at least one" in str(exc.value.detail)
 
 
 # ── Codebook import tests ──────────────────────────────────────────────
@@ -1349,7 +2184,7 @@ class TestCodebookImport:
         db_session.flush()
 
         xml = '''<?xml version="1.0" encoding="UTF-8"?>
-        <CodeBook origin="Test" xmlns="urn:QDA-XML:codebook:1:0">
+        <CodeBook origin="Test" xmlns="urn:QDA-XML:codebook:1.0">
           <Codes>
             <Code guid="a1" name="Theme" color="#ff0000" isCodable="false">
               <Code guid="a2" name="SubCode" color="#00ff00" isCodable="true">
@@ -1377,7 +2212,7 @@ class TestCodebookImport:
         db_session.flush()
 
         xml = '''<?xml version="1.0" encoding="UTF-8"?>
-        <CodeBook origin="Test" xmlns="urn:QDA-XML:codebook:1:0">
+        <CodeBook origin="Test" xmlns="urn:QDA-XML:codebook:1.0">
           <Codes>
             <Code guid="b1" name="CodableParent" color="#ff0000" isCodable="true">
               <Code guid="b2" name="Child" color="#00ff00" isCodable="true"/>
@@ -1396,7 +2231,7 @@ class TestCodebookImport:
         db_session.flush()
 
         xml = '''<?xml version="1.0" encoding="UTF-8"?>
-        <CodeBook origin="Test" xmlns="urn:QDA-XML:codebook:1:0">
+        <CodeBook origin="Test" xmlns="urn:QDA-XML:codebook:1.0">
           <Codes>
             <Code guid="c1" name="ImplicitCategory" color="#ff0000">
               <Code guid="c2" name="ImplicitCode" color="#00ff00"/>
@@ -1407,6 +2242,235 @@ class TestCodebookImport:
         counts = import_codebook_qdc(db_session, project.id, xml)
         assert counts["categories_created"] == 1  # parent defaults to category
         assert counts["codes_created"] == 1        # leaf defaults to code
+
+
+# ── #633: QDC namespace conformance + import hardening ──────────────────
+
+def _qdc(xmlns: str | None, prefix: str = "") -> str:
+    """One codebook, rendered with whatever namespace declaration is asked for."""
+    if xmlns is None:
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<CodeBook origin="Test"><Codes>'
+            '<Code guid="11111111-1111-1111-1111-111111111111" name="Trust" isCodable="true">'
+            "<Description>Expressions of trust</Description>"
+            "</Code></Codes></CodeBook>"
+        )
+    if prefix:
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            f'<{prefix}:CodeBook xmlns:{prefix}="{xmlns}" origin="Test"><{prefix}:Codes>'
+            f'<{prefix}:Code guid="11111111-1111-1111-1111-111111111111" '
+            f'name="Trust" isCodable="true">'
+            f"<{prefix}:Description>Expressions of trust</{prefix}:Description>"
+            f"</{prefix}:Code></{prefix}:Codes></{prefix}:CodeBook>"
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<CodeBook xmlns="{xmlns}" origin="Test"><Codes>'
+        '<Code guid="11111111-1111-1111-1111-111111111111" name="Trust" isCodable="true">'
+        "<Description>Expressions of trust</Description>"
+        "</Code></Codes></CodeBook>"
+    )
+
+
+class TestQdcNamespaceConformance:
+    """The regression that #633 is actually about.
+
+    Before the fix, import matched MM's own wrong URN or no namespace at all, so
+    a standards-compliant file raised "No <Codes> element found in QDC file" —
+    the one file every other QDA tool writes was the one file MM refused. The
+    fix matches on LOCAL NAME, so all four shapes below import identically and a
+    future revision of the standard needs no code change.
+    """
+
+    @pytest.mark.parametrize("label,xml", [
+        ("standard", _qdc(QDC_NAMESPACE)),
+        ("legacy-mm", _qdc(LEGACY_QDC_NAMESPACE)),
+        ("no-namespace", _qdc(None)),
+        ("prefixed", _qdc(QDC_NAMESPACE, prefix="qdc")),
+    ])
+    def test_every_namespace_shape_imports_identically(self, db_session, label, xml):
+        project = Project(name=f"NS {label}", status="active", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+
+        counts = import_codebook_qdc(db_session, project.id, xml)
+        assert counts["codes_created"] == 1, label
+
+        code = db_session.query(Code).filter(
+            Code.project_id == project.id, Code.name == "Trust"
+        ).first()
+        assert code is not None, label
+        # Description is matched by local name too — it lived behind the same
+        # namespace check as <Codes> and <Code>.
+        assert code.description == "Expressions of trust", label
+
+    def test_legacy_mm_files_still_import_after_the_namespace_change(self, db_session):
+        """Back-compat is the reason matching is agnostic rather than retargeted.
+
+        Every .qdc MM wrote between 2026-03-16 and the fix carries the old URN.
+        Simply pointing the constant at the standard would have broken all of
+        them — the fix must read both, and it does so without a legacy list.
+        """
+        project = Project(name="Legacy", status="active", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+
+        counts = import_codebook_qdc(
+            db_session, project.id, _qdc(LEGACY_QDC_NAMESPACE)
+        )
+        assert counts["codes_created"] == 1
+
+    def test_export_then_import_round_trips_through_the_real_functions(self, db_session, populated_project):
+        """End-to-end: our own export must satisfy our own import.
+
+        Both sides moved, so a same-URN pair could agree while both were wrong.
+        The namespace assertion above is what pins them to the STANDARD; this
+        pins that the pair still composes.
+        """
+        source_pid = populated_project["project"].id
+        xml_str = export_codebook_qdc(db_session, source_pid)
+
+        target = Project(name="Round trip", status="active", user_id=1)
+        db_session.add(target)
+        db_session.flush()
+
+        counts = import_codebook_qdc(db_session, target.id, xml_str)
+        assert counts["codes_created"] >= 1
+        assert counts["categories_created"] >= 1
+
+        names = {
+            c.name for c in db_session.query(Code).filter(
+                Code.project_id == target.id
+            ).all()
+        }
+        assert "Leadership" in names
+        assert "Inactive Code" not in names  # export is active-only
+
+    def test_missing_codes_element_names_the_root_it_found(self, db_session):
+        """The error should point at the problem, not just restate the symptom."""
+        project = Project(name="Bad root", status="active", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+
+        with pytest.raises(ValueError) as exc:
+            import_codebook_qdc(
+                db_session, project.id,
+                '<?xml version="1.0"?><Codebook><Wrong/></Codebook>',
+            )
+        assert "Codebook" in str(exc.value)
+
+
+class TestQdcImportHardening:
+
+    def test_deeply_nested_file_is_refused_not_a_500(self, db_session):
+        """Measured: 2000 levels in 112 KB blew the stack; the cap is 10 MB.
+
+        defusedxml stops entity expansion, not nesting depth — the recursion is
+        ours. Without the cap this raised RecursionError, which the router turns
+        into an opaque 500.
+        """
+        project = Project(name="Deep", status="active", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+
+        depth = MAX_QDC_DEPTH + 5
+        xml = (
+            f'<CodeBook xmlns="{QDC_NAMESPACE}"><Codes>'
+            + "".join(
+                f'<Code guid="g{i}" name="C{i}" isCodable="false">'
+                for i in range(depth)
+            )
+            + '<Code guid="leaf" name="leaf" isCodable="true"/>'
+            + "</Code>" * depth
+            + "</Codes></CodeBook>"
+        )
+
+        with pytest.raises(ValueError) as exc:
+            import_codebook_qdc(db_session, project.id, xml)
+        assert "levels deep" in str(exc.value)
+
+    def test_a_normal_hierarchy_is_not_caught_by_the_depth_cap(self, db_session):
+        """The cap must refuse the absurd without refusing real codebooks."""
+        project = Project(name="Normal depth", status="active", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+
+        depth = 5
+        xml = (
+            f'<CodeBook xmlns="{QDC_NAMESPACE}"><Codes>'
+            + "".join(
+                f'<Code guid="g{i}" name="C{i}" isCodable="false">'
+                for i in range(depth)
+            )
+            + '<Code guid="leaf" name="leaf" isCodable="true"/>'
+            + "</Code>" * depth
+            + "</Codes></CodeBook>"
+        )
+
+        counts = import_codebook_qdc(db_session, project.id, xml)
+        assert counts["codes_created"] == 1
+        assert counts["categories_created"] == depth
+
+    def test_too_many_codes_is_refused_before_any_db_work(self, db_session):
+        """Every other import adapter caps; this one was the outlier."""
+        from app.services import codebook_exchange
+
+        project = Project(name="Wide", status="active", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+
+        original = codebook_exchange.MAX_QDC_CODES
+        codebook_exchange.MAX_QDC_CODES = 3
+        try:
+            xml = (
+                f'<CodeBook xmlns="{QDC_NAMESPACE}"><Codes>'
+                + "".join(
+                    f'<Code guid="g{i}" name="C{i}" isCodable="true"/>'
+                    for i in range(10)
+                )
+                + "</Codes></CodeBook>"
+            )
+            with pytest.raises(ValueError) as exc:
+                import_codebook_qdc(db_session, project.id, xml)
+            assert "exceeds" in str(exc.value)
+        finally:
+            codebook_exchange.MAX_QDC_CODES = original
+
+        # Refused pre-flight: nothing was written.
+        assert db_session.query(Code).filter(
+            Code.project_id == project.id
+        ).count() == 0
+
+    def test_foreign_colour_and_name_are_sanitised(self, db_session):
+        """A foreign file's attributes are arbitrary text until proven otherwise.
+
+        SQLite does not enforce String(7)/String(255), so an over-long name or a
+        junk colour would land in the DB and reach the UI verbatim.
+        """
+        project = Project(name="Hostile attrs", status="active", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+
+        long_name = "N" * 400
+        xml = (
+            f'<CodeBook xmlns="{QDC_NAMESPACE}"><Codes>'
+            f'<Code guid="d1" name="{long_name}" color="javascript:alert(1)" isCodable="true"/>'
+            f'<Code guid="d2" name="Good" color="#ff0000" isCodable="true"/>'
+            "</Codes></CodeBook>"
+        )
+        import_codebook_qdc(db_session, project.id, xml)
+
+        codes = {
+            c.name: c for c in db_session.query(Code).filter(
+                Code.project_id == project.id
+            ).all()
+        }
+        assert len(next(iter(k for k in codes if k.startswith("N")))) == 255
+        assert codes["Good"].color == "#ff0000"
+        bad = next(c for k, c in codes.items() if k.startswith("N"))
+        assert bad.color is None
 
 
 def test_coder_attribution_survives_roundtrip(db_session: Session):

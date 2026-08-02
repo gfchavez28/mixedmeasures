@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle, useDefaultLayout } from 'react-resizable-panels'
 import {
@@ -20,6 +20,7 @@ import {
   codeAnalysisApi,
   conversationsApi,
   documentsApi,
+  observationsApi,
   materialsApi,
   exportApi,
   excerptsApi,
@@ -65,7 +66,7 @@ import SegmentedControl from '@/components/ui/segmented-control'
 import { useConsensusStatus } from '@/hooks/useConsensusStatus'
 import { useEnsureMaterialCollection } from '@/hooks/useEnsureMaterialCollection'
 import ReconciliationGrid from '@/components/qualitative-analysis/ReconciliationGrid'
-import IrrMatrix from '@/components/qualitative-analysis/IrrMatrix'
+import ReliabilityTab from '@/components/qualitative-analysis/ReliabilityTab'
 import { isReconciliationTabVisible, isIrrTabVisible } from '@/lib/qual-analysis-types'
 import { SELECTED_SEGMENT, SELECTED_ROW } from '@/lib/selection'
 import BlindModeToggle from '@/components/BlindModeToggle'
@@ -92,7 +93,7 @@ const CONTENT_MODE_LABELS: Record<QualContentMode, string> = {
 
 const CHART_TYPE_LABELS: Record<string, string> = {
   heatmap: 'Heatmap', bar: 'Horizontal Bar', stacked_bar: 'Stacked Bar',
-  summary: 'Summary Table', saturation: 'Saturation',
+  summary: 'Summary Table', saturation: 'Saturation', timeline: 'Timeline',
 }
 
 // ── Main View ──────────────────────────────────────────────────────────────
@@ -105,7 +106,7 @@ export default function QualitativeAnalysisView() {
 
   const qa = useQualitativeAnalysis()
   const { openCodebook } = useProjectLayout()
-  const { coders, multiCoder } = useCoders()
+  const { coders, coderMap, multiCoder } = useCoders()
   const { user } = useAuth()
   const { blind, toggleReveal } = useBlindMode(pid)
   const self = user?.id ?? null
@@ -123,6 +124,12 @@ export default function QualitativeAnalysisView() {
     [blind, self, coderInclude],
   )
   const effectiveCoderIncludeCsv = blind && self != null ? String(self) : coderIncludeCsv
+  // Set form for the client-computed timeline chart (§8q DEC-6c-2) — the SAME
+  // effective scope the backend-computed charts receive, null = no filter.
+  const effectiveCoderIncludeSet = useMemo(
+    () => (effectiveCoderInclude.length ? new Set(effectiveCoderInclude) : null),
+    [effectiveCoderInclude],
+  )
   const hiddenCoders = useMemo(
     () => coderInclude.length
       ? new Set(coders.filter(c => !coderInclude.includes(c.id)).map(c => c.id))
@@ -261,6 +268,12 @@ export default function QualitativeAnalysisView() {
     enabled: !!pid,
   })
 
+  const { data: observationsData } = useQuery({
+    queryKey: ['observations', pid],
+    queryFn: () => observationsApi.list(pid),
+    enabled: !!pid,
+  })
+
   // Palette queries
   const { data: collectionsData } = useQuery({
     queryKey: ['material-collections', pid],
@@ -302,11 +315,12 @@ export default function QualitativeAnalysisView() {
     participant_ids: qa.participantIds.length > 0 ? qa.participantIds.join(',') : undefined,
     text_column_ids: qa.selectedTextColumnIds.size > 0 ? Array.from(qa.selectedTextColumnIds).join(',') : undefined,
     document_ids: qa.selectedDocumentIds.size > 0 ? Array.from(qa.selectedDocumentIds).join(',') : undefined,
+    observation_ids: qa.selectedObservationIds.size > 0 ? Array.from(qa.selectedObservationIds).join(',') : undefined,
     source: qa.source,
     level: qa.tab === 'relationships' ? qa.cooccurrenceLevel : undefined,
     coder_ids: effectiveCoderIncludeCsv,
     layer_scope: qa.layerScope,
-  }), [qa.excludeFacilitator, qa.selectedConversationIds, qa.participantIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.source, qa.tab, qa.cooccurrenceLevel, effectiveCoderIncludeCsv, qa.layerScope])
+  }), [qa.excludeFacilitator, qa.selectedConversationIds, qa.participantIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.source, qa.tab, qa.cooccurrenceLevel, effectiveCoderIncludeCsv, qa.layerScope])
 
   const quoteFilterParams = useMemo(() => ({
     participant_ids: qa.participantIds.length > 0 ? qa.participantIds.join(',') : undefined,
@@ -320,7 +334,7 @@ export default function QualitativeAnalysisView() {
   })
 
   const { data: freqData } = useQuery({
-    queryKey: ['code-frequencies', pid, qa.excludeFacilitator, Array.from(qa.selectedConversationIds).join(','), qa.participantIds.join(','), qa.source, Array.from(qa.selectedTextColumnIds).join(','), Array.from(qa.selectedDocumentIds).join(','), effectiveCoderIncludeCsv ?? '', qa.layerScope],
+    queryKey: ['code-frequencies', pid, qa.excludeFacilitator, Array.from(qa.selectedConversationIds).join(','), qa.participantIds.join(','), qa.source, Array.from(qa.selectedTextColumnIds).join(','), Array.from(qa.selectedDocumentIds).join(','), Array.from(qa.selectedObservationIds).join(','), effectiveCoderIncludeCsv ?? '', qa.layerScope],
     queryFn: () => codeAnalysisApi.frequencies(pid, filterParams),
     enabled: !!pid,
   })
@@ -331,13 +345,14 @@ export default function QualitativeAnalysisView() {
     conversation_ids: qa.selectedConversationIds.size > 0 ? Array.from(qa.selectedConversationIds) : [],
     text_column_ids: qa.selectedTextColumnIds.size > 0 ? Array.from(qa.selectedTextColumnIds) : [],
     document_ids: qa.selectedDocumentIds.size > 0 ? Array.from(qa.selectedDocumentIds) : [],
+    observation_ids: qa.selectedObservationIds.size > 0 ? Array.from(qa.selectedObservationIds) : [],
     exclude_facilitator: qa.excludeFacilitator,
     participant_ids: qa.participantIds.length > 0 ? qa.participantIds : undefined,
     group_by_subtype: qa.chartType === 'bar' && qa.groupBy ? qa.groupBy : undefined,
     aggregation: qa.codeMode === 'categories' ? 'category' : undefined,
     coder_ids: effectiveCoderInclude.length ? effectiveCoderInclude : null,
     layer_scope: qa.layerScope,
-  }), [qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.excludeFacilitator, qa.participantIds, qa.chartType, qa.groupBy, qa.codeMode, effectiveCoderInclude, qa.layerScope])
+  }), [qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, qa.chartType, qa.groupBy, qa.codeMode, effectiveCoderInclude, qa.layerScope])
 
   const { data: sourceFreqData, isLoading: sourceFreqLoading } = useQuery({
     queryKey: ['qual-source-frequencies', pid,
@@ -345,6 +360,7 @@ export default function QualitativeAnalysisView() {
       Array.from(qa.selectedConversationIds).sort().join(','),
       Array.from(qa.selectedTextColumnIds).sort().join(','),
       Array.from(qa.selectedDocumentIds).sort().join(','),
+      Array.from(qa.selectedObservationIds).sort().join(','),
       qa.excludeFacilitator,
       qa.participantIds.join(','),
       qa.chartType === 'bar' ? qa.groupBy : null,
@@ -355,7 +371,7 @@ export default function QualitativeAnalysisView() {
     queryFn: () => codeAnalysisApi.sourceFrequencies(pid, sourceFreqRequest),
     enabled: !!pid && qa.tab === 'descriptives' && qa.chartType !== 'saturation'
       && qa.selectedCodeIds.size > 0
-      && (qa.selectedConversationIds.size > 0 || qa.selectedTextColumnIds.size > 0 || qa.selectedDocumentIds.size > 0),
+      && (qa.selectedConversationIds.size > 0 || qa.selectedTextColumnIds.size > 0 || qa.selectedDocumentIds.size > 0 || qa.selectedObservationIds.size > 0),
   })
 
   // Saturation query
@@ -363,6 +379,7 @@ export default function QualitativeAnalysisView() {
     queryKey: ['qual-saturation', pid, qa.excludeFacilitator, qa.codeMode === 'categories',
       Array.from(qa.selectedConversationIds).sort().join(','),
       Array.from(qa.selectedDocumentIds).sort().join(','),
+      Array.from(qa.selectedObservationIds).sort().join(','),
       effectiveCoderIncludeCsv ?? '',
       qa.layerScope,
     ],
@@ -371,6 +388,7 @@ export default function QualitativeAnalysisView() {
       category_level: qa.codeMode === 'categories',
       conversation_ids: qa.selectedConversationIds.size > 0 ? Array.from(qa.selectedConversationIds).join(',') : undefined,
       document_ids: qa.selectedDocumentIds.size > 0 ? Array.from(qa.selectedDocumentIds).join(',') : undefined,
+      observation_ids: qa.selectedObservationIds.size > 0 ? Array.from(qa.selectedObservationIds).join(',') : undefined,
       coder_ids: effectiveCoderIncludeCsv,
       layer_scope: qa.layerScope,
     }),
@@ -425,6 +443,7 @@ export default function QualitativeAnalysisView() {
   const conversations = useMemo(() => conversationsData?.conversations ?? [], [conversationsData?.conversations])
   const textColumns: TextColumnInfo[] = useMemo(() => textColumnsData ?? [], [textColumnsData])
   const documents: DocumentListItem[] = useMemo(() => documentsData ?? [], [documentsData])
+  const observations = useMemo(() => observationsData ?? [], [observationsData])
 
   // QB: filter sources to only those with quoted excerpts
   const qbConversations = useMemo(() => {
@@ -444,6 +463,12 @@ export default function QualitativeAnalysisView() {
     const ids = new Set(quoteData.excerpts.filter(e => e.document_id).map(e => e.document_id!))
     return documents.filter(d => ids.has(d.id))
   }, [documents, quoteData])
+
+  const qbObservations = useMemo(() => {
+    if (!quoteData) return observations
+    const ids = new Set(quoteData.excerpts.filter(e => e.observation_id).map(e => e.observation_id!))
+    return observations.filter(o => ids.has(o.id))
+  }, [observations, quoteData])
 
   // Content tab: filter codes and sources by Lens/Sources sidebar selections
   // On Content tab, empty selection = nothing shown (user must check items).
@@ -469,6 +494,18 @@ export default function QualitativeAnalysisView() {
     if (qa.selectedDocumentIds.size === 0) return isContentTab ? [] : documents
     return documents.filter(d => qa.selectedDocumentIds.has(d.id))
   }, [documents, qa.selectedDocumentIds, isContentTab])
+
+  const contentObservations = useMemo(() => {
+    if (qa.selectedObservationIds.size === 0) return isContentTab ? [] : observations
+    return observations.filter(o => qa.selectedObservationIds.has(o.id))
+  }, [observations, qa.selectedObservationIds, isContentTab])
+
+  // Timeline chart type (slab 6c): selected codes in sidebar order, empty
+  // selection = all active — the toolbar's own count semantics.
+  const timedCodes = useMemo(() => {
+    const active = codes.filter(c => c.is_active)
+    return qa.selectedCodeIds.size > 0 ? active.filter(c => qa.selectedCodeIds.has(c.id)) : active
+  }, [codes, qa.selectedCodeIds])
 
   // eslint-disable-next-line react-hooks/preserve-manual-memoization -- freqData?.frequencies is intentionally more specific than freqData
   const contentFrequencies = useMemo(() => {
@@ -501,8 +538,13 @@ export default function QualitativeAnalysisView() {
       if (qa.selectedDocumentIds.size > 0 && !qa.selectedDocumentIds.has(id)) {
         qa.setContentSource(null)
       }
+    } else if (qa.contentSource.startsWith('o:')) {
+      const id = Number(qa.contentSource.slice(2))
+      if (qa.selectedObservationIds.size > 0 && !qa.selectedObservationIds.has(id)) {
+        qa.setContentSource(null)
+      }
     }
-  }, [qa.contentSource, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [qa.contentSource, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-select all codes and sources when entering Content tab with empty selections.
   // Includes data arrays so auto-select fires when data arrives after tab switch.
@@ -520,7 +562,10 @@ export default function QualitativeAnalysisView() {
     if (qa.selectedDocumentIds.size === 0 && documents.length > 0) {
       qa.setSelectedDocumentIds(new Set(documents.map(d => d.id)))
     }
-  }, [qa.tab, codes.length, conversations.length, textColumns.length, documents.length]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (qa.selectedObservationIds.size === 0 && observations.length > 0) {
+      qa.setSelectedObservationIds(new Set(observations.map(o => o.id)))
+    }
+  }, [qa.tab, codes.length, conversations.length, textColumns.length, documents.length, observations.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Focus mode (Quote Board + Content tab) ─────────────────────────
   const focusedCode = useMemo(
@@ -700,6 +745,7 @@ export default function QualitativeAnalysisView() {
     if (qa.selectedConversationIds.size > 0) params.conversation_ids = Array.from(qa.selectedConversationIds).join(',')
     if (qa.selectedTextColumnIds.size > 0) params.text_column_ids = Array.from(qa.selectedTextColumnIds).join(',')
     if (qa.selectedDocumentIds.size > 0) params.document_ids = Array.from(qa.selectedDocumentIds).join(',')
+    if (qa.selectedObservationIds.size > 0) params.observation_ids = Array.from(qa.selectedObservationIds).join(',')
     if (qa.excludeFacilitator) params.exclude_facilitator = 'true'
     if (qa.participantIds.length > 0) params.participant_ids = qa.participantIds.join(',')
     // #499: carry the EFFECTIVE (blind-forced) coder/layer scope so the CSV
@@ -707,7 +753,7 @@ export default function QualitativeAnalysisView() {
     if (effectiveCoderIncludeCsv) params.coder_ids = effectiveCoderIncludeCsv
     if (qa.layerScope) params.layer_scope = qa.layerScope
     exportApi.sourceFrequenciesCsv(pid, params)
-  }, [pid, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderIncludeCsv, qa.layerScope])
+  }, [pid, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderIncludeCsv, qa.layerScope])
 
   const conversationSourceCount = useMemo(
     () => conversations.filter(c => qa.selectedConversationIds.size === 0 || qa.selectedConversationIds.has(c.id)).length,
@@ -737,8 +783,8 @@ export default function QualitativeAnalysisView() {
     invalidateDerivedCounts(queryClient, pid, { metrics: true })  // #450: cross-surface counts (Content tab codes text + segments)
   }, [queryClient, pid])
 
-  const hasActiveQbFilters = qa.qbHiddenCodeIds.size > 0 || qa.qbHideUncoded || qa.qbHiddenConversationIds.size > 0 || qa.qbHiddenTextColumnIds.size > 0 || qa.qbHiddenDocumentIds.size > 0
-  const qbFilterCount = qa.qbHiddenCodeIds.size + qa.qbHiddenConversationIds.size + qa.qbHiddenTextColumnIds.size + qa.qbHiddenDocumentIds.size + (qa.qbHideUncoded ? 1 : 0)
+  const hasActiveQbFilters = qa.qbHiddenCodeIds.size > 0 || qa.qbHideUncoded || qa.qbHiddenConversationIds.size > 0 || qa.qbHiddenTextColumnIds.size > 0 || qa.qbHiddenDocumentIds.size > 0 || qa.qbHiddenObservationIds.size > 0
+  const qbFilterCount = qa.qbHiddenCodeIds.size + qa.qbHiddenConversationIds.size + qa.qbHiddenTextColumnIds.size + qa.qbHiddenDocumentIds.size + qa.qbHiddenObservationIds.size + (qa.qbHideUncoded ? 1 : 0)
 
   // ── Tab navigation ────────────────────────────────────────────────────
 
@@ -906,7 +952,10 @@ export default function QualitativeAnalysisView() {
 
   const hasCoding = freqData && (freqData.total_coded_segments > 0 || freqData.total_coded_texts > 0)
   const hasCodeSelection = qa.selectedCodeIds.size > 0
-  const hasSourceSelection = qa.selectedConversationIds.size > 0 || qa.selectedTextColumnIds.size > 0 || qa.selectedDocumentIds.size > 0
+  // #626: observations are the FOURTH source kind (slab 4c) — omitting them here
+  // made an observation-only project read "No sources selected" on every
+  // Descriptives chart while the backend had data to give.
+  const hasSourceSelection = qa.selectedConversationIds.size > 0 || qa.selectedTextColumnIds.size > 0 || qa.selectedDocumentIds.size > 0 || qa.selectedObservationIds.size > 0
   const hasQualSelection = hasCodeSelection && hasSourceSelection
   const hasDemographicFilters = demoFilters.length > 0
 
@@ -1032,7 +1081,7 @@ export default function QualitativeAnalysisView() {
                 setSrAnnouncement={setSrAnnouncement}
               />
             ) : (
-              <IrrMatrix projectId={pid} codes={codes} />
+              <ReliabilityTab projectId={pid} codes={codes} />
             )}
           </div>
         </div>
@@ -1159,7 +1208,7 @@ export default function QualitativeAnalysisView() {
                 <ChevronDown className={`w-4 h-4 text-mm-text-muted transition-transform ${!sourcesOpen ? '-rotate-90' : ''}`} aria-hidden="true" />
                 Sources
                 <span className="text-xs text-mm-text-faint ml-auto">
-                  {conversations.length + textColumns.length + documents.length}
+                  {conversations.length + textColumns.length + documents.length + observations.length}
                 </span>
               </button>
               {sourcesOpen && (
@@ -1216,12 +1265,15 @@ export default function QualitativeAnalysisView() {
                     conversations={qa.source === 'text' ? [] : conversations}
                     textColumns={qa.source === 'conversations' ? [] : textColumns}
                     documents={qa.source === 'text' ? [] : documents}
+                    observations={qa.source === 'text' ? [] : observations}
                     selectedConversationIds={qa.selectedConversationIds}
                     selectedTextColumnIds={qa.selectedTextColumnIds}
                     selectedDocumentIds={qa.selectedDocumentIds}
+                    selectedObservationIds={qa.selectedObservationIds}
                     onConversationChange={qa.setSelectedConversationIds}
                     onTextColumnChange={qa.setSelectedTextColumnIds}
                     onDocumentChange={qa.setSelectedDocumentIds}
+                    onObservationChange={qa.setSelectedObservationIds}
                     onAllSourcesChange={qa.setAllSourceIds}
                   />
                 </div>
@@ -1266,6 +1318,7 @@ export default function QualitativeAnalysisView() {
                 qbConversations={qbConversations}
                 qbTextColumns={qbTextColumns}
                 qbDocuments={qbDocuments}
+                qbObservations={qbObservations}
                 hasActiveQbFilters={hasActiveQbFilters}
                 qbFilterCount={qbFilterCount}
                 showBoardNotes={showBoardNotes}
@@ -1398,6 +1451,13 @@ export default function QualitativeAnalysisView() {
                       saturationLoading={saturationLoading}
                       freqData={freqData}
                       onChartTypeChange={handleChartTypeChange}
+                      projectId={pid}
+                      timedObservations={contentObservations}
+                      timedCodes={timedCodes}
+                      timedCategories={categories}
+                      coderInclude={effectiveCoderIncludeSet}
+                      multiCoder={multiCoder}
+                      coderMap={coderMap}
                     />
                   )}
 
@@ -1461,6 +1521,7 @@ export default function QualitativeAnalysisView() {
                           hasConversations={contentConversations.length > 0}
                           hasCommentColumns={contentTextColumns.length > 0}
                           hasDocuments={contentDocuments.length > 0}
+                          hasObservations={contentObservations.length > 0}
                           focusedCodeId={focusedCodeId}
                           onFocusCode={handleFocusCode}
                           onCodeChange={handleCodeChange}
@@ -1475,6 +1536,7 @@ export default function QualitativeAnalysisView() {
                           conversations={contentConversations}
                           textColumns={contentTextColumns}
                           documents={contentDocuments}
+                          observations={contentObservations}
                           selectedSourceId={qa.contentSource}
                           onSourceSelect={(src) => qa.setContentSource(src)}
                           onCodeClick={qa.viewCodeInContent}
@@ -1509,6 +1571,7 @@ export default function QualitativeAnalysisView() {
                       hiddenConversationIds={qa.qbHiddenConversationIds}
                       hiddenTextColumnIds={qa.qbHiddenTextColumnIds}
                       hiddenDocumentIds={qa.qbHiddenDocumentIds}
+                      hiddenObservationIds={qa.qbHiddenObservationIds}
                       hasActiveFilters={hasActiveQbFilters}
                       onClearFilters={qa.clearQbFilters}
                       onCodeChange={handleCodeChange}

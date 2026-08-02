@@ -76,11 +76,12 @@ def source_coder_coverage(
     *,
     conversation_id: int | None = None,
     document_id: int | None = None,
+    observation_id: int | None = None,
     text_column_ids: list[int] | None = None,
 ) -> list[CoderCoverage]:
     """Distinct coders with ≥1 real coding on ONE source (conversation | document |
-    text columns). Active coders first, then archived; each alphabetical. Returns []
-    when no source selector is given.
+    observation | text columns). Active coders first, then archived; each
+    alphabetical. Returns [] when no source selector is given.
     """
     q = (
         db.query(User.id, User.username, User.display_color, User.archived)
@@ -88,13 +89,14 @@ def source_coder_coverage(
         .join(Code, CodeApplication.code_id == Code.id)
         .filter(Code.project_id == project_id, *_real_coding_filters())
     )
-    if conversation_id is not None or document_id is not None:
+    if conversation_id is not None or document_id is not None or observation_id is not None:
         q = q.join(Segment, CodeApplication.segment_id == Segment.id).filter(*visible_segment_filter())
-        q = q.filter(
-            Segment.conversation_id == conversation_id
-            if conversation_id is not None
-            else Segment.document_id == document_id
-        )
+        if conversation_id is not None:
+            q = q.filter(Segment.conversation_id == conversation_id)
+        elif document_id is not None:
+            q = q.filter(Segment.document_id == document_id)
+        else:
+            q = q.filter(Segment.observation_id == observation_id)
     elif text_column_ids:
         q = q.join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id).filter(
             DatasetValue.column_id.in_(text_column_ids)

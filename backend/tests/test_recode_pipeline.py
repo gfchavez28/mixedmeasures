@@ -8,8 +8,14 @@ RECODE_CASES = [
     ("Poor", "ordinal", ["Poor", "Fair", "Good", "Very Good", "Excellent"], 1.0),
     ("good", "ordinal", ["Poor", "Fair", "Good", "Very Good", "Excellent"], 3.0),
     ("  Excellent ", "ordinal", ["Poor", "Fair", "Good", "Very Good", "Excellent"], 5.0),
-    # Ordinal without scale_labels → None
-    ("Excellent", "ordinal", None, None),
+    # Ordinal without scale_labels: a NUMERIC cell is its own code (#580).
+    # Multi-digit + a 0-based code so a positional-vs-value confusion would fail
+    # (degenerate-fixture rule — 1..5 hides it). A non-numeric cell stays None.
+    ("3", "ordinal", None, 3.0),
+    ("12", "ordinal", None, 12.0),
+    ("0", "ordinal", None, 0.0),
+    ("4.5", "ordinal", None, 4.5),
+    ("Excellent", "ordinal", None, None),   # non-numeric, no labels → None
     # Ordinal with label not in scale → None
     ("Unknown", "ordinal", ["Poor", "Fair", "Good", "Very Good", "Excellent"], None),
     # Numeric

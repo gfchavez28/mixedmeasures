@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { NodeViewWrapper } from '@tiptap/react'
 import type { NodeViewProps } from '@tiptap/core'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router'
 import { Trash2, ExternalLink, AlertTriangle } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu'
@@ -9,6 +9,7 @@ import { useProjectLayout } from '@/layouts/ProjectLayout'
 import InlineChartRenderer from '../InlineChartRenderer'
 import MaterialsTagInline from '../MaterialsTagInline'
 import { materialsApi } from '@/lib/api'
+import { materialAnalysisPath } from '@/lib/material-kind'
 
 export default function ChartEmbedView({ node, updateAttributes, deleteNode, selected }: NodeViewProps) {
   const { projectId } = useProjectLayout()
@@ -38,6 +39,14 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
     const m = allMaterials.find(x => x.id === Number(materialId))
     return m?.has_missing_refs ? m.missing_refs : null
   }, [materialId, allMaterials])
+
+  // #652: routed from the CONFIG, not `source_tab` — the config is on the node,
+  // so it is synchronous and survives the material row being deleted. See
+  // lib/material-kind.ts for why that matters.
+  const analysisPath = useMemo(
+    () => materialAnalysisPath(projectId, materialId, parsedContent),
+    [projectId, materialId, parsedContent],
+  )
 
   return (
     <NodeViewWrapper
@@ -102,10 +111,11 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
 
             {materialId && (
               <Link
-                to={`/projects/${projectId}/analysis/quantitative?material=${materialId}`}
+                to={analysisPath}
                 className="flex items-center gap-1 text-[11px] text-mm-accent hover:underline mt-1.5 py-1"
+                aria-label={`Open ${title || 'this chart'} in Analysis`}
               >
-                Open in Analysis <span className="text-[9px]">{'\u2192'}</span>
+                Open in Analysis <span className="text-[9px]" aria-hidden>{'\u2192'}</span>
               </Link>
             )}
           </div>
@@ -113,7 +123,7 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
         <ContextMenuContent>
           {materialId && (
             <>
-              <ContextMenuItem onSelect={() => navigate(`/projects/${projectId}/analysis/quantitative?material=${materialId}`)}>
+              <ContextMenuItem onSelect={() => navigate(analysisPath)}>
                 <ExternalLink className="w-4 h-4 mr-2" />View Source
               </ContextMenuItem>
               <ContextMenuSeparator />

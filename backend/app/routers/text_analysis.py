@@ -16,7 +16,11 @@ from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from ..models.code_application import CodeApplication
 from ..models.code import Code
 from ..models.recode import RecodeDefinition
-from ..services.grouping import order_value_labels, value_label_sort_key
+from ..services.grouping import (
+    load_grouping_values,
+    order_value_labels,
+    value_label_sort_key,
+)
 from ..services.recode import _parse_mapping
 from ..services.text_analysis import (
     compute_comment_frequencies,
@@ -312,12 +316,10 @@ async def cross_tabulation(
     # recode `mapping` (keyed on labels) and row_to_cross_value below key on
     # value_text, so the order set must be labels, not recode targets.
     #
-    # Always derive the candidate set from values actually present in the data,
-    # so we never render an empty column for a mapped-but-absent label nor drop a
-    # present-but-unmapped value (e.g. a typo). When the cross column has a
-    # primary recode, order the labels by the recode's numeric mapping so columns
-    # read low→high (e.g. Standard → Premium); unmapped/non-numeric values sort
-    # alphabetically after the mapped ones. Without a recode, order is alphabetical.
+    # When the cross column has a primary recode, order the labels by the
+    # recode's numeric mapping so columns read low→high (e.g. Standard →
+    # Premium); unmapped/non-numeric values sort alphabetically after the
+    # mapped ones. Without a recode, order is alphabetical.
     #
     # NOTE: the model field is `mapping` ({label: value}); an older `.definition`
     # shape no longer exists. Reading `primary_recode.definition` here used to
@@ -331,19 +333,18 @@ async def cross_tabulation(
         .first()
     )
 
-    raw_values = [
-        v.value_text for v in (
-            db.query(DatasetValue.value_text)
-            .filter(
-                DatasetValue.column_id == cross_col.id,
-                DatasetValue.value_text.isnot(None),
-                DatasetValue.value_text != "",
-            )
-            .distinct()
-            .order_by(DatasetValue.value_text)
-            .all()
-        )
-    ]
+    # Build row_id -> cross_value through the shared grouping loader (#597):
+    # it applies the #384 N/A rule, so a recognized-missing label ("N/A",
+    # "Decline to state") never becomes a cross-tab column here while folding
+    # into the missing bucket on every quantitative surface. row_ids=None =
+    # every row holding a value in the cross column (this endpoint's scope).
+    row_to_cross_value = load_grouping_values(db, cross_col.id, None)
+
+    # The candidate axis set derives from values actually present (post-N/A):
+    # never an empty column for a mapped-but-absent label, never a dropped
+    # present-but-unmapped value. Alphabetical pre-sort keeps ties in
+    # _cross_value_key deterministic (sorted() is stable).
+    raw_values = sorted({v for v in row_to_cross_value.values() if v})
 
     order_map: dict[str, float] = {}
     if primary_recode:
@@ -364,21 +365,7 @@ async def cross_tabulation(
 
     response_values = sorted(raw_values, key=_cross_value_key)
 
-    # Build row_id -> cross_value mapping (same dataset as cross column)
     cross_dataset_id = cross_col.dataset_id
-    cross_values_q = (
-        db.query(DatasetValue.row_id, DatasetValue.value_text)
-        .filter(
-            DatasetValue.column_id == cross_col.id,
-            DatasetValue.value_text.isnot(None),
-            DatasetValue.value_text != "",
-        )
-        .all()
-    )
-    row_to_cross_value: dict[int, str] = {r.row_id: r.value_text for r in cross_values_q}
-
-    # Get all rows in the cross column's dataset
-    cross_dataset_row_ids = set(row_to_cross_value.keys())
 
     # Get comment values from the same dataset (or linked via participant)
     treat_as_empty = treat_as_empty_for_project(db, project_id)
@@ -580,17 +567,10 @@ async def code_density(
         if not group_col:
             raise HTTPException(status_code=400, detail="Group column not found in project")
 
-        # Build row_id -> group_value
-        group_values_q = (
-            db.query(DatasetValue.row_id, DatasetValue.value_text)
-            .filter(
-                DatasetValue.column_id == group_by_column_id,
-                DatasetValue.value_text.isnot(None),
-                DatasetValue.value_text != "",
-            )
-            .all()
-        )
-        row_to_group: dict[int, str] = {r.row_id: r.value_text for r in group_values_q}
+        # Build row_id -> group_value through the shared grouping loader (#597):
+        # applies the #384 N/A rule so a recognized-missing label never forms a
+        # code-density group. row_ids=None = every row holding a group value.
+        row_to_group = load_grouping_values(db, group_by_column_id, None)
 
         # Map comment values to groups
         grouped: dict[str, list[int]] = defaultdict(list)  # group_value -> [code_count, ...]
@@ -702,7 +682,8 @@ async def export_cross_analysis(
     project_id: int,
     column_ids: str = Query(..., description="Comma-separated focal column IDs"),
     filters_json: str = Query("[]", description="JSON-encoded filters"),
-    cross_column_id: int | None = Query(None),
+    # NOTE: a `cross_column_id` param used to be accepted here but was never
+    # read (#597) — dropped rather than wired into a third grouping query.
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
     # Bare default (not Query(None)) so direct-call tests don't bind the sentinel — see backend/tests/CLAUDE.md.
     layer_scope: str | None = None,

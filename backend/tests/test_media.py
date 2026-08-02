@@ -26,12 +26,19 @@ from app.models.user import User
 from app.routers.media import (
     MAX_MEDIA_SIZE,
     VIDEO_FORMATS,
+    _EBML_DURATION,
+    _EBML_INFO,
+    _EBML_SEGMENT,
+    _EBML_TIMECODE_SCALE,
     _detect_format,
     _detect_vbr,
     _extract_duration,
-    _media_dir,
+    MAX_MEDIA_DURATION_SECONDS,
+    _mp4_duration,
     _refine_mp4_family,
     _stream_upload_to_temp,
+    _webm_duration,
+    sanitize_duration_hint,
 )
 from app.services.backup import create_backup, restore_from_backup
 
@@ -826,6 +833,7 @@ from starlette.datastructures import Headers, UploadFile as StarletteUploadFile 
 
 from app.models.user import User as UserModel  # noqa: E402
 from app.routers import media as media_router  # noqa: E402
+from app.services import media_storage as media_storage_module  # noqa: E402
 
 
 def _run(coro):
@@ -847,7 +855,7 @@ class TestStreamingUpload:
     def _ctx(self, audio_session, tmp_path, monkeypatch):
         db, project, conv, _ = audio_session
         media_root = tmp_path / "media"
-        monkeypatch.setattr(media_router, "get_media_dir", lambda: media_root)
+        monkeypatch.setattr(media_storage_module, "get_media_dir", lambda: media_root)
         user = db.query(UserModel).first()
         media_dir = media_root / str(project.id) / str(conv.id)
         return db, project, conv, user, media_dir
@@ -952,6 +960,266 @@ def _moov(*handlers: bytes) -> bytes:
     return _box(b"moov", b"".join(_trak(h) for h in handlers))
 
 
+def _mvhd(timescale: int, ticks: int, version: int = 0) -> bytes:
+    """A movie-header box carrying duration = ticks / timescale."""
+    if version == 1:
+        payload = (
+            b"\x01\x00\x00\x00"                     # version 1 + flags
+            + b"\x00" * 16                          # creation(8) + modification(8)
+            + struct.pack(">I", timescale)
+            + struct.pack(">Q", ticks)
+        )
+    else:
+        payload = (
+            b"\x00\x00\x00\x00"                     # version 0 + flags
+            + b"\x00" * 8                           # creation(4) + modification(4)
+            + struct.pack(">I", timescale)
+            + struct.pack(">I", ticks)
+        )
+    return _box(b"mvhd", payload)
+
+
+def _moov_with_duration(timescale: int, ticks: int, version: int = 0) -> bytes:
+    """A moov whose mvhd sits AFTER a trak — the walker must not stop at the first child."""
+    return _box(b"moov", _trak(b"vide") + _mvhd(timescale, ticks, version))
+
+
+class TestRecordingDuration:
+    """Duration extraction across the video formats — the gap that shipped.
+
+    tinytag 2.2.1 cannot parse .mov or .webm at all (neither is in its
+    SUPPORTED_FILE_EXTENSIONS), so both silently yielded a NULL duration. That
+    was invisible for conversations (the browser reports its own duration for
+    playback) and is fatal for an observation, whose timeline IS the recording.
+    The pre-existing suite only covered mp3/m4a/wav — none of the formats where
+    the two behaviors disagree.
+    """
+
+    def test_mp4_duration_from_mvhd(self, tmp_path):
+        p = tmp_path / "v.mp4"
+        p.write_bytes(
+            _ftyp(b"isom") + _moov_with_duration(600, 25_200) + _box(b"mdat", b"\x00" * 64)
+        )
+        assert _extract_duration(p, "mp4") == pytest.approx(42.0)
+
+    def test_mov_duration_from_mvhd(self, tmp_path):
+        """The format tinytag cannot read at all — same box layout, different brand."""
+        p = tmp_path / "v.mov"
+        p.write_bytes(
+            _ftyp(b"qt  ") + _moov_with_duration(1000, 90_500) + _box(b"mdat", b"\x00" * 64)
+        )
+        assert _extract_duration(p, "mov") == pytest.approx(90.5)
+
+    def test_mvhd_version_1_64bit(self, tmp_path):
+        p = tmp_path / "v.mp4"
+        p.write_bytes(_ftyp(b"isom") + _moov_with_duration(48_000, 480_000, version=1))
+        assert _extract_duration(p, "mp4") == pytest.approx(10.0)
+
+    def test_mdat_is_never_read(self, tmp_path):
+        """A header-seek walk: a huge mdat before moov costs one seek, not a read."""
+        p = tmp_path / "v.mp4"
+        p.write_bytes(
+            _ftyp(b"isom")
+            + _box(b"mdat", b"\x00" * (5 * 1024 * 1024))
+            + _moov_with_duration(600, 6_000)
+        )
+        assert _extract_duration(p, "mp4") == pytest.approx(10.0)
+
+    def test_fragmented_mp4_unknown_duration_is_none(self, tmp_path):
+        """All-ones is the spec's 'unknown', not 2^32 ticks."""
+        p = tmp_path / "v.mp4"
+        p.write_bytes(_ftyp(b"isom") + _moov_with_duration(600, 0xFFFFFFFF))
+        assert _extract_duration(p, "mp4") is None
+
+    def test_moov_without_mvhd_is_none(self, tmp_path):
+        p = tmp_path / "v.mp4"
+        p.write_bytes(_ftyp(b"isom") + _moov(b"vide"))
+        assert _mp4_duration(p) is None
+
+    def test_zero_timescale_is_none(self, tmp_path):
+        p = tmp_path / "v.mp4"
+        p.write_bytes(_ftyp(b"isom") + _moov_with_duration(0, 1000))
+        assert _mp4_duration(p) is None
+
+    def test_garbage_mp4_never_raises(self, tmp_path):
+        p = tmp_path / "v.mp4"
+        p.write_bytes(b"\x00\x00\x00\x08moov" + b"\xff" * 32)
+        assert _extract_duration(p, "mp4") is None
+
+
+# ── WebM / Matroska duration (#573) ──────────────────────────────────────
+#
+# EBML is easier to synthesize than MP4 boxes because the encoding is uniform:
+# one element primitive plus a size-VINT encoder covers every fixture below.
+# The ids carry their marker bit (an id IS its encoded bytes); sizes strip it.
+
+
+def _ebml_size(length: int) -> bytes:
+    """Encode a payload length as the shortest VINT that fits it."""
+    for width in range(1, 9):
+        capacity = (1 << (7 * width)) - 1
+        if length < capacity:  # the all-ones value is reserved for "unknown"
+            marker = 1 << (8 - width)
+            return (marker << (8 * (width - 1)) | length).to_bytes(width, "big")
+    raise ValueError("payload too large to encode")
+
+
+def _ebml(element_id: bytes, payload: bytes) -> bytes:
+    return element_id + _ebml_size(len(payload)) + payload
+
+
+def _ebml_uint(element_id: bytes, value: int) -> bytes:
+    width = max(1, (value.bit_length() + 7) // 8)
+    return _ebml(element_id, value.to_bytes(width, "big"))
+
+
+def _webm_bytes(
+    duration: float | None = 7000.0,
+    timecode_scale: int | None = 1_000_000,
+    *,
+    float_width: int = 8,
+    unknown_size_segment: bool = False,
+) -> bytes:
+    """A minimal WebM: EBML header + Segment > Info > {TimecodeScale, Duration}."""
+    info_payload = b""
+    if timecode_scale is not None:
+        info_payload += _ebml_uint(_EBML_TIMECODE_SCALE, timecode_scale)
+    if duration is not None:
+        fmt = ">f" if float_width == 4 else ">d"
+        info_payload += _ebml(_EBML_DURATION, struct.pack(fmt, duration))
+    segment_payload = _ebml(_EBML_INFO, info_payload)
+    header = _ebml(b"\x1a\x45\xdf\xa3", b"\x00" * 4)
+    if unknown_size_segment:
+        # What a live/streamed muxer writes: every value bit set.
+        return header + _EBML_SEGMENT + b"\x01\xff\xff\xff\xff\xff\xff\xff" + segment_payload
+    return header + _ebml(_EBML_SEGMENT, segment_payload)
+
+
+class TestWebmDuration:
+    """#573 — the server-side WebM probe.
+
+    Before this, `_extract_duration` had no webm branch at all: it matched no
+    format and fell to a bare `return None` WITHOUT OPENING THE FILE, so every
+    webm recording depended on a client-measured hint — and three of the four
+    upload call sites never send one, leaving conversation webm unconditionally
+    lengthless.
+    """
+
+    def test_reads_a_float64_duration(self, tmp_path):
+        p = tmp_path / "v.webm"
+        p.write_bytes(_webm_bytes(duration=7000.0))
+        assert _webm_duration(p) == pytest.approx(7.0)
+
+    def test_reads_a_float32_duration(self, tmp_path):
+        """Chrome's MediaRecorder writes 4 bytes; other muxers write 8.
+
+        A float64-only reader passes the fixture above and then mis-reads real
+        browser output, so this arm is not optional.
+        """
+        p = tmp_path / "v.webm"
+        p.write_bytes(_webm_bytes(duration=2899.945068359375, float_width=4))
+        assert _webm_duration(p) == pytest.approx(2.899945, abs=1e-6)
+
+    def test_honors_a_non_default_timecode_scale(self, tmp_path):
+        """The degenerate-fixture rule: every real sample used 1,000,000.
+
+        With the default scale a wrong divisor is invisible, so the arithmetic is
+        only actually pinned by a scale that differs from it.
+        """
+        p = tmp_path / "v.webm"
+        p.write_bytes(_webm_bytes(duration=5000.0, timecode_scale=100_000))
+        assert _webm_duration(p) == pytest.approx(0.5)
+
+    def test_absent_timecode_scale_falls_back_to_the_matroska_default(self, tmp_path):
+        p = tmp_path / "v.webm"
+        p.write_bytes(_webm_bytes(duration=3000.0, timecode_scale=None))
+        assert _webm_duration(p) == pytest.approx(3.0)
+
+    def test_no_duration_element_is_an_honest_none(self, tmp_path):
+        p = tmp_path / "v.webm"
+        p.write_bytes(_webm_bytes(duration=None))
+        assert _webm_duration(p) is None
+
+    def test_unknown_size_segment_declines_without_hanging(self, tmp_path):
+        """The streamed-MediaRecorder shape: unknown-size Segment, no Duration.
+
+        Pins the OUTCOME (an honest None, no hang), not the unknown-size branch
+        itself — the walker's payload-end clamp already defuses 2**56-1, so that
+        branch is redundancy rather than a distinguishable guard. Verified by
+        mutation: swapping it for clamped arithmetic changes nothing observable.
+        """
+        p = tmp_path / "v.webm"
+        p.write_bytes(_webm_bytes(duration=None, unknown_size_segment=True))
+        assert _webm_duration(p) is None
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+    def test_non_finite_duration_is_refused(self, tmp_path, bad):
+        """`Duration` is an IEEE float from an untrusted upload, so inf/NaN are
+        directly representable in the bytes — and NOTHING downstream guards for
+        them: `cut_clips` tests `is None or <= 0`, which inf passes (inf > 0) and
+        NaN passes too (NaN <= 0 is False), reaching `math.ceil` as an
+        OverflowError/ValueError. A bare `Infinity` also breaks JSON encoding.
+        """
+        p = tmp_path / "v.webm"
+        p.write_bytes(_webm_bytes(duration=bad))
+        assert _webm_duration(p) is None
+
+    def test_absurdly_long_duration_is_refused(self, tmp_path):
+        p = tmp_path / "v.webm"
+        p.write_bytes(_webm_bytes(duration=48.0 * 60 * 60 * 1000))
+        assert _webm_duration(p) is None
+
+    def test_zero_timecode_scale_is_none(self, tmp_path):
+        p = tmp_path / "v.webm"
+        p.write_bytes(_webm_bytes(duration=7000.0, timecode_scale=0))
+        assert _webm_duration(p) is None
+
+    def test_truncated_file_never_raises(self, tmp_path):
+        p = tmp_path / "v.webm"
+        p.write_bytes(_webm_bytes()[:24])
+        assert _extract_duration(p, "webm") is None
+
+    def test_undecodable_size_vint_never_raises(self, tmp_path):
+        """A leading 0x00 has no valid VINT length at all.
+
+        Unlike MP4's fixed-width sizes — where a corrupt byte is merely a wrong
+        number — this is unparseable and must abort the walk.
+        """
+        p = tmp_path / "v.webm"
+        p.write_bytes(_EBML_SEGMENT + b"\x00" + b"\xff" * 32)
+        assert _extract_duration(p, "webm") is None
+
+    def test_garbage_webm_never_raises(self, tmp_path):
+        p = tmp_path / "v.webm"
+        p.write_bytes(b"\x1a\x45\xdf\xa3" + b"\x00" * 64)
+        assert _extract_duration(p, "webm") is None
+
+    def test_missing_file_is_none(self, tmp_path):
+        assert _extract_duration(tmp_path / "nope.webm", "webm") is None
+
+
+class TestDurationHint:
+    def test_accepts_a_real_measurement(self):
+        assert sanitize_duration_hint(90.5) == pytest.approx(90.5)
+
+    def test_rejects_infinity(self):
+        # A headerless/live WebM reports Infinity in the browser.
+        assert sanitize_duration_hint(float("inf")) is None
+
+    def test_rejects_nan(self):
+        assert sanitize_duration_hint(float("nan")) is None
+
+    def test_rejects_non_positive(self):
+        assert sanitize_duration_hint(0) is None
+        assert sanitize_duration_hint(-5) is None
+
+    def test_rejects_absurd(self):
+        assert sanitize_duration_hint(25 * 60 * 60) is None
+
+    def test_none_passes_through(self):
+        assert sanitize_duration_hint(None) is None
+
+
 class TestVideoDetection:
     def test_webm_magic(self):
         assert _detect_format(b"\x1a\x45\xdf\xa3" + b"\x00" * 8) == "webm"
@@ -1021,7 +1289,7 @@ class TestVideoUpload:
     def _ctx(self, audio_session, tmp_path, monkeypatch):
         db, project, conv, _ = audio_session
         media_root = tmp_path / "media"
-        monkeypatch.setattr(media_router, "get_media_dir", lambda: media_root)
+        monkeypatch.setattr(media_storage_module, "get_media_dir", lambda: media_root)
         user = db.query(UserModel).first()
         media_dir = media_root / str(project.id) / str(conv.id)
         return db, project, conv, user, media_dir
@@ -1048,6 +1316,40 @@ class TestVideoUpload:
         assert resp.media_format == "webm"
         assert resp.media_type == "video"
         assert (media_dir / "original.webm").exists()
+
+    def test_upload_webm_carries_its_probed_duration_to_the_wire(
+        self, audio_session, tmp_path, monkeypatch
+    ):
+        """#573 end to end: the probe's answer must reach the response.
+
+        The sibling above uploads magic-plus-zeros, which has no Duration element
+        — so it would keep passing whether or not a probe existed. This one
+        uploads a webm that actually carries a length.
+        """
+        db, project, conv, user, media_dir = self._ctx(audio_session, tmp_path, monkeypatch)
+        resp = _run(media_router.upload_media(
+            project_id=project.id, conversation_id=conv.id,
+            file=_upload_file(_webm_bytes(duration=9000.0), "clip.webm"),
+            user=user, db=db,
+        ))
+        assert resp.media_duration_seconds == pytest.approx(9.0)
+
+    def test_upload_webm_without_a_duration_falls_back_to_the_client_hint(
+        self, audio_session, tmp_path, monkeypatch
+    ):
+        """Precedence is decided in exactly one place: server probe first.
+
+        A live-muxed webm carries no Duration, and this is the case the hint
+        exists for — but note only the Observations import actually sends one
+        today, which is why conversation webm was unconditionally lengthless.
+        """
+        db, project, conv, user, media_dir = self._ctx(audio_session, tmp_path, monkeypatch)
+        resp = _run(media_router.upload_media(
+            project_id=project.id, conversation_id=conv.id,
+            file=_upload_file(_webm_bytes(duration=None), "clip.webm"),
+            user=user, db=db, duration_seconds=42.5,
+        ))
+        assert resp.media_duration_seconds == pytest.approx(42.5)
 
     def test_upload_real_m4a_still_audio(self, audio_session, tmp_path, monkeypatch):
         # Regression for the pre-V1 trap in reverse: genuine m4a audio must
@@ -1107,11 +1409,13 @@ def wire_client(tmp_path, monkeypatch):
     need HTTP-layer coverage — a direct-call test can pass while the wire
     still emits the old shape.
     """
-    monkeypatch.setattr(media_router, "get_media_dir", lambda: tmp_path / "media")
-    # conversation_to_response stats the media file for media_size_bytes —
-    # its module-level import needs the same redirect.
-    from app.routers import conversations as conversations_router
-    monkeypatch.setattr(conversations_router, "get_media_dir", lambda: tmp_path / "media")
+    # ONE binding now: every media path — the router's upload/stream/delete, the
+    # conversation + observation response stat blocks, and the .mmproject media
+    # namespace — resolves through services/media_storage. media.py no longer
+    # carries its own get_media_dir (it used to, and the two could diverge:
+    # patching only the router redirected the WRITE while the response stat still
+    # read the real media dir).
+    monkeypatch.setattr(media_storage_module, "get_media_dir", lambda: tmp_path / "media")
     Base.metadata.create_all(bind=shared_engine)
     with TestClient(fastapi_app, raise_server_exceptions=False) as c:
         yield c
@@ -1297,3 +1601,221 @@ class TestMediaConstantsMirror:
 
     def test_video_formats_pinned_to_frontend_mirror(self):
         assert VIDEO_FORMATS == {"mp4", "mov", "webm"}
+
+
+# ── Observation recordings (Observations track, slab 1 — the 2nd media mount) ──
+
+
+class TestObservationMedia:
+    """The recording seam has TWO owners. Everything heavy (chunked spool, format
+    sniff + mp4-family refine, ENOSPC guard, atomic replace, stale-format sweep,
+    Range streaming, the six media columns) is SHARED with conversations via
+    media.py's owner-agnostic handlers — so these tests pin what is genuinely
+    per-owner: the disk namespace, the audit entity_type, the response builder,
+    the ownership gate, and the deliberate ABSENCE of /offset.
+
+    HTTP-layer, not direct-call: a direct-call test can pass while the wire is
+    wrong (the mount could bind the wrong param, or not be mounted at all).
+    """
+
+    def _bootstrap(self, client) -> tuple[int, int, dict]:
+        status = client.get("/api/auth/status")
+        headers = {"X-CSRF-Token": status.json()["user"]["csrf_token"]}
+        resp = client.post("/api/projects", json={"name": "Obs media"}, headers=headers)
+        pid = resp.json()["id"]
+        resp = client.post(
+            f"/api/projects/{pid}/observations",
+            json={"name": "Classroom session 1"}, headers=headers,
+        )
+        assert resp.status_code in (200, 201), resp.text
+        return pid, resp.json()["id"], headers
+
+    def _video_bytes(self) -> bytes:
+        # Synthetic MP4 with a 'vide' track — detection is structural, so no
+        # real media is needed (same trick as TestVideoDetection).
+        return _ftyp(b"isom") + _moov(b"vide") + _box(b"mdat", b"\x00" * 2048)
+
+    def test_upload_lands_under_obs_namespace_and_reports_video(self, wire_client, tmp_path):
+        pid, oid, headers = self._bootstrap(wire_client)
+
+        resp = wire_client.post(
+            f"/api/projects/{pid}/observations/{oid}/media",
+            files={"file": ("session1.mp4", self._video_bytes(), "video/mp4")},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["media_filename"] == "session1.mp4"
+        assert body["media_format"] == "mp4"
+        assert body["media_type"] == "video"      # the shared refine ran
+        assert body["media_offset_seconds"] == 0.0
+
+        # `obs-{id}` — NOT `{id}`: an observation's id shares a sequence space with
+        # conversations, so an unprefixed dir would collide under the same project.
+        landed = tmp_path / "media" / str(pid) / f"obs-{oid}" / "original.mp4"
+        assert landed.is_file()
+
+    def test_observation_response_carries_media_and_version(self, wire_client):
+        pid, oid, headers = self._bootstrap(wire_client)
+        before = wire_client.get(f"/api/projects/{pid}/observations/{oid}").json()
+        assert before["has_media"] is False
+        assert before["media_version"] is None
+
+        wire_client.post(
+            f"/api/projects/{pid}/observations/{oid}/media",
+            files={"file": ("session1.mp4", self._video_bytes(), "video/mp4")},
+            headers=headers,
+        )
+        after = wire_client.get(f"/api/projects/{pid}/observations/{oid}").json()
+        assert after["has_media"] is True
+        assert after["media_size_bytes"] > 0
+        assert after["media_version"]  # the #549 cache-buster token
+
+    def test_stream_serves_the_recording_no_cache(self, wire_client):
+        pid, oid, headers = self._bootstrap(wire_client)
+        payload = self._video_bytes()
+        wire_client.post(
+            f"/api/projects/{pid}/observations/{oid}/media",
+            files={"file": ("session1.mp4", payload, "video/mp4")}, headers=headers,
+        )
+        resp = wire_client.get(f"/api/projects/{pid}/observations/{oid}/media/stream")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "video/mp4"
+        assert resp.headers["accept-ranges"] == "bytes"
+        assert resp.headers["cache-control"] == "private, no-cache"
+        assert resp.content == payload
+
+    def test_delete_removes_the_file_but_keeps_the_observation(self, wire_client, tmp_path):
+        pid, oid, headers = self._bootstrap(wire_client)
+        wire_client.post(
+            f"/api/projects/{pid}/observations/{oid}/media",
+            files={"file": ("session1.mp4", self._video_bytes(), "video/mp4")},
+            headers=headers,
+        )
+        landed = tmp_path / "media" / str(pid) / f"obs-{oid}" / "original.mp4"
+        assert landed.is_file()
+
+        resp = wire_client.delete(
+            f"/api/projects/{pid}/observations/{oid}/media", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        # The Observation SURVIVES — its clips and their codings hang off segments,
+        # not off the file. Detaching a recording is not deleting the source.
+        assert resp.json()["id"] == oid
+        assert resp.json()["has_media"] is False
+        assert not landed.exists()
+        assert wire_client.get(f"/api/projects/{pid}/observations/{oid}").status_code == 200
+
+    def test_no_offset_endpoint_for_observations(self, wire_client):
+        """media_offset_seconds is definitionally 0 for an Observation (the
+        recording IS the timeline), so /offset is deliberately NOT mounted."""
+        pid, oid, headers = self._bootstrap(wire_client)
+        resp = wire_client.patch(
+            f"/api/projects/{pid}/observations/{oid}/media/offset",
+            json={"offset_seconds": 5.0}, headers=headers,
+        )
+        # 404/405 depending on whether frontend/dist mounts the SPA catch-all
+        # (see backend/tests/CLAUDE.md) — the point is it is not routable.
+        assert resp.status_code in (404, 405)
+
+    def test_audit_entity_type_is_observation_not_conversation(self, wire_client):
+        """The audit entity_type rides `owner_kind`. A shared handler that
+        hardcoded "conversation" (as the pre-seam code did) would mis-attribute
+        every observation recording in the activity log."""
+        from app.models.audit import AuditEntry
+
+        pid, oid, headers = self._bootstrap(wire_client)
+        wire_client.post(
+            f"/api/projects/{pid}/observations/{oid}/media",
+            files={"file": ("session1.mp4", self._video_bytes(), "video/mp4")},
+            headers=headers,
+        )
+        db = SessionLocal()
+        try:
+            row = (
+                db.query(AuditEntry)
+                .filter(AuditEntry.action == "media_upload", AuditEntry.project_id == pid)
+                .order_by(AuditEntry.id.desc())
+                .first()
+            )
+            assert row is not None
+            assert row.entity_type == "observation"
+            assert row.entity_id == oid
+        finally:
+            db.close()
+
+    def test_conversation_media_still_lands_unprefixed(self, wire_client, tmp_path):
+        """Regression: the shared handlers must not change the LEGACY conversation
+        layout. `media/{pid}/{conv_id}/` is on disk in every shipped install."""
+        pid, _oid, headers = self._bootstrap(wire_client)
+        db = SessionLocal()
+        try:
+            conv = Conversation(
+                project_id=pid, name="Interview", status=ConversationStatus.IMPORTED,
+            )
+            db.add(conv)
+            db.commit()
+            cid = conv.id
+        finally:
+            db.close()
+
+        resp = wire_client.post(
+            f"/api/projects/{pid}/conversations/{cid}/media",
+            files={"file": ("i.mp4", self._video_bytes(), "video/mp4")}, headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert (tmp_path / "media" / str(pid) / str(cid) / "original.mp4").is_file()
+
+
+class TestEveryProbePathIsBounded:
+    """#625 — `sane_duration` is THE single exit, not a per-branch courtesy.
+
+    `_webm_duration` bounded internally and `sanitize_duration_hint` routed
+    through it, but `_extract_duration`'s mp4 / tinytag / wav branches returned
+    raw values and neither call site wrapped them. `_probe_duration` has five
+    separate `return` statements — wrapping them one at a time leaves five
+    places to forget, which is how two got missed.
+
+    ⚠️ Fixture discipline (the filing said this itself): a `[inf, -inf, nan]`
+    parametrization PASSES on the pre-fix code for mp4, because integer division
+    can't produce a non-finite. The value that actually discriminates is a huge
+    FINITE one — a timescale of 1 with a large tick count, which is what a
+    corrupt or hostile `mvhd` looks like.
+    """
+
+    def test_a_corrupt_mvhd_claiming_a_millennium_is_refused(self, tmp_path):
+        """timescale=1 + a huge tick count = an absurd but FINITE duration."""
+        p = tmp_path / "v.mp4"
+        # 31,536,000,000 ticks at 1 tick/sec ≈ 1000 years.
+        p.write_bytes(_ftyp(b"isom") + _moov_with_duration(1, 31_536_000_000, version=1))
+        assert _extract_duration(p, "mp4") is None
+
+    def test_the_boundary_itself_is_still_accepted(self, tmp_path):
+        """Exactly MAX is legal — the guard is `>`, and a 24 h recording is real."""
+        p = tmp_path / "v.mp4"
+        p.write_bytes(_ftyp(b"isom") + _moov_with_duration(1, MAX_MEDIA_DURATION_SECONDS))
+        assert _extract_duration(p, "mp4") == pytest.approx(MAX_MEDIA_DURATION_SECONDS)
+
+    def test_one_second_over_the_boundary_is_refused(self, tmp_path):
+        p = tmp_path / "v.mp4"
+        p.write_bytes(_ftyp(b"isom") + _moov_with_duration(1, MAX_MEDIA_DURATION_SECONDS + 1))
+        assert _extract_duration(p, "mp4") is None
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan"), -1.0, 0.0])
+    def test_a_non_finite_or_nonpositive_probe_result_is_refused(self, tmp_path, monkeypatch, bad):
+        """The branches we do NOT control the arithmetic of.
+
+        `tag.duration` is a float tinytag COMPUTES (bitrate/filesize on a VBR
+        mp3), not integer/frame arithmetic — so ruling out non-finite there was
+        never ours to assert. Patching the probe is the honest way to pin the
+        wrapper: it is the wrapper under test, not tinytag.
+        """
+        import app.services.media_duration as md
+        monkeypatch.setattr(md, "_probe_duration", lambda *_a, **_k: bad)
+        assert md._extract_duration(tmp_path / "x.mp3", "mp3") is None
+
+    def test_a_normal_probe_result_passes_through_unchanged(self, tmp_path, monkeypatch):
+        """The wrapper must not be a filter that eats real answers."""
+        import app.services.media_duration as md
+        monkeypatch.setattr(md, "_probe_duration", lambda *_a, **_k: 123.5)
+        assert md._extract_duration(tmp_path / "x.wav", "wav") == pytest.approx(123.5)

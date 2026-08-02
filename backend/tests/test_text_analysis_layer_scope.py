@@ -164,10 +164,10 @@ def test_export_excludes_consensus_and_reflects_layer(db_session):
     user = db.get(User, 1)
 
     human = _run(export_cross_analysis(project_id=pid, column_ids=str(COMMENT_COL),
-                                       filters_json="[]", cross_column_id=None,
+                                       filters_json="[]",
                                        coder_ids=None, layer_scope=None, db=db, user=user))
     consensus = _run(export_cross_analysis(project_id=pid, column_ids=str(COMMENT_COL),
-                                           filters_json="[]", cross_column_id=None,
+                                           filters_json="[]",
                                            coder_ids=None, layer_scope=LAYER_CONSENSUS, db=db, user=user))
     human_body = _run(_csv_body(human))
     consensus_body = _run(_csv_body(consensus))

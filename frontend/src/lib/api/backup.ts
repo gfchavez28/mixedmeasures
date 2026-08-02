@@ -5,6 +5,9 @@ export interface ProjectBackupSummary {
   conversation_count: number
   dataset_count: number
   document_count: number
+  /** Observations track (v1.3.0). Backups written before v1.3.0 carry no such
+   * key, but the backend model defaults it to 0, so the wire always has it. */
+  observation_count: number
 }
 
 export interface BackupManifest {

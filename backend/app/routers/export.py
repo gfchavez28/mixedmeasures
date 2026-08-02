@@ -11,17 +11,20 @@ from ..database import get_db
 from ..models.user import User
 from ..models.project import Project
 from ..models.conversation import Conversation
+from ..models.document import Document
+from ..models.observation import Observation
 from ..models.segment import Segment
 from ..models.code import Code
 from ..models.code_application import CodeApplication
 from ..models.speaker import Speaker
-from ..models.excerpt import Excerpt
+from ..models.excerpt import Excerpt, segment_has_any_quote_filter
 from ..models.participant import Participant
 from ..services.code_analysis import get_code_frequencies, get_code_cooccurrence
 from ..services.coding_layers import (
     CONSENSUS_ORIGIN,
     code_usage_count_expr,
     non_consensus_filter,
+    project_scoped_segments,
     visible_target_filter,
 )
 from ..auth import get_current_user
@@ -30,9 +33,9 @@ from .helpers import _get_project_or_404, parse_int_list, sanitize_content_dispo
 from .export_helpers import (
     EXPORT_VALUE_PRECISION,
     _build_category_tree_and_chains,
-    build_code_conversation_matrix,
     build_code_cooccurrence_matrix,
     csv_safe,
+    segment_source_pair,
 )
 
 router = APIRouter(prefix="/api/projects/{project_id}/export", tags=["export"])
@@ -44,7 +47,29 @@ async def export_study_csv(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Export project data as CSV with 1/0 for codes."""
+    """Export project data as a WIDE segment × code CSV — one row per segment,
+    one 1/0 column per code.
+
+    **This is not a duplicate of `/coded-segments`, and must not be retired in
+    favour of it (#650).** The two are different shapes and neither derives from
+    the other:
+
+    * here — one row per SEGMENT, INCLUDING segments nobody coded, which emit a
+      row of zeros. That is a case-by-variable matrix: each segment a case, each
+      code a binary variable, loadable straight into SPSS/R/jamovi. **The zero
+      rows are the denominator** — they are what makes "18% of segments were
+      coded X" computable.
+    * `/coded-segments` — one row per CODE APPLICATION. Its query root is
+      `CodeApplication`, so an uncoded segment has no row to produce and the
+      denominator is simply absent from the file.
+
+    #650: three-parent scope. It filtered `Segment.conversation_id.in_(...)`
+    until 2026-08-02, so document segments (silently, since documents shipped)
+    and observation clips were missing from a file that showed no sign of being
+    partial — the last member of the #616/#620/#629 family. The single
+    `conversation_name` column is now the honest `source_type` + `source_name`
+    pair, matching every other export.
+    """
     project = _get_project_or_404(db, project_id, user.id)
 
     output = io.StringIO()
@@ -56,63 +81,77 @@ async def export_study_csv(
         Code.is_active == True
     ).order_by(Code.numeric_id).all()
 
-    # Headers
+    # Headers. Deliberately snake_case, unlike the Title Case of
+    # /coded-segments: this file's OTHER column names are unchanged, so a script
+    # reading `segment_id`, `text` or `code_3` keeps working and only the source
+    # column moves. Unifying the casing would break every reference instead of
+    # one.
     headers = [
-        "conversation_name", "segment_id", "sequence_order", "speaker",
+        "source_type", "source_name", "segment_id", "sequence_order", "speaker",
         "is_facilitator", "start_time", "end_time", "text"
     ]
     headers.extend([f"code_{c.numeric_id}" for c in codes])
     writer.writerow(headers)
 
-    # Get all conversations and segments (bulk-load to avoid N+1)
-    conversations = db.query(Conversation).filter(
-        Conversation.project_id == project_id
-    ).order_by(Conversation.created_at).all()
-
-    conv_ids = [c.id for c in conversations]
-    all_segments = db.query(Segment).options(
-        selectinload(Segment.code_applications),
-        joinedload(Segment.speaker),
+    # Every visible segment in the project, whatever its parent —
+    # `project_scoped_segments` is the ONE three-parent scope (#616/#620/#629),
+    # never a hand-rolled `or_`. Ordering mirrors the Excel Coded Data sheet so
+    # the two renderings of this same matrix list rows identically.
+    all_segments = project_scoped_segments(
+        db.query(Segment).options(
+            selectinload(Segment.code_applications),
+            joinedload(Segment.speaker),
+            joinedload(Segment.conversation),
+            joinedload(Segment.document),
+            joinedload(Segment.observation),
+        ),
+        project_id,
     ).filter(
-        Segment.conversation_id.in_(conv_ids),
         Segment.merged_into_id == None,
         Segment.split_into_id == None,
-    ).order_by(Segment.conversation_id, Segment.sequence_order).all()
+    ).order_by(
+        func.coalesce(Conversation.name, Document.name, Observation.name),
+        Segment.sequence_order,
+    ).all()
 
-    segments_by_conv: dict[int, list[Segment]] = defaultdict(list)
-    for seg in all_segments:
-        segments_by_conv[seg.conversation_id].append(seg)
+    for segment in all_segments:
+        # J2-B: human layer only. Consensus is a derived duplicate of codes
+        # the coders already agreed on, so today it cannot flip a 1/0 cell —
+        # but the filter keeps that true if the indicator ever becomes a
+        # count or per-coder breakdown (#490 latent site).
+        applied_code_ids = set(
+            ca.code_id for ca in segment.code_applications
+            if ca.origin != CONSENSUS_ORIGIN
+        )
 
-    for conversation in conversations:
-        segments = segments_by_conv.get(conversation.id, [])
+        source_kind, source_name = segment_source_pair(segment)
 
-        for segment in segments:
-            # J2-B: human layer only. Consensus is a derived duplicate of codes
-            # the coders already agreed on, so today it cannot flip a 1/0 cell —
-            # but the filter keeps that true if the indicator ever becomes a
-            # count or per-coder breakdown (#490 latent site).
-            applied_code_ids = set(
-                ca.code_id for ca in segment.code_applications
-                if ca.origin != CONSENSUS_ORIGIN
-            )
+        # Speaker and facilitator are conversation-only concepts. They go BLANK
+        # on a speaker-less row rather than 0 — a document paragraph is not "a
+        # non-facilitator", it is a unit the question does not apply to, and a 0
+        # there would be counted as a real observation by any consumer that
+        # tabulates the column.
+        speaker_name = ""
+        is_facilitator = ""
+        if segment.speaker:
+            speaker_name = segment.speaker.name
+            is_facilitator = 1 if segment.speaker.is_facilitator else 0
 
-            speaker_name = segment.speaker.name if segment.speaker else ""
-            is_facilitator = 1 if segment.speaker and segment.speaker.is_facilitator else 0
+        row = [
+            source_kind,
+            csv_safe(source_name),
+            segment.id,
+            segment.sequence_order,
+            csv_safe(speaker_name),
+            is_facilitator,
+            segment.start_time if segment.start_time is not None else "",
+            segment.end_time if segment.end_time is not None else "",
+            csv_safe(segment.text),
+        ]
 
-            row = [
-                csv_safe(conversation.name),
-                segment.id,
-                segment.sequence_order,
-                csv_safe(speaker_name),
-                is_facilitator,
-                segment.start_time if segment.start_time is not None else "",
-                segment.end_time if segment.end_time is not None else "",
-                csv_safe(segment.text),
-            ]
-
-            # Add code columns (1/0)
-            row.extend([1 if code.id in applied_code_ids else 0 for code in codes])
-            writer.writerow(row)
+        # Add code columns (1/0)
+        row.extend([1 if code.id in applied_code_ids else 0 for code in codes])
+        writer.writerow(row)
 
     output.seek(0)
     filename = f"{sanitize_content_disposition(project.name)}_export_{datetime.now().strftime('%Y%m%d')}.csv"
@@ -199,6 +238,8 @@ async def export_code_frequencies_csv(
     document_ids: str | None = None,
     coder_ids: str | None = None,
     layer_scope: str | None = None,
+    # Appended LAST (bare-default convention) — 4c: observation scoping.
+    observation_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -216,6 +257,7 @@ async def export_code_frequencies_csv(
         document_ids=parse_int_list(document_ids),
         coder_ids=parsed_coder_ids,
         layer_scope=layer_scope,
+        observation_ids=parse_int_list(observation_ids),
     )
 
     output = io.StringIO()
@@ -274,25 +316,38 @@ async def export_coded_segments_csv(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Export all coded segment data as CSV (one row per code application)."""
+    """Export all coded segment data as CSV (one row per code application).
+
+    #616: three-parent scope — documents' codings had been silently absent since
+    documents shipped (and clips would have been too) because the query
+    inner-joined Conversation. The rows now carry an honest Source Type + Source
+    pair; the Speaker/Participant columns degrade to blank for speaker-less
+    parents, and ``exclude_facilitator`` no-ops there (its filter keeps
+    speaker-less rows by construction).
+    """
     from sqlalchemy.orm import joinedload
 
     project = _get_project_or_404(db, project_id, user.id)
 
-    # Build query for code applications with all needed joins
-    query = (
+    # Build query for code applications across ALL THREE segment parents
+    # (project_scoped_segments — never a hand-rolled third or_, #616).
+    query = project_scoped_segments(
         db.query(CodeApplication)
-        .join(Segment, CodeApplication.segment_id == Segment.id)
-        .join(Conversation, Segment.conversation_id == Conversation.id)
+        .join(Segment, CodeApplication.segment_id == Segment.id),
+        project_id,
+    )
+    query = (
+        query
         .join(Code, CodeApplication.code_id == Code.id)
         .outerjoin(Speaker, Segment.speaker_id == Speaker.id)
         .options(
             joinedload(CodeApplication.segment).joinedload(Segment.conversation),
+            joinedload(CodeApplication.segment).joinedload(Segment.document),
+            joinedload(CodeApplication.segment).joinedload(Segment.observation),
             joinedload(CodeApplication.segment).joinedload(Segment.speaker),
             joinedload(CodeApplication.code).joinedload(Code.category),
         )
         .filter(
-            Conversation.project_id == project_id,
             Segment.merged_into_id == None,
             Segment.split_into_id == None,
             Code.is_active == True,
@@ -304,11 +359,15 @@ async def export_coded_segments_csv(
     )
 
     if exclude_facilitator:
+        # Keeps speaker-less rows (documents/clips) by construction — the
+        # facilitator concept only exists on conversation segments.
         query = query.filter(
             (Speaker.is_facilitator == 0) | (Speaker.id == None)
         )
     parsed_conv_ids = parse_int_list(conversation_ids)
     if parsed_conv_ids:
+        # A conversation-scoped export stays conversation-scoped (unchanged
+        # filtered semantics; the unfiltered export is the completeness claim).
         query = query.filter(Segment.conversation_id.in_(parsed_conv_ids))
     parsed_code_ids = parse_int_list(code_ids)
     if parsed_code_ids:
@@ -317,7 +376,11 @@ async def export_coded_segments_csv(
     if parsed_part_ids:
         query = query.filter(Speaker.participant_id.in_(parsed_part_ids))
 
-    query = query.order_by(Code.name, Conversation.name, Segment.sequence_order)
+    query = query.order_by(
+        Code.name,
+        func.coalesce(Conversation.name, Document.name, Observation.name),
+        Segment.sequence_order,
+    )
     apps = query.all()
 
     # Batch-load quoted status (whole-segment excerpts) for segments
@@ -327,7 +390,7 @@ async def export_coded_segments_csv(
         csv_quoted_seg_ids = set(
             eid for (eid,) in db.query(Excerpt.segment_id).filter(
                 Excerpt.segment_id.in_(seg_ids),
-                Excerpt.start_offset.is_(None),
+                segment_has_any_quote_filter(),
             ).all()
         )
 
@@ -377,9 +440,19 @@ async def export_coded_segments_csv(
 
     output = io.StringIO()
     writer = csv.writer(output)
+    # #616: "Conversation" became the honest Source Type + Source pair — the
+    # export now spans documents and observation clips, so the source column
+    # must say WHAT it names. Conversation rows keep every value they had
+    # (the old Conversation cell's value now lives in Source).
+    # #623: "End Timestamp" joins the start one so a timed unit carries its
+    # DURATION. Without it an observation clip exports a start and nothing else,
+    # so rate/airtime/bout analyses can't be reconstructed outside the tool —
+    # which matters while the timed-analytics surfaces are still being built.
+    # Conversation/document rows leave it blank exactly as they do the start.
     writer.writerow([
-        "Code", "Category", "Coder", "Conversation", "Speaker", "Participant",
+        "Code", "Category", "Coder", "Source Type", "Source", "Speaker", "Participant",
         "Participant Role", "Segment Text", "Other Codes", "Is Quoted", "Timestamp",
+        "End Timestamp",
     ])
 
     for app in apps:
@@ -393,13 +466,16 @@ async def export_coded_segments_csv(
             p_name = p_name or ""
             p_role = p_role or ""
 
+        source_kind, source_name = segment_source_pair(seg)
+
         other = [c for c in other_codes_map.get(seg.id, []) if c != code.name]
 
         writer.writerow([
             csv_safe(code.name),
             csv_safe(code.category.name if code.category else ""),
             csv_safe(coder_names.get(app.user_id, "")),
-            csv_safe(seg.conversation.name if seg.conversation else ""),
+            source_kind,
+            csv_safe(source_name),
             csv_safe(speaker_name),
             csv_safe(p_name),
             csv_safe(p_role),
@@ -407,6 +483,7 @@ async def export_coded_segments_csv(
             csv_safe("; ".join(other)),
             "Yes" if seg and seg.id in csv_quoted_seg_ids else "",
             f"{seg.start_time:.2f}" if seg and seg.start_time is not None else "",
+            f"{seg.end_time:.2f}" if seg and seg.end_time is not None else "",
         ])
 
     output.seek(0)
@@ -437,6 +514,8 @@ async def export_code_cooccurrence_csv(
     document_ids: str | None = None,
     coder_ids: str | None = None,
     layer_scope: str | None = None,
+    # Appended LAST (bare-default convention) — 4c: observation scoping.
+    observation_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -454,6 +533,7 @@ async def export_code_cooccurrence_csv(
         document_ids=parse_int_list(document_ids),
         coder_ids=parsed_coder_ids,
         layer_scope=layer_scope,
+        observation_ids=parse_int_list(observation_ids),
     )
 
     output = io.StringIO()

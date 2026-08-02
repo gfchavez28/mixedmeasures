@@ -40,6 +40,7 @@ GATE_TOKENS = {
     "_get_dataset_or_404",          # helpers.py — gates internally (#553)
     "_get_column_or_404",           # recode.py — gates internally (#553)
     "_get_document_or_404",         # documents.py — gates internally (#553)
+    "_get_observation_or_404",      # observations.py — gates internally (Observations track)
     "_get_conversation",            # media.py — chains to _get_project_or_404
     "_get_text_value_or_404",       # text_coding.py — chains
 }

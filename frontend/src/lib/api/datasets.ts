@@ -20,6 +20,15 @@ export interface DatasetColumnPreview {
    *  every other format, which keeps the positional 1..N encoding. */
   suggested_scale_values: number[] | null
   suggested_scale_unmatched: string[] | null
+  /** #596: SPSS's own user-missing declaration for this variable (.sav only;
+   *  null for every other format). The import does NOT depend on this — it
+   *  injects the same rules server-side — but the wizard needs it to show what
+   *  SPSS declared. */
+  suggested_missing_values?: MissingValueRule[] | null
+  /** #575: the complete sorted distinct numeric values for a likely scale (all
+   *  numeric + bounded cardinality), so the value-labels editor can seed every
+   *  code (sample_values is capped at 5). Null for non-scale columns. */
+  distinct_numeric_values: number[] | null
   suggested_column_code: string | null
   suggested_group_code: string | null
   suggested_column_text: string
@@ -49,6 +58,14 @@ export interface DatasetColumnConfig {
   scale_labels: string[] | null
   /** #28: parallel to scale_labels; preserves an SPSS scale's own codes. */
   scale_values?: number[] | null
+  /** #592: declared missing rules for this column, carried through the wizard.
+   *  Import persists them and judges every cell against them, so a declared
+   *  sentinel lands with value_numeric NULL rather than feeding means. */
+  missing_values?: MissingValueRule[] | null
+  /** #575: the cells are numeric CODES and scale_labels/scale_values declare a
+   *  code→label dictionary to substitute at import (wizard-authored value labels).
+   *  Import-config only; the resulting column is byte-identical to a .sav one. */
+  cells_are_codes?: boolean
   demographic_subtype?: string | null
 }
 
@@ -85,6 +102,9 @@ export interface DatasetImportResponse {
   // analysis per #381/#384. Disclosed on the import results screen.
   recognized_missing_count: number
   recognized_missing_labels: string[]
+  /** #575: per cells-are-codes column, the observed codes with no declared label
+   *  (kept numeric, never nulled), keyed by column_index. */
+  value_label_unlabeled?: Record<number, number[]>
   /** #414: present iff the request asked for participant linking. */
   participant_link_report?: ParticipantLinkReport | null
 }
@@ -125,6 +145,47 @@ export interface RecodeDefinition {
   unmapped_values: string[]
 }
 
+/**
+ * #592: one declared missing-value rule. Two shapes, exactly one of which
+ * applies — a discrete value (optionally labelled) or a numeric range.
+ *
+ * A range's `label` is display metadata only; it is never matched against a
+ * cell, because a range covers many codes while a label substitutes for one.
+ * Ranges are numeric-only (SPSS parity); a discrete `value` is a STRING because
+ * the cell space is text, and string missing values are legal (.sav carries
+ * them, #541b). `lo`/`hi` may each be null = unbounded (SPSS's LO/HI THRU).
+ */
+export type MissingValueRule =
+  | { value: string; label?: string }
+  | { lo: number | null; hi: number | null; label?: string }
+
+export interface ApplyValueLabelsResult {
+  column_id: number
+  updated: number
+  unlabeled_codes: number[]
+  /** Pairs dropped because the column already declares that code missing (C4:
+   *  a missing code is never a scale point). Surface these — silently absorbing
+   *  them is how a researcher loses a label they thought they set. */
+  missing_skipped?: number[]
+}
+
+export interface MissingValuesResult {
+  column_id: number
+  missing_values: MissingValueRule[] | null
+  /** Cells whose value_numeric was cleared. */
+  nulled_rows: number
+  /** Cells whose text was substituted to a rule's label ("99" → "Refused"). */
+  labelled_rows: number
+  /** Scale points removed because their code is now declared missing (C4). */
+  stripped_scale_points: number
+  /** Cells that became substantive again (un-declare / narrowed rules). */
+  recovered_rows: number
+  recovered_values: string[]
+  /** Recovered texts the column's recode could not map back to a code — they
+   *  stay text-only, for the researcher to map or label. */
+  recovered_unmapped: string[]
+}
+
 export interface RecodeDefinitionSummary {
   id: number
   name: string
@@ -135,6 +196,16 @@ export interface RecodeDefinitionSummary {
   is_primary: boolean
   is_auto_detected: boolean
   source_definition_id: number | null
+  /**
+   * #600: THE reflection offset for a `reverse` definition, computed server-side
+   * over the mapping's NON-null-set values (a missing or excluded key is not a
+   * scale point and must not set the endpoint). Display `offset - code` with
+   * this — never re-derive it from `mapping`, which cannot see the
+   * recognized-N/A rule or the column's missing declaration and would drift from
+   * what `value_numeric` holds (#578). Null for non-reverse definitions, and
+   * absent on payloads that don't send it (see `reflectReverseValue`).
+   */
+  reverse_offset?: number | null
 }
 
 export interface ValueFrequency {
@@ -165,6 +236,14 @@ export interface DatasetColumn {
   column_type: string
   sequence_order: number
   scale_labels: string[] | null
+  /** #576: parallel to scale_labels — the numeric code each label carries. */
+  scale_values?: number[] | null
+  /** #592: the column's declared missing rules, already parsed by the backend.
+   *  `null` = no declaration, so the recognized-N/A defaults apply; `[]` = the
+   *  researcher declared that NOTHING is missing. Rides BOTH column response
+   *  schemas deliberately — /data is the only payload the editor reads, and a
+   *  field on one sibling but not the other is the #586 bug class. */
+  missing_values?: MissingValueRule[] | null
   scale_points: number | null
   numeric_min: number | null
   numeric_max: number | null
@@ -367,6 +446,10 @@ export interface DatasetAppendResponse {
   next_row_id: string
   /** #414: present iff the request asked for participant linking. */
   participant_link_report?: ParticipantLinkReport | null
+  /** #575: appended values on a value-labelled column that didn't map to a
+   *  numeric code (unknown labels/typos or undeclared codes) — stored as text
+   *  with value_numeric NULL. */
+  unmapped_values?: string[]
 }
 
 // Project-wide column types
@@ -597,6 +680,32 @@ export const recodeApi = {
   getFrequencies: (projectId: number, datasetId: number, columnId: number) =>
     api.get<ColumnFrequenciesResponse>(
       `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/frequencies`
+    ).then(res => res.data),
+
+  // #576/#577: declare a code→label dictionary for a numbers-only column.
+  // `column_type` omitted / null = keep the column's current type (C5) — the
+  // dialog must not force a type just because labels were edited.
+  applyValueLabels: (
+    projectId: number, datasetId: number, columnId: number,
+    data: { labels: { value: number; label: string }[]; column_type?: string | null },
+  ) =>
+    api.post<ApplyValueLabelsResult>(
+      `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/value-labels`,
+      data
+    ).then(res => res.data),
+
+  // #592: declare which of a column's values are NOT real answers.
+  // `rules: null` un-declares (the recognized-N/A defaults apply again);
+  // `rules: []` declares that nothing is missing. Touches no scale metadata and
+  // never the column type, so it is the only path for a missing-only
+  // declaration on a continuous column (e.g. -99 THRU -1 on `age`).
+  setMissingValues: (
+    projectId: number, datasetId: number, columnId: number,
+    rules: MissingValueRule[] | null,
+  ) =>
+    api.put<MissingValuesResult>(
+      `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/missing-values`,
+      { rules }
     ).then(res => res.data),
 
   bulkTypeUpdate: (projectId: number, datasetId: number, columnIds: number[], columnType: string) =>

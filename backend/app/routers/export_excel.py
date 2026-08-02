@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload, selectinload
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 import io
 import json
 from datetime import datetime
@@ -15,6 +15,8 @@ from ..database import get_db
 from ..models.user import User
 from ..models.project import Project
 from ..models.conversation import Conversation
+from ..models.document import Document
+from ..models.observation import Observation
 from ..models.segment import Segment
 from ..models.code import Code
 from ..models.code_application import CodeApplication
@@ -24,22 +26,27 @@ from ..models.note import Note
 from ..models.memo import Memo
 from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, ColumnType
 from ..models.metric import MetricDefinition
-from ..models.excerpt import Excerpt
+from ..models.excerpt import Excerpt, segment_has_any_quote_filter
 from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
 from ..models.equivalence_group import EquivalenceGroup
 from ..services.recode import compute_value
+from ..services.missing_values import parse_missing_rules
 from ..services.metrics import resolve_input_source_labels
 from ..services.coding_layers import (
     CONSENSUS_ORIGIN,
     code_usage_count_expr,
     non_consensus_filter,
+    project_scoped_segments,
     visible_target_filter,
 )
 from ..auth import get_current_user
 from .helpers import _get_project_or_404, sanitize_content_disposition
+from ..services.timestamp import format_timecode
+from .excerpts import _base_excerpt_query, _excerpt_to_response
 from .export_helpers import (
     _build_category_tree_and_chains,
-    build_code_conversation_matrix,
+    build_code_source_matrix,
+    segment_source_pair,
     build_code_cooccurrence_matrix,
     EXPORT_VALUE_PRECISION,
     excel_set_safe,
@@ -58,13 +65,25 @@ async def export_study_excel(
     include_codebook: bool = True,
     include_memos: bool = True,
     include_notes: bool = True,
+    include_quotes: bool = True,
     include_summaries: bool = True,
     include_audit: bool = True,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Export project data as Excel with up to 8 sheets: Coded Data, Code-Conversation Matrix,
-    Code Co-occurrence, Codebook, Memos, Notes, Summaries, Audit Trail."""
+    """Export project data as Excel with up to 9 sheets: Coded Data, Code-Source Matrix,
+    Code Co-occurrence, Codebook, Memos, Notes, Quotes, Summaries, Audit Trail.
+
+    #620: the Coded Data and Notes sheets span all THREE segment parents /
+    FOUR note parents; before this they inner-joined Conversation and silently
+    omitted documents (since documents shipped) and observation clips. Quotes is
+    a new sheet — excerpts previously reached Excel only as a Yes/No flag.
+
+    #629: the matrix sheet was the last one #620 left conversation-only. It is
+    now "Code-Source Matrix" — every segment parent on the axis, each column
+    naming its source TYPE, and the sheet no longer disappears on a project
+    without conversations.
+    """
     project = _get_project_or_404(db, project_id, user.id)
 
     wb = Workbook()
@@ -86,16 +105,37 @@ async def export_study_excel(
         Conversation.project_id == project_id
     ).order_by(Conversation.created_at).all()
 
+    # The other two source types, for the three-parent sheets (#620).
+    documents = db.query(Document).filter(
+        Document.project_id == project_id
+    ).order_by(Document.created_at).all()
+    observations = db.query(Observation).filter(
+        Observation.project_id == project_id
+    ).order_by(Observation.created_at).all()
+
     # Create lookup dicts for entity name resolution
     code_id_to_name = {c.id: c.name for c in codes}
     conversation_id_to_name = {c.id: c.name for c in conversations}
+    document_id_to_name = {d.id: d.name for d in documents}
+    observation_id_to_name = {o.id: o.name for o in observations}
+
+    # A dataset-value note names its dataset + column, not the value's id (#620).
+    dataset_value_source = {
+        vid: f"{ds_name} · {col_name}"
+        for vid, col_name, ds_name in db.query(
+            DatasetValue.id, DatasetColumn.column_name, Dataset.name
+        )
+        .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
+        .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+        .filter(Dataset.project_id == project_id)
+        .all()
+    }
 
     # Pre-query all whole-segment excerpts for this project (whole-segment excerpt lookup)
     quoted_seg_ids = set(
         eid for (eid,) in db.query(Excerpt.segment_id).filter(
             Excerpt.project_id == project_id,
-            Excerpt.segment_id.isnot(None),
-            Excerpt.start_offset.is_(None),
+            segment_has_any_quote_filter(),
         ).all()
     )
 
@@ -105,11 +145,16 @@ async def export_study_excel(
         ws_coded.title = "Coded Data"
         worksheets.append(ws_coded)
 
+        # #620: "Conversation" became the honest Source Type + Source pair —
+        # this sheet spans all THREE segment parents now, exactly as the
+        # coded-segments CSV has since #616, so the source column must say WHAT
+        # it names. Conversation rows keep every value they had.
         coded_headers = [
-            "Conversation", "Segment ID", "Sequence", "Speaker", "Is Facilitator",
+            "Source Type", "Source", "Segment ID", "Sequence", "Speaker", "Is Facilitator",
             "Start Time", "End Time", "Text", "Quoted"
         ]
         coded_headers.extend([f"{c.numeric_id} - {c.name}" for c in codes])
+        first_code_col = len(coded_headers) - len(codes) + 1
 
         for col, header in enumerate(coded_headers, 1):
             cell = ws_coded.cell(row=1, column=col, value=header)
@@ -117,76 +162,111 @@ async def export_study_excel(
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center")
 
-        # Bulk-load all visible segments across conversations (avoids N+1)
-        conv_ids = [c.id for c in conversations]
-        all_segments = db.query(Segment).options(
-            selectinload(Segment.code_applications),
-            joinedload(Segment.speaker),
+        # Bulk-load every visible segment in the project, whatever its parent
+        # (#620). `project_scoped_segments` is the ONE three-parent scope — never
+        # a hand-rolled third `or_`. Before this, `Segment.conversation_id.in_()`
+        # silently excluded document segments (since documents shipped) and
+        # observation clips, so a sheet titled "Coded Data" was a partial answer
+        # presenting itself as a complete one.
+        all_segments = project_scoped_segments(
+            db.query(Segment).options(
+                selectinload(Segment.code_applications),
+                joinedload(Segment.speaker),
+                joinedload(Segment.conversation),
+                joinedload(Segment.document),
+                joinedload(Segment.observation),
+            ),
+            project_id,
         ).filter(
-            Segment.conversation_id.in_(conv_ids),
             Segment.merged_into_id == None,
             Segment.split_into_id == None,
-        ).order_by(Segment.conversation_id, Segment.sequence_order).all()
-
-        segments_by_conv: dict[int, list[Segment]] = defaultdict(list)
-        for seg in all_segments:
-            segments_by_conv[seg.conversation_id].append(seg)
+        ).order_by(
+            func.coalesce(Conversation.name, Document.name, Observation.name),
+            Segment.sequence_order,
+        ).all()
 
         row = 2
-        for conversation in conversations:
-            segments = segments_by_conv.get(conversation.id, [])
+        for segment in all_segments:
+            # J2-B: human layer only (#490 latent site — an "X" can't flip
+            # today since consensus ⊆ agreed codes, but keep the layer rule).
+            applied_code_ids = set(
+                ca.code_id for ca in segment.code_applications
+                if ca.origin != CONSENSUS_ORIGIN
+            )
 
-            for segment in segments:
-                # J2-B: human layer only (#490 latent site — an "X" can't flip
-                # today since consensus ⊆ agreed codes, but keep the layer rule).
-                applied_code_ids = set(
-                    ca.code_id for ca in segment.code_applications
-                    if ca.origin != CONSENSUS_ORIGIN
-                )
+            source_kind, source_name = segment_source_pair(segment)
 
-                speaker_name = ""
-                is_facilitator = ""
-                if segment.speaker:
-                    speaker_name = segment.speaker.name
-                    is_facilitator = "Yes" if segment.speaker.is_facilitator else "No"
+            # Speaker/facilitator are conversation-only concepts; they degrade to
+            # blank on the other two parents rather than inventing a value.
+            speaker_name = ""
+            is_facilitator = ""
+            if segment.speaker:
+                speaker_name = segment.speaker.name
+                is_facilitator = "Yes" if segment.speaker.is_facilitator else "No"
 
-                start_time = f"{segment.start_time:.2f}" if segment.start_time is not None else ""
-                end_time = f"{segment.end_time:.2f}" if segment.end_time is not None else ""
+            start_time = f"{segment.start_time:.2f}" if segment.start_time is not None else ""
+            end_time = f"{segment.end_time:.2f}" if segment.end_time is not None else ""
 
-                excel_set_safe(ws_coded.cell(row=row, column=1), conversation.name)
-                ws_coded.cell(row=row, column=2, value=segment.id)
-                ws_coded.cell(row=row, column=3, value=segment.sequence_order)
-                excel_set_safe(ws_coded.cell(row=row, column=4), speaker_name)
-                ws_coded.cell(row=row, column=5, value=is_facilitator)
-                ws_coded.cell(row=row, column=6, value=start_time)
-                ws_coded.cell(row=row, column=7, value=end_time)
-                excel_set_safe(ws_coded.cell(row=row, column=8), segment.text)
-                ws_coded.cell(row=row, column=9, value="Yes" if segment.id in quoted_seg_ids else "")
+            ws_coded.cell(row=row, column=1, value=source_kind)
+            excel_set_safe(ws_coded.cell(row=row, column=2), source_name)
+            ws_coded.cell(row=row, column=3, value=segment.id)
+            ws_coded.cell(row=row, column=4, value=segment.sequence_order)
+            excel_set_safe(ws_coded.cell(row=row, column=5), speaker_name)
+            ws_coded.cell(row=row, column=6, value=is_facilitator)
+            ws_coded.cell(row=row, column=7, value=start_time)
+            ws_coded.cell(row=row, column=8, value=end_time)
+            excel_set_safe(ws_coded.cell(row=row, column=9), segment.text)
+            ws_coded.cell(row=row, column=10, value="Yes" if segment.id in quoted_seg_ids else "")
 
-                for col_offset, code in enumerate(codes):
-                    value = "X" if code.id in applied_code_ids else ""
-                    ws_coded.cell(row=row, column=10 + col_offset, value=value)
+            for col_offset, code in enumerate(codes):
+                value = "X" if code.id in applied_code_ids else ""
+                ws_coded.cell(row=row, column=first_code_col + col_offset, value=value)
 
-                row += 1
+            row += 1
     else:
         # Remove the default sheet if not including coded data
         wb.remove(wb.active)
 
-    # ==================== Sheet 2: Code-Conversation Matrix ====================
-    if include_matrix and codes and conversations:
-        ws_matrix = wb.create_sheet("Code-Conversation Matrix")
+    # ==================== Sheet 2: Code-Source Matrix ====================
+    # #629: was "Code-Conversation Matrix", gated on `conversations` and keyed by
+    # bare conversation id. Three defects in one sheet: documents and observation
+    # clips were absent from the axis; a document-only or observation-only
+    # project got NO SHEET AT ALL (the `and conversations` gate — the #626/#627
+    # `isEmpty` shape, silent, with nothing saying why); and the bare-id key
+    # would have summed conversation 5 into document 5 the moment it widened.
+    matrix_sources = (
+        [("conversation", c.id, c.name) for c in conversations]
+        + [("document", d.id, d.name) for d in documents]
+        + [("observation", o.id, o.name) for o in observations]
+    )
+    if include_matrix and codes and matrix_sources:
+        ws_matrix = wb.create_sheet("Code-Source Matrix")
         worksheets.append(ws_matrix)
 
-        matrix_data = build_code_conversation_matrix(db, project_id)
+        matrix_data = build_code_source_matrix(db, project_id)
 
-        # Header row: blank + conversation names + Total. Conversation names
-        # are user-supplied; defang via excel_set_safe.
-        matrix_headers = ["Code"] + [c.name for c in conversations] + ["Total"]
+        # Header row: "Code" + one column per source + Total. The source's TYPE
+        # rides its header because two sources of different types may share a
+        # name ("Session 1" as both a transcript and a recording) and the column
+        # would otherwise be ambiguous — the matrix analogue of the Source Type +
+        # Source column pair #620 introduced on the row-shaped sheets.
+        # Source names are user-supplied AND lead the string, so excel_set_safe
+        # is load-bearing here, not decorative.
+        matrix_headers = (
+            ["Code"]
+            + [f"{name} ({kind})" for kind, _sid, name in matrix_sources]
+            + ["Total"]
+        )
         for col, header in enumerate(matrix_headers, 1):
             cell = ws_matrix.cell(row=1, column=col)
             excel_set_safe(cell, header)
             cell.fill = header_fill
             cell.font = header_font
+
+        # Keep the Code column and the header row on screen: with three source
+        # types the axis is materially wider than it was, and scrolling right
+        # used to strand the reader among unlabelled numbers.
+        ws_matrix.freeze_panes = "B2"
 
         for row_num, code in enumerate(codes, 2):
             # Leading "{numeric_id} - " makes formula-prefix risk negligible
@@ -194,11 +274,11 @@ async def export_study_excel(
             # for consistency.
             excel_set_safe(ws_matrix.cell(row=row_num, column=1), f"{code.numeric_id} - {code.name}")
             row_total = 0
-            for col_num, conversation in enumerate(conversations, 2):
-                count = matrix_data.get((conversation.id, code.id), 0)
+            for col_num, (kind, source_id, _name) in enumerate(matrix_sources, 2):
+                count = matrix_data.get(((kind, source_id), code.id), 0)
                 ws_matrix.cell(row=row_num, column=col_num, value=count if count > 0 else "")
                 row_total += count
-            ws_matrix.cell(row=row_num, column=len(conversations) + 2, value=row_total)
+            ws_matrix.cell(row=row_num, column=len(matrix_sources) + 2, value=row_total)
 
     # ==================== Sheet 3: Code Co-occurrence ====================
     if include_cooccurrence and codes:
@@ -290,15 +370,27 @@ async def export_study_excel(
 
         for row_num, memo in enumerate(memos, 2):
             # Resolve entity name
+            # #620: this ladder had arms for FOUR of the ten memo-able entity
+            # types (see MEMO_ENTITY_REMAP), so a memo on a document,
+            # observation, dataset or saved analysis exported with Link Type
+            # filled in and Link Name BLANK — the row named a link it couldn't
+            # resolve. Unknown types now fall back to "{Type} {id}", which is
+            # ugly but never silently empty.
             link_name = ""
             if memo.entity_type == "project":
                 link_name = project.name
             elif memo.entity_type == "conversation":
                 link_name = conversation_id_to_name.get(memo.entity_id, f"Conversation {memo.entity_id}")
+            elif memo.entity_type == "document":
+                link_name = document_id_to_name.get(memo.entity_id, f"Document {memo.entity_id}")
+            elif memo.entity_type == "observation":
+                link_name = observation_id_to_name.get(memo.entity_id, f"Observation {memo.entity_id}")
             elif memo.entity_type == "code":
                 link_name = code_id_to_name.get(memo.entity_id, f"Code {memo.entity_id}")
             elif memo.entity_type == "code_category":
                 link_name = f"Category {memo.entity_id}"
+            else:
+                link_name = f"{memo.entity_type.replace('_', ' ').capitalize()} {memo.entity_id}"
 
             ws_memos.cell(row=row_num, column=1, value=f"M-{memo.numeric_id}")
             excel_set_safe(ws_memos.cell(row=row_num, column=2), memo.content)
@@ -312,21 +404,64 @@ async def export_study_excel(
         ws_notes = wb.create_sheet("Notes")
         worksheets.append(ws_notes)
 
-        note_headers = ["ID", "Content", "Conversation", "Segment #", "Segment Text", "Created", "Updated"]
+        # #620: the "Conversation" column became Source Type + Source. A Note
+        # hangs off FOUR parents (conversation · document · observation ·
+        # dataset value), and the old `.join(Conversation)` was an INNER join, so
+        # every document note (live since documents shipped), every clip note and
+        # every dataset-value note was silently absent from a sheet titled
+        # "Notes".
+        note_headers = [
+            "ID", "Content", "Source Type", "Source", "Segment #", "Segment Text",
+            "Created", "Updated",
+        ]
         for col, header in enumerate(note_headers, 1):
             cell = ws_notes.cell(row=1, column=col, value=header)
             cell.fill = header_fill
             cell.font = header_font
 
-        notes = db.query(Note).options(
-            joinedload(Note.segment),
-        ).join(Conversation).filter(
-            Conversation.project_id == project_id,
-            Note.is_archived == False
-        ).order_by(Note.created_at).all()
+        # ONE query with outer joins rather than four per-parent queries: a note
+        # has exactly one parent, so the ORs are disjoint and nothing multiplies.
+        # The dataset-value arm needs three hops (value → column → dataset) —
+        # DatasetValue carries no project_id of its own.
+        notes = (
+            db.query(Note)
+            .options(joinedload(Note.segment))
+            .outerjoin(Conversation, Note.conversation_id == Conversation.id)
+            .outerjoin(Document, Note.document_id == Document.id)
+            .outerjoin(Observation, Note.observation_id == Observation.id)
+            .outerjoin(DatasetValue, Note.dataset_value_id == DatasetValue.id)
+            .outerjoin(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
+            .outerjoin(Dataset, DatasetColumn.dataset_id == Dataset.id)
+            .filter(
+                Note.is_archived == False,
+                or_(
+                    Conversation.project_id == project_id,
+                    Document.project_id == project_id,
+                    Observation.project_id == project_id,
+                    Dataset.project_id == project_id,
+                ),
+            )
+            .order_by(Note.created_at)
+            .all()
+        )
 
         for row_num, note in enumerate(notes, 2):
-            conversation_name = conversation_id_to_name.get(note.conversation_id, "")
+            if note.conversation_id is not None:
+                source_kind = "conversation"
+                source_name = conversation_id_to_name.get(note.conversation_id, "")
+            elif note.document_id is not None:
+                source_kind, source_name = "document", document_id_to_name.get(note.document_id, "")
+            elif note.observation_id is not None:
+                source_kind = "observation"
+                source_name = observation_id_to_name.get(note.observation_id, "")
+            elif note.dataset_value_id is not None:
+                # A response-level note: the dataset+column is the useful
+                # locator, not the value's own id.
+                source_kind = "dataset value"
+                source_name = dataset_value_source.get(note.dataset_value_id, "")
+            else:
+                source_kind, source_name = "", ""
+
             segment_num = ""
             segment_text = ""
             if note.segment:
@@ -336,30 +471,128 @@ async def export_study_excel(
 
             ws_notes.cell(row=row_num, column=1, value=f"N-{note.sequence_number}")
             excel_set_safe(ws_notes.cell(row=row_num, column=2), note.content)
-            excel_set_safe(ws_notes.cell(row=row_num, column=3), conversation_name)
-            ws_notes.cell(row=row_num, column=4, value=segment_num)
-            excel_set_safe(ws_notes.cell(row=row_num, column=5), segment_text)
+            ws_notes.cell(row=row_num, column=3, value=source_kind)
+            excel_set_safe(ws_notes.cell(row=row_num, column=4), source_name)
+            ws_notes.cell(row=row_num, column=5, value=segment_num)
+            excel_set_safe(ws_notes.cell(row=row_num, column=6), segment_text)
             # #513: localize like the Codebook/Memos sheets — raw strftime emits UTC
-            ws_notes.cell(row=row_num, column=6, value=local_wall_time(note.created_at))
-            ws_notes.cell(row=row_num, column=7, value=local_wall_time(note.updated_at))
+            ws_notes.cell(row=row_num, column=7, value=local_wall_time(note.created_at))
+            ws_notes.cell(row=row_num, column=8, value=local_wall_time(note.updated_at))
 
-    # ==================== Sheet 7: Summaries ====================
+    # ==================== Sheet 7: Quotes ====================
+    #
+    # #620: excerpts reached this workbook only as the Coded Data sheet's
+    # Yes/No "Quoted" flag — the quote's own TEXT, its range and its note were
+    # nowhere, so the qualitative payload a researcher most wants to work with
+    # in a spreadsheet was the one thing the study export omitted. The
+    # `/export/excerpts` CSV already emits exactly these columns; this sheet
+    # reuses ITS builders (`_base_excerpt_query` / `_excerpt_to_response`)
+    # rather than re-deriving shape and text, because "which shape is this and
+    # what text does it carry" is single-sourced by rule (slab 5a) and a second
+    # copy is a drift waiting to happen.
+    if include_quotes:
+        ws_quotes = wb.create_sheet("Quotes")
+        worksheets.append(ws_quotes)
+
+        quote_headers = [
+            "Excerpt ID", "Source Type", "Source", "Speaker", "Timestamp",
+            "Start Time", "End Time", "Duration", "Quote Text", "Type", "Note", "Created",
+        ]
+        for col, header in enumerate(quote_headers, 1):
+            cell = ws_quotes.cell(row=1, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+
+        # Excerpts on soft-deleted segments are UI-unreachable and must not
+        # export (the outerjoin keeps comment excerpts, which have no segment).
+        excerpts = _base_excerpt_query(db, project_id).outerjoin(
+            Segment, Excerpt.segment_id == Segment.id
+        ).filter(
+            or_(
+                Excerpt.segment_id.is_(None),
+                and_(Segment.merged_into_id == None, Segment.split_into_id == None),
+            )
+        ).order_by(Excerpt.created_at).all()
+
+        for row_num, exc in enumerate(excerpts, 2):
+            resp = _excerpt_to_response(exc)
+            source_name = resp.conversation_name or ""
+            range_start = range_end = duration = ""
+            if exc.segment_id is not None:
+                seg = exc.segment
+                if exc.start_offset is not None:
+                    excerpt_type = "sub-segment"
+                elif exc.start_time is not None:
+                    excerpt_type = "time-range"
+                    range_start = format_timecode(exc.start_time)
+                    range_end = format_timecode(exc.end_time)
+                    duration = format_timecode(exc.end_time - exc.start_time)
+                else:
+                    excerpt_type = "whole-segment"
+                if seg is not None and seg.document_id is not None:
+                    source_kind = "document"
+                    source_name = seg.document.name if seg.document else ""
+                elif seg is not None and seg.observation_id is not None:
+                    source_kind = "observation"
+                    source_name = seg.observation.name if seg.observation else ""
+                    # A whole-clip quote's identity IS the clip's range — its
+                    # label is often blank, so without this the row would be
+                    # emptiest exactly where it matters most (mirrors the CSV).
+                    if exc.start_time is None and seg.start_time is not None and seg.end_time is not None:
+                        range_start = format_timecode(seg.start_time)
+                        range_end = format_timecode(seg.end_time)
+                        duration = format_timecode(seg.end_time - seg.start_time)
+                else:
+                    source_kind = "conversation"
+            else:
+                excerpt_type = "text"
+                source_kind = "text"
+
+            ws_quotes.cell(row=row_num, column=1, value=exc.id)
+            ws_quotes.cell(row=row_num, column=2, value=source_kind)
+            excel_set_safe(ws_quotes.cell(row=row_num, column=3), source_name)
+            excel_set_safe(ws_quotes.cell(row=row_num, column=4), resp.speaker_name or "")
+            ws_quotes.cell(row=row_num, column=5, value=resp.segment_timestamp or "")
+            ws_quotes.cell(row=row_num, column=6, value=range_start)
+            ws_quotes.cell(row=row_num, column=7, value=range_end)
+            ws_quotes.cell(row=row_num, column=8, value=duration)
+            excel_set_safe(ws_quotes.cell(row=row_num, column=9), resp.excerpt_text)
+            ws_quotes.cell(row=row_num, column=10, value=excerpt_type)
+            excel_set_safe(ws_quotes.cell(row=row_num, column=11), resp.note.content if resp.note else "")
+            ws_quotes.cell(row=row_num, column=12, value=local_wall_time(exc.created_at))
+
+    # ==================== Sheet 8: Summaries ====================
     if include_summaries:
         ws_summaries = wb.create_sheet("Summaries")
         worksheets.append(ws_summaries)
 
-        summary_headers = ["Conversation", "Subject ID", "Date", "Status", "Summary"]
+        # #620: Document carries its OWN `summary` column and was absent here.
+        # Observations are deliberately NOT included: they have `description`,
+        # which is a different field with a different meaning — folding it into a
+        # sheet called "Summaries" would mislabel it.
+        summary_headers = ["Source Type", "Source", "Subject ID", "Date", "Status", "Summary"]
         for col, header in enumerate(summary_headers, 1):
             cell = ws_summaries.cell(row=1, column=col, value=header)
             cell.fill = header_fill
             cell.font = header_font
 
-        for row_num, conversation in enumerate(conversations, 2):
-            excel_set_safe(ws_summaries.cell(row=row_num, column=1), conversation.name)
-            excel_set_safe(ws_summaries.cell(row=row_num, column=2), conversation.subject_id or "")
-            ws_summaries.cell(row=row_num, column=3, value=conversation.conversation_date.strftime("%Y-%m-%d") if conversation.conversation_date else "")
-            ws_summaries.cell(row=row_num, column=4, value=conversation.status.value if conversation.status else "")
-            excel_set_safe(ws_summaries.cell(row=row_num, column=5), conversation.summary or "")
+        row_num = 2
+        for conversation in conversations:
+            ws_summaries.cell(row=row_num, column=1, value="conversation")
+            excel_set_safe(ws_summaries.cell(row=row_num, column=2), conversation.name)
+            excel_set_safe(ws_summaries.cell(row=row_num, column=3), conversation.subject_id or "")
+            ws_summaries.cell(row=row_num, column=4, value=conversation.conversation_date.strftime("%Y-%m-%d") if conversation.conversation_date else "")
+            ws_summaries.cell(row=row_num, column=5, value=conversation.status.value if conversation.status else "")
+            excel_set_safe(ws_summaries.cell(row=row_num, column=6), conversation.summary or "")
+            row_num += 1
+
+        for document in documents:
+            # Subject ID / Date / Status are conversation-only fields; they stay
+            # blank rather than being faked from something adjacent.
+            ws_summaries.cell(row=row_num, column=1, value="document")
+            excel_set_safe(ws_summaries.cell(row=row_num, column=2), document.name)
+            excel_set_safe(ws_summaries.cell(row=row_num, column=6), document.summary or "")
+            row_num += 1
 
     # ==================== Sheet 8: Audit Trail ====================
     if include_audit:
@@ -465,6 +698,12 @@ async def export_datasets_excel(
         # Load columns (skip SKIP type), ordered by sequence_order
         columns = [col for col in dataset.columns
                    if col.column_type != ColumnType.SKIP]
+
+        # #592: per-column missing rules for on-the-fly recode computation
+        # (parsed once, not per cell). None = the recognized-N/A defaults.
+        missing_rules_by_col = {
+            col.id: parse_missing_rules(col.missing_values) for col in columns
+        }
 
         # Build column layout: for each column, determine export columns
         # Each entry: (header_text, is_recode, column, recode_definition_or_None)
@@ -586,16 +825,29 @@ async def export_datasets_excel(
                 if answer is None:
                     ws.cell(row=row_idx, column=col_idx, value="")
                 elif recode_def is None:
-                    # Raw value column — value_text is respondent free-text.
+                    # Raw value column — value_text is respondent free-text,
+                    # exported UN-blanked ON PURPOSE (#592 §I.10 / #611e): this
+                    # sheet is the researcher's raw-data escape hatch, so a
+                    # declared-missing "99" or a recognized "N/A" stays visible
+                    # here — the deliberate ASYMMETRY with the R export's
+                    # _text_cell, which blanks missing cells because R would
+                    # otherwise keep them as factor groups the tool's own
+                    # analyses exclude. The recode columns beside this one DO
+                    # honor the declaration (NULL under the missing rules).
                     excel_set_safe(ws.cell(row=row_idx, column=col_idx), answer.value_text or "")
                 elif recode_def.is_primary:
                     # Primary recode: use stored value_numeric
                     val = answer.value_numeric
                     ws.cell(row=row_idx, column=col_idx, value=val if val is not None else "")
                 else:
-                    # Non-primary recode: compute on the fly
+                    # Non-primary recode: compute on the fly (#592: the
+                    # column's missing declaration governs the null-set,
+                    # same as the stored primary values).
                     if answer.value_text:
-                        computed = compute_value(answer.value_text, recode_def)
+                        computed = compute_value(
+                            answer.value_text, recode_def,
+                            missing_rules=missing_rules_by_col.get(column.id),
+                        )
                         ws.cell(row=row_idx, column=col_idx, value=computed if computed is not None else "")
                     else:
                         ws.cell(row=row_idx, column=col_idx, value="")

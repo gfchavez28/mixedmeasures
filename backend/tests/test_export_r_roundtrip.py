@@ -55,7 +55,6 @@ import asyncio
 import io
 import json
 import re
-import shutil
 import subprocess
 import tempfile
 import zipfile
@@ -71,6 +70,7 @@ from app.models.metric import MetricDefinition
 from app.models.statistical_test import StatisticalTest
 from app.models.materials import MaterialCollection, Material
 from app.routers.export_r import export_r_data
+from tests import r_support
 from app.services.comparisons import compute_group_comparison
 from app.services.correlations import compute_correlation_matrix
 from app.services.cross_tabulation import compute_cross_tabulation
@@ -542,7 +542,7 @@ def _run_r(setup_path: Path, workdir: Path) -> dict:
         encoding="utf-8",
     )
     proc = subprocess.run(
-        [shutil.which("Rscript"), runner.name],
+        [r_support.RSCRIPT, runner.name],
         cwd=str(workdir), capture_output=True, text=True, timeout=300,
     )
     assert proc.returncode == 0, (
@@ -557,7 +557,7 @@ def _run_r(setup_path: Path, workdir: Path) -> dict:
     return out
 
 
-@pytest.mark.skipif(shutil.which("Rscript") is None, reason="Rscript not available")
+@pytest.mark.skipif(not r_support.HAS_R, reason=r_support.SKIP_REASON_R)
 def test_exported_script_reproduces_tool_results(db_session):
     db = db_session
     user = _seed(db)
@@ -822,7 +822,7 @@ emit("n_complete", nrow(__SCALE_FRAME__))
 '''
 
 
-@pytest.mark.skipif(shutil.which("Rscript") is None, reason="Rscript not available")
+@pytest.mark.skipif(not r_support.HAS_R, reason=r_support.SKIP_REASON_R)
 def test_export_r_cross_dataset_nominal_and_na(db_session):
     db = db_session
     user, tool_alpha = _seed_cross_dataset(db)
@@ -849,7 +849,7 @@ def test_export_r_cross_dataset_nominal_and_na(db_session):
             encoding="utf-8",
         )
         proc = subprocess.run(
-            [shutil.which("Rscript"), runner.name],
+            [r_support.RSCRIPT, runner.name],
             cwd=str(workdir), capture_output=True, text=True, timeout=300,
         )
         assert proc.returncode == 0, (
@@ -868,3 +868,145 @@ def test_export_r_cross_dataset_nominal_and_na(db_session):
     # #495a: pooled EG-stacked alpha reproduces the tool's displayed number.
     assert actual["n_complete"] == pytest.approx(13, abs=0.5)  # 8 + 5 rows
     assert actual["cronbach"] == pytest.approx(tool_alpha, abs=0.001)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #611 — declared missing rules in the R export (#592).
+#
+# Two-sided per the REPLACE corollary: the declared "99" is blanked (→ R NA)
+# while "Prefer not to say" survives as data on the declared column, and a
+# []-declared column keeps "N/A" as DATA (and as an R factor level). The CSV
+# bytes arm pins `_text_cell` directly (no test referenced it at all); the
+# Rscript-gated arm proves the R side computes the tool's own numbers.
+# ═══════════════════════════════════════════════════════════════════════════
+
+DECLARED_PID = 977
+
+
+def _seed_declared(db):
+    import csv as _csv  # noqa: F401  (used by the bytes test below)
+    db.add(Project(id=DECLARED_PID, name="Declared", user_id=1))
+    db.flush()
+    db.add(Dataset(id=9770, project_id=DECLARED_PID, name="Survey"))
+    db.flush()
+    db.add_all([
+        # Numeric + declared: the mean arm. NUMERIC columns export via
+        # value_numeric, which the write paths NULL for declared cells — so
+        # the declared "99" carries vn=None here (the true at-rest state; a
+        # vn-populated declared cell is unreachable post-slab-3). The
+        # declaration-KEYED emission under test is `_text_cell` (the nominal
+        # columns below, which have no vn at all).
+        DatasetColumn(
+            id=9771, dataset_id=9770, column_code="sat", column_text="sat",
+            column_type="numeric", sequence_order=0,
+            missing_values=json.dumps([{"value": "99", "label": "Refused"}]),
+        ),
+        # Nominal + declared: the factor-level arm (two-sided).
+        DatasetColumn(
+            id=9772, dataset_id=9770, column_code="grade", column_text="grade",
+            column_type="nominal", sequence_order=1,
+            missing_values=json.dumps([{"value": "99"}]),
+        ),
+        # Nominal + []-declared: recognized-N/A text stays DATA.
+        DatasetColumn(
+            id=9773, dataset_id=9770, column_code="consent", column_text="consent",
+            column_type="nominal", sequence_order=2, missing_values="[]",
+        ),
+    ])
+    db.flush()
+    cells = [
+        ("2", 2.0, "A", "Yes"),
+        ("4", 4.0, "B", "N/A"),
+        ("99", None, "99", "Yes"),
+        ("2", 2.0, "Prefer not to say", "No"),
+    ]
+    for i, (sat, satn, grade, consent) in enumerate(cells):
+        row = DatasetRow(id=9780 + i, dataset_id=9770)
+        db.add(row)
+        db.flush()
+        db.add(DatasetValue(row_id=row.id, column_id=9771,
+                            value_text=sat, value_numeric=satn))
+        db.add(DatasetValue(row_id=row.id, column_id=9772, value_text=grade))
+        db.add(DatasetValue(row_id=row.id, column_id=9773, value_text=consent))
+    db.flush()
+    return db.query(User).filter(User.id == 1).one()
+
+
+def _declared_csv_rows(raw: bytes) -> tuple[list[str], list[list[str]]]:
+    import csv as _csv
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        for name in zf.namelist():
+            if not name.endswith("_data.csv"):
+                continue
+            text = zf.read(name).decode("utf-8")
+            rows = list(_csv.reader(io.StringIO(text)))
+            if rows and "sat" in rows[0]:
+                return rows[0], rows[1:]
+    raise AssertionError("data CSV with the declared columns not found in the export")
+
+
+def test_declared_rules_blank_the_exported_csv(db_session):
+    """The `_text_cell` pin (#611a): declared-missing cells export EMPTY —
+    otherwise R keeps them as factor groups the tool's analyses exclude —
+    while REPLACE-substantive text survives."""
+    user = _seed_declared(db_session)
+    raw = asyncio.run(_export_zip_bytes(DECLARED_PID, user, db_session))
+    header, data = _declared_csv_rows(raw)
+    sat_i, grade_i = header.index("sat"), header.index("grade")
+    consent_i = header.index("consent")
+
+    assert data[2][sat_i] == "", "declared-missing 99 must export blank"
+    assert data[2][grade_i] == "", "declared-missing 99 must export blank (nominal)"
+    assert data[3][grade_i] == "Prefer not to say", (
+        "REPLACE: substantive on the declared column, must survive"
+    )
+    assert data[1][consent_i] == "N/A", (
+        "[]-declared: recognized-N/A text is DATA and must survive"
+    )
+    assert data[0][sat_i] == "2.0"  # numeric columns emit value_numeric
+
+
+@pytest.mark.skipif(not r_support.HAS_R, reason=r_support.SKIP_REASON_R)
+def test_declared_rules_round_trip_in_real_r(db_session):
+    """#611b — the declared arm in REAL R: the exported frame's mean equals
+    the tool's (sentinel → NA), and the factor levels mirror the declaration
+    both ways."""
+    user = _seed_declared(db_session)
+    raw = asyncio.run(_export_zip_bytes(DECLARED_PID, user, db_session))
+    with tempfile.TemporaryDirectory() as d:
+        workdir = Path(d)
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            zf.extractall(workdir)
+            setup_name = next(n for n in zf.namelist() if n.endswith(".R"))
+        driver = workdir / "mm_declared_check.R"
+        driver.write_text(
+            f'source("{setup_name}")\n'
+            'cat(sprintf("[MM] sat_mean = %.6f\\n",'
+            ' mean(.mm_num(data$sat, "sat"), na.rm = TRUE)))\n'
+            'cat(sprintf("[MM] sat_na = %.6f\\n",'
+            ' sum(is.na(.mm_num(data$sat, "sat")))))\n'
+            'cat(sprintf("[MM] grade_has_99 = %.6f\\n",'
+            ' as.numeric("99" %in% as.character(data$grade))))\n'
+            'cat(sprintf("[MM] grade_has_pnts = %.6f\\n",'
+            ' as.numeric("Prefer not to say" %in% as.character(data$grade))))\n'
+            'cat(sprintf("[MM] consent_has_na = %.6f\\n",'
+            ' as.numeric("N/A" %in% as.character(data$consent))))\n',
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [r_support.RSCRIPT, "--vanilla", driver.name], cwd=workdir,
+            capture_output=True, text=True, timeout=300,
+        )
+        assert proc.returncode == 0, f"R failed:\n{proc.stdout}\n{proc.stderr}"
+        actual = {}
+        for line in proc.stdout.splitlines():
+            m = re.match(r"\[MM\] (\w+) = (-?[\d.]+)", line)
+            if m:
+                actual[m.group(1)] = float(m.group(2))
+
+    # The tool's own mean of sat is (2 + 4 + 2) / 3 — the declared 99 is out.
+    assert actual["sat_mean"] == pytest.approx(8 / 3, abs=1e-6)
+    assert actual["sat_na"] == pytest.approx(1.0)
+    assert actual["grade_has_99"] == 0.0, "declared 99 became an R value"
+    assert actual["grade_has_pnts"] == 1.0, "REPLACE text lost on the way to R"
+    assert actual["consent_has_na"] == 1.0, "[]-kept N/A lost on the way to R"

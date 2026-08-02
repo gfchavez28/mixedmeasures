@@ -4,6 +4,7 @@ from .project import Project
 from .document import Document, SegmentationMode
 from .speaker import Speaker
 from .conversation import Conversation, ConversationStatus
+from .observation import Observation
 from .segment import Segment
 from .segment_group import SegmentGroup
 from .code import Code
@@ -37,6 +38,7 @@ __all__ = [
     "Speaker",
     "Conversation",
     "ConversationStatus",
+    "Observation",
     "Segment",
     "SegmentGroup",
     "Code",

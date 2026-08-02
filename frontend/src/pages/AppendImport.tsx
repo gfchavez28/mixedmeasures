@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { FileInput, Check, ChevronRight, TriangleAlert, Link2, FileQuestion } from 'lucide-react'
@@ -521,6 +521,26 @@ export default function AppendImport() {
                 )}
                 <div className="text-xs text-mm-text-muted mt-2">Batch ID: {importResult.batch_id}</div>
               </div>
+
+              {/* #575: appended values that didn't map to a scale code land NULL. */}
+              {importResult.unmapped_values && importResult.unmapped_values.length > 0 && (
+                <div
+                  role="note"
+                  className="flex items-start gap-2 p-3 rounded-lg text-sm text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20"
+                >
+                  <TriangleAlert className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+                  <span>
+                    {importResult.unmapped_values.length} value
+                    {importResult.unmapped_values.length === 1 ? '' : 's'} didn't match a
+                    labelled scale point and were stored without a numeric code:{' '}
+                    {importResult.unmapped_values.slice(0, 5).map(v => `"${v}"`).join(', ')}
+                    {importResult.unmapped_values.length > 5
+                      ? `, +${importResult.unmapped_values.length - 5} more`
+                      : ''}
+                    . Add value labels for these codes, or check the source file for typos.
+                  </span>
+                </div>
+              )}
 
               <div className="flex justify-end pt-4 gap-2">
                 <Button variant="outline" onClick={() => navigate(`/projects/${pid}/datasets/${did}`)}>

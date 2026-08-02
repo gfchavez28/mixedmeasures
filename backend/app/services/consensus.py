@@ -43,16 +43,17 @@ from sqlalchemy.orm import Session
 from ..auth import SYSTEM_CODER_TYPES, get_or_create_consensus_user
 from ..models.code import Code
 from ..models.code_application import CodeApplication
-from ..models.conversation import Conversation
 from ..models.dataset import Dataset, DatasetColumn, DatasetValue
-from ..models.document import Document
 from ..models.segment import Segment
 from ..models.user import User
 from ..routers.helpers import visible_segment_filter
 from .coding_layers import (
     CONSENSUS_ORIGIN,
     build_effective_code_map,
+    consensus_eligible_segment_clause,
+    consensus_scoped_segments,
     non_consensus_filter,
+    project_scoped_segments,
     resolve_effective_code,
 )
 
@@ -82,15 +83,15 @@ def consensus_exists_for_project(db: Session, project_id: int) -> bool:
     selector itself is frontend — DEC-A). Project-scoped via the same target joins
     the materializer uses; short-circuits on the first hit.
     """
+    # Broad scope: this reports what EXISTS, so it must never HIDE a row (a row on
+    # a just-unfrozen observation is still there until the next rebuild reclaims it).
     seg_hit = (
-        db.query(CodeApplication.id)
-        .join(Segment, CodeApplication.segment_id == Segment.id)
-        .outerjoin(Conversation, Segment.conversation_id == Conversation.id)
-        .outerjoin(Document, Segment.document_id == Document.id)
-        .filter(
-            CodeApplication.origin == CONSENSUS_ORIGIN,
-            or_(Conversation.project_id == project_id, Document.project_id == project_id),
+        project_scoped_segments(
+            db.query(CodeApplication.id)
+            .join(Segment, CodeApplication.segment_id == Segment.id),
+            project_id,
         )
+        .filter(CodeApplication.origin == CONSENSUS_ORIGIN)
         .first()
     )
     if seg_hit is not None:
@@ -196,8 +197,24 @@ def recompute_consensus_for_target(
         # it yields zero voters, which clears any stale consensus on it. This keeps
         # per-target recompute consistent with the project materializer (both
         # honor visibility) so the sweep tidies up consensus after segment ops.
+        #
+        # Observations track (D18 — supersedes D2's blanket exclusion): a clip is
+        # consensus-eligible iff its Observation is FROZEN, i.e. the team agreed
+        # the cuts before coding, so every coder codes the SAME clips. An UNFROZEN
+        # observation's clips are each coder's own (one voter per clip), so voting
+        # is meaningless there and unitizing-alpha is the reliability statistic
+        # instead.
+        #
+        # This must use the SAME eligibility definition as the exists-gate, the
+        # materializer's gather and the rebuild DELETE — a consensus row written
+        # here on a segment the rebuild's scope can't see would be a permanent,
+        # invisible orphan that no rebuild can clean. That trap is exactly why D2
+        # excluded observations wholesale; the fix is one shared definition, not a
+        # blanket exclusion. Yielding zero voters writes nothing AND lets the
+        # DELETE below tidy any orphan defensively.
         voters = voters.join(Segment, CodeApplication.segment_id == Segment.id).filter(
-            *visible_segment_filter()
+            *visible_segment_filter(),
+            consensus_eligible_segment_clause(),
         )
     rows = voters.all()
     per_coder: dict[int, set[int]] = {}
@@ -239,14 +256,16 @@ def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
     # Voter applications (roster coders only, non-universal codes, non-consensus,
     # visible segments) — bucketed per target → per coder → effective-code set.
     seg_rows = (
-        db.query(CodeApplication.segment_id, CodeApplication.user_id, CodeApplication.code_id)
-        .join(Segment, CodeApplication.segment_id == Segment.id)
-        .join(Code, CodeApplication.code_id == Code.id)
-        .join(User, CodeApplication.user_id == User.id)
-        .outerjoin(Conversation, Segment.conversation_id == Conversation.id)
-        .outerjoin(Document, Segment.document_id == Document.id)
+        consensus_scoped_segments(
+            db.query(
+                CodeApplication.segment_id, CodeApplication.user_id, CodeApplication.code_id
+            )
+            .join(Segment, CodeApplication.segment_id == Segment.id)
+            .join(Code, CodeApplication.code_id == Code.id)
+            .join(User, CodeApplication.user_id == User.id),
+            project_id,
+        )
         .filter(
-            or_(Conversation.project_id == project_id, Document.project_id == project_id),
             *visible_segment_filter(),
             non_consensus_filter(),
             Code.is_universal == False,  # noqa: E712
@@ -282,12 +301,12 @@ def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
         val_buckets.setdefault(val_id, {}).setdefault(user_id, set()).add(eff)
 
     # Project-scoped DELETE of the prior consensus layer (ADJ-1).
-    project_segment_ids = (
-        db.query(Segment.id)
-        .outerjoin(Conversation, Segment.conversation_id == Conversation.id)
-        .outerjoin(Document, Segment.document_id == Document.id)
-        .filter(or_(Conversation.project_id == project_id, Document.project_id == project_id))
-    )
+    # The CLEANER's scope — deliberately BROADER than the writer's (which is
+    # eligibility-filtered above). Unfreezing an observation REVOKES its clips'
+    # eligibility, and the rebuild must still be able to SEE the consensus rows it
+    # previously wrote there in order to reclaim them. Scoping this DELETE to
+    # eligible-only segments would strand them forever as invisible orphans.
+    project_segment_ids = project_scoped_segments(db.query(Segment.id), project_id)
     project_value_ids = (
         db.query(DatasetValue.id)
         .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)

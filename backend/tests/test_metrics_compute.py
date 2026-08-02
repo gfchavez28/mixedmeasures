@@ -242,6 +242,47 @@ def test_group_comparison_excludes_na(db_session):
     assert "Female" in gc["groups"]
 
 
+def test_domain_grouping_excludes_na(db_session):
+    """#593: the DOMAIN path must exclude N/A exactly like the column path above.
+
+    `resolve_dataset_domain` hand-rolled its own unfiltered value_text query
+    instead of routing through `load_grouping_values`, so the SAME grouping
+    column yielded a real "Decline to state" group here while folding into the
+    None bucket via `resolve_dataset_column` — and the phantom group inflates
+    `real_group_count`, which per #506 can flip the auto-picked test.
+
+    ⚠️ Fixture note: use metric_type="mean". A `domain_aggregate` metric BUILDS
+    the grouping map and then ignores it (one ungrouped result), so it is a
+    FALSE NEGATIVE for this bug — it passes whether or not the fix is present.
+    """
+    db = db_session
+    cols = _setup_board(db)
+
+    domain = AnalysisDomain(id=1, project_id=1, name="Vision & Strategy")
+    db.add(domain)
+    for seq, key in enumerate(["col9", "col10", "col11", "col12", "col13"]):
+        db.add(AnalysisDomainMember(
+            domain_id=1, member_type="column",
+            member_id=cols[key].id, sequence_order=seq,
+        ))
+    db.flush()
+
+    metric = MetricDefinition(
+        project_id=1, name="V&S mean by gender",
+        metric_type="mean",
+        input_source_type="dataset_domain",
+        input_source_id=domain.id,
+        grouping_column_id=cols["gender"].id,
+        config="{}",
+    )
+    db.add(metric)
+    db.flush()
+
+    groups = [r.group_value for r in compute_metric(db, metric)]
+    assert "Decline to state" not in groups
+    assert "Female" in groups and "Male" in groups
+
+
 def test_scatter_grouping_excludes_na(db_session):
     db = db_session
     cols = _setup_board(db)

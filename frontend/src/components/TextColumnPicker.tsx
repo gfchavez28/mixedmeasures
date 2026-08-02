@@ -82,7 +82,12 @@ export default function TextCodingColumnPicker({
   const label = selectedCount === 0
     ? 'Select columns'
     : selectedCount === 1
-      ? columns.find(c => c.column_id === selectedColumnIds[0])?.column_name || '1 column'
+      ? (() => {
+          // #575: fall back to column_text, not the misleading literal "1 column",
+          // when the single selected column has no short name.
+          const c = columns.find(c => c.column_id === selectedColumnIds[0])
+          return c?.column_name || c?.column_text || '1 column'
+        })()
       : `${selectedCount} columns`
 
   return (

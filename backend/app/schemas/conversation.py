@@ -2,6 +2,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 from .common import UTCTimestamp
 from ..models.conversation import ConversationStatus
+from ..services.media_duration import MAX_MEDIA_OFFSET_SECONDS
 
 
 class ConversationCreate(BaseModel):
@@ -57,7 +58,7 @@ class ConversationResponse(BaseModel):
 
 
 class MediaOffsetUpdate(BaseModel):
-    offset_seconds: float = Field(ge=-300.0, le=300.0)
+    offset_seconds: float = Field(ge=-MAX_MEDIA_OFFSET_SECONDS, le=MAX_MEDIA_OFFSET_SECONDS)
 
 
 class MediaUploadResponse(BaseModel):

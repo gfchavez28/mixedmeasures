@@ -28,7 +28,7 @@ from ..schemas.backup import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 MANIFEST_FORMAT_VERSION = 1
 STALE_HOURS = 24
 
@@ -114,11 +114,15 @@ def _read_project_summaries(db_path: Path) -> list[ProjectBackupSummary]:
             doc_count = conn.execute(
                 "SELECT COUNT(*) FROM documents WHERE project_id = ?", (pid,)
             ).fetchone()[0]
+            obs_count = conn.execute(
+                "SELECT COUNT(*) FROM observations WHERE project_id = ?", (pid,)
+            ).fetchone()[0]
             summaries.append(ProjectBackupSummary(
                 name=pname,
                 conversation_count=conv_count,
                 dataset_count=ds_count,
                 document_count=doc_count,
+                observation_count=obs_count,
             ))
         return summaries
     except Exception:

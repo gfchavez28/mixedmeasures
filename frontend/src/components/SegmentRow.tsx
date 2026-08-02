@@ -85,7 +85,6 @@ function getSpeakerHoverColor(colorIndex: number, isFacilitator: boolean): strin
 interface SegmentRowProps {
   segment: Segment
   isSelected: boolean
-  isDragOver?: boolean
   onClick: (e: React.MouseEvent) => void
   conversationId: number
   codes: Code[]
@@ -155,7 +154,6 @@ interface SegmentRowProps {
 function SegmentRow({
   segment,
   isSelected,
-  isDragOver = false,
   onClick,
   conversationId,
   codes,
@@ -334,7 +332,6 @@ function SegmentRow({
   const hasCustomColor = !!segment.speaker_color
   const getBackgroundClass = () => {
     if (isSelected) return SELECTED_TINT
-    if (isDragOver) return SELECTED_TINT
     // Custom hex color → use inline style instead of Tailwind token
     if (hasCustomColor) {
       const uncoded = !segment.is_facilitator && segment.applied_codes.length === 0
@@ -353,11 +350,11 @@ function SegmentRow({
 
   // Inline style for custom speaker color row backgrounds
   const customRowStyle = useMemo(() => {
-    if (!hasCustomColor || isSelected || isDragOver) return undefined
+    if (!hasCustomColor || isSelected) return undefined
     return {
       backgroundColor: hexToRowBg(segment.speaker_color!, isDark),
     } as React.CSSProperties
-  }, [hasCustomColor, segment.speaker_color, isSelected, isDragOver, isDark])
+  }, [hasCustomColor, segment.speaker_color, isSelected, isDark])
 
   const getTextClass = () => {
     if (segment.is_facilitator) return 'text-mm-text-secondary'
@@ -379,20 +376,20 @@ function SegmentRow({
             id={`segment-${segment.id}`}
             className={cn(
               'px-4 py-2 h-full cursor-pointer transition-colors group/row relative',
-              isSelected || isDragOver
+              isSelected
                 ? 'hover:bg-mm-blue/20'
                 : hasCustomColor
                   ? ''
                   : getSpeakerHoverColor(segment.speaker_color_index || 0, segment.is_facilitator),
               getBackgroundClass(),
               groupPosition && 'border-l-[3px] border-teal-400 dark:border-teal-600',
-              (isSelected || isDragOver) && 'border-l-[3px] border-[hsl(var(--mm-blue)/0.7)]',
+              isSelected && 'border-l-[3px] border-[hsl(var(--mm-blue)/0.7)]',
             )}
             style={customRowStyle}
-            onMouseEnter={hasCustomColor && !isSelected && !isDragOver ? (e) => {
+            onMouseEnter={hasCustomColor && !isSelected ? (e) => {
               (e.currentTarget as HTMLElement).style.backgroundColor = hexToRowHoverBg(segment.speaker_color!, isDark)
             } : undefined}
-            onMouseLeave={hasCustomColor && !isSelected && !isDragOver ? (e) => {
+            onMouseLeave={hasCustomColor && !isSelected ? (e) => {
               (e.currentTarget as HTMLElement).style.backgroundColor = hexToRowBg(segment.speaker_color!, isDark)
             } : undefined}
             // #436: option role makes aria-selected valid (the listbox is the
@@ -938,7 +935,6 @@ export default React.memo(SegmentRow, (prevProps, nextProps) => {
   return (
     prevProps.segment === nextProps.segment &&
     prevProps.isSelected === nextProps.isSelected &&
-    prevProps.isDragOver === nextProps.isDragOver &&
     prevProps.onClick === nextProps.onClick &&
     prevProps.conversationId === nextProps.conversationId &&
     prevProps.codes === nextProps.codes &&

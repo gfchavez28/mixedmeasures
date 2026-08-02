@@ -151,7 +151,9 @@ def build_row_item_matrix(
                 matrix[row.row_id][col_id] = RecordItemRow(
                     numeric=row.value_numeric,
                     text=row.value_text,
-                    excluded=row.excluded,
+                    # #592: fold the resolver's column-aware missing mark into
+                    # item exclusion — every downstream item filter inherits.
+                    excluded=row.excluded or row.missing,
                 )
                 # Track grouping
                 if grouping_column_id is not None and group_val is not None:
@@ -459,7 +461,7 @@ def _resolve_grouped_values(
         for group_val, rows in grouped_rows.items():
             valid = [
                 r.value_numeric for r in rows
-                if not r.excluded and r.value_numeric is not None
+                if not r.excluded and not r.missing and r.value_numeric is not None
             ]
             if valid:
                 result[group_val] = valid
