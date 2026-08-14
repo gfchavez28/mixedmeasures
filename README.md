@@ -12,13 +12,15 @@
 
 <table>
   <tr>
-    <td width="33%"><img src=".github/assets/02-coding-workbench.png" alt="Qualitative coding workbench"></td>
-    <td width="33%"><img src=".github/assets/03-dataset-grid.png" alt="Quantitative dataset grid"></td>
-    <td width="33%"><img src=".github/assets/06-canvas-spatial.png" alt="Integration canvas"></td>
+    <td width="25%"><img src=".github/assets/02-coding-workbench.png" alt="Qualitative coding workbench showing a coded focus-group transcript"></td>
+    <td width="25%"><img src=".github/assets/03-dataset-grid.png" alt="Quantitative dataset grid with typed columns"></td>
+    <td width="25%"><img src=".github/assets/04-observations.png" alt="Observation workbench: a recording coded as clips on its timeline"></td>
+    <td width="25%"><img src=".github/assets/06-canvas.png" alt="Integration canvas with themes written up as prose"></td>
   </tr>
   <tr>
     <td align="center"><sub><b>Qualitative coding</b></sub></td>
     <td align="center"><sub><b>Quantitative data</b></sub></td>
+    <td align="center"><sub><b>Observations</b></sub></td>
     <td align="center"><sub><b>Integration canvas</b></sub></td>
   </tr>
 </table>
@@ -46,11 +48,20 @@ to stay on their own machine.
 
 ## Install
 
-**Recommended:** download the latest signed installer for Windows or macOS from the
+**Recommended:** download the latest signed installer from the
 [Releases page](https://github.com/gfchavez28/mixedmeasures/releases/latest) and run
-it — no setup required. (Installers are attached to each `v1.0`+ release tag; if
-Releases looks empty during the initial launch, the first signed build is on the
-way.) Prefer to build it yourself? See [Running from source](#running-from-source).
+it — no setup required:
+
+| Platform | File |
+|----------|------|
+| **Windows** (x64) | `.exe` installer |
+| **macOS** — **Apple Silicon only** (M1 or later) | `.dmg` |
+| **Linux** (x86_64) | `.AppImage` — mark it executable, then run it |
+
+**Intel Macs are not supported.** Not sure which you have? Apple menu → *About This
+Mac*; the **Chip** line reads "Apple M1" (or M2/M3/M4) on a supported machine.
+
+Prefer to build it yourself? See [Running from source](#running-from-source).
 
 **First launch — a security prompt is expected.** The installers are signed (and
 notarized on macOS), so the verified publisher is **George Chavez**. Because Mixed
@@ -269,9 +280,9 @@ Being honest about scope:
 | UI | shadcn/ui + Tailwind CSS v4 |
 | Data fetching | TanStack Query |
 | Rich text | Tiptap |
-| Charts | Recharts + d3-force |
-| Statistics | SciPy + statsmodels (lazy-imported) |
-| Parsing | python-docx, pdfminer.six, tinytag (all permissive) |
+| Charts | Recharts |
+| Statistics | NumPy + SciPy + statsmodels (lazy-imported) |
+| Parsing | python-docx, pdfminer.six, tinytag, openpyxl, pyreadstat (all permissive) |
 
 ## Running from source
 
@@ -311,8 +322,11 @@ Common ones — see `backend/app/config.py` for the full list:
 | `MM_DATABASE_PATH` | `dev.db` | SQLite database file |
 | `MM_DATA_DIR` | `data` | Parent of `documents/` and `media/` |
 | `MM_BACKUP_DIR` | `backups` | Backup storage |
-| `INACTIVITY_TIMEOUT_MINUTES` | `0` (off) | Auto-logout on a shared machine (e.g. `30`) |
-| `COOKIE_SECURE` | `false` | Set `true` when serving over HTTPS |
+| `MM_INACTIVITY_TIMEOUT_MINUTES` | `0` (off) | Auto-logout on a shared machine (e.g. `30`) |
+| `MM_COOKIE_SECURE` | `false` | Set `true` when serving over HTTPS |
+
+The bare names (`INACTIVITY_TIMEOUT_MINUTES`, `COOKIE_SECURE`) are still accepted as
+aliases, but the `MM_`-prefixed form takes precedence when both are set.
 
 ## Tests
 
