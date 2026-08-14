@@ -28,6 +28,8 @@
       "backend-process.js",
       "key-manager.js",
       "updater.js",
+      "zoom.js",
+      "fatal-error.js",
       "splash.html"
     ],
     "extraResources": [
