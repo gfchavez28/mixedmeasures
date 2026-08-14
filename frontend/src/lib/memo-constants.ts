@@ -1,13 +1,19 @@
 import {
   Folder, MessageSquare, Tag, Tags, TrendingUp, Database,
-  TableProperties, Columns3, Layers,
+  TableProperties, Columns3, Layers, FileText, Video,
 } from 'lucide-react'
 
-export type FilterType = 'all' | 'project' | 'conversation' | 'code' | 'code_category' | 'analysis' | 'dataset' | 'canvas'
+export type FilterType = 'all' | 'project' | 'conversation' | 'document' | 'observation' | 'code' | 'code_category' | 'analysis' | 'dataset' | 'canvas'
 
 export const ENTITY_TYPE_LABELS: Record<string, string> = {
   project: 'Project',
   conversation: 'Conversation',
+  // #681: `document` and `observation` are accepted by the backend's
+  // MemoCreate.entity_type pattern but were missing from every map in this file,
+  // so those memos rendered with the RAW lowercase type as their label, a
+  // fallback icon, and project-purple. Keep all five maps below in step.
+  document: 'Document',
+  observation: 'Observation',
   code: 'Code',
   code_category: 'Category',
   analysis: 'Analysis',
@@ -22,13 +28,22 @@ export const ENTITY_TYPE_COLORS: Record<string, { bg: string; text: string }> = 
   code: { bg: 'bg-emerald-100 dark:bg-emerald-900/30', text: 'text-emerald-700 dark:text-emerald-300' },
   conversation: { bg: 'bg-teal-100 dark:bg-teal-900/30', text: 'text-teal-700 dark:text-teal-300' },
   document: { bg: 'bg-indigo-100 dark:bg-indigo-900/30', text: 'text-indigo-700 dark:text-indigo-300' },
-  // eslint-disable-next-line no-restricted-syntax -- categorical entity-color map hue (DESIGN.md §5 carve-out; siblings raw, not the mm-blue "selected" token)
+  // eslint-disable-next-line no-restricted-syntax -- categorical entity-color map hue (the internal design notes carve-out; siblings raw, not the mm-blue "selected" token)
   code_category: { bg: 'bg-blue-100 dark:bg-blue-900/30', text: 'text-blue-700 dark:text-blue-300' },
   analysis: { bg: 'bg-orange-100 dark:bg-orange-900/30', text: 'text-orange-700 dark:text-orange-300' },
   dataset: { bg: 'bg-sky-100 dark:bg-sky-900/30', text: 'text-sky-700 dark:text-sky-300' },
   dataset_row: { bg: 'bg-cyan-100 dark:bg-cyan-900/30', text: 'text-cyan-700 dark:text-cyan-300' },
   dataset_column: { bg: 'bg-sky-100 dark:bg-sky-900/30', text: 'text-sky-700 dark:text-sky-300' },
   canvas: { bg: 'bg-amber-100 dark:bg-amber-900/30', text: 'text-amber-700 dark:text-amber-300' },
+  // Rose, not the teal the TopRail gives the Observations workspace: teal is
+  // already `conversation` in THIS palette, and two identically-coloured chips in
+  // one filter row are worse than a palette that differs from the nav rail (they
+  // already differ — the rail calls conversations green).
+  observation: { bg: 'bg-rose-100 dark:bg-rose-900/30', text: 'text-rose-700 dark:text-rose-300' },
+  // #676: text-coding notes are keyed 'comment' by AllNotesPanel and had no entry
+  // here, so their chip fell back to project-purple while their own filter chip
+  // was sky.
+  comment: { bg: 'bg-sky-100 dark:bg-sky-900/30', text: 'text-sky-700 dark:text-sky-300' },
 }
 
 export const ENTITY_TYPE_ICONS: Record<string, React.ElementType> = {
@@ -41,6 +56,8 @@ export const ENTITY_TYPE_ICONS: Record<string, React.ElementType> = {
   dataset_row: TableProperties,
   dataset_column: Columns3,
   canvas: Layers,
+  document: FileText,
+  observation: Video,
 }
 
 export const ENTITY_TYPE_HEX: Record<string, string> = {
@@ -53,6 +70,8 @@ export const ENTITY_TYPE_HEX: Record<string, string> = {
   dataset_row: '#06b6d4',
   dataset_column: '#0284c7',
   canvas: '#d97706',
+  document: '#4f46e5',
+  observation: '#e11d48',
 }
 
 export function entityTypeHexColor(type: string): string {
@@ -63,6 +82,8 @@ export const FILTER_CHIPS: { value: FilterType; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'project', label: 'Project' },
   { value: 'conversation', label: 'Conversations' },
+  { value: 'document', label: 'Documents' },
+  { value: 'observation', label: 'Observations' },
   { value: 'code', label: 'Codes' },
   { value: 'analysis', label: 'Analysis' },
   { value: 'dataset', label: 'Datasets' },

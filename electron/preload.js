@@ -10,6 +10,13 @@ contextBridge.exposeInMainWorld('mmDesktop', {
   // main process and resolves to { ok: true, path } | { ok: false, reason }.
   saveRecoveryKey: () => ipcRenderer.invoke('encryption:saveRecoveryKey'),
 
+  // Page zoom (#697). A verb, like the rest of this surface — the renderer asks
+  // for a factor and gets back the one actually APPLIED (main clamps; a rejected
+  // value must not leave the Settings control disagreeing with the window).
+  // `Number()` here is belt-and-braces; main clamps non-numbers to the default
+  // regardless, because the bridge is not a trust boundary the main process owns.
+  setZoomFactor: (factor) => ipcRenderer.invoke('zoom:set', Number(factor)),
+
   // Auto-update (#29 S2). Verbs only — the renderer can request a check, flip the
   // preference, and ask to install a STAGED update; it can never hand the main
   // process a URL, a path, or a version to install.

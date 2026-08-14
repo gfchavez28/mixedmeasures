@@ -12,7 +12,7 @@ its own timeline, no transcript) as the THIRD `Segment` parent, and a
 The CHECK redefinitions force `batch_alter_table(recreate='always')`. env.py
 holds PRAGMA foreign_keys=OFF at the connection level, so recreating `segments`
 /`notes` does not cascade-delete their children — NO PRAGMA statements here
-(they are a no-op inside Alembic's transaction). See backend/alembic/CLAUDE.md.
+(they are a no-op inside Alembic's transaction). See backend/alembic/the internal design notes.
 
 Revision ID: f1a2b3c4d5e6
 Revises: b3f1d9a7c2e5

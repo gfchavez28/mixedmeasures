@@ -109,6 +109,15 @@ function buildSpawnEnv({ port, userData, baseEnv = {}, encryptionKeyHex = null, 
     MM_CORS_ORIGINS: '',
     MM_PACKAGED: '1',
     PYTHONDONTWRITEBYTECODE: '1',
+    // #723: pin the child's stdio encoding so the two processes agree on UTF-8.
+    // Python picks the LOCALE encoding for a pipe, and `sys.stderr` defaults to
+    // `errors='backslashreplace'` — so on a non-UTF-8 Windows the #716 fatal line
+    // arrives as `C:\Users\\u674e\u660e\backups` (measured). No exception, no
+    // missing line, just a path the researcher cannot act on — and the Electron
+    // side, which decodes UTF-8, cannot repair it. ⚠️ Deliberately NOT `PYTHONUTF8`:
+    // that flips UTF-8 mode globally including the FILESYSTEM encoding on Windows,
+    // which is a far larger blast radius than this needs.
+    PYTHONIOENCODING: 'utf-8',
   }
   if (encryptionKeyHex) {
     env.MM_ENCRYPTION_ENABLED = '1'

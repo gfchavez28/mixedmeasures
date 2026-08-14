@@ -200,6 +200,11 @@ class BulkCodeResponse(BaseModel):
     results: list[TextCodeResponse]
     success_count: int
     error_count: int
+    # #678: WHICH ids were skipped. This endpoint is apply-only (remove is the
+    # separate /bulk-remove-code with its own shape), so `applied` is unambiguous
+    # here — unlike the segment sibling. The explicit list is still what the
+    # client reads, so one shared helper can interpret both responses.
+    failed_dataset_value_ids: list[int] = []
 
 
 class BulkRemoveCodeResponse(BaseModel):

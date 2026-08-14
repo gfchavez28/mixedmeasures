@@ -10,6 +10,7 @@ import {
   Settings,
 } from 'lucide-react'
 import { ChevronDown, Clock, Users, UserPlus } from 'lucide-react'
+import { jotAccessibleName } from '@/lib/rail-labels'
 // #409: chrome icons are lucide SVGs, not emoji — emoji render as tofu on
 // systems without an emoji font (Linux/WSL) and as inconsistent OS art elsewhere.
 import {
@@ -68,6 +69,59 @@ interface WorkspaceTab {
   count?: number
 }
 
+/**
+ * #718 — how the rail gives up width, stated ONCE for both layouts.
+ *
+ * The rail has two independent branches (compact single-row, full two-row) with
+ * separately-written tabs and action clusters. Measured at a 625px viewport the
+ * full layout wanted 1064px and the compact one 1017px, so BOTH overflow and the
+ * document scrolls sideways on every route. A rule applied to one branch and not
+ * the other just relocates that asymmetry, so it lives here and both branches
+ * import it.
+ *
+ * ⚠️ `sr-only`, NOT `hidden` — and this is a bug fix, not a preference. The
+ * previous compact tabs used `hidden sm:inline`, which removes the label from the
+ * accessibility tree; the icons beside them are `aria-hidden`, so below 640px
+ * every workspace tab was a link with NO ACCESSIBLE NAME (WCAG 2.4.4 / 4.1.2).
+ * `sr-only` keeps the text in the tree and merely stops it painting, so the name
+ * is identical at every width and only the pixels collapse. It also keeps WCAG
+ * 2.5.3 label-in-name true: when the text IS visible it is exactly the name.
+ *
+ * ⚠️ `min-width: 0` was tried first and does NOT fix this — measured, the document
+ * stayed at 1064px, because the flex boxes shrink while their content spills out
+ * of them. Only reducing the CONTENT reduces the document.
+ *
+ * Breakpoints are chosen so nothing changes at the 1280px minimum window (#706):
+ * at xl the rail renders exactly as it does today.
+ */
+const RAIL_LABEL = 'sr-only xl:not-sr-only'
+/**
+ * Tab text survives further down than the pill labels — the tabs are the nav.
+ *
+ * No `title` on the tabs, deliberately: five of the six are wrapped in
+ * `TabDropdown`, which opens on HOVER, so a native tooltip would surface on top of
+ * an open menu at every width — including the wide ones where the label is already
+ * visible. The action controls below take titles instead, because they have no
+ * hover menu to collide with. If icon-only tabs need naming for sighted users at
+ * narrow widths, the answer is the overflow menu #718 left undecided, not a tooltip.
+ */
+const TAB_LABEL = 'sr-only lg:not-sr-only'
+/**
+ * Counts are the first thing to go; they stay in the a11y tree regardless.
+ *
+ * ⚠️ **The padding belongs to this constant and carries the SAME `xl:` prefix as
+ * `not-sr-only`. Do not move it back onto the element unprefixed.** `not-sr-only`
+ * declares `padding: 0; margin: 0`, and Tailwind emits the `xl` variant block AFTER
+ * the base utilities — so a bare `px-1.5 py-0.5` LOSES to it at every width ≥1280px.
+ * Measured in the shipped bundle: this pill rendered 14.41×14 at `padding: 0px`
+ * instead of 26.41×18, which is how #718 shipped claiming "1280px renders exactly as
+ * before". The skip link in `ProjectLayout` is safe for the mirror-image reason — its
+ * padding carries the same `focus:` prefix as its `focus:not-sr-only`, so it is
+ * emitted after and wins. The rule is *same variant, or it loses*, and it is guarded
+ * fail-closed in `lib/responsive-chrome.test.ts`.
+ */
+const TAB_COUNT_LABEL = 'sr-only xl:not-sr-only xl:px-1.5 xl:py-0.5'
+
 const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--mm-green)/0.5)] focus-visible:ring-offset-1'
 
 // Tabs that have dropdown menus
@@ -87,6 +141,9 @@ export default function TopRail({
   const { isDark, toggleTheme } = useTheme()
   const projectBase = project ? `/projects/${project.id}` : ''
   const projectId = project?.id
+
+  const jotCount = scratchpadCount ?? 0
+  const jotLabel = jotAccessibleName(scratchpadCount)
 
   // Query project summary for dropdown content (shares cache with OverviewPage)
   const { data: summary } = useQuery({
@@ -118,7 +175,7 @@ export default function TopRail({
         <span className="text-white/20 mx-1">/</span>
 
         {/* Compact tabs */}
-        <div className="flex items-center gap-0.5">
+        <div className="flex items-center gap-0.5 shrink-0">
           {tabs.map(tab => {
             const isActive = tab.id === activeWorkspace
             const hasDropdown = TABS_WITH_DROPDOWNS.has(tab.id)
@@ -133,7 +190,7 @@ export default function TopRail({
                 aria-current={isActive ? 'page' : undefined}
               >
                 <tab.icon className="w-3 h-3" aria-hidden="true" />
-                <span className="hidden sm:inline">{tab.label}</span>
+                <span className={TAB_LABEL}>{tab.label}</span>
               </Link>
             )
 
@@ -153,29 +210,31 @@ export default function TopRail({
         {breadcrumbs.length > 1 && breadcrumbs[breadcrumbs.length - 1].label && (
           <>
             <ChevronRight className="w-3 h-3 text-white/20 mx-1 shrink-0" />
-            <span className="text-[hsl(var(--mm-chrome-text))] text-xs truncate" title={breadcrumbs[breadcrumbs.length - 1].label}>
+            <span className="text-[hsl(var(--mm-chrome-text))] text-xs truncate min-w-0" title={breadcrumbs[breadcrumbs.length - 1].label}>
               {breadcrumbs[breadcrumbs.length - 1].label}
             </span>
           </>
         )}
 
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto shrink-0 flex items-center gap-1">
           <button
             onClick={onSearchOpen}
             className={`p-2 rounded text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] transition-colors ${FOCUS_RING}`}
             aria-label="Search"
+            title="Search"
           >
             <Search className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
           <button
             onClick={onScratchpadToggle}
             className={`relative p-2 rounded text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] transition-colors ${FOCUS_RING}`}
-            aria-label="Jot a thought"
+            aria-label={jotLabel}
+            title="Jot a thought"
           >
             <PenLine className="w-3.5 h-3.5" aria-hidden="true" />
-            {(scratchpadCount ?? 0) > 0 && (
+            {jotCount > 0 && (
               <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] flex items-center justify-center rounded-full bg-amber-500 text-white text-[9px] font-bold leading-none px-0.5">
-                {scratchpadCount}
+                {jotCount}
               </span>
             )}
           </button>
@@ -183,6 +242,7 @@ export default function TopRail({
             onClick={onMemosOpen}
             className={`p-2 rounded text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] transition-colors ${FOCUS_RING}`}
             aria-label="Memos"
+            title="Memos"
           >
             <StickyNote className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
@@ -192,6 +252,7 @@ export default function TopRail({
               to={`${projectBase}/participants`}
               className={`p-2 rounded text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] transition-colors ${FOCUS_RING}`}
               aria-label="Participants"
+              title="Participants"
             >
               <Users className="w-3.5 h-3.5" aria-hidden="true" />
             </Link>
@@ -200,6 +261,7 @@ export default function TopRail({
             onClick={toggleTheme}
             className={`p-2 rounded text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] transition-colors ${FOCUS_RING}`}
             aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+            title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
           >
             {isDark ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
           </button>
@@ -210,6 +272,7 @@ export default function TopRail({
             to="/settings"
             className={`p-2 rounded text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] transition-colors ${FOCUS_RING}`}
             aria-label="Settings"
+            title="Settings"
           >
             <Settings className="w-3.5 h-3.5" />
           </Link>
@@ -231,9 +294,16 @@ export default function TopRail({
           <MMLogo size={28} />
         </Link>
         <span className="text-white/20 mx-2">/</span>
+        {/* #718: ONE element absorbs the pressure. Without a designated flexible
+            child every item is rigid, so the row cannot shrink and the DOCUMENT
+            grows instead — measured at 653px against a 625px viewport even after
+            the labels collapsed. The breadcrumb is the right one to give: it is
+            already truncating, and losing characters from a path is cheaper than
+            losing a control. */}
+        <div className="flex items-center min-w-0 flex-1">
         <Link
           to="/"
-          className={`text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] text-sm transition-colors rounded ${FOCUS_RING}`}
+          className={`shrink-0 text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] text-sm transition-colors rounded ${FOCUS_RING}`}
         >
           Projects
         </Link>
@@ -244,74 +314,84 @@ export default function TopRail({
             {crumb.to ? (
               <Link
                 to={crumb.to}
-                className={`text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] text-sm transition-colors truncate max-w-[200px] rounded ${FOCUS_RING}`}
+                className={`text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] text-sm transition-colors truncate max-w-[110px] xl:max-w-[200px] rounded ${FOCUS_RING}`}
               >
                 {crumb.label}
               </Link>
             ) : (
-              <span className="text-[hsl(var(--mm-chrome-text))] text-sm font-medium truncate max-w-[200px]" title={crumb.label}>
+              <span className="text-[hsl(var(--mm-chrome-text))] text-sm font-medium truncate max-w-[110px] xl:max-w-[200px]" title={crumb.label}>
                 {crumb.label}
               </span>
             )}
           </span>
         ))}
+        </div>
 
-        <div className="ml-auto flex items-center gap-1.5">
+        <div className="ml-auto shrink-0 flex items-center gap-1 xl:gap-1.5">
           <button
             onClick={onSearchOpen}
-            className={`inline-flex items-center gap-1.5 bg-white/[0.06] border border-white/[0.07] rounded-[5px] px-3 py-1 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.1] transition-colors ${FOCUS_RING}`}
+            className={`inline-flex items-center gap-1.5 bg-white/[0.06] border border-white/[0.07] rounded-[5px] px-2 xl:px-3 py-1 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.1] transition-colors ${FOCUS_RING}`}
             title="Search (Ctrl+K)"
           >
-            {/* #394: no aria-label — let the accessible name come from the visible
-                text ("Search Ctrl+K") so it can't mismatch (WCAG 2.5.3 label-in-name). */}
+            {/* #394: no aria-label — the accessible name comes from the visible text
+                so it can't mismatch (WCAG 2.5.3 label-in-name). ⚠️ That name is now
+                "Search", not "Search Ctrl+K": #718 made the shortcut hint aria-hidden
+                (it is decoration, and `hidden` is right for decoration) and put the
+                word behind RAIL_LABEL, which is `sr-only` — so the name survives at
+                every width while only the pixels collapse. */}
             <Search className="w-3 h-3" aria-hidden="true" />
-            Search
-            <kbd className="ml-1 text-[10px]">Ctrl+K</kbd>
+            <span className={RAIL_LABEL}>Search</span>
+            <kbd className="ml-1 text-[10px] hidden xl:inline" aria-hidden="true">Ctrl+K</kbd>
           </button>
           {/* #407: the participant spine needs a global nav entry — it was
               reachable only from the Overview button or by URL. */}
           {projectBase && (
             <Link
               to={`${projectBase}/participants`}
-              className={`inline-flex items-center gap-1.5 bg-white/[0.06] border border-white/[0.07] rounded-[5px] px-3 py-1 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.1] transition-colors ${FOCUS_RING}`}
+              className={`inline-flex items-center gap-1.5 bg-white/[0.06] border border-white/[0.07] rounded-[5px] px-2 xl:px-3 py-1 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.1] transition-colors ${FOCUS_RING}`}
+              title="Participants"
             >
               <Users className="w-3 h-3" aria-hidden="true" />
-              Participants
+              <span className={RAIL_LABEL}>Participants</span>
             </Link>
           )}
           <button
             onClick={onMemosOpen}
-            className={`inline-flex items-center gap-1.5 bg-white/[0.06] border border-white/[0.07] rounded-[5px] px-3 py-1 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.1] transition-colors ${FOCUS_RING}`}
+            className={`inline-flex items-center gap-1.5 bg-white/[0.06] border border-white/[0.07] rounded-[5px] px-2 xl:px-3 py-1 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.1] transition-colors ${FOCUS_RING}`}
             aria-label="Memos"
+            title="Memos"
           >
             <StickyNote className="w-3 h-3" aria-hidden="true" />
-            Memos
+            <span className={RAIL_LABEL}>Memos</span>
           </button>
           <button
             onClick={onScratchpadToggle}
-            className={`relative inline-flex items-center gap-1.5 bg-white/[0.06] border border-white/[0.07] rounded-[5px] px-3 py-1 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.1] transition-colors ${FOCUS_RING}`}
-            aria-label="Jot a thought"
+            className={`relative inline-flex items-center gap-1.5 bg-white/[0.06] border border-white/[0.07] rounded-[5px] px-2 xl:px-3 py-1 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.1] transition-colors ${FOCUS_RING}`}
+            aria-label={jotLabel}
+            title="Jot a thought"
           >
             <PenLine className="w-3 h-3" aria-hidden="true" />
-            Jot
-            {(scratchpadCount ?? 0) > 0 && (
+            <span className={RAIL_LABEL}>Jot</span>
+            {jotCount > 0 && (
               <span className="min-w-[16px] h-[16px] flex items-center justify-center rounded-full bg-amber-500 text-white text-[10px] font-bold leading-none px-1">
-                {scratchpadCount}
+                {jotCount}
               </span>
             )}
           </button>
           <button
             onClick={onExportOpen}
-            className={`inline-flex items-center gap-1.5 bg-white/[0.06] border border-white/[0.07] rounded-[5px] px-3 py-1 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.1] transition-colors ${FOCUS_RING}`}
+            className={`inline-flex items-center gap-1.5 bg-white/[0.06] border border-white/[0.07] rounded-[5px] px-2 xl:px-3 py-1 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.1] transition-colors ${FOCUS_RING}`}
             aria-label="Export"
+            title="Export"
           >
             <FileOutput className="w-3 h-3" aria-hidden="true" />
-            Export
+            <span className={RAIL_LABEL}>Export</span>
           </button>
           <button
             onClick={toggleTheme}
             className={`p-2 rounded text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] transition-colors ${FOCUS_RING}`}
             aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+            title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
           >
             {isDark ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
           </button>
@@ -322,6 +402,7 @@ export default function TopRail({
             to="/settings"
             className={`p-2 rounded text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] transition-colors ${FOCUS_RING}`}
             aria-label="Settings"
+            title="Settings"
           >
             <Settings className="w-3.5 h-3.5" />
           </Link>
@@ -345,9 +426,9 @@ export default function TopRail({
               aria-current={isActive ? 'page' : undefined}
             >
               <tab.icon className="w-3.5 h-3.5" aria-hidden="true" />
-              <span>{tab.label}</span>
+              <span className={TAB_LABEL}>{tab.label}</span>
               {tab.count !== undefined && tab.count > 0 && (
-                <span className={`text-xs font-mono tabular-nums px-1.5 py-0.5 rounded-full ${
+                <span className={`text-xs font-mono tabular-nums rounded-full ${TAB_COUNT_LABEL} ${
                   isActive ? `bg-white/20 ${tab.accent}` : 'bg-white/10 text-[hsl(var(--mm-chrome-text-muted))]'
                 }`}>
                   {tab.count}

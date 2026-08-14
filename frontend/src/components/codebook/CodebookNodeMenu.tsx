@@ -203,7 +203,7 @@ export default function CodebookNodeMenu({
     const rect = el.getBoundingClientRect()
     const nx = x + rect.width > window.innerWidth - 8 ? x - rect.width : x
     const ny = y + rect.height > window.innerHeight - 8 ? y - rect.height : y
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- clamp menu position to viewport bounds after DOM measurement
+    // clamp menu position to viewport bounds after DOM measurement
     setPosition({ x: Math.max(8, nx), y: Math.max(8, ny) })
   }, [x, y])
 

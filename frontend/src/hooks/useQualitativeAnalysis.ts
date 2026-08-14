@@ -18,6 +18,7 @@ import type {
   QuoteDensity,
   QuoteLayout,
 } from '@/lib/qual-analysis-types'
+import { orientationFromToken } from '@/lib/qual-analysis-types'
 import { DEFAULT_FORMATTING, type ChartFormatting } from '@/lib/chart-data'
 import type { MaterialResponse } from '@/lib/api'
 
@@ -292,7 +293,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
   const valueMode = valRaw as QualValueMode
   const denominatorMode = denomRaw as QualDenominatorMode
   const sortOrder = sortRaw as QualSortOrder
-  const orientation = (orientRaw === 'cr' ? 'codes-rows' : 'sources-rows') as QualOrientation
+  const orientation = orientationFromToken(orientRaw)
   const relView = relViewRaw as QualRelView
   const cooccurrenceLevel = coLevelRaw as QualCooccurrenceLevel
   const showProportion = showPropRaw === '1'

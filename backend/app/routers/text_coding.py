@@ -18,6 +18,7 @@ from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, C
 from ..models.code_application import CodeApplication
 from ..models.code import Code
 from ..models.note import Note
+from ..services.note_numbering import next_note_sequence
 from ..models.text_coding_config import TextCodingConfig, is_empty_text, parse_treat_as_empty
 from ..models.excerpt import Excerpt
 from ..models.speaker import Speaker
@@ -749,13 +750,20 @@ async def bulk_code(
     if not code:
         raise HTTPException(status_code=400, detail="Code not found or inactive")
 
+    # De-duplicate while preserving order — a repeated id would be processed
+    # twice against a stale `existing` set (not updated in the loop) and insert a
+    # second CodeApplication for the same (value, code, coder), which the
+    # per-coder unique index rejects with an IntegrityError at commit. Same
+    # latent shape as the segment sibling in coding.py.
+    requested_ids = list(dict.fromkeys(data.dataset_value_ids))
+
     # Batch validate all dataset_value_ids in one query
     valid_dvs = (
         db.query(DatasetValue.id)
         .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
         .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
         .filter(
-            DatasetValue.id.in_(data.dataset_value_ids),
+            DatasetValue.id.in_(requested_ids),
             Dataset.project_id == project_id,
             DatasetColumn.column_type.in_(TEXT_TYPES),
         )
@@ -767,7 +775,7 @@ async def bulk_code(
     # dedup; #J2-1b — a second coder still gets their own layer rows).
     existing = set(
         dv_id for (dv_id,) in db.query(CodeApplication.dataset_value_id).filter(
-            CodeApplication.dataset_value_id.in_(data.dataset_value_ids),
+            CodeApplication.dataset_value_id.in_(requested_ids),
             CodeApplication.code_id == data.code_id,
             CodeApplication.user_id == user.id,
         ).all()
@@ -776,13 +784,15 @@ async def bulk_code(
     results = []
     success_count = 0
     error_count = 0
+    failed_dataset_value_ids: list[int] = []
 
-    for dv_id in data.dataset_value_ids:
+    for dv_id in requested_ids:
         if dv_id not in valid_ids:
             results.append(TextCodeResponse(
                 dataset_value_id=dv_id, code_id=data.code_id, applied=False
             ))
             error_count += 1
+            failed_dataset_value_ids.append(dv_id)
             continue
 
         if dv_id in existing:
@@ -813,6 +823,7 @@ async def bulk_code(
         results=results,
         success_count=success_count,
         error_count=error_count,
+        failed_dataset_value_ids=failed_dataset_value_ids,
     )
 
 
@@ -885,8 +896,10 @@ async def create_text_note(
         conversation_id=None,
         dataset_value_id=data.dataset_value_id,
         content=data.content,
-        sequence_number=0,
     )
+    # #747: was a literal 0. `TextNotesPanel` shows no number, so this one was
+    # invisible until the Memos & Notes page printed `N-0` beside it.
+    note.sequence_number = next_note_sequence(db, note)
     db.add(note)
     db.commit()
     db.refresh(note)

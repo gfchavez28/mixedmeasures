@@ -40,6 +40,17 @@ import { DatasetDotButton } from './DatasetDotButton'
 
 interface CellProps {
   cell: CellData | EmptyCellData
+  /**
+   * #756 — this cell's `row-col` coordinate inside its grid, and whether it is
+   * the grid's single tab stop.
+   *
+   * The coordinate is a `data-` attribute rather than a ref because `Cell` is a
+   * memoized leaf and a ref prop would churn its identity on every parent
+   * render, defeating the #332 render-chain work that makes dragging smooth.
+   * The owning `Bracket` focuses by querying the coordinate.
+   */
+  gridPos?: string
+  isActiveCell?: boolean
   /** Equivalence group id this cell belongs to (used to compose the empty
    * cell droppable id for empty placeholders). Null/omitted for synthetic
    * single-cell rows (Path A #325) — see `rowSyntheticColumnId` instead. */
@@ -131,6 +142,9 @@ interface EmptyCellInternalProps {
   /** When false, the empty cell's droppable is disabled — no hover highlight,
    * won't accept drops. Used by Legacy ungrouped rows to reject domain-member drops. */
   canAcceptDrop?: boolean
+  /** #756 — see `CellProps`. An empty cell is a grid cell like any other. */
+  gridPos?: string
+  isActiveCell?: boolean
 }
 
 const EmptyCell = memo(function EmptyCell({
@@ -139,6 +153,8 @@ const EmptyCell = memo(function EmptyCell({
   rowSyntheticColumnId,
   dndEnabled = true,
   canAcceptDrop = true,
+  gridPos,
+  isActiveCell = false,
 }: EmptyCellInternalProps) {
   // Path A #325: synthetic rows emit `empty-unlinked-` IDs; EG rows emit
   // `empty-eg-` IDs. F3+F5 wires the actual drop branches; for now the
@@ -159,7 +175,13 @@ const EmptyCell = memo(function EmptyCell({
     <div
       ref={drop.setNodeRef}
       role="gridcell"
-      className={`flex items-center justify-center px-3 py-2 text-mm-text-muted italic text-sm min-h-[48px] rounded border border-dashed border-mm-border-subtle ${overClass}`}
+      data-cell-pos={gridPos}
+      /* #756: an empty cell is reachable too. It had NO tabindex at all, so it
+       * was skipped entirely — yet "no column from this dataset" is exactly the
+       * fact a researcher scans a crosswalk for, and it is a drop target. Under
+       * the grid pattern it costs no extra tab stop. */
+      tabIndex={isActiveCell ? 0 : -1}
+      className={`flex items-center justify-center px-3 py-2 text-mm-text-muted italic text-sm min-h-[48px] rounded border border-dashed border-mm-border-subtle focus-visible:ring-2 focus-visible:ring-ring focus:outline-none ${overClass}`}
       aria-label={`No column from ${cell.dataset_name}${canDrop ? ' — drop a column here to assign' : ''}`}
     >
       —
@@ -173,6 +195,8 @@ interface DataCellProps extends CellProps {
 
 const DataCell = memo(function DataCell({
   cell,
+  gridPos,
+  isActiveCell = false,
   isSearchMatch = false,
   dndEnabled = true,
   isDragging = false,
@@ -261,7 +285,13 @@ const DataCell = memo(function DataCell({
           {...draggable.attributes}
           {...draggable.listeners}
           role="gridcell"
-          tabIndex={0}
+          data-cell-pos={gridPos}
+          /* #756: exactly ONE cell per grid is a tab stop; the rest are reached
+           * with the arrow keys. Every cell used to be `tabIndex={0}`, so a
+           * 3-dataset × 30-row crosswalk cost 90 tab stops to walk past. This
+           * must come AFTER the dnd-kit attribute spread, which sets its own
+           * `tabIndex` — order is what makes ours win. */
+          tabIndex={isActiveCell ? 0 : -1}
           aria-label={ariaLabel}
           title={cellTitle}
           aria-grabbed={dndEnabled && isDragging ? 'true' : undefined}

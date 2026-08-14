@@ -28,7 +28,7 @@ export class PageErrorBoundary extends React.Component<Props, State> {
       return (
         <div role="alert" className="flex flex-col items-center justify-center h-full text-mm-text-faint text-sm gap-3 p-8">
           <span className="text-base font-medium text-mm-text-secondary">Something went wrong</span>
-          <span className="text-xs text-mm-border-medium max-w-md text-center">
+          <span className="text-xs max-w-md text-center">
             {this.state.error?.message}
           </span>
           <button

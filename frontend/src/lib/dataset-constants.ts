@@ -48,12 +48,12 @@ export function isCrosswalkEligible(columnType: string): boolean {
 }
 
 export const TYPE_BADGE_CLASSES: Record<string, string> = {
-  // eslint-disable-next-line no-restricted-syntax -- categorical column-type color map hue (DESIGN.md §5 carve-out; siblings raw, not the mm-blue "selected" token)
+  // eslint-disable-next-line no-restricted-syntax -- categorical column-type color map hue (the internal design notes carve-out; siblings raw, not the mm-blue "selected" token)
   ordinal: 'bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-200',
   nominal: 'bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-200',
   binary: 'bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-200',
-  numeric: 'bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-200',
-  percentage: 'bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-200',
+  numeric: 'bg-green-100 text-green-800 dark:bg-green-900/50 dark:text-green-200',
+  percentage: 'bg-green-100 text-green-800 dark:bg-green-900/50 dark:text-green-200',
   open_text: 'bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-200',
   demographic: 'bg-teal-100 text-teal-700 dark:bg-teal-900/50 dark:text-teal-200',
   identifier: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-200',

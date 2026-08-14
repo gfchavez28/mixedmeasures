@@ -429,7 +429,7 @@ export default function ClipTimeline({
               <Info aria-hidden className="h-3 w-3" />
             </Button>
           </PopoverTrigger>
-          <PopoverContent align="start" className="w-80 text-xs space-y-2">
+          <PopoverContent align="start" className="w-80 text-xs space-y-2" aria-label="About the timeline lanes">
             <p>
               <strong className="text-mm-text-secondary">Lanes</strong> are the labelled rows —
               one per code category, then Uncategorized, then Uncoded. A clip coded in two

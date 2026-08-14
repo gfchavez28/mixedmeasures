@@ -19,12 +19,15 @@ import type { DataLabelPosition } from '@/lib/chart-data'
 import { compareValueLabels } from '@/lib/chart-data'
 import type { ChartDataRow } from '@/lib/chart-types'
 import { shapeQualBarData, computeCellValue, resolveRenderedBarEntry, QUAL_GROUP_COLORS } from './qual-chart-data'
+import { ChartFigure } from '@/components/charts/ChartFigure'
 
 interface QualBarChartProps {
   data: SourceFrequenciesResponse
   valueMode: QualValueMode
   denominatorMode: QualDenominatorMode
   sortOrder: QualSortOrder
+  /** #675 — the code-axis order behind `sortOrder: 'custom'`. */
+  customOrder: number[]
   groupBy?: string | null
   labelFontSize?: number
   dataFontSize?: number
@@ -74,6 +77,7 @@ export default function QualBarChart({
   valueMode,
   denominatorMode,
   sortOrder,
+  customOrder,
   groupBy,
   labelFontSize = 12,
   dataFontSize = 12,
@@ -135,7 +139,7 @@ export default function QualBarChart({
 
   // ── Simple mode data ──
   const simpleChartData = useMemo(() => {
-    const bars = shapeQualBarData(data, valueMode, denominatorMode, sortOrder)
+    const bars = shapeQualBarData(data, valueMode, denominatorMode, sortOrder, customOrder)
     return bars.map(b => ({
       label: b.label,
       value: b.value,
@@ -145,7 +149,7 @@ export default function QualBarChart({
       _color: b.color,
       _isPercent: isPercent,
     }))
-  }, [data, valueMode, denominatorMode, sortOrder, isPercent])
+  }, [data, valueMode, denominatorMode, sortOrder, customOrder, isPercent])
 
   const isGrouped = !!groupedResult
   const chartData: ChartDataRow[] = isGrouped ? groupedResult.chartData : simpleChartData
@@ -165,7 +169,7 @@ export default function QualBarChart({
   const chartHeight = Math.max(300, chartData.length * rowHeight + 60)
 
   return (
-    <div role="img" aria-label="Horizontal bar chart">
+    <ChartFigure label="Horizontal bar chart">
       <ResponsiveContainer width="100%" height={chartHeight}>
         <BarChart
           layout="vertical"
@@ -326,6 +330,6 @@ export default function QualBarChart({
           )}
         </BarChart>
       </ResponsiveContainer>
-    </div>
+    </ChartFigure>
   )
 }

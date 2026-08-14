@@ -14,8 +14,10 @@ import {
 } from 'recharts'
 import type { LabelProps } from 'recharts'
 import { DISPLAY_PRECISION, mergeFormatting, computeYAxisWidth, wrapLabel, resolveColorPalette, computeLogDomain } from '@/lib/chart-data'
+import { ciLabel, ciCaveat } from '@/lib/ci-label'
 import { useChartColors } from '@/lib/theme-context'
 import type { BarDatum, ChartFormatting, VariableNMode, SortOrder } from '@/lib/chart-data'
+import { ChartFigure } from './ChartFigure'
 
 interface HorizontalBarChartProps {
   data: BarDatum[]
@@ -44,7 +46,9 @@ function CustomTooltip({ active, payload, isLog }: { active?: boolean; payload?:
         <div className="text-mm-text-muted">log₁₀ = {Math.log10(d.value).toFixed(2)}</div>
       )}
       {d._ciLower != null && d._ciUpper != null && (
-        <div className="text-mm-text-muted">95% CI: [{d._ciLower.toFixed(DISPLAY_PRECISION)}, {d._ciUpper.toFixed(DISPLAY_PRECISION)}]</div>
+        <div className="text-mm-text-muted" title={ciCaveat(d.ciMethod)}>
+          {ciLabel(d.ciMethod)}: [{d._ciLower.toFixed(DISPLAY_PRECISION)}, {d._ciUpper.toFixed(DISPLAY_PRECISION)}]
+        </div>
       )}
       {d.n != null && <div className="text-mm-text-muted">n = {d.n}</div>}
     </div>
@@ -96,7 +100,7 @@ export default function HorizontalBarChart({
   const chartData = isLog ? logFiltered : sorted
 
   // Container measurement for data-width mode
-  const containerRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLElement>(null)
   const [containerWidth, setContainerWidth] = useState<number>(0)
   useEffect(() => {
     const el = containerRef.current
@@ -318,9 +322,9 @@ export default function HorizontalBarChart({
   )
 
   return (
-    <div ref={containerRef} role="img" aria-label="Horizontal bar chart">
+    <ChartFigure ref={containerRef} label="Horizontal bar chart" count={chartData.length} countNoun="bars">
       {isLog && logExcludedCount > 0 && (
-        <div className="text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded px-2 py-1 mb-2">
+        <div className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded px-2 py-1 mb-2">
           {logExcludedCount} value{logExcludedCount > 1 ? 's' : ''} ≤ 0 excluded from log scale
         </div>
       )}
@@ -332,6 +336,6 @@ export default function HorizontalBarChart({
       {isLog && (
         <div className="text-[11px] text-mm-text-faint mt-1 text-right">Log scale</div>
       )}
-    </div>
+    </ChartFigure>
   )
 }

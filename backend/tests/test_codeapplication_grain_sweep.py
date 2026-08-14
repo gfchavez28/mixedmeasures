@@ -59,6 +59,27 @@ _APP_DIR = Path(__file__).resolve().parent.parent / "app"
 # and the `code_usage_count_expr()` helper do NOT match — they are the correct shapes.
 _RAW_ROW_COUNT_RE = re.compile(r"func\.count\(\s*CodeApplication\.id\s*\)")
 
+# #730: this scan asserts an EMPTY violation list, which passes just as happily
+# when it reads nothing at all — and `rglob` on a mistyped root yields `[]`
+# rather than raising. So prove the population first (163 files today; the floor
+# detects a BAD ROOT, not growth).
+_MIN_APP_FILES = 100
+
+
+def _app_files() -> list[Path]:
+    files = sorted(_APP_DIR.rglob("*.py"))
+    assert len(files) >= _MIN_APP_FILES, (
+        f"This sweep's population is {len(files)} file(s) under {_APP_DIR} — "
+        f"expected at least {_MIN_APP_FILES}. rglob returns [] for a bad path "
+        "instead of raising, so the violation assertion below would pass "
+        "VACUOUSLY. Fix _APP_DIR — do NOT lower this floor."
+    )
+    assert (_APP_DIR / "routers" / "coding.py").is_file(), (
+        f"the sweep cannot see routers/coding.py under {_APP_DIR}: a file COUNT "
+        "alone cannot tell this tree from another that also has .py files"
+    )
+    return files
+
 
 def test_no_unmarked_raw_codeapplication_row_count():
     """No source file may count CodeApplication rows as a code/usage count.
@@ -71,7 +92,7 @@ def test_no_unmarked_raw_codeapplication_row_count():
     inflation tests never had: it fails the instant a NEW raw-count site appears.
     """
     violations: list[str] = []
-    for path in sorted(_APP_DIR.rglob("*.py")):
+    for path in _app_files():
         text = path.read_text(encoding="utf-8")
         if not _RAW_ROW_COUNT_RE.search(text):
             continue

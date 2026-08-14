@@ -173,7 +173,7 @@ export default function AppendImport() {
         </nav>
 
         {error && (
-          <div className="mb-6 p-4 bg-red-50 text-red-600 rounded-lg">{error}</div>
+          <div className="mb-6 p-4 bg-red-50 text-red-700 rounded-lg">{error}</div>
         )}
 
         {/* Step 1: Upload */}
@@ -403,6 +403,7 @@ export default function AppendImport() {
               <CardContent className="p-0">
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm border-collapse">
+                    <caption className="sr-only">Preview of the rows to be appended.</caption>
                     <thead>
                       <tr className="bg-mm-bg border-b">
                         <th className="px-3 py-2 text-left text-xs font-medium text-mm-text-muted">#</th>
@@ -446,7 +447,7 @@ export default function AppendImport() {
                                 {skipDuplicates ? 'skip' : 'duplicate'}
                               </span>
                             ) : (
-                              <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700">new</span>
+                              <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-800">new</span>
                             )}
                           </td>
                         </tr>
@@ -562,7 +563,7 @@ export default function AppendImport() {
 function MatchedColumnRow({ col }: { col: AppendMatchedColumn }) {
   return (
     <div className="flex items-center gap-3 px-4 py-2.5">
-      <span className="w-5 h-5 rounded-full bg-green-100 text-green-600 flex items-center justify-center flex-shrink-0">
+      <span className="w-5 h-5 rounded-full bg-green-100 text-green-800 flex items-center justify-center flex-shrink-0">
         <Check className="w-3 h-3" />
       </span>
       <span className="flex-1 text-sm truncate">

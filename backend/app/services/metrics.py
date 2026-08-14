@@ -36,6 +36,17 @@ from .grouping import (
 PERCENTAGE_PRECISION = 2   # round(x, 2) for percentage values (e.g. 85.71%)
 STATS_PRECISION = 4        # round(x, 4) for proportions, means, and descriptive stats
 
+# ── How a domain aggregate was computed (#693) ───────────────────────────────
+# Written into `result_data.aggregation_basis` so every display surface can say
+# what the number is, instead of inferring it from the metric type. The value is
+# mirrored in `frontend/src/lib/aggregate-basis.ts`; the two are hand-kept in
+# step and pinned by a cross-language assertion in `test_aggregate_basis.py`.
+#
+# ⚠️ A second basis (POMP / z-scored — #693(ii)) MUST take a new value here
+# rather than reusing this one. The whole point is that the client displays what
+# the server did; a basis that lies is worse than no basis at all.
+AGGREGATION_BASIS_UNWEIGHTED_ITEM_MEANS = "unweighted_item_means"
+
 # ── t-distribution critical values (two-tailed 95% CI, α=0.025 each tail) ────
 # Precomputed t.ppf(0.975, df) for df 1..200 + ∞ (z=1.96).
 # Avoids scipy dependency; uses linear interpolation for df > 200.
@@ -79,8 +90,24 @@ def _t_critical(df: int) -> float:
     return _T_CRIT_975[lo] + frac * (_T_CRIT_975[hi] - _T_CRIT_975[lo])
 
 
-def _ci_mean(mean_val: float, std_dev: float, n: int) -> dict | None:
-    """Compute 95% CI for a mean using t-distribution. Returns None if n < 3."""
+def _ci_mean(
+    mean_val: float, std_dev: float, n: int, *, method: str = "t_interval"
+) -> dict | None:
+    """Compute 95% CI for a mean using t-distribution. Returns None if n < 3.
+
+    ``method`` names what the interval is OVER, because that is not always
+    respondents. The domain aggregate treats its *k* column-level scalars as the
+    sample, so its interval is driven by between-ITEM variance, not sampling error
+    — it widens and narrows with the number of items rather than the number of
+    respondents (#690). Callers pass the honest label; the default is the
+    respondent-level case every other caller is.
+
+    ⚠️ Do NOT go back to letting the caller stamp the label after the fact. That is
+    exactly what broke: `compute_domain_aggregate` seeded its dict with the honest
+    ``item_level_t`` and then REPLACED the whole dict with this function's return
+    value, so the honest label survived only when ``k < 3`` — i.e. only when there
+    was no interval to label at all.
+    """
     if n < 3 or std_dev is None:
         return None
     se = std_dev / math.sqrt(n)
@@ -90,7 +117,7 @@ def _ci_mean(mean_val: float, std_dev: float, n: int) -> dict | None:
         "ci_lower": round(mean_val - margin, STATS_PRECISION),
         "ci_upper": round(mean_val + margin, STATS_PRECISION),
         "ci_level": 0.95,
-        "ci_method": "t_interval",
+        "ci_method": method,
     }
 
 
@@ -1234,6 +1261,9 @@ def compute_domain_aggregate(
 
     child_results: dict[str, dict] = {}
     scalars: list[float] = []
+    # #693: the per-item respondent counts, kept so the client can state what
+    # the pooled `valid_n` is a pool OF. See `MEMBER_N_*` below.
+    contributing_ns: list[int] = []
     total_valid = 0
     total_total = 0
 
@@ -1259,6 +1289,7 @@ def compute_domain_aggregate(
         }
         if scalar is not None:
             scalars.append(scalar)
+            contributing_ns.append(valid_n)
         total_valid += valid_n
         total_total += total_n
 
@@ -1268,12 +1299,14 @@ def compute_domain_aggregate(
     else:
         aggregate_value = None
 
-    # CI for the aggregate: treat k column-level scalars as a sample (item-level t)
+    # CI for the aggregate: treat the k column-level scalars as the sample, so this
+    # interval is over ITEMS, not respondents (#690). The label rides in rather than
+    # being stamped on afterwards — see `_ci_mean`'s docstring for why.
     ci_data: dict = {"ci_lower": None, "ci_upper": None, "ci_level": 0.95, "ci_method": "item_level_t"}
     k = len(scalars)
     if k >= 3 and aggregate_value is not None:
         item_sd = statistics.stdev(scalars)
-        ci = _ci_mean(aggregate_value, item_sd, k)
+        ci = _ci_mean(aggregate_value, item_sd, k, method="item_level_t")
         if ci:
             ci_data = ci
 
@@ -1282,6 +1315,24 @@ def compute_domain_aggregate(
         "child_results": child_results,
         "column_count": len(column_groups),
         "aggregation": aggregation,
+        # #693 — what this number IS, said by the code that computes it.
+        #
+        # The R export has always emitted an honest comment block ("the final
+        # mean equally weights each item"), and the app said nothing. The basis
+        # rides the wire for the same reason `ci_method` does (#690/#715): the
+        # server owns the computation, so a client that inferred the basis from
+        # `metric_type === 'domain_aggregate'` would drift the moment a second
+        # aggregation exists — which is exactly what POMP/z-scoring will be.
+        "aggregation_basis": AGGREGATION_BASIS_UNWEIGHTED_ITEM_MEANS,
+        # The per-item respondent counts this aggregate pooled. `valid_n` is
+        # their SUM, and a sum reads as a respondent count beside a mean:
+        # n=1000 mean=2.0 plus n=10 mean=8.0 displays 5.0 next to "n = 1010"
+        # when the respondent-weighted estimate is ≈2.06. The client states the
+        # spread instead. Both are None for an aggregate with no contributing
+        # items, so a consumer cannot render "n 0–0" for an empty scale.
+        "member_n_min": min(contributing_ns) if contributing_ns else None,
+        "member_n_max": max(contributing_ns) if contributing_ns else None,
+        "member_count": len(scalars),
         **ci_data,
     }
     return result_data, total_valid, total_total

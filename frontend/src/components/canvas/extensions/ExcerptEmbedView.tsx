@@ -33,7 +33,7 @@ export default function ExcerptEmbedView({ node, updateAttributes, deleteNode, s
               <button
                 type="button"
                 onClick={deleteNode}
-                className="opacity-0 group-hover/material:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded text-mm-text-faint hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30"
+                className="opacity-0 group-hover/material:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded text-mm-text-faint hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
                 aria-label="Remove from canvas"
                 title="Remove from canvas"
               >

@@ -34,6 +34,7 @@ from app.services.canvas import (
     create_snapshot,
     list_snapshots,
     restore_snapshot,
+    SNAPSHOT_ROTATION_ORDER,
     delete_snapshot,
 )
 from app.services.audit import get_audit_trail, log_action
@@ -1321,3 +1322,40 @@ def test_snapshot_rotation(db_session):
     names = [s.name for s in snapshots]
     assert "snap-0" not in names  # oldest was rotated out
     assert "snap-10" in names
+
+
+def test_snapshot_rotation_breaks_created_at_ties_deterministically(db_session):
+    """#750 — the rotation must not decide "oldest" on `created_at` alone.
+
+    ⚠️ This is a STRUCTURAL assertion on purpose, and the reason is worth keeping:
+    a behavioural test cannot distinguish the two orderings. `created_at` defaults
+    to `func.now()` (SECOND precision in SQLite), so a burst of snapshots ties —
+    asserted below, because if that ever stops being true this test is pointless.
+    But SQLite reaches those rows by a rowid-ordered scan, so a stable sort over a
+    tied key returns them in id order anyway: `ORDER BY created_at` and
+    `ORDER BY created_at, id` agree on every run you can actually produce. They
+    diverge only when the sorter is unstable, which is not summonable on demand.
+    Measured, not assumed — removing the tiebreaker left an outcome-level version
+    of this test green.
+
+    So the guard holds the ordering OBJECT the query uses. Re-typing the clause
+    here would validate a copy (#729); reading `SNAPSHOT_ROTATION_ORDER` fails the
+    moment the tiebreaker leaves the query.
+    """
+    p = _create_project(db_session)
+    c = _create_canvas(db_session, p.id)
+    for i in range(11):
+        create_snapshot(db_session, c.id, f"snap-{i}")
+
+    surviving = db_session.query(CanvasSnapshot).filter(
+        CanvasSnapshot.canvas_id == c.id).all()
+    assert len({s.created_at for s in surviving}) == 1, (
+        "snapshots no longer tie on created_at — if the column gained sub-second "
+        "precision the tiebreaker may be redundant; re-decide rather than delete"
+    )
+
+    ordered_cols = [str(clause.element) for clause in SNAPSHOT_ROTATION_ORDER]
+    assert ordered_cols == ["canvas_snapshots.created_at", "canvas_snapshots.id"], (
+        "the rotation orders by created_at alone, so which snapshot counts as "
+        f"oldest is undefined among the tied rows: {ordered_cols}"
+    )

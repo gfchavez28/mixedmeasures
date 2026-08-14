@@ -1,7 +1,7 @@
 # Self-hosted fonts
 
 Vendored to remove the Google Fonts CDN dependency (privacy + offline/Electron
-packaging — CLAUDE.md Known Issues #3). Referenced by `@font-face` in
+packaging — the internal design notes Known Issues #3). Referenced by `@font-face` in
 `src/index.css`; Vite hashes and bundles them into the build.
 
 | Family | License | Source |

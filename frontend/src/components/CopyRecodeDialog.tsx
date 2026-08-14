@@ -57,7 +57,7 @@ export interface CopyRecodeDialogProps {
 const RECODE_TYPE_STYLES: Record<string, { label: string; cls: string }> = {
   scale_map: { label: 'Scale Map', cls: 'bg-mm-blue/12 text-mm-blue-text' },
   category_group: { label: 'Category', cls: 'bg-purple-50 text-purple-600 dark:bg-purple-950/30 dark:text-purple-300' },
-  reverse: { label: 'Reverse', cls: 'bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-300' },
+  reverse: { label: 'Reverse', cls: 'bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300' },
 }
 
 function mappingsEqual(a: Record<string, number | string>, b: Record<string, number | string>): boolean {
@@ -308,7 +308,7 @@ export function CopyRecodeDialog({
         ) : (
           <>
             {targetDefsFetchError && (
-              <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2.5 py-1.5 mb-2">
+              <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2.5 py-1.5 mb-2">
                 Some target definitions could not be loaded. Duplicate detection may be incomplete.
               </div>
             )}

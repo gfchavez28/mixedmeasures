@@ -22,8 +22,11 @@ from sqlalchemy import inspect as sa_inspect, func
 from sqlalchemy.orm import Session
 
 from . import media_storage
+from .archive_safety import assert_expanded_size_within_limit, assert_member_within
+from .text_offsets import has_astral, utf16_to_codepoint
 from .text_similarity import similarity_ratio
 from .media_duration import MAX_MEDIA_OFFSET_SECONDS, sane_duration
+from .note_numbering import renumber_imported_notes
 
 from ..models import (
     AnalysisDomain,
@@ -98,7 +101,14 @@ logger = logging.getLogger(__name__)
 # the first production write path (the slab-1 decision: until something could
 # WRITE a declaration, refusing old builds bought nothing). v1–v3 files still
 # import.
-CURRENT_FORMAT_VERSION = 4
+# v5 = #687 — char excerpt offsets are CODE POINTS. v1–v4 archives carry UTF-16
+# code units (the browser's basis, unconverted), so an excerpt on a segment with an
+# astral character points at the wrong text. Unlike v2/v3/v4 this bump is NOT a
+# refusal gate for old files — they import fine, and `_repair_pre_v5_excerpt_offsets`
+# converts them on the way in. The version is what makes "is this file's basis
+# UTF-16?" answerable at all; without it a re-import would silently reintroduce the
+# drift the repair migration just removed.
+CURRENT_FORMAT_VERSION = 5
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
 
 
@@ -575,10 +585,15 @@ def validate_project_file(file_path: Path) -> dict:
 
     try:
         with zipfile.ZipFile(str(file_path), "r") as zf:
-            # Zip-slip prevention
+            # Cheap pre-flight only. The REAL containment check is per-member, inside
+            # `_extract_zip_member` (#688) — this pattern scan cannot see a Windows
+            # drive-absolute or UNC member, which is what made it bypassable.
             for name in zf.namelist():
                 if name.startswith("/") or ".." in name:
                     raise ValueError(f"Invalid project file: suspicious path '{name}'")
+
+            # #696: MAX_UPLOAD_SIZE caps the archive, not what it expands to.
+            assert_expanded_size_within_limit(zf)
 
             manifest = _read_manifest_and_check_format(zf)
 
@@ -1312,16 +1327,107 @@ def build_merge_code_preview(
     return previews
 
 
-def _extract_zip_member(zf: zipfile.ZipFile, member: str, target_path: Path) -> None:
+def _repair_pre_v5_excerpt_offsets(
+    db: Session, data: dict, remap: dict, inserted_excerpt_ids: set[int],
+) -> int:
+    """Convert an old archive's UTF-16 excerpt offsets to code points (#687).
+
+    Format v5 is the first to write code-point offsets. Anything earlier carries the
+    browser's UTF-16 basis unconverted, so an excerpt on a segment containing an
+    astral character (emoji, CJK Ext-B, ZWJ sequence, flag, skin-tone modifier)
+    points at the wrong text — the same defect the repair migration fixed in place,
+    arriving through the other door.
+
+    Scoped to segments whose text actually contains an astral character: every BMP
+    character is one unit in BOTH bases, so for everything else the stored number is
+    already correct and rewriting it would be a no-op at best. That is what keeps
+    this safe to run over an entire archive.
+
+    ⚠️ ``inserted_excerpt_ids`` is REQUIRED, and it is the whole correctness argument
+    (#714). The conversion is only valid on rows whose offsets CAME OUT OF THIS FILE.
+    Under ``import_mode="merge"`` the excerpt remap also points at rows that already
+    existed locally — matched by uuid, which is the designed multi-coder flow, so
+    those are exactly the shared quotes both copies carry. Those rows already hold
+    code points (the repair migration converted them, or a post-fix build wrote
+    them), so converting again shifts them one place per preceding astral character:
+    silent, permanent, and on data this import never wrote. Reading `remap` here
+    instead of the inserted set is what caused that, so the parameter has no default
+    — a future caller has to answer the question rather than inherit a wrong answer.
+
+    Returns the number of excerpts rewritten (for the import report / tests).
+    """
+    if int(data.get("format_version", 0) or 0) >= 5:
+        return 0
+
+    excerpt_remap = remap.get("excerpts", {})
+    # No `or not inserted_excerpt_ids` short-circuit here on purpose: the filter
+    # below already yields nothing against an empty set, so the extra clause could
+    # not be killed by mutation — and it actively HID a broken filter, because a
+    # merge where every excerpt matches leaves the set empty and returns here before
+    # the filter ever runs.
+    if not excerpt_remap:
+        return 0
+
+    # Only char-range excerpts can be affected; time ranges are seconds (D29) and
+    # whole-segment excerpts carry no offsets at all.
+    char_range_old_ids = {
+        it.get("_original_id")
+        for it in data.get("excerpts", [])
+        if it.get("start_offset") is not None
+    }
+    new_ids = [
+        nid for old_id, nid in excerpt_remap.items()
+        if old_id in char_range_old_ids and nid in inserted_excerpt_ids
+    ]
+    if not new_ids:
+        return 0
+
+    repaired = 0
+    rows = (
+        db.query(Excerpt, Segment.text)
+        .join(Segment, Excerpt.segment_id == Segment.id)
+        .filter(Excerpt.id.in_(new_ids), Excerpt.start_offset.isnot(None))
+        .all()
+    )
+    for excerpt, text in rows:
+        if not text or not has_astral(text):
+            continue
+        new_start = utf16_to_codepoint(text, excerpt.start_offset)
+        new_end = utf16_to_codepoint(text, excerpt.end_offset)
+        # ck_excerpt_offsets_valid_range needs end > start STRICTLY; a range that
+        # collapses under conversion was already degenerate, so leave it be rather
+        # than fail the whole import over one malformed row.
+        if new_end <= new_start or (new_start == excerpt.start_offset and new_end == excerpt.end_offset):
+            continue
+        excerpt.start_offset = new_start
+        excerpt.end_offset = new_end
+        repaired += 1
+
+    if repaired:
+        db.flush()
+    return repaired
+
+
+def _extract_zip_member(
+    zf: zipfile.ZipFile, member: str, target_path: Path, base_dir: Path
+) -> None:
     """Stream one archive member to target_path in fixed-size chunks.
 
     #567: media files can be up to 4 GB (MAX_MEDIA_SIZE) against a <256 MB
     backend memory target, so NEVER buffer the whole member in RAM
     (``dst.write(src.read())`` would). ``shutil.copyfileobj`` reads in 1 MiB
     slices — matching the upload path's streaming (``_stream_upload_to_temp``).
-    Callers resolve target_path; the top-of-import zip-slip scan guarantees no
-    member escapes the project dir before we reach here.
+
+    #688: the containment check lives HERE, not at the call sites, and ``base_dir``
+    is REQUIRED for that reason. This function opens the member with ``zf.open()``
+    and writes through a manually-joined path — which bypasses the member
+    sanitisation CPython applies inside ``zf.extract`` — so it is the last place the
+    destination can be judged, and the only place all three call sites pass through.
+    The old top-of-import name scan is retained as a cheap pre-flight, but it is no
+    longer what makes extraction safe: it matched patterns (``startswith("/")``,
+    ``".." in name``) and a Windows drive-absolute member defeated both.
     """
+    assert_member_within(base_dir, target_path, member)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     with zf.open(member) as src, open(target_path, "wb") as dst:
         shutil.copyfileobj(src, dst, length=1024 * 1024)
@@ -1380,10 +1486,14 @@ def import_project(
         report.setdefault("codes_linked", 0)
         report.setdefault("codes_created", 0)
     with zipfile.ZipFile(str(file_path), "r") as zf:
-        # Zip-slip prevention (matches validate_project_file check)
+        # Cheap pre-flight (matches validate_project_file). Per-member containment
+        # is enforced inside `_extract_zip_member`; the expansion cap is #696.
+        # Both run HERE too rather than trusting /validate-import — same reasoning
+        # as the format gate three lines down (see its helper docstring).
         for name in zf.namelist():
             if name.startswith("/") or ".." in name:
                 raise ValueError(f"Invalid project file: suspicious path '{name}'")
+        assert_expanded_size_within_limit(zf)
 
         # Format gate — must run here too, not just in /validate-import (see helper docstring)
         _read_manifest_and_check_format(zf)
@@ -1423,6 +1533,16 @@ def import_project(
             "canvas_pending_items": {}, "coders": {},
         }
 
+        # #714: which rows this import actually INSERTED, per remap key.
+        #
+        # `remap` alone cannot answer that. A MERGE remaps a matched entity onto a
+        # row that ALREADY EXISTED in the target, so every value in `remap` is
+        # either "we wrote this" or "this was already here" with nothing to tell
+        # them apart — and a post-pass that rewrites the second kind is editing the
+        # user's own data, which `_add`'s match branch deliberately never does.
+        # Any post-pass that MUTATES imported rows must read this, not `remap`.
+        inserted_ids: dict[str, set[int]] = {}
+
         def _add(model, item, overrides=None, remap_key=None):
             """Build entity from export dict, add to session, track in remap.
 
@@ -1451,6 +1571,7 @@ def import_project(
             db.flush()
             if remap_key:
                 remap[remap_key][item["_original_id"]] = obj.id
+                inserted_ids.setdefault(remap_key, set()).add(obj.id)
             return obj
 
         # ── a. Project ──────────────────────────────────────────────
@@ -1868,6 +1989,15 @@ def import_project(
                 "dataset_value_id": _remap_id(remap, "dataset_values", item.get("dataset_value_id")),
             }, "excerpts")
 
+        # #687: a pre-v5 archive carries UTF-16 offsets. Repair AFTER the excerpts
+        # land, because the conversion needs each one's segment TEXT, which is only
+        # addressable once both rows exist and the FK has been remapped. #714: only
+        # the rows THIS import inserted — a merge-matched row is the target's own
+        # data and already speaks code points.
+        _repair_pre_v5_excerpt_offsets(
+            db, data, remap, inserted_ids.get("excerpts", set()),
+        )
+
         # ── q. CodeApplications ────────────────────────────────────
         for item in data.get("code_applications", []):
             seg_id = _remap_id(remap, "segments", item.get("segment_id"))
@@ -1919,6 +2049,22 @@ def import_project(
                 "observation_id": _remap_id(remap, "observations", item.get("observation_id")),
                 "excerpt_id": _remap_id(remap, "excerpts", item.get("excerpt_id")),
             }, "notes")
+
+        # #747: give imported notes numbers that do not collide with the target's
+        # own. This is NOT version-gated — the collision predates the fix, because
+        # `sequence_number` rides the wire as a plain column, so a merge into an
+        # existing conversation has always brought a second `1..n` run into the
+        # same parent. Same #714 rule as `_repair_pre_v5_excerpt_offsets` above:
+        # the INSERTED set, never `remap`, or the target's own labels get rewritten.
+        #
+        # ⚠️ It must run AFTER the loop that inserts them. It originally sat beside
+        # the excerpt repair, ~50 lines earlier, where `inserted_ids["notes"]` is
+        # still empty — so it returned 0 on its first line and renumbered nothing,
+        # on every import. The unit tests could not see it: they call the service
+        # directly with a hand-built id set, so 14 of 16 stayed green under the
+        # mutant. `tests/test_note_numbering.py::TestImportRenumberingIsWired`
+        # drives a real `import_project` for exactly that reason.
+        renumber_imported_notes(db, inserted_ids.get("notes", set()))
 
         # ── s. Memos (defer "analysis" and "canvas" types until their targets exist)
         deferred_memos = []
@@ -2338,7 +2484,7 @@ def import_project(
 
                 relative_path = parts[2]
                 target_path = new_project_docs_dir / str(new_doc_id) / relative_path
-                _extract_zip_member(zf, member, target_path)
+                _extract_zip_member(zf, member, target_path, new_project_docs_dir)
 
         # ── Copy media files (audio) ──────────────────────────────
         if media_dir is not None:
@@ -2355,7 +2501,7 @@ def import_project(
                     # Canvas images: media/canvas/{uuid}.{ext} — no ID remapping
                     if parts[1] == "canvas":
                         target_path = new_project_media_dir / "canvas" / parts[2]
-                        _extract_zip_member(zf, member, target_path)
+                        _extract_zip_member(zf, member, target_path, new_project_media_dir)
                         continue
 
                     # Recordings: media/{owner_dir}/{filename}, where owner_dir is a
@@ -2382,7 +2528,7 @@ def import_project(
                         / media_storage.media_owner_segment(owner_kind, new_owner_id)
                         / relative_path
                     )
-                    _extract_zip_member(zf, member, target_path)
+                    _extract_zip_member(zf, member, target_path, new_project_media_dir)
 
         # Media-less archives (include_media=False exports, or trimmed files):
         # clear orphaned media metadata for any conversation whose recording

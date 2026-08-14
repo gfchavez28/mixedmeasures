@@ -36,7 +36,9 @@ function excerpt(over: Partial<ExcerptResponse> = {}): ExcerptResponse {
   return {
     id: 5, segment_id: 2001, dataset_value_id: null,
     start_offset: null, end_offset: null, start_time: null, end_time: null,
-    excerpt_text: '', conversation_id: null, conversation_name: null,
+    excerpt_text: '',
+    source_kind: 'observation', source_name: 'nasa_collins_apollo11_interview',
+    conversation_id: null, conversation_name: null,
     observation_id: 7, observation_name: 'nasa_collins_apollo11_interview',
     speaker_name: null, segment_timestamp: null,
     note: null, has_note: false, created_at: '2026-07-25T00:00:00+00:00',
@@ -110,7 +112,8 @@ describe('MaterialsDrawer — clip excerpts (#630)', () => {
         excerpt({ id: 5, start_time: 60, end_time: 61 }),
         excerpt({
           id: 6, observation_id: null, observation_name: null,
-          conversation_id: 3, conversation_name: 'Interview 1',
+          source_kind: 'conversation', source_name: 'Interview 1',
+      conversation_id: 3, conversation_name: 'Interview 1',
           speaker_name: 'P04', excerpt_text: 'we tried that',
         }),
       ],
@@ -131,7 +134,8 @@ describe('MaterialsDrawer — clip excerpts (#630)', () => {
     vi.mocked(excerptsApi.list).mockResolvedValue({
       excerpts: [excerpt({
         observation_id: null, observation_name: null,
-        conversation_id: 3, conversation_name: 'Interview 1',
+        source_kind: 'conversation', source_name: 'Interview 1',
+      conversation_id: 3, conversation_name: 'Interview 1',
         speaker_name: 'P04', excerpt_text: 'we tried that',
       })],
     } as never)

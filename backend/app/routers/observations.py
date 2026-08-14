@@ -19,6 +19,7 @@ from ..auth import get_current_user
 from ..database import get_db
 from ..models.code_application import CodeApplication
 from ..models.note import Note
+from ..services.note_numbering import next_note_sequence
 from ..models.observation import Observation
 from ..models.segment import Segment
 from ..models.user import User
@@ -1153,8 +1154,11 @@ async def create_observation_note(
         document_id=None,
         dataset_value_id=None,
         content=data.content,
-        sequence_number=0,
     )
+    # #747: was a literal 0, so every observation note was "note 0" — visible the
+    # moment #740 gave each note its own badge, and printed as `N-0` by the Excel
+    # export and the Memos & Notes page all along.
+    note.sequence_number = next_note_sequence(db, note)
     db.add(note)
     db.flush()
 

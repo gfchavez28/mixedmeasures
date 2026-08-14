@@ -219,7 +219,7 @@ export default function ScratchpadSection({ projectId, search, onExpandedChange 
                 {/* Meta row — always first, matching Memos/Notes */}
                 <div className="flex items-center gap-2 mb-1.5">
                   {entry.context_hint && (
-                    <span className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-100/70 dark:bg-amber-900/20 rounded px-1.5 py-0.5 truncate max-w-[150px]">
+                    <span className="text-[10px] text-amber-700 dark:text-amber-400 bg-amber-100/70 dark:bg-amber-900/20 rounded px-1.5 py-0.5 truncate max-w-[150px]">
                       {entry.context_hint}
                     </span>
                   )}
@@ -288,7 +288,7 @@ export default function ScratchpadSection({ projectId, search, onExpandedChange 
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-6 text-[11px] text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20 px-1.5 ml-auto"
+                      className="h-6 text-[11px] text-red-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/20 px-1.5 ml-auto"
                       onClick={(e) => { e.stopPropagation(); deleteMutation.mutate(entry.id) }}
                       disabled={deleteMutation.isPending}
                     >

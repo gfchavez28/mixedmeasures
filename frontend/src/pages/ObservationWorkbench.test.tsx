@@ -207,6 +207,22 @@ const CLIPS = [
   clip(14, 1000, 1100, 'Coded moment', {
     applied_codes: [7],
     applied_code_details: [{ code_id: 7, user_id: 1, attribution: null, is_universal: false }],
+    // #740: MORE THAN ONE note, on the clip that already carries the extras.
+    // A zero-note fixture cannot tell a per-note control from a count badge —
+    // the old code rendered nothing there either, so both pass. The defect only
+    // shows when a clip has several notes and you want a particular one.
+    // Attached here rather than as a fifth clip: two other tests assert the
+    // list's length and its end-to-end merge behaviour.
+    // ⚠️ sequence_numbers that do NOT match their positions, and that is the
+    // whole point of the fixture — a 1,2,3 set cannot tell "numbered by the
+    // note" from "numbered by where it sits". #747 made these real (they were
+    // all 0, so the badge had to count positions for one release); the gap here
+    // is what deleting note 2 leaves behind, which a stable label must survive.
+    attached_notes: [
+      { id: 901, sequence_number: 1 },
+      { id: 902, sequence_number: 3 },
+      { id: 903, sequence_number: 7 },
+    ],
   }),
 ]
 
@@ -294,6 +310,22 @@ describe('the clip listbox (#436/#484 pattern)', () => {
       expect(row).toHaveAttribute('aria-selected', 'true')
       expect(listbox).toHaveAttribute('aria-activedescendant', 'clip-11')
     })
+  })
+
+  it('#751: every option states its position and the real set size', async () => {
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    expect(rows.length).toBeGreaterThan(0)
+
+    // ⚠️ Asserted against the FIXTURE's clip count, deliberately not against
+    // `rows.length`. jsdom gives Virtuoso no viewport so it mounts every row,
+    // making those two numbers coincide here — and a test that compares the
+    // rendered count to itself would pass on exactly the bug this fixes (NVDA
+    // announced "1 of 7" on a 13-clip observation because it counted the DOM).
+    for (const [i, row] of rows.entries()) {
+      expect(row).toHaveAttribute('aria-setsize', String(CLIPS.length))
+      expect(row, 'aria-posinset is 1-based').toHaveAttribute('aria-posinset', String(i + 1))
+    }
   })
 })
 
@@ -457,6 +489,46 @@ describe('slab 3e — the freeze flow', () => {
     expect(await screen.findByText(/drops this observation’s consensus layer/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Unfreeze' }))
     await waitFor(() => expect(unfreezeSegmentation).toHaveBeenCalledWith(1, 5))
+  })
+
+  /**
+   * #754 — measured with NVDA on a frozen observation: tabbing the toolbar
+   * announced Previous/Rename/Follow/Colleagues/Unfreeze and nothing else.
+   * Split, Merge, Undo, Redo and every Delete were ABSENT, because native
+   * `disabled` takes a control out of the tab order — so a keyboard user never
+   * learned those operations exist, nor that the reason was the agreed cut set.
+   * The walkthrough had predicted they would announce as "unavailable"; they
+   * did not, they were skipped.
+   */
+  it('frozen: the segmentation controls stay reachable and name the reason (#754)', async () => {
+    getObservation.mockResolvedValue({ ...OBSERVATION, segmentation_frozen_at: '2026-07-17T00:00:00+00:00' })
+    renderWorkbench()
+    await screen.findAllByRole('option')
+
+    for (const label of ['Split clip at playhead', 'Merge selected clips']) {
+      const btn = screen.getByRole('button', { name: `${label} — unavailable while the clip set is frozen` })
+      expect(btn).not.toBeDisabled()          // reachable by Tab...
+      expect(btn).toHaveAttribute('aria-disabled', 'true')   // ...and announced unavailable
+      // The click guard, at the call site: aria-disabled does not stop
+      // activation on its own, and splitting a frozen set would 409 anyway.
+      fireEvent.click(btn)
+    }
+    expect(splitClip).not.toHaveBeenCalled()
+    expect(mergeClips).not.toHaveBeenCalled()
+
+    // The badge states the same consequence for a browse-mode reader, who never
+    // tabs to a control at all.
+    expect(screen.getByRole('img', { name: /Splitting, merging and deleting clips are unavailable/ }))
+      .toBeInTheDocument()
+  })
+
+  it('unfrozen: a transient precondition keeps the plain name and no tab stop', async () => {
+    renderWorkbench()
+    await screen.findAllByRole('option')
+    // Nothing selected → merge is unavailable for a reason that resolves itself.
+    const merge = screen.getByRole('button', { name: 'Merge selected clips' })
+    expect(merge).toBeDisabled()
+    expect(merge).not.toHaveAttribute('aria-disabled')
   })
 })
 
@@ -861,12 +933,12 @@ describe('chips + blind mode (the #441 chokepoints through the blind lens)', () 
     const rows = await screen.findAllByRole('option')
     // Both-coded clip: exactly ONE chip (mine), attributed to me.
     await waitFor(() =>
-      expect(within(rows[0]).getAllByLabelText(/coded by/)).toHaveLength(1),
+      expect(within(rows[0]).getAllByText(/coded by/)).toHaveLength(1),
     )
-    expect(within(rows[0]).getByLabelText('coded by Alice')).toBeInTheDocument()
+    expect(within(rows[0]).getByText('coded by Alice')).toBeInTheDocument()
     // Colleague-only clip: no chip, no attribution, and no add-code affordance
     // either — the widget's PRESENCE would leak "a colleague coded this".
-    expect(within(rows[1]).queryByLabelText(/coded by/)).not.toBeInTheDocument()
+    expect(within(rows[1]).queryByText(/coded by/)).not.toBeInTheDocument()
     expect(within(rows[1]).queryByRole('button', { name: 'Add code' })).not.toBeInTheDocument()
   })
 
@@ -881,12 +953,12 @@ describe('chips + blind mode (the #441 chokepoints through the blind lens)', () 
     expect(await screen.findByText('Colleagues shown')).toBeInTheDocument()
     const rows = await screen.findAllByRole('option')
     await waitFor(() =>
-      expect(within(rows[0]).getAllByLabelText(/coded by/)).toHaveLength(2),
+      expect(within(rows[0]).getAllByText(/coded by/)).toHaveLength(2),
     )
-    expect(within(rows[0]).getByLabelText('coded by Alice')).toBeInTheDocument()
-    expect(within(rows[0]).getByLabelText('coded by Bob')).toBeInTheDocument()
+    expect(within(rows[0]).getByText('coded by Alice')).toBeInTheDocument()
+    expect(within(rows[0]).getByText('coded by Bob')).toBeInTheDocument()
     // The colleague-only clip now shows Bob's chip.
-    expect(within(rows[1]).getByLabelText('coded by Bob')).toBeInTheDocument()
+    expect(within(rows[1]).getByText('coded by Bob')).toBeInTheDocument()
   })
 
   // #656: colour is a THIRD channel through which "a colleague coded this"
@@ -1104,8 +1176,54 @@ describe('#666 — the clip column header matches the clip row', () => {
     renderWorkbench()
     const rows = await screen.findAllByRole('option')
     const header = screen.getByTestId('clip-column-header')
-    expect(trackClasses(header)).toEqual(['w-28', 'flex-1', 'w-44', 'w-16'])
+    // #740 added a FIFTH track: row actions (the delete button), deliberately
+    // unlabelled in the header. Naming that track is what put the word "Notes"
+    // over a delete button — a header names data columns, not row actions.
+    expect(trackClasses(header)).toEqual(['w-28', 'flex-1', 'w-44', 'w-16', 'w-8'])
     expect(trackClasses(rows[0])).toEqual(trackClasses(header))
+  })
+
+  it('keeps the delete button OUT of the column the header calls "Notes" (#740)', async () => {
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    // The reported defect: on a clip with no note — 12 of 13 in the live
+    // fixture — this cell was nothing but a trash can, under the word "Notes".
+    //
+    // ⚠️ Ask it of the BUTTON, not of the cell. Querying the notes cell and
+    // looking inside it passes the moment a second element carries the same
+    // marker — `querySelector` returns the first match and the real notes cell
+    // is innocent. Mutation-proven: that version survived putting the delete
+    // button back under a `data-col="notes"` track.
+    const del = within(rows[0]).getByLabelText(/^Delete clip/)
+    expect(del.closest('[data-col="notes"]')).toBeNull()
+    expect(del.closest('[role="option"]')).toBe(rows[0])
+  })
+
+  it('gives every note its own control, not a count (#740)', async () => {
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    const row = rows.find(r => within(r).queryByText('Coded moment'))!
+    const badges = [...row.querySelectorAll('[aria-label^="Note "]')]
+    // A `role="img"` count told you three notes existed and offered no way to
+    // reach any one of them; the sibling surfaces render one button per note.
+    //
+    // ⚠️ Assert the ARITY against the fixture, not `length > 0`. Mutation-proven:
+    // rendering only the first note passed a `toBeGreaterThan(0)` version — the
+    // exact half-fixed state (a control that exists, for one note of three).
+    expect(badges).toHaveLength(3)
+    // #747: the note's OWN number, so this is the fixture's 1/3/7 rather than
+    // 1/2/3. Reverting to `i + 1` renders positions and fails here — which is
+    // what makes this an assertion about the label's source, not its presence.
+    expect(badges.map(b => b.textContent?.trim())).toEqual(['1', '3', '7'])
+    expect(badges.map(b => b.getAttribute('aria-label'))).toEqual([
+      expect.stringMatching(/^Note 1 on clip /),
+      expect.stringMatching(/^Note 3 on clip /),
+      expect.stringMatching(/^Note 7 on clip /),
+    ])
+    for (const b of badges) {
+      expect(b.tagName).toBe('BUTTON')
+      expect(b.getAttribute('aria-label')).toMatch(/^Note \d+ on clip /)
+    }
   })
 
   it('shares the header row’s gap and padding, so the tracks line up', async () => {
@@ -1116,6 +1234,29 @@ describe('#666 — the clip column header matches the clip row', () => {
       expect(header.className).toContain(cls)
       expect(rows[0].className).toContain(cls)
     }
+  })
+
+  /**
+   * #739's rendered half. The cross-surface guard (`lib/coding-column-order.test.ts`)
+   * scans SOURCE order across all four coding surfaces, because only this one
+   * has a harness; this confirms that on a real render the two halves agree and
+   * the markers survive into the DOM.
+   *
+   * ⚠️ **What it does NOT prove, established by mutation rather than assumed:**
+   * adding `order-first` to the notes track leaves this test GREEN. `order-*`
+   * and `flex-row-reverse` change VISUAL order without touching DOM order, and
+   * jsdom computes no layout (the #717/#718 rule), so no unit test in this repo
+   * can see that class of divergence. Visual order is a layout claim and needs a
+   * rendered measurement — it was driven live at the #739 fix.
+   */
+  it('renders Codes before Notes in the DOM, header and row alike (#739)', async () => {
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    const header = screen.getByTestId('clip-column-header')
+    const order = (el: Element) =>
+      [...el.querySelectorAll('[data-col]')].map(n => n.getAttribute('data-col'))
+    expect(order(header)).toEqual(['codes', 'notes'])
+    expect(order(rows[0])).toEqual(order(header))
   })
 
   it('keeps the search box OUT of the column header — that was the whole bug', async () => {
@@ -1765,7 +1906,7 @@ describe('coverage gauge + density strip + `u` (6a — D33/D34/D35/D36)', () => 
     // EITHER variable reads 50% and `waitFor` settles on that first render.
     const rows = await screen.findAllByRole('option')
     await waitFor(() =>
-      expect(within(rows[1]).queryByLabelText(/coded by/)).not.toBeInTheDocument(),
+      expect(within(rows[1]).queryByText(/coded by/)).not.toBeInTheDocument(),
     )
     // 50 (mine) + 50 (Carla's) of 200 = 50%. On the chip lens it reads 25%.
     expect(screen.getByRole('progressbar')).toHaveTextContent('50% covered')

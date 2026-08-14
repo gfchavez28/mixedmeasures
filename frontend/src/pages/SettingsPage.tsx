@@ -1,10 +1,12 @@
 import { useState, useRef } from 'react'
 import { Link } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Sun, Moon, Monitor, Download, FileInput, ChevronDown, ChevronUp, LoaderCircle, ArrowLeft, Clock, Info, Lock, Unlock, Archive, ArchiveRestore, UserPlus, Copy, Quote } from 'lucide-react'
+import { Sun, Moon, Monitor, Download, FileInput, ChevronDown, ChevronUp, LoaderCircle, ArrowLeft, Clock, Info, Lock, Unlock, Archive, ArchiveRestore, UserPlus, Copy, Quote, Plus, Minus } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuth } from '@/lib/auth-context'
 import { useTheme, type ThemeMode } from '@/lib/theme-context'
+import { useZoom } from '@/lib/zoom-context'
+import { formatZoom, MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM } from '@/lib/zoom'
 import { authApi, backupApi, type RestorePreview } from '@/lib/api'
 import { formatRelativeTime, formatBytes } from '@/lib/format'
 import MMLogo from '@/components/MMLogo'
@@ -45,6 +47,79 @@ const BACKUP_TYPE_LABELS: Record<string, string> = {
   auto: 'Auto',
   pre_restore: 'Pre-restore',
   pre_migration: 'Pre-migration',
+}
+
+/**
+ * Text size (#697) — the discoverable half of the zoom fix.
+ *
+ * Renders nothing in the browser, matching `SoftwareUpdateSection`: outside the
+ * packaged app there is no bridge to apply a factor, and the browser's own Ctrl+=
+ * already works, so a control here would be a broken duplicate of a working one.
+ *
+ * A visible control rather than keyboard-only on purpose. The audience is applied
+ * researchers, evaluators and faculty reading a 12–13px type scale; a shortcut they
+ * have to already know about is worth much less than a row they can find. The
+ * accelerators are restored too (`zoom-context`), so both paths exist.
+ */
+function TextSizeControl() {
+  const { zoom, isSupported, zoomIn, zoomOut, resetZoom } = useZoom()
+  if (!isSupported) return null
+
+  const atMin = zoom <= MIN_ZOOM
+  const atMax = zoom >= MAX_ZOOM
+
+  return (
+    <div className="mt-4 pt-4 border-t border-mm-border-subtle">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h3 className="text-sm font-medium text-mm-text">Text size</h3>
+          <p className="text-xs text-mm-text-muted mt-0.5">
+            Scales the whole app. Also available as {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}
+            {' '}+ plus, minus and 0.
+          </p>
+        </div>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={zoomOut}
+            disabled={atMin}
+            aria-label="Decrease text size"
+          >
+            <Minus className="w-4 h-4" aria-hidden="true" />
+          </Button>
+          {/* aria-live so the new size is announced on press — the visible number is
+              the only feedback, and a screen-reader user pressing +/− would
+              otherwise get silence. `atomic` because "110%" only means something whole. */}
+          <span
+            className="min-w-[3.5rem] text-center text-sm tabular-nums text-mm-text"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {formatZoom(zoom)}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={zoomIn}
+            disabled={atMax}
+            aria-label="Increase text size"
+          >
+            <Plus className="w-4 h-4" aria-hidden="true" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={resetZoom}
+            disabled={zoom === DEFAULT_ZOOM}
+            className="ml-1"
+          >
+            Reset
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export default function SettingsPage() {
@@ -105,6 +180,7 @@ export default function SettingsPage() {
               )
             })}
           </div>
+          <TextSizeControl />
         </section>
 
         {/* Backup & Data */}
@@ -440,7 +516,7 @@ function BackupSection() {
               <Info className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
           </PopoverTrigger>
-          <PopoverContent align="start" className="text-sm text-mm-text-secondary leading-relaxed max-w-xs">
+          <PopoverContent align="start" className="text-sm text-mm-text-secondary leading-relaxed max-w-xs" aria-label="Saved vs. backed up">
             <p className="font-medium text-mm-text mb-1">Saved vs. backed up</p>
             Every edit is saved to disk the moment you make it — your work isn't waiting in
             memory anywhere. Backups are a separate safety net: Mixed Measures takes a
@@ -971,7 +1047,7 @@ function CoderIdentitySection() {
               <PopoverTrigger asChild>
                 <ColorDotButton color={previewColor} aria-label="Change badge color" title="Change badge color" />
               </PopoverTrigger>
-              <PopoverContent className="w-auto p-3" align="start">
+              <PopoverContent className="w-auto p-3" align="start" aria-label="Badge color">
                 <div className="space-y-2">
                   <p className="text-xs font-medium text-mm-text-secondary">Badge color</p>
                   <ColorSwatchPicker value={effectiveColor ?? ''} onChange={c => { setColor(c); setPickerOpen(false) }} />

@@ -12,7 +12,7 @@ repair, the consensus sweep, the #574 duration backfill.
 ⚠️ These tests assert on logger STATE, never on captured output. `caplog`
 installs its own handler and forces levels, so a `caplog`-based test passes
 green against the broken app — which is exactly why this survived for so long,
-and why `backend/tests/CLAUDE.md` carried it as a test-harness quirk rather than
+and why `backend/tests/the internal design notes carried it as a test-harness quirk rather than
 a production defect.
 """
 

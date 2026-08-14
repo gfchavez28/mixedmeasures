@@ -131,7 +131,7 @@ M_K2011 = [
     [None, 3, None, None],  # <2 present → contributes nothing
 ]
 
-# Ordering-sensitive data MUST include values ≥10 (backend/tests/CLAUDE.md): a
+# Ordering-sensitive data MUST include values ≥10 (backend/tests/the internal design notes): a
 # string-ranked ordinal metric would order 1 < 10 < 2 and get a different α.
 M_MULTIDIGIT = [[1, 1], [2, 3], [10, 10], [1, 2], [5, 5], [10, 2], [3, 3]]
 

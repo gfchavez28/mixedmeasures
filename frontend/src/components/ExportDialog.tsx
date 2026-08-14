@@ -344,8 +344,7 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
               Coded Data, Notes, Quotes and now the Code-Source Matrix all span
               conversations, documents AND observation clips. A researcher
               reading the old heading had every reason to look elsewhere for
-              their document coding. ("CSV (segments)" below IS still
-              conversation-only — see its own note.) */}
+              their document coding. */}
           <section>
             <h3 className="text-xs font-semibold uppercase tracking-wider text-mm-text-secondary mb-2">
               Full project

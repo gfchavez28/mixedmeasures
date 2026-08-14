@@ -39,6 +39,12 @@ interface EquivalenceRowProps {
   domainId: number
   rowIndex: number
   rowCount: number
+  /**
+   * #756 — the column index of this grid's active cell, or null when the active
+   * cell is in a different row. A PRIMITIVE, so it can cross `Cell`'s memo
+   * boundary without churning identity (the #332 render-chain invariant).
+   */
+  activeCol?: number | null
   searchHighlightIds: Set<number>
   activeDragColumnId?: number | null
   conflictFlashColumnId?: number | null
@@ -85,6 +91,7 @@ export const EquivalenceRow = memo(function EquivalenceRow({
   domainId,
   rowIndex,
   rowCount,
+  activeCol = null,
   searchHighlightIds,
   activeDragColumnId = null,
   conflictFlashColumnId = null,
@@ -324,6 +331,8 @@ export const EquivalenceRow = memo(function EquivalenceRow({
                 )}
                 <Cell
                   cell={cellData}
+                  gridPos={`${rowIndex}-${idx}`}
+                  isActiveCell={activeCol === idx}
                   rowEgId={row.kind === 'eg' ? row.equivalence_group_id : null}
                   rowSyntheticColumnId={row.kind === 'unlinked' ? row.column_id : null}
                   isSearchMatch={isSearchMatch}

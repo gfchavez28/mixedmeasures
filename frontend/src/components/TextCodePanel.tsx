@@ -222,7 +222,7 @@ export default function TextCodePanel({
               aria-label={`Change color for ${code.name}`}
             />
           </PopoverTrigger>
-          <PopoverContent className="w-auto p-3" align="start" onClick={(e) => e.stopPropagation()}>
+          <PopoverContent className="w-auto p-3" align="start" onClick={(e) => e.stopPropagation()} aria-label="Code color">
             <ColorSwatchPicker
               value={code.color || ''}
               onChange={(color) => updateColorMutation.mutate({ codeId: code.id, color })}
@@ -314,7 +314,7 @@ export default function TextCodePanel({
                 )}
                 {cat?.name || 'Category'}
                 {chordNumberMap.has(catId) && (
-                  <span className="font-mono text-mm-border-medium">[{chordNumberMap.get(catId)}]</span>
+                  <span className="font-mono text-mm-text-faint">[{chordNumberMap.get(catId)}]</span>
                 )}
               </div>
               {catCodes.map(code =>

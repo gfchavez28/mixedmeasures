@@ -227,6 +227,7 @@ export function MissingValueRows({
     <div ref={containerRef} data-testid={`${idPrefix}-section`}>
       {rows.length > 0 && (
         <table className="w-full text-sm">
+          <caption className="sr-only">Values declared missing for this column.</caption>
           <tbody>
             {rows.map((r, i) => (
               <tr key={i}>
@@ -290,7 +291,7 @@ export function MissingValueRows({
                     data-row-remove={i}
                     onClick={() => removeRow(i)}
                     aria-label={`Remove missing row ${i + 1}`}
-                    className="p-1.5 -m-1.5 rounded text-mm-border-medium hover:text-red-500 transition-colors"
+                    className="p-1.5 -m-1.5 rounded text-mm-text-faint hover:text-red-500 transition-colors"
                   >
                     <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
                   </button>

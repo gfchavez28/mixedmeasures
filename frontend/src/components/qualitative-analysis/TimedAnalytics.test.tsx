@@ -131,3 +131,33 @@ describe('TimedAnalytics', () => {
     expect(listSegments).not.toHaveBeenCalled() // the queries stay off too
   })
 })
+
+describe('chart formatting reaches the codeline (#686)', () => {
+  it('scales the lane labels with labelFontSize, keeping the ruler recessive', async () => {
+    // Every sibling qualitative component honours the material's
+    // `labelFontSize`; this one hardcoded 10px/11px, so the researcher's choice
+    // silently did nothing — on the analysis view as much as on the canvas.
+    // The two sizes stay DISTINCT (a recessive ruler under larger lane labels),
+    // so they scale relative rather than both snapping to one value.
+    listSegments.mockResolvedValue(CLIPS)
+    renderTimed({ labelFontSize: 20 })
+
+    // 'Off-task' renders twice — the codeline lane label (first in DOM order)
+    // and the table's row header. The lane label is the one that scales.
+    await screen.findByRole('table')
+    expect(screen.getAllByText('Off-task')[0]).toHaveStyle({ fontSize: '19px' })
+
+    // The ruler renders the extent's tick labels; 0:00.0 is the first.
+    const tick = screen.getAllByText('0:00.0')[0]
+    expect(tick.parentElement).toHaveStyle({ fontSize: '18px' })
+  })
+
+  it('reproduces the original hardcoded sizes when no formatting is given', async () => {
+    listSegments.mockResolvedValue(CLIPS)
+    renderTimed()
+
+    await screen.findByRole('table')
+    expect(screen.getAllByText('Off-task')[0]).toHaveStyle({ fontSize: '11px' })
+    expect(screen.getAllByText('0:00.0')[0].parentElement).toHaveStyle({ fontSize: '10px' })
+  })
+})

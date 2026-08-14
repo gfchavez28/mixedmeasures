@@ -19,10 +19,12 @@ import {
   resolveGroupTextColors,
   computeLogDomain,
 } from '@/lib/chart-data'
+import { ciCaveat, isItemLevelCi } from '@/lib/ci-label'
 import { useChartColors } from '@/lib/theme-context'
 import type { LabelProps } from 'recharts'
 import type { GroupedScalarSection, ChartFormatting, VariableNMode, SortOrder } from '@/lib/chart-data'
 import type { RechartsTooltipProps, RechartsPayloadEntry, ChartDataRow } from '@/lib/chart-types'
+import { ChartFigure } from './ChartFigure'
 
 interface GroupedScalarBarChartProps {
   sections: GroupedScalarSection[]
@@ -58,8 +60,14 @@ function GroupedTooltip({ active, payload, label }: RechartsTooltipProps) {
             </span>
           )}
           {entry.payload[`_ciLower_${entry.name}`] != null && entry.payload[`_ciUpper_${entry.name}`] != null && (
-            <span className="text-mm-text-faint ml-1">
+            <span
+              className="text-mm-text-faint ml-1"
+              title={ciCaveat(entry.payload[`_ciMethod_${entry.name}`] as string | undefined)}
+            >
               [{(entry.payload[`_ciLower_${entry.name}`] as number).toFixed(DISPLAY_PRECISION)}, {(entry.payload[`_ciUpper_${entry.name}`] as number).toFixed(DISPLAY_PRECISION)}]
+              {/* #715: this tooltip shows a bare range, so an item-level interval needs
+                  the qualifier spelled out — an ordinary one stays uncluttered. */}
+              {isItemLevelCi(entry.payload[`_ciMethod_${entry.name}`] as string | undefined) && ' across items'}
             </span>
           )}
         </div>
@@ -104,6 +112,7 @@ function SingleGroupedScalarChart({
       entry[`_n_${gv}`] = g?.n ?? 0
       entry[`_ciLower_${gv}`] = g?.ciLower ?? undefined
       entry[`_ciUpper_${gv}`] = g?.ciUpper ?? undefined
+      entry[`_ciMethod_${gv}`] = g?.ciMethod ?? undefined
       if (showCI && g?.ciLower != null && g?.ciUpper != null) {
         entry[`_error_${gv}`] = [g.value - g.ciLower, g.ciUpper - g.value]
       }
@@ -327,7 +336,7 @@ export default function GroupedScalarBarChart({
   if (orderedSections.length === 0) return null
 
   return (
-    <div role="img" aria-label={`Grouped bar charts by ${groupValues.join(', ')}`}>
+    <ChartFigure label={`Grouped bar charts by ${groupValues.join(', ')}`}>
       {/* Shared group legend */}
       <div className="flex items-center gap-3 px-1 mb-3">
         {groupValues.map(gv => (
@@ -355,6 +364,6 @@ export default function GroupedScalarBarChart({
           axisTransform={axisTransform}
         />
       ))}
-    </div>
+    </ChartFigure>
   )
 }

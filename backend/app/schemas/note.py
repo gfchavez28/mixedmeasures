@@ -96,7 +96,33 @@ class AllNotesDocument(BaseModel):
     notes: list[AllNotesDocumentNote]
 
 
+class AllNotesObservationNote(BaseModel):
+    id: int
+    content: str
+    sequence_number: int
+    segment_id: int | None
+    # The clip's LABEL, not transcript text — on an observation `Segment.text` is
+    # the researcher's label for a time range and is frequently ''.
+    segment_text: str | None = None
+    created_at: UTCTimestamp
+
+
+class AllNotesObservation(BaseModel):
+    observation_id: int
+    observation_name: str
+    notes: list[AllNotesObservationNote]
+
+
 class AllNotesResponse(BaseModel):
+    """Every note in a project, grouped by the source it hangs off.
+
+    ⚠️ **One group per Note PARENT — and `Note` has four.** A parent missing here
+    is invisible on the Memos & Notes page even though the note exists and the
+    workbench shows it (#515 for documents, #676 for observations: the reader was
+    two parents behind the writer both times). `test_all_notes_arity.py` fails if
+    a parent gains a `Note` FK without gaining a group here.
+    """
     conversations: list[AllNotesConversation]
     texts: list[AllNotesColumn]
     documents: list[AllNotesDocument] = []
+    observations: list[AllNotesObservation] = []

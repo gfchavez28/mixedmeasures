@@ -1,7 +1,9 @@
 import { useMemo } from 'react'
 import type { DumbbellData, ChartFormatting, VariableNMode } from '@/lib/chart-data'
 import { DISPLAY_PRECISION, mergeFormatting, resolveGroupColors, resolveGroupTextColors, computeLogDomain, computeDumbbellAxis } from '@/lib/chart-data'
+import { ciLabel } from '@/lib/ci-label'
 import { useChartColors } from '@/lib/theme-context'
+import { ChartFigure } from './ChartFigure'
 
 interface DumbbellChartProps {
   data: DumbbellData
@@ -240,9 +242,9 @@ export default function DumbbellChart({
   if (filteredRows.length === 0) return null
 
   return (
-    <div role="img" aria-label="Dumbbell comparison chart">
+    <ChartFigure label="Dumbbell comparison chart" count={filteredRows.length} countNoun="rows">
       {isLog && logExcludedCount > 0 && (
-        <div className="text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded px-2 py-1 mb-2">
+        <div className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded px-2 py-1 mb-2">
           {logExcludedCount} value{logExcludedCount > 1 ? 's' : ''} ≤ 0 excluded from log scale
         </div>
       )}
@@ -393,7 +395,7 @@ export default function DumbbellChart({
                 const hasCI = showCI && dot.ciLower != null && dot.ciUpper != null
                 const logSuffix = isLog && dot.value > 0 ? `, log₁₀ = ${Math.log10(dot.value).toFixed(2)}` : ''
                 const ciTitle = hasCI
-                  ? `${dot.groupValue}: ${dot.value.toFixed(DISPLAY_PRECISION)}${suffix}${logSuffix}, 95% CI: [${dot.ciLower!.toFixed(DISPLAY_PRECISION)}${suffix}, ${dot.ciUpper!.toFixed(DISPLAY_PRECISION)}${suffix}], n = ${dot.n}`
+                  ? `${dot.groupValue}: ${dot.value.toFixed(DISPLAY_PRECISION)}${suffix}${logSuffix}, ${ciLabel(dot.ciMethod)}: [${dot.ciLower!.toFixed(DISPLAY_PRECISION)}${suffix}, ${dot.ciUpper!.toFixed(DISPLAY_PRECISION)}${suffix}], n = ${dot.n}`
                   : `${dot.groupValue}: ${dot.value.toFixed(DISPLAY_PRECISION)}${suffix}${logSuffix}, n = ${dot.n}`
 
                 // Label positioning: when jittered, spread labels to avoid collisions
@@ -504,6 +506,6 @@ export default function DumbbellChart({
       {isLog && (
         <div className="text-[11px] text-mm-text-faint mt-1 text-right">Log scale</div>
       )}
-    </div>
+    </ChartFigure>
   )
 }

@@ -282,9 +282,14 @@ describe('Bracket label (Layer 1: variables · datasets)', () => {
   })
 
   it('aria-label includes the count summary for screen readers', () => {
+    // #701(b): the bracket is a REGION, not a grid. `role="grid"` requires row
+    // children and this element's are the label gutter and the frame — the
+    // `aria-required-children` violation the issue reports. The grid moved
+    // inward to the element that maps the rows; the summary label stayed here,
+    // which is what this test is actually about.
     const bracket = buildBracket({ dataset_count: 2 })
     renderBracket({ bracket })
-    const region = screen.getByRole('grid', { name: /Variable group: Leadership/i })
+    const region = screen.getByRole('region', { name: /Variable group: Leadership/i })
     expect(region.getAttribute('aria-label')).toMatch(/1 variable across 2 datasets/i)
   })
 })

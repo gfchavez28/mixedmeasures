@@ -203,6 +203,7 @@ export default function DatasetsListPage() {
         /* Dataset table */
         <div className="rounded-lg border border-mm-surface-border bg-mm-surface shadow-mm-card overflow-hidden">
           <table className="w-full">
+            <caption className="sr-only">Datasets in this project, with record, variable and open-ended counts.</caption>
             <thead>
               <tr className="border-b border-mm-surface-border">
                 <th className="px-4 py-3 text-left text-[13px] font-medium text-mm-text-muted">Name</th>
@@ -211,7 +212,7 @@ export default function DatasetsListPage() {
                 <th className="px-4 py-3 text-right text-[13px] font-medium text-mm-text-muted">Variables</th>
                 <th className="px-4 py-3 text-right text-[13px] font-medium text-mm-text-muted">Open-Ended</th>
                 <th className="px-4 py-3 text-right text-[13px] font-medium text-mm-text-muted">Imported</th>
-                <th className="px-4 py-3 w-16"></th>
+                <th className="px-4 py-3 w-16"><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-mm-border-subtle">
@@ -246,6 +247,7 @@ export default function DatasetsListPage() {
                               />
                             </PopoverTrigger>
                             <PopoverContent
+                              aria-label="Dataset color"
                               align="start"
                               className="w-auto p-3"
                               onClick={(e) => e.stopPropagation()}

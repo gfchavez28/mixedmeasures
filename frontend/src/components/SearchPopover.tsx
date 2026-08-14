@@ -27,6 +27,12 @@ import {
 import { getSpeakerInitials, getInitialsBadgeColors } from '@/lib/conversation-import-utils'
 import { displayCountAfterLocalFilter } from '@/lib/search-display'
 import {
+  canRouteNoteHit,
+  canRouteSegmentHit,
+  noteHitPath,
+  segmentHitPath,
+} from '@/lib/search-source'
+import {
   type FilterCategory,
   SOURCE_FILTERS,
   ANNOTATION_FILTERS,
@@ -66,18 +72,76 @@ function getItemId(item: FlatResultItem): string {
 
 // ── Source badge pill ──
 
-function SourceBadge({ sourceType }: { sourceType?: string }) {
-  if (sourceType === 'document') {
-    return <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400">Doc</span>
-  }
-  if (sourceType === 'conversation') {
-    return <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400">Conv</span>
-  }
-  if (sourceType === 'observation') {
+/**
+ * The source pill on a segment/note row.
+ *
+ * ⚠️ **The light-mode text is `-800`, not `-600`, and that is a WCAG fix — do not
+ * "restore" the lighter tone.** Measured 2026-08-09 against the built stylesheet
+ * (Tailwind v4 OKLCH → sRGB, WCAG 2.x relative luminance), at `text-[10px]` where AA
+ * demands **4.5:1** for normal-size text:
+ *
+ * | badge | was (`-600` on `-100`) | now (`-800` on `-100`) |
+ * |-------|------------------------|------------------------|
+ * | Conv  | **2.93:1 FAIL**        | 6.45:1 PASS            |
+ * | Doc   | 4.68:1 pass            | 7.51:1 PASS            |
+ * | Obs   | **3.25:1 FAIL**        | 6.69:1 PASS            |
+ *
+ * Two of the three shipped below AA. Only the LIGHT tone moved: dark mode already
+ * passed (8.21 / 5.59 / 7.88, compositing the real `-900/30` tint over the dialog's
+ * `hsl(230,10%,12%)`), and the hue is unchanged in both themes because these colours
+ * are the entity identity — green/purple/teal match the TopRail tabs and clip bars.
+ *
+ * ⚠️ Neither contrast guard covers this: `contrast-matrix.test.ts` and
+ * `chrome-contrast.test.ts` both parse `mm-*` tokens out of `index.css`, and these
+ * are raw palette utilities. Same blind spot as #667 (3 of 16 code swatches) and
+ * #699 (2 tokens of ~20) — an entity-palette sweep is worth filing.
+ *
+ * The visible text stays abbreviated so the pill does not crowd the row, while the
+ * announced text is the whole word — "Document", not "Doc". Never focusable (the
+ * #559 rule): a tab stop per row would cost every keyboard user N stops to reach
+ * what the name already announces in browse mode.
+ *
+ * ⚠️ **`aria-hidden` + `sr-only`, deliberately NOT `role="img"` + `aria-label`** —
+ * even though that is the shape the internal design notes names for static badges. Two reasons, and
+ * the first is the one that decided it: `ChartFigure.test.tsx` is a fail-closed scan
+ * banning `role="img"` anywhere in `src/` (#698 — it suppresses children, which
+ * buries a chart's axis labels and values). It offers an ALLOWED escape hatch, and
+ * taking it would have been the easy move; but an exemption is a small permanent
+ * hole in a guard, and this needs none. Second, it announces BETTER: `role="img"`
+ * reads "Document, image", while this reads plain "Document". The rule's actual
+ * intent — named, not focusable — is fully satisfied.
+ */
+const SOURCE_BADGES: Record<string, { label: string; full: string; className: string }> = {
+  document: {
+    label: 'Doc',
+    full: 'Document',
+    className: 'bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400',
+  },
+  conversation: {
+    label: 'Conv',
+    full: 'Conversation',
+    className: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400',
+  },
+  observation: {
     // Teal = the observation accent (TopRail tab, clip bars).
-    return <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium bg-teal-100 text-teal-600 dark:bg-teal-900/30 dark:text-teal-400">Obs</span>
-  }
-  return null
+    label: 'Obs',
+    full: 'Observation',
+    className: 'bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-400',
+  },
+}
+
+function SourceBadge({ sourceKind }: { sourceKind?: string }) {
+  const badge = sourceKind ? SOURCE_BADGES[sourceKind] : undefined
+  if (!badge) return null
+  return (
+    <span
+      title={badge.full}
+      className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium ${badge.className}`}
+    >
+      <span aria-hidden="true">{badge.label}</span>
+      <span className="sr-only">{badge.full}</span>
+    </span>
+  )
 }
 
 export default function SearchPopover({
@@ -141,7 +205,6 @@ export default function SearchPopover({
 
     const exclusionPattern = /\s+-(codes?|segments?|notes?|memos?|conversations?|documents?|observations?|comments?|canvases?)(?:\s|$)/gi
     const exclusions: SearchEntityType[] = []
-    let searchTerm = trimmed
     let match
 
     while ((match = exclusionPattern.exec(trimmed)) !== null) {
@@ -153,7 +216,7 @@ export default function SearchPopover({
     }
 
     if (exclusions.length > 0) {
-      searchTerm = trimmed.replace(/\s+-(codes?|segments?|notes?|memos?|conversations?|documents?|observations?|comments?|canvases?)(?=\s|$)/gi, '').trim()
+      const searchTerm = trimmed.replace(/\s+-(codes?|segments?|notes?|memos?|conversations?|documents?|observations?|comments?|canvases?)(?=\s|$)/gi, '').trim()
       const backendTypes = filtersToBackendTypes(selectedFilters)
       const remainingTypes = backendTypes.filter(t => !exclusions.includes(t))
       if (remainingTypes.length > 0) {
@@ -203,16 +266,20 @@ export default function SearchPopover({
   }
 
   // ── Display-filtered results ──
-  // Segments: filter by source_type to match checked source checkboxes.
+  // Segments: filter by source_kind to match checked source checkboxes.
   // #507: keep the backend's honest total when the filter removed nothing —
   // items is CAPPED, so items.length is the cap, not the match count.
   const displaySegments = useMemo(() => {
     if (!searchResults?.segments) return null
     const fetched = searchResults.segments.items
     const items = fetched.filter(s => {
-      if (s.source_type === 'conversation' && showConvSegments) return true
-      if (s.source_type === 'document' && showDocSegments) return true
-      if (s.source_type === 'observation' && showObsSegments) return true
+      // Fail closed on anything unroutable FIRST (#569): a row this build cannot
+      // navigate must never render, and `canRouteSegmentHit` is the same authority
+      // the click handler uses — so the two can no longer drift apart.
+      if (!canRouteSegmentHit(s)) return false
+      if (s.source_kind === 'conversation') return showConvSegments
+      if (s.source_kind === 'document') return showDocSegments
+      if (s.source_kind === 'observation') return showObsSegments
       return false
     })
     if (items.length === 0) return null
@@ -222,16 +289,14 @@ export default function SearchPopover({
     }
   }, [searchResults?.segments, showConvSegments, showDocSegments, showObsSegments])
 
-  // Notes: the same whitelist posture as segments — a kind this popover can't
-  // navigate must not render a row that clicks through to /conversations/null.
-  // All three source kinds navigate since 4e; the whitelist stays fail-closed
-  // against a FUTURE kind.
+  // Notes: the same posture as segments — a kind this popover can't navigate must
+  // not render a row that clicks through to /conversations/null. That is no longer
+  // a hand-kept whitelist beside the router; it IS the router (#569), so a future
+  // source kind is unrenderable until it is given a route.
   const displayNotes = useMemo(() => {
     if (!searchResults?.notes) return null
     const fetched = searchResults.notes.items
-    const items = fetched.filter(n =>
-      n.source_type === 'conversation' || n.source_type === 'document'
-      || n.source_type === 'observation' || n.source_type === undefined)
+    const items = fetched.filter(canRouteNoteHit)
     if (items.length === 0) return null
     return {
       count: displayCountAfterLocalFilter(searchResults.notes.count, fetched.length, items.length),
@@ -337,18 +402,12 @@ export default function SearchPopover({
   }, [onClose, navigate])
 
   const handleSegmentClick = (segment: SegmentSearchResult) => {
-    const term = parsedSearchTerm
-    if (segment.source_kind === 'observation' && segment.source_id != null) {
-      // Clip hit → the workbench ?clip= deep-link (D26). Keyed on the honest
-      // source_id pair — conversation_id is NULL on observation hits (#569).
-      closeAndNavigate(`/projects/${projectId}/observations/${segment.source_id}?clip=${segment.id}`)
-    } else if (segment.source_type === 'document') {
-      closeAndNavigate(`/projects/${projectId}/documents/${segment.conversation_id}`)
-    } else {
-      const params = new URLSearchParams({ segment: String(segment.id) })
-      if (term) params.set('q', term)
-      closeAndNavigate(`/projects/${projectId}/conversations/${segment.conversation_id}?${params}`)
-    }
+    // #569: routing lives in lib/search-source.ts so it is testable and so the
+    // render filter above cannot disagree with it. A null path means "this build
+    // cannot route that kind" — the row should not have rendered, so do nothing
+    // rather than navigate somewhere wrong.
+    const path = segmentHitPath(projectId, segment, parsedSearchTerm)
+    if (path) closeAndNavigate(path)
   }
 
   const handleCodeClick = (_code: CodeSearchResult) => {
@@ -370,16 +429,8 @@ export default function SearchPopover({
   }
 
   const handleNoteClick = (note: NoteSearchResult) => {
-    if (note.source_kind === 'observation' && note.source_id != null) {
-      // Clip-anchored notes deep-link to their clip; observation-level notes
-      // land on the workbench plain.
-      const suffix = note.segment_id != null ? `?clip=${note.segment_id}` : ''
-      closeAndNavigate(`/projects/${projectId}/observations/${note.source_id}${suffix}`)
-    } else if (note.source_type === 'document') {
-      closeAndNavigate(`/projects/${projectId}/documents/${note.conversation_id}`)
-    } else {
-      closeAndNavigate(`/projects/${projectId}/conversations/${note.conversation_id}`)
-    }
+    const path = noteHitPath(projectId, note)
+    if (path) closeAndNavigate(path)
   }
 
   const handleMemoClick = (_memo: MemoSearchResult) => {
@@ -642,7 +693,7 @@ export default function SearchPopover({
       <div className="flex-1 min-w-0">
         <p className="text-sm">{highlightMatch(getSnippet(segment.text, debouncedQuery), debouncedQuery)}</p>
         <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5">
-          <SourceBadge sourceType={segment.source_type} />
+          <SourceBadge sourceKind={segment.source_kind} />
           {segment.conversation_name}
           {segment.speaker_name && ` \u00b7 ${segment.speaker_name}`}
           {segment.start_time !== null && ` \u00b7 ${formatTime(segment.start_time)}`}
@@ -715,7 +766,7 @@ export default function SearchPopover({
       <div className="flex-1 min-w-0">
         <p className="text-sm">{highlightMatch(getSnippet(note.content, debouncedQuery), debouncedQuery)}</p>
         <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5">
-          <SourceBadge sourceType={note.source_type} />
+          <SourceBadge sourceKind={note.source_kind} />
           {note.conversation_name}
           {note.segment_text_preview && ` \u00b7 "${truncate(note.segment_text_preview, 30)}"`}
         </p>

@@ -38,6 +38,45 @@ interface ByTextTableProps {
   showArchived?: boolean  // #451 "view all coders" — reveal archived chips
 }
 
+/**
+ * #717 — the frozen band's geometry lives in ONE custom property.
+ *
+ * The quote column's WIDTH and the Text column's sticky LEFT offset must be the
+ * same number: Text pins immediately after the quote toggle. They were two
+ * literals in four places (`w-5` and `left-[20px]`, header and body), so changing
+ * one silently misaligned the other into a seam or an overlap that reads as a
+ * rendering artifact. A CSS variable is the only way to single-source it here —
+ * Tailwind needs literal class strings, so a TS constant could not feed both.
+ *
+ * ## Why the band relaxes below a container width
+ *
+ * Measured at a 640px viewport: the scroller is 322px, the quote column 20px and
+ * the Text column 300px — so 320 of 322px was permanently covered by sticky cells
+ * and `Codes` and `Notes` were **never visible at any scroll position**. Sticky
+ * columns are an affordance only while there is something left to scroll; past
+ * that they are an occlusion. Below `STICKY_RELAX_AT` nothing is sticky and the
+ * table behaves like an ordinary wide table, which is honest at that size.
+ *
+ * ⚠️ The container context sits on a wrapper OUTSIDE the Virtuoso scroller, not on
+ * the scroller itself. `container-type: inline-size` applies size containment, and
+ * this project has already been bitten by CSS perturbing the
+ * `getBoundingClientRect` react-virtuoso measures (#697 rejected CSS `zoom` for
+ * exactly that). Keeping the containment off the measured element avoids it.
+ */
+const QUOTE_COL_W = '20px'
+/**
+ * ⚠️ `width` ALONE is not enough on a table cell. Measured: `width: 20px` with the
+ * cell's `px-1` padding computed to **22px**, because the table layout algorithm may
+ * widen a cell past its specified width — so Text pinned at 20px while the quote
+ * column occupied 22, leaving a 2px seam of the quote column showing through the
+ * sticky edge. The pre-#717 `w-5` + `left-[20px]` pair had the same defect; it is
+ * only visible when you measure the two against each other, which is the argument
+ * for deriving both from one value AND clamping the cell so it cannot drift.
+ */
+const QUOTE_COL_CLAMP = { width: QUOTE_COL_W, minWidth: QUOTE_COL_W, maxWidth: QUOTE_COL_W } as const
+/** Below this container width the frozen band would occlude more than it reveals. */
+const STICKY_RELAX_AT = '@max-[560px]:static'
+
 export default function ByTextTable({
   comments,
   loading,
@@ -64,7 +103,15 @@ export default function ByTextTable({
   const [contextCache, setContextCache] = useState<Record<number, RecordContext>>({})
   const loadingRef = useRef(new Set<number>())
 
-  // Clear context cache when focal columns or project changes
+  // Clear context cache when focal columns or project changes.
+  //
+  // ⚠️ This is the ONLY thing `focalColumnIds` is used for since #719 removed the
+  // per-row column label — do not delete the prop as unused, and do not "simplify"
+  // the call site's `activeColumnId ? [activeColumnId] : focalColumnIds` narrowing
+  // away: it decides how often this cache clears. Correctness does not hinge on it
+  // (`recordContext` is fetched per ROW and takes no column ids, so a stale entry
+  // cannot be wrong for a different column) — it is conservative invalidation, which
+  // is why the narrowing is safe either way.
   const focalKey = focalColumnIds.join(',')
   useEffect(() => {
     setContextCache({})
@@ -164,8 +211,6 @@ export default function ByTextTable({
   // Capture right-click coordinates for floating dialogs
   const lastCoordsRef = useRef<FloatingCoords>({ x: 0, y: 0 })
 
-  const hasMultipleColumns = focalColumnIds.length > 1
-
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
@@ -190,11 +235,11 @@ export default function ByTextTable({
       overscan={10}
       fixedHeaderContent={() => (
         <tr className="bg-mm-surface">
-          <th scope="col" className="w-5 px-1 sticky left-0 z-20 bg-mm-surface" aria-label="Quote" />
+          <th scope="col" className={`px-1 sticky left-0 z-20 bg-mm-surface ${STICKY_RELAX_AT}`} style={QUOTE_COL_CLAMP} aria-label="Quote" />
           <th scope="col" className="px-4 py-2 text-left w-[120px] bg-mm-surface">
             <span className="bg-orange-50 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300 rounded-full px-2.5 py-0.5 text-xs font-medium">Record</span>
           </th>
-          <th scope="col" className="px-4 py-2 text-left sticky left-[20px] z-20 bg-mm-surface border-r border-mm-border-subtle" style={{ minWidth: 300 }}>
+          <th scope="col" className={`px-4 py-2 text-left sticky z-20 bg-mm-surface border-r border-mm-border-subtle min-w-[220px] xl:min-w-[300px] ${STICKY_RELAX_AT}`} style={{ left: QUOTE_COL_W }}>
             <div className="flex items-center gap-2">
               <span className="bg-orange-50 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300 rounded-full px-2.5 py-0.5 text-xs font-medium">Text</span>
               {searchText && (
@@ -213,10 +258,10 @@ export default function ByTextTable({
               )}
             </div>
           </th>
-          <th scope="col" className="px-4 py-2 text-left w-[160px] bg-mm-surface">
+          <th data-col="codes" scope="col" className="px-4 py-2 text-left w-[160px] bg-mm-surface">
             <span className="bg-orange-50 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300 rounded-full px-2.5 py-0.5 text-xs font-medium">Codes</span>
           </th>
-          <th scope="col" className="px-4 py-2 text-center w-[48px] bg-mm-surface">
+          <th data-col="notes" scope="col" className="px-4 py-2 text-center w-[48px] bg-mm-surface">
             <span className="bg-orange-50 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300 rounded-full px-2.5 py-0.5 text-xs font-medium">Notes</span>
           </th>
           {contextVisible.demographics && (
@@ -242,13 +287,13 @@ export default function ByTextTable({
 
         return (
           <>
-            <td className={`w-5 px-1 py-2 border-b text-center sticky left-0 z-10 ${isSelected ? SELECTED_CELL : 'bg-mm-surface group-hover:bg-mm-surface-hover'}`}>
+            <td className={`px-1 py-2 border-b text-center sticky left-0 z-10 ${STICKY_RELAX_AT} ${isSelected ? SELECTED_CELL : 'bg-mm-surface group-hover:bg-mm-surface-hover'}`} style={QUOTE_COL_CLAMP}>
               <button
                 className={`shrink-0 ${comment.is_quoted ? '' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'} transition-opacity`}
                 onClick={e => { e.stopPropagation(); onQuoteToggle(comment.dataset_value_id) }}
                 aria-label={comment.is_quoted ? 'Unquote' : 'Quote'}
               >
-                <Quote className={`w-3.5 h-3.5 ${comment.is_quoted ? 'fill-amber-400 text-amber-400' : 'text-mm-border-medium'}`} />
+                <Quote className={`w-3.5 h-3.5 ${comment.is_quoted ? 'fill-amber-400 text-amber-400' : 'text-mm-text-faint'}`} />
               </button>
             </td>
             <td
@@ -257,28 +302,30 @@ export default function ByTextTable({
               <span className="font-mono text-xs truncate block">
                 {comment.row_identifier || comment.participant_name || `R${comment.dataset_row_id}`}
               </span>
-              {hasMultipleColumns && (
-                <div className="text-[11px] text-muted-foreground mt-0.5 truncate">{comment.column_name || comment.column_text}</div>
-              )}
-              {hasMultipleColumns && (
-                <span
-                  className="inline-block mt-0.5 px-1 py-0.5 text-[9px] bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 rounded"
-                  title={`This text appeared at position ${comment.column_sequence_order} in ${comment.dataset_name}`}
-                >
-                  Col {comment.column_sequence_order}
-                </span>
-              )}
             </td>
             <td
-              className={`px-4 py-2 border-b border-r border-mm-border-subtle text-sm sticky left-[20px] z-10 ${isSelected ? SELECTED_CELL : 'bg-mm-surface group-hover:bg-mm-surface-hover'}`}
+              className={`px-4 py-2 border-b border-r border-mm-border-subtle text-sm sticky z-10 ${STICKY_RELAX_AT} ${isSelected ? SELECTED_CELL : 'bg-mm-surface group-hover:bg-mm-surface-hover'}`}
+              style={{ left: QUOTE_COL_W }}
             >
+              {/* #719: NO per-row column label here, and that is the design, not a
+                  gap. By Text PAGES one column at a time — the toolbar carries the
+                  column picker, prev/next and "1 of N" — so every row on screen
+                  answers the same question and a per-row prompt would repeat it once
+                  per row. Reading ACROSS columns is By Record's job, and it already
+                  labels each answer with its column name and a "Col N" badge
+                  (`ByRecordPanel.tsx`). Copy from there if this view ever interleaves.
+
+                  A guarded version of both affordances lived here and had never
+                  painted: the call site narrows the prop to the active column, so the
+                  guard was always false. Deleted rather than wired up, because the
+                  capability already ships one mode over. */}
               {comment.value_text ? (
                 <span>{comment.value_text}</span>
               ) : (
                 <span className="italic text-muted-foreground">Empty response</span>
               )}
             </td>
-            <td className={`w-[160px] px-4 py-2 border-b ${isSelected ? SELECTED_CELL : ''}`}>
+            <td data-col="codes" className={`w-[160px] px-4 py-2 border-b ${isSelected ? SELECTED_CELL : ''}`}>
               <div className="flex flex-wrap gap-1">
                 {visibleCodeChipRows(comment.applied_code_details ?? [], chipHidden).map(row => {
                   const code = codeMap[row.codeId]
@@ -295,7 +342,7 @@ export default function ByTextTable({
                 })}
               </div>
             </td>
-            <td className={`w-[48px] px-4 py-2 border-b text-center ${isSelected ? SELECTED_CELL : ''}`}>
+            <td data-col="notes" className={`w-[48px] px-4 py-2 border-b text-center ${isSelected ? SELECTED_CELL : ''}`}>
               {comment.note_count > 0 && (
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -386,6 +433,7 @@ export default function ByTextTable({
             }
             className="min-w-full bg-mm-surface border-separate border-spacing-0"
             aria-rowcount={comments.length}
+            aria-label="Open-text responses with the codes applied to each"
           />
         ),
         TableRow: ({ item, ...props }) => {

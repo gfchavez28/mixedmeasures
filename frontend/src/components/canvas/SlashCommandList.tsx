@@ -23,7 +23,7 @@ const SlashCommandList = forwardRef<SlashCommandListRef, SlashCommandListProps>(
     const listRef = useRef<HTMLDivElement>(null)
 
     // Reset focus when items change
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset highlight to top when the Tiptap suggestion list changes (external editor-driven)
+    // reset highlight to top when the Tiptap suggestion list changes (external editor-driven)
     useEffect(() => { setFocusIndex(0) }, [items])
 
     // Scroll focused item into view

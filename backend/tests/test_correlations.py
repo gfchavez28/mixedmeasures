@@ -171,9 +171,14 @@ def test_constant_variable(mtcars_session):
         correlation_type="pearson",
         bonferroni=False,
     )
-    # Constant vs mpg: r should be 0 or NaN-handled
+    # #689: a column that does not vary CANNOT covary — that is not a measured
+    # zero, and this assertion used to accept the `r = 0.00, p = 1.00` cell a
+    # researcher reads as "no relationship". The cell now declines and says why.
     cell = result["matrix"][0][1]
-    assert cell["r"] == pytest.approx(0.0, abs=0.001) or cell["p"] == 1.0
+    assert cell["r"] is None and cell["p"] is None
+    assert cell["undefined_reason"] == "no_variance"
+    # The pair count is still a real fact about the data and stays populated.
+    assert cell["n"] > 0
 
 
 def test_n_equals_2(db_session):
@@ -216,8 +221,12 @@ def test_n_equals_2(db_session):
         correlation_type="pearson",
         bonferroni=False,
     )
-    # n < 3 → service returns r=0.0, p=1.0
+    # #689: n < 3 is below the floor for a correlation at all. The old contract
+    # (r=0.0, p=1.0) reported a confident null result from two points.
     cell = result["matrix"][0][1]
     assert cell["n"] == 2
-    assert cell["r"] == pytest.approx(0.0, abs=0.001)
-    assert cell["p"] == 1.0
+    assert cell["r"] is None and cell["p"] is None
+    assert cell["undefined_reason"] == "insufficient_n"
+    # Distinct from the no-variance reason: "only two people answered both" and
+    # "this item has one answer" are different facts and read differently.
+    assert cell["undefined_reason"] != "no_variance"

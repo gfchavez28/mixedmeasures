@@ -889,7 +889,7 @@ export default function ConversationImport() {
                     aria-label="Set speaker color"
                   />
                 </PopoverTrigger>
-                <PopoverContent className="w-auto p-3" align="end">
+                <PopoverContent className="w-auto p-3" align="end" aria-label="Speaker color">
                   <ColorSwatchPicker
                     value={mapping.color || ''}
                     onChange={(color) => {
@@ -1004,7 +1004,7 @@ export default function ConversationImport() {
         </nav>
 
         {error && (
-          <div className="mb-6 p-4 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 rounded-lg flex items-start gap-2">
+          <div className="mb-6 p-4 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 rounded-lg flex items-start gap-2">
             <CircleAlert className="w-5 h-5 flex-shrink-0 mt-0.5" />
             <span>{error}</span>
           </div>
@@ -1413,6 +1413,7 @@ export default function ConversationImport() {
                 </h4>
                 <div className="overflow-x-auto border rounded">
                   <table className="w-full text-sm">
+                    <caption className="sr-only">Preview of the transcript file's rows and columns.</caption>
                     <thead className="bg-mm-bg">
                       <tr>
                         {firstPreview.headers.map((h) => {
@@ -1596,7 +1597,7 @@ export default function ConversationImport() {
                   )}
 
                   {fileSpeakerValidation[0] && !fileSpeakerValidation[0].valid && (
-                    <div className="p-4 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 rounded-lg flex items-center gap-2">
+                    <div className="p-4 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 rounded-lg flex items-center gap-2">
                       <CircleAlert className="w-5 h-5" />
                       <span>{fileSpeakerValidation[0].error}</span>
                     </div>
@@ -1715,7 +1716,7 @@ export default function ConversationImport() {
                             )}
 
                             {validation && !validation.valid && (
-                              <div className="p-3 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 rounded flex items-center gap-2 text-sm">
+                              <div className="p-3 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 rounded flex items-center gap-2 text-sm">
                                 <CircleAlert className="w-4 h-4" />
                                 <span>{validation.error}</span>
                               </div>

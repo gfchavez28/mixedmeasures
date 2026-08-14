@@ -1,6 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 
 from ..database import get_db
 from ..models.user import User
@@ -11,6 +10,7 @@ from ..models.dataset import Dataset, DatasetColumn, DatasetValue
 from ..models.segment import Segment
 from ..models.note import Note
 from ..models.excerpt import Excerpt
+from ..services.note_numbering import next_note_sequence
 from ..schemas.note import NoteCreate, NoteUpdate, NoteResponse, NoteListResponse
 from ..auth import get_current_user
 from ..services.audit import log_action
@@ -112,18 +112,16 @@ async def create_note(
         if not data.segment_id and excerpt.segment_id:
             data.segment_id = excerpt.segment_id
 
-    # Get next sequence number
-    max_seq = db.query(func.max(Note.sequence_number)).filter(
-        Note.conversation_id == conversation_id
-    ).scalar() or 0
-
     note = Note(
         conversation_id=conversation_id,
         segment_id=data.segment_id,
         excerpt_id=excerpt_id,
         content=data.content,
-        sequence_number=max_seq + 1
     )
+    # #747: one numbering rule for all four parents. This path was the only one
+    # that ever numbered anything; the inline `max()` it used lives in
+    # `note_numbering` now so the other three cannot disagree with it.
+    note.sequence_number = next_note_sequence(db, note)
     db.add(note)
     db.flush()
 

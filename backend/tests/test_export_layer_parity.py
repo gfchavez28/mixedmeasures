@@ -250,3 +250,180 @@ def test_cooccurrence_csv_honors_coder_scope(multicoder_project, db_session):
         screen = get_code_cooccurrence(db_session, 730, coder_ids=coder_ids)
         i = next(idx for idx, c in enumerate(screen["codes"]) if c["name"] == "theme A")
         assert diagonal(rows, "theme A") == screen["matrix"][i][i]
+
+
+# ── #732 — the group-comparison CSV vs the two screens that show the same test ──
+#
+# The strip (`ComparisonTestStrip.tsx:34`) and the comparison table
+# (`GroupComparisonTable.tsx:357`) both display OMEGA-squared for a one-way
+# ANOVA. The CSV wrote `test['effect_size']`, which is ETA-squared, under a
+# header that said `eta_sq`. Nothing was mislabelled and nothing was wrong —
+# which is why it survived: a researcher who quotes the screen and attaches the
+# file simply has two different effect sizes for one test in one deliverable.
+#
+# The fix emits BOTH (the saved-test APA string already does) and, more
+# importantly, defines each column's header label and cell value in ONE place
+# (`_test_columns`), because their being thirty lines apart is the actual defect.
+
+from app.routers.comparisons import group_comparison_csv          # noqa: E402
+from app.routers.helpers import _fmt_p, _fmt_stat                 # noqa: E402
+from app.services.comparisons import compute_group_comparison     # noqa: E402
+
+# mtcars column ids from conftest (mirrors test_comparisons.py)
+MPG_ID, CYL_ID, AM_ID = 1, 5, 6
+
+
+def _comparison_csv(db, **overrides):
+    """Direct-call the CSV endpoint.
+
+    ⚠️ EVERY `Query(...)`-defaulted parameter is passed explicitly. A direct
+    call takes the function default verbatim, so an omitted `test_type` would
+    arrive as the `Query("auto")` OBJECT — which `_resolve_test_type` does not
+    match, silently resolving to a t-test and testing the wrong branch.
+    """
+    kwargs = dict(
+        project_id=1,
+        column_ids=str(MPG_ID),
+        domain_ids=None,
+        grouping_column_id=CYL_ID,       # 3 groups → one-way ANOVA
+        grouping_column_id_2=None,
+        test_type="auto",
+        exclude_groups=None,
+        nonparametric=False,
+        user=db.get(User, 1),
+        db=db,
+    )
+    kwargs.update(overrides)
+    text = _stream_to_text(_run(group_comparison_csv(**kwargs)))
+    rows = list(csv_module.reader(io.StringIO(text)))
+    # #744: the file opens by stating the significance convention it follows,
+    # the same shape as the `Scope:` line the coder-scoped exports write. Strip
+    # it here so every assertion below still reads `rows[0]` as the header.
+    return rows[1:] if rows and rows[0] and rows[0][0].startswith("Significance:") else rows
+
+
+def test_the_csv_states_the_significance_convention_it_follows(mtcars_session):
+    """#744 — an export applies data filters and discloses them; it does not
+    apply annotation filters, and says so.
+
+    The screen gates each star on the researcher's show_05/show_01/show_001
+    toggles; the file writes the full ladder. That is deliberate — the p-value
+    is in the file either way — but a reader comparing the file against a
+    screenshot needs the file to say which convention it used.
+    """
+    text = _stream_to_text(_run(group_comparison_csv(
+        project_id=1, column_ids=str(MPG_ID), domain_ids=None,
+        grouping_column_id=CYL_ID, grouping_column_id_2=None, test_type="auto",
+        exclude_groups=None, nonparametric=False,
+        user=mtcars_session.get(User, 1), db=mtcars_session,
+    )))
+    # Read it as CSV, not as raw text: the line contains commas, so it is
+    # quoted on the wire — asserting on `splitlines()[0]` tests the quoting.
+    first_cell = next(csv_module.reader(io.StringIO(text)))[0]
+    assert first_cell.startswith("Significance:")
+    assert "*** p < .001" in first_cell
+    assert "display settings are not applied" in first_cell
+
+
+def _service(db, **overrides):
+    kwargs = dict(
+        db=db, project_id=1, column_ids=[MPG_ID], domain_ids=[],
+        grouping_column_id=CYL_ID, grouping_column_id_2=None,
+        test_type="auto", include_effect_size_ci=True,
+    )
+    kwargs.update(overrides)
+    return compute_group_comparison(**kwargs)
+
+
+def test_anova_csv_carries_the_effect_size_the_screen_displays(mtcars_session):
+    """#732: omega-squared reaches the file, and it equals the service's value."""
+    db = mtcars_session
+    header, data = _comparison_csv(db)[:2]
+
+    assert "omega_sq" in header, (
+        "both comparison screens display omega-squared; an export that cannot "
+        "carry it disagrees with the screenshot beside it (#732)"
+    )
+    assert "eta_sq" in header, (
+        "eta-squared is kept, not replaced — the saved-test APA string reports "
+        "the pair, and dropping it would lose the primary field"
+    )
+
+    test = _service(db)["rows"][0]["test"]
+    assert data[header.index("omega_sq")] == _fmt_stat(test["omega_squared"])
+    assert data[header.index("eta_sq")] == _fmt_stat(test["effect_size"])
+
+    # Without this the fixture proves nothing: if the two statistics rendered
+    # identically, a CSV still emitting only eta-squared would pass every
+    # assertion above. mtcars mpg×cyl gives .73 vs .71.
+    assert data[header.index("omega_sq")] != data[header.index("eta_sq")]
+
+
+def test_two_group_csv_carries_the_confidence_interval_it_already_computes(mtcars_session):
+    """The endpoint hardcodes include_effect_size_ci=True; the CSV discarded it."""
+    db = mtcars_session
+    header, data = _comparison_csv(db, grouping_column_id=AM_ID)[:2]  # am → 2 groups
+
+    assert "d_CI_lower" in header and "d_CI_upper" in header
+    test = _service(db, grouping_column_id=AM_ID)["rows"][0]["test"]
+    assert test["effect_size_ci_lower"] is not None, "fixture must actually have a CI"
+    assert data[header.index("d_CI_lower")] == _fmt_stat(test["effect_size_ci_lower"])
+    assert data[header.index("d_CI_upper")] == _fmt_stat(test["effect_size_ci_upper"])
+
+
+def test_column_labels_follow_the_test_that_actually_ran(mtcars_session):
+    """The header is resolved from the same inputs the service used, not sniffed.
+
+    The 3-groups-but-t_test case is the one that matters: group COUNT says ANOVA
+    while the requested test says t, and only the effective test type is right.
+    """
+    db = mtcars_session
+    cases = [
+        (dict(), ["F", "p", "eta_sq", "omega_sq", "Sig"]),
+        (dict(nonparametric=True), ["H", "p", "epsilon_sq", "Sig"]),
+        (dict(grouping_column_id=AM_ID), ["Delta", "p", "d", "d_CI_lower", "d_CI_upper", "Sig"]),
+        (dict(grouping_column_id=AM_ID, nonparametric=True), ["U", "p", "r", "Sig"]),
+        # 3 groups, t-test requested → the first two groups get a Welch t-test
+        (dict(test_type="t_test"), ["t", "p", "d", "d_CI_lower", "d_CI_upper", "Sig"]),
+    ]
+    for overrides, expected_tail in cases:
+        header = _comparison_csv(db, **overrides)[0]
+        assert header[-len(expected_tail):] == expected_tail, (
+            f"{overrides or 'defaults'} produced {header[-len(expected_tail):]}"
+        )
+
+
+def test_every_declared_column_gets_exactly_one_cell(mtcars_session):
+    """Header width and row width derive from one list, so they cannot drift.
+
+    Their drifting apart is the defect class this whole change is about — the
+    old code built the header in one branch and the values in another.
+
+    ⚠️ Covers the POPULATED branch only: every mtcars row computes a test, so
+    the `test is None` path (which now pads by `len(test_cols)` rather than a
+    literal 4) is correct by construction here rather than by execution.
+    """
+    db = mtcars_session
+    for overrides in (dict(), dict(nonparametric=True), dict(grouping_column_id=AM_ID)):
+        rows = _comparison_csv(db, **overrides)
+        header = rows[0]
+        # Skip the post-hoc sub-table, which is deliberately padded to width.
+        body = [r for r in rows[1:] if r and not r[0].startswith(("Post-hoc", "Pair"))]
+        assert body, "fixture produced no data rows"
+        for row in body:
+            assert len(row) == len(header), f"{overrides}: {row}"
+
+
+def test_a_statistic_that_is_not_computable_is_blank_not_zero():
+    """#689 makes these fields nullable; a bare f-string 500s the download.
+
+    Pinned at the formatter because that is the single place every export cell
+    passes through. The 0.0 case is not decoration: a `if not value` shortcut
+    would blank a real measured zero, which is the falsy-zero defect this
+    project has already shipped twice.
+    """
+    assert _fmt_stat(None) == ""
+    assert _fmt_p(None) == ""
+    assert _fmt_stat(0.0) == "0.00"
+    assert _fmt_stat(-0.5) == "-0.50"
+    assert _fmt_stat(0.12345, 4) == "0.1235"

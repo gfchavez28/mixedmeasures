@@ -99,7 +99,7 @@ export default function TextCodingColumnPicker({
           <ChevronDown className="w-3 h-3 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-80 p-0" align="start">
+      <PopoverContent className="w-80 p-0" align="start" aria-label="Focal text columns">
         <div className="p-2 border-b">
           <p className="text-xs text-muted-foreground font-medium">Focal text columns</p>
         </div>

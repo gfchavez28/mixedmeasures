@@ -17,6 +17,8 @@ interface QualHeatmapProps {
   denominatorMode: QualDenominatorMode
   orientation: QualOrientation
   sortOrder: QualSortOrder
+  /** #675 — the code-axis order behind `sortOrder: 'custom'`. */
+  customOrder: number[]
   showSummaryRow: boolean
   showRowN?: boolean
   heatmapPreset?: string
@@ -31,6 +33,7 @@ export default function QualHeatmap({
   denominatorMode,
   orientation,
   sortOrder,
+  customOrder,
   showSummaryRow,
   showRowN = true,
   heatmapPreset = 'green',
@@ -41,8 +44,8 @@ export default function QualHeatmap({
   const { isDark } = useTheme()
 
   const heatmapData: QualHeatmapData = useMemo(
-    () => shapeQualHeatmapData(data, valueMode, denominatorMode, orientation, sortOrder),
-    [data, valueMode, denominatorMode, orientation, sortOrder],
+    () => shapeQualHeatmapData(data, valueMode, denominatorMode, orientation, sortOrder, customOrder),
+    [data, valueMode, denominatorMode, orientation, sortOrder, customOrder],
   )
 
   const { rows, columnLabels, columnIds, maxValue } = heatmapData

@@ -624,7 +624,7 @@ export function ParticipantCell({
               <button
                 onClick={handleUnlink}
                 aria-label="Unlink participant"
-                className="absolute -right-1 top-1/2 -translate-y-1/2 hidden group-hover/cell:flex items-center justify-center w-4 h-4 rounded-full bg-muted hover:bg-red-100 text-mm-text-muted hover:text-red-600"
+                className="absolute -right-1 top-1/2 -translate-y-1/2 hidden group-hover/cell:flex items-center justify-center w-4 h-4 rounded-full bg-muted hover:bg-red-100 text-mm-text-muted hover:text-red-700"
               >
                 <X className="w-3 h-3" />
               </button>
@@ -636,7 +636,7 @@ export function ParticipantCell({
             </button>
           )}
         </PopoverTrigger>
-        <PopoverContent className="w-64 p-0" align="start">
+        <PopoverContent className="w-64 p-0" align="start" aria-label="Link a participant">
           <div className="p-2 border-b">
             <Input
               placeholder="Search participants..."

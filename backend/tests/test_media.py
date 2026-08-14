@@ -1715,7 +1715,7 @@ class TestObservationMedia:
             json={"offset_seconds": 5.0}, headers=headers,
         )
         # 404/405 depending on whether frontend/dist mounts the SPA catch-all
-        # (see backend/tests/CLAUDE.md) — the point is it is not routable.
+        # (see backend/tests/the internal design notes) — the point is it is not routable.
         assert resp.status_code in (404, 405)
 
     def test_audit_entity_type_is_observation_not_conversation(self, wire_client):

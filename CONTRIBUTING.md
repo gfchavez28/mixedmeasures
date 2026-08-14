@@ -34,7 +34,7 @@ talks to it. In development the Vite server proxies `/api` to the backend.
 
 ## Development setup
 
-**Prerequisites:** Python 3.12+ and Node.js 20+ (current LTS).
+**Prerequisites:** Python 3.12+ and Node.js 24+ (Active LTS).
 
 **Backend:**
 

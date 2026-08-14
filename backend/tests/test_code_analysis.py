@@ -354,3 +354,49 @@ def test_saturation_names_inactive_code(db_session):
     assert not any(n.startswith("Unknown (") for n in all_new_names)
     # The inactive application still counts (the #489 standard): 6 active + 1
     assert result["total_unique_codes"] == 7
+
+
+class TestCodeSegmentsEndpointIsGone:
+    """#677 — resolved by REMOVAL, not by fixing the grouping.
+
+    ``GET /projects/{id}/codes/{code_id}/segments`` (``routers/codes.py``)
+    grouped coded segments on ``segment.conversation_id`` and labelled the group
+    ``segment.conversation.name if segment.conversation else "Unknown"``. That is
+    NULL for both document segments and observation clips, so two source kinds
+    collapsed into one bucket named "Unknown" inside a response key called
+    ``conversations`` — the silent-INCLUSION direction of the three-parent shape.
+
+    **It was removed rather than repaired because it had no callers.** The
+    filing recorded it as live on the grounds that its query key
+    ``code-sample-segments`` sits in the #450 ``invalidateDerivedCounts`` set —
+    but that key belongs to a query which fetches the *code-analysis* sibling
+    (``CodebookPeekPanel.tsx:245-246``), so the evidence was a query-key /
+    endpoint conflation. Verified before deleting: ``codesApi.getSegments`` was
+    the only client wrapper and had zero callers, and no test, script, or shell
+    referenced the route.
+
+    The live sibling ``/code-analysis/codes/{code_id}/segments`` already returns
+    the correct three-parent shape — separate ``conversations`` / ``documents``
+    / ``observations`` arrays (D25) — so repairing the dead one would have
+    produced a second, differently-shaped answer to the same question.
+
+    Asserted against the ROUTE TABLE rather than an HTTP status: with
+    ``frontend/dist`` present the GET-only SPA catch-all answers a removed API
+    path, so a status assertion measures the catch-all, not the route (the
+    #568 precedent in ``test_coding_counts.py``).
+    """
+
+    def test_the_route_is_not_registered(self):
+        from app.main import app
+
+        paths = {getattr(route, "path", None) for route in app.routes}
+        assert "/api/projects/{project_id}/codes/{code_id}/segments" not in paths
+
+    def test_the_live_sibling_still_exists(self):
+        # The surface a researcher actually sees (the codebook peek panel).
+        # This pin is what makes the deletion "the dead one" rather than "a
+        # capability", and it fails loudly if the two are ever confused again.
+        from app.main import app
+
+        paths = {getattr(route, "path", None) for route in app.routes}
+        assert "/api/projects/{project_id}/code-analysis/codes/{code_id}/segments" in paths

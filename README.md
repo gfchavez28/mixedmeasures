@@ -6,7 +6,7 @@
 [![CI](https://github.com/gfchavez28/mixedmeasures/actions/workflows/ci.yml/badge.svg)](https://github.com/gfchavez28/mixedmeasures/actions/workflows/ci.yml)
 ![Platform: Windows | macOS | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)
-![Node 20+](https://img.shields.io/badge/node-20%2B-339933.svg)
+![Node 24+](https://img.shields.io/badge/node-24%2B-339933.svg)
 
 ![Mixed Measures — project overview](.github/assets/01-overview.png)
 
@@ -191,6 +191,9 @@ across, leaving the original and its coding untouched.
   round-trip test that R's numbers match the app's.
 - **Canvas export** to Word (`.docx`), HTML, and PDF, with charts embedded as
   images.
+- **REFI-QDA codebook** (`.qdc`) — export and import your codebook in the open
+  cross-tool standard, so codes, hierarchy, descriptions and colours move between
+  Mixed Measures and other QDA tools that read the REFI-QDA codebook format.
 - **`.mmproject`** — a complete, database-agnostic project archive for moving a
   whole project between machines or instances.
 
@@ -220,6 +223,15 @@ Being honest about scope:
 - **Not a full statistical-modeling suite.** Regression and factor analysis are not
   currently included; for analysis beyond the built-in descriptives and comparisons,
   export the R script and continue there.
+- **REFI-QDA support is partial — codebooks yes, whole projects not yet.** The
+  standard has two halves. Mixed Measures reads and writes the **codebook** half
+  (`.qdc`), so your codes travel to and from tools that support it. It
+  does **not** yet read or write `.qdpx`, the full project package that carries
+  sources, coded selections and memos — so a complete project cannot currently move
+  to NVivo or MAXQDA, or be deposited with an archive that requires QDPX. `.qdpx`
+  export is the next interoperability build; `.mmproject` is a documented, open
+  archive in the meantime, but it has one implementation and that is the honest
+  limitation.
 
 ## Privacy & your data
 
@@ -268,7 +280,7 @@ To develop, contribute, or build it yourself, run the backend and frontend toget
 
 **Prerequisites**
 - Python 3.12+
-- Node.js 20+ (current LTS)
+- Node.js 24+ (Active LTS)
 
 **Backend** (FastAPI, port 8000):
 
@@ -354,6 +366,8 @@ sidebar, and the app itself offers copyable APA and BibTeX under
 
 - Development setup and conventions: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Reporting a vulnerability: [SECURITY.md](SECURITY.md)
+- Accessibility — what works, what doesn't, and what is untested:
+  [ACCESSIBILITY.md](ACCESSIBILITY.md)
 
 ### Support & expectations
 

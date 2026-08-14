@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useNavigate } from 'react-router'
+import { useTreeKeyboardNav, useTreeAriaPositions } from '@/hooks/useTreeKeyboardNav'
 import { Search, Check, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import type { Code, CodeCategory, CodeFrequencyItem } from '@/lib/api'
@@ -194,66 +195,22 @@ export default function CodePicker({
   }, [])
 
   // Keyboard navigation
-  const handleTreeKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
-    const items = treeRef.current?.querySelectorAll('[role="treeitem"]')
-    if (!items || items.length === 0) return
-
-    const focused = document.activeElement as HTMLElement
-    const idx = Array.from(items).indexOf(focused)
-    if (idx === -1) return
-
-    switch (e.key) {
-      case 'ArrowDown': {
-        e.preventDefault()
-        const next = items[Math.min(idx + 1, items.length - 1)] as HTMLElement
-        next?.focus()
-        break
-      }
-      case 'ArrowUp': {
-        e.preventDefault()
-        const prev = items[Math.max(idx - 1, 0)] as HTMLElement
-        prev?.focus()
-        break
-      }
-      case 'ArrowRight': {
-        e.preventDefault()
-        const catId = focused.dataset.categoryId
-        if (catId) {
-          setExpandedCategories(prev => new Set(prev).add(Number(catId)))
-        }
-        break
-      }
-      case 'ArrowLeft': {
-        e.preventDefault()
-        const catId = focused.dataset.categoryId
-        if (catId) {
-          setExpandedCategories(prev => {
-            const next = new Set(prev)
-            next.delete(Number(catId))
-            return next
-          })
-        }
-        break
-      }
-      case ' ': {
-        e.preventDefault()
-        focused.click()
-        break
-      }
-      case 'Home': {
-        e.preventDefault()
-        const first = items[0] as HTMLElement
-        first?.focus()
-        break
-      }
-      case 'End': {
-        e.preventDefault()
-        const last = items[items.length - 1] as HTMLElement
-        last?.focus()
-        break
-      }
-    }
+  // #701(a): shared keyboard layer. This tree was the only one of the three
+  // that implemented ArrowRight/ArrowLeft; the hook lifts that behaviour to all
+  // of them, and adds the Enter key none of them had.
+  const handleSetExpanded = useCallback((item: HTMLElement, expand: boolean) => {
+    const catId = item.dataset.categoryId
+    if (!catId) return
+    setExpandedCategories(prev => {
+      const next = new Set(prev)
+      if (expand) next.add(Number(catId))
+      else next.delete(Number(catId))
+      return next
+    })
   }, [])
+
+  const handleTreeKeyDown = useTreeKeyboardNav({ treeRef, onSetExpanded: handleSetExpanded })
+  useTreeAriaPositions(treeRef)
 
   // Mode toggle keyboard nav
   const handleModeKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -287,6 +244,8 @@ export default function CodePicker({
             data-category-id={cat.id}
             aria-checked={catState === 'all'}
             aria-expanded={expanded}
+            aria-owns={`code-picker-group-${cat.id}`}
+            aria-level={depth + 1}
             className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-mm-surface-hover cursor-pointer"
             onClick={() => toggleCategory(cat.id)}
           >
@@ -308,7 +267,7 @@ export default function CodePicker({
             </button>
           </div>
           {expanded && (
-            <div role="group" className="ml-6 space-y-0.5">
+            <div role="group" id={`code-picker-group-${cat.id}`} className="ml-6 space-y-0.5">
               {catCodes.map(code => (
                 <div key={code.id} className="flex items-center gap-2 px-2 py-1 text-xs text-mm-text-muted">
                   <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: getCodeColor(code) }} />
@@ -331,6 +290,8 @@ export default function CodePicker({
           tabIndex={-1}
           data-category-id={cat.id}
           aria-expanded={expanded}
+          aria-owns={`code-picker-group-${cat.id}`}
+          aria-level={depth + 1}
           aria-checked={catState === 'all'}
           className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-mm-surface-hover rounded"
           onClick={() => { toggleCategory(cat.id) }}
@@ -352,12 +313,13 @@ export default function CodePicker({
           </button>
         </div>
         {expanded !== false && (
-          <div role="group" className="ml-2 space-y-0.5">
+          <div role="group" id={`code-picker-group-${cat.id}`} className="ml-2 space-y-0.5">
             {catCodes.map(code => (
               <div
                 key={code.id}
                 role="treeitem"
                 tabIndex={-1}
+                aria-level={depth + 2}
                 aria-checked={selectedCodeIds.has(code.id)}
                 className={`flex items-center gap-2 px-2 py-1 text-sm rounded cursor-pointer hover:bg-mm-surface-hover ${
                   code.is_universal ? 'opacity-60' : ''
@@ -455,6 +417,7 @@ export default function CodePicker({
           <div
             role="treeitem"
             tabIndex={0}
+            aria-level={1}
             aria-checked={allSelected}
             className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-mm-surface-hover cursor-pointer border-b border-mm-border-subtle mb-1 pb-2"
             onClick={toggleAll}
@@ -483,6 +446,7 @@ export default function CodePicker({
                 key={code.id}
                 role="treeitem"
                 tabIndex={-1}
+                aria-level={1}
                 aria-checked={selectedCodeIds.has(code.id)}
                 className={`flex items-center gap-2 px-2 py-1 text-sm rounded cursor-pointer hover:bg-mm-surface-hover ${
                   code.is_universal ? 'opacity-60' : ''

@@ -246,8 +246,13 @@ export default function WritingCanvas({
     return themeInsertNodeRefs.get(themeId)!
   }, [themeInsertNodeRefs])
 
+  // #10: this was role="main" and it renders INSIDE ProjectLayout's outlet, so the
+  // page carried two nested main landmarks — which ARIA forbids, and which makes a
+  // skip-link target ambiguous (AT has to pick one). It is a section of the page,
+  // not the page's main region, so it is a labelled region instead. The label is
+  // kept: that is what made it findable in the landmark list.
   return (
-    <div className={`flex-1 flex flex-col bg-white dark:bg-mm-surface${!showColorBars ? ' hide-material-colors' : ''}`} role="main" aria-label="Writing canvas">
+    <div className={`flex-1 flex flex-col bg-white dark:bg-mm-surface${!showColorBars ? ' hide-material-colors' : ''}`} role="region" aria-label="Writing canvas">
       <div className="flex-1 overflow-auto">
       <div className="max-w-[740px] mx-auto px-8 py-10 min-h-[50vh]">
         {/* ── Focus mode exit bar ─────────────────────────────────────── */}
@@ -569,7 +574,7 @@ function ThemeSection({
                     aria-label={`Change color for ${theme.name}`}
                   />
                 </PopoverTrigger>
-                <PopoverContent className="w-auto p-2" align="start">
+                <PopoverContent className="w-auto p-2" align="start" aria-label="Theme color">
                   <ColorSwatchPicker value={themeColor} onChange={color => onUpdateTheme(theme.id, { color })} />
                 </PopoverContent>
               </Popover>
@@ -609,7 +614,7 @@ function ThemeSection({
               <button
                 type="button"
                 onClick={() => onDeleteTheme(theme.id)}
-                className="p-1 rounded text-mm-text-muted hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
+                className="p-1 rounded text-mm-text-muted hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
                 title={`Delete ${isTheme ? 'theme' : 'section'} ${theme.name}`}
                 aria-label={`Delete ${isTheme ? 'theme' : 'section'} ${theme.name}`}
               >

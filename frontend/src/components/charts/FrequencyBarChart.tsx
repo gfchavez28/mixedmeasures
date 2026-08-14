@@ -30,6 +30,7 @@ import { useChartColors } from '@/lib/theme-context'
 import type { LabelProps } from 'recharts'
 import type { BarDatum, ChartFormatting, VariableNMode, GroupedFrequencySection, SortOrder } from '@/lib/chart-data'
 import type { RechartsTooltipProps, RechartsPayloadEntry, ChartDataRow } from '@/lib/chart-types'
+import { ChartFigure } from './ChartFigure'
 
 interface FrequencyBarChartProps {
   metrics: MetricDefinitionResponse[]
@@ -576,7 +577,7 @@ export default function FrequencyBarChart({
 
   if (isGrouped) {
     return (
-      <div role="img" aria-label={`Grouped frequency bar charts by ${groupValues.join(', ')}`}>
+      <ChartFigure label={`Grouped frequency bar charts by ${groupValues.join(', ')}`}>
         {/* Shared group legend */}
         <div className="flex items-center gap-3 px-1 mb-3">
           {groupValues.map(gv => (
@@ -603,12 +604,12 @@ export default function FrequencyBarChart({
             responseLabels={rl}
           />
         ))}
-      </div>
+      </ChartFigure>
     )
   }
 
   return (
-    <div role="img" aria-label="Frequency bar charts">
+    <ChartFigure label="Frequency bar charts">
       {sections.map(({ metric, barData, sectionLabel, fullLabel }) => (
         <SingleFrequencyChart
           key={metric.id}
@@ -624,6 +625,6 @@ export default function FrequencyBarChart({
           responseLabels={unifiedLabels}
         />
       ))}
-    </div>
+    </ChartFigure>
   )
 }

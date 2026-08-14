@@ -15,6 +15,7 @@ import { DISPLAY_PRECISION, mergeFormatting, computeYAxisWidth, wrapLabel } from
 import { useChartColors } from '@/lib/theme-context'
 import type { StackedBarData, DivergingStackedBarData, ChartFormatting, VariableNMode, SortOrder } from '@/lib/chart-data'
 import type { RechartsTooltipProps, RechartsPayloadEntry, ChartDataRow } from '@/lib/chart-types'
+import { ChartFigure } from './ChartFigure'
 
 interface StackedHorizontalBarChartProps {
   data: StackedBarData
@@ -198,7 +199,7 @@ function StandardRenderer({
     return processed
   }, [rows, mode, responseLabels, isGrouped])
 
-  const containerRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLElement>(null)
   const [containerWidth, setContainerWidth] = useState<number>(0)
   useEffect(() => {
     const el = containerRef.current
@@ -235,7 +236,7 @@ function StandardRenderer({
   if (chartData.length === 0 || responseLabels.length === 0) return null
 
   return (
-    <div ref={containerRef} role="img" aria-label="Stacked horizontal bar chart">
+    <ChartFigure ref={containerRef} label="Stacked horizontal bar chart">
       <ResponsiveContainer width="100%" height={chartHeight}>
         <BarChart
           layout="vertical"
@@ -314,7 +315,7 @@ function StandardRenderer({
           ))}
         </BarChart>
       </ResponsiveContainer>
-    </div>
+    </ChartFigure>
   )
 }
 
@@ -386,7 +387,7 @@ function DivergingRenderer({
     return processed
   }, [rows, isGrouped])
 
-  const containerRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLElement>(null)
   const [containerWidth, setContainerWidth] = useState<number>(0)
   useEffect(() => {
     const el = containerRef.current
@@ -441,7 +442,7 @@ function DivergingRenderer({
   }
 
   return (
-    <div ref={containerRef} role="img" aria-label="Diverging stacked bar chart">
+    <ChartFigure ref={containerRef} label="Diverging stacked bar chart">
       {hasMixedScales && (
         <div className="flex items-center gap-2 px-3 py-2 mb-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded text-xs text-amber-700 dark:text-amber-400">
           Variables have different response scales — diverging center may not align across rows
@@ -523,7 +524,7 @@ function DivergingRenderer({
           ))}
         </BarChart>
       </ResponsiveContainer>
-    </div>
+    </ChartFigure>
   )
 }
 

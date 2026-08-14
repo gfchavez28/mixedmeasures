@@ -79,9 +79,20 @@ export function CrosswalkColumnHeaders({
       data-testid="crosswalk-column-headers"
       className="sticky top-0 z-10 pl-[220px] mb-3 pb-2 border-b border-mm-border-subtle bg-mm-bg/95 backdrop-blur-sm"
     >
+      {/* #701(b): NOT `role="row"`.
+        *
+        * `row` requires a grid/rowgroup/table parent, and this strip is
+        * deliberately OUTSIDE every bracket — it is one sticky header shared by
+        * all of them, so no single grid can own it. Measured live: it was the
+        * one row on the page with no grid ancestor, which is the reported
+        * `aria-required-parent` violation.
+        *
+        * Nothing is lost by dropping the role: each `gridcell` already names its
+        * dataset in its own `aria-label` ("C002: School — Student Assessments —
+        * nominal"), so a reader never depends on this strip to know which
+        * column it is in. The heading text stays on screen for sighted users. */}
       <div
-        role="row"
-        aria-label="Dataset column headers"
+        role="presentation"
         className="grid gap-[var(--crosswalk-gap)] px-3"
         style={{
           gridTemplateColumns: 'var(--crosswalk-cols)',

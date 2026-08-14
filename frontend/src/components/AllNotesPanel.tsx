@@ -2,7 +2,7 @@ import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   ChevronRight, ChevronDown, ExternalLink, FileText, MessageSquare,
-  LoaderCircle, TableProperties
+  LoaderCircle, TableProperties, Video
 } from 'lucide-react'
 import { allNotesApi } from '@/lib/api'
 import {
@@ -12,19 +12,23 @@ import {
 import { useTheme } from '@/lib/theme-context'
 import { getUnfocusedStyle } from '@/lib/utils'
 
-type SourceFilter = 'all' | 'conversations' | 'documents' | 'text'
+type SourceFilter = 'all' | 'conversations' | 'documents' | 'observations' | 'text'
 
 const SOURCE_FILTER_COLORS: Record<SourceFilter, { active: string; inactive: string }> = {
   all:           { active: 'bg-mm-text text-mm-bg', inactive: 'bg-mm-bg text-mm-text-muted hover:bg-mm-surface-hover' },
   conversations: { active: 'bg-teal-600 text-white dark:bg-teal-500 dark:text-white', inactive: 'bg-teal-50 text-teal-700 hover:bg-teal-100 dark:bg-teal-900/20 dark:text-teal-300 dark:hover:bg-teal-900/30' },
   documents:     { active: 'bg-indigo-600 text-white dark:bg-indigo-500 dark:text-white', inactive: 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-900/20 dark:text-indigo-300 dark:hover:bg-indigo-900/30' },
   text:          { active: 'bg-sky-600 text-white dark:bg-sky-500 dark:text-white', inactive: 'bg-sky-50 text-sky-700 hover:bg-sky-100 dark:bg-sky-900/20 dark:text-sky-300 dark:hover:bg-sky-900/30' },
+  // Rose — see the note beside `observation` in memo-constants.ts. Teal is taken
+  // by conversations in this palette.
+  observations:  { active: 'bg-rose-600 text-white dark:bg-rose-500 dark:text-white', inactive: 'bg-rose-50 text-rose-700 hover:bg-rose-100 dark:bg-rose-900/20 dark:text-rose-300 dark:hover:bg-rose-900/30' },
 }
 
 const SOURCE_FILTERS: { value: SourceFilter; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'conversations', label: 'Conversations' },
   { value: 'documents', label: 'Documents' },
+  { value: 'observations', label: 'Observations' },
   { value: 'text', label: 'Text' },
 ]
 
@@ -35,7 +39,7 @@ interface FlatNote {
   content: string
   sequenceNumber: number
   createdAt: string
-  sourceType: 'conversation' | 'document' | 'comment'
+  sourceType: 'conversation' | 'document' | 'observation' | 'comment'
   sourceId: number
   sourceName: string
   speakerName?: string
@@ -47,7 +51,7 @@ interface FlatNote {
 interface SourceGroup {
   key: string
   label: string
-  sourceType: 'conversation' | 'document' | 'comment'
+  sourceType: 'conversation' | 'document' | 'observation' | 'comment'
   sourceId: number
   notes: FlatNote[]
 }
@@ -84,6 +88,7 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
   const conversations = useMemo(() => data?.conversations ?? [], [data?.conversations])
   const comments = useMemo(() => data?.texts ?? [], [data?.texts])
   const documents = useMemo(() => data?.documents ?? [], [data?.documents])
+  const observations = useMemo(() => data?.observations ?? [], [data?.observations])
 
   // Filter by source type
   const filteredConversations = useMemo(
@@ -93,6 +98,10 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
   const filteredDocuments = useMemo(
     () => sourceFilter === 'all' || sourceFilter === 'documents' ? documents : [],
     [sourceFilter, documents],
+  )
+  const filteredObservations = useMemo(
+    () => sourceFilter === 'all' || sourceFilter === 'observations' ? observations : [],
+    [sourceFilter, observations],
   )
   const filteredComments = useMemo(
     () => sourceFilter === 'all' || sourceFilter === 'text' ? comments : [],
@@ -170,6 +179,31 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
       }
     }
 
+    for (const obs of filteredObservations) {
+      const notes: FlatNote[] = obs.notes.map(note => ({
+        id: note.id,
+        content: note.content,
+        sequenceNumber: note.sequence_number,
+        createdAt: note.created_at,
+        sourceType: 'observation' as const,
+        sourceId: obs.observation_id,
+        sourceName: obs.observation_name,
+        // A clip's label may legitimately be '' — leave the context block off
+        // rather than rendering an empty quote.
+        contextText: note.segment_text || undefined,
+        segmentId: note.segment_id,
+      }))
+      if (notes.length > 0) {
+        groups.push({
+          key: `obs-${obs.observation_id}`,
+          label: obs.observation_name,
+          sourceType: 'observation',
+          sourceId: obs.observation_id,
+          notes,
+        })
+      }
+    }
+
     for (const col of filteredComments) {
       const notes: FlatNote[] = []
       for (const r of col.rows) {
@@ -199,7 +233,7 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
     }
 
     return groups
-  }, [filteredConversations, filteredDocuments, filteredComments])
+  }, [filteredConversations, filteredDocuments, filteredObservations, filteredComments])
 
   const totalCount = useMemo(() => sourceGroups.reduce((s, g) => s + g.notes.length, 0), [sourceGroups])
 
@@ -277,6 +311,8 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
 
       {/* Grouped flat list */}
       <div className="flex-1 overflow-y-auto" role="list" aria-label="Notes">
+        {/* Each NoteSourceGroup renders role="listitem" — a role="list" whose
+            children carry no listitem role announces as a list of 0 items. */}
         {isLoading ? (
           <div className="flex items-center justify-center py-12">
             <LoaderCircle className="h-5 w-5 animate-spin text-mm-text-muted" />
@@ -288,7 +324,7 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
               {debouncedSearch ? 'No notes match your search' : 'No notes yet'}
             </p>
             <p className="text-xs text-mm-text-muted/70 mt-1">
-              Notes are created in conversations, documents, and the Text Coding tab
+              Notes are created in conversations, documents, observations, and the Text Coding tab
             </p>
           </div>
         ) : (
@@ -338,15 +374,18 @@ function NoteSourceGroup({
   const { isDark } = useTheme()
   const Icon = group.sourceType === 'conversation' ? MessageSquare
     : group.sourceType === 'document' ? FileText
+    : group.sourceType === 'observation' ? Video
     : TableProperties
   const sourceColor = group.sourceType === 'conversation'
     ? (isDark ? '#14b8a6' : '#0d9488')
     : group.sourceType === 'document'
       ? (isDark ? '#818cf8' : '#4f46e5')
-      : (isDark ? '#38bdf8' : '#0284c7')
+      : group.sourceType === 'observation'
+        ? (isDark ? '#fb7185' : '#e11d48')
+        : (isDark ? '#38bdf8' : '#0284c7')
 
   return (
-    <div>
+    <div role="listitem">
       {/* Collapsible group header */}
       <button
         className="w-full flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-mm-text hover:bg-mm-surface-hover transition-colors"
@@ -409,13 +448,23 @@ function NoteCard({
 }) {
   const typeLabel = note.sourceType === 'conversation' ? 'Conversation'
     : note.sourceType === 'document' ? 'Document'
+    : note.sourceType === 'observation' ? 'Observation'
     : 'Text'
   const colors = ENTITY_TYPE_COLORS[note.sourceType] ?? ENTITY_TYPE_COLORS.project
   const url = note.sourceType === 'conversation'
     ? `/projects/${projectId}/conversations/${note.conversationId}${note.segmentId ? `?segment=${note.segmentId}` : ''}`
     : note.sourceType === 'document'
       ? `/projects/${projectId}/documents/${note.sourceId}`
-      : `/projects/${projectId}/datasets/text-coding`
+      : note.sourceType === 'observation'
+        // `?clip=` is the workbench's deep-link param (slab 4e) — it selects the
+        // clip paused rather than seeking playback.
+        ? `/projects/${projectId}/observations/${note.sourceId}${note.segmentId ? `?clip=${note.segmentId}` : ''}`
+        : `/projects/${projectId}/datasets/text-coding`
+
+  const openInLabel = note.sourceType === 'conversation' ? 'conversation'
+    : note.sourceType === 'document' ? 'document'
+    : note.sourceType === 'observation' ? 'observation'
+    : 'text coding'
 
   const isFocusMatch = !focusedType || (
     focusedEntityId != null
@@ -485,7 +534,7 @@ function NoteCard({
 
       {/* Context block — associated segment/comment */}
       {note.contextText && (
-        <div className={`mt-1.5 pl-2 border-l-2 ${note.sourceType === 'conversation' ? 'border-teal-300 dark:border-teal-700' : note.sourceType === 'document' ? 'border-indigo-300 dark:border-indigo-700' : 'border-sky-300 dark:border-sky-700'}`}>
+        <div className={`mt-1.5 pl-2 border-l-2 ${note.sourceType === 'conversation' ? 'border-teal-300 dark:border-teal-700' : note.sourceType === 'document' ? 'border-indigo-300 dark:border-indigo-700' : note.sourceType === 'observation' ? 'border-rose-300 dark:border-rose-700' : 'border-sky-300 dark:border-sky-700'}`}>
           <p className="text-[11px] text-mm-text-secondary italic line-clamp-2">
             {note.contextText}
           </p>
@@ -498,10 +547,18 @@ function NoteCard({
           href={url}
           target="_blank"
           rel="noopener noreferrer"
-          className="opacity-0 group-hover:opacity-100 transition-opacity"
-          title={`Open in ${note.sourceType === 'conversation' ? 'conversation' : note.sourceType === 'document' ? 'document' : 'text coding'}`}
+          // Reveal on ANY focus, not just `:focus-visible`: opacity-0 alone left
+          // this control focusable but INVISIBLE (WCAG 2.4.7). `:focus-visible`
+          // is a browser heuristic that deliberately does NOT match programmatic
+          // focus — verified live — so focus management or a screen reader's
+          // cursor landing here would still find nothing. The usual reason to
+          // prefer `:focus-visible` (no ring on mouse click) does not apply to a
+          // hidden control: a mouse user hovered it to click it, so it was
+          // already visible.
+          className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity rounded-sm"
+          aria-label={`Open this note's ${openInLabel} — opens in a new tab`}
         >
-          <ExternalLink className="h-3 w-3 text-mm-text-muted hover:text-mm-accent" />
+          <ExternalLink className="h-3 w-3 text-mm-text-muted hover:text-mm-accent" aria-hidden="true" />
         </a>
       </div>
     </div>

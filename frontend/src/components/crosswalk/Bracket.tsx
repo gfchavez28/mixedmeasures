@@ -35,7 +35,7 @@
  *   - Keyboard reorder via Ctrl+Shift+Up/Down on grip (parallel to row reorder)
  */
 
-import { memo, useCallback, useMemo, type MutableRefObject } from 'react'
+import { memo, useCallback, useMemo, useRef, useState, type MutableRefObject } from 'react'
 import type { BracketData, RowData } from './crosswalk-types'
 import { EquivalenceRow } from './EquivalenceRow'
 import { getBracketLabelStyles } from './bracket-color'
@@ -197,6 +197,69 @@ export const Bracket = memo(function Bracket({
   // (including drag-from-Unassigned in commit 2) and lands them as
   // synthetic single-cell rows in this bracket via move_members.
   const addRowDrop = useDroppable({ id: makeAddRowDropId(bracket.domain_id) })
+
+  /**
+   * #756 — the ARIA grid keyboard pattern: ONE tab stop, arrows inside.
+   *
+   * ⚠️ **The filed fix is unsafe as written, and this is why the whole widget
+   * is here.** #756 describes the defect as an inverted tab order (container
+   * `tabindex="-1"`, every cell `tabindex="0"`) and says arrow keys already
+   * "work once inside". Measured live on a 2-bracket / 7-row crosswalk: 13 of
+   * 18 cells were tab stops, no grid was, and **ArrowRight/ArrowDown moved
+   * focus nowhere** — there is no arrow handler in the crosswalk at all. What
+   * the NVDA pass met was the reader's own browse-mode table navigation, which
+   * works on any `role="grid"` regardless of what the author implemented. So
+   * simply flipping the two attributes would have left keyboard users unable to
+   * reach the cells AT ALL. The tab order and the arrow keys are one feature.
+   *
+   * ⚠️ **Roving tabindex, NOT `aria-activedescendant` — and that is not a
+   * violation of the the internal design notes rule.** That rule ("use activedescendant, NEVER
+   * roving tabindex") is scoped to VIRTUALISED lists, where Virtuoso recycles
+   * the focused row out of the DOM and focus falls to `<body>`. The crosswalk
+   * renders every row. Real DOM focus is what the cells need: they carry
+   * dnd-kit drag listeners, a context menu (whose Menu key targets the focused
+   * element, not an activedescendant reference), and a focus-visible ring.
+   */
+  const rowCount = bracket.rows.length
+  const colCount = activeDatasetIds.length
+  const frameRef = useRef<HTMLDivElement | null>(null)
+  const [active, setActive] = useState({ r: 0, c: 0 })
+  // Clamp at RENDER, not on mutation: rows and datasets come and go under this
+  // component (a drag out, a dataset toggled off), and a stale coordinate would
+  // silently leave the grid with no tab stop — the #701(a) closed loop, where
+  // nothing focusable means no keydown means nothing ever becomes focusable.
+  const activeRow = rowCount > 0 ? Math.min(active.r, rowCount - 1) : 0
+  const activeCol = colCount > 0 ? Math.min(active.c, colCount - 1) : 0
+
+  const handleGridKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // Modified arrows belong to the row-reorder shortcut (Ctrl+Shift+Arrow) and
+    // to the browser; only bare arrows drive the grid.
+    if (e.altKey || e.shiftKey) return
+    const rows = bracket.rows.length
+    const cols = activeDatasetIds.length
+    if (rows === 0 || cols === 0) return
+
+    let { r, c } = { r: Math.min(active.r, rows - 1), c: Math.min(active.c, cols - 1) }
+    switch (e.key) {
+      case 'ArrowRight': if (e.ctrlKey) return; c = Math.min(c + 1, cols - 1); break
+      case 'ArrowLeft':  if (e.ctrlKey) return; c = Math.max(c - 1, 0); break
+      case 'ArrowDown':  if (e.ctrlKey) return; r = Math.min(r + 1, rows - 1); break
+      case 'ArrowUp':    if (e.ctrlKey) return; r = Math.max(r - 1, 0); break
+      // Home/End are row-scoped; Ctrl+Home/End span the grid (APG grid pattern).
+      case 'Home': c = 0; if (e.ctrlKey) r = 0; break
+      case 'End':  c = cols - 1; if (e.ctrlKey) r = rows - 1; break
+      default: return
+    }
+    e.preventDefault()
+    e.stopPropagation()
+    setActive({ r, c })
+    // Focus by coordinate rather than by threading a ref per cell: the cells are
+    // memoized leaves and a ref prop would churn their identity every render,
+    // which is the #332 render-chain invariant this file's own layout depends on.
+    frameRef.current
+      ?.querySelector<HTMLElement>(`[data-cell-pos="${r}-${c}"]`)
+      ?.focus()
+  }, [active.r, active.c, bracket.rows.length, activeDatasetIds.length])
   const handleCreateScore = useCallback(
     () => onCreateScoreMetric?.(bracket),
     [onCreateScoreMetric, bracket],
@@ -346,7 +409,8 @@ export const Bracket = memo(function Bracket({
         ref={setSortableRef}
         style={sortableStyle}
         tabIndex={-1}
-        role="grid"
+        /* #701(b): a collapsed bracket renders no rows, so it is not a grid
+         * either — it is a one-line summary strip. */
         aria-label={`Variable group: ${bracket.name} (collapsed)`}
         data-testid={`crosswalk-bracket-${bracket.domain_id}`}
         className="mb-1.5 flex items-stretch group/bracket focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
@@ -405,7 +469,16 @@ export const Bracket = memo(function Bracket({
       ref={setSortableRef}
       style={sortableStyle}
       tabIndex={-1}
-      role="grid"
+      /* #701(b): NOT `role="grid"`.
+       *
+       * `grid` requires row children, and this element's two children are the
+       * 210px label gutter and the frame — measured live on a 2-bracket / 7-row
+       * crosswalk, every grid's direct children were two role-less divs, which
+       * is the `aria-required-children` violation the issue reports. The grid is
+       * the FRAME, which is the element that actually owns the rows; the gutter
+       * is chrome ABOUT the group, not part of its tabular structure. A named
+       * <section> is a region, which is the honest role for the pair.
+       */
       aria-label={`Variable group: ${bracket.name}, ${ariaCountSummary}`}
       data-testid={`crosswalk-bracket-${bracket.domain_id}`}
       className="mb-5 flex items-stretch gap-[10px] group/bracket focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
@@ -518,11 +591,29 @@ export const Bracket = memo(function Bracket({
         style={labelStyles.frame}
       >
         {bracket.rows.length === 0 ? (
+          /* #701(b): the empty-state message is a SIBLING of the grid, not a
+           * child of it. A `role="grid"` may only own rows and rowgroups, so a
+           * prose div inside it is the same violation as the label gutter was —
+           * and an empty grid with the message beside it is also the more honest
+           * structure. */
           <div className="text-xs text-mm-text-muted italic px-3 py-2">
             No columns yet. Drag a column from Unassigned, or click + Add variable row below.
           </div>
         ) : (
-          <div>
+          /* The grid is THIS element: its direct children are the rows and
+           * nothing else. It was the outer <section> (whose children are the
+           * label gutter and this frame) and then briefly the frame (whose
+           * child was a bare wrapper div) — both `aria-required-children`
+           * violations, and the second one is why the live re-measure is the
+           * step that proves this rather than the diff. */
+          <div
+            ref={frameRef}
+            role="grid"
+            aria-label={`${bracket.name} variables`}
+            aria-rowcount={bracket.rows.length}
+            aria-colcount={activeDatasetIds.length}
+            onKeyDown={handleGridKeyDown}
+          >
             {bracket.rows.map((row, idx) => (
               <EquivalenceRow
                 key={row.kind === 'eg' ? `eg-${row.equivalence_group_id}` : `col-${row.column_id}`}
@@ -533,6 +624,7 @@ export const Bracket = memo(function Bracket({
                 domainId={bracket.domain_id}
                 rowIndex={idx}
                 rowCount={bracket.rows.length}
+                activeCol={idx === activeRow ? activeCol : null}
                 searchHighlightIds={searchHighlightIds}
                 activeDragColumnId={activeDragColumnId}
                 conflictFlashColumnId={conflictFlashColumnId}

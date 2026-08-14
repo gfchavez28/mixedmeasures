@@ -331,6 +331,13 @@ def test_domain_aggregate(db_session):
     assert data["aggregate_value"] == pytest.approx(4.3406, abs=0.001)
     assert data["column_count"] == 5
 
+    # #690: 5 columns ⇒ k ≥ 3 ⇒ an interval IS computed, and it must still be
+    # labelled for what it is over. The old code seeded "item_level_t" and then
+    # replaced the whole dict with `_ci_mean`'s return, so the honest label
+    # survived ONLY when k < 3 — i.e. only when there was no interval to label.
+    assert data["ci_lower"] is not None and data["ci_upper"] is not None
+    assert data["ci_method"] == "item_level_t"
+
     # Check per-row scores (mean of valid items per row)
     scores = (
         db.query(RowScore)

@@ -661,3 +661,197 @@ class TestVisibility:
         visible = _visible_segments(db_session, conv.id)
         orders = [s.sequence_order for s in visible]
         assert orders == list(range(len(orders)))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #695 — char-range quotes must survive a split
+#
+# `split_segment` carried forward only WHOLE-segment excerpts (`had_whole_excerpt`).
+# Char-range quotes stayed attached to the original, which the split soft-deletes via
+# `split_into_id` — so `visible_segment_filter()` hid them and they vanished from the
+# workbench and the Quote Board with no notice. Not data loss (unsplit recovers them),
+# but silent disappearance.
+#
+# The fix ports #621's `_clip_excerpt_carry_plan` shape to text. Two things make the
+# text case genuinely different from the clip case, and both are pinned below:
+#   1. children are built from STRIPPED slices, so offsets shift by discarded whitespace
+#   2. the multi-segment split CONCATENATES runs from N sources into one child
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestCharRangeQuotesSurviveSplit:
+
+    def _quote(self, db, project_id, seg, start, end):
+        ex = Excerpt(project_id=project_id, segment_id=seg.id, start_offset=start, end_offset=end)
+        db.add(ex)
+        db.flush()
+        return ex
+
+    def _visible_quotes(self, db, segs):
+        """(text, quote_text) for every char-range quote on the given segments."""
+        out = []
+        for s in segs:
+            for e in s.excerpts:
+                if e.start_offset is not None:
+                    out.append(s.text[e.start_offset:e.end_offset])
+        return out
+
+    def test_quote_inside_the_selected_part_is_carried_and_rebased(self, db_session):
+        project, user, conv, speakers, segs = _setup_conversation(db_session)
+        seg = segs[0]  # "First segment text."
+        # Quote "segment" (offsets 6..13), split so it lands wholly in `selected`.
+        assert seg.text[6:13] == "segment"
+        self._quote(db_session, project.id, seg, 6, 13)
+
+        new_segs, _ = split_segment(
+            db_session,
+            ranges=[SegmentSplitRange(segment_id=seg.id, start_offset=6, end_offset=13)],
+            parent_type="conversation", parent_id=conv.id,
+            project_id=project.id, user_id=user.id,
+        )
+        assert self._visible_quotes(db_session, new_segs) == ["segment"]
+
+    def test_the_rebase_accounts_for_the_stripped_whitespace(self, db_session):
+        """The arithmetic the clip sibling never needs.
+
+        `before_text = text[:start].strip()`, so the child's text is NOT
+        `text[:start]` — a naive `offset - part_start` would be off by the discarded
+        leading whitespace and the quote would point at the wrong words.
+        """
+        project, user, conv, speakers, segs = _setup_conversation(db_session)
+        seg = segs[0]
+        seg.text = "   Leading space then QUOTED here."
+        db_session.flush()
+        qs = seg.text.index("QUOTED")
+        self._quote(db_session, project.id, seg, qs, qs + len("QUOTED"))
+
+        # Split so the quote lands in `after`, whose slice also gets stripped.
+        cut = seg.text.index("then")
+        new_segs, _ = split_segment(
+            db_session,
+            ranges=[SegmentSplitRange(segment_id=seg.id, start_offset=cut, end_offset=cut + 4)],
+            parent_type="conversation", parent_id=conv.id,
+            project_id=project.id, user_id=user.id,
+        )
+        assert "QUOTED" in self._visible_quotes(db_session, new_segs)
+
+    def test_a_quote_straddling_the_cut_is_divided_not_dropped(self, db_session):
+        """Picking a side or dropping it would silently discard a marked passage."""
+        project, user, conv, speakers, segs = _setup_conversation(db_session)
+        seg = segs[0]  # "First segment text."
+        # Quote "rst segment" spans the cut at offset 6.
+        qs, qe = 2, 13
+        self._quote(db_session, project.id, seg, qs, qe)
+
+        new_segs, _ = split_segment(
+            db_session,
+            ranges=[SegmentSplitRange(segment_id=seg.id, start_offset=6, end_offset=13)],
+            parent_type="conversation", parent_id=conv.id,
+            project_id=project.id, user_id=user.id,
+        )
+        quotes = self._visible_quotes(db_session, new_segs)
+        # Both halves of the marked passage survive, one per child.
+        assert "rst" in quotes
+        assert "segment" in quotes
+
+    def test_unsplit_restores_the_original_quote_and_removes_the_copies(self, db_session):
+        """Copy-never-move is what makes the inverse free.
+
+        Re-pointing would be worse than awkward: unsplit DELETES the children, so a
+        re-pointed excerpt would be destroyed outright and its note's `excerpt_id`
+        (ondelete=SET NULL) would silently detach.
+        """
+        project, user, conv, speakers, segs = _setup_conversation(db_session)
+        seg = segs[0]
+        original_id = seg.id
+        self._quote(db_session, project.id, seg, 6, 13)
+        before = db_session.query(Excerpt).count()
+
+        new_segs, _ = split_segment(
+            db_session,
+            ranges=[SegmentSplitRange(segment_id=seg.id, start_offset=6, end_offset=13)],
+            parent_type="conversation", parent_id=conv.id,
+            project_id=project.id, user_id=user.id,
+        )
+        assert db_session.query(Excerpt).count() > before, "a copy must have been made"
+
+        unsplit_segment(
+            db_session, segment_id=new_segs[0].id,
+            parent_type="conversation", parent_id=conv.id,
+            project_id=project.id, user_id=user.id,
+        )
+        restored = db_session.query(Segment).filter(Segment.id == original_id).one()
+        assert restored.split_into_id is None
+        assert [(e.start_offset, e.end_offset) for e in restored.excerpts] == [(6, 13)]
+        assert db_session.query(Excerpt).count() == before, "copies must go with the children"
+
+    def test_two_quotes_collapsing_to_the_same_span_do_not_violate_the_unique_index(self, db_session):
+        """`ix_excerpt_segment_range` is unique per (segment, start, end).
+
+        Two distinct quotes on the source CAN clip to the same span on one child;
+        without the dedup that is an IntegrityError mid-split, not a duplicate row.
+        """
+        project, user, conv, speakers, segs = _setup_conversation(db_session)
+        seg = segs[0]  # "First segment text."
+        # Both overlap the `selected` part [6,13) on exactly [6,13) after clipping.
+        self._quote(db_session, project.id, seg, 0, 13)
+        self._quote(db_session, project.id, seg, 3, 13)
+
+        new_segs, _ = split_segment(
+            db_session,
+            ranges=[SegmentSplitRange(segment_id=seg.id, start_offset=6, end_offset=13)],
+            parent_type="conversation", parent_id=conv.id,
+            project_id=project.id, user_id=user.id,
+        )
+        db_session.flush()  # would raise IntegrityError without the dedup
+        selected = [s for s in new_segs if s.text == "segment"][0]
+        spans = sorted((e.start_offset, e.end_offset) for e in selected.excerpts if e.start_offset is not None)
+        assert spans == [(0, 7)], spans
+
+    def test_multi_segment_split_carries_quotes_from_every_source(self, db_session):
+        """The concatenation case — the sibling path with the same defect.
+
+        `selected_text` joins runs from N segments with ' ', so a quote from the
+        SECOND source needs `dest_offset + (quote - src_start)`; a plain rebase
+        would land it at the wrong place in the merged child.
+        """
+        project, user, conv, speakers, segs = _setup_conversation(db_session)
+        s0, s1 = segs[0], segs[1]   # "First segment text." / "Second segment here."
+        # A quote in the FIRST source's selected run…
+        self._quote(db_session, project.id, s0, 6, 13)          # "segment"
+        # …and one in the SECOND, which only a dest-offset-aware map places correctly.
+        q1s = s1.text.index("here")
+        self._quote(db_session, project.id, s1, q1s, q1s + 4)   # "here"
+
+        new_segs, _ = split_segment(
+            db_session,
+            ranges=[
+                SegmentSplitRange(segment_id=s0.id, start_offset=6, end_offset=len(s0.text)),
+                SegmentSplitRange(segment_id=s1.id, start_offset=0, end_offset=len(s1.text)),
+            ],
+            parent_type="conversation", parent_id=conv.id,
+            project_id=project.id, user_id=user.id,
+        )
+        quotes = self._visible_quotes(db_session, new_segs)
+        assert "segment" in quotes, quotes
+        assert "here" in quotes, quotes
+
+    def test_a_whitespace_only_quote_is_carried_nowhere_rather_than_misplaced(self, db_session):
+        """No child exists for stripped whitespace, so there is no honest destination.
+
+        It stays on the soft-deleted original and returns on unsplit — the same
+        outcome as before the fix, but now by decision rather than by omission.
+        """
+        project, user, conv, speakers, segs = _setup_conversation(db_session)
+        seg = segs[0]
+        seg.text = "Alpha    Beta"
+        db_session.flush()
+        self._quote(db_session, project.id, seg, 5, 9)  # inside the run of spaces
+
+        new_segs, _ = split_segment(
+            db_session,
+            ranges=[SegmentSplitRange(segment_id=seg.id, start_offset=9, end_offset=13)],
+            parent_type="conversation", parent_id=conv.id,
+            project_id=project.id, user_id=user.id,
+        )
+        carried = [e for s in new_segs for e in s.excerpts if e.start_offset is not None]
+        assert carried == []

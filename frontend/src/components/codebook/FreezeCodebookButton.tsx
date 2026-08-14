@@ -39,7 +39,7 @@ export default function FreezeCodebookButton({
       disabled={mut.isPending}
       className={`flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium border transition-colors disabled:opacity-50 ${
         isFrozen
-          ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30 hover:bg-amber-500/25'
+          ? 'bg-amber-500/15 text-amber-800 dark:text-amber-300 border-amber-500/30 hover:bg-amber-500/25'
           : 'text-mm-text-muted border-mm-surface-border hover:bg-mm-surface'
       } ${className}`}
       title={

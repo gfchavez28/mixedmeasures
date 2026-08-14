@@ -7,7 +7,7 @@
  * wizard's recording slot, the conversations-list "Attach Recording" context
  * menu, and the coding-workbench toolbar. New media-attach surfaces MUST import
  * from here — never re-inline the size/extension check (that duplication was the
- * three-mirror drift the media-format-seam bullet in CLAUDE.md warned about).
+ * three-mirror drift the media-format-seam bullet in the internal design notes warned about).
  */
 
 import { ApiError } from './api/client'

@@ -221,6 +221,13 @@ def _emit_domain_aggregate_r_lines(
     lines: list[str] = []
     cross_dataset = members_by_dataset is not None and len(members_by_dataset) > 1
     if not cross_dataset:
+        # #693: the equal-weighting caveat is NOT a cross-dataset-only fact. A
+        # single-dataset domain averages item means too, so an item answered by
+        # 10 people counts as much as one answered by 1000 — and this branch
+        # said nothing at all, while the app now labels the same number on
+        # screen. The two must not disagree about what they computed.
+        lines.append("# Unweighted mean of item means: each item counts equally,")
+        lines.append("# regardless of how many respondents answered it.")
         lines.append(f"domain_means <- colMeans(.mm_num(data[, {r_name_for_full_set}]), na.rm = TRUE)")
         lines.append("mean(domain_means)")
         return lines

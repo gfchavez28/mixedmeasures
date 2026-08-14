@@ -180,7 +180,7 @@ export default function ByRecordPanel({
                           onClick={e => { e.stopPropagation(); onQuoteToggle(comment.dataset_value_id) }}
                           aria-label={comment.is_quoted ? 'Unquote' : 'Quote'}
                         >
-                          <Quote className={`w-3.5 h-3.5 ${comment.is_quoted ? 'fill-amber-400 text-amber-400' : 'text-mm-border-medium'}`} />
+                          <Quote className={`w-3.5 h-3.5 ${comment.is_quoted ? 'fill-amber-400 text-amber-400' : 'text-mm-text-faint'}`} />
                         </button>
                       )}
                     </div>

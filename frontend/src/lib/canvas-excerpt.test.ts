@@ -11,6 +11,7 @@ function excerpt(over: Partial<ExcerptDetailResponse> = {}): ExcerptDetailRespon
     id: 5, segment_id: 2001, dataset_value_id: null,
     start_offset: null, end_offset: null, start_time: null, end_time: null,
     excerpt_text: 'Small-group transition',
+    source_kind: 'observation', source_name: 'Classroom',
     conversation_id: null, conversation_name: null,
     observation_id: 7, observation_name: 'Classroom',
     speaker_name: null, segment_timestamp: 65,
@@ -56,6 +57,7 @@ describe('excerptEmbedAttrs', () => {
   it('leaves the conversation shape untouched', () => {
     expect(excerptEmbedAttrs(excerpt({
       observation_id: null, observation_name: null,
+      source_kind: 'conversation', source_name: 'Interview 1',
       conversation_id: 3, conversation_name: 'Interview 1',
       excerpt_text: 'we tried that',
     }))).toEqual({
@@ -95,6 +97,7 @@ describe('the Materials drawer row (#630)', () => {
     // quietly drop it by reusing the embed's conversation-only attribution.
     const conv = excerpt({
       observation_id: null, observation_name: null,
+      source_kind: 'conversation', source_name: 'Interview 1',
       conversation_id: 3, conversation_name: 'Interview 1',
       speaker_name: 'P04', excerpt_text: 'we tried that',
     })
@@ -108,6 +111,7 @@ describe('the Materials drawer row (#630)', () => {
     // blockquote — well outside #630.
     const conv = excerpt({
       observation_id: null, observation_name: null,
+      source_kind: 'conversation', source_name: 'Interview 1',
       conversation_id: 3, conversation_name: 'Interview 1',
       speaker_name: 'P04', excerpt_text: 'we tried that',
     })

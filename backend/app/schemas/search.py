@@ -6,12 +6,11 @@ from datetime import datetime
 
 class SegmentSearchResult(BaseModel):
     id: int
-    # ⚠️ DEPRECATED PAIR (#569, one-release beat): `conversation_id` is overloaded
-    # with the DOCUMENT id on doc hits (kept populated so existing consumers keep
-    # working); `source_type` is superseded by `source_kind`. New consumers read
-    # source_kind + source_id — observation hits carry conversation_id=None (a new
-    # kind never repeats the lie). Retire both after the beat.
-    conversation_id: int | None = None
+    # #569 RETIRED 2026-08-09 (beat ended at the cut after v1.3.0): `conversation_id`
+    # — overloaded with the DOCUMENT id on doc hits — and `source_type` are GONE.
+    # `source_kind` + `source_id` is the only source identity. ⚠️ Never re-introduce
+    # an id field whose MEANING depends on another field; that overload silently
+    # routed doc hits through a conversation-shaped id for two releases.
     conversation_name: str = ""  # the SOURCE display name (conv/doc/observation)
     speaker_name: str | None = None
     is_facilitator: bool = False
@@ -19,7 +18,6 @@ class SegmentSearchResult(BaseModel):
     text: str
     sequence_order: int
     is_quoted: bool = False
-    source_type: str = "conversation"  # deprecated alias of source_kind
     source_kind: str = "conversation"  # "conversation" | "document" | "observation"
     source_id: int | None = None  # the id in source_kind's namespace — the honest pair
 
@@ -51,17 +49,13 @@ class ConversationSearchResult(BaseModel):
 
 class NoteSearchResult(BaseModel):
     id: int
-    # Optional since 4b (#569): observation notes carry None here — the field was
-    # a REQUIRED int overloaded with the document id on doc hits. Same deprecation
-    # beat as SegmentSearchResult: conv/doc hits keep it populated one release;
-    # new consumers read source_kind + source_id.
-    conversation_id: int | None = None
+    # #569 RETIRED 2026-08-09 — see SegmentSearchResult. `conversation_id` and
+    # `source_type` are gone; `source_kind` + `source_id` identify the source.
     conversation_name: str
     segment_id: int | None
     segment_text_preview: str | None  # First ~100 chars of attached segment
     content: str
     sequence_number: int
-    source_type: str = "conversation"  # deprecated alias of source_kind
     source_kind: str = "conversation"  # "conversation" | "document" | "observation"
     source_id: int | None = None  # the id in source_kind's namespace — the honest pair
 

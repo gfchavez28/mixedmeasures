@@ -229,6 +229,24 @@ export default function QualitativeAnalysisView() {
     }
   }, [qa.codeMode]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  /**
+   * A custom order belongs to ONE axis identity, so switching codes↔categories
+   * discards it (#675).
+   *
+   * ⚠️ Only on a CHANGE — clearing on mount would wipe the order a shared URL or
+   * a saved material had just loaded, which is the one case this state exists
+   * for. Filtering at read time cannot substitute: the two id spaces are
+   * independent, so a stale code id is indistinguishable from a valid category
+   * id and would silently reorder the axis rather than being ignored.
+   */
+  const prevCodeModeRef = useRef(qa.codeMode)
+  useEffect(() => {
+    if (prevCodeModeRef.current !== qa.codeMode) {
+      prevCodeModeRef.current = qa.codeMode
+      if (qa.customOrder.length > 0) qa.setCustomOrder([])
+    }
+  }, [qa.codeMode]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Auto-coerce dataLabels when switching to stacked_bar (which only supports inside/none)
   useEffect(() => {
     if (qa.chartType === 'stacked_bar' && qa.formatting.dataLabels === 'outside') {
@@ -439,7 +457,25 @@ export default function QualitativeAnalysisView() {
   const [cooccurrenceN, setCooccurrenceN] = useState<number | null>(null)
 
   const codes = useMemo(() => codesData?.codes ?? [], [codesData?.codes])
-  const categories = categoriesData?.categories ?? []
+  // Memoized like `codes` above: it feeds `axisEntities`, whose identity decides
+  // whether the Chart Options list re-derives on every render.
+  const categories = useMemo(() => categoriesData?.categories ?? [], [categoriesData?.categories])
+
+  /**
+   * What sits on the chart's CODE AXIS — #675.
+   *
+   * `aggregation: 'category'` makes the source-frequencies response return
+   * CATEGORIES in its `codes` array, so the axis identity follows `codeMode`.
+   * The Chart Options custom-order list is authored against this, because code
+   * ids and category ids are independent sequences: ordering one by the other's
+   * ids moves whichever rows happen to share a number.
+   */
+  const axisEntities = useMemo(
+    () => (qa.codeMode === 'categories'
+      ? categories.map(c => ({ id: c.id, name: c.name }))
+      : codes.filter(c => c.is_active).map(c => ({ id: c.id, name: c.name }))),
+    [qa.codeMode, codes, categories],
+  )
   const conversations = useMemo(() => conversationsData?.conversations ?? [], [conversationsData?.conversations])
   const textColumns: TextColumnInfo[] = useMemo(() => textColumnsData ?? [], [textColumnsData])
   const documents: DocumentListItem[] = useMemo(() => documentsData ?? [], [documentsData])
@@ -726,7 +762,7 @@ export default function QualitativeAnalysisView() {
     return `qualitative_${qa.tab}`
   }, [qa.tab, qa.relView])
 
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- qa.buildCurrentConfig is stable but compiler infers full qa object
+  // qa.buildCurrentConfig is stable but compiler infers full qa object
   const handleAddToMaterials = useCallback(async () => {
     const collectionId = await ensureCollectionId()
     const config = qa.buildCurrentConfig()
@@ -788,7 +824,7 @@ export default function QualitativeAnalysisView() {
 
   // ── Tab navigation ────────────────────────────────────────────────────
 
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- qa.tab/qa.setTab are stable but compiler infers full qa object
+  // qa.tab/qa.setTab are stable but compiler infers full qa object
   const handleTabKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
     const idx = visibleTabs.findIndex(t => t.id === qa.tab)
     let next: typeof visibleTabs[number] | undefined
@@ -816,7 +852,7 @@ export default function QualitativeAnalysisView() {
   }, [qa.tab, qa.setTab, visibleTabs]) // eslint-disable-line react-hooks/exhaustive-deps -- qa destructured access; individual properties listed
 
   // Source mode keyboard nav (for sidebar segmented control)
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- qa.source/qa.setSource are stable but compiler infers full qa object
+  // qa.source/qa.setSource are stable but compiler infers full qa object
   const handleSourceKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
     const idx = SOURCE_MODES.indexOf(qa.source)
     let next: typeof SOURCE_MODES[number] | undefined
@@ -860,7 +896,7 @@ export default function QualitativeAnalysisView() {
   }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderIncludeCsv, qa.layerScope])
 
   // Content mode keyboard nav
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- qa.contentMode/qa.setContentMode are stable but compiler infers full qa object
+  // qa.contentMode/qa.setContentMode are stable but compiler infers full qa object
   const handleContentModeKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
     const idx = CONTENT_MODES.indexOf(qa.contentMode)
     let next: QualContentMode | undefined
@@ -888,24 +924,24 @@ export default function QualitativeAnalysisView() {
   }, [qa.contentMode, qa.setContentMode]) // eslint-disable-line react-hooks/exhaustive-deps -- qa destructured access; individual properties listed
 
   // Screen reader announcements for chart type / value mode / orientation changes
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- qa.setChartType is stable but compiler infers full qa object
+  // qa.setChartType is stable but compiler infers full qa object
   const handleChartTypeChange = useCallback((type: typeof qa.chartType) => {
     qa.setChartType(type)
     setSrAnnouncement(`Chart type changed to ${CHART_TYPE_LABELS[type] || type}`)
   }, [qa.setChartType]) // eslint-disable-line react-hooks/exhaustive-deps -- qa destructured access
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- qa.setValueMode is stable but compiler infers full qa object
+  // qa.setValueMode is stable but compiler infers full qa object
   const handleValueModeChange = useCallback((mode: typeof qa.valueMode) => {
     qa.setValueMode(mode)
     const labels: Record<string, string> = { count: 'Count', segment_proportion: 'Proportion', text_coverage: 'Word Coverage' }
     setSrAnnouncement(`Value mode changed to ${labels[mode] || mode}`)
   }, [qa.setValueMode]) // eslint-disable-line react-hooks/exhaustive-deps -- qa destructured access
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- qa.setOrientation is stable but compiler infers full qa object
+  // qa.setOrientation is stable but compiler infers full qa object
   const handleOrientationChange = useCallback((orient: typeof qa.orientation) => {
     qa.setOrientation(orient)
     setSrAnnouncement(`Orientation changed to ${orient === 'sources-rows' ? 'sources as rows' : 'codes as rows'}`)
   }, [qa.setOrientation]) // eslint-disable-line react-hooks/exhaustive-deps -- qa destructured access
 
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- qa.setContentCodeId is stable but compiler infers full qa object
+  // qa.setContentCodeId is stable but compiler infers full qa object
   const handleContentCodeSelect = useCallback((codeId: number) => {
     if (codeId === 0) {
       qa.setContentCodeId(null)
@@ -1336,7 +1372,7 @@ export default function QualitativeAnalysisView() {
             {qa.tab === 'descriptives' && (
               <DescriptivesSidebar
                 qa={qa}
-                codes={codes}
+                axisEntities={axisEntities}
                 demoFilters={demoFilters}
                 onValueModeChange={handleValueModeChange}
                 onOrientationChange={handleOrientationChange}
@@ -1449,7 +1485,6 @@ export default function QualitativeAnalysisView() {
                       sourceFreqLoading={sourceFreqLoading}
                       saturationData={saturationData}
                       saturationLoading={saturationLoading}
-                      freqData={freqData}
                       onChartTypeChange={handleChartTypeChange}
                       projectId={pid}
                       timedObservations={contentObservations}

@@ -1,4 +1,6 @@
 import { DISPLAY_PRECISION, mergeFormatting } from '@/lib/chart-data'
+import { ciLabel, ciCaveat } from '@/lib/ci-label'
+import { aggregateBasisCaveat, aggregateBasisLabel, aggregateNLabel, aggregateNCaveat } from '@/lib/aggregate-basis'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import { useChartColors } from '@/lib/theme-context'
 import type { SummaryStatsRow, ChartFormatting } from '@/lib/chart-data'
@@ -14,6 +16,15 @@ interface SummaryStatsTableProps {
 function fmtNum(v: number | null): string {
   if (v == null) return '—'
   return v.toFixed(DISPLAY_PRECISION)
+}
+
+/** The #693 fields, under the names `lib/aggregate-basis.ts` reads. */
+function toBasisFields(row: SummaryStatsRow) {
+  return {
+    member_count: row.memberCount,
+    member_n_min: row.memberNMin,
+    member_n_max: row.memberNMax,
+  }
 }
 
 export default function SummaryStatsTable({
@@ -33,19 +44,34 @@ export default function SummaryStatsTable({
   const hasMax = data.some(r => r.max != null)
   const hasMedian = data.some(r => r.median != null)
   const hasCI = showCI && data.some(r => r.ciLower != null && r.ciUpper != null)
+  // #715: the header names the interval for the whole column, so take the method from
+  // the first row that actually has an interval. A table renders one metric type at a
+  // time (see `metricType` below), so these agree in practice; reading the FIRST
+  // CI-bearing row rather than `data[0]` keeps that true even when a leading metric
+  // has too few items to produce one.
+  const ciMethod = data.find(r => r.ciLower != null && r.ciUpper != null)?.ciMethod
 
   // Dynamic value column header based on metric type
   const valueHeader = metricType === 'proportion'
     ? (proportionLabel ? `% ${proportionLabel}` : '% Responding')
     : metricType === 'domain_aggregate' ? 'Score' : 'Mean'
 
+  // #693: what the Score column IS. Taken from the payload, never from
+  // `metricType` — a second aggregation (POMP) would make that inference wrong
+  // while still reading as `domain_aggregate`. Same rule as `ciMethod` above.
+  const basis = data.find(r => r.aggregationBasis != null)?.aggregationBasis
+  const basisLabel = aggregateBasisLabel(basis)
+  const basisCaveat = aggregateBasisCaveat(basis)
+
   if (data.length === 0) return null
 
   return (
+    <>
     <ScrollableTable>
       <table className="border-collapse text-xs w-full" aria-label="Summary statistics">
         <caption className="sr-only">
           Descriptive summary statistics for each variable (sample size and distribution measures).
+          {basisCaveat ? ` ${basisCaveat}` : ''}
         </caption>
         <thead className="sticky top-0 bg-mm-surface z-10">
           <tr>
@@ -121,8 +147,9 @@ export default function SummaryStatsTable({
                 scope="col"
                 className="text-center px-2 py-2 font-medium border-b"
                 style={{ fontSize: fmt.axisFontSize - 1, color: colors.text, minWidth: 100 }}
+                title={ciCaveat(ciMethod)}
               >
-                95% CI
+                {ciLabel(ciMethod)}
               </th>
             )}
           </tr>
@@ -141,8 +168,13 @@ export default function SummaryStatsTable({
               <td
                 className="text-center px-2 py-2 tabular-nums"
                 style={{ fontSize: fmt.labelFontSize, color: colors.text }}
+                title={aggregateNCaveat(toBasisFields(row), row.n) ?? undefined}
               >
-                {row.n}
+                {/* #693: a scale score's `n` is the SUM of its items'
+                    respondent counts, and a sum reads as a respondent count
+                    beside a mean. State the unit and the spread instead; the
+                    pooled figure stays in the tooltip. */}
+                {aggregateNLabel(toBasisFields(row)) ?? row.n}
               </td>
               <td
                 className="text-center px-2 py-2 tabular-nums font-semibold"
@@ -205,5 +237,16 @@ export default function SummaryStatsTable({
         </tbody>
       </table>
     </ScrollableTable>
+    {/* #693: the aggregate names itself, in the words the R export already
+        uses, and says that measurement equivalence was asserted rather than
+        tested. The R comment block has always been honest; a researcher who
+        never generates the script saw nothing. Rendered as a visible note
+        (not only a tooltip) because it qualifies every number in the table. */}
+    {basisLabel && (
+      <p className="text-[11px] text-mm-text-muted mt-1.5 px-1" style={{ fontSize: fmt.axisFontSize - 2 }}>
+        Score = {basisLabel}. Mixed Measures does not test whether the items share a scale.
+      </p>
+    )}
+    </>
   )
 }

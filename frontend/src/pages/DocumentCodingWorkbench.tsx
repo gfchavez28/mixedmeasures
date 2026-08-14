@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, type CSS
 import { useParams, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Virtuoso, type VirtuosoHandle, type Components } from 'react-virtuoso'
+import { useScrollbarGutter } from '@/hooks/useScrollbarGutter'
 import {
   Search, X, Undo2, Redo2, Eye, EyeOff, Pencil, ChevronLeft, ChevronRight, FileText, Download,
   Check, Image, ImageOff, Trash2, ArrowUp, ArrowDown, Quote, BookOpen,
@@ -29,6 +30,9 @@ import FloatingCreateCode, { type FloatingCoords } from '@/components/FloatingCr
 import FloatingCreateNote from '@/components/FloatingCreateNote'
 import { coordsFromElement, selectionPrefill } from '@/lib/floating-utils'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { describeQuoteNotesStayed } from '@/lib/split-disclosure'
+import { optionOrdinals, optionPositionAria } from '@/lib/listbox-aria'
+import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
 import { isSegmentCodedVisible, computeCoverage } from '@/lib/coding-progress'
 import BlindModeToggle from '@/components/BlindModeToggle'
 import CoderCountBadge from '@/components/CoderCountBadge'
@@ -52,6 +56,7 @@ import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { useAuth } from '@/lib/auth-context'
 import CoderFilterPopover from '@/components/CoderFilterPopover'
 import { mergeArchivedIntoCoderMap, chipHiddenWithArchived } from '@/lib/coder-color'
+import { sliceByCodePoints, codePointLength } from '@/lib/text-offsets'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -341,6 +346,15 @@ export default function DocumentCodingWorkbench() {
     return items
   }, [filteredSegments, imagesBySequenceOrder, showImages])
 
+  // #751: segment ID → 1-based ordinal among OPTIONS. Distinct from
+  // `segIdToListIndex` below on purpose: that one indexes `listItems` (segments
+  // AND images) for scrollToIndex; this one counts only the rows that are
+  // actually options, which is what `aria-posinset`/`aria-setsize` describe.
+  const segIdToOptionOrdinal = useMemo(
+    () => optionOrdinals(filteredSegments, s => s.id),
+    [filteredSegments],
+  )
+
   // Map segment ID → list item index (for scrollToIndex with interleaved images)
   const segIdToListIndex = useMemo(() => {
     const map = new Map<number, number>()
@@ -414,6 +428,8 @@ export default function DocumentCodingWorkbench() {
   // ── Refs ──
 
   const virtuosoRef = useRef<VirtuosoHandle>(null)
+  // #741: the header is outside the scroller — pad by the scrollbar's width.
+  const gutter = useScrollbarGutter()
   const codePanelRef = useRef<CodePanelHandle>(null)
   const memoPanelRef = useRef<MemoPanelHandle>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -436,6 +452,18 @@ export default function DocumentCodingWorkbench() {
     queryClient.invalidateQueries({ queryKey: ['project-summary', projectId] })
     invalidateDerivedCounts(queryClient, projectId)  // #450: cross-surface counts
   }, [queryClient, projectId, documentId])
+
+  // #678: a bulk post reports a PARTIAL failure as an ordinary 200 body. This
+  // workbench never patches optimistically and always invalidates above, so
+  // nothing renders stale here — but without this the coder is simply not told
+  // that some of the selection was skipped, and the toolbar still flashes Saved.
+  const reportBulkOutcome = useCallback(
+    (responses: Parameters<typeof collectBulkOutcome>[0], action: 'apply' | 'remove') => {
+      const outcome = collectBulkOutcome(responses)
+      if (outcome.hasFailures) toast.warning(describeBulkFailure(outcome, 'segment', action))
+    },
+    [],
+  )
 
   // Clicking an applied-code chip on a segment pivots to that code in the codes panel (#422a).
   const handleFocusCode = useCallback((codeId: number) => {
@@ -494,12 +522,12 @@ export default function DocumentCodingWorkbench() {
       history.execute({
         type: allHaveCode ? 'code_remove' : 'code_apply',
         description: `${action === 'apply' ? 'Apply' : 'Remove'} code "${codeName}" from ${segmentIds.length} segments`,
-        redo: async () => { await codingApi.bulkCode(segmentIds, codeId, action); invalidateAfterCodeChange() },
-        undo: async () => { await codingApi.bulkCode(segmentIds, codeId, action === 'apply' ? 'remove' : 'apply'); invalidateAfterCodeChange() },
+        redo: async () => { reportBulkOutcome(await codingApi.bulkCode(segmentIds, codeId, action), action); invalidateAfterCodeChange() },
+        undo: async () => { const inv = action === 'apply' ? 'remove' as const : 'apply' as const; reportBulkOutcome(await codingApi.bulkCode(segmentIds, codeId, inv), inv); invalidateAfterCodeChange() },
       })
     }
     showSaved()
-  }, [selectedSegments, segmentMap, history, invalidateAfterCodeChange, showSaved, selfId])
+  }, [selectedSegments, segmentMap, history, invalidateAfterCodeChange, reportBulkOutcome, showSaved, selfId])
 
   const handleMultiCodeToggle = useCallback((codesToToggle: Code[]) => {
     if (selectedSegments.length === 0 || codesToToggle.length === 0) return
@@ -509,16 +537,16 @@ export default function DocumentCodingWorkbench() {
       type: 'code_apply',
       description: `Apply codes "${codeNames}" to ${segmentIds.length} segment(s)`,
       redo: async () => {
-        await Promise.all(codesToToggle.map(code => codingApi.bulkCode(segmentIds, code.id, 'apply')))
+        reportBulkOutcome(await Promise.all(codesToToggle.map(code => codingApi.bulkCode(segmentIds, code.id, 'apply'))), 'apply')
         invalidateAfterCodeChange()
       },
       undo: async () => {
-        await Promise.all(codesToToggle.map(code => codingApi.bulkCode(segmentIds, code.id, 'remove')))
+        reportBulkOutcome(await Promise.all(codesToToggle.map(code => codingApi.bulkCode(segmentIds, code.id, 'remove'))), 'remove')
         invalidateAfterCodeChange()
       },
     })
     showSaved()
-  }, [selectedSegments, history, invalidateAfterCodeChange, showSaved])
+  }, [selectedSegments, history, invalidateAfterCodeChange, reportBulkOutcome, showSaved])
 
   // ── Quote toggle (with history) ──
 
@@ -907,6 +935,10 @@ export default function DocumentCodingWorkbench() {
       redo: async () => {
         const result = await documentsApi.split(projectId, documentId, ranges)
         newSegmentIds = result.new_segments.map(s => s.id)
+        // #712: the notes this split left on the original — say so now, because
+        // the link is unrecoverable afterwards.
+        const stayed = describeQuoteNotesStayed(result.quote_notes_stayed)
+        if (stayed) toast.info(stayed)
         invalidateDoc()
         const selectedSeg = result.new_segments[Math.floor(result.new_segments.length / 2)]
         if (selectedSeg) setSelectedSegments([selectedSeg.id])
@@ -1342,7 +1374,10 @@ export default function DocumentCodingWorkbench() {
         {/* Center panel: Document segments */}
         <div className="flex-1 flex flex-col min-w-0">
           {/* Column header row */}
-          <div className="flex-shrink-0 bg-mm-surface border-b px-4 py-2 flex items-center gap-3 font-medium text-sm text-mm-text-secondary">
+          <div
+            className="flex-shrink-0 bg-mm-surface border-b px-4 py-2 flex items-center gap-2 font-medium text-sm text-mm-text-secondary"
+            style={{ paddingRight: `calc(1rem + ${gutter.gutter}px)` }}
+          >
             {/* Quote filter toggle */}
             <button
               className={`w-5 flex-shrink-0 transition-colors ${
@@ -1374,14 +1409,9 @@ export default function DocumentCodingWorkbench() {
               )}
             </div>
 
-            {/* Notes pill */}
-            {showNotes && (
-              <span className="bg-purple-50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 rounded-full px-2 py-0.5 text-xs font-medium">Notes</span>
-            )}
-
-            {/* Codes pill */}
+            {/* Codes pill (#739: Codes -> Notes on every coding surface) */}
             {showCodes && (
-              <div className="w-[160px] flex-shrink-0 flex items-center gap-1.5">
+              <div data-col="codes" className="w-[160px] flex-shrink-0 flex items-center gap-1.5">
                 <span className="bg-purple-50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 rounded-full px-2.5 py-0.5 text-xs font-medium">Codes</span>
                 {coders.length > 1 && !blind && (
                   <CoderFilterPopover
@@ -1397,11 +1427,21 @@ export default function DocumentCodingWorkbench() {
                 )}
               </div>
             )}
+
+            {/* Notes pill — trailing track, so it declares the same 40px the
+                row cell does. It was a bare span: aligned only because Codes
+                used to be last (#666/#741 shape). */}
+            {showNotes && (
+              <div data-col="notes" className="w-[40px] flex-shrink-0 flex items-center justify-center">
+                <span className="bg-purple-50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 rounded-full px-2 py-0.5 text-xs font-medium">Notes</span>
+              </div>
+            )}
           </div>
 
           {/* Segment list */}
           <div className="flex-1 min-h-0 bg-mm-surface" ref={segmentListRef}>
             <Virtuoso
+              scrollerRef={gutter.setScroller}
               ref={virtuosoRef}
               data={listItems}
               overscan={200}
@@ -1459,6 +1499,8 @@ export default function DocumentCodingWorkbench() {
                 return (
                   <DocumentSegmentRow
                     key={seg.id}
+                    positionInSet={segIdToOptionOrdinal.get(seg.id) ?? 1}
+                    setSize={filteredSegments.length}
                     segment={seg}
                     isSelected={selectedSet.has(seg.id)}
                     isEditing={editingSegmentId === seg.id}
@@ -1648,7 +1690,7 @@ export default function DocumentCodingWorkbench() {
                 if (segmentIds.length === 1) {
                   await codingApi.applyCode(segmentIds[0], code.id)
                 } else {
-                  await codingApi.bulkCode(segmentIds, code.id, 'apply')
+                  reportBulkOutcome(await codingApi.bulkCode(segmentIds, code.id, 'apply'), 'apply')
                 }
                 invalidateAfterCodeChange()
               },
@@ -1656,7 +1698,7 @@ export default function DocumentCodingWorkbench() {
                 if (segmentIds.length === 1) {
                   await codingApi.removeCode(segmentIds[0], code.id)
                 } else {
-                  await codingApi.bulkCode(segmentIds, code.id, 'remove')
+                  reportBulkOutcome(await codingApi.bulkCode(segmentIds, code.id, 'remove'), 'remove')
                 }
                 invalidateAfterCodeChange()
               },
@@ -1743,7 +1785,18 @@ function DocumentSegmentRow({
   onSplitAtSelection,
   documentName,
   onNoteClick,
+  positionInSet,
+  setSize,
 }: {
+  /**
+   * #751 — 1-based ordinal among SEGMENTS and the segment count, NOT the index
+   * into `listItems` or its length. `listItems` interleaves `type: 'image'` rows
+   * which render `role="presentation"` and are deliberately outside the option
+   * set (#436), so using the list index would count images and announce a total
+   * that includes them — a new wrong number in place of the old one.
+   */
+  positionInSet: number
+  setSize: number
   segment: VisibleSegment
   isSelected: boolean
   isEditing: boolean
@@ -1832,6 +1885,8 @@ function DocumentSegmentRow({
           // #436: option role makes aria-selected valid (listbox = the Virtuoso List).
           role="option"
           aria-selected={isSelected}
+          // #751: ordinals among segments only — see the prop's doc comment.
+          {...optionPositionAria(positionInSet, setSize)}
           onContextMenu={(e) => {
             const rect = e.currentTarget.getBoundingClientRect()
             lastCoordsRef.current = {
@@ -1853,7 +1908,7 @@ function DocumentSegmentRow({
             onClick={e => { e.stopPropagation(); onToggleQuote(segment.id) }}
             aria-label={hasExcerpt ? 'Unquote' : 'Quote'}
           >
-            <Quote className={`w-3.5 h-3.5 ${hasExcerpt ? 'fill-amber-400 text-amber-400' : 'text-mm-border-medium hover:text-amber-400'}`} />
+            <Quote className={`w-3.5 h-3.5 ${hasExcerpt ? 'fill-amber-400 text-amber-400' : 'text-mm-text-faint hover:text-amber-400'}`} />
           </button>
 
           {/* Segment badge */}
@@ -1910,37 +1965,18 @@ function DocumentSegmentRow({
               >
                 {textSelection && textSelection.start < textSelection.end
                   ? <>
-                      {segment.text.slice(0, textSelection.start)}
-                      <mark className="bg-mm-blue/30 text-foreground rounded-sm px-px">{segment.text.slice(textSelection.start, textSelection.end)}</mark>
-                      {segment.text.slice(textSelection.end)}
+                      {sliceByCodePoints(segment.text, 0, textSelection.start)}
+                      <mark className="bg-mm-blue/30 text-foreground rounded-sm px-px">{sliceByCodePoints(segment.text, textSelection.start, textSelection.end)}</mark>
+                      {sliceByCodePoints(segment.text, textSelection.end, codePointLength(segment.text))}
                     </>
                   : segment.text}
               </p>
             )}
           </div>
 
-          {/* Notes column */}
-          {showNotes && (
-            <div className="w-[40px] flex-shrink-0 flex flex-col items-center justify-center gap-0.5">
-              {segment.attached_notes.map(note => (
-                <button
-                  key={note.id}
-                  className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 text-[10px] font-medium hover:bg-amber-200 dark:hover:bg-amber-800/50 transition-colors"
-                  onClick={e => {
-                    e.stopPropagation()
-                    onNoteClick?.(note.id)
-                  }}
-                  title={`Note ${note.sequence_number}`}
-                >
-                  {note.sequence_number}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* Codes column */}
+          {/* Codes column (#739) */}
           {showCodes && (
-            <div className="w-[160px] flex-shrink-0 flex items-center">
+            <div data-col="codes" className="w-[160px] flex-shrink-0 flex items-center">
               {segment.codes.length > 0 && !isEditing && (
                 <InlineCodeActions
                   projectId={projectId}
@@ -1956,6 +1992,25 @@ function DocumentSegmentRow({
                   hiddenCoderIds={hiddenCoderIds}
                 />
               )}
+            </div>
+          )}
+
+          {/* Notes column — trailing narrow track (#739) */}
+          {showNotes && (
+            <div data-col="notes" className="w-[40px] flex-shrink-0 flex flex-col items-center justify-center gap-0.5">
+              {segment.attached_notes.map(note => (
+                <button
+                  key={note.id}
+                  className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 text-[10px] font-medium hover:bg-amber-200 dark:hover:bg-amber-800/50 transition-colors"
+                  onClick={e => {
+                    e.stopPropagation()
+                    onNoteClick?.(note.id)
+                  }}
+                  title={`Note ${note.sequence_number}`}
+                >
+                  {note.sequence_number}
+                </button>
+              ))}
             </div>
           )}
         </div>

@@ -32,9 +32,13 @@ class ScatterMatrixRequest(BaseModel):
 
 
 class CorrelationCell(BaseModel):
-    r: float
-    p: float
+    # #689: `None`, not `0.0`/`1.0`. A cell reading `r = 0.00 (p = 1.00)` is
+    # read as a measured absence of relationship; the truth in these cells is
+    # "not computable" — too few shared rows, or a column that does not vary.
+    r: float | None = None
+    p: float | None = None
     n: int
+    undefined_reason: str | None = None
 
 
 class CorrelationMatrixResponse(BaseModel):
@@ -46,11 +50,14 @@ class CorrelationMatrixResponse(BaseModel):
 
 
 class RegressionResult(BaseModel):
-    slope: float
-    intercept: float
-    r_squared: float
-    r: float
-    p: float
+    # #689: all-zeros drew a flat line through the origin and reported
+    # `r = 0.00` — a fitted model where nothing was fitted.
+    slope: float | None = None
+    intercept: float | None = None
+    r_squared: float | None = None
+    r: float | None = None
+    p: float | None = None
+    undefined_reason: str | None = None
 
 
 class ScatterDataResponse(BaseModel):

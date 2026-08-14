@@ -639,7 +639,7 @@ async def set_codebook_freeze(
     already_frozen = project.codebook_frozen_at is not None
     if data.frozen:
         # Preserve the original freeze instant on an idempotent re-freeze.
-        # Naive UTC to match the ORM DateTime storage convention (see CLAUDE.md wire-format).
+        # Naive UTC to match the ORM DateTime storage convention (see the internal design notes wire-format).
         if not already_frozen:
             project.codebook_frozen_at = datetime.now(timezone.utc).replace(tzinfo=None)
         action = "codebook_froze"

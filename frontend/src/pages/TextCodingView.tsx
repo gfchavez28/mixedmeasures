@@ -28,6 +28,7 @@ import { useCoders } from '@/hooks/useCoders'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { isSegmentCodedVisible, isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
 import { useAuth } from '@/lib/auth-context'
 import CoderFilterPopover from '@/components/CoderFilterPopover'
 import BlindModeToggle from '@/components/BlindModeToggle'
@@ -52,6 +53,15 @@ export default function TextCodingView() {
   const { projectId: pid } = useParams<{ projectId: string }>()
   const projectId = Number(pid)
   const queryClient = useQueryClient()
+
+  // #678: the text bulk-code endpoint reports a PARTIAL failure as an ordinary
+  // 200 body (ids whose dataset value is gone, or no longer an open-text column,
+  // are skipped and counted). Every caller here already invalidates, so nothing
+  // renders stale — this is purely so the coder is told the batch was trimmed.
+  const reportBulkOutcome = (responses: Parameters<typeof collectBulkOutcome>[0]) => {
+    const outcome = collectBulkOutcome(responses)
+    if (outcome.hasFailures) toast.warning(describeBulkFailure(outcome, 'text', 'apply'))
+  }
   const [searchParams] = useSearchParams()
   const { openCodebook } = useProjectLayout()
 
@@ -369,7 +379,7 @@ export default function TextCodingView() {
           if (targets.length === 1) {
             await textCodingApi.applyCode(projectId, { dataset_value_id: targets[0], code_id: codeId })
           } else {
-            await textCodingApi.bulkCode(projectId, { dataset_value_ids: targets, code_id: codeId })
+            reportBulkOutcome(await textCodingApi.bulkCode(projectId, { dataset_value_ids: targets, code_id: codeId }))
           }
           queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
           queryClient.invalidateQueries({ queryKey: ['text-progress', projectId] })
@@ -385,7 +395,7 @@ export default function TextCodingView() {
           if (targets.length === 1) {
             await textCodingApi.applyCode(projectId, { dataset_value_id: targets[0], code_id: codeId })
           } else {
-            await textCodingApi.bulkCode(projectId, { dataset_value_ids: targets, code_id: codeId })
+            reportBulkOutcome(await textCodingApi.bulkCode(projectId, { dataset_value_ids: targets, code_id: codeId }))
           }
           queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
           queryClient.invalidateQueries({ queryKey: ['text-progress', projectId] })
@@ -1088,7 +1098,7 @@ export default function TextCodingView() {
                     Seed {randomSeed}
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent className="w-64 p-3" align="start">
+                <PopoverContent className="w-64 p-3" align="start" aria-label="Randomization seed">
                   <p className="text-sm font-medium text-mm-text mb-1">Randomization seed</p>
                   <p className="text-xs text-mm-text-muted mb-2">
                     The same seed always reproduces the same order — enter one to
@@ -1232,7 +1242,13 @@ export default function TextCodingView() {
                 </div>
               ) : viewMode === 'by_text' ? (
                 <div className="flex flex-col h-full">
-                  <div className="flex-1 min-h-0">
+                  {/* #717: the container context for ByTextTable's sticky-relax
+                      rule. It sits HERE, outside the Virtuoso scroller, on purpose —
+                      `container-type: inline-size` applies size containment, and
+                      #697 already found CSS perturbing the getBoundingClientRect
+                      react-virtuoso measures. Containing an ancestor is safe;
+                      containing the measured scroller is not. */}
+                  <div className="flex-1 min-h-0 @container">
                     <ByTextTable
                       comments={filteredComments}
                       loading={commentsLoading}
@@ -1383,7 +1399,7 @@ export default function TextCodingView() {
                 if (valueIds.length === 1) {
                   await textCodingApi.applyCode(projectId, { dataset_value_id: valueIds[0], code_id: code.id })
                 } else {
-                  await textCodingApi.bulkCode(projectId, { dataset_value_ids: valueIds, code_id: code.id })
+                  reportBulkOutcome(await textCodingApi.bulkCode(projectId, { dataset_value_ids: valueIds, code_id: code.id }))
                 }
                 invalidate()
               },

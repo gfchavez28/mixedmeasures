@@ -179,7 +179,7 @@ export default function ThemeRelationshipPopover({
   useEffect(() => {
     if (open && prefilledTargetId != null && prefillHandledRef.current !== prefilledTargetId) {
       prefillHandledRef.current = prefilledTargetId
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- populate form + enter adding mode from the prefill prop when the popover opens
+      // populate form + enter adding mode from the prefill prop when the popover opens
       setFormTargetId(String(prefilledTargetId))
       setAdding(true)
     }
@@ -264,6 +264,7 @@ export default function ThemeRelationshipPopover({
         {children ?? <span className="absolute w-0 h-0" />}
       </PopoverTrigger>
       <PopoverContent
+        aria-label="Theme relationship"
         align="start"
         className="w-72 p-0"
         onClick={(e) => e.stopPropagation()}
@@ -310,7 +311,7 @@ export default function ThemeRelationshipPopover({
                   </button>
                   <button
                     onClick={() => onDeleteRelationship(rel.id)}
-                    className="p-0.5 rounded hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors text-mm-text-muted hover:text-red-500"
+                    className="p-0.5 rounded hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors text-mm-text-muted hover:text-red-700"
                     title="Delete"
                   >
                     <Trash2 className="w-3 h-3" />

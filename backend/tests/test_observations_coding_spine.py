@@ -168,7 +168,7 @@ class TestClipExcerpts:
         pid, oid, sid = self._obs_with_clip(db, start=65.0)  # 65s -> 01:05
         _run(create_excerpt(pid, ExcerptCreate(segment_id=sid), user=_user(db), db=db))
         # All Query-defaulted params passed explicitly — a Query() default leaks
-        # its sentinel object into direct calls (backend/tests/CLAUDE.md).
+        # its sentinel object into direct calls (backend/tests/the internal design notes).
         resp = _run(list_quoted_excerpts(
             pid, source="all", code_ids=None, conversation_ids=None,
             document_ids=None, text_column_ids=None, exclude_facilitator=False,

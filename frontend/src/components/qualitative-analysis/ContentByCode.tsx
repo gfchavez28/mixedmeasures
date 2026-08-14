@@ -625,7 +625,7 @@ function ContextLine({
         className={`w-5 h-5 rounded-full text-[9px] font-semibold flex items-center justify-center ring-1 flex-shrink-0 mt-0.5 opacity-50 ${
           segment.is_facilitator
             ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-600 dark:text-purple-400 ring-purple-200 dark:ring-purple-700'
-            : 'bg-orange-100 dark:bg-orange-900/50 text-orange-600 dark:text-orange-400 ring-orange-200 dark:ring-orange-700'
+            : 'bg-orange-100 dark:bg-orange-900/50 text-orange-700 dark:text-orange-400 ring-orange-200 dark:ring-orange-700'
         }`}
         title={segment.speaker_name || 'Unknown'}
       >

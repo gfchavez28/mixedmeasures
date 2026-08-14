@@ -106,6 +106,7 @@ export function TypePickerPopover({
         {children}
       </PopoverTrigger>
       <PopoverContent
+        aria-label="Change column type"
         className="w-72 p-2"
         align="start"
         // Defensive: if the popover opens during a drag, the user probably

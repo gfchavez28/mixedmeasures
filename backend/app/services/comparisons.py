@@ -19,6 +19,14 @@ from .metrics import _t_critical
 from .statistical_tests import (
     _classify_effect_cohens_d,
     _classify_effect_eta_squared,
+    pooled_cohens_d,
+)
+from .undefined_stats import (
+    DEGENERATE,
+    EMPTY_GROUP,
+    INSUFFICIENT_N,
+    NO_VARIANCE,
+    finite_or_none,
 )
 
 logger = logging.getLogger(__name__)
@@ -171,9 +179,15 @@ def compute_group_comparison(
             gvals = grouped[g]
             n = len(gvals)
             if n == 0:
+                # #689: nobody in this group has a usable value. A mean of 0.0
+                # with a zero-width CI is a measurement claim about people who
+                # are not there — and `"median": None` already sat in this very
+                # dict literal, so the module knew the convention and applied it
+                # to one field out of five.
                 group_stats.append({
-                    "group": g, "n": 0, "mean": 0.0, "sd": 0.0,
-                    "median": None, "ci_lower": 0.0, "ci_upper": 0.0,
+                    "group": g, "n": 0, "mean": None, "sd": None,
+                    "median": None, "ci_lower": None, "ci_upper": None,
+                    "undefined_reason": EMPTY_GROUP,
                 })
                 continue
             m = statistics.mean(gvals)
@@ -190,8 +204,11 @@ def compute_group_comparison(
                 "ci_lower": ci_lower, "ci_upper": ci_upper,
             })
 
-        # Run statistical test
-        test_result = _run_test(
+        # Run statistical test. #566: when it does not run, the row carries WHY
+        # — a blank delta/p/d with no explanation is indistinguishable from a
+        # broken tool, and this is the single most common honest refusal
+        # (a group left with fewer than 2 values after missing-data exclusion).
+        test_result, test_omitted_reason = _run_test(
             grouped, unique_groups, effective_test, include_effect_size_ci,
             nonparametric=nonparametric,
         )
@@ -203,6 +220,7 @@ def compute_group_comparison(
             "source_type": source_type,
             "group_stats": group_stats,
             "test": test_result,
+            "test_omitted_reason": test_omitted_reason,
         })
 
     # Bonferroni warning
@@ -277,24 +295,63 @@ def _run_test(
     test_type: str,
     include_ci: bool,
     nonparametric: bool = False,
-) -> dict | None:
-    """Run a statistical test on grouped values."""
+) -> tuple[dict | None, str | None]:
+    """Run a statistical test, returning ``(result, omitted_reason)``.
+
+    Exactly one of the two is set. A bare ``None`` used to be the whole answer,
+    which is #566: the row rendered blank delta/p/d cells and the researcher had
+    no way to tell "refused to compute, honestly" from "broken". The reason now
+    travels with the omission.
+
+    **Why the reason is per-TEST rather than per-value.** Measured, not assumed:
+    whenever an effect size is undefined here the statistic is non-finite too
+    (both groups constant ⇒ Welch t = ±inf or nan, ANOVA F likewise), so there
+    is no case where a test is half-defined. One reason per omitted test covers
+    every case, and the row-level field is what the screen and the CSV read.
+    """
     # Non-parametric tests only need ≥1 per group; parametric need ≥2
     min_per_group = 1 if nonparametric else 2
     arrays = [grouped[g] for g in group_names]
-    valid_arrays = [a for a in arrays if len(a) >= min_per_group]
-    if len(valid_arrays) < 2:
-        return None
+    if len([a for a in arrays if a]) < 2:
+        return None, EMPTY_GROUP
+    if len([a for a in arrays if len(a) >= min_per_group]) < 2:
+        return None, INSUFFICIENT_N
 
     if test_type == "independent_t_test":
-        return _run_t_test(grouped, group_names, include_ci)
+        result = _run_t_test(grouped, group_names, include_ci)
     elif test_type == "one_way_anova":
-        return _run_anova(grouped, group_names, include_ci)
+        result = _run_anova(grouped, group_names, include_ci)
     elif test_type == "mann_whitney_u":
-        return _run_mann_whitney(grouped, group_names)
+        result = _run_mann_whitney(grouped, group_names)
     elif test_type == "kruskal_wallis":
-        return _run_kruskal_wallis(grouped, group_names)
-    return None
+        result = _run_kruskal_wallis(grouped, group_names)
+    else:
+        return None, DEGENERATE
+
+    if result is None:
+        return None, NO_VARIANCE
+
+    # ── The finiteness chokepoint ────────────────────────────────────────────
+    # ONE check for all four runners rather than four copies, and it covers a
+    # runner added later. Measured, all on real scipy calls:
+    #   Welch t   constant groups, different means -> -inf ; same mean -> nan
+    #   ANOVA F   internally-constant groups       ->  inf ; all equal  -> nan
+    #   Kruskal H all values identical             ->  nan  (the NON-parametric
+    #             path, i.e. the robust alternative a researcher switches to
+    #             after the first failure, fails the same way)
+    #   Mann-Whitney U is safe by construction (U is a rank count; its effect
+    #             size divides by n1*n2, both ≥ 1) — deliberately not special-cased.
+    # A non-finite number here is not a bad value, it is a 500: starlette's
+    # JSONResponse renders with allow_nan=False and raises at RESPONSE time.
+    for key in ("statistic", "p", "df", "df2", "effect_size"):
+        value = result.get(key)
+        if value is not None and finite_or_none(value) is None:
+            logger.warning(
+                "Non-finite %s from %s; reporting the test as undefined", key, test_type,
+            )
+            return None, NO_VARIANCE
+
+    return result, None
 
 
 def _run_t_test(
@@ -332,10 +389,14 @@ def _run_t_test(
     if not math.isfinite(df):
         df = n1 + n2 - 2
 
-    # Cohen's d (pooled SD)
-    pooled_var = ((n1 - 1) * s1 ** 2 + (n2 - 1) * s2 ** 2) / (n1 + n2 - 2)
-    pooled_sd = math.sqrt(pooled_var) if pooled_var > 0 else 0
-    cohens_d = (m1 - m2) / pooled_sd if pooled_sd > 0 else 0.0
+    # Cohen's d (pooled SD) — single-sourced with the saved-test path, which
+    # carried a byte-identical copy of this block (#733: a copy propagates a
+    # defect verbatim, it does not merely drift). Unreachable-by-construction
+    # here now that a non-finite t has already returned, but the helper is the
+    # thing both callers share.
+    cohens_d = pooled_cohens_d(m1, s1, n1, m2, s2, n2)
+    if cohens_d is None:
+        return None
 
     ci_lower, ci_upper = None, None
     if include_ci:
@@ -376,7 +437,15 @@ def _run_anova(
         for arr in arrays
     )
     ss_total = sum((v - grand_mean) ** 2 for v in all_vals)
-    eta_squared = ss_between / ss_total if ss_total > 0 else 0.0
+    # ⚠️ `ss_total == 0` means every value in every group is identical. The old
+    # `if ss_total > 0 else 0.0` guarded eta-squared only, and the omega term
+    # below divides by `(ss_total + ms_within)` — which is 0 + 0 — so this case
+    # raised ZeroDivisionError, an unhandled 500, NOT the "eta = 0.0" the issue
+    # described. The finiteness guard above already returned for it; this stays
+    # as the explicit statement of the invariant the omega line depends on.
+    if ss_total <= 0:
+        return None
+    eta_squared = ss_between / ss_total
 
     total_n = sum(len(arr) for arr in arrays)
     k = len(arrays)
@@ -407,6 +476,13 @@ def _run_anova(
         "effect_size_type": "eta_squared",
         "effect_size_label": _classify_effect_eta_squared(eta_squared),
         "omega_squared": round(omega_sq, 4),
+        # #742: omega-squared gets its OWN label. Both comparison surfaces
+        # DISPLAY omega and were printing the eta-derived word beside it — and
+        # omega <= eta always, so any pair straddling a threshold read e.g.
+        # "omega^2 = 0.14 (large)" when 0.14 is the boundary eta cleared and
+        # omega did not. Same classifier because both are the proportion of
+        # variance explained on one scale, so Cohen's benchmarks apply to each.
+        "omega_squared_label": _classify_effect_eta_squared(omega_sq),
         "post_hoc": post_hoc,
         "effect_size_ci_lower": None,
         "effect_size_ci_upper": None,

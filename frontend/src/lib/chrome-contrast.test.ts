@@ -17,6 +17,8 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
+import { contrast, over, readToken, relativeLuminance, type Rgb } from './contrast'
+
 const CSS = readFileSync(join(__dirname, '..', 'index.css'), 'utf-8')
 
 /** The rail paints `bg-[hsl(var(--mm-chrome))]`; its controls sit on white
@@ -30,43 +32,11 @@ const RAIL_OVERLAYS: Array<[label: string, alpha: number]> = [
   ['count badge (bg-white/10)', 0.1],
 ]
 
-type Rgb = [number, number, number]
-
-function hslToRgb(h: number, s: number, l: number): Rgb {
-  const S = s / 100
-  const L = l / 100
-  const k = (n: number) => (n + h / 30) % 12
-  const a = S * Math.min(L, 1 - L)
-  const f = (n: number) => L - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)))
-  return [f(0) * 255, f(8) * 255, f(4) * 255]
-}
-
-const over = (fg: Rgb, bg: Rgb, alpha: number): Rgb =>
-  [0, 1, 2].map(i => fg[i] * alpha + bg[i] * (1 - alpha)) as Rgb
-
-function relativeLuminance([r, g, b]: Rgb): number {
-  const lin = (c: number) => {
-    const v = c / 255
-    return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
-  }
-  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
-}
-
-function contrast(a: Rgb, b: Rgb): number {
-  const [hi, lo] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x)
-  return (hi + 0.05) / (lo + 0.05)
-}
-
-/** Pull `--name: H S% L%;` out of the `:root` (light) or `.dark` block. */
+/** The arithmetic and the token reader live in `lib/contrast.ts` — this guard
+ *  and the #699 token×surface matrix are two consumers, and two copies of a
+ *  luminance formula propagate a defect verbatim (#733). */
 function token(theme: 'light' | 'dark', name: string): Rgb {
-  // `.dark` is declared after `:root`, so slicing at it separates the two.
-  const darkAt = CSS.indexOf('.dark {')
-  expect(darkAt, 'index.css must declare a .dark block').toBeGreaterThan(-1)
-  const block = theme === 'light' ? CSS.slice(0, darkAt) : CSS.slice(darkAt)
-  const m = block.match(new RegExp(`--${name}:\\s*([\\d.]+)\\s+([\\d.]+)%\\s+([\\d.]+)%`))
-  expect(m, `--${name} not found in the ${theme} block`).not.toBeNull()
-  const [, h, s, l] = m!
-  return hslToRgb(Number(h), Number(s), Number(l))
+  return readToken(CSS, theme, name)
 }
 
 describe('TopRail chrome contrast (#645)', () => {

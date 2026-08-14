@@ -431,7 +431,7 @@ const NotesPanel = forwardRef<NotesPanelHandle, NotesPanelProps>(function NotesP
             <p className="text-xs text-green-600 dark:text-green-400 mt-1"><kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Tab</kbd>{' or '}<kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Enter</kbd>{' to create note'}</p>
           )}
           {associatingNoteId && (
-            <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-1 bg-emerald-50 dark:bg-emerald-950/30 p-1 rounded">
+            <p className="text-xs text-emerald-700 dark:text-emerald-400 mt-1 bg-emerald-50 dark:bg-emerald-950/30 p-1 rounded">
               {selectedSegmentId
                 ? <><kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Enter</kbd>{' to link to selected segment, or '}<kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Esc</kbd>{' to cancel'}</>
                 : <><kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Space</kbd>{' to associate, or '}<kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Esc</kbd>{' to cancel'}</>}

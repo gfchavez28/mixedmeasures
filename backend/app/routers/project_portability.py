@@ -98,7 +98,7 @@ async def export_project_endpoint(
     project_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
-    # Appended LAST + bare default (tests CLAUDE.md: direct-call positional
+    # Appended LAST + bare default (tests the internal design notes: direct-call positional
     # args must not shift; a Query() default would leak its sentinel).
     include_media: bool = True,
 ):

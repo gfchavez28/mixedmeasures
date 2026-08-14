@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback, memo } from 'react'
 import { getDivergingCellStyle, jitterOffset, formatPValue } from '@/lib/chart-data'
 import { useTheme } from '@/lib/theme-context'
 import type { ScatterPair, CorrelationCell } from '@/lib/api'
+import { NO_VALUE, formatStat, undefinedTooltip } from '@/lib/stat-format'
 import ScatterPlotModal from './ScatterPlotModal'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 
@@ -53,7 +54,7 @@ const MiniScatter = memo(function MiniScatter({
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleClick() } }}
       tabIndex={0}
       role="button"
-      aria-label={`Scatter: ${pair.x_label} vs ${pair.y_label}, r = ${pair.regression.r.toFixed(2)}, n = ${pair.n}. Press Enter to expand.`}
+      aria-label={`Scatter: ${pair.x_label} vs ${pair.y_label}, r = ${formatStat(pair.regression.r)}, n = ${pair.n}. Press Enter to expand.`}
     >
       {/* Background */}
       <rect width={size} height={size} className="fill-mm-bg" rx={2} />
@@ -75,7 +76,9 @@ const MiniScatter = memo(function MiniScatter({
       })}
 
       {/* Regression line */}
-      {showRegLine && pair.n >= 3 && (
+      {/* #689: no fit, no line. Drawing one from null coefficients used to
+          mean a flat line through the origin — a model that was never fitted. */}
+      {showRegLine && pair.n >= 3 && pair.regression.slope != null && pair.regression.intercept != null && (
         <line
           x1={scaleX(xMin)}
           y1={scaleY(pair.regression.intercept + pair.regression.slope * xMin)}
@@ -98,7 +101,7 @@ const MiniScatter = memo(function MiniScatter({
           fontSize={9}
           fontFamily="var(--font-mono, monospace)"
         >
-          {pair.regression.r >= 0 ? '' : ''}{pair.regression.r.toFixed(2).replace(/^0/, '').replace(/^-0/, '-')}
+          {formatStat(pair.regression.r).replace(/^0/, '').replace(/^-0/, '-')}
         </text>
       )}
     </svg>
@@ -114,6 +117,20 @@ function UpperTriangleCell({
 }) {
   const { isDark } = useTheme()
   if (!cell) return <div style={{ width: size, height: size }} className="bg-mm-bg" />
+
+  // #689: an undefined cell gets neither a number nor a colour — the heat IS a
+  // claim about the size and direction of a relationship.
+  if (cell.r == null || cell.p == null) {
+    return (
+      <div
+        style={{ width: size, height: size }}
+        className="flex items-center justify-center text-sm text-mm-text-faint bg-mm-bg rounded-sm"
+        title={`${undefinedTooltip(cell.undefined_reason)} n = ${cell.n}`}
+      >
+        {NO_VALUE}
+      </div>
+    )
+  }
 
   const style = getDivergingCellStyle(cell.r, isDark)
   const rStr = cell.r.toFixed(2).replace(/^0/, '').replace(/^-0/, '-')
@@ -202,7 +219,7 @@ export default function ScatterMatrix({
               if (j > i) {
                 const cell = correlationMatrix?.[i]?.[j]
                 return (
-                  <div key={key} role="gridcell" aria-label={cell ? `r = ${cell.r.toFixed(2)}` : ''}>
+                  <div key={key} role="gridcell" aria-label={cell ? `r = ${formatStat(cell.r)}` : ''}>
                     <UpperTriangleCell cell={cell} size={cellSize} />
                   </div>
                 )
@@ -223,7 +240,7 @@ export default function ScatterMatrix({
               }
 
               return (
-                <div key={key} role="gridcell" aria-label={`Scatter: ${fullLabels[i]} vs ${fullLabels[j]}, r = ${pair.regression.r.toFixed(2)}, n = ${pair.n}`}>
+                <div key={key} role="gridcell" aria-label={`Scatter: ${fullLabels[i]} vs ${fullLabels[j]}, r = ${formatStat(pair.regression.r)}, n = ${pair.n}`}>
                   <MiniScatter
                     pair={pair}
                     size={cellSize}

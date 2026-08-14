@@ -9,8 +9,15 @@
 # DRAFT GitHub Release. You review the draft and click "Publish" to ship.
 #
 # RELATIONSHIP TO ci.yml: ci.yml is the fast per-push feedback loop (tests only, no
-# packaging). THIS workflow does packaging only, and gates on the same checks as
-# HARD failures (ci.yml runs the dep audits advisory; here they block the build).
+# packaging). THIS workflow does packaging only.
+#
+# ⚠️ Updated 2026-08-09 — the old line here ("ci.yml runs the dep audits advisory;
+# here they block the build") is NO LONGER TRUE. All three PRODUCTION dep audits are
+# now hard gates in BOTH workflows, running identical commands, so a shipping CVE
+# fails at push rather than at cut. What ci.yml keeps that this workflow does not is
+# the FRONTEND FULL-TREE advisory audit (#632) — dev-toolchain advisories stay
+# visible per-push without ever blocking. That single asymmetry is the deliberate
+# one; the production gates are deliberately identical.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # CAN IT RUN TODAY? Yes — the unsigned path is fully functional. With NO signing
@@ -128,7 +135,7 @@ jobs:
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend deps
@@ -155,7 +162,7 @@ jobs:
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: electron/package-lock.json
       - name: Electron unit tests
@@ -219,7 +226,7 @@ jobs:
           python-version: "3.12"
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
         with:
-          node-version: "20"
+          node-version: "24"
 
       # 1) Build the SPA first — the PyInstaller spec bundles frontend/dist into the
       #    backend (config.dist_dir() serves it same-origin under the frozen app).

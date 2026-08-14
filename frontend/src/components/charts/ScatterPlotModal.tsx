@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import { X } from 'lucide-react'
 import type { ScatterPair } from '@/lib/api'
 import { jitterOffset, formatPValue } from '@/lib/chart-data'
+import { formatStat, undefinedTooltip } from '@/lib/stat-format'
 import { useFocusTrap } from '@/hooks/useFocusTrap'
 
 interface ScatterPlotModalProps {
@@ -64,8 +65,12 @@ export default function ScatterPlotModal({
             <h3 className="text-sm font-semibold text-mm-text">{pair.x_label} vs {pair.y_label}</h3>
             <p className="text-xs text-mm-text-muted mt-0.5">
               n = {pair.n}
+              {/* #689: the fit line's stats only exist when a line was fitted.
+                  A constant x makes scipy refuse outright; a constant y yields nan. */}
               {showRegLine && pair.n >= 3 && (
-                <> &middot; r = {reg.r.toFixed(3)}, R&sup2; = {reg.r_squared.toFixed(3)}, {formatPValue(reg.p)}</>
+                reg.r != null && reg.r_squared != null && reg.p != null
+                  ? <> &middot; r = {formatStat(reg.r, 3)}, R&sup2; = {formatStat(reg.r_squared, 3)}, {formatPValue(reg.p)}</>
+                  : <> &middot; {undefinedTooltip(reg.undefined_reason)}</>
               )}
             </p>
           </div>
@@ -116,7 +121,7 @@ export default function ScatterPlotModal({
           <text x={14} y={size / 2} textAnchor="middle" className="fill-mm-text-secondary" fontSize={11} transform={`rotate(-90, 14, ${size / 2})`}>{truncLabel(pair.y_label, 50)}</text>
 
           {/* Regression line */}
-          {showRegLine && pair.n >= 3 && (
+          {showRegLine && pair.n >= 3 && reg.slope != null && reg.intercept != null && (
             <line
               x1={scaleX(xMin)}
               y1={scaleY(reg.intercept + reg.slope * xMin)}
@@ -146,7 +151,7 @@ export default function ScatterPlotModal({
           })}
 
           {/* Regression equation */}
-          {showRegLine && pair.n >= 3 && (
+          {showRegLine && pair.n >= 3 && reg.slope != null && reg.intercept != null && (
             <text x={size - padding - 4} y={padding + 14} textAnchor="end" className="fill-mm-text-muted" fontSize={10} fontFamily="var(--font-mono, monospace)">
               y = {reg.slope.toFixed(2)}x {reg.intercept >= 0 ? '+' : '\u2212'} {Math.abs(reg.intercept).toFixed(2)}
             </text>

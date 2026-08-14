@@ -113,12 +113,24 @@ jobs:
           MM_REQUIRE_R: "1"
         run: python -m pytest tests/ -q
 
-      # Advisory here (won't block a push on a freshly-disclosed CVE); the release
-      # workflow will run this as a HARD gate before building installers. Scoped to
-      # requirements.txt so it audits production deps only, not dev/tooling transitives.
-      - name: Dependency audit (production deps)
+      # HARD gate since 2026-08-09 (was advisory). Scoped to requirements.txt so it
+      # audits production deps only, not dev/tooling transitives.
+      #
+      # Why promote it: release.yml runs the IDENTICAL command as a blocking gate, so
+      # advisory-here only ever meant "learn at cut time instead of at push". A
+      # freshly-disclosed CVE in a shipping dep could sit on main, green, until
+      # someone tried to release. Given the policy is to patch security promptly, the
+      # earlier signal is the whole point.
+      #
+      # ⚠️ Accepted cost, stated so it is not re-litigated as flakiness: this queries
+      # the PyPI advisory DB, so a network blip now reddens CI. release.yml already
+      # carries that exposure; taking it here too is the deliberate trade.
+      #
+      # Placement is load-bearing: LAST in the job, after Tests. A failing step halts
+      # the ones after it, so an audit placed earlier would cost the test signal on
+      # exactly the runs you most want it.
+      - name: Dependency audit (HARD gate, production deps)
         run: pip-audit -r requirements.txt
-        continue-on-error: true
 
   # ── Frontend: lint + vitest + production build + dep audit ──────────────────
   frontend:
@@ -132,7 +144,7 @@ jobs:
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
         with:
-          node-version: "20"              # matches frontend/.nvmrc
+          node-version: "24"              # matches frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -149,14 +161,22 @@ jobs:
       - name: Build
         run: npm run build                # = tsc && vite build
 
-      # Deliberately FULL-TREE (no --omit=dev) and advisory: this surfaces
-      # dev-toolchain advisories without blocking normal work. release.yml's
-      # hard gate is the scoped one (--omit=dev) — it blocks on what ships.
-      # Keep the asymmetry; flattening it either hides dev advisories or blocks
-      # every push on them. See #632.
+      # TWO audits, and the pair is the point — do not collapse them into one.
+      #
+      # (1) FULL-TREE, advisory: surfaces dev-toolchain advisories without blocking
+      #     normal work. Flattening this either hides dev advisories or blocks every
+      #     push on them. See #632. It runs FIRST and cannot fail the job, so its
+      #     output is always printed — even on a run the gate below then fails.
       - name: Dependency audit (full tree, advisory)
         run: npm audit --audit-level=high
         continue-on-error: true
+
+      # (2) PRODUCTION-SCOPED, hard gate — added 2026-08-09, identical to the
+      #     release.yml gate. Without it `ci.yml` had no production-dep check at all
+      #     on the frontend: a CVE in a SHIPPING dep passed every push and surfaced
+      #     only when someone tried to cut. --omit=dev is load-bearing (see #632).
+      - name: Dependency audit (HARD gate, production deps)
+        run: npm audit --omit=dev --audit-level=high
 
   # ── Electron shell: headless unit tests ─────────────────────────────────────
   electron:
@@ -170,15 +190,38 @@ jobs:
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: electron/package-lock.json
 
-      # Note: electron/ deliberately has no `ignore-scripts`, so npm ci runs
-      # electron's postinstall (downloads the runtime binary). The unit tests
-      # resolve `require('electron')`, so we keep the download rather than skip it.
+      # Note: `electron/.npmrc` sets `ignore-scripts=true` (#562a, 2026-07-11), so
+      # npm ci runs NO lifecycle scripts here. That is a no-op today rather than a
+      # behaviour change — the tree declares zero install scripts (no
+      # `hasInstallScript` entry in electron/package-lock.json, and electron@42's
+      # own package.json declares no `scripts` at all; its binary is fetched by
+      # electron-builder/@electron/get at BUILD time, not by a postinstall). The
+      # headless unit tests are pure modules (backend-process / key-manager / zoom /
+      # fatal-error / updater) and never `require('electron')`, so no runtime
+      # download is needed for them.
       - name: Install dependencies
         run: npm ci
 
       - name: Unit tests
-        run: npm test                     # = node --test (the 42 headless tests)
+        run: npm test                     # = node --test (106 headless cases)
+
+      # Added 2026-08-09. electron/ had NO dependency audit in ci.yml at all, and it
+      # is the job where that gap actually bit: #720 was a red PRODUCTION gate here
+      # (js-yaml, via electron-updater) discovered while trying to cut a release —
+      # the precise failure this catches one push earlier. Identical command to the
+      # release.yml gate so the two can never disagree.
+      #
+      # --omit=dev is load-bearing (#547), and here is the MEASURED reason rather
+      # than an assertion (2026-08-09): this tree's FULL audit reports
+      # `17 vulnerabilities (1 moderate, 15 high, 1 critical)` and exits 1, while
+      # `--omit=dev` exits 0. Every one of the 17 is the dev-only
+      # electron-builder/tar/node-gyp chain that policy says to DISMISS, never
+      # `--force` — so a full-tree gate here would fail literally every run and be
+      # switched off within a week. electron ships exactly ONE runtime dep
+      # (electron-updater, #29 S2), which is what this gate exists to watch.
+      - name: Dependency audit (HARD gate, production deps)
+        run: npm audit --omit=dev --audit-level=high

@@ -5,6 +5,160 @@ All notable changes to Mixed Measures are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-08-14
+
+A correctness and accessibility release. No new capability to speak of — this
+fixes numbers that were wrong or wrongly labelled, finishes the qualitative
+Canvas that 1.3.0 shipped with a stated limitation, and makes a large part of the
+app reachable without a mouse.
+
+### Upgrade notes
+
+Please read these before updating. Several of them change numbers you may
+already have written down or reported.
+
+- **If you reported an effect size from a group comparison, check which
+  statistic it was.** The comparison table chose its effect-size heading from the
+  **number of groups** while the number itself came from the **test that ran**.
+  Where those disagreed — a Welch's t-test across three groups is the common
+  case — the table showed Cohen's *d* under an ω² heading, and the tooltip
+  described it as a negative η². The heading, the tooltip and the value now all
+  come from the test. Nothing about your data changed, but a figure copied from
+  that table may be labelled with the wrong statistic.
+- **The group-comparison CSV and the screen now report the same effect size.**
+  The export wrote η² while the screen showed ω². If you have both a file and a
+  screenshot from the same analysis, they will have disagreed; the file now
+  matches the screen.
+- **Significance stars in exports now follow the thresholds you chose.** The CSV
+  always marked significance at the conventional .05/.01/.001 levels regardless
+  of the levels set for the analysis. If you changed those levels, the stars in
+  files exported before this release do not reflect them.
+- **A statistic that cannot be computed now says so instead of showing `0.00`.**
+  A correlation with too few values, a comparison with an empty group, a test on
+  data with no variance — all previously displayed `0.00`, which reads as *no
+  relationship* when the truth is *not computable*. These now show `—` with the
+  reason. **Re-check any table where you recorded a zero:** some of those zeros
+  were real measured zeros and some were this.
+- **A scale score now states what it averaged and over how many people.** A
+  crosswalk scale score is the unweighted mean of its items' means. It previously
+  showed a single pooled *n* that summed each item's respondents — so a score
+  built from a 1,000-response item and a 10-response item quoted *n* = 1,010,
+  when no single estimate rests on 1,010 people. It now reads `3 items · n
+  210–260`, with the pooled total named as a total in the tooltip. The figure
+  labelled "95% CI" is computed **across items**, not across respondents, and is
+  now labelled as such — any confidence interval reported from a scale score
+  should be re-described. The score also now warns when its items are measured on
+  different scales (a 1–5 item averaged with a 1–7 one), at the point where the
+  score is created and again where it is read.
+- **Note numbers in the Excel export are real numbers now.** Notes on documents,
+  observation clips and dataset cells were all stored as `0`, so the export wrote
+  `N-0` for every one of them while the workbench showed a sensible number. They
+  are numbered per source now — and **gaps are correct**: deleting note 2 leaves
+  1 and 3.
+- **Quote positions in text containing emoji or rare CJK characters are repaired
+  on first launch.** Where a quote sat in a segment containing such a character,
+  the stored position drifted and the quote could resolve to the wrong words in
+  exports and on the Canvas. This is corrected automatically the first time you
+  open this version. Ordinary text was never affected, and nothing needs to be
+  re-quoted by hand.
+- **Some things look different.** Text boxes, dropdowns and outlined buttons now
+  have a clearly visible border — they were nearly invisible against the page.
+  Dimmed text on selected and now-playing rows is darker, several status and
+  source colours were adjusted to meet contrast minimums, and a few error
+  messages that were almost unreadable now aren't. Nothing moved; only contrast
+  changed.
+
+### Added
+
+- **Text size control.** Settings → Appearance now has a text-size setting with
+  **Ctrl/Cmd +**, **−** and **0** shortcuts, and the choice persists across
+  restarts. The packaged desktop app previously had no way to enlarge text at
+  all.
+- **A split says what it left behind.** Splitting a segment carries its quotes
+  onto the halves; where a quote had a note attached, the split now tells you how
+  many notes stayed with the original rather than moving them silently.
+
+### Changed
+
+- **Qualitative charts can be embedded in a Canvas.** 1.3.0 shipped with this as
+  a stated known limitation — code frequency, co-occurrence, saturation,
+  comparisons, the summary table and the timeline could be saved as materials and
+  then rendered as an empty "No data configured" box. All of them draw now, they
+  export as images alongside the quantitative charts, and a material whose source
+  has since been deleted says so instead of rendering blank. **That limitation is
+  retired.**
+- **The qualitative Sort control now moves the codes.** Choosing Alphabetical or
+  Count with codes on the row axis left them in import order, and the Custom
+  order — which you could author by dragging — never reached a chart at all. All
+  four orders now apply to the code axis of the heatmap, bar and stacked bar, and
+  a custom order travels with a chart saved to a Canvas.
+- **Codes come before Notes** on every coding surface, consistently.
+- **Declaring a missing value tells you what it did** to the column, rather than
+  reporting only when it failed.
+
+### Fixed
+
+**Analysis and exports**
+
+- The Descriptives summary table now takes every number from one source, so its
+  counts, percentages and per-source columns follow your selection instead of
+  mixing a selection-scoped count with a project-wide percentage.
+- Its per-kind columns follow the selection too: an observations-only selection
+  no longer reports "Conv. 1, Participants 11" for a selection containing
+  neither.
+- The comparison table explains a blank cell (too few usable values in a group)
+  instead of leaving it empty.
+- Every group-comparison export gets its own filename, so a second export no
+  longer silently overwrites the first.
+- Chart exports keep non-Latin characters in the filename — a wholly non-Latin
+  chart name previously produced a file called `.png`.
+- The Code-Conversation Matrix and the study CSV cover documents and observations
+  as well as conversations.
+
+**Coding, quotes and notes**
+
+- A bulk code that partially fails is reported as a failure. Rows could
+  previously be left painted as coded, with attribution, when nothing had been
+  applied.
+- A quote taken from a document carries its source on the Canvas and in every
+  export; it previously had none.
+- Dragging a quote onto a Canvas theme now produces the same embed as inserting
+  it — the dragged version lost its text, its attribution and its clip link.
+- Observation notes appear on the project-wide Memos & Notes page, and memos on
+  documents and observations show a proper label and filter instead of a raw type
+  name.
+- Merging a colleague's project no longer disturbs quote positions that were
+  already correct.
+
+**Desktop app**
+
+- A startup failure the app cannot recover from now shows what happened and what
+  to do about it, instead of "the local engine exited unexpectedly" — including
+  when the message contains a non-English path.
+- Only one dialog appears when startup fails, and it is the one that names the
+  cause.
+- Canvas snapshot rotation no longer depends on which of two snapshots taken in
+  the same second is judged older.
+
+**Accessibility**
+
+- The codebook tree, the source picker and the code picker are reachable and
+  navigable by keyboard, and announce their structure and position instead of a
+  flat list.
+- The variable-group grid costs one tab stop with arrow-key movement inside it,
+  rather than one tab stop per cell.
+- A clip list tells a screen reader how many clips it has, rather than how many
+  happen to be on screen.
+- Colour swatches and menus on a code row no longer announce as unavailable while
+  being fully operable.
+- On a frozen observation, splitting and merging explain that the clip set is
+  frozen instead of vanishing from the keyboard entirely.
+- A code chip announces who applied it instead of reading out the badge initials.
+- The app is usable at 200% zoom and at narrow window widths without the page
+  scrolling sideways.
+- Charts, tables, popovers and dialogs carry names; the skip link works; and the
+  focus indicator and text colours meet contrast minimums across both themes.
+
 ## [1.3.0] - 2026-08-02
 
 ### Upgrade notes
@@ -361,7 +515,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.1.0...v1.1.1

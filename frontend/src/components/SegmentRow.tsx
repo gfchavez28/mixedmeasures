@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { SELECTED_TINT } from '@/lib/selection'
+import { optionPositionAria } from '@/lib/listbox-aria'
 import { Quote, Paperclip, Check } from 'lucide-react'
 import { type Segment, type SegmentExcerptInfo, type Code, type Coder, type Speaker, segmentsApi, speakersApi } from '@/lib/api'
 import InlineCodeActions from '@/components/qualitative-analysis/InlineCodeActions'
@@ -45,6 +46,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { sliceByCodePoints, codePointLength } from '@/lib/text-offsets'
 
 // Speaker background colors using mm-* tokens (dark mode aware)
 const SPEAKER_BG_TOKENS = [
@@ -88,6 +90,14 @@ interface SegmentRowProps {
   onClick: (e: React.MouseEvent) => void
   conversationId: number
   codes: Code[]
+  /**
+   * #751 — 1-based position in the navigable set, and that set's size. Required
+   * because the listbox is virtualised: without them a screen reader counts the
+   * DOM and announces the render window's size as the list length. See
+   * `lib/listbox-aria.ts`.
+   */
+  positionInSet: number
+  setSize: number
   // Merge support
   canMergeWithPrev?: boolean
   canMergeWithNext?: boolean
@@ -201,6 +211,8 @@ function SegmentRow({
   coderMap,
   hiddenCoderIds,
   activeCoderId,
+  positionInSet,
+  setSize,
 }: SegmentRowProps) {
   const queryClient = useQueryClient()
   const { isDark } = useTheme()
@@ -291,16 +303,16 @@ function SegmentRow({
 
     for (const exc of subExcerpts) {
       const start = exc.start_offset!
-      const end = Math.min(exc.end_offset!, text.length)
+      const end = Math.min(exc.end_offset!, codePointLength(text))
       if (start > lastEnd) {
-        parts.push(text.slice(lastEnd, start))
+        parts.push(sliceByCodePoints(text, lastEnd, start))
       }
       const markEl = (
         <mark
           key={exc.id}
           className="bg-amber-100 dark:bg-amber-900/30 text-inherit border-b-2 border-amber-400 dark:border-amber-600 rounded-sm px-px cursor-default"
         >
-          {text.slice(start, end)}
+          {sliceByCodePoints(text, start, end)}
         </mark>
       )
       if (exc.has_note && exc.note_preview) {
@@ -321,8 +333,13 @@ function SegmentRow({
       lastEnd = end
     }
 
-    if (lastEnd < text.length) {
-      parts.push(text.slice(lastEnd))
+    // `lastEnd` is a CODE-POINT offset, so it must be compared against the code-point
+    // length — `text.length` is UTF-16 units and is larger on astral text (#687). The
+    // slice below already clamps, so the mismatch only ever pushed an empty node; it
+    // is corrected because a mixed-basis comparison is the exact reflex this module
+    // exists to remove, and the next reader would copy it.
+    if (lastEnd < codePointLength(text)) {
+      parts.push(sliceByCodePoints(text, lastEnd, codePointLength(text)))
     }
 
     return <>{parts}</>
@@ -398,6 +415,8 @@ function SegmentRow({
             role="option"
             aria-selected={isSelected}
             aria-description={groupAriaLabel}
+            // #751: the virtualised listbox's real length (lib/listbox-aria.ts).
+            {...optionPositionAria(positionInSet, setSize)}
             onContextMenu={(e) => {
               const rect = e.currentTarget.getBoundingClientRect()
               lastCoordsRef.current = {
@@ -435,7 +454,7 @@ function SegmentRow({
                   'w-5 flex-shrink-0 pt-0.5 focus:outline-none transition-colors',
                   segment.excerpts.length > 0
                     ? 'text-amber-400'
-                    : 'text-mm-border-medium hover:text-amber-400 opacity-0 group-hover/row:opacity-100 focus:opacity-100'
+                    : 'text-mm-text-faint hover:text-amber-400 opacity-0 group-hover/row:opacity-100 focus:opacity-100'
                 )}
                 onClick={(e) => {
                   e.stopPropagation()
@@ -578,49 +597,26 @@ function SegmentRow({
                 >
                   {textSelection && textSelection.start < textSelection.end && searchHighlight
                     ? <>
-                        {highlightText(segment.text.slice(0, textSelection.start), searchHighlight)}
+                        {highlightText(sliceByCodePoints(segment.text, 0, textSelection.start), searchHighlight)}
                         <mark className="bg-mm-blue/30 text-foreground rounded-sm px-px">
-                          {highlightText(segment.text.slice(textSelection.start, textSelection.end), searchHighlight)}
+                          {highlightText(sliceByCodePoints(segment.text, textSelection.start, textSelection.end), searchHighlight)}
                         </mark>
-                        {highlightText(segment.text.slice(textSelection.end), searchHighlight)}
+                        {highlightText(sliceByCodePoints(segment.text, textSelection.end, codePointLength(segment.text)), searchHighlight)}
                       </>
                     : searchHighlight
                       ? highlightText(segment.text, searchHighlight)
                       : textSelection && textSelection.start < textSelection.end
                         ? <>
-                            {segment.text.slice(0, textSelection.start)}
-                            <mark className="bg-mm-blue/30 text-foreground rounded-sm px-px">{segment.text.slice(textSelection.start, textSelection.end)}</mark>
-                            {segment.text.slice(textSelection.end)}
+                            {sliceByCodePoints(segment.text, 0, textSelection.start)}
+                            <mark className="bg-mm-blue/30 text-foreground rounded-sm px-px">{sliceByCodePoints(segment.text, textSelection.start, textSelection.end)}</mark>
+                            {sliceByCodePoints(segment.text, textSelection.end, codePointLength(segment.text))}
                           </>
                         : renderTextWithExcerpts(segment.text, segment.excerpts)}
                 </div>
               )}
 
-              {/* Notes Column */}
-              {showNotes && <div className="w-[40px] flex-shrink-0 flex flex-col items-center justify-center gap-0.5">
-                {segment.attached_notes && segment.attached_notes.length > 0 && segment.attached_notes.map(note => (
-                  <Tooltip key={note.id}>
-                    <TooltipTrigger asChild>
-                      <button
-                        className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 text-[10px] font-medium hover:bg-amber-200 dark:hover:bg-amber-800/50 transition-colors focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-1"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          onNoteClick?.(note.id)
-                        }}
-                        aria-label={`Note ${note.sequence_number}`}
-                      >
-                        {note.sequence_number}
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="max-w-xs">
-                      Note {note.sequence_number} — click to view
-                    </TooltipContent>
-                  </Tooltip>
-                ))}
-              </div>}
-
-              {/* Codes Column - colored chips with inline add/remove */}
-              {showCodes && <div className="w-[160px] flex-shrink-0 flex items-center">
+              {/* Codes column (#739: Codes -> Notes on every coding surface) */}
+              {showCodes && <div data-col="codes" className="w-[160px] flex-shrink-0 flex items-center">
                 {onCodeChange && allCodes && codeMap && projectId ? (
                   <InlineCodeActions
                     projectId={projectId}
@@ -654,6 +650,29 @@ function SegmentRow({
                     })}
                   </div>
                 )}
+              </div>}
+
+              {/* Notes column — the narrow indicator sits at the row end (#739) */}
+              {showNotes && <div data-col="notes" className="w-[40px] flex-shrink-0 flex flex-col items-center justify-center gap-0.5">
+                {segment.attached_notes && segment.attached_notes.length > 0 && segment.attached_notes.map(note => (
+                  <Tooltip key={note.id}>
+                    <TooltipTrigger asChild>
+                      <button
+                        className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 text-[10px] font-medium hover:bg-amber-200 dark:hover:bg-amber-800/50 transition-colors focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-1"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onNoteClick?.(note.id)
+                        }}
+                        aria-label={`Note ${note.sequence_number}`}
+                      >
+                        {note.sequence_number}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="max-w-xs">
+                      Note {note.sequence_number} — click to view
+                    </TooltipContent>
+                  </Tooltip>
+                ))}
               </div>}
             </div>
           </div>
@@ -719,7 +738,7 @@ function SegmentRow({
               {segment.excerpts
                 .filter(e => e.start_offset !== null)
                 .map(e => {
-                  const excerptText = segment.text.slice(e.start_offset!, Math.min(e.end_offset!, segment.text.length))
+                  const excerptText = sliceByCodePoints(segment.text, e.start_offset!, e.end_offset!)
                   const truncated = excerptText.length > 30 ? excerptText.slice(0, 30) + '...' : excerptText
                   return (
                     <ContextMenuItem key={e.id} onClick={() => onDeleteExcerpt(e.id)}>
@@ -735,7 +754,7 @@ function SegmentRow({
                 .filter(e => !e.has_note)
                 .map(e => {
                   if (e.start_offset !== null && e.end_offset !== null) {
-                    const excerptText = segment.text.slice(e.start_offset, Math.min(e.end_offset, segment.text.length))
+                    const excerptText = sliceByCodePoints(segment.text, e.start_offset, e.end_offset)
                     const truncated = excerptText.length > 30 ? excerptText.slice(0, 30) + '...' : excerptText
                     return (
                       <ContextMenuItem key={`note-${e.id}`} onClick={() => onAddNoteToExcerpt(e.id, segment.id)}>
@@ -833,14 +852,14 @@ function SegmentRow({
             <>
               <ContextMenuItem
                 onClick={() => {
-                  navigator.clipboard.writeText(segment.text.slice(textSelection.start, textSelection.end))
+                  navigator.clipboard.writeText(sliceByCodePoints(segment.text, textSelection.start, textSelection.end))
                 }}
               >
                 Copy Selected Text
               </ContextMenuItem>
               <ContextMenuItem
                 onClick={() => {
-                  const selected = segment.text.slice(textSelection.start, textSelection.end)
+                  const selected = sliceByCodePoints(segment.text, textSelection.start, textSelection.end)
                   const quote = `"${selected}" - ${segment.speaker_name || 'Unknown'}`
                   navigator.clipboard.writeText(quote)
                 }}

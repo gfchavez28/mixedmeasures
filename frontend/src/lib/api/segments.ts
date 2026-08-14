@@ -76,7 +76,7 @@ export const segmentsApi = {
   updateSegment: (conversationId: number, segmentId: number, data: { text?: string; speaker_id?: number }) =>
     api.patch<Segment>(`/conversations/${conversationId}/segments/${segmentId}`, data).then(res => res.data),
   split: (conversationId: number, ranges: { segment_id: number; start_offset: number; end_offset: number }[]) =>
-    api.post<{ new_segments: Segment[]; deleted_segment_ids: number[] }>(
+    api.post<{ new_segments: Segment[]; deleted_segment_ids: number[] ; quote_notes_stayed?: number }>(
       `/conversations/${conversationId}/segments/split`,
       { ranges }
     ).then(res => res.data),

@@ -44,6 +44,12 @@ interface CodePanelProps {
   onCreateCode: (name: string) => void
   onAddCodeMemo?: (codeId: number, codeName: string) => void  // Opens memo panel for this code
   disabled: boolean
+  /**
+   * #752 — what the researcher must select before these codes do anything. Each
+   * workbench names its own unit ("clip", "segment"), because "select a row"
+   * describes nothing a researcher recognises.
+   */
+  disabledHint?: string
   categories?: { id: number; name: string; parent_id?: number | null }[]
   // Keyboard navigation props
   isFocused?: boolean
@@ -62,6 +68,7 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
   onCreateCode,
   onAddCodeMemo,
   disabled,
+  disabledHint = 'Select a segment to apply codes.',
   categories: categoriesProp,
   isFocused = false,
   onFocusChange,
@@ -504,6 +511,18 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
         </div>
       </div>
 
+      {/* #752 — say WHY the codes are dimmed, once.
+          Every code row is faux-disabled when nothing is selected, so a screen
+          reader previously met the state as N repetitions of "unavailable" with
+          no cause given, and a sighted user met it as a panel that had simply
+          gone pale. One polite live line replaces both. It is announced on the
+          transition rather than per row, which is the whole point. */}
+      {disabled && (
+        <div aria-live="polite" className="px-4 py-2 border-b border-mm-border-subtle">
+          <p className="text-xs text-mm-text-secondary">{disabledHint}</p>
+        </div>
+      )}
+
       {/* Code List */}
       <div ref={listRef} className="flex-1 overflow-y-auto">
         {(() => {
@@ -817,9 +836,19 @@ function CodeItem({
             onClick={(e) => { e.stopPropagation(); setColorPickerOpen(true) }}
             title="Change color"
             aria-label={`Change color for ${code.name}`}
+            // #752 — LOAD-BEARING, do not delete as redundant. The ROW above
+            // carries aria-disabled (the #434 contrast exemption) and Chrome
+            // PROPAGATES that into the accessibility tree, so this button and the
+            // menu below were both exposed as disabled while being fully
+            // operable — NVDA announced "unavailable" for every code in the
+            // panel. Recolouring a code has nothing to do with whether a segment
+            // is selected. Measured in Chrome with a same-row control: with this
+            // attribute the button reports enabled, without it "disableable
+            // disabled".
+            aria-disabled={false}
           />
         </PopoverTrigger>
-        <PopoverContent className="w-auto p-3" align="start" onClick={(e) => e.stopPropagation()}>
+        <PopoverContent className="w-auto p-3" align="start" onClick={(e) => e.stopPropagation()} aria-label="Code color">
           <ColorSwatchPicker
             value={code.color || ''}
             onChange={(color) => updateColorMutation.mutate(color)}
@@ -847,11 +876,15 @@ function CodeItem({
               setMenuOpen(true)
             }}
             aria-label={`Options for ${code.name}`}
+            // #752 — LOAD-BEARING; see the ColorDotButton above. The row's
+            // aria-disabled propagates here too, and this menu (rename, merge,
+            // delete, category) is operable regardless of segment selection.
+            aria-disabled={false}
           >
             <Ellipsis className="w-4 h-4 text-mm-text-muted" />
           </button>
         </PopoverTrigger>
-        <PopoverContent className={cn(menuView === 'category' ? 'w-64' : 'w-48', 'p-1')} align="end">
+        <PopoverContent className={cn(menuView === 'category' ? 'w-64' : 'w-48', 'p-1')} align="end" aria-label="Code actions">
           {menuView === 'category' ? (
             <>
               <button

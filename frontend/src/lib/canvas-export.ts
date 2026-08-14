@@ -5,7 +5,31 @@
  * and fetches chart metric data via quickCompute for table rendering.
  */
 
-import { metricsApi, type CanvasDetail, type CanvasTheme, type CanvasThemeRelationship, type MetricDefinitionResponse } from '@/lib/api'
+import {
+  metricsApi,
+  codeAnalysisApi,
+  codesApi,
+  observationsApi,
+  type CanvasDetail,
+  type CanvasTheme,
+  type CanvasThemeRelationship,
+  type MetricDefinitionResponse,
+  type SourceFrequenciesResponse,
+} from '@/lib/api'
+import { safeFilename } from './filename'
+import {
+  computeTimedRows,
+  coveredTotalSeconds,
+  formatTimedRate,
+  formatTimedSeconds,
+  formatTimedShare,
+  timedExtent,
+} from '@/lib/timed-analytics'
+import {
+  resolveTimelineObservations,
+  resolveTimelineCodes,
+  resolveTimelineCoderLens,
+} from '@/components/canvas/qual-timeline-params'
 import {
   detectChartType,
   shapeScalarBars,
@@ -15,7 +39,18 @@ import {
   shapeLineChart,
   type ChartType,
 } from '@/lib/chart-data'
-import { extractComputeParams, buildRequest } from '@/components/canvas/inline-chart-params'
+import {
+  extractComputeParams,
+  buildRequest,
+  extractQualComputeParams,
+  buildQualSaturationParams,
+  buildQualCooccurrenceParams,
+  buildQualComparisonRequest,
+  qualChartKind,
+  qualChartHasEnoughToFetch,
+  type QualComputeParams,
+} from '@/components/canvas/inline-chart-params'
+import { isQualitativeMaterialConfig } from '@/lib/material-kind'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -29,8 +64,10 @@ interface TiptapNode {
 
 // ── Download utility ─────────────────────────────────────────────────────────
 
+/** Download filenames follow ONE client rule — see `lib/filename.ts` (#734).
+ *  Canvas titles are prose, so spaces are kept rather than underscored. */
 function sanitizeFilename(name: string): string {
-  return name.replace(/[/\\?%*:|"<>]/g, '_').slice(0, 80)
+  return safeFilename(name, { fallback: 'canvas', spaces: 'keep' })
 }
 
 export function downloadFile(content: string, filename: string, mimeType: string): void {
@@ -83,16 +120,53 @@ function walkNodes(node: TiptapNode, callback: (n: TiptapNode) => void): void {
   }
 }
 
+/**
+ * The viewer's blind state, threaded in from `CanvasView` (#652 slab 4).
+ *
+ * ⚠️ The export runs OUTSIDE React, so it cannot call `useBlindMode` — but it
+ * must still honour the lens. A Timeline table exported while blind would
+ * otherwise carry all-coder numbers into a file that gets shared, which is the
+ * privacy problem the on-screen lens exists to prevent, only worse. It also
+ * keeps the exported table equal to the rendered chart, which is the whole
+ * contract of `qualChartTable`.
+ *
+ * Absent (e.g. a caller that predates this) ⇒ not blind, which is the historical
+ * behaviour and correct on every single-coder install.
+ */
+export interface TimelineExportLens {
+  blind: boolean
+  self: number | null
+}
+
 /** Fetch chart data for all chart-embeds and convert to tables. */
 export async function fetchChartTables(
   themes: CanvasTheme[],
   projectId: number,
+  timelineLens: TimelineExportLens = { blind: false, self: null },
 ): Promise<Map<number, { md: string; html: string }>> {
   const charts = collectChartEmbeds(themes)
   if (charts.length === 0) return new Map()
 
   const results = await Promise.allSettled(
     charts.map(async (chart) => {
+      // #652 slab 1: a qualitative embed reads a different endpoint. Without
+      // this branch `extractComputeParams` finds no columns or domains and the
+      // chart exports as an EMPTY table in Markdown, HTML, PDF and the docx
+      // fallback — so the export would silently lag the renderer.
+      if (isQualitativeMaterialConfig(chart.config)) {
+        const qualParams = extractQualComputeParams(chart.config)
+        if (!qualChartHasEnoughToFetch(qualParams)) {
+          return { materialId: chart.materialId, md: '', html: '' }
+        }
+        const table = await qualChartTable(projectId, qualParams, timelineLens)
+        if (!table || table.rows.length === 0) return { materialId: chart.materialId, md: '', html: '' }
+        return {
+          materialId: chart.materialId,
+          md: mdTable(table.headers, table.rows),
+          html: htmlTable(table.headers, table.rows),
+        }
+      }
+
       const params = extractComputeParams(chart.config)
       if (params.columnIds.length === 0 && params.domainIds.length === 0) {
         return { materialId: chart.materialId, md: '', html: '' }
@@ -117,6 +191,198 @@ export async function fetchChartTables(
     }
   }
   return map
+}
+
+/**
+ * Fetch and flatten whichever payload this qualitative chart is made of.
+ *
+ * Dispatches on the SAME `qualChartKind` the renderer uses, so an exported
+ * table can never describe a different chart than the one on screen. Note
+ * co-occurrence is fetched directly here — the export mounts no components, so
+ * the fact that `QualCooccurrence` normally fetches for itself is irrelevant on
+ * this path.
+ */
+async function qualChartTable(
+  projectId: number,
+  params: QualComputeParams,
+  timelineLens: TimelineExportLens,
+): Promise<{ headers: string[]; rows: string[][] } | null> {
+  switch (qualChartKind(params)) {
+    case 'timeline':
+      return qualTimelineTable(projectId, params, timelineLens)
+
+    case 'heatmap':
+    case 'bar':
+    case 'stacked_bar':
+    case 'summary': {
+      const data = await codeAnalysisApi.sourceFrequencies(projectId, params.request)
+      return qualFrequenciesToTable(data, params.orientation === 'codes-rows')
+    }
+
+    case 'saturation': {
+      const data = await codeAnalysisApi.saturation(projectId, buildQualSaturationParams(params))
+      return {
+        headers: ['#', 'Source', 'New codes', 'Cumulative unique codes'],
+        rows: (data.points ?? []).map(p => [
+          String(p.source_index + 1),
+          p.source_label,
+          String(p.new_codes_this_source),
+          String(p.cumulative_unique_codes),
+        ]),
+      }
+    }
+
+    case 'cooccurrence': {
+      const data = await codeAnalysisApi.cooccurrence(projectId, {
+        ...buildQualCooccurrenceParams(params),
+        level: params.cooccurrenceLevel,
+      })
+      const codes = data.codes ?? []
+      if (codes.length === 0) return null
+      return {
+        headers: ['Code', ...codes.map(c => c.name)],
+        rows: codes.map((code, i) => [code.name, ...codes.map((_, j) => String(data.matrix?.[i]?.[j] ?? 0))]),
+      }
+    }
+
+    case 'comparison_table':
+    case 'comparison_bar': {
+      const request = buildQualComparisonRequest(params)
+      if (!request) return null
+      const data = await codeAnalysisApi.demographicComparison(projectId, request)
+      const groups = data.groups ?? []
+      if (groups.length === 0) return null
+      return {
+        headers: ['Code', ...groups.map(g => `${g} n`), ...groups.map(g => `${g} %`)],
+        rows: (data.codes ?? []).map(entry => [
+          entry.code_name,
+          ...groups.map(g => String(entry.by_group?.[g]?.count ?? 0)),
+          ...groups.map(g => {
+            const p = entry.by_group?.[g]?.proportion
+            return p == null ? '' : `${(p * 100).toFixed(1)}%`
+          }),
+        ]),
+      }
+    }
+
+    default:
+      return null
+  }
+}
+
+/**
+ * Flatten a Timeline material into one table (#652 slab 4).
+ *
+ * ⚠️ **This is the one place a second implementation could appear.** Every other
+ * kind hands a fetched payload to a flattener; the Timeline has no endpoint, so
+ * this path has to do the same resolving and the same arithmetic the renderer
+ * does — and a divergence here would be invisible, because both outputs look
+ * plausible and only differ in a number. So it calls exactly the shared pieces:
+ * `resolveTimeline*` for which observations / codes / marks count,
+ * `timedExtent` + `computeTimedRows` + `coveredTotalSeconds` for the maths, and
+ * the `formatTimed*` trio for the strings. Nothing is re-derived locally.
+ *
+ * The table is BY CODE only — the on-screen "By code × coder" toggle is local
+ * per-observation state that no config records (#685), so by-code is the only
+ * breakdown a saved material can be said to have.
+ */
+async function qualTimelineTable(
+  projectId: number,
+  params: QualComputeParams,
+  lens: TimelineExportLens,
+): Promise<{ headers: string[]; rows: string[][] } | null> {
+  // Mirrors the embed's first gate: this chart reads the human coding layer.
+  if (params.layerScope === 'consensus') return null
+
+  const [observationList, codeList] = await Promise.all([
+    observationsApi.list(projectId),
+    codesApi.list(projectId),
+  ])
+  const observations = resolveTimelineObservations(params.request.observation_ids ?? [], observationList)
+  const codes = resolveTimelineCodes(params.request.code_ids ?? [], codeList.codes ?? [])
+  if (observations.length === 0 || codes.length === 0) return null
+
+  // `multiCoder` is irrelevant here (no coder column), so the roster flag is
+  // false; the blind arm is what matters and it ignores it.
+  const { include } = resolveTimelineCoderLens(params.request.coder_ids ?? null, lens.blind, lens.self, false)
+  const codeIds = codes.map(c => c.id)
+
+  const clipsPerObservation = await Promise.all(
+    observations.map(o => observationsApi.listSegments(projectId, o.id)),
+  )
+
+  const rows: string[][] = []
+  observations.forEach((obs, i) => {
+    const clips = clipsPerObservation[i] ?? []
+    const { extent } = timedExtent(obs.media_duration_seconds, clips)
+    const codeRows = computeTimedRows(clips, codeIds, include, extent)
+    codeRows.forEach((row, j) => {
+      rows.push([
+        obs.name,
+        codes[j].name,
+        String(row.marks),
+        formatTimedSeconds(row.airtimeSeconds),
+        formatTimedShare(row.airtimeFraction),
+        formatTimedRate(row.ratePerMinute),
+        formatTimedSeconds(row.meanBoutSeconds),
+        formatTimedSeconds(row.medianBoutSeconds),
+        formatTimedSeconds(row.maxBoutSeconds),
+      ])
+    })
+    // The table's footer row, flattened. Airtimes across codes do NOT sum to
+    // this (codes overlap) — carrying it is what stops a reader adding the
+    // column up and getting a different, wrong answer.
+    const covered = coveredTotalSeconds(clips, codeIds, include, extent)
+    if (covered != null && extent != null) {
+      rows.push([
+        obs.name,
+        'Covered by selected coding',
+        '',
+        formatTimedSeconds(covered),
+        formatTimedShare(covered / extent),
+        '', '', '', '',
+      ])
+    }
+  })
+
+  if (rows.length === 0) return null
+  return {
+    headers: [
+      'Observation', 'Code', 'Marks', 'Airtime', 'Share of session',
+      'Rate', 'Mean bout', 'Median bout', 'Longest bout',
+    ],
+    rows,
+  }
+}
+
+/**
+ * Flatten a source-frequencies payload into a codes × sources count table.
+ *
+ * Honours the material's saved orientation so the exported table reads the way
+ * the researcher arranged the chart — transposed, not re-derived, because the
+ * numbers are identical either way and only the axes swap.
+ */
+function qualFrequenciesToTable(
+  data: SourceFrequenciesResponse,
+  codesAsRows: boolean,
+): { headers: string[]; rows: string[][] } {
+  const codes = data.codes ?? []
+  const sources = data.sources ?? []
+  if (codes.length === 0 || sources.length === 0) return { headers: [], rows: [] }
+
+  const countFor = (source: (typeof sources)[number], codeId: number): string =>
+    String(source.code_counts?.[String(codeId)]?.count ?? 0)
+
+  if (codesAsRows) {
+    return {
+      headers: ['Code', ...sources.map(s => s.source_label)],
+      rows: codes.map(code => [code.name, ...sources.map(s => countFor(s, code.id))]),
+    }
+  }
+  return {
+    headers: ['Source', ...codes.map(c => c.name)],
+    rows: sources.map(source => [source.source_label, ...codes.map(c => countFor(source, c.id))]),
+  }
 }
 
 // ── Chart-to-table conversion ────────────────────────────────────────────────
@@ -401,8 +667,17 @@ export async function captureCanvasChartPngs(): Promise<Map<number, string>> {
         const mid = Number(w.getAttribute('data-material-id'))
         if (!mid) return null
         // Prefer the clean chart subtree; only capture once it has actually rendered.
+        //
+        // ⚠️ #682: this used to require an `<svg>`, which quietly excluded every
+        // TABLE-shaped qualitative chart — heatmap, summary table, co-occurrence
+        // and comparison table render no SVG at all, so half of what #652 slabs
+        // 1–2 shipped exported with no image and fell back to the data table
+        // (losing, for instance, the heatmap's entire colour ramp). The Timeline
+        // is the same shape. Accepting a rendered `<table>` does not reopen what
+        // the gate was guarding: `waitForChartsReady` above is what keeps a
+        // spinner from being rasterized, and a spinner contains neither element.
         const root = w.querySelector<HTMLElement>('[data-chart-capture-root]')
-        if (!root || !root.querySelector('svg')) return null
+        if (!root || !root.querySelector('svg, table')) return null
         const dataUrl = await toPng(root, {
           pixelRatio: 2,
           skipFonts: true,
@@ -578,8 +853,9 @@ export async function exportCanvasMarkdown(
   canvas: CanvasDetail,
   themes: CanvasTheme[],
   projectId: number,
+  timelineLens?: TimelineExportLens,
 ): Promise<string> {
-  const chartTables = await fetchChartTables(themes, projectId)
+  const chartTables = await fetchChartTables(themes, projectId, timelineLens)
   const relationships = getAllRelationships(themes)
 
   let md = `# ${canvas.name}\n\n`
@@ -619,8 +895,9 @@ async function buildCanvasHtmlBody(
   themes: CanvasTheme[],
   projectId: number,
   chartPngs: Map<number, string>,
+  timelineLens?: TimelineExportLens,
 ): Promise<string> {
-  const chartTables = await fetchChartTables(themes, projectId)
+  const chartTables = await fetchChartTables(themes, projectId, timelineLens)
   const relationships = getAllRelationships(themes)
 
   let body = `<h1>${esc(canvas.name)}</h1>\n`
@@ -637,9 +914,10 @@ export async function exportCanvasHtml(
   themes: CanvasTheme[],
   projectId: number,
   preCapturedPngs?: Map<number, string>,
+  timelineLens?: TimelineExportLens,
 ): Promise<string> {
   const chartPngs = preCapturedPngs ?? await captureCanvasChartPngs()
-  const body = await buildCanvasHtmlBody(canvas, themes, projectId, chartPngs)
+  const body = await buildCanvasHtmlBody(canvas, themes, projectId, chartPngs, timelineLens)
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -721,9 +999,10 @@ export async function exportCanvasPdf(
   themes: CanvasTheme[],
   projectId: number,
   preCapturedPngs?: Map<number, string>,
+  timelineLens?: TimelineExportLens,
 ): Promise<void> {
   const chartPngs = preCapturedPngs ?? await captureCanvasChartPngs()
-  const body = await buildCanvasHtmlBody(canvas, themes, projectId, chartPngs)
+  const body = await buildCanvasHtmlBody(canvas, themes, projectId, chartPngs, timelineLens)
 
   const html = `<!DOCTYPE html>
 <html lang="en">

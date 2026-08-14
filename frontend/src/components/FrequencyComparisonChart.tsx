@@ -1,4 +1,5 @@
 import type { FrequencySet } from '@/lib/api'
+import { ChartFigure } from '@/components/charts/ChartFigure'
 
 interface FrequencyComparisonChartProps {
   filtered: FrequencySet
@@ -34,7 +35,7 @@ export default function FrequencyComparisonChart({
   }
 
   return (
-    <div className="border rounded-lg bg-mm-surface p-4" role="img" aria-label={`Frequency comparison: ${filterDescription}`}>
+    <ChartFigure className="border rounded-lg bg-mm-surface p-4" label={`Frequency comparison: ${filterDescription}`}>
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium">Code Frequencies</h3>
         <span className="text-xs text-mm-text-muted">
@@ -127,6 +128,6 @@ export default function FrequencyComparisonChart({
           })}
         </tbody>
       </table>
-    </div>
+    </ChartFigure>
   )
 }

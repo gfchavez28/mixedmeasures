@@ -57,7 +57,7 @@ export default function ConversationsListPage() {
       )
     }
     const sorted = [...result].sort((a, b) => {
-      let cmp = 0
+      let cmp: number
       if (sortBy === 'name') {
         cmp = a.name.localeCompare(b.name)
       } else if (sortBy === 'date') {

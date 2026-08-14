@@ -8,8 +8,25 @@ alembic>=1.13.0,<2.0.0
 bcrypt==5.0.0
 python-multipart==0.0.31  # security floor: CVE-2026-53538/53539/53540 (multipart parser DoS); FastAPI form/upload parsing. Bumped from 0.0.27.
 openpyxl==3.1.5
-scipy>=1.10.0,<2.0.0
-statsmodels>=0.14.0,<1.0.0
+# ── The numbers stack: EXACT pins, and the reason is reproducibility, not security ──
+# A range here means the installer ships whatever the build machine resolved that
+# day, so two builds from identical source can compute different statistics. For a
+# tool whose proposition is numbers a researcher can stand behind, that is a defect.
+#
+# It is not hypothetical: `scipy>=1.10.0,<2.0.0` had CI on 1.18.0 (published
+# 2026-06-19) while the dev venv sat on 1.17.0, and the two disagree about
+# `mannwhitneyu` on all-tied input — 1.17 returns p=1.0, 1.18 returns nan (the more
+# honest answer: with no variance in the ranks there is no test). That divergence
+# turned CI red for five consecutive pushes while every local run reported green.
+#
+# Bump these DELIBERATELY, together, and re-run the R round-trip oracles
+# (`test_export_r_roundtrip.py`) — they are what prove the numbers did not move.
+numpy==2.5.2        # DIRECT dependency: imported by comparisons/correlations/
+                    # cross_tabulation/data_quality/statistical_tests. It was never
+                    # declared and arrived transitively via scipy/statsmodels — an
+                    # undeclared contract that a scipy release could have broken.
+scipy==1.18.0
+statsmodels==0.14.6
 python-docx>=1.1.0,<2.0.0
 lxml==6.1.0  # security floor: CVE-2026-41066, transitive via python-docx (uploaded .docx parsing). Pinned to vetted 6.1.0; revisit when 6.1.x clears cooldown.
 pdfminer.six==20260107  # PDF text extraction (replaced AGPL-licensed PyMuPDF for Apache-2.0 compat, 2026-06-01). Pulls cryptography (Apache/BSD) + cffi (MIT) transitively.

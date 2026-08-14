@@ -24,6 +24,8 @@
  * second one keyed on `source_tab`.
  */
 
+import type { MaterialRefKind } from './api/materials'
+
 /** Keys only ever written by `useQualitativeAnalysis::buildCurrentConfig`. */
 const QUALITATIVE_CONFIG_KEYS = ['code_mode', 'code_ids'] as const
 
@@ -55,4 +57,45 @@ export function materialAnalysisPath(
 ): string {
   const view = isQualitativeMaterialConfig(config) ? 'qualitative' : 'quantitative'
   return `/projects/${projectId}/analysis/${view}?material=${materialId}`
+}
+
+/** Human wording for the ref kinds a material can lose (#652 slab 3). */
+const REF_KIND_NOUNS: Record<MaterialRefKind, [singular: string, plural: string]> = {
+  column: ['column', 'columns'],
+  domain: ['domain', 'domains'],
+  code: ['code', 'codes'],
+  conversation: ['conversation', 'conversations'],
+  document: ['document', 'documents'],
+  observation: ['observation', 'observations'],
+  participant: ['participant', 'participants'],
+}
+
+/**
+ * Describe a material's missing references by KIND.
+ *
+ * The previous copy read *"N referenced columns or domains no longer exist"* —
+ * accurate while only those two kinds were ever collected, and wrong the moment
+ * slab 3 started reporting codes and sources. Naming the kinds actually missing
+ * is also more useful: "1 conversation" tells the researcher where to look,
+ * "1 reference" does not.
+ */
+export function describeMissingRefs(refs: { type: MaterialRefKind }[]): string {
+  if (refs.length === 0) return ''
+  const counts = new Map<MaterialRefKind, number>()
+  for (const r of refs) counts.set(r.type, (counts.get(r.type) ?? 0) + 1)
+
+  const parts = [...counts.entries()]
+    // Stable ordering so the sentence does not reshuffle between renders.
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([kind, n]) => {
+      const nouns = REF_KIND_NOUNS[kind]
+      // An unknown kind from a newer server degrades to the raw token rather
+      // than rendering "undefined".
+      return `${n} ${nouns ? (n === 1 ? nouns[0] : nouns[1]) : kind}`
+    })
+
+  const list = parts.length === 1
+    ? parts[0]
+    : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+  return `${list} referenced here no longer ${refs.length === 1 ? 'exists' : 'exist'}.`
 }

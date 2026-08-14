@@ -295,7 +295,7 @@ export function CopyToEquivalentsDialog({
                   <span className={`px-1.5 py-0.5 rounded text-[11px] font-medium ${
                     def.recode_type === 'scale_map' ? 'bg-mm-blue/12 text-mm-blue-text' :
                     def.recode_type === 'category_group' ? 'bg-purple-50 text-purple-600 dark:bg-purple-950/30 dark:text-purple-300' :
-                    'bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-300'
+                    'bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300'
                   }`}>
                     {def.recode_type === 'scale_map' ? 'Scale Map' :
                      def.recode_type === 'category_group' ? 'Category' : 'Reverse'}

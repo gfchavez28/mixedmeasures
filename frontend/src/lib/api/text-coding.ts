@@ -1,6 +1,7 @@
 import api from './client'
 import { downloadFromApi } from './download'
 import type { AppliedCodeDetail } from './segments'
+import type { BulkTextCodeResponse } from '../bulk-code-result'
 
 // Text Coding types
 export interface TextQueryParams {
@@ -124,8 +125,11 @@ export const textCodingApi = {
     api.post(`/projects/${pid}/text-coding/code`, data).then(r => r.data),
   removeCode: (pid: number, params: { dataset_value_id: number; code_id: number }) =>
     api.delete(`/projects/${pid}/text-coding/code`, { params }).then(r => r.data),
-  bulkCode: (pid: number, data: { dataset_value_ids: number[]; code_id: number }) =>
-    api.post(`/projects/${pid}/text-coding/bulk-code`, data).then(r => r.data),
+  // #678: typed — a partial failure is a 200 body, not a throw. Route the result
+  // through lib/bulk-code-result.ts. (bulkRemoveCode below is a different shape
+  // by design: it returns deleted_count and skips nothing silently.)
+  bulkCode: (pid: number, data: { dataset_value_ids: number[]; code_id: number }): Promise<BulkTextCodeResponse> =>
+    api.post<BulkTextCodeResponse>(`/projects/${pid}/text-coding/bulk-code`, data).then(r => r.data),
   bulkRemoveCode: (pid: number, data: { dataset_value_ids: number[]; code_id: number }) =>
     api.post(`/projects/${pid}/text-coding/bulk-remove-code`, data).then(r => r.data),
 

@@ -153,10 +153,13 @@ export interface AnalysisCrossTabCell {
 }
 
 export interface ChiSquareResult {
-  statistic: number
-  p_value: number
+  statistic: number | null
+  p_value: number | null
   df: number
-  cramers_v: number
+  /** `null` when the table has a single effective row or column — it cannot
+   *  express association, which is not the same as measuring none (#689). */
+  cramers_v: number | null
+  undefined_reason: string | null
 }
 
 export interface AnalysisCrossTabResponse {

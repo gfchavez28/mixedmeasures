@@ -70,6 +70,19 @@ test('buildSpawnEnv injects absolute userData paths + the packaged flags', () =>
   assert.equal(env.MM_ENCRYPTION_KEY, undefined)
 })
 
+test('buildSpawnEnv pins the child stdio encoding to UTF-8 (#723)', () => {
+  // Python picks the LOCALE encoding for a pipe and sys.stderr defaults to
+  // errors='backslashreplace', so on a non-UTF-8 Windows the #716 fatal line arrives
+  // with a mangled path (C:\Users\\u674e\u660e\backups) — no exception, no missing
+  // line, just guidance the researcher cannot act on. The Electron side decodes
+  // UTF-8, so this is the half of the contract that lives here.
+  const env = buildSpawnEnv({ port: 1, userData: '/u' })
+  assert.equal(env.PYTHONIOENCODING, 'utf-8')
+  // NOT PYTHONUTF8: that flips UTF-8 mode globally, including the FILESYSTEM
+  // encoding on Windows — a far larger blast radius than this needs.
+  assert.equal(env.PYTHONUTF8, undefined)
+})
+
 test('buildSpawnEnv turns on encryption when a key is supplied', () => {
   const key = 'ab'.repeat(32)
   const env = buildSpawnEnv({ port: 1, userData: '/u', encryptionKeyHex: key })

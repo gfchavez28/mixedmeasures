@@ -265,15 +265,23 @@ async def bulk_code(
     # observation) — the old two-parent outerjoin silently dropped clips from the
     # map, so every multi-clip chord commit came back applied=False inside a 200
     # (D23; the first thing the coding surface does on a clip selection).
+    # De-duplicate while preserving order. A repeated id would otherwise be
+    # processed twice, and the second pass still sees the stale `existing_set`
+    # (it is not updated in the loop) — so it adds a SECOND CodeApplication for
+    # the same (segment, code, coder), which the per-coder unique index rejects
+    # with an IntegrityError at commit. That is a 500 on a request the client
+    # believes is ordinary, so dedup here rather than trusting every caller.
+    requested_ids = list(dict.fromkeys(data.segment_ids))
+
     segments = project_scoped_segments(
         db.query(Segment), code.project_id
-    ).filter(Segment.id.in_(data.segment_ids)).all()
+    ).filter(Segment.id.in_(requested_ids)).all()
     segment_map = {s.id: s for s in segments}
 
     # Batch check existing code applications by THIS coder (per-coder dedup;
     # #J2-1b — "have *I* applied this?", not "has anyone?").
     existing_apps = db.query(CodeApplication).filter(
-        CodeApplication.segment_id.in_(data.segment_ids),
+        CodeApplication.segment_id.in_(requested_ids),
         CodeApplication.code_id == data.code_id,
         CodeApplication.user_id == user.id
     ).all()
@@ -282,11 +290,13 @@ async def bulk_code(
     results = []
     success_count = 0
     error_count = 0
+    failed_segment_ids: list[int] = []
 
-    for segment_id in data.segment_ids:
+    for segment_id in requested_ids:
         # Check if segment exists using pre-fetched map
         if segment_id not in segment_map:
             error_count += 1
+            failed_segment_ids.append(segment_id)
             results.append(CodeApplicationResponse(
                 segment_id=segment_id,
                 code_id=data.code_id,
@@ -320,18 +330,19 @@ async def bulk_code(
                 applied=False
             ))
 
+    # The ids the server actually acted on. Computed once and reused by the
+    # bulk-remove delete, the consensus marker and the audit row — they were
+    # three copies of one comprehension, which is three chances to drift.
+    affected_ids = [sid for sid in requested_ids if sid in segment_map]
+
     # Batch delete for remove action — scoped to THIS coder so a bulk-remove
     # never nukes another coder's applications (#J2-1b critical nuke site).
-    if data.action == "remove":
-        valid_segment_ids = [sid for sid in data.segment_ids if sid in segment_map]
-        if valid_segment_ids:
-            db.query(CodeApplication).filter(
-                CodeApplication.segment_id.in_(valid_segment_ids),
-                CodeApplication.code_id == data.code_id,
-                CodeApplication.user_id == user.id
-            ).delete(synchronize_session=False)
-
-    affected_ids = [sid for sid in data.segment_ids if sid in segment_map]
+    if data.action == "remove" and affected_ids:
+        db.query(CodeApplication).filter(
+            CodeApplication.segment_id.in_(affected_ids),
+            CodeApplication.code_id == data.code_id,
+            CodeApplication.user_id == user.id
+        ).delete(synchronize_session=False)
 
     if consensus_enabled(db) and affected_ids:
         mark_consensus_stale(db, code.project_id, segment_ids=affected_ids)
@@ -354,7 +365,8 @@ async def bulk_code(
     return BulkCodeResponse(
         results=results,
         success_count=success_count,
-        error_count=error_count
+        error_count=error_count,
+        failed_segment_ids=failed_segment_ids,
     )
 
 

@@ -332,6 +332,7 @@ export default function ParticipantsPage() {
             {/* Table */}
             <div className={`bg-mm-surface rounded-lg border border-mm-border-subtle ${selectedParticipantId ? 'flex-1 min-w-0' : 'w-full'}`}>
               <table className="w-full">
+                <caption className="sr-only">Participants with their role and their linked conversations and datasets.</caption>
                 <thead className="bg-mm-bg">
                   <tr>
                     <th className="px-4 py-3 w-10">
@@ -730,7 +731,7 @@ function ParticipantDetailPanel({
                       {getSpeakerInitials(s.speaker_name)}
                     </button>
                   </PopoverTrigger>
-                  <PopoverContent className="w-auto p-3" align="start">
+                  <PopoverContent className="w-auto p-3" align="start" aria-label="Speaker color">
                     <ColorSwatchPicker
                       value={s.color || ''}
                       onChange={(color: string) => {

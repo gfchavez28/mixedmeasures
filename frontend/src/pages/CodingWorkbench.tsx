@@ -41,6 +41,8 @@ import { useCoders } from '@/hooks/useCoders'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { isSegmentCodedVisible, computeCoverage, isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { describeQuoteNotesStayed } from '@/lib/split-disclosure'
+import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
 import { useAuth } from '@/lib/auth-context'
 import CodePanel, { type CodePanelHandle } from '@/components/CodePanel'
 import CollapsiblePanel from '@/components/CollapsiblePanel'
@@ -660,14 +662,34 @@ export default function CodingWorkbench() {
       const snapshot = queryClient.getQueryData(['segments', cid])
       patchSegmentCodes(segmentIds, codeId, action, fanOutGroups)
       try {
-        await serverCall()
-        settleAfterCodeChange()
+        const result = await serverCall()
+        // #678: a bulk post reports a PARTIAL failure as a 200 body. The optimistic
+        // patch above already painted every id, and `settleAfterCodeChange` is the
+        // deliberately-light settle that does NOT refetch segments (#367), so a
+        // skipped id would stay painted as coded — with attribution — forever.
+        //
+        // Reconcile by INVALIDATION rather than by un-patching the failed ids: a
+        // failure means the server did not recognise those ids, so this cache is
+        // untrustworthy for them (they may be gone entirely, in which case the row
+        // itself is a phantom). Un-patching would also be wrong for an id the coder
+        // had already coded before the batch — there the optimistic apply was a
+        // no-op and reverting it would remove a legitimate chip. This mirrors the
+        // multi-code path below, which has always reconciled this way for the same
+        // reason. Single applyCode/removeCode responses carry no failed-id list, so
+        // they fall through to the light settle exactly as before.
+        const outcome = collectBulkOutcome(result as Parameters<typeof collectBulkOutcome>[0])
+        if (outcome.hasFailures) {
+          invalidateAfterCodeChange()
+          toast.warning(describeBulkFailure(outcome, 'segment', action))
+        } else {
+          settleAfterCodeChange()
+        }
       } catch (e) {
         queryClient.setQueryData(['segments', cid], snapshot)
         throw e
       }
     },
-    [queryClient, cid, patchSegmentCodes, settleAfterCodeChange]
+    [queryClient, cid, patchSegmentCodes, settleAfterCodeChange, invalidateAfterCodeChange]
   )
 
   // Toggle code on selected segments with history tracking
@@ -739,8 +761,20 @@ export default function CodingWorkbench() {
       const runMulti = async (action: 'apply' | 'remove') => {
         codesToToggle.forEach(code => patchSegmentCodes(segmentIds, code.id, action, false))
         try {
-          await Promise.all(codesToToggle.map(code => codingApi.bulkCode(segmentIds, code.id, action)))
-          settleAfterCodeChange()
+          const results = await Promise.all(
+            codesToToggle.map(code => codingApi.bulkCode(segmentIds, code.id, action)),
+          )
+          // #678: same reconciliation as the thrown case below — a 200 carrying
+          // skipped ids leaves the same stale paint a rejection would. Ids are
+          // folded across the N per-code responses, so a segment that failed for
+          // every code is reported once.
+          const outcome = collectBulkOutcome(results)
+          if (outcome.hasFailures) {
+            invalidateAfterCodeChange()
+            toast.warning(describeBulkFailure(outcome, 'segment', action))
+          } else {
+            settleAfterCodeChange()
+          }
         } catch (e) {
           invalidateAfterCodeChange()
           throw e
@@ -1108,6 +1142,10 @@ export default function CodingWorkbench() {
         redo: async () => {
           const result = await segmentsApi.split(cid, ranges)
           newSegmentIds = result.new_segments.map(s => s.id)
+          // #712: the notes this split left on the original — say so now, because
+          // the link is unrecoverable afterwards.
+          const stayed = describeQuoteNotesStayed(result.quote_notes_stayed)
+          if (stayed) toast.info(stayed)
           invalidateAfterSplitChange()
           const selectedSeg = result.new_segments[Math.floor(result.new_segments.length / 2)]
           if (selectedSeg) {
@@ -1313,7 +1351,7 @@ export default function CodingWorkbench() {
   if (projectError || conversationError) {
     return (
       <div className="p-8">
-        <div role="alert" className="p-4 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 rounded-lg text-sm text-center">
+        <div role="alert" className="p-4 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 rounded-lg text-sm text-center">
           Failed to load conversation. It may have been deleted, or there was a network error.
         </div>
       </div>
@@ -1522,7 +1560,7 @@ export default function CodingWorkbench() {
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="text-xs">Media sync offset</TooltipContent>
                 </Tooltip>
-                <PopoverContent side="bottom" align="start" className="w-64 p-3">
+                <PopoverContent side="bottom" align="start" className="w-64 p-3" aria-label="Recording sync offset">
                   <div className="space-y-2">
                     <p className="text-xs font-medium">{conversation?.media_type === 'video' ? 'Video' : 'Audio'} Sync Offset</p>
                     <div className="flex items-center gap-1">
@@ -1942,11 +1980,15 @@ export default function CodingWorkbench() {
             history.execute({
               type: 'code_apply',
               description: `Apply code "${code.name}" to ${segmentIds.length} segment(s)`,
+              // #678: this path already refetches, so nothing goes stale — but the
+              // success toast below names every selected segment, so a silently
+              // skipped id would still be reported as coded. Warn on the shortfall.
               redo: async () => {
                 if (segmentIds.length === 1) {
                   await codingApi.applyCode(segmentIds[0], code.id)
                 } else {
-                  await codingApi.bulkCode(segmentIds, code.id, 'apply')
+                  const outcome = collectBulkOutcome(await codingApi.bulkCode(segmentIds, code.id, 'apply'))
+                  if (outcome.hasFailures) toast.warning(describeBulkFailure(outcome, 'segment', 'apply'))
                 }
                 invalidateAfterCodeChange()
               },
@@ -1954,7 +1996,8 @@ export default function CodingWorkbench() {
                 if (segmentIds.length === 1) {
                   await codingApi.removeCode(segmentIds[0], code.id)
                 } else {
-                  await codingApi.bulkCode(segmentIds, code.id, 'remove')
+                  const outcome = collectBulkOutcome(await codingApi.bulkCode(segmentIds, code.id, 'remove'))
+                  if (outcome.hasFailures) toast.warning(describeBulkFailure(outcome, 'segment', 'remove'))
                 }
                 invalidateAfterCodeChange()
               },

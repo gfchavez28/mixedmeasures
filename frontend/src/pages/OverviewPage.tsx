@@ -159,7 +159,7 @@ export default function OverviewPage() {
   if (isError) {
     return (
       <div className="max-w-4xl mx-auto px-3.5 py-3.5">
-        <div role="alert" className="p-4 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 rounded-lg text-sm">
+        <div role="alert" className="p-4 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 rounded-lg text-sm">
           Failed to load project summary. Please try refreshing the page.
         </div>
       </div>

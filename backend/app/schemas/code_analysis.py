@@ -248,6 +248,14 @@ class SourceFrequenciesTotals(BaseModel):
     total_documents: int = 0
     total_observations: int = 0
     total_text_columns: int
+    # #749 — `coded_segments` above pools transcript segments AND coded texts.
+    # These two split it, so a "% of coded texts" is never divided by a number
+    # that also counted segments.
+    coded_transcript_segments: int = 0
+    coded_texts: int = 0
+    total_participants: int = 0
+    total_records: int = 0
+    unlinked_speaker_count: int = 0
 
 
 class CodeInfo(BaseModel):
@@ -259,6 +267,13 @@ class CodeInfo(BaseModel):
     category_color: str | None = None
     is_universal: bool
     numeric_id: int
+    # #749 — the two counts a client CANNOT derive from `sources`, because one
+    # participant speaks across conversations and one record can be coded in
+    # several text columns, so summing per-source counts double-counts them.
+    # Under `aggregation="category"` these are per-CATEGORY (distinct people /
+    # rows with any code in the category), not the sum over its codes.
+    participant_count: int = 0
+    record_count: int = 0
 
 
 class SourceFrequenciesResponse(BaseModel):

@@ -308,6 +308,33 @@ export default function ProjectLayout() {
 
   return (
     <div className="h-screen flex flex-col">
+      {/*
+        #10 — the first tab stop, so a keyboard or switch user can reach the page
+        instead of traversing the rail. Measured cost without it: 16 stops before
+        the first focusable thing in the content, on EVERY navigation.
+
+        `sr-only` until focused, then a real visible control — an invisible skip
+        link is worse than none, because the user cannot tell where focus went.
+
+        ⚠️ The target carries `tabIndex={-1}` and that is load-bearing, not
+        decoration. Without it the browser scrolls but focus stays on the link, so
+        the next Tab lands back on rail stop 2 and the link silently does nothing —
+        the classic broken skip link.
+      */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-3 focus:z-50 focus:rounded-md focus:bg-mm-surface focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-mm-text focus:shadow-mm-card focus:ring-2 focus:ring-ring"
+        onClick={(e) => {
+          // Drive focus explicitly rather than trusting the fragment: React Router
+          // owns the URL, and a bare hash navigation would also push a history entry.
+          e.preventDefault()
+          const target = document.getElementById('main-content')
+          target?.focus()
+          target?.scrollIntoView()
+        }}
+      >
+        Skip to main content
+      </a>
       <PageErrorBoundary>
         <TopRail
           project={project}
@@ -329,11 +356,11 @@ export default function ProjectLayout() {
           scratchpadCount={scratchpadCount}
         />
       </PageErrorBoundary>
-      <div className="flex-1 overflow-auto" role="main">
+      <main id="main-content" tabIndex={-1} className="flex-1 overflow-auto">
         {projectError ? (
           <div role="alert" className="flex flex-col items-center justify-center h-full text-mm-text-faint text-sm gap-2 p-8">
             <span className="text-base font-medium text-mm-text-secondary">Failed to load project</span>
-            <span className="text-xs text-mm-border-medium">
+            <span className="text-xs">
               {(projectError as Error).message || 'An unexpected error occurred'}
             </span>
           </div>
@@ -348,7 +375,7 @@ export default function ProjectLayout() {
             </Suspense>
           </PageErrorBoundary>
         )}
-      </div>
+      </main>
 
       <SearchPopover
         open={isSearchOpen}

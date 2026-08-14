@@ -1,4 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, type MouseEvent as ReactMouseEvent } from 'react'
+import { siblingPositions } from '@/hooks/useTreeKeyboardNav'
 import type { CodebookTreeResponse, CodebookCategoryNode, CodebookCodeNode } from '@/lib/api'
 import type { CodebookSizing, CodebookFormat } from '@/hooks/useCodebookState'
 import { useChartColors, useTheme } from '@/lib/theme-context'
@@ -59,6 +60,16 @@ interface LayoutNode {
   // Category-specific
   cat?: CodebookCategoryNode
   depth?: number
+  /**
+   * #701(a) — 1-based ARIA level, set at PUSH time per node type.
+   *
+   * Recorded explicitly rather than derived from `depth` at render: `depth` is
+   * category-only (code nodes never carry it), it is -1 for the synthetic
+   * uncategorized label, and a code's level is its category's depth + 2. Three
+   * different rules — and a WRONG level actively misinforms, which is worse
+   * than none, so each push site states its own.
+   */
+  level?: number
   isExpanded?: boolean
   codeCount?: number
   totalCodes?: number
@@ -66,6 +77,17 @@ interface LayoutNode {
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
+
+/**
+ * #701(a) — the DOM id `aria-activedescendant` points at.
+ *
+ * Node ids are already unique per render (`cat-3`, `code-12`,
+ * `uncategorized-label`); this only namespaces them so they cannot collide with
+ * anything else on the Codebook page. The five `role="treeitem"` sites are
+ * mutually exclusive branches (compact vs full, universal vs categorised) so one
+ * node emits exactly one element.
+ */
+const nodeDomId = (id: string) => `codebook-node-${id}`
 
 const CODE_DOT_R = 6  // radius of compact-mode code dot
 
@@ -457,6 +479,7 @@ export default function CodebookTreeView({
         const uniStride = isCompactCode ? dotSize + 12 : 210
         nodes.push({
           type: 'universal-code',
+          level: 1,          // #701(a): top band, no parent group node
           id: `code-${code.id}`,
           x: 90 + i * uniStride,
           y: 12,
@@ -534,6 +557,7 @@ export default function CodebookTreeView({
 
           nodes.push({
             type: 'code',
+            level: depth + 2,  // #701(a): category is depth+1, its codes one deeper
             id: `code-${code.id}`,
             x: cx - w / 2,
             y: cy - h / 2,
@@ -564,6 +588,7 @@ export default function CodebookTreeView({
       // Emit category node
       nodes.push({
         type: 'cat',
+        level: depth + 1,    // #701(a): depth is 0-based, aria-level is 1-based
         id: `cat-${catNode.id}`,
         x,
         y: catCY - ch / 2,
@@ -634,6 +659,7 @@ export default function CodebookTreeView({
 
         nodes.push({
           type: 'code',
+          level: 2,          // #701(a): child of the synthetic 'Uncategorized' root
           id: `code-${code.id}`,
           x: cx - w / 2,
           y: cy - h / 2,
@@ -654,6 +680,7 @@ export default function CodebookTreeView({
       if (filteredUncategorized.length > 0) {
         nodes.push({
           type: 'cat' as const,
+          level: 1,          // #701(a): a root-level grouping (its depth is -1)
           id: 'uncategorized-label',
           x: 30,
           y: labelY,
@@ -678,6 +705,26 @@ export default function CodebookTreeView({
 
     return { nodes, totalH: currentY + 30, bounds }
   }, [treeData, catFormat, codeFormat, containerWidth, expandedCategories, matchingCodeIds, ancestorCategoryIds, getScale, rootColorMap])
+
+  /**
+   * #701(a) — `aria-setsize` / `aria-posinset` per level.
+   *
+   * `aria-level` shipped 2026-08-12; without a set size a reader announces the
+   * depth but never "3 of 7", which is the half that tells someone how much of
+   * a branch is left. Derived from the layout's own node order and levels via
+   * the shared `siblingPositions`, so this SVG tree and the three DOM trees
+   * cannot disagree about what counts as a sibling.
+   *
+   * ⚠️ Keyed on `n.id`, not the array index: the label pseudo-node is filtered
+   * out of `nodeOrder` below, so index-based lookup would drift by one from the
+   * moment an `uncategorized-label` exists.
+   */
+  const nodeAria = useMemo(() => {
+    // `level` is optional on LayoutNode (the label pseudo-node has none); a
+    // missing level is a root, which is what 1 means.
+    const positions = siblingPositions(layout.nodes.map(n => n.level ?? 1))
+    return new Map(layout.nodes.map((n, i) => [n.id, positions[i]]))
+  }, [layout.nodes])
 
   // ── Flat node order for keyboard navigation ────────────────────────────
 
@@ -798,7 +845,7 @@ export default function CodebookTreeView({
       && layout !== layoutIdRef.current
     ) {
       layoutIdRef.current = layout
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- sync viewport when layout changes
+      // sync viewport when layout changes
       setViewport(defaultVp)
     }
   }, [layout, containerSize, defaultVp])
@@ -939,7 +986,7 @@ export default function CodebookTreeView({
   useEffect(() => {
     if (spatialZoomPercent !== prevSpatialZoom.current) {
       prevSpatialZoom.current = spatialZoomPercent
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- ARIA announcement via announce() which wraps setState
+      // ARIA announcement via announce() which wraps setState
       announce(`Tree zoom ${spatialZoomPercent}%`)
     }
   }, [spatialZoomPercent, announce])
@@ -1187,7 +1234,7 @@ export default function CodebookTreeView({
     if (focusedIdx < 0 || focusedIdx >= nodeOrder.length) return
     const nodeId = nodeOrder[focusedIdx]
     const node = layout.nodes.find(n => n.id === nodeId)
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- sync tooltip position to keyboard-focused node
+    // sync tooltip position to keyboard-focused node
     if (node) showTooltipAtNodeFocus(node)
   }, [focusedIdx, nodeOrder, layout.nodes, showTooltipAtNodeFocus])
 
@@ -1259,6 +1306,10 @@ export default function CodebookTreeView({
     return (
       <g
         key={n.id}
+        id={nodeDomId(n.id)}
+        aria-level={n.level}
+        aria-posinset={nodeAria.get(n.id)?.posinset}
+        aria-setsize={nodeAria.get(n.id)?.setsize}
         role="treeitem"
         aria-label={`${cat.name}: ${n.totalCodes ?? 0} codes, ${n.totalSeg ?? 0} segments`}
         aria-expanded={n.isExpanded}
@@ -1392,6 +1443,10 @@ export default function CodebookTreeView({
         return (
           <g
             key={n.id}
+            id={nodeDomId(n.id)}
+            aria-level={n.level}
+            aria-posinset={nodeAria.get(n.id)?.posinset}
+            aria-setsize={nodeAria.get(n.id)?.setsize}
             role="treeitem"
             aria-label={`${code.name} (universal): ${code.segment_count} segments, ${code.source_count} sources`}
             aria-selected={isSel}
@@ -1426,6 +1481,10 @@ export default function CodebookTreeView({
       return (
         <g
           key={n.id}
+          id={nodeDomId(n.id)}
+          aria-level={n.level}
+          aria-posinset={nodeAria.get(n.id)?.posinset}
+          aria-setsize={nodeAria.get(n.id)?.setsize}
           role="treeitem"
           aria-label={`${code.name} (universal): ${code.segment_count} segments, ${code.source_count} sources`}
           aria-selected={isSel}
@@ -1470,6 +1529,10 @@ export default function CodebookTreeView({
       return (
         <g
           key={n.id}
+          id={nodeDomId(n.id)}
+          aria-level={n.level}
+          aria-posinset={nodeAria.get(n.id)?.posinset}
+          aria-setsize={nodeAria.get(n.id)?.setsize}
           role="treeitem"
           aria-label={`${code.name}: ${code.segment_count} segments, ${code.source_count} sources`}
           aria-selected={isSel}
@@ -1510,6 +1573,10 @@ export default function CodebookTreeView({
     return (
       <g
         key={n.id}
+        id={nodeDomId(n.id)}
+        aria-level={n.level}
+        aria-posinset={nodeAria.get(n.id)?.posinset}
+        aria-setsize={nodeAria.get(n.id)?.setsize}
         role="treeitem"
         aria-label={`${code.name}: ${code.segment_count} segments, ${code.source_count} sources`}
         aria-selected={isSel}
@@ -1585,6 +1652,38 @@ export default function CodebookTreeView({
       role="tree"
       aria-label="Codebook tree"
       aria-multiselectable={multiSelect.size > 0 ? true : undefined}
+      /*
+       * #701(a) — the tree was keyboard-unreachable by construction, and the
+       * three attributes below are what break the loop.
+       *
+       * The roving-tabindex half was already here (`tabIndex={isFocused ? 0 : -1}`
+       * on every node) but it had NO RESTING STATE: `focusedIdx` starts at -1, so
+       * no node was focusable; this container had no tabIndex either, so nothing
+       * in the tree could take focus; and `handleKeyDown` lives HERE, so it could
+       * only fire once focus was already inside. Nothing focusable → no keydown →
+       * `focusedIdx` never leaves -1 → still nothing focusable. Measured live: 38
+       * treeitems, 0 focusable. That is the reported silence — the arrow keys were
+       * never reaching the handler at all.
+       *
+       * ⚠️ `aria-activedescendant`, NOT completed roving tabindex. The nodes are
+       * SVG `<g>` elements; moving real DOM focus into SVG is the patchier path,
+       * and there is no `.focus()` call anywhere to build on. Keeping focus on
+       * this stable HTML container is the pattern the workbenches already use
+       * (#436/#484) and it leaves every node at `tabIndex=-1`, which is correct
+       * for activedescendant rather than something to undo.
+       */
+      tabIndex={0}
+      aria-activedescendant={
+        focusedIdx >= 0 && focusedIdx < nodeOrder.length
+          ? nodeDomId(nodeOrder[focusedIdx])
+          : undefined
+      }
+      onFocus={() => {
+        // The resting state the roving version never had: entering the tree puts
+        // the cursor on the first node so there is something to announce and to
+        // arrow away from. Guarded so re-entering does not discard your place.
+        if (focusedIdx < 0 && nodeOrder.length > 0) setFocusedIdx(0)
+      }}
       onKeyDown={handleKeyDown}
     >
       <svg

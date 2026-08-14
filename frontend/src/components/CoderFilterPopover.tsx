@@ -86,7 +86,7 @@ export default function CoderFilterPopover({
           {hidden.size > 0 && <span>{hidden.size}</span>}
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-60 p-2" align="start">
+      <PopoverContent aria-label="Show codes by coder" className="w-60 p-2" align="start">
         <div className="text-xs text-mm-text-muted mb-1">Show codes by coder</div>
         {perSource && (
           <div className="text-[11px] text-mm-text-faint mb-2">

@@ -174,7 +174,7 @@ export const documentsApi = {
     ).then(res => res.data),
 
   split: (projectId: number, documentId: number, ranges: { segment_id: number; start_offset: number; end_offset: number }[]) =>
-    api.post<{ new_segments: DocumentSegmentResponse[]; deleted_segment_ids: number[] }>(
+    api.post<{ new_segments: DocumentSegmentResponse[]; deleted_segment_ids: number[] ; quote_notes_stayed?: number }>(
       `/projects/${projectId}/documents/${documentId}/segments/split`,
       { ranges },
     ).then(res => res.data),

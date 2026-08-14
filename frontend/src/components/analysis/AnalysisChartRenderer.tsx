@@ -36,6 +36,7 @@ import StackedHorizontalBarChart from '@/components/charts/StackedHorizontalBarC
 import FrequencyBarChart from '@/components/charts/FrequencyBarChart'
 import GroupedScalarBarChart from '@/components/charts/GroupedScalarBarChart'
 import SummaryStatsTable from '@/components/charts/SummaryStatsTable'
+import type { ScaleAgreement } from '@/lib/scale-comparison'
 import VerticalBarChart from '@/components/charts/VerticalBarChart'
 import LineChartComponent from '@/components/charts/LineChart'
 import DetailedFrequencyTable from '@/components/charts/DetailedFrequencyTable'
@@ -92,6 +93,8 @@ export interface AnalysisChartRendererProps {
   divergingCenter: string | null
   divergingCenterAuto: { centerLabel: string | null; mode: 'center' | 'boundary' }
   hasMixedScales: boolean
+  /** #693 — whether the items behind a charted scale score share a scale. */
+  scaleScoreAgreement?: ScaleAgreement | null
   hasMixedTypes: boolean
 
   // Line chart options
@@ -124,6 +127,7 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
     formatting,
     hiddenResponseOptions, scaleOrder, hiddenGroupValues, groupOrganization, responseLabels,
     divergingMode, divergingCenter, divergingCenterAuto, hasMixedScales, hasMixedTypes,
+    scaleScoreAgreement,
     showErrorBand, lineStyle, lineOverlay,
     proportionMode, proportionOperator, proportionThreshold, proportionValues,
     crossTabColumnId, crossTabDisplay, crossTabData,
@@ -204,6 +208,36 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
         <RefreshCw className="w-3 h-3 mr-1" />
         Compute All
       </Button>
+    </div>
+  ) : null
+
+  /**
+   * #693 — the scale score's own disclosure, at the point the number is READ.
+   *
+   * Separate from `scaleWarning` below on purpose: that one is about the
+   * SELECTED METRICS disagreeing with each other, and it explains a disabled
+   * chart type. This one is about the items INSIDE an aggregate, and it
+   * qualifies the number itself. `unknown` is deliberately quieter than
+   * `mismatch` — nothing was demonstrated, only unchecked — but it is not
+   * silent, because silence about an unchecked claim reads as a passed check.
+   */
+  const scaleScoreNotice = scaleScoreAgreement ? (
+    <div
+      className={`flex items-start gap-2 px-3 py-2 mb-2 rounded text-xs ${
+        scaleScoreAgreement === 'mismatch'
+          ? 'bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300'
+          : 'bg-mm-bg border text-mm-text-muted'
+      }`}
+      role="status"
+    >
+      <TriangleAlert className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden="true" />
+      <span>
+        {scaleScoreAgreement === 'mismatch'
+          ? 'A scale score here averages items measured on different response scales, without '
+            + 'rescaling — the result sits on none of them.'
+          : 'Response scales aren’t recorded for some items behind a scale score, so Mixed '
+            + 'Measures can’t check whether they match.'}
+      </span>
     </div>
   ) : null
 
@@ -665,6 +699,7 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
   return (
     <>
       {scaleWarning}
+      {scaleScoreNotice}
       {chartContent}
     </>
   )

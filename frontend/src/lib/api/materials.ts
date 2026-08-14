@@ -14,8 +14,15 @@ export interface MaterialCollectionListResponse {
   collections: MaterialCollectionResponse[]
 }
 
+/** #652 slab 3: every entity kind a material config can reference. Widened from
+ *  `'column' | 'domain'` — a qualitative material references codes and sources,
+ *  and could never be flagged stale until the backend collected them. */
+export type MaterialRefKind =
+  | 'column' | 'domain' | 'code'
+  | 'conversation' | 'document' | 'observation' | 'participant'
+
 export interface MaterialMissingRef {
-  type: 'column' | 'domain'
+  type: MaterialRefKind
   id: number
 }
 

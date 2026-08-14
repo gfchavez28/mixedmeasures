@@ -1,8 +1,9 @@
 import { Fragment } from 'react'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
-import type { ComparisonRow, GroupStat } from '@/lib/api'
+import type { ComparisonRow, GroupStat, TestResult } from '@/lib/api'
 import { formatP, formatPValue, getSignificanceStars } from '@/lib/chart-data'
 import PostHocTable from '@/components/analysis/PostHocTable'
+import { NO_VALUE, describeUndefined, formatStat } from '@/lib/stat-format'
 
 interface GroupComparisonTableProps {
   groups: string[]
@@ -53,6 +54,76 @@ function effectSizeBadge(d: number, type: string, label?: string | null): { bg: 
   return { bg: 'bg-mm-bg text-mm-text-faint', label: '' }
 }
 
+/**
+ * The effect size each test reports: the column header and the name the cell
+ * tooltip calls it, declared TOGETHER (#746).
+ *
+ * The table used to take these from the GROUP COUNT while the number came from
+ * the TEST — and the two disagree the moment a researcher overrides the test in
+ * the sidebar (neither combination is gated there):
+ *
+ *   3 groups + "Welch's t-test"  → Cohen's d printed under a header reading ω²,
+ *                                  tooltipped as "η² = −0.70" (η² is a
+ *                                  proportion of variance; it cannot be negative)
+ *   2 groups + "One-way ANOVA"   → η² printed under a header reading d
+ *
+ * Same root cause as #732 in the export and #742 in the label: two halves of one
+ * fact produced in different places, each half correct on its own.
+ */
+const EFFECT_BY_TEST: Record<string, { header: string; name: string }> = {
+  one_way_anova: { header: 'ω²', name: 'ω²' },
+  independent_t_test: { header: 'd', name: "Cohen's d" },
+  mann_whitney_u: { header: 'r', name: 'r' },
+  kruskal_wallis: { header: 'ε²', name: 'ε²' },
+}
+
+/**
+ * The test the table is displaying — what the rows actually carry, falling back
+ * to what `auto` would have picked for this shape (mirroring the service's
+ * `_resolve_test_type`) when no row computed one. A header still has to be
+ * right for a table whose every row failed to compute.
+ */
+function resolveShownTest(
+  firstTest: TestResult | null | undefined,
+  isTwoGroup: boolean,
+  nonparametric?: boolean,
+): string {
+  if (firstTest?.test_type) return firstTest.test_type
+  if (nonparametric) return isTwoGroup ? 'mann_whitney_u' : 'kruskal_wallis'
+  return isTwoGroup ? 'independent_t_test' : 'one_way_anova'
+}
+
+/**
+ * THE effect size a row shows: the number, the qualitative word that belongs to
+ * that number, and what to call it. One resolver, so a cell cannot render one
+ * statistic's value beside another's verdict (#742) or under another's header
+ * (#746).
+ *
+ * ANOVA displays ω² — the app's standing convention (the internal design notes: "the UI
+ * displays ω², the backend's primary field is η²"), which the two-group branch
+ * had simply never implemented because it assumed two groups meant a t-test.
+ */
+function displayedEffect(test: TestResult): { value: number; label: string | null; name: string } {
+  if (test.test_type === 'one_way_anova' && test.omega_squared != null) {
+    return { value: test.omega_squared, label: test.omega_squared_label, name: 'ω²' }
+  }
+  return {
+    value: test.effect_size,
+    label: test.effect_size_label,
+    name: EFFECT_BY_TEST[test.test_type]?.name ?? 'effect size',
+  }
+}
+
+/** Tooltip text for the effect-size cell. ANOVA shows the pair, because a
+ *  reader comparing against another tool wants the η² that tool reports. */
+function effectTooltip(test: TestResult, ciStr = ''): string {
+  if (test.test_type === 'one_way_anova' && test.omega_squared != null) {
+    return `ω² = ${test.omega_squared.toFixed(3)}, η² = ${test.effect_size.toFixed(3)}`
+  }
+  const es = displayedEffect(test)
+  return `${es.name} = ${es.value.toFixed(3)}${ciStr}`
+}
+
 // ── Component ───────────────────────────────────────────────────────────────
 
 export default function GroupComparisonTable({
@@ -86,6 +157,9 @@ export default function GroupComparisonTable({
 
   // Sub-column count per group
   const groupSubCols = nonparametric ? 2 : 3
+
+  const effectHeader =
+    EFFECT_BY_TEST[resolveShownTest(firstTest, isTwoGroup, nonparametric)]?.header ?? 'ES'
 
   return (
     <div>
@@ -135,23 +209,27 @@ export default function GroupComparisonTable({
               {groups.map(g => (
                 <GroupSubHeaders key={g} nonparametric={nonparametric} />
               ))}
+              {/* #746: the effect-size header comes from the SAME resolver the
+                  cells use, so it names the statistic actually printed below it. */}
               {nonparametric ? (
                 <>
                   <SubHeader label={isTwoGroup ? 'U' : 'H'} />
                   <SubHeader label="p" />
-                  <SubHeader label={isTwoGroup ? 'r' : '\u03B5\u00B2'} />
+                  <SubHeader label={effectHeader} />
                 </>
               ) : isTwoGroup ? (
                 <>
+                  {/* The two-group cell shows the mean DIFFERENCE, not the test
+                      statistic \u2014 \u0394 is right whichever test ran. */}
                   <SubHeader label={'\u0394'} />
                   <SubHeader label="p" />
-                  <SubHeader label="d" />
+                  <SubHeader label={effectHeader} />
                 </>
               ) : (
                 <>
                   <SubHeader label="F/t" />
                   <SubHeader label="p" />
-                  <SubHeader label={'\u03C9\u00B2'} />
+                  <SubHeader label={effectHeader} />
                 </>
               )}
             </tr>
@@ -219,11 +297,11 @@ export default function GroupComparisonTable({
         {sigLevels.show_001 && <span>*** p &lt; .001</span>}
         {testTypeLabel && (
           <>
-            <span className="text-mm-border-medium">|</span>
+            <span className="text-mm-text-faint">|</span>
             <span>{testTypeLabel}</span>
           </>
         )}
-        <span className="text-mm-border-medium">|</span>
+        <span className="text-mm-text-faint">|</span>
         <span>Hover cells for details</span>
       </div>
     </div>
@@ -258,6 +336,32 @@ function GroupSubHeaders({ nonparametric }: { nonparametric?: boolean }) {
   )
 }
 
+/**
+ * The three test cells when no test was run — saying WHY (#566).
+ *
+ * A blank delta/p/d with no explanation is indistinguishable from a broken
+ * tool, and the commonest cause is an honest refusal: a group left with fewer
+ * than two usable values after missing-data exclusion. The reason arrives on
+ * the row (`test_omitted_reason`) rather than being guessed from the group
+ * sizes here, so the table, a tooltip and an export cannot disagree about it.
+ *
+ * The sentence is `sr-only` on the first cell as well as a `title`, because a
+ * title is not reachable by keyboard or screen reader.
+ */
+function OmittedTestCells({ reason }: { reason: string | null }) {
+  const text = describeUndefined(reason)
+  return (
+    <>
+      {[0, 1, 2].map(i => (
+        <td key={i} className="px-2 py-2 text-center text-mm-text-faint" title={text ?? undefined}>
+          {NO_VALUE}
+          {i === 0 && text && <span className="sr-only"> {text}</span>}
+        </td>
+      ))}
+    </>
+  )
+}
+
 function GroupStatCells({ stat, nonparametric }: { stat: GroupStat | undefined; nonparametric?: boolean }) {
   const emptyCols = nonparametric ? 2 : 3
   if (!stat || stat.n === 0) {
@@ -286,30 +390,28 @@ function GroupStatCells({ stat, nonparametric }: { stat: GroupStat | undefined; 
         className="px-2 py-2 text-center text-mm-text tabular-nums"
         title={stat.ci_lower != null && stat.ci_upper != null ? `M = ${stat.mean}, 95% CI [${stat.ci_lower}, ${stat.ci_upper}]` : `M = ${stat.mean}`}
       >
-        {stat.mean.toFixed(2)}
+        {formatStat(stat.mean)}
       </td>
-      <td className="px-2 py-2 text-center text-mm-text-muted tabular-nums" title={`SD = ${stat.sd}`}>{stat.sd.toFixed(2)}</td>
+      <td className="px-2 py-2 text-center text-mm-text-muted tabular-nums" title={`SD = ${stat.sd}`}>{formatStat(stat.sd)}</td>
     </>
   )
 }
 
 function TwoGroupTestCells({ row, groups, sigLevels }: { row: ComparisonRow; groups: string[]; sigLevels: GroupComparisonTableProps['sigLevels'] }) {
   const test = row.test
-  if (!test) {
-    return (
-      <>
-        <td className="px-2 py-2 text-center text-mm-text-faint">&mdash;</td>
-        <td className="px-2 py-2 text-center text-mm-text-faint">&mdash;</td>
-        <td className="px-2 py-2 text-center text-mm-text-faint">&mdash;</td>
-      </>
-    )
-  }
+  if (!test) return <OmittedTestCells reason={row.test_omitted_reason} />
 
   const g1 = row.group_stats.find(s => s.group === groups[0])
   const g2 = row.group_stats.find(s => s.group === groups[1])
-  const delta = g1 && g2 ? (g1.mean - g2.mean) : 0
+  // #689: a group with no usable values has no mean, so there is no difference
+  // to report. `0` here would have read as "the groups are identical".
+  const delta = g1?.mean != null && g2?.mean != null ? g1.mean - g2.mean : null
   const stars = getSignificanceStars(test.p, sigLevels)
-  const badge = effectSizeBadge(test.effect_size, test.effect_size_type, test.effect_size_label)
+  // #746: two groups does NOT mean a t-test — "One-way ANOVA" is selectable in
+  // the sidebar at any group count, and this branch then showed η² under a
+  // header saying `d`. The resolver decides both.
+  const es = displayedEffect(test)
+  const badge = effectSizeBadge(es.value, test.effect_size_type, es.label)
 
   const ciStr = test.effect_size_ci_lower != null && test.effect_size_ci_upper != null
     ? `, 95% CI [${test.effect_size_ci_lower.toFixed(2)}, ${test.effect_size_ci_upper.toFixed(2)}]`
@@ -319,9 +421,9 @@ function TwoGroupTestCells({ row, groups, sigLevels }: { row: ComparisonRow; gro
     <>
       <td
         className="px-2 py-2 text-center tabular-nums text-mm-text"
-        title={`\u0394 = ${delta.toFixed(2)}`}
+        title={`\u0394 = ${formatStat(delta)}`}
       >
-        {delta.toFixed(2)}
+        {formatStat(delta)}
       </td>
       <td
         className={`px-2 py-2 text-center tabular-nums font-medium ${pColor(test.p)}`}
@@ -331,10 +433,10 @@ function TwoGroupTestCells({ row, groups, sigLevels }: { row: ComparisonRow; gro
       </td>
       <td
         className="px-2 py-2 text-center tabular-nums"
-        title={`Cohen's d = ${test.effect_size.toFixed(3)}${ciStr}`}
+        title={effectTooltip(test, ciStr)}
       >
         <span className={`inline-block px-1.5 py-0.5 rounded text-[11px] ${badge.bg}`}>
-          {test.effect_size.toFixed(2)}
+          {es.value.toFixed(2)}
         </span>
       </td>
     </>
@@ -343,27 +445,23 @@ function TwoGroupTestCells({ row, groups, sigLevels }: { row: ComparisonRow; gro
 
 function MultiGroupTestCells({ row, sigLevels }: { row: ComparisonRow; sigLevels: GroupComparisonTableProps['sigLevels'] }) {
   const test = row.test
-  if (!test) {
-    return (
-      <>
-        <td className="px-2 py-2 text-center text-mm-text-faint">&mdash;</td>
-        <td className="px-2 py-2 text-center text-mm-text-faint">&mdash;</td>
-        <td className="px-2 py-2 text-center text-mm-text-faint">&mdash;</td>
-      </>
-    )
-  }
+  if (!test) return <OmittedTestCells reason={row.test_omitted_reason} />
 
   const stars = getSignificanceStars(test.p, sigLevels)
-  const omegaSq = test.omega_squared
-  const displayEs = omegaSq != null ? omegaSq : test.effect_size
-  const badge = effectSizeBadge(displayEs, test.effect_size_type, test.effect_size_label)
+  // #742: `effectSizeBadge` IGNORES the value whenever a label is passed, so
+  // handing it eta's label while displaying omega made the badge purely
+  // eta-driven — "medium" rendered as a large-effect badge. The label has to
+  // travel with the number it describes, which is what the resolver guarantees.
+  const es = displayedEffect(test)
+  const badge = effectSizeBadge(es.value, test.effect_size_type, es.label)
   const statLabel = test.test_type === 'one_way_anova'
     ? `F(${test.df.toFixed(0)}${test.df2 != null ? ', ' + test.df2.toFixed(0) : ''})`
     : `t(${test.df.toFixed(1)})`
 
-  const esTooltip = omegaSq != null
-    ? `\u03C9\u00B2 = ${omegaSq.toFixed(3)}, \u03B7\u00B2 = ${test.effect_size.toFixed(3)}`
-    : `\u03B7\u00B2 = ${test.effect_size.toFixed(3)}`
+  // #746: this branch renders for ANY 3+-group test, including the t-test the
+  // sidebar lets a researcher request — whose effect size is Cohen's d, and
+  // which this used to tooltip as a NEGATIVE eta-squared (an impossible value).
+  const esTooltip = effectTooltip(test)
 
   return (
     <>
@@ -384,7 +482,7 @@ function MultiGroupTestCells({ row, sigLevels }: { row: ComparisonRow; sigLevels
         title={esTooltip}
       >
         <span className={`inline-block px-1.5 py-0.5 rounded text-[11px] ${badge.bg}`}>
-          {displayEs.toFixed(2)}
+          {es.value.toFixed(2)}
         </span>
       </td>
     </>
@@ -393,15 +491,7 @@ function MultiGroupTestCells({ row, sigLevels }: { row: ComparisonRow; sigLevels
 
 function NonParametricTestCells({ row, isTwoGroup, sigLevels }: { row: ComparisonRow; isTwoGroup: boolean; sigLevels: GroupComparisonTableProps['sigLevels'] }) {
   const test = row.test
-  if (!test) {
-    return (
-      <>
-        <td className="px-2 py-2 text-center text-mm-text-faint">&mdash;</td>
-        <td className="px-2 py-2 text-center text-mm-text-faint">&mdash;</td>
-        <td className="px-2 py-2 text-center text-mm-text-faint">&mdash;</td>
-      </>
-    )
-  }
+  if (!test) return <OmittedTestCells reason={row.test_omitted_reason} />
 
   const stars = getSignificanceStars(test.p, sigLevels)
   const badge = effectSizeBadge(test.effect_size, test.effect_size_type, test.effect_size_label)

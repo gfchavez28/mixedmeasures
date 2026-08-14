@@ -89,6 +89,17 @@ class ExcerptResponse(BaseModel):
     start_time: float | None = None
     end_time: float | None = None
     excerpt_text: str
+    # The RESOLVED source (#736) — `models/excerpt.py::excerpt_source_pair`.
+    # Read THESE for anything that names a quote's origin. The per-parent pairs
+    # below are an ENUMERATION, and it was one parent short: a document quote
+    # matched neither, so `excerptAttributionLine` fell through to '' and every
+    # canvas embed and export rendered a blank attribution. `source_kind` is one
+    # of conversation | document | observation | text.
+    # ⚠️ `source_name` is BARE — no timecode. Composing a range onto it is the
+    # caller's job; a per-clip suffix once shattered the quote board's
+    # group-by-source into one bucket per clip.
+    source_kind: str = ""
+    source_name: str = ""
     conversation_id: int | None = None
     conversation_name: str | None = None
     # Observation parentage (slab 5, D31) — canvas embeds and quote cards need

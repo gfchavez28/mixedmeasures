@@ -20,6 +20,7 @@ import {
   LINE_DASH_PATTERNS,
   computeLogDomain,
 } from '@/lib/chart-data'
+import { ciCaveat, isItemLevelCi } from '@/lib/ci-label'
 import { useChartColors } from '@/lib/theme-context'
 import type {
   LineChartData,
@@ -27,6 +28,7 @@ import type {
   VariableNMode,
 } from '@/lib/chart-data'
 import type { RechartsTooltipProps, RechartsPayloadEntry, ChartDataRow } from '@/lib/chart-types'
+import { ChartFigure } from './ChartFigure'
 
 const DOT_SHAPES = [
   'circle',
@@ -76,6 +78,7 @@ function LineTooltip({ active, payload, label }: RechartsTooltipProps) {
           const n = (point[`_n_${groupKey}`] ?? point._n) as number | undefined
           const ciLower = (point[`_ciLower_${groupKey}`] ?? point._ciLower) as number | undefined
           const ciUpper = (point[`_ciUpper_${groupKey}`] ?? point._ciUpper) as number | undefined
+          const ciMethod = (point[`_ciMethod_${groupKey}`] ?? point._ciMethod) as string | undefined
           return (
             <div key={entry.name} className="flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: entry.color || entry.stroke }} />
@@ -85,7 +88,11 @@ function LineTooltip({ active, payload, label }: RechartsTooltipProps) {
               </span>
               {n != null && <span className="text-mm-text-faint">(n={n})</span>}
               {ciLower != null && ciUpper != null && (
-                <span className="text-mm-text-faint">[{ciLower.toFixed(DISPLAY_PRECISION)}, {ciUpper.toFixed(DISPLAY_PRECISION)}]</span>
+                <span className="text-mm-text-faint" title={ciCaveat(ciMethod)}>
+                  [{ciLower.toFixed(DISPLAY_PRECISION)}, {ciUpper.toFixed(DISPLAY_PRECISION)}]
+                  {/* #715 — see GroupedScalarBarChart: a bare range must say when it is over items. */}
+                  {isItemLevelCi(ciMethod) && ' across items'}
+                </span>
               )}
             </div>
           )
@@ -134,6 +141,7 @@ export default function LineChartComponent({
           entry._n = point.n
           entry._ciLower = point.ciLower
           entry._ciUpper = point.ciUpper
+          entry._ciMethod = point.ciMethod
           if (point.ciLower != null && point.ciUpper != null) {
             entry._ciError = [point.value - point.ciLower, point.ciUpper - point.value]
             entry._band_value = [point.ciLower, point.ciUpper]
@@ -148,6 +156,7 @@ export default function LineChartComponent({
             entry[`_n_${gv}`] = point.n
             entry[`_ciLower_${gv}`] = point.ciLower
             entry[`_ciUpper_${gv}`] = point.ciUpper
+            entry[`_ciMethod_${gv}`] = point.ciMethod
             if (point.ciLower != null && point.ciUpper != null) {
               entry[`_ciError_${gv}`] = [point.value - point.ciLower, point.ciUpper - point.value]
               entry[`_band_${gv}`] = [point.ciLower, point.ciUpper]
@@ -192,9 +201,9 @@ export default function LineChartComponent({
   const markersOnly = lineStyle === 'markers'
 
   return (
-    <div role="img" aria-label="Line chart">
+    <ChartFigure label="Line chart" count={chartData.length} countNoun="points">
       {isLog && logExcludedCount > 0 && (
-        <div className="text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded px-2 py-1 mb-2">
+        <div className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded px-2 py-1 mb-2">
           {logExcludedCount} value{logExcludedCount > 1 ? 's' : ''} ≤ 0 excluded from log scale
         </div>
       )}
@@ -343,6 +352,6 @@ export default function LineChartComponent({
           ))}
         </tbody>
       </table>
-    </div>
+    </ChartFigure>
   )
 }

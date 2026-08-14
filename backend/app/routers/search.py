@@ -139,7 +139,6 @@ async def search_study(
                 all_segment_items.append(
                     SegmentSearchResult(
                         id=s.id,
-                        conversation_id=s.conversation_id,
                         conversation_name=s.conversation.name if s.conversation else "Unknown",
                         speaker_name=s.speaker.name if s.speaker else None,
                         is_facilitator=s.speaker.is_facilitator if s.speaker else False,
@@ -197,10 +196,10 @@ async def search_study(
                 all_segment_items.append(
                     SegmentSearchResult(
                         id=s.id,
-                        # #569 deprecation beat: the document id still rides the
-                        # overloaded conversation_id ONE release; honest consumers
-                        # read source_kind + source_id. Drop the overload next cut.
-                        conversation_id=s.document_id,
+                        # `conversation_name` is the SOURCE display name for every
+                        # kind — here the document's. The id half of that old
+                        # conversation-shaped naming was the #569 overload and is
+                        # gone; only the display-name field keeps the legacy name.
                         conversation_name=s.document.name if s.document else "Unknown",
                         speaker_name=None,
                         is_facilitator=False,
@@ -208,15 +207,13 @@ async def search_study(
                         text=s.text,
                         sequence_order=s.sequence_order,
                         is_quoted=s.id in doc_quoted_seg_ids,
-                        source_type="document",
                         source_kind="document",
                         source_id=s.document_id,
                     )
                 )
 
         # Observation clips (slab 4b) — a clip's LABEL is its searchable text.
-        # No conversation_id lie for the new kind: clip hits carry
-        # conversation_id=None and the honest source_kind/source_id pair only.
+        # Every kind carries the same honest source_kind/source_id pair (#569).
         # start_time rides for the client's timecode subtitle (4e).
         observation_ids = [o.id for o in db.query(Observation.id).filter(Observation.project_id == project_id).all()]
         if observation_ids:
@@ -260,7 +257,6 @@ async def search_study(
                 all_segment_items.append(
                     SegmentSearchResult(
                         id=s.id,
-                        conversation_id=None,
                         conversation_name=s.observation.name if s.observation else "Unknown",
                         speaker_name=None,
                         is_facilitator=False,
@@ -268,7 +264,6 @@ async def search_study(
                         text=s.text,
                         sequence_order=s.sequence_order,
                         is_quoted=s.id in clip_quoted_ids,
-                        source_type="observation",
                         source_kind="observation",
                         source_id=s.observation_id,
                     )
@@ -399,7 +394,6 @@ async def search_study(
                 note_items.append(
                     NoteSearchResult(
                         id=n.id,
-                        conversation_id=n.conversation_id,
                         conversation_name=n.conversation.name if n.conversation else "Unknown",
                         segment_id=n.segment_id,
                         segment_text_preview=(
@@ -408,7 +402,6 @@ async def search_study(
                         ),
                         content=n.content,
                         sequence_number=n.sequence_number,
-                        source_type="conversation",
                         source_kind="conversation",
                         source_id=n.conversation_id,
                     )
@@ -434,7 +427,6 @@ async def search_study(
                 NoteSearchResult(
                     id=n.id,
                     # #569 deprecation beat — same as the doc-segment block above.
-                    conversation_id=n.document_id,
                     conversation_name=n.document.name if n.document else "Unknown",
                     segment_id=n.segment_id,
                     segment_text_preview=(
@@ -443,14 +435,13 @@ async def search_study(
                     ),
                     content=n.content,
                     sequence_number=n.sequence_number,
-                    source_type="document",
                     source_kind="document",
                     source_id=n.document_id,
                 )
             )
 
         # Observation notes (slab 4b — the 4a create/list endpoints made these
-        # exist). No conversation_id lie for the new kind (None + honest pair).
+        # exist). Same honest source_kind/source_id pair as every other kind (#569).
         obs_note_query = (
             db.query(Note)
             .options(joinedload(Note.observation), joinedload(Note.segment))
@@ -469,7 +460,6 @@ async def search_study(
             note_items.append(
                 NoteSearchResult(
                     id=n.id,
-                    conversation_id=None,
                     conversation_name=n.observation.name if n.observation else "Unknown",
                     segment_id=n.segment_id,
                     segment_text_preview=(
@@ -478,7 +468,6 @@ async def search_study(
                     ),
                     content=n.content,
                     sequence_number=n.sequence_number,
-                    source_type="observation",
                     source_kind="observation",
                     source_id=n.observation_id,
                 )

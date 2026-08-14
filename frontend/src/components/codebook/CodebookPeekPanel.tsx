@@ -584,7 +584,7 @@ export default function CodebookPeekPanel({
                 title="Change color"
               />
             </PopoverTrigger>
-            <PopoverContent className="w-auto p-3" align="start" side="left" collisionPadding={16}>
+            <PopoverContent className="w-auto p-3" align="start" side="left" collisionPadding={16} aria-label="Code color">
               <div className="space-y-2">
                 <p className="text-xs font-medium text-mm-text-secondary">Code Color</p>
                 <ColorSwatchPicker
@@ -814,7 +814,7 @@ export default function CodebookPeekPanel({
                 <span className="w-3 h-3 rounded" style={{ backgroundColor: catColor }} />
               </button>
             </PopoverTrigger>
-            <PopoverContent className="w-auto p-3" align="start" side="left" collisionPadding={16}>
+            <PopoverContent className="w-auto p-3" align="start" side="left" collisionPadding={16} aria-label="Category color">
               <div className="space-y-2">
                 <p className="text-xs font-medium text-mm-text-secondary">Category Color</p>
                 <ColorSwatchPicker

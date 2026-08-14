@@ -87,7 +87,7 @@ export default function CrossTabTable({ data, loading }: CrossTabTableProps) {
                           <span className="text-mm-text-muted ml-0.5">({pct.toFixed(0)}%)</span>
                         </span>
                       ) : (
-                        <span className="text-mm-border-medium">{'\u2013'}</span>
+                        <span className="text-mm-text-faint">{'\u2013'}</span>
                       )}
                     </td>
                   )

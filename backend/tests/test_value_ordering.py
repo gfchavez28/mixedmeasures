@@ -8,7 +8,7 @@ code-density groups) are one-line swaps to the same helper.
 
 Every fixture here deliberately uses multi-digit (and 3-digit) values —
 lexicographic ordering equals numeric ordering for 1–5 Likert data, which is
-exactly how #406 stayed hidden (see backend/tests/CLAUDE.md).
+exactly how #406 stayed hidden (see backend/tests/the internal design notes).
 """
 import pytest
 

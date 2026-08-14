@@ -17,11 +17,14 @@ import type { QualOrientation, QualSortOrder, QualValueMode, QualDenominatorMode
 import type { DataLabelPosition } from '@/lib/chart-data'
 import type { ChartDataRow } from '@/lib/chart-types'
 import { shapeQualStackedBarData } from './qual-chart-data'
+import { ChartFigure } from '@/components/charts/ChartFigure'
 
 interface QualStackedBarProps {
   data: SourceFrequenciesResponse
   orientation: QualOrientation
   sortOrder: QualSortOrder
+  /** #675 — the code-axis order behind `sortOrder: 'custom'`. */
+  customOrder: number[]
   valueMode?: QualValueMode
   denominatorMode?: QualDenominatorMode
   labelFontSize?: number
@@ -62,6 +65,7 @@ export default function QualStackedBar({
   data,
   orientation,
   sortOrder,
+  customOrder,
   valueMode = 'count',
   denominatorMode = 'total',
   labelFontSize,
@@ -71,8 +75,8 @@ export default function QualStackedBar({
 }: QualStackedBarProps) {
   const chartTheme = useChartColors()
   const stackedData = useMemo(
-    () => shapeQualStackedBarData(data, orientation, sortOrder, valueMode, denominatorMode),
-    [data, orientation, sortOrder, valueMode, denominatorMode],
+    () => shapeQualStackedBarData(data, orientation, sortOrder, valueMode, denominatorMode, customOrder),
+    [data, orientation, sortOrder, valueMode, denominatorMode, customOrder],
   )
 
   const { rows, segmentLabels, colors } = stackedData
@@ -107,7 +111,7 @@ export default function QualStackedBar({
   const chartHeight = Math.max(300, chartData.length * rowHeight + 60)
 
   return (
-    <div role="img" aria-label="Stacked bar chart">
+    <ChartFigure label="Stacked bar chart">
       <ResponsiveContainer width="100%" height={chartHeight}>
         <BarChart
           layout="vertical"
@@ -188,6 +192,6 @@ export default function QualStackedBar({
           ))}
         </BarChart>
       </ResponsiveContainer>
-    </div>
+    </ChartFigure>
   )
 }

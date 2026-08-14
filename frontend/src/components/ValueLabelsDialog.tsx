@@ -24,6 +24,7 @@
  * rule's label in and strips the code out of the scale; un-declare reverts).
  */
 import { useState, useEffect, useMemo, useRef } from 'react'
+import { describeRecoveredUnmapped, describeMissingValueChanges } from '@/lib/missing-values-copy'
 import { useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -61,20 +62,7 @@ import {
 export { buildValueLabelPayload }
 export type { ValueLabelValidation } from '@/components/ValueLabelRows'
 
-/**
- * Toast copy for values that became data again without a recoverable code
- * (#609d): capped at 5 + "+N more" (the AppendImport convention), count-aware
- * verb — the old string was unbounded and read "…values became data again but
- * has no code yet".
- */
-// eslint-disable-next-line react-refresh/only-export-components -- pure copy helper, unit-tested
-export function describeRecoveredUnmapped(values: string[]): string {
-  const shown = values.slice(0, 5).map(v => `"${v}"`).join(', ')
-  const more = values.length > 5 ? ` +${values.length - 5} more` : ''
-  return values.length === 1
-    ? `${shown} became data again but has no code yet.`
-    : `${shown}${more} became data again but have no codes yet.`
-}
+
 
 /** `null` = keep the column's current type (#592 C5) — the dialog must not
  *  force a type just because someone edited labels. Sent as omitted. */
@@ -224,6 +212,7 @@ export function ValueLabelsDialog({
     if (!canApply) return
     setSaving(true)
     const notes: string[] = []
+    let changes: string | null = null
     try {
       // Missing FIRST: it is the call that can be refused, and landing it before
       // the labels means a failure never leaves labels half-applied. The two
@@ -235,6 +224,10 @@ export function ValueLabelsDialog({
         if (res.recovered_unmapped.length) {
           notes.push(describeRecoveredUnmapped(res.recovered_unmapped))
         }
+        // #680: what the declaration DID to stored cells. Kept separate from
+        // `notes` on purpose — those demand action, this is disclosure, and
+        // folding them together would file a plain report under "warning".
+        changes = describeMissingValueChanges(res)
       }
       if (labelsUsable && validation.payload) {
         const res = await recodeApi.applyValueLabels(
@@ -256,8 +249,18 @@ export function ValueLabelsDialog({
         }
       }
 
-      if (notes.length) toast.warning(`Applied — ${notes.join(' ')}`)
-      else toast.success('Column updated.')
+      // #680: a silent data mutation is always disclosed. `notes` (action
+      // needed) still decides the SEVERITY; `changes` only ever adds detail.
+      // The longer duration is deliberate — this is a report about the
+      // researcher's data, and the default 4s is not enough to read a sentence
+      // and decide whether it was what they meant.
+      if (notes.length) {
+        toast.warning(`Applied — ${notes.join(' ')}${changes ? ` ${changes}` : ''}`, { duration: 10_000 })
+      } else if (changes) {
+        toast.success(`Column updated — ${changes}`, { duration: 8_000 })
+      } else {
+        toast.success('Column updated.')
+      }
       onClose()
     } catch (e) {
       const detail = (e as { response?: { data?: { detail?: string } } })

@@ -128,12 +128,13 @@ function ScaleMapEditor({
         </Button>
       </div>
       <table className="w-full text-sm border-collapse">
+        <caption className="sr-only">Scale mapping: each response label, its numeric value, and whether it is excluded.</caption>
         <thead>
           <tr className="text-xs text-mm-text-muted">
             <th scope="col" className="text-left py-1 pr-2">Label</th>
             <th scope="col" className="text-center py-1 px-2 w-20">Value</th>
             <th scope="col" className="text-center py-1 pl-2 w-16">Exclude</th>
-            <th scope="col" className="w-8"></th>
+            <th scope="col" className="w-8"><span className="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
@@ -160,7 +161,7 @@ function ScaleMapEditor({
                 <td className="py-1.5 pl-1">
                   <button
                     onClick={() => handleRemoveLabel(label)}
-                    className="text-mm-border-medium hover:text-red-500 transition-colors"
+                    className="text-mm-text-faint hover:text-red-500 transition-colors"
                     title="Remove label"
                   >
                     <Trash2 className="w-3 h-3" />
@@ -243,12 +244,13 @@ function CategoryGroupEditor({
     <div>
       <span className="text-xs text-mm-text-muted font-medium block mb-2">Group Mapping</span>
       <table className="w-full text-sm border-collapse">
+        <caption className="sr-only">Category grouping: each response label and the group it is recoded into.</caption>
         <thead>
           <tr className="text-xs text-mm-text-muted">
             <th scope="col" className="text-left py-1 pr-2">Label</th>
             <th scope="col" className="text-left py-1 px-2">Group</th>
             <th scope="col" className="text-center py-1 pl-2 w-16">Exclude</th>
-            <th scope="col" className="w-8"></th>
+            <th scope="col" className="w-8"><span className="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
@@ -279,7 +281,7 @@ function CategoryGroupEditor({
                 <td className="py-1.5 pl-1">
                   <button
                     onClick={() => handleRemoveLabel(label)}
-                    className="text-mm-border-medium hover:text-red-500 transition-colors"
+                    className="text-mm-text-faint hover:text-red-500 transition-colors"
                     title="Remove label"
                   >
                     <Trash2 className="w-3 h-3" />
@@ -331,7 +333,7 @@ function ReverseEditor({
 
   if (!sourceDef) {
     return (
-      <div role="alert" className="text-sm text-amber-600 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-300 rounded p-3">
+      <div role="alert" className="text-sm text-amber-700 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-300 rounded p-3">
         Source definition not found or deleted.
       </div>
     )
@@ -352,6 +354,7 @@ function ReverseEditor({
         highest response scores lowest.
       </p>
       <table className="w-full text-sm border-collapse">
+        <caption className="sr-only">Reverse scoring: each response label with its source code and reversed score.</caption>
         <thead>
           <tr className="text-xs text-mm-text-muted">
             <th scope="col" className="text-left py-1 pr-2">Label</th>
@@ -440,7 +443,7 @@ function DefinitionCard({
   const recodeTypeBadge = {
     scale_map: { label: 'Scale Map', cls: 'bg-mm-blue/12 text-mm-blue-text' },
     category_group: { label: 'Category', cls: 'bg-purple-50 text-purple-600 dark:bg-purple-950/30 dark:text-purple-300' },
-    reverse: { label: 'Reverse', cls: 'bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-300' },
+    reverse: { label: 'Reverse', cls: 'bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300' },
   }[definition.recode_type] || { label: definition.recode_type, cls: 'bg-mm-bg text-mm-text-muted' }
 
   return (
@@ -1256,6 +1259,7 @@ export default function RecodeWorkbench() {
                   <h3 className="text-xs font-medium text-mm-text-muted uppercase mb-2">Value Frequencies</h3>
                   <div className="border rounded-lg overflow-hidden">
                     <table className="w-full text-sm">
+                      <caption className="sr-only">Observed values in this column with how often each occurs.</caption>
                       <thead>
                         <tr className="bg-mm-bg text-xs text-mm-text-muted">
                           <th scope="col" className="text-left py-1.5 px-3">Value</th>

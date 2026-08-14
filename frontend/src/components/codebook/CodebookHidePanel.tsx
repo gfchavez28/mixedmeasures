@@ -1,4 +1,5 @@
-import { useMemo, useState, useCallback, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useMemo, useState, useCallback, useRef } from 'react'
+import { useTreeKeyboardNav, useTreeAriaPositions } from '@/hooks/useTreeKeyboardNav'
 import { EyeOff, Filter, ChevronDown, ChevronRight } from 'lucide-react'
 import type { CodebookTreeResponse, CodebookCategoryNode, Conversation, TextCodingColumn } from '@/lib/api'
 import { getCodeColor } from '@/lib/utils'
@@ -153,51 +154,32 @@ export default function CodebookHidePanel({
     onHiddenColIdsChange(next)
   }, [textColumns, hiddenColIds, onHiddenColIdsChange])
 
-  const toggleDatasetExpand = useCallback((datasetId: number) => {
+  /** Toggle, or set explicitly — ArrowRight/ArrowLeft mean expand/collapse, not
+   *  "flip", so a second ArrowRight must not close what it just opened. */
+  const toggleDatasetExpand = useCallback((datasetId: number, force?: boolean) => {
     setExpandedDatasets(prev => {
       const next = new Set(prev)
-      if (next.has(datasetId)) next.delete(datasetId)
-      else next.add(datasetId)
+      const open = force ?? !next.has(datasetId)
+      if (open) next.add(datasetId)
+      else next.delete(datasetId)
       return next
     })
   }, [])
 
   // Keyboard nav
-  const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
-    const items = treeRef.current?.querySelectorAll('[role="treeitem"]')
-    if (!items || items.length === 0) return
-    const focused = document.activeElement as HTMLElement
-    const idx = Array.from(items).indexOf(focused)
-    if (idx === -1) return
-
-    switch (e.key) {
-      case 'ArrowDown': {
-        e.preventDefault()
-        ;(items[Math.min(idx + 1, items.length - 1)] as HTMLElement)?.focus()
-        break
-      }
-      case 'ArrowUp': {
-        e.preventDefault()
-        ;(items[Math.max(idx - 1, 0)] as HTMLElement)?.focus()
-        break
-      }
-      case ' ': {
-        e.preventDefault()
-        focused.click()
-        break
-      }
-      case 'Home': {
-        e.preventDefault()
-        ;(items[0] as HTMLElement)?.focus()
-        break
-      }
-      case 'End': {
-        e.preventDefault()
-        ;(items[items.length - 1] as HTMLElement)?.focus()
-        break
-      }
+  // #701(a): shared keyboard layer — see `hooks/useTreeKeyboardNav`.
+  const handleSetExpanded = useCallback((item: HTMLElement, expand: boolean) => {
+    const owns = item.getAttribute('aria-owns') ?? ''
+    if (owns.endsWith('codes')) setCodesExpanded(expand)
+    else if (owns.endsWith('sources')) setSourcesExpanded(expand)
+    else if (owns.startsWith('hide-tree-group-dataset-')) {
+      const datasetId = Number(owns.slice('hide-tree-group-dataset-'.length))
+      if (Number.isFinite(datasetId)) toggleDatasetExpand(datasetId, expand)
     }
-  }, [])
+  }, [toggleDatasetExpand])
+
+  const handleKeyDown = useTreeKeyboardNav({ treeRef, onSetExpanded: handleSetExpanded })
+  useTreeAriaPositions(treeRef)
 
   const renderCheckbox = (checked: boolean) => (
     <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 transition-colors ${
@@ -239,6 +221,8 @@ export default function CodebookHidePanel({
               role="treeitem"
               tabIndex={0}
               aria-expanded={codesExpanded}
+              aria-owns="hide-tree-group-codes"
+              aria-level={1}
               className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-mm-surface-hover rounded"
               onClick={() => setCodesExpanded(!codesExpanded)}
             >
@@ -253,7 +237,7 @@ export default function CodebookHidePanel({
               )}
             </div>
             {codesExpanded && (
-              <div role="group" className="ml-2 space-y-0.5">
+              <div role="group" id="hide-tree-group-codes" className="ml-2 space-y-0.5">
                 {codeGroups.map(group => (
                   <div key={group.categoryId ?? 'uncategorized'}>
                     {group.categoryId !== null && (
@@ -266,6 +250,7 @@ export default function CodebookHidePanel({
                           key={code.id}
                           role="treeitem"
                           tabIndex={-1}
+                          aria-level={2}
                           aria-checked={isHidden}
                           className="flex items-center gap-1.5 px-2 py-0.5 text-xs rounded cursor-pointer hover:bg-mm-surface-hover"
                           onClick={() => toggleCode(code.id)}
@@ -295,6 +280,8 @@ export default function CodebookHidePanel({
               role="treeitem"
               tabIndex={-1}
               aria-expanded={sourcesExpanded}
+              aria-owns="hide-tree-group-sources"
+              aria-level={1}
               className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-mm-surface-hover rounded mt-1"
               onClick={() => setSourcesExpanded(!sourcesExpanded)}
             >
@@ -311,7 +298,7 @@ export default function CodebookHidePanel({
               )}
             </div>
             {sourcesExpanded && (
-              <div role="group" className="ml-2 space-y-0.5">
+              <div role="group" id="hide-tree-group-sources" className="ml-2 space-y-0.5">
                 {/* Conversations */}
                 {conversations.map(conv => {
                   const isHidden = hiddenConvIds.has(conv.id)
@@ -320,6 +307,7 @@ export default function CodebookHidePanel({
                       key={`conv-${conv.id}`}
                       role="treeitem"
                       tabIndex={-1}
+                      aria-level={2}
                       aria-checked={isHidden}
                       className="flex items-center gap-1.5 px-2 py-0.5 text-xs rounded cursor-pointer hover:bg-mm-surface-hover"
                       onClick={() => toggleConversation(conv.id)}
@@ -344,6 +332,8 @@ export default function CodebookHidePanel({
                         role="treeitem"
                         tabIndex={-1}
                         aria-expanded={expanded}
+                        aria-owns={`hide-tree-group-dataset-${datasetId}`}
+                        aria-level={2}
                         className="flex items-center gap-1.5 px-2 py-0.5 cursor-pointer hover:bg-mm-surface-hover rounded"
                       >
                         <span onClick={e => { e.stopPropagation(); toggleDataset(datasetId) }}>
@@ -363,7 +353,7 @@ export default function CodebookHidePanel({
                         </button>
                       </div>
                       {expanded && (
-                        <div role="group" className="ml-4 space-y-0.5">
+                        <div role="group" id={`hide-tree-group-dataset-${datasetId}`} className="ml-4 space-y-0.5">
                           {columns.map(col => {
                             const isHidden = hiddenColIds.has(col.column_id)
                             return (
@@ -371,6 +361,7 @@ export default function CodebookHidePanel({
                                 key={col.column_id}
                                 role="treeitem"
                                 tabIndex={-1}
+                                aria-level={3}
                                 aria-checked={isHidden}
                                 className="flex items-center gap-1.5 px-2 py-0.5 text-xs rounded cursor-pointer hover:bg-mm-surface-hover"
                                 onClick={() => toggleTextCodingColumn(col.column_id)}

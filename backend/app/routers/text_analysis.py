@@ -508,7 +508,7 @@ async def code_density(
     column_ids: str = Query(..., description="Comma-separated focal column IDs"),
     group_by_column_id: int | None = Query(None, description="Column to group by"),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
-    # Bare default (not Query(None)) so direct-call tests don't bind the sentinel — see backend/tests/CLAUDE.md.
+    # Bare default (not Query(None)) so direct-call tests don't bind the sentinel — see backend/tests/the internal design notes.
     layer_scope: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -596,7 +596,7 @@ async def response_length_by_code(
     project_id: int,
     column_ids: str = Query(..., description="Comma-separated focal column IDs"),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
-    # Bare default (not Query(None)) so direct-call tests don't bind the sentinel — see backend/tests/CLAUDE.md.
+    # Bare default (not Query(None)) so direct-call tests don't bind the sentinel — see backend/tests/the internal design notes.
     layer_scope: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -685,7 +685,7 @@ async def export_cross_analysis(
     # NOTE: a `cross_column_id` param used to be accepted here but was never
     # read (#597) — dropped rather than wired into a third grouping query.
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
-    # Bare default (not Query(None)) so direct-call tests don't bind the sentinel — see backend/tests/CLAUDE.md.
+    # Bare default (not Query(None)) so direct-call tests don't bind the sentinel — see backend/tests/the internal design notes.
     layer_scope: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),

@@ -1,10 +1,14 @@
 import api from './client'
+import { namedBlob } from './download'
 
 // Correlation types
 export interface CorrelationCell {
-  r: number
-  p: number
+  /** `null` when not computable — render via `lib/stat-format.ts`, never
+   *  `.toFixed()` directly. `undefined_reason` says why (#689). */
+  r: number | null
+  p: number | null
   n: number
+  undefined_reason: string | null
 }
 
 export interface CorrelationMatrixResponse {
@@ -16,11 +20,14 @@ export interface CorrelationMatrixResponse {
 }
 
 export interface RegressionResult {
-  slope: number
-  intercept: number
-  r_squared: number
-  r: number
-  p: number
+  /** All `null` when no line could be fitted — a constant x makes scipy refuse
+   *  outright, a constant y yields nan (#689). */
+  slope: number | null
+  intercept: number | null
+  r_squared: number | null
+  r: number | null
+  p: number | null
+  undefined_reason: string | null
 }
 
 export interface ScatterDataResponse {
@@ -72,6 +79,7 @@ export const correlationsApi = {
     max_variables?: number
   }) =>
     api.post<ScatterMatrixResponse>(`/projects/${projectId}/metrics/scatter-matrix`, data).then(res => res.data),
+  /** Resolves to the blob AND the server's filename — see `namedBlob` (#743). */
   correlationMatrixCsv: (projectId: number, params: {
     column_ids: number[]
     domain_ids: number[]
@@ -86,7 +94,7 @@ export const correlationsApi = {
         bonferroni: params.bonferroni,
       },
       responseType: 'blob',
-    }).then(res => res.data as Blob),
+    }).then(res => namedBlob(res, `correlation_matrix_${params.correlation_type}.csv`)),
   scatterDataCsv: (projectId: number, params: {
     column_ids: number[]
     domain_ids: number[]
@@ -101,5 +109,5 @@ export const correlationsApi = {
         group_column_id: params.group_column_id ?? undefined,
       },
       responseType: 'blob',
-    }).then(res => res.data as Blob),
+    }).then(res => namedBlob(res, 'scatter_data.csv')),
 }

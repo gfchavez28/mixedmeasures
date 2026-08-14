@@ -397,6 +397,7 @@ export function ColumnFormDialog({
               {preview?.valid && preview.preview_rows.length > 0 && (
                 <div className="border rounded-md overflow-hidden max-h-40">
                   <table className="text-xs w-full table-fixed">
+                    <caption className="sr-only">Preview of the computed column's result for sample rows.</caption>
                     <thead>
                       <tr className="bg-mm-bg border-b">
                         {Object.keys(preview.preview_rows[0].source_values).map(name => (

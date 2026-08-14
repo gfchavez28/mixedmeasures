@@ -269,7 +269,7 @@ function ColumnValueLabelsControl({
             {authored ? `Value labels (${labelledCount})` : 'Add value labels…'}
           </Button>
         </PopoverTrigger>
-        <PopoverContent align="start" className="w-96 p-3">
+        <PopoverContent align="start" className="w-96 p-3" aria-label="Value labels for numeric codes">
           <p className="text-xs text-mm-text-muted mb-2">
             These cells are numeric codes. Give each code a label — charts and tables will show
             the label; means and other statistics keep using the code.
@@ -1203,7 +1203,7 @@ export default function DatasetImport() {
         </nav>
 
         {error && (
-          <div role="alert" className="mb-6 p-4 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 rounded-lg flex items-start gap-2">
+          <div role="alert" className="mb-6 p-4 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 rounded-lg flex items-start gap-2">
             <CircleAlert className="w-5 h-5 flex-shrink-0 mt-0.5" />
             <span>{error}</span>
           </div>

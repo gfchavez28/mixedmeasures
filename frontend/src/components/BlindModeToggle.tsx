@@ -40,7 +40,28 @@ export default function BlindModeToggle({ blind, onToggle, surface }: BlindModeT
       <button
         type="button"
         onClick={handleClick}
-        aria-pressed={!blind}
+        /*
+         * #755 — deliberately NOT a toggle button.
+         *
+         * It carried `aria-pressed={!blind}` while its NAME also described the
+         * state, and NVDA announced the pair as "Colleagues hidden, toggle
+         * button, not pressed" — two state claims that read as opposites, since
+         * "not pressed" attaches to the named thing ("colleagues hidden is
+         * off" ⇒ shown). The ARIA toggle pattern requires the accessible NAME to
+         * stay CONSTANT while `aria-pressed` carries the state; this control
+         * flips both.
+         *
+         * ⚠️ A constant name is not available here. The visible text is the
+         * dual-encoded state indicator (never colour-only — see the docstring),
+         * and WCAG 2.5.3 requires the accessible name to contain the visible
+         * text, so freezing the name would mean freezing the visible label and
+         * losing the at-a-glance state a multi-coder integrity affordance needs.
+         *
+         * So the state lives in the NAME alone and the toggle semantics go. The
+         * ACTION is still announced — the `title` below is read as the
+         * description ("…Click to reveal — this is logged"), confirmed in the
+         * 2026-08-12 NVDA transcript.
+         */
         className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium transition-colors ${
           blind
             ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 hover:bg-amber-200/70 dark:hover:bg-amber-900/60'

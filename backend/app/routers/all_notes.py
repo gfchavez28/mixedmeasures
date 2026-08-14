@@ -6,9 +6,9 @@ from ..models.note import Note
 from ..models.segment import Segment
 from ..models.conversation import Conversation
 from ..models.document import Document
+from ..models.observation import Observation
 from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from ..models.participant import Participant
-from ..models.speaker import Speaker
 from ..schemas.note import (
     AllNotesConversationNote,
     AllNotesSpeaker,
@@ -18,6 +18,8 @@ from ..schemas.note import (
     AllNotesColumn,
     AllNotesDocumentNote,
     AllNotesDocument,
+    AllNotesObservationNote,
+    AllNotesObservation,
     AllNotesResponse,
 )
 from ..auth import get_current_user
@@ -41,8 +43,9 @@ async def get_all_notes(
     conv_notes_q = (
         db.query(Note)
         .join(Conversation, Note.conversation_id == Conversation.id)
-        .outerjoin(Segment, Note.segment_id == Segment.id)
-        .outerjoin(Speaker, Segment.speaker_id == Speaker.id)
+        # No outerjoin to Segment/Speaker: nothing filters or orders on them, and
+        # the joinedload below already fetches both. (They were joined AND eager-
+        # loaded, which is two round trips' worth of SQL for one use.)
         .options(
             joinedload(Note.segment).joinedload(Segment.speaker),
             joinedload(Note.conversation),
@@ -244,8 +247,66 @@ async def get_all_notes(
 
     documents_result = [AllNotesDocument(**d) for d in doc_map.values()]
 
+    # --- Query 4: Observation notes (#676) ---
+    #
+    # Shaped like the DOCUMENT block, deliberately, NOT like the conversation
+    # block: the conversation block files a segment-attached note under its
+    # speaker, and an observation clip has no speaker (only conversation
+    # segments do), so every clip note would land under "Unknown Speaker".
+    #
+    # A note here may be floating (observation_id only) or anchored to a clip
+    # (segment_id too). `Segment.text` on a clip is the researcher's LABEL for a
+    # time range and is often '' — the falsy check below leaves context_text None
+    # in that case rather than emitting an empty quote block.
+    obs_notes_q = (
+        db.query(Note)
+        .join(Observation, Note.observation_id == Observation.id)
+        .options(
+            joinedload(Note.segment),
+            joinedload(Note.observation),
+        )
+        .filter(
+            Observation.project_id == project_id,
+            Note.observation_id.isnot(None),
+        )
+    )
+    if not include_archived:
+        obs_notes_q = obs_notes_q.filter(Note.is_archived == False)  # noqa: E712
+    if search:
+        obs_notes_q = obs_notes_q.filter(Note.content.ilike(f"%{escaped_search}%", escape="\\"))
+
+    obs_notes = obs_notes_q.order_by(Observation.name, Note.sequence_number).all()
+
+    obs_map: dict[int, dict] = {}
+    for note in obs_notes:
+        obs = note.observation
+        oid = obs.id
+        if oid not in obs_map:
+            obs_map[oid] = {
+                "observation_id": oid,
+                "observation_name": obs.name,
+                "notes": [],
+            }
+
+        clip_label = None
+        if note.segment and note.segment.text:
+            raw = note.segment.text
+            clip_label = raw[:200] + ("..." if len(raw) > 200 else "")
+
+        obs_map[oid]["notes"].append(AllNotesObservationNote(
+            id=note.id,
+            content=note.content,
+            sequence_number=note.sequence_number,
+            segment_id=note.segment_id,
+            segment_text=clip_label,
+            created_at=note.created_at,
+        ))
+
+    observations_result = [AllNotesObservation(**o) for o in obs_map.values()]
+
     return AllNotesResponse(
         conversations=conversations_result,
         texts=texts_result,
         documents=documents_result,
+        observations=observations_result,
     )

@@ -176,14 +176,38 @@ def sanitize_content_disposition(name: str) -> str:
     return sanitize_csv_filename(cleaned)
 
 
-def _fmt_p(p: float) -> str:
-    """Format p-value: <.001 or leading-zero stripped 3-decimal."""
+def _fmt_p(p: float | None) -> str:
+    """Format p-value: <.001 or leading-zero stripped 3-decimal.
+
+    ``None`` renders as an empty cell rather than raising — see ``_fmt_stat``.
+    """
+    if p is None:
+        return ""
     if p < 0.001:
         return "<.001"
     s = f"{p:.3f}"
     if s.startswith("0."):
         return s[1:]
     return s
+
+
+def _fmt_stat(value: float | None, digits: int = 2) -> str:
+    """Format a numeric export cell; a value that is not computable is BLANK.
+
+    Export writers reach for a bare ``f"{v:.2f}"``, which turns a null statistic
+    into a ``TypeError`` at download time — a 500 on the response, not an empty
+    cell, and only for the researcher whose data happened to hit the degenerate
+    case. The response schemas are moving toward nullable statistics (#689
+    replaces eight ``0.0``-for-undefined returns with ``None``, precisely because
+    a numeric zero reads as "no effect"), so the formatter has to answer for
+    ``None`` before the services start producing it.
+
+    Blank is the right rendering: a spreadsheet shows an empty cell, and no
+    reader mistakes it for a measurement.
+    """
+    if value is None:
+        return ""
+    return f"{value:.{digits}f}"
 
 
 ALLOWED_ENCODINGS = {"utf-8", "utf-8-sig", "latin-1", "iso-8859-1", "cp1252", "ascii"}

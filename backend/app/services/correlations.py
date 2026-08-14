@@ -13,6 +13,7 @@ from ..models.analysis_domain import AnalysisDomain
 from ..models.row_score import RowScore
 from ..models.metric import MetricDefinition
 from .grouping import load_grouping_values
+from .undefined_stats import INSUFFICIENT_N, NO_VARIANCE, finite_or_none
 
 
 # ── Data loading helpers ─────────────────────────────────────────────────────
@@ -211,7 +212,10 @@ def compute_correlation_matrix(
             n = len(common_ids)
 
             if n < 3:
-                cell = {"r": 0.0, "p": 1.0, "n": n}
+                # #689: `r = 0.00, p = 1.00` is read as "measured, no
+                # relationship". Three shared rows is the floor for a
+                # correlation at all — say so instead.
+                cell = {"r": None, "p": None, "n": n, "undefined_reason": INSUFFICIENT_N}
                 matrix[i][j] = cell
                 matrix[j][i] = cell
                 continue
@@ -233,8 +237,15 @@ def compute_correlation_matrix(
                     t_stat = r_val * math.sqrt((n - 2) / (1 - r_val ** 2))
                     p_val = float(2 * t_dist.sf(abs(t_stat), df=n - 2))
 
-            if math.isnan(r_val) or (isinstance(p_val, float) and math.isnan(p_val)):
-                cell = {"r": 0.0, "p": 1.0, "n": n}
+            if finite_or_none(r_val) is None or finite_or_none(p_val) is None:
+                # A constant column: `np.corrcoef` divides by a zero standard
+                # deviation and returns nan. The old cell claimed a measured
+                # zero for "this variable does not vary, so it cannot covary
+                # with anything" — a different fact, and a common one (an item
+                # everyone answered identically, a flag that is all-1 after a
+                # subgroup filter). Widened from isnan to isfinite: ±inf is the
+                # same non-answer and would 500 under allow_nan=False.
+                cell = {"r": None, "p": None, "n": n, "undefined_reason": NO_VARIANCE}
                 matrix[i][j] = cell
                 matrix[j][i] = cell
                 continue
@@ -411,18 +422,52 @@ def compute_scatter_matrix(
 
 
 def _compute_regression(x: list[float], y: list[float]) -> dict:
-    """Compute linear regression via scipy.stats.linregress."""
+    """Compute linear regression via scipy.stats.linregress.
+
+    ⚠️ **Both degenerate directions were unhandled, and they fail differently**
+    (#689, measured against scipy rather than reasoned about):
+
+    * a constant **x** makes `linregress` **raise** ``ValueError`` — an
+      unhandled 500 on the scatter surface whenever the horizontal variable
+      does not vary;
+    * a constant **y** returns ``slope=0.0`` with ``r=nan, p=nan`` — which then
+      500s at response time under ``allow_nan=False``.
+
+    Neither is exotic: a subgroup filter that leaves one value, an all-1 derived
+    flag, an item everyone answered identically.
+    """
     from scipy.stats import linregress
 
-    result = linregress(x, y)
+    try:
+        result = linregress(x, y)
+    except ValueError:
+        # scipy's own message names the x case specifically.
+        return _empty_regression(NO_VARIANCE)
+
+    slope = finite_or_none(result.slope, 4)
+    r_val = finite_or_none(result.rvalue, 4)
+    p_val = finite_or_none(result.pvalue, 6)
+    if slope is None or r_val is None or p_val is None:
+        return _empty_regression(NO_VARIANCE)
+
     return {
-        "slope": round(float(result.slope), 4),
-        "intercept": round(float(result.intercept), 4),
-        "r_squared": round(float(result.rvalue ** 2), 4),
-        "r": round(float(result.rvalue), 4),
-        "p": round(float(result.pvalue), 6),
+        "slope": slope,
+        "intercept": finite_or_none(result.intercept, 4),
+        "r_squared": finite_or_none(result.rvalue ** 2, 4),
+        "r": r_val,
+        "p": p_val,
+        "undefined_reason": None,
     }
 
 
-def _empty_regression() -> dict:
-    return {"slope": 0.0, "intercept": 0.0, "r_squared": 0.0, "r": 0.0, "p": 1.0}
+def _empty_regression(reason: str = INSUFFICIENT_N) -> dict:
+    """The scatter fallback when no line can be fitted (#689).
+
+    Was all-zeros, which draws a flat line through the origin and reports
+    `r = 0.00` — a fitted model, confidently claiming no relationship, where
+    none was fitted at all.
+    """
+    return {
+        "slope": None, "intercept": None, "r_squared": None,
+        "r": None, "p": None, "undefined_reason": reason,
+    }

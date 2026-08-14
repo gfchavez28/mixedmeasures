@@ -11,10 +11,20 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models.user import User
 from ..auth import get_current_user
-from .helpers import _get_project_or_404, _parse_ids, _fmt_p, sanitize_content_disposition
+from .helpers import (
+    _get_project_or_404,
+    _parse_ids,
+    _fmt_p,
+    _fmt_stat,
+    sanitize_content_disposition,
+)
 from .export_helpers import csv_safe
 from ..schemas.comparison import GroupComparisonRequest, GroupComparisonResponse
-from ..services.comparisons import compute_group_comparison
+# `_resolve_test_type` is imported rather than mirrored ON PURPOSE: the CSV has
+# to label its columns for the same test the service actually ran, and a second
+# copy of "which test does this group count get?" is the shape of defect this
+# module is being fixed for.
+from ..services.comparisons import compute_group_comparison, _resolve_test_type
 
 router = APIRouter(tags=["comparisons"])
 
@@ -59,6 +69,90 @@ async def group_comparison(
 # ── CSV Export ───────────────────────────────────────────────────────────────
 
 
+def _significance_stars(p: float | None) -> str:
+    """Star ladder for the `Sig` column.
+
+    ⚠️ Unconditional, unlike the screen — `chart-data.ts::getSignificanceStars`
+    gates each rung on the researcher's show_05 / show_01 / show_001 toggles, so
+    a level switched off shows no star there and still stars here. That is #744,
+    left open deliberately: the endpoint receives no `sigLevels`, and whether an
+    export honours a display filter is a decision for the whole export layer.
+    """
+    if p is None:
+        return ""
+    if p < 0.001:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    return ""
+
+
+def _test_columns(effective_test: str, is_two_group: bool, groups: list[str]):
+    """The test-result columns: header label and cell value defined TOGETHER.
+
+    These used to live thirty lines apart — a header branch that named the
+    statistic, and a value line that wrote `test['effect_size']`. That gap is
+    exactly how the CSV came to publish **eta-squared** under a screen that
+    displays **omega-squared** (#732): ANOVA gained the less-biased statistic,
+    the two screens were updated to show it, and the export's value line was
+    never touched because nothing put the two decisions in the same place.
+
+    Returns `[(header_label, cell_fn)]`; `cell_fn(row, test) -> str`. Adding a
+    statistic means adding ONE entry, so the label and the number cannot
+    disagree again. The blank-row width derives from `len()` of this list too,
+    so that cannot drift either.
+    """
+    def _delta(row, test) -> str:
+        # Two-group parametric reports the mean difference in the statistic
+        # slot (the screen shows `t` there — that divergence is filed ⚪ and is
+        # deliberately NOT changed here).
+        g1 = next((s for s in row["group_stats"] if s["group"] == groups[0]), None)
+        g2 = next((s for s in row["group_stats"] if s["group"] == groups[1]), None)
+        if not g1 or not g2 or g1["mean"] is None or g2["mean"] is None:
+            return ""
+        return _fmt_stat(g1["mean"] - g2["mean"])
+
+    if effective_test == "independent_t_test" and is_two_group:
+        cols = [("Delta", _delta)]
+    else:
+        label = {
+            "one_way_anova": "F",
+            "kruskal_wallis": "H",
+            "mann_whitney_u": "U",
+        }.get(effective_test, "t")
+        cols = [(label, lambda row, test: _fmt_stat(test["statistic"]))]
+
+    cols.append(("p", lambda row, test: _fmt_p(test["p"])))
+
+    if effective_test == "one_way_anova":
+        # #732: BOTH, not either. The strip and the comparison table display
+        # omega-squared; `effect_size` (the primary field) is eta-squared; and
+        # the saved-test APA string has always reported the pair. Emitting both
+        # is the only option that carries the displayed field without dropping
+        # the one the rest of the app and the wider literature use.
+        # NOTE: no effect-size LABEL column — `effect_size_label` is classified
+        # from eta-squared (#742), so shipping it beside omega-squared would put
+        # a known mislabel into a file researchers cite.
+        cols.append(("eta_sq", lambda row, test: _fmt_stat(test["effect_size"])))
+        cols.append(("omega_sq", lambda row, test: _fmt_stat(test.get("omega_squared"))))
+    elif effective_test == "kruskal_wallis":
+        cols.append(("epsilon_sq", lambda row, test: _fmt_stat(test["effect_size"])))
+    elif effective_test == "mann_whitney_u":
+        cols.append(("r", lambda row, test: _fmt_stat(test["effect_size"])))
+    else:
+        # Cohen's d is the one effect size that carries a CI, and the endpoint
+        # already pays to compute it (`include_effect_size_ci=True`) — it was
+        # then discarded, while the screen showed it.
+        cols.append(("d", lambda row, test: _fmt_stat(test["effect_size"])))
+        cols.append(("d_CI_lower", lambda row, test: _fmt_stat(test.get("effect_size_ci_lower"))))
+        cols.append(("d_CI_upper", lambda row, test: _fmt_stat(test.get("effect_size_ci_upper"))))
+
+    cols.append(("Sig", lambda row, test: _significance_stars(test["p"])))
+    return cols
+
+
 @router.get("/api/projects/{project_id}/metrics/group-comparison/csv")
 async def group_comparison_csv(
     project_id: int,
@@ -99,10 +193,26 @@ async def group_comparison_csv(
     groups = result["groups"]
     rows = result["rows"]
     is_two_group = len(groups) == 2
-    first_test = next((r["test"] for r in rows if r.get("test")), None)
+    # Resolved the same way the service did, from the same inputs — NOT sniffed
+    # from the first row that happens to carry a test. An export whose every row
+    # failed to compute still has to label its columns correctly.
+    effective_test = _resolve_test_type(test_type, len(groups), nonparametric=nonparametric)
+    test_cols = _test_columns(effective_test, is_two_group, groups)
 
     output = io.StringIO()
     writer = csv.writer(output)
+
+    # #744 — the export layer's rule, stated in the file that follows it: an
+    # export HONOURS a filter that changes which data is in the file (coder
+    # scope, excluded groups — disclosed in a `Scope:` line, the #499/#512
+    # convention) and does NOT apply one that only changes how present data is
+    # ANNOTATED. The screen's significance toggles are the second kind: the
+    # p-value is in the file either way, so the full ladder is written and the
+    # file says so rather than silently differing from the screen beside it.
+    writer.writerow([csv_safe(
+        "Significance: * p < .05, ** p < .01, *** p < .001 "
+        "(full ladder; the screen's display settings are not applied)"
+    )])
 
     # Build header — adapt for non-parametric. Group names come from user-typed
     # column values; defang the header cells that lead with them.
@@ -114,16 +224,7 @@ async def group_comparison_csv(
         for g in groups:
             header.extend([csv_safe(f"{g}_n"), csv_safe(f"{g}_M"), csv_safe(f"{g}_SD")])
 
-    if nonparametric:
-        stat_label = "U" if is_two_group else "H"
-        es_label = "r" if is_two_group else "epsilon_sq"
-        header.extend([stat_label, "p", es_label, "Sig"])
-    elif is_two_group:
-        header.extend(["Delta", "p", "d", "Sig"])
-    else:
-        stat_label = "F" if first_test and first_test.get("test_type") == "one_way_anova" else "t"
-        es_label = "eta_sq" if first_test and first_test.get("effect_size_type") == "eta_squared" else "d"
-        header.extend([stat_label, "p", es_label, "Sig"])
+    header.extend(label for label, _ in test_cols)
 
     writer.writerow(header)
 
@@ -136,37 +237,19 @@ async def group_comparison_csv(
             stat = next((s for s in row["group_stats"] if s["group"] == g), None)
             if stat and stat["n"] > 0:
                 if nonparametric:
-                    mdn = stat.get("median")
-                    csv_row.extend([stat["n"], f"{mdn:.2f}" if mdn is not None else ""])
+                    csv_row.extend([stat["n"], _fmt_stat(stat.get("median"))])
                 else:
-                    csv_row.extend([stat["n"], f"{stat['mean']:.2f}", f"{stat['sd']:.2f}"])
+                    csv_row.extend([stat["n"], _fmt_stat(stat["mean"]), _fmt_stat(stat["sd"])])
             else:
                 csv_row.extend(["", ""] if nonparametric else ["", "", ""])
 
-        # Test results
+        # Test results — one entry per declared column, so the row can never be
+        # a different width or a different statistic than the header promised.
         test = row.get("test")
         if test:
-            if not nonparametric and is_two_group:
-                g1 = next((s for s in row["group_stats"] if s["group"] == groups[0]), None)
-                g2 = next((s for s in row["group_stats"] if s["group"] == groups[1]), None)
-                delta = (g1["mean"] - g2["mean"]) if g1 and g2 else 0
-                csv_row.append(f"{delta:.2f}")
-            else:
-                csv_row.append(f"{test['statistic']:.2f}")
-
-            csv_row.append(_fmt_p(test["p"]))
-            csv_row.append(f"{test['effect_size']:.2f}")
-
-            if test["p"] < 0.001:
-                csv_row.append("***")
-            elif test["p"] < 0.01:
-                csv_row.append("**")
-            elif test["p"] < 0.05:
-                csv_row.append("*")
-            else:
-                csv_row.append("")
+            csv_row.extend(cell(row, test) for _, cell in test_cols)
         else:
-            csv_row.extend(["", "", "", ""])
+            csv_row.extend([""] * len(test_cols))
 
         writer.writerow(csv_row)
 
@@ -179,14 +262,13 @@ async def group_comparison_csv(
             ph_header = ["Pair", "Mean Diff", "p", "CI Lower", "CI Upper", "Sig"]
             writer.writerow(ph_header + [""] * max(0, n_cols - len(ph_header)))
             for comp in ph["comparisons"]:
-                sig = "***" if comp["p"] < 0.001 else "**" if comp["p"] < 0.01 else "*" if comp["p"] < 0.05 else ""
                 ph_row = [
                     csv_safe(f"{comp['group_a']} vs {comp['group_b']}"),
-                    f"{comp['mean_diff']:.2f}",
+                    _fmt_stat(comp["mean_diff"]),
                     _fmt_p(comp["p"]),
-                    f"{comp['ci_lower']:.2f}",
-                    f"{comp['ci_upper']:.2f}",
-                    sig,
+                    _fmt_stat(comp["ci_lower"]),
+                    _fmt_stat(comp["ci_upper"]),
+                    _significance_stars(comp["p"]),
                 ]
                 writer.writerow(ph_row + [""] * max(0, n_cols - len(ph_row)))
 

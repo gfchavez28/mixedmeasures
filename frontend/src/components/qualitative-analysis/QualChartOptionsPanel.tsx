@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
 import {
   GripVertical,
   ArrowUpDown,
@@ -37,7 +37,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import OptionRow from '@/components/analysis/OptionRow'
 import { OptionsAccordion, AccordionSection, useAccordionState } from '@/components/analysis/OptionsAccordion'
 import { type ChartFormatting, type DataLabelPosition } from '@/lib/chart-data'
-import { QUAL_HEATMAP_LABELS } from './qual-chart-data'
+import { QUAL_HEATMAP_LABELS, applyCustomOrder } from './qual-chart-data'
 import type {
   QualChartType,
   QualValueMode,
@@ -61,7 +61,19 @@ interface QualChartOptionsPanelProps {
   onFormattingChange: (patch: Partial<ChartFormatting>) => void
   customOrder: number[]
   onCustomOrderChange: (ids: number[]) => void
-  codes: { id: number; name: string }[]
+  /**
+   * The entities ON THE CODE AXIS — codes, or CATEGORIES under
+   * `codeMode === 'categories'` (#675).
+   *
+   * ⚠️ This used to be the project's active codes unconditionally, while the
+   * chart's axis switches to categories with the mode. Code ids and category ids
+   * are independent sequences, so a custom order authored against one silently
+   * addressed rows in the other wherever the numbers happened to coincide — the
+   * #749 defect, one screen over. The panel now labels and orders exactly what
+   * the chart draws.
+   */
+  axisEntities: { id: number; name: string }[]
+  categoryMode: boolean
   groupBy?: string | null
   onGroupByChange?: (v: string | null) => void
   demoFilters?: { subtype: string; label: string; values: { value: string }[] }[]
@@ -121,7 +133,8 @@ export default function QualChartOptionsPanel({
   onFormattingChange,
   customOrder,
   onCustomOrderChange,
-  codes,
+  axisEntities,
+  categoryMode,
   groupBy,
   onGroupByChange,
   demoFilters,
@@ -138,7 +151,10 @@ export default function QualChartOptionsPanel({
 }: QualChartOptionsPanelProps) {
   const showValueMode = chartType === 'heatmap' || chartType === 'bar' || chartType === 'stacked_bar'
   const showDenominator = showValueMode && valueMode === 'segment_proportion'
-  const showSort = chartType !== 'saturation' && chartType !== 'summary'
+  // #675: the three charts whose shaping consumes `sortOrder`. It used to be
+  // "not saturation and not summary", which also offered Sort on the Timeline —
+  // `TimedAnalytics` takes no sortOrder prop, so that dropdown moved nothing.
+  const showSort = chartType === 'heatmap' || chartType === 'bar' || chartType === 'stacked_bar'
   const showGroupBy = chartType === 'bar'
   const showOrientation = chartType === 'heatmap' || chartType === 'stacked_bar'
   const showHeatmapAppearance = chartType === 'heatmap'
@@ -147,25 +163,34 @@ export default function QualChartOptionsPanel({
   const { expanded, toggle } = useAccordionState('data')
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
-  const codeLabels = new Map(codes.map(c => [c.id, c.name]))
+  const axisLabels = new Map(axisEntities.map(e => [e.id, e.name]))
+  const axisNoun = categoryMode ? 'categories' : 'codes'
 
-  const handleSortChange = useCallback((newSort: QualSortOrder) => {
-    onSortOrderChange(newSort)
-    if (newSort === 'custom' && customOrder.length === 0 && codes.length > 0) {
-      onCustomOrderChange(codes.map(c => c.id))
-    }
-  }, [onSortOrderChange, customOrder.length, codes, onCustomOrderChange])
+  /**
+   * What the list SHOWS — and it is `applyCustomOrder`'s rule, so the list and
+   * the chart cannot disagree: saved ids first, anything not in the saved order
+   * appended.
+   *
+   * Deriving it also retires the old seed-on-select step. An entity added since
+   * the order was authored now appears at the end instead of being absent, and a
+   * deleted one stops rendering as `Code 17` — both of which the seed could only
+   * fix by being re-run, which nothing did.
+   */
+  const displayOrder = useMemo(
+    () => applyCustomOrder(axisEntities, customOrder, e => e.id).map(e => e.id),
+    [axisEntities, customOrder],
+  )
 
   const handleDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event
     if (!over || active.id === over.id) return
-    const activeId = Number(active.id)
-    const overId = Number(over.id)
-    const oldIndex = customOrder.indexOf(activeId)
-    const newIndex = customOrder.indexOf(overId)
+    const oldIndex = displayOrder.indexOf(Number(active.id))
+    const newIndex = displayOrder.indexOf(Number(over.id))
     if (oldIndex === -1 || newIndex === -1) return
-    onCustomOrderChange(arrayMove(customOrder, oldIndex, newIndex))
-  }, [customOrder, onCustomOrderChange])
+    // Written back in full, so the persisted order always covers every entity on
+    // the axis — a partial order is what let the two lists drift.
+    onCustomOrderChange(arrayMove(displayOrder, oldIndex, newIndex))
+  }, [displayOrder, onCustomOrderChange])
 
   const hasAnyData = showValueMode || showSort || showGroupBy || showOrientation
 
@@ -212,7 +237,7 @@ export default function QualChartOptionsPanel({
 
           {showSort && (
             <OptionRow icon={ArrowUpDown} label="Sort">
-              <Select value={sortOrder} onValueChange={v => handleSortChange(v as QualSortOrder)}>
+              <Select value={sortOrder} onValueChange={v => onSortOrderChange(v as QualSortOrder)}>
                 <SelectTrigger className="h-7 text-xs">
                   <SelectValue />
                 </SelectTrigger>
@@ -225,20 +250,23 @@ export default function QualChartOptionsPanel({
             </OptionRow>
           )}
 
-          {showSort && sortOrder === 'custom' && customOrder.length > 0 && (
+          {showSort && sortOrder === 'custom' && displayOrder.length > 0 && (
             <div className="pl-5 space-y-1">
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-                <SortableContext items={customOrder} strategy={verticalListSortingStrategy}>
-                  {customOrder.map(id => (
+                <SortableContext items={displayOrder} strategy={verticalListSortingStrategy}>
+                  {displayOrder.map((id, index) => (
                     <SortableCodeItem
                       key={id}
                       id={id}
-                      label={codeLabels.get(id) || `Code ${id}`}
+                      label={axisLabels.get(id) ?? `#${id}`}
+                      position={index + 1}
+                      total={displayOrder.length}
+                      noun={categoryMode ? 'category' : 'code'}
                     />
                   ))}
                 </SortableContext>
               </DndContext>
-              <p className="text-[11px] text-mm-text-faint pl-5 mt-1">Drag to reorder codes</p>
+              <p className="text-[11px] text-mm-text-faint pl-5 mt-1">Drag to reorder {axisNoun}</p>
             </div>
           )}
 
@@ -431,7 +459,13 @@ export default function QualChartOptionsPanel({
   )
 }
 
-function SortableCodeItem({ id, label }: { id: number; label: string }) {
+function SortableCodeItem({ id, label, position, total, noun }: {
+  id: number
+  label: string
+  position: number
+  total: number
+  noun: string
+}) {
   const {
     attributes,
     listeners,
@@ -457,9 +491,9 @@ function SortableCodeItem({ id, label }: { id: number; label: string }) {
         className="cursor-grab text-mm-text-faint hover:text-mm-text-secondary touch-none"
         {...attributes}
         {...listeners}
-        aria-label={`Drag to reorder ${label}`}
+        aria-label={`Drag to reorder ${noun} ${label}, ${position} of ${total}`}
       >
-        <GripVertical className="w-3 h-3" />
+        <GripVertical aria-hidden className="w-3 h-3" />
       </button>
       <span className="truncate flex-1" title={label}>{label}</span>
     </div>

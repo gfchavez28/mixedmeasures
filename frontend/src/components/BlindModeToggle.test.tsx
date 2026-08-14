@@ -10,16 +10,24 @@ import BlindModeToggle from './BlindModeToggle'
 afterEach(cleanup)
 
 describe('BlindModeToggle', () => {
-  it('shows "Colleagues hidden" + aria-pressed=false when blind', () => {
+  // #755 — the state lives in the NAME, and the control is NOT a toggle button.
+  // It used to carry aria-pressed as well, which NVDA announced as "Colleagues
+  // hidden, toggle button, not pressed" — two state claims reading as opposites.
+  it('names the state when blind, and claims no toggle state', () => {
     render(<BlindModeToggle blind={true} onToggle={() => {}} surface="workbench" />)
-    expect(screen.getByRole('button', { name: /Colleagues hidden/i }))
-      .toHaveAttribute('aria-pressed', 'false')
+    const btn = screen.getByRole('button', { name: /Colleagues hidden/i })
+    expect(btn).not.toHaveAttribute('aria-pressed')
+    expect(
+      btn,
+      'the ACTION must still be announced, as the description',
+    ).toHaveAttribute('title', expect.stringContaining('Click to reveal'))
   })
 
-  it('shows "Colleagues shown" + aria-pressed=true when revealed', () => {
+  it('names the state when revealed, and claims no toggle state', () => {
     render(<BlindModeToggle blind={false} onToggle={() => {}} surface="workbench" />)
-    expect(screen.getByRole('button', { name: /Colleagues shown/i }))
-      .toHaveAttribute('aria-pressed', 'true')
+    const btn = screen.getByRole('button', { name: /Colleagues shown/i })
+    expect(btn).not.toHaveAttribute('aria-pressed')
+    expect(btn).toHaveAttribute('title', expect.stringContaining('Click to hide'))
   })
 
   it('confirms before revealing, then calls onToggle with the surface', async () => {

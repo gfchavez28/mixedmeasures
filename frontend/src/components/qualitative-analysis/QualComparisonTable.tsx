@@ -106,6 +106,7 @@ export default function QualComparisonTable({
     <div>
       <div className="overflow-x-auto border rounded-lg">
         <table className="w-full text-xs" style={{ borderCollapse: 'collapse' }}>
+          <caption className="sr-only">Code frequencies compared across demographic groups.</caption>
           <thead>
             {/* Group header row for multi-group */}
             {!is2Group && (

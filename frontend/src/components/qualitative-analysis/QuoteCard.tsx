@@ -16,6 +16,7 @@ import { formatTimecode } from '@/lib/utils'
 import { isTimeExcerpt } from '@/lib/excerpt-shape'
 import type { QuoteDensity } from '@/lib/qual-analysis-types'
 import SendToCanvasMenu from '@/components/canvas/SendToCanvasMenu'
+import { sliceByCodePoints, codePointLength } from '@/lib/text-offsets'
 
 interface QuoteCardProps {
   excerpt: QuotedExcerptItem
@@ -114,9 +115,9 @@ function renderQuoteText(
   ) : null
 
   if (isFull && excerpt.is_sub_segment && excerpt.full_segment_text && excerpt.start_offset !== null && excerpt.end_offset !== null) {
-    const before = excerpt.full_segment_text.slice(0, excerpt.start_offset)
-    const highlighted = excerpt.full_segment_text.slice(excerpt.start_offset, excerpt.end_offset)
-    const after = excerpt.full_segment_text.slice(excerpt.end_offset)
+    const before = sliceByCodePoints(excerpt.full_segment_text, 0, excerpt.start_offset)
+    const highlighted = sliceByCodePoints(excerpt.full_segment_text, excerpt.start_offset, excerpt.end_offset)
+    const after = sliceByCodePoints(excerpt.full_segment_text, excerpt.end_offset, codePointLength(excerpt.full_segment_text))
     return (
       <>
         {contextBlock}

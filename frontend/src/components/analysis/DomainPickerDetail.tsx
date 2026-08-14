@@ -1,7 +1,8 @@
 import { useMemo } from 'react'
-import { Plus } from 'lucide-react'
+import { Plus, AlertTriangle, HelpCircle } from 'lucide-react'
 import { resolveBracketColor, BRACKET_DOT_CLASS } from '@/components/crosswalk/bracket-color'
 import { isCrosswalkAuto, isUngroupedScaleScore, metricDisplayLabel } from '@/lib/metric-label'
+import { compareScales } from '@/lib/scale-comparison'
 import type { AnalysisDomainResponse, MetricDefinitionSummaryResponse } from '@/lib/api'
 
 /**
@@ -67,6 +68,21 @@ export default function DomainPickerDetail({
     [domainMetrics],
   )
 
+  /**
+   * #693 — do these items share a scale?
+   *
+   * The score this panel creates is an unweighted mean of the members' means,
+   * so a 1–5 item averaged with a 1–7 item lands on neither scale. The
+   * detection existed on the crosswalk grid, which is a screen the researcher
+   * has already left by the time they get here. `scale_points` / `scale_labels`
+   * ride on `DomainMemberInfo` already — no wire change was needed, only a
+   * shared comparator.
+   */
+  const scaleAgreement = useMemo(
+    () => compareScales(domain.members),
+    [domain.members],
+  )
+
   // Pre-select: hint > the auto-origin ungrouped variant > first ungrouped
   const activeMetricId = useMemo(() => {
     if (selectedMetricIdHint && ungroupedMetrics.some(m => m.id === selectedMetricIdHint)) {
@@ -93,6 +109,45 @@ export default function DomainPickerDetail({
             </div>
           )
         })}
+      </div>
+    )
+  }
+
+  /**
+   * The scale disclosure — #693(i) + (iii).
+   *
+   * Two states speak and one stays quiet:
+   *   `mismatch` — the members demonstrably measure on different scales.
+   *   `unknown`  — fewer than two members record a scale, so nothing was
+   *                checked. It used to be silent, which reads exactly like a
+   *                passed check; that hole is how the flagship 1–5 vs 1–7 case
+   *                escaped whenever either side lacked labels.
+   *   `match`    — say nothing. A notice on every well-formed group is noise,
+   *                and noise is what gets ignored when it matters.
+   *
+   * ⚠️ Not an `<Alert>` or a toast: this is reference text under a picker row,
+   * and an assertive announcement would interrupt keyboard navigation through
+   * the domain list. The icon is `aria-hidden`; the sentence carries the meaning.
+   */
+  const renderScaleNotice = () => {
+    if (scaleAgreement === 'match') return null
+    const mismatch = scaleAgreement === 'mismatch'
+    const Icon = mismatch ? AlertTriangle : HelpCircle
+    return (
+      <div
+        className={`flex items-start gap-1.5 text-[11px] leading-snug ${
+          mismatch ? 'text-amber-700 dark:text-amber-400' : 'text-mm-text-muted'
+        }`}
+      >
+        <Icon className="w-3 h-3 mt-0.5 shrink-0" aria-hidden="true" />
+        <span>
+          {mismatch
+            ? 'These variables use different response scales. A scale score averages their '
+              + 'item means without rescaling, so the result sits on none of them.'
+            : 'Response scales aren’t recorded for these variables, so Mixed Measures can’t '
+              + 'check whether they match. A scale score averages their item means without '
+              + 'rescaling.'}
+        </span>
       </div>
     )
   }
@@ -168,6 +223,7 @@ export default function DomainPickerDetail({
         </span>
       </div>
       {renderMembers()}
+      {renderScaleNotice()}
       <div className="pt-0.5">{renderMetricSection()}</div>
     </div>
   )

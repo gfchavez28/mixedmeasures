@@ -14,6 +14,7 @@ import { useChartColors } from '@/lib/theme-context'
 import { resolveGroupColors } from '@/lib/chart-data'
 import type { DemographicComparisonResponse } from '@/lib/api'
 import type { ChartDataRow } from '@/lib/chart-types'
+import { ChartFigure } from '@/components/charts/ChartFigure'
 
 interface QualComparisonBarProps {
   data: DemographicComparisonResponse
@@ -92,7 +93,7 @@ export default function QualComparisonBar({
   const chartHeight = Math.max(300, chartData.length * rowHeight + 60)
 
   return (
-    <div role="img" aria-label="Code comparison bar chart by demographic group">
+    <ChartFigure label="Code comparison bar chart by demographic group">
       <ResponsiveContainer width="100%" height={chartHeight}>
         <BarChart
           layout="vertical"
@@ -157,6 +158,6 @@ export default function QualComparisonBar({
           ))}
         </BarChart>
       </ResponsiveContainer>
-    </div>
+    </ChartFigure>
   )
 }

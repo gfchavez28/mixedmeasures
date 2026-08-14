@@ -468,14 +468,16 @@ async def split_segments_endpoint(
 
     conversation = _verify_conversation_ownership(db, conversation_id, user.id)
 
+    report: dict = {}
     new_segments, deleted_ids = do_split(
         db, data.ranges, 'conversation', conversation_id,
-        conversation.project_id, user.id,
+        conversation.project_id, user.id, report=report,
     )
 
     return SegmentSplitResponse(
         new_segments=[segment_to_response(s) for s in new_segments],
         deleted_segment_ids=deleted_ids,
+        quote_notes_stayed=report.get("quote_notes_stayed", 0),
     )
 
 

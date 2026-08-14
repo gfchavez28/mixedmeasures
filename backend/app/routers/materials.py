@@ -13,6 +13,11 @@ from ..models.user import User
 from ..models.materials import MaterialCollection, Material
 from ..models.dataset import Dataset, DatasetColumn
 from ..models.analysis_domain import AnalysisDomain
+from ..models.code import Code
+from ..models.conversation import Conversation
+from ..models.document import Document
+from ..models.observation import Observation
+from ..models.participant import Participant
 from ..schemas.materials import (
     MaterialCollectionCreate,
     MaterialCollectionUpdate,
@@ -63,89 +68,125 @@ def _get_material_or_404(db: Session, collection_id: int, material_id: int) -> M
     return material
 
 
-# #296: keys in Material.config that point at column or domain IDs.
-# Conservative — only the keys the canvas embed actually reads
-# (frontend/src/components/canvas/InlineChartRenderer.tsx::extractComputeParams).
+# #296 / #652 slab 3: keys in Material.config that point at project entities.
+#
+# Conservative — only the keys a canvas embed actually reads
+# (`InlineChartRenderer::extractComputeParams` for the quantitative branch,
+# `inline-chart-params.ts::extractQualComputeParams` for the qualitative one).
 # Better to miss a reference than to false-positive on a valid material.
-_MATERIAL_COLUMN_LIST_KEYS = ("column_ids", "selected_columns")
-_MATERIAL_DOMAIN_LIST_KEYS = ("domain_ids", "selected_domains")
-_MATERIAL_COLUMN_SCALAR_KEYS = ("grouping_column_id", "grouping_column_id_2", "compareBy", "compareBy2", "crossTabCol")
+#
+# ⚠️ **Keyed by REF KIND, not returned positionally.** This started as a 2-tuple
+# `(column_ids, domain_ids)`, which is why slab 3 sat deferred: adding the
+# qualitative kinds changed the arity at every call site. A dict makes the next
+# kind additive instead — add a row here and an existence query below, and every
+# consumer keeps working.
+_MATERIAL_REF_LIST_KEYS: dict[str, tuple[str, ...]] = {
+    # `text_column_ids` are DatasetColumn ids like the others, so they resolve
+    # through the same existence query rather than needing their own.
+    "column": ("column_ids", "selected_columns", "text_column_ids"),
+    "domain": ("domain_ids", "selected_domains"),
+    "code": ("code_ids",),
+    "conversation": ("conversation_ids",),
+    "document": ("document_ids",),
+    "observation": ("observation_ids",),
+    "participant": ("participant_ids",),
+}
+_MATERIAL_REF_SCALAR_KEYS: dict[str, tuple[str, ...]] = {
+    "column": ("grouping_column_id", "grouping_column_id_2", "compareBy", "compareBy2", "crossTabCol"),
+}
+
+# Back-compat aliases — the original names, kept so a reader grepping the #296
+# comment history still lands somewhere real.
+_MATERIAL_COLUMN_LIST_KEYS = _MATERIAL_REF_LIST_KEYS["column"]
+_MATERIAL_DOMAIN_LIST_KEYS = _MATERIAL_REF_LIST_KEYS["domain"]
+_MATERIAL_COLUMN_SCALAR_KEYS = _MATERIAL_REF_SCALAR_KEYS["column"]
 
 
-def _collect_material_refs(config: dict) -> tuple[set[int], set[int]]:
-    """Return (column_ids, domain_ids) referenced by a material's config.
+def _collect_material_refs(config: dict) -> dict[str, set[int]]:
+    """Return ``{ref_kind: {ids}}`` referenced by a material's config.
 
-    The canvas embed reads `column_ids` / `domain_ids` (and a handful of
-    grouping/compare scalar keys); deleted refs are what trigger a silent
-    render of incomplete data, so those are the keys we check.
+    A deleted reference is what makes an embed render silently incomplete, so
+    every kind the embed can filter on is collected — quantitative (columns,
+    domains) AND qualitative (codes plus the four source kinds and participants).
+
+    Before slab 3 this returned columns and domains only, so **every qualitative
+    material reported `(∅, ∅)` and could never be flagged stale** — harmless while
+    those materials rendered "No data configured" regardless, and live the moment
+    slabs 1–2 made eight of the nine types actually draw.
     """
+    refs: dict[str, set[int]] = {kind: set() for kind in _MATERIAL_REF_LIST_KEYS}
     if not isinstance(config, dict):
-        return set(), set()
-    column_ids: set[int] = set()
-    domain_ids: set[int] = set()
-    for key in _MATERIAL_COLUMN_LIST_KEYS:
-        val = config.get(key)
-        if isinstance(val, list):
-            for item in val:
-                if isinstance(item, int) and item > 0:
-                    column_ids.add(item)
-    for key in _MATERIAL_DOMAIN_LIST_KEYS:
-        val = config.get(key)
-        if isinstance(val, list):
-            for item in val:
-                if isinstance(item, int) and item > 0:
-                    domain_ids.add(item)
-    for key in _MATERIAL_COLUMN_SCALAR_KEYS:
-        val = config.get(key)
-        if isinstance(val, int) and val > 0:
-            column_ids.add(val)
-    return column_ids, domain_ids
+        return refs
+    for kind, keys in _MATERIAL_REF_LIST_KEYS.items():
+        for key in keys:
+            val = config.get(key)
+            if isinstance(val, list):
+                for item in val:
+                    # bool is an int subclass — exclude it explicitly, or a
+                    # `True` in a list would register as entity id 1.
+                    if isinstance(item, int) and not isinstance(item, bool) and item > 0:
+                        refs[kind].add(item)
+    for kind, keys in _MATERIAL_REF_SCALAR_KEYS.items():
+        for key in keys:
+            val = config.get(key)
+            if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+                refs[kind].add(val)
+    return refs
 
 
 def _build_existence_sets(
     db: Session, project_id: int, materials: Iterable[Material]
-) -> tuple[set[int], set[int]]:
-    """Single-query existence check for all column + domain IDs referenced
-    by any material in the iterable. Avoids N+1 by batching across the full
-    list before per-material #296 detection."""
-    all_col_ids: set[int] = set()
-    all_dom_ids: set[int] = set()
+) -> dict[str, set[int]]:
+    """Batched existence check per ref kind across every material in the iterable.
+
+    One query per kind that has any ids, run once for the whole list rather than
+    per material (the #296 detection is then pure set arithmetic).
+
+    Every query is **project-scoped** (#390): an id belonging to another project
+    must read as missing, not as "source available".
+    """
+    wanted: dict[str, set[int]] = {kind: set() for kind in _MATERIAL_REF_LIST_KEYS}
     for m in materials:
         try:
             cfg = json.loads(m.config) if isinstance(m.config, str) else m.config
         except (json.JSONDecodeError, TypeError):
             continue
-        c, d = _collect_material_refs(cfg or {})
-        all_col_ids |= c
-        all_dom_ids |= d
+        for kind, ids in _collect_material_refs(cfg or {}).items():
+            wanted[kind] |= ids
 
-    existing_cols: set[int] = set()
-    if all_col_ids:
-        # #390: join Dataset.project_id so a foreign column can't register as
-        # "source available" (mirrors the domain query's project scoping below).
-        existing_cols = {
+    existing: dict[str, set[int]] = {kind: set() for kind in wanted}
+
+    if wanted["column"]:
+        existing["column"] = {
             r[0] for r in
             db.query(DatasetColumn.id)
             .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
-            .filter(DatasetColumn.id.in_(all_col_ids), Dataset.project_id == project_id)
+            .filter(DatasetColumn.id.in_(wanted["column"]), Dataset.project_id == project_id)
             .all()
         }
-    existing_doms: set[int] = set()
-    if all_dom_ids:
-        existing_doms = {
-            r[0] for r in
-            db.query(AnalysisDomain.id).filter(
-                AnalysisDomain.id.in_(all_dom_ids),
-                AnalysisDomain.project_id == project_id,
-            ).all()
-        }
-    return existing_cols, existing_doms
+    # The remaining kinds are all directly project-scoped, so one shape covers them.
+    for kind, model in (
+        ("domain", AnalysisDomain),
+        ("code", Code),
+        ("conversation", Conversation),
+        ("document", Document),
+        ("observation", Observation),
+        ("participant", Participant),
+    ):
+        if wanted[kind]:
+            existing[kind] = {
+                r[0] for r in
+                db.query(model.id).filter(
+                    model.id.in_(wanted[kind]),
+                    model.project_id == project_id,
+                ).all()
+            }
+    return existing
 
 
 def _build_material_response(
     material: Material,
-    existing_columns: set[int] | None = None,
-    existing_domains: set[int] | None = None,
+    existing: dict[str, set[int]] | None = None,
 ) -> MaterialResponse:
     try:
         config = json.loads(material.config) if isinstance(material.config, str) else material.config
@@ -156,16 +197,14 @@ def _build_material_response(
     # provided (single-material write paths like create/update — fresh refs
     # are valid by construction), skip the check.
     missing_refs: list[dict] = []
-    if existing_columns is not None or existing_domains is not None:
-        col_ids, dom_ids = _collect_material_refs(config or {})
-        if existing_columns is not None:
-            for cid in col_ids:
-                if cid not in existing_columns:
-                    missing_refs.append({"type": "column", "id": cid})
-        if existing_domains is not None:
-            for did in dom_ids:
-                if did not in existing_domains:
-                    missing_refs.append({"type": "domain", "id": did})
+    if existing is not None:
+        for kind, ids in _collect_material_refs(config or {}).items():
+            # A kind absent from `existing` was never queried, so it cannot be
+            # judged — skip rather than report every id of that kind missing.
+            if kind not in existing:
+                continue
+            for ref_id in sorted(ids - existing[kind]):
+                missing_refs.append({"type": kind, "id": ref_id})
 
     return MaterialResponse(
         id=material.id,
@@ -269,8 +308,8 @@ async def list_all_materials(
         .all()
     )
 
-    existing_cols, existing_doms = _build_existence_sets(db, project_id, materials)
-    return [_build_material_response(m, existing_cols, existing_doms) for m in materials]
+    existing = _build_existence_sets(db, project_id, materials)
+    return [_build_material_response(m, existing) for m in materials]
 
 
 @router.get("/{collection_id}", response_model=MaterialCollectionDetailResponse)
@@ -293,14 +332,14 @@ async def get_collection(
     if not collection:
         raise HTTPException(status_code=404, detail="Material collection not found")
 
-    existing_cols, existing_doms = _build_existence_sets(db, project_id, collection.materials)
+    existing = _build_existence_sets(db, project_id, collection.materials)
     return MaterialCollectionDetailResponse(
         id=collection.id,
         project_id=collection.project_id,
         name=collection.name,
         display_order=collection.display_order,
         created_at=collection.created_at,
-        materials=[_build_material_response(m, existing_cols, existing_doms) for m in collection.materials],
+        materials=[_build_material_response(m, existing) for m in collection.materials],
     )
 
 

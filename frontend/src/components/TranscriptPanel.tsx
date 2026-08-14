@@ -12,6 +12,7 @@ import { useTextSplitSelection } from '@/hooks/useTextSplitSelection'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { usePlayback } from '@/hooks/usePlayback'
 import { scrubberPlayheadTime } from '@/lib/playback-utils'
+import { useScrollbarGutter } from '@/hooks/useScrollbarGutter'
 import SegmentRow from './SegmentRow'
 import SplitToolbar from './SplitToolbar'
 import TimelineScrubber from './TimelineScrubber'
@@ -246,6 +247,7 @@ export default function TranscriptPanel({
   playbackRef,
 }: TranscriptPanelProps) {
   const listRef = useRef<VirtuosoHandle>(null)
+  const gutter = useScrollbarGutter()
   const containerRef = useRef<HTMLDivElement>(null)
   const [containerHeight, setContainerHeight] = useState(600)
 
@@ -568,6 +570,10 @@ export default function TranscriptPanel({
                 onClick={(e) => handleSegmentClick(segment, e)}
                 conversationId={conversationId}
                 codes={codes}
+                /* #751: `index` and `segments.length` are the same fact from the
+                   same array — the one Virtuoso's `totalCount` is built from. */
+                positionInSet={index + 1}
+                setSize={segments.length}
                 canMergeWithPrev={canMergeWithPrev}
                 canMergeWithNext={canMergeWithNext}
                 canMergeSelected={canMergeSelected}
@@ -792,7 +798,10 @@ export default function TranscriptPanel({
       {/* Column Headers - moved below scrubber (Item 64) */}
       <div
         className="flex-shrink-0 bg-mm-surface border-b px-4 py-2 flex items-center gap-3 font-medium text-sm text-mm-text-secondary"
-        style={{ height: HEADER_HEIGHT }}
+        // #741: pad by the scrollbar's real width — the header is outside the
+        // Virtuoso scroller, so without this every trailing column drifts right
+        // of the column it names as soon as the transcript overflows.
+        style={{ height: HEADER_HEIGHT, paddingRight: `calc(1rem + ${gutter.gutter}px)` }}
       >
         {/* Excerpt filter toggle */}
         <button
@@ -821,7 +830,7 @@ export default function TranscriptPanel({
               <Filter className="w-3 h-3" />
             </button>
           </PopoverTrigger>
-          <PopoverContent className="w-56 p-2" align="start">
+          <PopoverContent className="w-56 p-2" align="start" aria-label="Filter by speaker">
             <div className="text-xs text-mm-text-muted mb-2">Filter by speaker</div>
             <div className="space-y-2 max-h-48 overflow-y-auto">
               {uniqueSpeakers.map(speaker => (
@@ -987,27 +996,9 @@ export default function TranscriptPanel({
           )}
         </div>
 
-        {/* Notes Header (Item 65) */}
-        {showNotes && (
-          <div className="flex-shrink-0 flex items-center gap-1">
-            <span className="bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 rounded-full px-2 py-0.5 text-xs font-medium">Notes</span>
-            {hasActiveFilters && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-5 px-1 text-xs"
-                onClick={clearFilters}
-                title="Clear all filters"
-              >
-                <X className="w-3 h-3" />
-              </Button>
-            )}
-          </div>
-        )}
-
-        {/* Codes Header (Item 65) - left aligned */}
+        {/* Codes header (#739: Codes -> Notes on every coding surface) */}
         {showCodes && (
-          <div className="w-[160px] flex-shrink-0 flex items-center gap-1.5">
+          <div data-col="codes" className="w-[160px] flex-shrink-0 flex items-center gap-1.5">
             <span className="bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 rounded-full px-2.5 py-0.5 text-xs font-medium">Codes</span>
             {coders && coders.length > 1 && coderFilterHidden && onCoderFilterChange && !hideCoderFilter && (
               <CoderFilterPopover
@@ -1020,6 +1011,28 @@ export default function TranscriptPanel({
                 showArchived={coderShowArchived}
                 onShowArchivedChange={onCoderShowArchivedChange}
               />
+            )}
+          </div>
+        )}
+
+        {/* Notes header — #739 put this last, so it needs the SAME 40px track
+            the row cell declares. It had no width at all: harmless while Codes
+            was last on both (the flexible text column absorbed the difference),
+            and the #666/#741 misalignment the moment Notes became the trailing
+            track. */}
+        {showNotes && (
+          <div data-col="notes" className="w-[40px] flex-shrink-0 flex items-center justify-center gap-1">
+            <span className="bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 rounded-full px-2 py-0.5 text-xs font-medium">Notes</span>
+            {hasActiveFilters && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-5 px-1 text-xs"
+                onClick={clearFilters}
+                title="Clear all filters"
+              >
+                <X className="w-3 h-3" />
+              </Button>
             )}
           </div>
         )}
@@ -1090,6 +1103,7 @@ export default function TranscriptPanel({
         ) : (
           <Virtuoso
             ref={listRef}
+            scrollerRef={gutter.setScroller}
             style={{ height: containerHeight }}
             totalCount={segments.length}
             itemContent={itemContent}

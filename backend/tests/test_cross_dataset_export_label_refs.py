@@ -42,17 +42,28 @@ def _run(coro):
 # ── #293 — R export per-dataset breakdown ────────────────────────────────────
 
 
-def test_r_export_single_dataset_domain_unchanged():
-    """Single-dataset domains use the original mean(colMeans(...)) form
-    — no comment block, no per-dataset breakdown."""
+def test_r_export_single_dataset_domain_states_the_equal_weighting():
+    """Single-dataset domains keep the mean(colMeans(...)) form — with the
+    equal-weighting caveat, and still no per-dataset breakdown.
+
+    #693: the caveat used to be cross-dataset-only, but the equal weighting is
+    not. A single-dataset domain averages item means too, so an item answered
+    by 10 people counts as much as one answered by 1000. The screen now labels
+    that number; this branch said nothing, and an export that disagrees with
+    the app about what it computed is worse than one that is merely terse.
+    """
     members_by_ds = {"Board": ["BQ1", "BQ2", "BQ3"]}
     lines = _emit_domain_aggregate_r_lines(members_by_ds, "domains$wellness")
     assert lines == [
+        "# Unweighted mean of item means: each item counts equally,",
+        "# regardless of how many respondents answered it.",
         # #363: ordinal members are ordered factors; .mm_num() coerces them to
         # numeric so colMeans doesn't error on factor columns.
         "domain_means <- colMeans(.mm_num(data[, domains$wellness]), na.rm = TRUE)",
         "mean(domain_means)",
     ]
+    # Still no per-dataset breakdown — that half is genuinely cross-dataset-only.
+    assert not any("data$dataset ==" in ln for ln in lines)
 
 
 def test_r_export_cross_dataset_domain_emits_comment_and_per_dataset_breakdown():
@@ -262,16 +273,20 @@ def test_collect_material_refs_extracts_lists_and_scalars():
         "compareBy": 303,
         "metric_type": "mean",  # not a ref; should be ignored
     }
-    cols, doms = _collect_material_refs(config)
-    assert cols == {101, 102, 103, 301, 302, 303}
-    assert doms == {201, 202}
+    refs = _collect_material_refs(config)
+    assert refs["column"] == {101, 102, 103, 301, 302, 303}
+    assert refs["domain"] == {201, 202}
 
 
 def test_collect_material_refs_handles_invalid_config():
     """Missing or malformed config returns empty sets — never raises."""
-    assert _collect_material_refs({}) == (set(), set())
-    assert _collect_material_refs({"column_ids": "not a list"}) == (set(), set())
-    assert _collect_material_refs({"column_ids": [None, "x", 0, -1]}) == (set(), set())
+    def empty(cfg):
+        return all(not ids for ids in _collect_material_refs(cfg).values())
+    assert empty({})
+    assert empty({"column_ids": "not a list"})
+    assert empty({"column_ids": [None, "x", 0, -1]})
+    # bool is an int subclass — a stray True must not register as entity id 1.
+    assert empty({"column_ids": [True, False]})
 
 
 def test_material_response_flags_missing_column_refs(project_with_material, db_session):
@@ -292,8 +307,8 @@ def test_material_response_flags_missing_column_refs(project_with_material, db_s
     db.add(m)
     db.flush()
 
-    existing_cols, existing_doms = _build_existence_sets(db, project_id=960, materials=[m])
-    response = _build_material_response(m, existing_cols, existing_doms)
+    existing = _build_existence_sets(db, project_id=960, materials=[m])
+    response = _build_material_response(m, existing)
 
     assert response.has_missing_refs is True
     assert {"type": "column", "id": 99999} in response.missing_refs
@@ -318,8 +333,8 @@ def test_material_response_clean_when_all_refs_exist(project_with_material, db_s
     db.add(m)
     db.flush()
 
-    existing_cols, existing_doms = _build_existence_sets(db, project_id=960, materials=[m])
-    response = _build_material_response(m, existing_cols, existing_doms)
+    existing = _build_existence_sets(db, project_id=960, materials=[m])
+    response = _build_material_response(m, existing)
 
     assert response.has_missing_refs is False
     assert response.missing_refs == []
@@ -342,8 +357,8 @@ def test_material_response_flags_missing_domain_ref(project_with_material, db_se
     db.add(m)
     db.flush()
 
-    existing_cols, existing_doms = _build_existence_sets(db, project_id=960, materials=[m])
-    response = _build_material_response(m, existing_cols, existing_doms)
+    existing = _build_existence_sets(db, project_id=960, materials=[m])
+    response = _build_material_response(m, existing)
 
     assert response.has_missing_refs is True
     assert response.missing_refs == [{"type": "domain", "id": 88888}]

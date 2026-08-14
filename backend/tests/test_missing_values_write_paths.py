@@ -749,14 +749,21 @@ class TestMissingValuesEndpoint:
 
 class TestDeclarationPortability:
     def test_declared_column_round_trips(self, db_session, tmp_path):
-        """missing_values rides .mmproject by reflection — and the format is
-        now v4, so an older (v<=3) build refuses the file cleanly instead of
-        silently dropping a statistics-deciding declaration (§I.10)."""
+        """missing_values rides .mmproject by reflection — and the format bumped
+        to v4 for it, so an older (v<=3) build refuses the file cleanly instead
+        of silently dropping a statistics-deciding declaration (§I.10).
+
+        The pin is now `>= 4`, not `== 4`: this test's subject is the DECLARATION
+        round-trip, and it should not fail every time the format bumps for an
+        unrelated reason. It did exactly that at v5 (#687's code-point offsets),
+        which is the version-pin equivalent of a per-variant test — see
+        `test_project_portability.py` for the pin that tracks the CURRENT value.
+        """
         import zipfile
         from app.services.project_portability import (
             CURRENT_FORMAT_VERSION, export_project, import_project,
         )
-        assert CURRENT_FORMAT_VERSION == 4
+        assert CURRENT_FORMAT_VERSION >= 4
 
         _seed(db_session, column_type="numeric", cells=("3", "99"),
               missing_values=DECLARE_99)
@@ -768,7 +775,11 @@ class TestDeclarationPortability:
         out.write_bytes(buf.getvalue())
         with zipfile.ZipFile(out) as zf:
             manifest = json.loads(zf.read("manifest.json"))
-        assert manifest["format_version"] == 4
+        # Track the constant, not a literal: this test's subject is the DECLARATION
+        # round-trip, and the exported manifest should simply carry whatever the
+        # current version is. Hard-coding it made an unrelated bump (#687's v5) fail
+        # here, which says nothing about declarations.
+        assert manifest["format_version"] == CURRENT_FORMAT_VERSION
 
         new_id, _ = import_project(db_session, out, docs_dir, user_id=1)
         imported = (

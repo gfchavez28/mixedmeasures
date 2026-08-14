@@ -4,6 +4,12 @@ export { default } from './client'
 export { setCsrfToken, ApiError } from './client'
 export { extractApiError } from './error-utils'
 
+// Downloads — the canonical blob→anchor helpers. Exported here because they
+// were not reachable from the barrel, and six components hand-rolled their own
+// copy rather than go looking (#743).
+export { downloadBlob, extractFilename, namedBlob } from './download'
+export type { NamedBlob } from './download'
+
 // Auth
 export { authApi } from './auth'
 export type { User, AuthStatus, Coder } from './auth'
@@ -235,6 +241,9 @@ export type {
 // Code Analysis
 export { codeAnalysisApi } from './code-analysis'
 export type {
+  // THE source-kind enumeration — consumers key `Record<SourceKind, …>` off
+  // this so a fifth kind fails to compile instead of silently disappearing.
+  SourceKind,
   CodeFrequencyItem,
   CodeFrequencySummary,
   ContextSegment,

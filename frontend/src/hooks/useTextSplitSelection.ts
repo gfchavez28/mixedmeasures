@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type RefObject } from 'react'
+import { charOffsetInElement, codePointLength } from '@/lib/text-offsets'
 
 export interface SplitableSegment {
   id: number
@@ -121,26 +122,11 @@ export function useTextSplitSelection(
       return findSegmentIdFromElement(el)
     }
 
-    // Compute character offset of a caret position within a text element
-    const computeCharOffset = (textEl: HTMLElement, node: Node, offset: number): number => {
-      if (node === textEl) {
-        return offset === 0 ? 0 : (textEl.textContent?.length ?? 0)
-      }
-      const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT)
-      let charCount = 0
-      let textNode: Text | null
-      while ((textNode = walker.nextNode() as Text | null)) {
-        if (textNode === node) {
-          return charCount + offset
-        }
-        charCount += textNode.length
-      }
-      const cmp = node.compareDocumentPosition(textEl)
-      if (cmp & Node.DOCUMENT_POSITION_FOLLOWING) {
-        return 0
-      }
-      return textEl.textContent?.length ?? 0
-    }
+    // #687: THE producer lives in `lib/text-offsets.ts` so it is testable — as a
+    // closure here it was only reachable through `caretPositionFromPoint`, which
+    // jsdom does not implement, so the conversion could be reverted with the whole
+    // suite still green. For a defect this silent that was the worst place to hide it.
+    const computeCharOffset = charOffsetInElement
 
     // Resolve a mouse position to a segment ID + character offset
     const resolvePosition = (clientX: number, clientY: number): { segmentId: number; offset: number } | null => {
@@ -300,7 +286,7 @@ export function useTextSplitSelection(
 
           // Bug fix #6: use boundary check instead of trim()
           const atStart = startOffset === 0
-          const atEnd = endOffset >= seg.text.length
+          const atEnd = endOffset >= codePointLength(seg.text)
           if (atStart && atEnd) { setSplitSelection(null); return }
 
           setSplitSelection({
@@ -327,7 +313,7 @@ export function useTextSplitSelection(
           if (endOffset === 0 && endIdx > startIdx) {
             endIdx--
             endSegId = segments[endIdx].id
-            endOffset = segments[endIdx].text.length
+            endOffset = codePointLength(segments[endIdx].text)
           }
 
           // Bug fix #7: check group_id when multi collapses to single
@@ -335,12 +321,12 @@ export function useTextSplitSelection(
             const seg = segments[startIdx]
             if (seg.group_id) { setSplitSelection(null); return }
             const atStart = startOffset === 0
-            const atEnd = endOffset >= seg.text.length
+            const atEnd = endOffset >= codePointLength(seg.text)
             if (atStart && atEnd) { setSplitSelection(null); return }
             if (atStart) { setSplitSelection(null); return }
 
             setSplitSelection({
-              ranges: [{ segment_id: seg.id, start_offset: startOffset, end_offset: seg.text.length }],
+              ranges: [{ segment_id: seg.id, start_offset: startOffset, end_offset: codePointLength(seg.text) }],
               rect: toolbarRect,
             })
             setAnnouncement('Text selected for split')
@@ -373,13 +359,13 @@ export function useTextSplitSelection(
           ranges.push({
             segment_id: startSegId,
             start_offset: startOffset,
-            end_offset: segments[startIdx].text.length,
+            end_offset: codePointLength(segments[startIdx].text),
           })
           for (let i = startIdx + 1; i < endIdx; i++) {
             ranges.push({
               segment_id: segments[i].id,
               start_offset: 0,
-              end_offset: segments[i].text.length,
+              end_offset: codePointLength(segments[i].text),
             })
           }
           ranges.push({

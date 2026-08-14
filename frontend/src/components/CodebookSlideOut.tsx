@@ -608,7 +608,7 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
     if (!activeContainer) return
 
     // Determine target: could be a code ID (number) or a container ID (string, for empty zones)
-    let overContainer: string | null = null
+    let overContainer: string | null
     let overCodeId: number | null = null
 
     if (typeof over.id === 'string' && (over.id.startsWith('cat-') || over.id === 'uncategorized')) {
@@ -762,7 +762,7 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
               title="Change code color"
             />
           </PopoverTrigger>
-          <PopoverContent className="w-auto p-3 z-[200]" align="start" side="left" collisionPadding={16}>
+          <PopoverContent className="w-auto p-3 z-[200]" align="start" side="left" collisionPadding={16} aria-label="Code color">
             <div className="space-y-2">
               <p className="text-xs font-medium text-mm-text-secondary">Code Color</p>
               <ColorSwatchPicker
@@ -938,7 +938,7 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
                 />
               </button>
             </PopoverTrigger>
-            <PopoverContent className="w-auto p-3 z-[200]" align="start" side="left" collisionPadding={16}>
+            <PopoverContent className="w-auto p-3 z-[200]" align="start" side="left" collisionPadding={16} aria-label="Category color">
               <div className="space-y-2">
                 <p className="text-xs font-medium text-mm-text-secondary">Category Color</p>
                 <ColorSwatchPicker

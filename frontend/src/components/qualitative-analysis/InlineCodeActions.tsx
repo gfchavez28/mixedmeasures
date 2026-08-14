@@ -178,6 +178,7 @@ export default function InlineCodeActions({
           </button>
         </PopoverTrigger>
         <PopoverContent
+          aria-label="Add a code"
           className="w-56 p-2"
           align="start"
           onFocusOutside={keepOpenOnFocusOutside ? (e) => e.preventDefault() : undefined}

@@ -766,7 +766,7 @@ export default function ChartOptionsPanel({
                         <>
                           <SelectSeparator />
                           <SelectItem value="_dataset">
-                            <span aria-label="By Dataset — groups results by source dataset">By Dataset</span>
+                            <span title="Groups results by source dataset">By Dataset</span>
                           </SelectItem>
                         </>
                       )}

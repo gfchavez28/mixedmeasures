@@ -9,7 +9,7 @@ import { useProjectLayout } from '@/layouts/ProjectLayout'
 import InlineChartRenderer from '../InlineChartRenderer'
 import MaterialsTagInline from '../MaterialsTagInline'
 import { materialsApi } from '@/lib/api'
-import { materialAnalysisPath } from '@/lib/material-kind'
+import { materialAnalysisPath, describeMissingRefs } from '@/lib/material-kind'
 
 export default function ChartEmbedView({ node, updateAttributes, deleteNode, selected }: NodeViewProps) {
   const { projectId } = useProjectLayout()
@@ -63,7 +63,7 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
               <button
                 type="button"
                 onClick={deleteNode}
-                className="opacity-0 group-hover/material:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded text-mm-text-faint hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30"
+                className="opacity-0 group-hover/material:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded text-mm-text-faint hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
                 aria-label="Remove from canvas"
                 title="Remove from canvas"
               >
@@ -91,9 +91,7 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
                 <AlertTriangle className="w-3.5 h-3.5 flex-none mt-px" aria-hidden />
                 <div className="flex-1 min-w-0">
                   <span className="font-medium">Sources missing.</span>{' '}
-                  {missingRefs.length === 1
-                    ? `1 referenced ${missingRefs[0].type} no longer exists.`
-                    : `${missingRefs.length} referenced columns or domains no longer exist.`}{' '}
+                  {describeMissingRefs(missingRefs)}{' '}
                   This chart may render incomplete data.
                 </div>
               </div>
@@ -104,6 +102,7 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
                 projectId={Number(projectId)}
                 materialId={Number(materialId)}
                 content={parsedContent}
+                embedTitle={title ?? null}
               />
             ) : (
               <p className="text-sm text-mm-text-muted italic">Chart source not available</p>

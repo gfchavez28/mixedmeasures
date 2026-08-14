@@ -8,6 +8,7 @@ dataset/questionnaire data rather than conversation transcripts.
 import csv
 import io
 import json
+import logging
 import math
 import re
 from sqlalchemy.orm import Session
@@ -26,6 +27,15 @@ from .missing_values import (  # noqa: F401 — _NA_PREFIXES/_is_na re-export (#
     is_missing,
     matched_missing_label,
 )
+
+# #691: this module called logger.warning() at two sites with no `logger` in scope,
+# so a malformed .sav — the exact case the warnings exist to report — raised
+# NameError mid-import instead of degrading gracefully. Both branches are
+# user-reachable (scale_values/scale_labels length mismatch; a cells_are_codes
+# column with mismatched labels/values). Guarded by tests/test_logger_defined_sweep.py,
+# which fails the suite for ANY module that uses `logger.` without defining it —
+# the instance was a singleton backend-wide, and the class is what stays closed.
+logger = logging.getLogger(__name__)
 
 # ── Rounding precision constants ─────────────────────────────────────────────
 PREVIEW_STATS_PRECISION = 1  # round(x, 1) for import preview statistics

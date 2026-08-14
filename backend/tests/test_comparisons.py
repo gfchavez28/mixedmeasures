@@ -174,3 +174,57 @@ def test_effect_size_ci(mtcars_session):
     assert test["effect_size_ci_upper"] == pytest.approx(-0.6517, abs=0.05)
     # CI should contain the point estimate
     assert test["effect_size_ci_lower"] < test["effect_size"] < test["effect_size_ci_upper"]
+
+
+# ── #742 — the effect-size LABEL must describe the statistic it is printed beside ──
+#
+# Both comparison surfaces display omega-squared for a one-way ANOVA, and both
+# were printing `effect_size_label` next to it — a word classified from
+# ETA-squared. `omega <= eta` always, so any pair straddling a threshold showed
+# a number from one statistic under a verdict from the other. The table was the
+# worse of the two: `effectSizeBadge` ignores the value entirely when a label is
+# supplied, so the badge was purely eta-driven.
+
+def test_omega_squared_carries_its_own_label():
+    """`_run_anova` is pure, so the straddling case needs no dataset.
+
+    ⚠️ The mtcars fixture CANNOT see this defect — eta .7325 and omega .7075 are
+    both "large", so a label taken from the wrong statistic still reads right.
+    This fixture is built where the two DISAGREE, which is the only place the
+    claim is testable at all (`backend/tests/the internal design notes: put the fixture where
+    old and new behaviour differ).
+    """
+    from app.services.comparisons import _run_anova
+
+    # Three tight, evenly-spaced groups: a large eta, a much-shrunk omega.
+    grouped = {
+        "a": [10.0, 12.0, 11.0, 13.0],
+        "b": [10.9, 12.9, 11.9, 13.9],
+        "c": [11.8, 13.8, 12.8, 14.8],
+    }
+    test = _run_anova(grouped, ["a", "b", "c"], include_ci=False)
+
+    assert test["effect_size"] == pytest.approx(0.3017, abs=0.001)
+    assert test["omega_squared"] == pytest.approx(0.1359, abs=0.001)
+
+    # They straddle the 0.14 "large" boundary — without this the fixture is
+    # degenerate and the assertions below pass on the old code too.
+    assert test["effect_size_label"] == "large"
+    assert test["omega_squared_label"] == "medium", (
+        "omega-squared sits below the 0.14 boundary that eta-squared cleared; "
+        "labelling the displayed omega 'large' overstates the finding (#742)"
+    )
+    assert test["effect_size_label"] != test["omega_squared_label"]
+
+
+def test_every_anova_result_labels_both_effect_sizes(mtcars_session):
+    """The pair travels together, so a consumer can never find one without the other."""
+    result = compute_group_comparison(
+        mtcars_session, project_id=1,
+        column_ids=[MPG_ID], domain_ids=[],
+        grouping_column_id=CYL_ID, grouping_column_id_2=None,
+        test_type="auto", include_effect_size_ci=False,
+    )
+    test = result["rows"][0]["test"]
+    assert test["omega_squared"] is not None
+    assert test["omega_squared_label"] is not None

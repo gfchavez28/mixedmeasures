@@ -28,6 +28,7 @@
  */
 
 import { unionIntervals, coveredSeconds, assignTracks } from './clip-timeline'
+import { formatTimecode } from './utils'
 import type { AppliedCodeDetailLike } from './coding-progress'
 
 export interface TimedClipLike {
@@ -153,6 +154,46 @@ export function computeTimedRowsByCoder(
   }
   return rows
 }
+
+/**
+ * The "Covered by selected coding" anchor: every visible mark for the selected
+ * codes, pooled and unioned once — i.e. what share of the session the selected
+ * coding touches AT ALL. It is deliberately NOT the sum of the per-code
+ * airtimes (codes overlap), which is the disclosure the table carries.
+ *
+ * Lives here rather than in the component because the canvas EXPORT needs the
+ * same number and mounts nothing (#652 slab 4). A second implementation of this
+ * would disagree invisibly.
+ */
+export function coveredTotalSeconds(
+  clips: readonly TimedClipLike[],
+  codeIds: readonly number[],
+  include: CoderInclude,
+  extent: number | null,
+): number | null {
+  if (extent == null) return null
+  const codeSet = new Set(codeIds)
+  const intervals = clips.flatMap(clip =>
+    clip.applied_code_details.some(d => codeSet.has(d.code_id) && detailVisible(d.user_id, include))
+      ? [{ start: clip.start_time, end: clip.end_time }]
+      : [])
+  return coveredSeconds(unionIntervals(intervals), extent)
+}
+
+// ── Display formatting ──────────────────────────────────────────────────────
+//
+// Shared by the on-screen table and the canvas export's flattened table, so the
+// two can never disagree by a rounding rule. A formatting divergence is the
+// invisible kind: both outputs look right and only differ in the last digit.
+
+/** Seconds → timecode; null → em dash. */
+export const formatTimedSeconds = (s: number | null): string => (s == null ? '—' : formatTimecode(s))
+
+/** Fraction → whole percent; null → em dash. */
+export const formatTimedShare = (f: number | null): string => (f == null ? '—' : `${Math.round(f * 100)}%`)
+
+/** Marks per minute, 2dp; null → em dash. */
+export const formatTimedRate = (r: number | null): string => (r == null ? '—' : `${r.toFixed(2)}/min`)
 
 // ── Codeline layout (DEC-6c-4) ──────────────────────────────────────────────
 

@@ -1,6 +1,7 @@
 import type {
   SourceFrequenciesResponse,
   SourceEntry,
+  SourceKind,
 } from '@/lib/api'
 import type {
   QualValueMode,
@@ -52,7 +53,8 @@ export interface QualHeatmapCell {
 export interface QualHeatmapRow {
   label: string
   id: number
-  sourceType: 'conversation' | 'text_column' | 'document' | 'observation' | 'code'
+  // `SourceKind` + the heatmap's own code-as-row mode (#679: one enumeration).
+  sourceType: SourceKind | 'code'
   cells: QualHeatmapCell[]
   totalN: number
 }
@@ -64,6 +66,10 @@ export interface QualHeatmapData {
   maxValue: number
 }
 
+/**
+ * The SOURCE axis. `'custom'` deliberately falls through to import order — the
+ * drag list orders CODES, and there is no custom source list to honour (#675).
+ */
 function sortSources(sources: SourceEntry[], sortOrder: QualSortOrder): SourceEntry[] {
   const sorted = [...sources]
   switch (sortOrder) {
@@ -76,6 +82,7 @@ function sortSources(sources: SourceEntry[], sortOrder: QualSortOrder): SourceEn
     case 'count_asc':
       sorted.sort((a, b) => a.total_segments - b.total_segments)
       break
+    case 'custom':
     case 'import':
     default:
       // Conversations first (by import_order), then comment columns
@@ -90,15 +97,139 @@ function sortSources(sources: SourceEntry[], sortOrder: QualSortOrder): SourceEn
   return sorted
 }
 
+// ── The code axis (#675) ────────────────────────────────────────────────────
+
+/**
+ * Order by an explicit id list: listed ids first in that order, everything else
+ * appended in its original order.
+ *
+ * The rule is `hooks/useAnalysisDerived.ts:74–83`'s, deliberately — the
+ * quantitative path has implemented this since it shipped, and the qualitative
+ * side had the same authoring UI and the same `custom_order` config key with no
+ * consumer at all. An id in the list that no longer exists is skipped, so a
+ * deleted code cannot leave a hole.
+ */
+export function applyCustomOrder<T>(
+  items: T[],
+  customOrder: number[],
+  idOf: (item: T) => number,
+): T[] {
+  if (customOrder.length === 0) return [...items]
+  const remaining = new Map(items.map(item => [idOf(item), item]))
+  const out: T[] = []
+  for (const id of customOrder) {
+    const item = remaining.get(id)
+    if (item !== undefined) {
+      out.push(item)
+      remaining.delete(id)
+    }
+  }
+  for (const item of items) if (remaining.has(idOf(item))) out.push(item)
+  return out
+}
+
+/**
+ * The ONE ordering rule for the code axis, shared by all three shapers.
+ *
+ * ⚠️ Before #675 only the bar chart ordered codes at all: the heatmap and the
+ * stacked bar applied `sortOrder` to their SOURCE axis in both orientations, so
+ * "Codes as rows" + any sort left the rows in import order — `alpha` and the two
+ * `count` options were as dead as `custom` was, on two charts out of three. This
+ * is a pure ADDITION: the source axis keeps the ordering it has always had, and
+ * the code axis gains the one it was already being asked for.
+ */
+function orderCodeAxis<T>(
+  items: T[],
+  sortOrder: QualSortOrder,
+  customOrder: number[],
+  accessors: { id: (item: T) => number; label: (item: T) => string; value: (item: T) => number },
+): T[] {
+  const sorted = [...items]
+  switch (sortOrder) {
+    case 'alpha':
+      sorted.sort((a, b) => accessors.label(a).localeCompare(accessors.label(b)))
+      break
+    case 'count_desc':
+      sorted.sort((a, b) => accessors.value(b) - accessors.value(a))
+      break
+    case 'count_asc':
+      sorted.sort((a, b) => accessors.value(a) - accessors.value(b))
+      break
+    case 'custom':
+      return applyCustomOrder(items, customOrder, accessors.id)
+    case 'import':
+    default:
+      break
+  }
+  return sorted
+}
+
+/**
+ * A code's magnitude across the whole selection — what `count_desc`/`count_asc`
+ * order the code axis by.
+ *
+ * Computed through `computeCellValue` against the response totals, i.e. exactly
+ * the aggregation `shapeQualBarData` performs for its bars, so a heatmap row and
+ * the bar for the same code can never disagree about which is larger. Every code
+ * shares the denominator, so this ranks by summed count under `count`/
+ * `segment_proportion` and by summed words under `text_coverage`.
+ */
+function codeMagnitudes(
+  response: SourceFrequenciesResponse,
+  valueMode: QualValueMode,
+  denominatorMode: QualDenominatorMode,
+): Map<number, number> {
+  const { codes, sources, totals } = response
+  const out = new Map<number, number>()
+  for (const code of codes) {
+    let count = 0
+    let wordCount = 0
+    for (const src of sources) {
+      const ce = src.code_counts?.[String(code.id)]
+      if (ce) {
+        count += ce.count
+        wordCount += ce.word_count
+      }
+    }
+    out.set(code.id, computeCellValue(
+      count, wordCount,
+      totals.total_segments, totals.total_word_count, totals.coded_segments,
+      valueMode, denominatorMode,
+    ))
+  }
+  return out
+}
+
+/** The response's code entries, in the order the code axis should render them. */
+function sortResponseCodes<T extends { id: number; name: string }>(
+  codes: T[],
+  sortOrder: QualSortOrder,
+  customOrder: number[],
+  magnitudes: Map<number, number>,
+): T[] {
+  return orderCodeAxis(codes, sortOrder, customOrder, {
+    id: c => c.id,
+    label: c => c.name,
+    value: c => magnitudes.get(c.id) ?? 0,
+  })
+}
+
 export function shapeQualHeatmapData(
   response: SourceFrequenciesResponse,
   valueMode: QualValueMode,
   denominatorMode: QualDenominatorMode,
   orientation: QualOrientation,
   sortOrder: QualSortOrder,
+  customOrder: number[],
 ): QualHeatmapData {
-  const { codes, sources } = response
+  const { sources } = response
   const sortedSources = sortSources(sources, sortOrder)
+  // #675: the code axis is ordered in BOTH orientations — as rows when codes are
+  // the rows, as columns when they are the columns. It used to be neither.
+  const codes = sortResponseCodes(
+    response.codes, sortOrder, customOrder,
+    codeMagnitudes(response, valueMode, denominatorMode),
+  )
 
   if (orientation === 'sources-rows') {
     // Sources as rows, codes as columns
@@ -182,6 +313,7 @@ export function shapeQualBarData(
   valueMode: QualValueMode,
   denominatorMode: QualDenominatorMode,
   sortOrder: QualSortOrder,
+  customOrder: number[],
 ): QualBarDatum[] {
   const { codes, sources, totals } = response
 
@@ -207,7 +339,7 @@ export function shapeQualBarData(
       categoryName: code.category_name,
     }
   })
-  return sortBarData(bars, sortOrder)
+  return sortBarData(bars, sortOrder, customOrder)
 }
 
 /**
@@ -233,22 +365,22 @@ export function resolveRenderedBarEntry<T extends { value: number }>(
   return entry
 }
 
-function sortBarData(bars: QualBarDatum[], sortOrder: QualSortOrder): QualBarDatum[] {
-  const sorted = [...bars]
-  switch (sortOrder) {
-    case 'alpha':
-      sorted.sort((a, b) => a.fullLabel.localeCompare(b.fullLabel))
-      break
-    case 'count_desc':
-      sorted.sort((a, b) => b.value - a.value)
-      break
-    case 'count_asc':
-      sorted.sort((a, b) => a.value - b.value)
-      break
-    default:
-      break // import order = original order from API
-  }
-  return sorted
+/**
+ * The bar chart's bars ARE the code axis, so it routes through the same rule as
+ * the heatmap and the stacked bar. `value` is already the aggregate
+ * `codeMagnitudes` computes, so passing it directly keeps the two identical
+ * without recomputing.
+ */
+function sortBarData(
+  bars: QualBarDatum[],
+  sortOrder: QualSortOrder,
+  customOrder: number[],
+): QualBarDatum[] {
+  return orderCodeAxis(bars, sortOrder, customOrder, {
+    id: b => b.codeId,
+    label: b => b.fullLabel,
+    value: b => b.value,
+  })
 }
 
 // ── Summary table ───────────────────────────────────────────────────────────
@@ -260,17 +392,56 @@ export interface QualCodeSummaryRow {
   categoryName: string | null
   totalCount: number
   segmentProportion: number
+  /**
+   * "% of Coded" — #745. Computed HERE, from the same payload as `totalCount`,
+   * because the two are one fact: the count of segments carrying this code, and
+   * that count as a share of the coded segments it was counted in.
+   *
+   * ⚠️ `null` means "no coded segments in this selection", which is not 0%. The
+   * renderer must not collapse the two (#689's convention, and the falsy-zero
+   * trap: `pct ? … : '—'` prints "—" for a real measured zero).
+   */
+  segmentPercentage: number | null
   textCoverage: number
   sourceCount: number
   totalSources: number
+  /**
+   * Per-kind reach — #749. Every one of these used to come from the
+   * `code-frequencies` payload while the row's `totalCount` came from this one.
+   * The two endpoints read an unselected kind differently ("none of that kind"
+   * here, "ALL of that kind" there), so a conversations-only selection printed
+   * Conv. columns scoped to the selection beside Obs. columns scoped to the
+   * whole project — and the Texts/Records columns could not be scoped at all,
+   * because `/frequencies` declares no `text_column_ids` parameter.
+   *
+   * Three of these are per-source roll-ups and are derived below.
+   * `participantCount` and `recordCount` are NOT derivable — one participant
+   * speaks across conversations, one record can be coded in several columns —
+   * so they ride the payload per code (or per CATEGORY, keyed identically).
+   */
   conversationCount: number
-  totalConversations: number
+  documentCount: number
+  observationCount: number
+  textCount: number
+  participantCount: number
+  recordCount: number
+}
+
+/**
+ * A share as a percentage, or `null` when the denominator is zero.
+ *
+ * `null` is "not computable", which is not 0% — the #689 convention. A renderer
+ * that collapses them tells the researcher a code reached none of their sources
+ * when the truth is that there were no sources to reach.
+ */
+export function sharePercent(part: number, whole: number): number | null {
+  return whole > 0 ? (part / whole) * 100 : null
 }
 
 export interface QualSourceSummaryRow {
   sourceId: number
   sourceLabel: string
-  sourceType: 'conversation' | 'text_column' | 'document' | 'observation'
+  sourceType: SourceKind
   totalCodes: number
   uniqueCodes: number
   codedSegments: number
@@ -285,15 +456,27 @@ export function shapeQualCodeSummary(
   return codes.map(code => {
     let totalCount = 0
     let totalWordCount = 0
-    let convCount = 0
     let srcCount = 0
+    // Per-kind reach (#749). Conversations/documents/observations count the
+    // SOURCES this code appears in; text columns sum the coded TEXTS, because
+    // that is the grain the Texts column has always shown (and the grain the
+    // backend's per-column `count` carries).
+    let conversationCount = 0
+    let documentCount = 0
+    let observationCount = 0
+    let textCount = 0
     for (const src of sources) {
       const ce = src.code_counts?.[String(code.id)]
       if (ce && ce.count > 0) {
         totalCount += ce.count
         totalWordCount += ce.word_count
         srcCount++
-        if (src.source_type === 'conversation') convCount++
+        switch (src.source_type) {
+          case 'conversation': conversationCount++; break
+          case 'document': documentCount++; break
+          case 'observation': observationCount++; break
+          case 'text_column': textCount += ce.count; break
+        }
       }
     }
     return {
@@ -303,13 +486,66 @@ export function shapeQualCodeSummary(
       categoryName: code.category_name,
       totalCount,
       segmentProportion: totals.total_segments > 0 ? totalCount / totals.total_segments : 0,
+      // #745: the percentage rides the SAME payload as the count above it.
+      // It used to come from the code-frequencies endpoint, which reads an
+      // absent id list as "all of that kind" while this one reads an empty list
+      // as "none" — so a conversations-only selection had its Count summed over
+      // 2 conversations and its % computed over those conversations PLUS every
+      // observation in the project. Measured on the dev corpus: every code read
+      // `Count 0` beside `25.0%`, with `Sources 0/2`.
+      // ⚠️ `totals.total_segments` (above) and `totals.coded_segments` (here)
+      // are different denominators on purpose — "share of all segments" vs
+      // "share of the coded ones".
+      segmentPercentage: totals.coded_segments > 0
+        ? (totalCount / totals.coded_segments) * 100
+        : null,
       textCoverage: totals.total_word_count > 0 ? totalWordCount / totals.total_word_count : 0,
       sourceCount: srcCount,
       totalSources: sources.length,
-      conversationCount: convCount,
-      totalConversations: totals.total_conversations,
+      conversationCount,
+      documentCount,
+      observationCount,
+      textCount,
+      participantCount: code.participant_count ?? 0,
+      recordCount: code.record_count ?? 0,
     }
   })
+}
+
+/**
+ * The denominator for each per-kind percentage — #749.
+ *
+ * Every one is "how many of this kind are in the SELECTION", so each percentage
+ * is a share of a set the numerator is drawn from. The old Conv. denominator
+ * was conversations carrying ANY coding, which made "% Conv." a ratio between
+ * two differently-scoped counts.
+ */
+export function summaryKindTotals(response: SourceFrequenciesResponse) {
+  const t = response.totals
+  return {
+    conversation: t.total_conversations,
+    document: t.total_documents,
+    observation: t.total_observations,
+    text: t.coded_texts,
+    participant: t.total_participants,
+    record: t.total_records,
+  }
+}
+
+/**
+ * The source kinds actually present in this response (#679).
+ *
+ * The summary table renders a count/% pair per kind, and this is what decides
+ * which pairs exist. Derived from the sources the backend returned rather than
+ * from the mode tabs, so the columns follow the researcher's SELECTION: an
+ * observations-only selection gets Obs. columns and no Conv. columns, instead
+ * of the old fixed pair of groups that had no `showDoc` or `showObs` at all and
+ * reported "Conv. 1, Participants 11" for a selection containing neither.
+ */
+export function presentSourceKinds(
+  response: SourceFrequenciesResponse,
+): Set<SourceKind> {
+  return new Set(response.sources.map(s => s.source_type))
 }
 
 export function shapeQualSourceSummary(
@@ -360,9 +596,15 @@ export function shapeQualStackedBarData(
   sortOrder: QualSortOrder,
   valueMode: QualValueMode = 'count',
   denominatorMode: QualDenominatorMode = 'total',
+  customOrder: number[] = [],
 ): QualStackedBarData {
-  const { codes, sources } = response
+  const { sources } = response
   const sortedSources = sortSources(sources, sortOrder)
+  // #675: bars when codes are the rows, stack + legend order when they are not.
+  const codes = sortResponseCodes(
+    response.codes, sortOrder, customOrder,
+    codeMagnitudes(response, valueMode, denominatorMode),
+  )
 
   if (orientation === 'sources-rows') {
     // Each source is a bar, segments colored by code

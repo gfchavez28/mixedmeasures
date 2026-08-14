@@ -35,49 +35,17 @@ import type {
   EquivalenceGroupResponse,
 } from './crosswalk-types'
 import type { MetricDefinitionSummaryResponse } from '@/lib/api/metrics'
+import { compareScales } from '@/lib/scale-comparison'
 
-/** Phase 4.5: canonical normalization for scale_labels comparison.
+/*
+ * Scale-signature comparison moved to `lib/scale-comparison.ts` (#693).
  *
- * Trim each label, lowercase, then JSON-stringify the sorted array. Sorted
- * order ensures equivalence between datasets that encode the same scale
- * with different numeric direction (e.g. 1=Strongly disagree…5=Strongly
- * agree vs 5=Strongly disagree…1=Strongly agree). Returns null when the
- * input is null/undefined/empty so the caller can treat "unknown" as
- * non-mismatch.
+ * It was private to this file, feeding one gutter icon on the grid — while the
+ * screen where a scale score is CREATED and the screen where it is READ had no
+ * access to it at all. Re-exported here because `ScaleLabelsMismatchIcon` and
+ * the crosswalk tests import `normalizeScaleLabels` from this module.
  */
-export function normalizeScaleLabels(labels: string[] | null | undefined): string | null {
-  if (!labels || labels.length === 0) return null
-  const cleaned = labels.map((l) => (l ?? '').trim().toLowerCase())
-  return JSON.stringify([...cleaned].sort())
-}
-
-/** Phase 4.5: scale signature for mismatch detection across an EG row.
- *
- * Composition rule (preferred → fallback → null):
- *   1. If `scale_labels` is non-null/non-empty → use the normalized labels.
- *      This catches the v2 case (same point count, different label content).
- *   2. Else if `scale_points` is non-null → use `points:${scale_points}`.
- *      This is the v1 fallback for legacy projects that have point counts
- *      but no labels recorded (e.g. pre-Phase-4 imports).
- *   3. Else → null. Treated as "unknown" by the caller (no mismatch
- *      reported when at least one cell is in this state and others have
- *      signatures — conservative).
- *
- * Note: a column with labels and a column with only scale_points cannot
- * share a signature even when point counts agree, because the signature
- * shapes are textually distinct. That's intentional — a labeled column
- * and an unlabeled column give the researcher different actionable
- * information, so flagging the mismatch is correct.
- */
-function scaleSignature(col: {
-  scale_points: number | null
-  scale_labels: string[] | null
-}): string | null {
-  const labels = normalizeScaleLabels(col.scale_labels)
-  if (labels != null) return `labels:${labels}`
-  if (col.scale_points != null) return `points:${col.scale_points}`
-  return null
-}
+export { normalizeScaleLabels } from '@/lib/scale-comparison'
 
 interface BuildGridInput {
   domains: AnalysisDomainResponse[]
@@ -194,20 +162,12 @@ export function buildGrid({
     //
     // Single-cell EG rows can't compare. `kind:'unlinked'` rows never enter
     // buildEgRow.
-    let has_scale_labels_mismatch = false
-    if (members.length >= 2) {
-      const sigs = members.map(scaleSignature)
-      const known = sigs.filter((s): s is string => s != null)
-      if (known.length >= 2) {
-        const first = known[0]
-        for (let i = 1; i < known.length; i++) {
-          if (known[i] !== first) {
-            has_scale_labels_mismatch = true
-            break
-          }
-        }
-      }
-    }
+    // #693: one comparator, shared with the domain picker and the analysis
+    // view. `unknown` (fewer than two columns carry scale metadata) does not
+    // raise the grid's gutter icon — the grid shows WHICH datasets disagree,
+    // and there is nothing to show when nothing is known. The surfaces that
+    // make a claim ABOUT the aggregate say "unknown" out loud instead.
+    const has_scale_labels_mismatch = compareScales(members) === 'mismatch'
 
     return {
       kind: 'eg',

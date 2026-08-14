@@ -29,6 +29,17 @@ from .missing_values import column_missing_rules, is_missing
 # ── Rounding precision constants ─────────────────────────────────────────────
 DISPLAY_PERCENTAGE_PRECISION = 1  # round(x, 1) for display percentages (e.g. 42.9%)
 
+# The category fold used by `get_source_frequencies` when `aggregation="category"`.
+# An uncategorised code becomes its own pseudo-category keyed on the NEGATIVE of
+# its code id, which is what keeps the two id spaces from colliding inside one
+# response. Declared once because several queries must agree on it exactly: a
+# second copy that folded uncategorised codes differently would put a row's
+# counts under a key no consumer looks up, and the row would silently read zero.
+_EFFECTIVE_CAT_ID = sa_case(
+    (Code.category_id.isnot(None), Code.category_id),
+    else_=(-1 * Code.id),
+)
+
 
 def _get_universal_code_ids(db: Session, project_id: int) -> set[int]:
     return set(
@@ -477,6 +488,32 @@ def get_code_frequencies(
     source: "conversations" | "text" | "all" (legacy "comments" coerced to "text")
     When source is "conversations" or "all", document segments and observation
     clips are included (the segment-shaped sources travel together).
+
+    ⚠️ **#749 — this reads an empty id list DIFFERENTLY from its sibling
+    `get_source_frequencies` (below, ~line 2140). Read that one before changing
+    this one.**
+
+    Here (and in the four `_get_*_frequencies` helpers) the test is truthy —
+    ``if <ids>:`` — so an empty or absent list means **ALL sources of that kind**.
+    `get_source_frequencies` tests ``is not None``, where an empty list means
+    **NONE of that kind**. The two live ~1,600 lines apart and neither said so,
+    which is how #745 shipped: the summary table summed its Count over one
+    payload and took its percentage from the other, and every code read
+    ``Count 0`` beside ``25.0%``.
+
+    ⚠️ **Do not "harmonise" this to ``is not None`` on its own.**
+    `routers/helpers.py::parse_int_list` returns ``None`` for an absent param AND
+    for an empty string, so no client can express "none of this kind" over the
+    wire regardless; the only behaviour that would change is for in-process
+    callers passing a literal ``[]``. It looks like a fix and closes nothing.
+
+    ⚠️ **The resulting scope is a HYBRID, not "project-wide" — measured, not
+    inferred.** Because the UI omits unselected kinds entirely, selecting one
+    conversation in a 4-conversation project moved ``total_conversations`` 2 → 1
+    while ``total_coded_segments`` only moved 21 → 20: conversations were
+    restricted, observations were not. So these totals are neither the project
+    nor the selection, and there is no honest one-line label for them. Closing
+    that is a wire-contract decision recorded in ISSUES #749.
     """
     # Backward-compat: legacy callers may still pass "comments"
     if source == "comments":
@@ -2149,7 +2186,23 @@ def get_source_frequencies(
     layer_scope: str | None = None,
     observation_ids: list[int] | None = None,
 ) -> dict:
-    """Compute per-source, per-code frequencies with word counts."""
+    """Compute per-source, per-code frequencies with word counts.
+
+    ⚠️ **#749 — this reads an empty id list DIFFERENTLY from its sibling
+    `get_code_frequencies` (above, ~line 462). Read that one before changing
+    this one.**
+
+    Here the test is ``is not None``, so an empty list means **NONE of that
+    kind** — the UI sends ``[]`` for kinds the researcher did not select.
+    `get_code_frequencies` uses a truthy ``if <ids>:``, where the same ``[]``
+    means **ALL of that kind**. Both readings are load-bearing for their own
+    callers; the bug was never the disagreement, it was that #745 built ONE
+    number out of both payloads and printed it beside a number from the other
+    ([[feedback_two_halves_of_one_fact]]).
+
+    This side is the one that can express a scoped selection exactly, which is
+    why the summary table now sources BOTH its count and its percentage here.
+    """
 
     # Load code metadata
     code_query = (
@@ -2265,11 +2318,10 @@ def get_source_frequencies(
             for idx, (cat_id, meta) in enumerate(cat_meta.items())
         ]
 
-        # Effective category ID expression for SQL
-        effective_cat_id = sa_case(
-            (Code.category_id.isnot(None), Code.category_id),
-            else_=(-1 * Code.id),
-        )
+        # Effective category ID expression for SQL — the module-level fold, so
+        # the per-source counts below and the cross-source counts further down
+        # key their rows identically.
+        effective_cat_id = _EFFECTIVE_CAT_ID
 
         # Conversation category counts: DISTINCT segments per category per conversation
         conv_cat_subq = (
@@ -2469,6 +2521,137 @@ def get_source_frequencies(
         col_code_counts: dict[int, dict[int, tuple[int, int]]] = defaultdict(dict)
         for col_id, code_id, cnt, wc in col_code_agg:
             col_code_counts[col_id][code_id] = (cnt, int(wc))
+
+    # ── Cross-source distinct counts: participants and records (#749) ──
+    #
+    # These two grains CANNOT be derived from the per-source counts above, and
+    # that is the whole reason they ride the payload instead of being summed on
+    # the client: a participant speaks in several conversations and one record
+    # can be coded in several text columns, so adding per-source counts
+    # double-counts the same person and the same row. Everything else the
+    # summary table renders IS a per-source roll-up and is derived client-side.
+    #
+    # `group_expr` is the same fold the per-source queries use, so a category
+    # row's participant count is the participants who have ANY code in that
+    # category — not the sum over its codes, which would double-count anyone
+    # coded twice inside one category.
+    group_expr = _EFFECTIVE_CAT_ID if aggregation == "category" else CodeApplication.code_id
+
+    part_by_code_q = (
+        db.query(group_expr.label("gid"), func.count(func.distinct(Speaker.participant_id)))
+        .select_from(CodeApplication)
+        .join(Code, Code.id == CodeApplication.code_id)
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .join(Conversation, Segment.conversation_id == Conversation.id)
+        .join(Speaker, Segment.speaker_id == Speaker.id)
+        .filter(
+            Conversation.project_id == project_id,
+            Speaker.participant_id != None,
+            Speaker.is_facilitator == 0,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+        )
+    )
+    if conv_ids_filter is not None:
+        part_by_code_q = part_by_code_q.filter(Segment.conversation_id.in_(conv_ids_filter))
+    if participant_ids:
+        part_by_code_q = part_by_code_q.filter(Speaker.participant_id.in_(participant_ids))
+    if code_ids is not None:
+        part_by_code_q = part_by_code_q.filter(CodeApplication.code_id.in_(code_ids))
+    part_by_code_q = _coder_filter(part_by_code_q, coder_ids, layer_scope)
+    part_by_code = {r[0]: r[1] for r in part_by_code_q.group_by(group_expr).all()}
+
+    rec_by_code_q = (
+        db.query(group_expr.label("gid"), func.count(func.distinct(DatasetValue.row_id)))
+        .select_from(CodeApplication)
+        .join(Code, Code.id == CodeApplication.code_id)
+        .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
+        .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
+        .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+        .filter(
+            CodeApplication.dataset_value_id.isnot(None),
+            Dataset.project_id == project_id,
+            DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
+        )
+    )
+    if text_column_ids is not None:
+        rec_by_code_q = rec_by_code_q.filter(DatasetValue.column_id.in_(text_column_ids))
+    if participant_ids:
+        rec_by_code_q = rec_by_code_q.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+        rec_by_code_q = rec_by_code_q.filter(DatasetRow.participant_id.in_(participant_ids))
+    if code_ids is not None:
+        rec_by_code_q = rec_by_code_q.filter(CodeApplication.code_id.in_(code_ids))
+    rec_by_code_q = _coder_filter(rec_by_code_q, coder_ids, layer_scope)
+    rec_by_code = {r[0]: r[1] for r in rec_by_code_q.group_by(group_expr).all()}
+
+    # Their denominators. Both are "how many of these exist in the SELECTION",
+    # not "how many carry any coding" — the per-code numerator above is a subset
+    # of exactly this set, which is what makes the percentage a share rather
+    # than a ratio of two differently-scoped counts (the #745 shape).
+    total_part_q = (
+        db.query(func.count(func.distinct(Speaker.participant_id)))
+        .select_from(Segment)
+        .join(Conversation, Segment.conversation_id == Conversation.id)
+        .join(Speaker, Segment.speaker_id == Speaker.id)
+        .filter(
+            Conversation.project_id == project_id,
+            Speaker.participant_id != None,
+            Speaker.is_facilitator == 0,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+        )
+    )
+    if conv_ids_filter is not None:
+        total_part_q = total_part_q.filter(Segment.conversation_id.in_(conv_ids_filter))
+    if participant_ids:
+        total_part_q = total_part_q.filter(Speaker.participant_id.in_(participant_ids))
+    total_participants = total_part_q.scalar() or 0
+
+    # Speakers never linked to a participant. They are excluded from the
+    # participant counts above (the `participant_id != None` filter), so the
+    # table says how many are unaccounted for rather than silently absorbing
+    # them. A participant filter makes the question moot — an unlinked speaker
+    # cannot match a participant id — hence the 0.
+    unlinked_q = (
+        db.query(func.count(func.distinct(Speaker.id)))
+        .select_from(CodeApplication)
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .join(Conversation, Segment.conversation_id == Conversation.id)
+        .join(Speaker, Segment.speaker_id == Speaker.id)
+        .filter(
+            Conversation.project_id == project_id,
+            Speaker.participant_id == None,
+            Speaker.is_facilitator == 0,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+        )
+    )
+    if conv_ids_filter is not None:
+        unlinked_q = unlinked_q.filter(Segment.conversation_id.in_(conv_ids_filter))
+    unlinked_q = _coder_filter(unlinked_q, coder_ids, layer_scope)
+    unlinked_speaker_count = 0 if participant_ids else (unlinked_q.scalar() or 0)
+
+    total_rec_q = (
+        db.query(func.count(func.distinct(DatasetValue.row_id)))
+        .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
+        .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+        .filter(
+            Dataset.project_id == project_id,
+            DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
+            DatasetValue.value_text != None,
+            DatasetValue.value_text != "",
+        )
+    )
+    if text_column_ids is not None:
+        total_rec_q = total_rec_q.filter(DatasetValue.column_id.in_(text_column_ids))
+    if participant_ids:
+        total_rec_q = total_rec_q.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+        total_rec_q = total_rec_q.filter(DatasetRow.participant_id.in_(participant_ids))
+    total_records = total_rec_q.scalar() or 0
+
+    for _c in codes_info:
+        _c["participant_count"] = part_by_code.get(_c["id"], 0)
+        _c["record_count"] = rec_by_code.get(_c["id"], 0)
 
     # ── Documents ──
     documents = (
@@ -2831,6 +3014,14 @@ def get_source_frequencies(
     total_segs = 0
     total_wc = 0
     total_coded = 0
+    # `total_coded` pools segments and texts because several charts want one
+    # "coded units" denominator. The summary table wants them apart: a % of
+    # coded TEXTS computed over a denominator that also counted transcript
+    # segments is the #745 shape with different nouns. Split here, at the one
+    # place that knows which kind each source is, rather than asking the client
+    # to re-derive it from `source_type`.
+    total_coded_segments = 0
+    total_coded_texts = 0
     conv_count = 0
     doc_count = 0
     obs_count = 0
@@ -2867,6 +3058,7 @@ def get_source_frequencies(
         total_segs += t_segs
         total_wc += t_wc
         total_coded += coded
+        total_coded_segments += coded
         conv_count += 1
 
     for d_id, (doc_name, import_order) in doc_map.items():
@@ -2899,6 +3091,7 @@ def get_source_frequencies(
         total_segs += t_segs
         total_wc += t_wc
         total_coded += coded
+        total_coded_segments += coded
         doc_count += 1
 
     for o_id, (obs_name, import_order) in obs_map.items():
@@ -2932,6 +3125,7 @@ def get_source_frequencies(
         total_segs += t_segs
         total_wc += t_wc
         total_coded += coded
+        total_coded_segments += coded
         obs_count += 1
 
     for col_id, meta in col_meta.items():
@@ -2964,6 +3158,7 @@ def get_source_frequencies(
         total_segs += t_segs
         total_wc += t_wc
         total_coded += coded
+        total_coded_texts += coded
         col_count += 1
 
     return {
@@ -2978,6 +3173,16 @@ def get_source_frequencies(
             "total_documents": doc_count,
             "total_observations": obs_count,
             "total_text_columns": col_count,
+            # #749 — the summary table's remaining denominators. Every number it
+            # renders now comes from this one response; it used to take its
+            # per-kind columns from `get_code_frequencies`, which reads an
+            # unselected kind as ALL of that kind, so a conversations-only
+            # selection still counted every observation in the project.
+            "coded_transcript_segments": total_coded_segments,
+            "coded_texts": total_coded_texts,
+            "total_participants": total_participants,
+            "total_records": total_records,
+            "unlinked_speaker_count": unlinked_speaker_count,
         },
         "group_by": group_by_subtype,
     }

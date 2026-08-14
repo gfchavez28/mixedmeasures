@@ -19,6 +19,7 @@ from .consensus import consensus_enabled
 from .consensus_staleness import mark_consensus_stale
 from .coding_layers import CONSENSUS_ORIGIN
 from .observation_segmentation import resequence_observation_clips
+from typing import NamedTuple
 
 
 def _mark_consensus_stale_for_parent(db: Session, project_id: int, parent_type: str, parent_id: int) -> None:
@@ -458,15 +459,22 @@ def split_segment(
     parent_id: int,
     project_id: int,
     user_id: int,
+    report: dict | None = None,
 ) -> tuple[list[Segment], list[int]]:
-    """Split segment(s). Returns (new_segments, deleted_segment_ids)."""
+    """Split segment(s). Returns (new_segments, deleted_segment_ids).
+
+    `report` is an optional out-param (the `import_project` idiom) — the caller
+    passes `{}` and reads `quote_notes_stayed` back: how many quote notes stayed
+    with the original, per #712. Kept OUT of the return tuple so existing callers
+    are unaffected.
+    """
     _refuse_text_op_on_observation(parent_type)
     if len(ranges) == 1:
-        return _split_single(db, ranges[0], parent_type, parent_id, project_id, user_id)
-    return _split_multi(db, ranges, parent_type, parent_id, project_id, user_id)
+        return _split_single(db, ranges[0], parent_type, parent_id, project_id, user_id, report)
+    return _split_multi(db, ranges, parent_type, parent_id, project_id, user_id, report)
 
 
-def _split_single(db, r, parent_type, parent_id, project_id, user_id):
+def _split_single(db, r, parent_type, parent_id, project_id, user_id, report=None):
     """Split a single segment into up to 3 parts."""
     segment = db.query(Segment).filter(
         Segment.id == r.segment_id,
@@ -516,13 +524,31 @@ def _split_single(db, r, parent_type, parent_id, project_id, user_id):
     original_page_number = segment.page_number if parent_type == 'document' else None
     original_heading_level = segment.heading_level if parent_type == 'document' else None
 
-    # Build parts
+    # Build parts. The spans are the STRIPPED extents inside the original text —
+    # `_char_excerpt_carry_plan` rebases quotes against them, and a child's text is
+    # the stripped slice, so the requested offsets alone would be off by the
+    # discarded whitespace (#695).
     parts = []
+    regions: list[_CarryRegion] = []
+    def _region(lo: int, hi: int) -> None:
+        span = _stripped_span(text, lo, hi)
+        regions.append(_CarryRegion(original_id, span[0], span[1], len(parts) - 1, 0))
+
     if before_text:
         parts.append(('before', before_text))
+        _region(0, r.start_offset)
     parts.append(('selected', selected_text))
+    _region(r.start_offset, r.end_offset)
     if after_text:
         parts.append(('after', after_text))
+        _region(r.end_offset, len(text))
+
+    # #695: char-range quotes used to be left on the original, which the split
+    # soft-deletes — so they vanished from the workbench and the Quote Board with no
+    # notice. Carried per the plan, the text-shaped port of #621's clip rule.
+    carry_plan = _char_excerpt_carry_plan(list(segment.excerpts or []), regions)
+    if report is not None:
+        report["quote_notes_stayed"] = _count_notes_left_behind(carry_plan)
 
     num_new = len(parts)
 
@@ -566,6 +592,8 @@ def _split_single(db, r, parent_type, parent_id, project_id, user_id):
         if part_type == 'selected' and had_whole_excerpt:
             db.add(Excerpt(project_id=project_id, segment_id=new_seg.id))
 
+        _add_carried_excerpts(db, carry_plan, i, new_seg.id)
+
         new_segments.append(new_seg)
         if part_type == 'selected':
             selected_segment = new_seg
@@ -599,7 +627,7 @@ def _split_single(db, r, parent_type, parent_id, project_id, user_id):
     return result, [original_id]
 
 
-def _split_multi(db, ranges, parent_type, parent_id, project_id, user_id):
+def _split_multi(db, ranges, parent_type, parent_id, project_id, user_id, report=None):
     """Split across multiple adjacent segments."""
     segment_ids = [r.segment_id for r in ranges]
     segments = db.query(Segment).filter(
@@ -692,11 +720,37 @@ def _split_multi(db, ranges, parent_type, parent_id, project_id, user_id):
     first_heading = first_seg.heading_level if parent_type == 'document' else None
 
     parts = []
+    regions: list[_CarryRegion] = []
     if before_text:
         parts.append(('before', before_text, first_speaker_id))
+        b_lo, b_hi = _stripped_span(first_seg.text, 0, first_range.start_offset)
+        regions.append(_CarryRegion(first_seg.id, b_lo, b_hi, len(parts) - 1, 0))
+
     parts.append(('selected', selected_text, merged_speaker_id))
+    # #695: the selected child CONCATENATES runs from every source segment, so each
+    # run needs its own destination offset — a plain rebase would be wrong for all
+    # but the first. `_joined_regions` lays them out exactly as
+    # `' '.join(p for p in selected_parts if p)` did, dropping empties BEFORE
+    # counting a separator (counting one for a piece that was never emitted would
+    # shift every later offset by one). Middles are deliberately UNstripped here,
+    # matching `middle_texts = [s.text for s in segments[1:-1]]`.
+    _pieces: list[tuple[int, int, int, str]] = []
+    _pieces.append((first_seg.id, *_stripped_span(first_seg.text, first_range.start_offset, len(first_seg.text)), first_selected))
+    for _mid in (segments[1:-1] if len(segments) > 2 else []):
+        _pieces.append((_mid.id, 0, len(_mid.text), _mid.text))
+    _pieces.append((last_seg.id, *_stripped_span(last_seg.text, 0, last_range.end_offset), last_selected))
+    regions.extend(_joined_regions(_pieces, len(parts) - 1))
+
     if after_text:
         parts.append(('after', after_text, last_speaker_id))
+        a_lo, a_hi = _stripped_span(last_seg.text, last_range.end_offset, len(last_seg.text))
+        regions.append(_CarryRegion(last_seg.id, a_lo, a_hi, len(parts) - 1, 0))
+
+    carry_plan = _char_excerpt_carry_plan(
+        [e for seg in segments for e in (seg.excerpts or [])], regions,
+    )
+    if report is not None:
+        report["quote_notes_stayed"] = _count_notes_left_behind(carry_plan)
 
     num_new = len(parts)
     num_originals = len(segments)
@@ -737,6 +791,8 @@ def _split_multi(db, ranges, parent_type, parent_id, project_id, user_id):
 
         if part_type == 'selected' and had_whole_excerpt:
             db.add(Excerpt(project_id=project_id, segment_id=new_seg.id))
+
+        _add_carried_excerpts(db, carry_plan, i, new_seg.id)
 
         new_segments.append(new_seg)
         if part_type == 'selected':
@@ -980,6 +1036,183 @@ def _human_app_fields(segment: Segment) -> list[dict]:
         for ca in segment.code_applications
         if ca.origin != CONSENSUS_ORIGIN
     ]
+
+
+def _count_notes_left_behind(carry_plan: list[tuple["Excerpt", int, int, int]]) -> int:
+    """#712 — how many quote notes this split is about to leave on the original.
+
+    Counted from the carry plan, so it is exactly the set of SOURCE quotes that
+    produce a carried copy AND carry a one-to-one `Note`. Distinct on the source
+    excerpt: the plan lists one tuple per (excerpt, destination part), so a quote
+    divided across two children would otherwise be counted twice.
+
+    ⚠️ **This is computable HERE and nowhere later**, which is the whole reason the
+    disclosure happens at split time (#712's amended design). Afterwards the link is
+    gone: `Excerpt` has no provenance column, `_add_carried_excerpts` clips offsets
+    and dedups on `(start, end)` so child→source is many-to-one, and the
+    child→original edge is `_find_split_siblings`' contiguity heuristic. A per-quote
+    caveat rendered later could only be guessed.
+    """
+    return len({id(ex) for ex, _idx, _s, _e in carry_plan if ex.note is not None})
+
+
+def _add_carried_excerpts(
+    db: Session, carry_plan: list[tuple["Excerpt", int, int, int]], part_index: int, segment_id: int,
+) -> int:
+    """Write this part's share of the carried char-range quotes (#695).
+
+    A carried quote is a NEW row, never a re-pointed one — the same reasoning as
+    `_copy_clip_excerpt`: the original keeps its own while soft-deleted, so
+    `unsplit_segment` DELETES these children and their copies go with them via
+    `Segment.excerpts`' delete-orphan cascade, restoring the original's quote with no
+    explicit move-back. Re-pointing would be worse than merely awkward here — unsplit
+    would DESTROY the only row, and the attached note's `excerpt_id`
+    (``ondelete="SET NULL"``) would silently detach.
+
+    ⚠️ Dedup on (start, end): `ix_excerpt_segment_range` is unique per segment, and
+    two distinct quotes on the source can clip to the same span on one child. Without
+    this that is an IntegrityError mid-split, not a duplicate row.
+
+    ⚠️ Deliberately NOT carried, matching `_copy_clip_excerpt`: the excerpt's `uuid`
+    (a distinct row IS a distinct entity for the J3-2 merge spine) and its one-to-one
+    `note` (`ix_notes_excerpt_unique` allows exactly one, so a divided quote could not
+    keep it on both pieces). The note stays with the original and an undo restores it.
+    Unlike the clip case this IS reachable today — `onAddNoteToExcerpt` exists on the
+    text workbenches — so it is a real, bounded gap rather than a documented
+    impossibility, tracked separately rather than decided here.
+    """
+    seen: set[tuple[int, int]] = set()
+    written = 0
+    for ex, idx, new_start, new_end in carry_plan:
+        if idx != part_index:
+            continue
+        if (new_start, new_end) in seen:
+            continue
+        seen.add((new_start, new_end))
+        db.add(Excerpt(
+            project_id=ex.project_id,
+            segment_id=segment_id,
+            start_offset=new_start,
+            end_offset=new_end,
+        ))
+        written += 1
+    return written
+
+
+def _stripped_span(text: str, lo: int, hi: int) -> tuple[int, int]:
+    """Where ``text[lo:hi].strip()`` actually sits inside ``text``.
+
+    `split_segment` builds each child from a STRIPPED slice, so a child's text is not
+    `text[lo:hi]` — leading and trailing whitespace is discarded and every offset
+    inside it shifts. Re-anchoring a quote therefore needs the stripped span, not the
+    requested one. This is the one thing the clip sibling (`_clip_excerpt_carry_plan`)
+    does not have to reason about: times are absolute, so a clip split moves
+    ownership without moving coordinates.
+
+    A whitespace-only slice returns a zero-width span at `lo`; the caller drops
+    quotes that fall in one, since no child segment is created for it either.
+    """
+    raw = text[lo:hi]
+    lead = len(raw) - len(raw.lstrip())
+    trail = len(raw) - len(raw.rstrip())
+    start = lo + lead
+    end = hi - trail
+    return (start, end) if end > start else (start, start)
+
+
+class _CarryRegion(NamedTuple):
+    """One run of SOURCE text landing at a known place in ONE new segment.
+
+    Both text splits are describable this way, which is what lets them share a plan:
+    the single-segment split produces three regions from one source, and the
+    multi-segment split produces regions from N sources — including several that
+    concatenate into the same "selected" child.
+    """
+    src_segment_id: int
+    src_start: int    # stripped span start, in the SOURCE segment's text
+    src_end: int      # stripped span end (exclusive)
+    part_index: int   # which new segment this run lands in
+    dest_offset: int  # where this run's text begins inside that new segment
+
+
+def _joined_regions(
+    pieces: list[tuple[int, int, int, str]], part_index: int, joiner_len: int = 1,
+) -> list[_CarryRegion]:
+    """Lay out `' '.join(non-empty pieces)` and report where each piece landed.
+
+    ``pieces`` is ``(src_segment_id, src_start, src_end, piece_text)``. Empty pieces
+    are dropped BEFORE the joiner is counted — mirroring
+    ``' '.join(p for p in parts if p)`` exactly, because counting a separator for a
+    piece that was never emitted would shift every subsequent offset by one.
+    """
+    out: list[_CarryRegion] = []
+    cursor = 0
+    for seg_id, s, e, txt in pieces:
+        if not txt:
+            continue
+        if cursor > 0:
+            cursor += joiner_len
+        out.append(_CarryRegion(seg_id, s, e, part_index, cursor))
+        cursor += len(txt)
+    return out
+
+
+def _char_excerpt_carry_plan(
+    excerpts: list[Excerpt],
+    regions: list[_CarryRegion],
+) -> list[tuple[Excerpt, int, int, int]]:
+    """Decide where each char-range quote goes when text segments are split (#695).
+
+    Returns ``(excerpt, part_index, new_start, new_end)`` — one row per destination,
+    so a quote straddling a cut yields TWO.
+
+    This is the text-shaped port of `_clip_excerpt_carry_plan`; the rules are the same
+    claim in a different coordinate system:
+
+    - **A quote contained in one region → that region's part**, rebased.
+    - **A quote spanning a cut → DIVIDED**, one piece per region it overlaps.
+      Dropping it or picking a side would silently discard part of a marked passage.
+    - **A quote landing entirely in stripped whitespace → carried nowhere.** No child
+      segment exists for that text, so there is no honest destination; it stays on
+      the soft-deleted original and returns on unsplit, exactly as today.
+
+    ⚠️ Two ways the text case is genuinely unlike the clip case, and neither is
+    hand-waving:
+
+    1. **Children are built from STRIPPED slices**, so offsets shift by the discarded
+       whitespace — hence `_stripped_span` feeding `src_start`/`src_end`. A clip split
+       moves ownership without moving coordinates, because times are absolute (D29).
+    2. **The multi-segment split CONCATENATES** runs from several source segments into
+       one child, so a destination offset is `dest_offset + (quote - src_start)`
+       rather than a plain rebase.
+
+    Whole-segment excerpts are NOT handled here — both splits already re-create those
+    on the "selected" part via `had_whole_excerpt`, which is the text analogue of the
+    clip rule's "both halves" (a text split has three parts and the selected one is
+    the one the user pointed at). Changing that is out of scope for #695.
+    """
+    plan: list[tuple[Excerpt, int, int, int]] = []
+
+    for ex in excerpts:
+        if ex.start_offset is None:
+            continue  # whole-segment; handled by had_whole_excerpt
+        for reg in regions:
+            if reg.src_segment_id != ex.segment_id:
+                continue
+            if reg.src_end <= reg.src_start:
+                continue  # whitespace-only run — nothing was emitted for it
+            lo = max(ex.start_offset, reg.src_start)
+            hi = min(ex.end_offset, reg.src_end)
+            if hi <= lo:
+                continue  # no overlap with this run
+            plan.append((
+                ex,
+                reg.part_index,
+                reg.dest_offset + (lo - reg.src_start),
+                reg.dest_offset + (hi - reg.src_start),
+            ))
+
+    return plan
 
 
 def _clip_excerpt_carry_plan(

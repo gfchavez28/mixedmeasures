@@ -12,6 +12,7 @@ import {
 import { useChartColors } from '@/lib/theme-context'
 import type { SaturationResponse } from '@/lib/api'
 import type { RechartsTooltipProps } from '@/lib/chart-types'
+import { ChartFigure } from '@/components/charts/ChartFigure'
 
 interface SaturationCurveProps {
   data: SaturationResponse
@@ -56,7 +57,7 @@ export default function SaturationCurve({ data }: SaturationCurveProps) {
 
   return (
     <div>
-      <div role="img" aria-label="Saturation curve showing cumulative unique codes by source">
+      <ChartFigure label="Saturation curve showing cumulative unique codes by source">
         <ResponsiveContainer width="100%" height={360}>
           <LineChart
             data={chartData}
@@ -108,7 +109,7 @@ export default function SaturationCurve({ data }: SaturationCurveProps) {
             />
           </LineChart>
         </ResponsiveContainer>
-      </div>
+      </ChartFigure>
 
       <div className="mt-3 text-xs text-mm-text-muted space-y-1">
         <p>

@@ -247,7 +247,10 @@ export function CreatableCombobox({
           <ChevronsUpDown className="w-3.5 h-3.5 text-mm-text-muted flex-shrink-0" />
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-[260px] p-1" align="start">
+      {/* Named from the caller's own placeholder, which already doubles as the
+          search input's accessible name — so a generic "Options" can never drift
+          from what the consumer actually asked for. */}
+      <PopoverContent className="w-[260px] p-1" align="start" aria-label={searchPlaceholder}>
         <CreatableComboList
           options={options}
           value={value}

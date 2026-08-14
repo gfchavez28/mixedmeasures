@@ -26,6 +26,30 @@ export function extractFilename(headers: Record<string, unknown>, fallback: stri
   return cd.match(/filename="?([^"]+)"?/)?.[1] ?? fallback
 }
 
+/** A downloadable blob together with the name the SERVER asked it to have. */
+export interface NamedBlob {
+  blob: Blob
+  filename: string
+}
+
+/**
+ * Wrap a blob response so the server's `Content-Disposition` name survives to
+ * the download (#743).
+ *
+ * An api wrapper that resolves to `res.data` alone throws the headers away, so
+ * the call site cannot use the server's filename even if it wants to — it is
+ * forced to invent one, and inventing one is how every group-comparison export
+ * came to be called `group_comparison.csv` regardless of which grouping
+ * produced it, silently overwriting the previous file. Prefer this over a
+ * hand-written literal whenever the endpoint sets the header.
+ */
+export function namedBlob(
+  res: { data: unknown; headers: Record<string, unknown> },
+  fallback: string,
+): NamedBlob {
+  return { blob: res.data as Blob, filename: extractFilename(res.headers, fallback) }
+}
+
 /**
  * Fetch an export endpoint as a blob (via the credentialed api client) and
  * trigger a browser download, using the server's Content-Disposition filename.

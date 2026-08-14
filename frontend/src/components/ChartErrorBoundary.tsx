@@ -28,7 +28,7 @@ export class ChartErrorBoundary extends React.Component<Props, State> {
       return (
         <div role="alert" className="flex flex-col items-center justify-center h-64 text-mm-text-faint text-sm gap-2 p-4">
           <span>Chart failed to render</span>
-          <span className="text-xs text-mm-border-medium max-w-md text-center">
+          <span className="text-xs max-w-md text-center">
             {this.state.error?.message}
           </span>
           <button

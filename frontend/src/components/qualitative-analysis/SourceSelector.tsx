@@ -1,5 +1,6 @@
-import { useState, useMemo, useCallback, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useState, useMemo, useCallback, useRef } from 'react'
 import { Check, ChevronDown, ChevronRight } from 'lucide-react'
+import { useTreeKeyboardNav, useTreeAriaPositions } from '@/hooks/useTreeKeyboardNav'
 import type { ConversationOption, TextColumnInfo, DocumentListItem, Observation } from '@/lib/api'
 
 interface SourceSelectorProps {
@@ -164,54 +165,38 @@ export default function SourceSelector({
     }
   }, [allObsSelected, observations, onObservationChange])
 
-  const toggleDatasetExpand = useCallback((datasetId: number) => {
+  /** Toggle, or set explicitly — ArrowRight/ArrowLeft mean expand/collapse, not
+   *  "flip", so a second ArrowRight on an open node must not close it. */
+  const toggleDatasetExpand = useCallback((datasetId: number, force?: boolean) => {
     setExpandedDatasets(prev => {
       const next = new Set(prev)
-      if (next.has(datasetId)) next.delete(datasetId)
-      else next.add(datasetId)
+      const open = force ?? !next.has(datasetId)
+      if (open) next.add(datasetId)
+      else next.delete(datasetId)
       return next
     })
   }, [])
 
   // Keyboard navigation
-  const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
-    const items = treeRef.current?.querySelectorAll('[role="treeitem"]')
-    if (!items || items.length === 0) return
-
-    const focused = document.activeElement as HTMLElement
-    const idx = Array.from(items).indexOf(focused)
-    if (idx === -1) return
-
-    switch (e.key) {
-      case 'ArrowDown': {
-        e.preventDefault()
-        const next = items[Math.min(idx + 1, items.length - 1)] as HTMLElement
-        next?.focus()
-        break
-      }
-      case 'ArrowUp': {
-        e.preventDefault()
-        const prev = items[Math.max(idx - 1, 0)] as HTMLElement
-        prev?.focus()
-        break
-      }
-      case ' ': {
-        e.preventDefault()
-        focused.click()
-        break
-      }
-      case 'Home': {
-        e.preventDefault()
-        ;(items[0] as HTMLElement)?.focus()
-        break
-      }
-      case 'End': {
-        e.preventDefault()
-        ;(items[items.length - 1] as HTMLElement)?.focus()
-        break
-      }
+  // #701(a): the keyboard layer is shared. This file used to carry its own
+  // copy — the same querySelectorAll + activeElement + switch as two sibling
+  // trees, minus the ArrowRight/ArrowLeft one of them had, minus the Enter key
+  // none of them had.
+  const handleSetExpanded = useCallback((item: HTMLElement, expand: boolean) => {
+    // The section is identified by the group it owns, which is the id already
+    // rendered for `aria-owns` — no second identifier to keep in step.
+    const owns = item.getAttribute('aria-owns') ?? ''
+    if (owns.endsWith('conversations')) setConvsExpanded(expand)
+    else if (owns.endsWith('documents')) setDocsExpanded(expand)
+    else if (owns.endsWith('observations')) setObsExpanded(expand)
+    else if (owns.startsWith('src-tree-group-dataset-')) {
+      const datasetId = Number(owns.slice('src-tree-group-dataset-'.length))
+      if (Number.isFinite(datasetId)) toggleDatasetExpand(datasetId, expand)
     }
-  }, [])
+  }, [toggleDatasetExpand])
+
+  const handleKeyDown = useTreeKeyboardNav({ treeRef, onSetExpanded: handleSetExpanded })
+  useTreeAriaPositions(treeRef)
 
   const renderCheckbox = (checked: boolean, indeterminate?: boolean) => (
     <span className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${
@@ -237,6 +222,7 @@ export default function SourceSelector({
       <div
         role="treeitem"
         tabIndex={0}
+        aria-level={1}
         aria-checked={allSelected}
         className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-mm-surface-hover cursor-pointer"
         onClick={toggleAll}
@@ -258,6 +244,8 @@ export default function SourceSelector({
             role="treeitem"
             tabIndex={-1}
             aria-expanded={convsExpanded}
+            aria-owns="src-tree-group-conversations"
+            aria-level={1}
             aria-checked={allConvsSelected}
             className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-mm-surface-hover rounded"
             onClick={toggleAllConvs}
@@ -277,12 +265,13 @@ export default function SourceSelector({
             <span className="text-xs text-mm-text-faint ml-auto tabular-nums">{conversations.length}</span>
           </div>
           {convsExpanded && (
-            <div role="group" className="ml-4 space-y-0.5">
+            <div role="group" id="src-tree-group-conversations" className="ml-4 space-y-0.5">
               {conversations.map(conv => (
                 <div
                   key={conv.id}
                   role="treeitem"
                   tabIndex={-1}
+                  aria-level={2}
                   aria-checked={selectedConversationIds.has(conv.id)}
                   className="flex items-center gap-2 px-2 py-1 text-sm rounded cursor-pointer hover:bg-mm-surface-hover"
                   onClick={() => toggleConversation(conv.id)}
@@ -308,6 +297,8 @@ export default function SourceSelector({
               role="treeitem"
               tabIndex={-1}
               aria-expanded={expanded}
+              aria-owns={`src-tree-group-dataset-${datasetId}`}
+              aria-level={1}
               aria-checked={allColsSel}
               className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-mm-surface-hover rounded"
               onClick={() => toggleDataset(datasetId)}
@@ -327,12 +318,13 @@ export default function SourceSelector({
               <span className="text-xs text-mm-text-faint ml-auto tabular-nums">{columns.length}</span>
             </div>
             {expanded && (
-              <div role="group" className="ml-4 space-y-0.5">
+              <div role="group" id={`src-tree-group-dataset-${datasetId}`} className="ml-4 space-y-0.5">
                 {columns.map(col => (
                   <div
                     key={col.column_id}
                     role="treeitem"
                     tabIndex={-1}
+                    aria-level={2}
                     aria-checked={selectedTextColumnIds.has(col.column_id)}
                     className="flex items-center gap-2 px-2 py-1 text-sm rounded cursor-pointer hover:bg-mm-surface-hover"
                     onClick={() => toggleTextColumn(col.column_id)}
@@ -355,6 +347,8 @@ export default function SourceSelector({
             role="treeitem"
             tabIndex={-1}
             aria-expanded={docsExpanded}
+            aria-owns="src-tree-group-documents"
+            aria-level={1}
             aria-checked={allDocsSelected}
             className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-mm-surface-hover rounded"
             onClick={toggleAllDocs}
@@ -374,12 +368,13 @@ export default function SourceSelector({
             <span className="text-xs text-mm-text-faint ml-auto tabular-nums">{documents.length}</span>
           </div>
           {docsExpanded && (
-            <div role="group" className="ml-4 space-y-0.5">
+            <div role="group" id="src-tree-group-documents" className="ml-4 space-y-0.5">
               {documents.map(doc => (
                 <div
                   key={doc.id}
                   role="treeitem"
                   tabIndex={-1}
+                  aria-level={2}
                   aria-checked={selectedDocumentIds.has(doc.id)}
                   className="flex items-center gap-2 px-2 py-1 text-sm rounded cursor-pointer hover:bg-mm-surface-hover"
                   onClick={() => toggleDocument(doc.id)}
@@ -400,6 +395,8 @@ export default function SourceSelector({
             role="treeitem"
             tabIndex={-1}
             aria-expanded={obsExpanded}
+            aria-owns="src-tree-group-observations"
+            aria-level={1}
             aria-checked={allObsSelected}
             className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-mm-surface-hover rounded"
             onClick={toggleAllObs}
@@ -419,12 +416,13 @@ export default function SourceSelector({
             <span className="text-xs text-mm-text-faint ml-auto tabular-nums">{observations.length}</span>
           </div>
           {obsExpanded && (
-            <div role="group" className="ml-4 space-y-0.5">
+            <div role="group" id="src-tree-group-observations" className="ml-4 space-y-0.5">
               {observations.map(obs => (
                 <div
                   key={obs.id}
                   role="treeitem"
                   tabIndex={-1}
+                  aria-level={2}
                   aria-checked={selectedObservationIds.has(obs.id)}
                   className="flex items-center gap-2 px-2 py-1 text-sm rounded cursor-pointer hover:bg-mm-surface-hover"
                   onClick={() => toggleObservation(obs.id)}

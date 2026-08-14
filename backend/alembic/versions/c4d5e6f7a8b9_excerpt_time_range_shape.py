@@ -15,7 +15,7 @@ as nullable `start_time`/`end_time` (absolute timeline seconds), with:
 
 The CHECK additions force `batch_alter_table(recreate='always')`. env.py holds
 PRAGMA foreign_keys=OFF at the connection level — NO PRAGMA statements here
-(see backend/alembic/CLAUDE.md). The partial indexes are dropped-if-present and
+(see backend/alembic/the internal design notes). The partial indexes are dropped-if-present and
 recreated explicitly AFTER the batch so the outcome never depends on how batch
 reflection handles partial-index WHERE clauses; `schema_diff_harness.py`
 compares the WHERE text against the model, which is the zero-drift gate.

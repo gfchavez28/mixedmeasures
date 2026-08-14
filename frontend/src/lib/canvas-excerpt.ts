@@ -43,20 +43,29 @@ export function excerptDisplayLabel(e: ExcerptResponse): string {
  * A clip has neither speaker nor conversation (its `Segment` parent is an
  * Observation), which is exactly why the drawer's old
  * `[speaker_name, conversation_name]` line rendered empty.
+ *
+ * ⚠️ #736: this used to ENUMERATE parents — observation, else conversation —
+ * and a DOCUMENT quote matched neither, so it returned ''. That blank reached
+ * the Materials drawer, the embed's `sourceContext`, and therefore all four
+ * export renderers: a document quote exported as an unattributed blockquote.
+ * It now reads the RESOLVED `source_name`, which cannot go one parent short.
+ * The clip branch survives only to COMPOSE the timecode — `source_name` is
+ * deliberately bare, because a per-clip suffix once shattered the quote
+ * board's group-by-source into one bucket per clip.
  */
 export function excerptAttributionLine(
   e: ExcerptResponse,
   opts: { includeSpeaker?: boolean } = {},
 ): string {
+  const name = e.source_name ?? ''
   if (e.observation_id) {
     const range = excerptRangeLabel(e)
-    const name = e.observation_name ?? ''
     return range ? `${name} · ${range}` : name
   }
   if (opts.includeSpeaker) {
-    return [e.speaker_name, e.conversation_name].filter(Boolean).join(' · ')
+    return [e.speaker_name, name].filter(Boolean).join(' · ')
   }
-  return e.conversation_name ?? ''
+  return name
 }
 
 /**

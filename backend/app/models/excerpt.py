@@ -137,3 +137,49 @@ def segment_has_any_quote_filter():
         Excerpt.segment_id.isnot(None),
         Excerpt.start_offset.is_(None),
     )
+
+
+# ── Source resolution (#736) ─────────────────────────────────────────────────
+
+def excerpt_source_pair(excerpt) -> tuple[str, str]:
+    """(source kind, source name) for an excerpt, whatever it hangs off.
+
+    THE place an excerpt's source is decided. The excerpt-scoped sibling of
+    `routers/export_helpers.py::segment_source_pair`, and deliberately NOT a
+    call into it: an excerpt has a FOURTH kind — ``text``, a `DatasetValue`
+    comment — which a segment-scoped helper cannot express at all.
+
+    #736: before this, three sites hand-rolled the dispatch (the excerpts CSV,
+    the Excel Quotes sheet, and `_excerpt_to_response`) and the third one was
+    one parent short — it resolved conversations and observations but not
+    documents, so a document quote reached the client with no name and every
+    canvas embed and export rendered a blank attribution.
+
+    ⚠️ The name is BARE — no timecode suffix. A per-clip suffix once made it
+    unique per clip and shattered the group-by-source quote board into one
+    bucket per clip (see the `quoted-excerpts` endpoint). Composing a range
+    onto it is the caller's job (`lib/canvas-excerpt.ts::excerptAttributionLine`).
+
+    ⚠️ Needs the parents eager-loaded — `_base_excerpt_query` does this.
+    """
+    seg = excerpt.segment if excerpt is not None else None
+    if seg is not None:
+        if seg.conversation is not None:
+            return "conversation", seg.conversation.name
+        if seg.document is not None:
+            return "document", seg.document.name
+        if seg.observation is not None:
+            return "observation", seg.observation.name
+        # ck_segment_exactly_one_parent forbids reaching here.
+        return "", ""  # pragma: no cover - defensive
+    if excerpt is not None and excerpt.dataset_value is not None:
+        dv = excerpt.dataset_value
+        col = dv.column
+        ds = col.dataset if col is not None else None
+        name = " › ".join(p for p in (
+            ds.name if ds is not None else None,
+            (col.column_name or col.column_text) if col is not None else None,
+        ) if p)
+        return "text", name
+    # ck_excerpt_exactly_one_target forbids reaching here.
+    return "", ""  # pragma: no cover - defensive

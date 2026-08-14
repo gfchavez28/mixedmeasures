@@ -5,6 +5,8 @@ import { DndContext, useDroppable, type DragEndEvent } from '@dnd-kit/core'
 import { canvasApi, excerptsApi, materialsApi, memosApi, type CanvasListItem, type CanvasDetail, type CanvasTheme, type CanvasSnapshot, type PendingItem } from '@/lib/api'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useHistory } from '@/hooks/useHistory'
+import { useBlindMode } from '@/hooks/useBlindMode'
+import { useAuth } from '@/lib/auth-context'
 import {
   Select,
   SelectContent,
@@ -307,6 +309,8 @@ function OutlineSidebar({
 
 export default function CanvasView() {
   const { projectId, setBreadcrumbLabel } = useProjectLayout()
+  const { blind } = useBlindMode(projectId)
+  const { user } = useAuth()
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
@@ -577,29 +581,38 @@ export default function CanvasView() {
     updateCanvasMut.mutate({ name })
   }, [updateCanvasMut])
 
+  // #652 slab 4 — the Timeline embed is the first canvas surface whose numbers
+  // are coder-scoped, and the export runs outside React, so the blind lens has
+  // to be read here and handed down. Without it a blind researcher's exported
+  // document would carry all-coder numbers into a shareable file.
+  const timelineLens = useMemo(
+    () => ({ blind, self: user?.id ?? null }),
+    [blind, user?.id],
+  )
+
   const handleExportMarkdown = useCallback(async () => {
     if (!canvas) return
     const toastId = toast.loading('Exporting as Markdown...')
     try {
-      const md = await exportCanvasMarkdown(canvas, themes, projectId)
+      const md = await exportCanvasMarkdown(canvas, themes, projectId, timelineLens)
       downloadFile(md, `${canvas.name}.md`, 'text/markdown')
       toast.success('Exported as Markdown', { id: toastId })
     } catch {
       toast.error('Export failed', { id: toastId })
     }
-  }, [canvas, themes, projectId])
+  }, [canvas, themes, projectId, timelineLens])
 
   const handleExportHtml = useCallback(async () => {
     if (!canvas) return
     const toastId = toast.loading('Exporting as HTML...')
     try {
-      const html = await exportCanvasHtml(canvas, themes, projectId)
+      const html = await exportCanvasHtml(canvas, themes, projectId, undefined, timelineLens)
       downloadFile(html, `${canvas.name}.html`, 'text/html')
       toast.success('Exported as HTML', { id: toastId })
     } catch {
       toast.error('Export failed', { id: toastId })
     }
-  }, [canvas, themes, projectId])
+  }, [canvas, themes, projectId, timelineLens])
 
   // Charts can only be captured from the live DOM, which exists in the Writing view
   // (all themes mount there). Warn once when a canvas has charts but none were
@@ -625,11 +638,11 @@ export default function CanvasView() {
       const pngs = await captureCanvasChartPngs()
       warnIfChartsUncaptured(pngs)
       toast.dismiss(toastId)
-      await exportCanvasPdf(canvas, themes, projectId, pngs)
+      await exportCanvasPdf(canvas, themes, projectId, pngs, timelineLens)
     } catch {
       toast.error('PDF export failed', { id: toastId })
     }
-  }, [canvas, themes, projectId, warnIfChartsUncaptured])
+  }, [canvas, themes, projectId, warnIfChartsUncaptured, timelineLens])
 
   const handleExportDocx = useCallback(async () => {
     if (!canvas || !canvasId) return
@@ -907,7 +920,15 @@ export default function CanvasView() {
       try {
         if (itemType === 'excerpt') {
           const e = await excerptsApi.get(projectId, sourceId)
-          targetRef.current.insertExcerpt({ excerptId: e.id, displayText: e.excerpt_text, sourceContext: e.conversation_name ?? '', conversationId: e.conversation_id })
+          // #738: this hand-rolled the embed attrs and was FOUR of five wrong —
+          // raw `excerpt_text` (a clip's label is routinely empty, so the embed
+          // rendered blank), a conversation-only `sourceContext` (empty for
+          // documents AND clips), an unconditional `conversationId`, and no
+          // `observationId` at all, so a dragged clip's deep link could never
+          // resolve. `excerptEmbedAttrs` is the single source the other two
+          // insert paths already used; this third gesture (drag onto a theme)
+          // arrived after the docstring said there were only two.
+          targetRef.current.insertExcerpt(excerptEmbedAttrs(e))
         } else if (itemType === 'material') {
           const materials = await materialsApi.listAllMaterials(projectId)
           const m = materials?.find(x => x.id === sourceId)
@@ -1324,7 +1345,7 @@ export default function CanvasView() {
                   )}
                 </button>
               </PopoverTrigger>
-              <PopoverContent align="end" className="w-72 p-0">
+              <PopoverContent align="end" className="w-72 p-0" aria-label="Save snapshot">
                 <div className="p-2 border-b border-mm-border-subtle">
                   <p className="text-xs font-semibold text-mm-text-muted uppercase tracking-wider mb-2">Save snapshot</p>
                   <div className="flex gap-1">
@@ -1374,7 +1395,7 @@ export default function CanvasView() {
                           </button>
                           <button
                             onClick={() => deleteSnapshotMut.mutate(snap.id)}
-                            className="p-0.5 rounded hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors text-mm-text-muted hover:text-red-500"
+                            className="p-0.5 rounded hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors text-mm-text-muted hover:text-red-700"
                             title="Delete snapshot"
                           >
                             <Trash2 className="w-3 h-3" />
@@ -1395,7 +1416,7 @@ export default function CanvasView() {
                 ? setPermanentDeleteTarget({ id: canvas.id, name: canvas.name })
                 : setDeleteTarget({ id: canvas.id, name: canvas.name })
               }
-              className="p-1.5 rounded text-mm-text-muted hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
+              className="p-1.5 rounded text-mm-text-muted hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
               title={isCurrentArchived ? 'Delete permanently' : 'Archive canvas'}
             >
               <Trash2 className="w-3.5 h-3.5" />

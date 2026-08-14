@@ -21,6 +21,16 @@ export interface ExcerptResponse {
   start_time: number | null
   end_time: number | null
   excerpt_text: string
+  /**
+   * The RESOLVED source (#736) — read THESE to name a quote's origin.
+   * `source_kind` is `conversation | document | observation | text`.
+   * The per-parent pairs below are an ENUMERATION and were one parent short:
+   * a document quote matched neither, so the attribution line fell through to
+   * '' on the canvas and in every export.
+   * ⚠️ `source_name` is BARE — compose any timecode onto it yourself.
+   */
+  source_kind: string
+  source_name: string
   conversation_id: number | null
   conversation_name: string | null
   observation_id: number | null

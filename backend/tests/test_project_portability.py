@@ -787,9 +787,10 @@ class TestChunkedMemberCopy:
         with zipfile.ZipFile(archive, "w") as zf:
             zf.writestr("media/1/original.mp4", payload)
 
-        target = tmp_path / "out" / "nested" / "original.mp4"
+        base = tmp_path / "out"
+        target = base / "nested" / "original.mp4"
         with zipfile.ZipFile(archive, "r") as zf:
-            _extract_zip_member(zf, "media/1/original.mp4", target)
+            _extract_zip_member(zf, "media/1/original.mp4", target, base)
 
         assert target.exists()
         assert target.read_bytes() == payload
@@ -2658,3 +2659,277 @@ def test_duplicate_project_endpoint(db_session, populated_project, tmp_path, mon
         for p in db_session.query(Project).filter(Project.user_id == 1).all()
     ]
     assert len(names) == len(set(names)), f"duplicate project names: {names}"
+
+
+class TestFormatVersionIsPinned:
+    """The CURRENT format version must be pinned, so a bump is a deliberate act.
+
+    Nothing pinned it before, which is how #687's v5 bump surfaced as a surprise
+    failure in an unrelated declaration test that happened to hard-code `== 4`.
+    A bump changes what an older build does with a file, so it should never be an
+    incidental side effect of another change.
+    """
+
+    def test_current_version_is_5(self):
+        from app.services.project_portability import CURRENT_FORMAT_VERSION
+        assert CURRENT_FORMAT_VERSION == 5, (
+            "The .mmproject format version changed. That is a real decision, not a "
+            "detail: v2 = #414 identifier, v3 = the third Segment parent, v4 = #592 "
+            "missing declarations, v5 = #687 code-point excerpt offsets. If this is "
+            "intentional, update this pin AND document what the new version means "
+            "in project_portability.py, the internal design notes, and the internal design notes."
+        )
+
+
+class TestPreV5OffsetRepairOnImport:
+    """#687 — a pre-v5 archive carries UTF-16 excerpt offsets; convert on the way in.
+
+    Without this, importing an old project would silently reintroduce exactly the
+    drift the repair migration removed — the other door into the same defect. It is
+    scoped to segments whose text actually contains an astral character, because for
+    everything else the two bases coincide and the stored number is already right.
+
+    ⚠️ **The cases below call `_repair_pre_v5_excerpt_offsets` DIRECTLY**, so none of
+    them can see WHERE `import_project` calls it — which is precisely how #747's
+    sibling call shipped inert, wired ~50 lines too early and handed an empty set on
+    every import. `test_the_repair_is_wired_into_the_real_import` closes that: it
+    enters at the pipeline's mouth. (Guard-gap sweep, 2026-08-12.)
+    """
+
+    def test_the_repair_is_wired_into_the_real_import(self, db_session, tmp_path, monkeypatch):
+        """The repair must be reached, AFTER the excerpts it is supposed to repair.
+
+        Deliberately a spy on the call rather than an end-to-end offset assertion:
+        the repair only acts on a pre-v5 archive containing astral text, and the
+        cases above already prove what it DOES. The open question this answers is
+        only whether the pipeline reaches it with a non-empty inserted set — the
+        #747 failure mode, which is invisible to every other test in this class.
+        """
+        from app.services import project_portability as pp
+        from app.models.excerpt import Excerpt
+
+        db = db_session
+        project = Project(name="Wiring", user_id=1, project_uuid=str(uuid_module.uuid4()))
+        db.add(project); db.flush()
+        conv = Conversation(project_id=project.id, name="C1")
+        db.add(conv); db.flush()
+        seg = Segment(conversation_id=conv.id, sequence_order=1, text="hello world")
+        db.add(seg); db.flush()
+        db.add(Excerpt(project_id=project.id, segment_id=seg.id, start_offset=0, end_offset=5))
+        db.flush(); db.commit()
+
+        archive = tmp_path / "p.mmproject"
+        archive.write_bytes(pp.export_project(db, project.id, tmp_path / "docs").getvalue())
+
+        seen = {}
+        real = pp._repair_pre_v5_excerpt_offsets
+
+        def spy(dbx, data, remap, inserted):
+            seen["inserted"] = set(inserted)
+            return real(dbx, data, remap, inserted)
+
+        monkeypatch.setattr(pp, "_repair_pre_v5_excerpt_offsets", spy)
+        new_pid, _ = pp.import_project(db, archive, tmp_path / "docs2", user_id=1)
+
+        assert db.query(Excerpt).filter(Excerpt.project_id == new_pid).count() == 1, (
+            "fixture: the import must actually have inserted an excerpt"
+        )
+        assert seen.get("inserted"), (
+            "the repair was reached with an EMPTY inserted set — it runs before the "
+            "excerpts are inserted, so it can never repair anything (#747's shape)"
+        )
+
+    ASTRAL_TEXT = "Reaction 😀 then CODE THIS PHRASE and more"
+    TARGET = "CODE THIS PHRASE"
+
+    def _utf16_index(self, text: str, needle: str) -> int:
+        return len(text[: text.index(needle)].encode("utf-16-le")) // 2
+
+    def test_astral_offsets_are_converted_from_a_v4_archive(self, db_session):
+        from app.services.project_portability import _repair_pre_v5_excerpt_offsets
+
+        project = Project(name="P", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+        conv = Conversation(project_id=project.id, name="C")
+        db_session.add(conv)
+        db_session.flush()
+        seg = Segment(conversation_id=conv.id, sequence_order=0,
+                      text=self.ASTRAL_TEXT, word_count=7)
+        db_session.add(seg)
+        db_session.flush()
+
+        # Land the excerpt with the UTF-16 offsets an old archive would carry.
+        u16 = self._utf16_index(self.ASTRAL_TEXT, self.TARGET)
+        exc = Excerpt(project_id=project.id, segment_id=seg.id,
+                      start_offset=u16, end_offset=u16 + len(self.TARGET))
+        db_session.add(exc)
+        db_session.flush()
+
+        # Pre-repair, Python slicing drifts — this is the defect, asserted.
+        assert seg.text[exc.start_offset:exc.end_offset] != self.TARGET
+
+        repaired = _repair_pre_v5_excerpt_offsets(
+            db_session,
+            {"format_version": 4,
+             "excerpts": [{"_original_id": 1, "start_offset": u16}]},
+            {"excerpts": {1: exc.id}},
+            {exc.id},
+        )
+        assert repaired == 1
+        db_session.refresh(exc)
+        assert seg.text[exc.start_offset:exc.end_offset] == self.TARGET
+
+    def test_a_v5_archive_is_left_alone(self, db_session):
+        """v5 already writes code points — converting again would BREAK it."""
+        from app.services.project_portability import _repair_pre_v5_excerpt_offsets
+
+        project = Project(name="P2", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+        conv = Conversation(project_id=project.id, name="C2")
+        db_session.add(conv)
+        db_session.flush()
+        seg = Segment(conversation_id=conv.id, sequence_order=0,
+                      text=self.ASTRAL_TEXT, word_count=7)
+        db_session.add(seg)
+        db_session.flush()
+        cp = len(self.ASTRAL_TEXT[: self.ASTRAL_TEXT.index(self.TARGET)])
+        exc = Excerpt(project_id=project.id, segment_id=seg.id,
+                      start_offset=cp, end_offset=cp + len(self.TARGET))
+        db_session.add(exc)
+        db_session.flush()
+
+        repaired = _repair_pre_v5_excerpt_offsets(
+            db_session,
+            {"format_version": 5, "excerpts": [{"_original_id": 1, "start_offset": cp}]},
+            {"excerpts": {1: exc.id}},
+            {exc.id},
+        )
+        assert repaired == 0
+        db_session.refresh(exc)
+        assert seg.text[exc.start_offset:exc.end_offset] == self.TARGET
+
+    def test_a_bmp_only_segment_is_untouched_even_from_a_v4_archive(self, db_session):
+        """The scope claim: BMP text already agrees in both bases."""
+        from app.services.project_portability import _repair_pre_v5_excerpt_offsets
+
+        project = Project(name="P3", user_id=1)
+        db_session.add(project)
+        db_session.flush()
+        conv = Conversation(project_id=project.id, name="C3")
+        db_session.add(conv)
+        db_session.flush()
+        text = "مرحبا then CODE THIS PHRASE and more"  # RTL, all BMP
+        seg = Segment(conversation_id=conv.id, sequence_order=0, text=text, word_count=6)
+        db_session.add(seg)
+        db_session.flush()
+        start = text.index(self.TARGET)
+        exc = Excerpt(project_id=project.id, segment_id=seg.id,
+                      start_offset=start, end_offset=start + len(self.TARGET))
+        db_session.add(exc)
+        db_session.flush()
+
+        repaired = _repair_pre_v5_excerpt_offsets(
+            db_session,
+            {"format_version": 4, "excerpts": [{"_original_id": 1, "start_offset": start}]},
+            {"excerpts": {1: exc.id}},
+            {exc.id},
+        )
+        assert repaired == 0
+        db_session.refresh(exc)
+        assert seg.text[exc.start_offset:exc.end_offset] == self.TARGET
+
+    TAIL = "and more"
+
+    def test_a_merge_converts_what_it_inserted_and_leaves_matched_rows_alone(
+        self, db_session, tmp_path,
+    ):
+        """#714 — the repair must run on the rows it WROTE, and only those.
+
+        Driven through the REAL merge path, because the defect was never in the
+        arithmetic — it was in WHICH rows the arithmetic ran on. Under
+        `import_mode="merge"` an incoming excerpt matches an existing local one by
+        uuid; that is the designed multi-coder flow, and those matched rows are
+        precisely the quotes both copies already share. They live in the target and
+        already hold code points, so converting them a second time shifts them one
+        place per preceding astral character — silently, permanently, on data the
+        import never wrote.
+
+        ⚠️ The scenario needs BOTH arms in one merge, and that is not fussiness. A
+        merge where every excerpt matches leaves the inserted set EMPTY, so the
+        function's early return fires and a broken filter below it is masked — a
+        mutation of the filter survives such a test. Here the colleague's file also
+        carries a quote the target does not have, so the set is non-empty and the
+        filter is the only thing standing between the matched row and a rewrite.
+
+        Story: a colleague still on an older build sends their copy back. Their file
+        is in the old UTF-16 basis throughout. The target has since been migrated, so
+        its shared quote is already correct, and it never had the second quote.
+        """
+        project = Project(name="Merge astral", user_id=1, project_uuid=str(uuid_module.uuid4()))
+        db_session.add(project)
+        db_session.flush()
+        conv = Conversation(project_id=project.id, name="C")
+        db_session.add(conv)
+        db_session.flush()
+        seg = Segment(conversation_id=conv.id, sequence_order=0,
+                      text=self.ASTRAL_TEXT, word_count=7)
+        db_session.add(seg)
+        db_session.flush()
+
+        # Both quotes as the OLD build stored them — UTF-16, the browser's basis.
+        shared_u16 = self._utf16_index(self.ASTRAL_TEXT, self.TARGET)
+        tail_u16 = self._utf16_index(self.ASTRAL_TEXT, self.TAIL)
+        shared = Excerpt(project_id=project.id, segment_id=seg.id,
+                         start_offset=shared_u16, end_offset=shared_u16 + len(self.TARGET))
+        tail = Excerpt(project_id=project.id, segment_id=seg.id,
+                       start_offset=tail_u16, end_offset=tail_u16 + len(self.TAIL))
+        db_session.add_all([shared, tail])
+        db_session.flush()
+        shared_id = tail_uuid = None
+        shared_id, tail_uuid = shared.id, tail.uuid
+
+        # The colleague's file: everything in the old basis, labelled v4.
+        buf = export_project(db_session, project.id, tmp_path / "docs")
+        current = tmp_path / "current.mmproject"
+        current.write_bytes(buf.getvalue())
+        old_file = tmp_path / "v4.mmproject"
+        with zipfile.ZipFile(current, "r") as zin, zipfile.ZipFile(old_file, "w") as zout:
+            for entry in zin.infolist():
+                payload = zin.read(entry.filename)
+                if entry.filename in ("manifest.json", "project.json"):
+                    obj = json.loads(payload)
+                    obj["format_version"] = 4
+                    payload = json.dumps(obj).encode()
+                zout.writestr(entry, payload)
+
+        # The target moved on: migration a1b2c3d4e5f7 converted the shared quote,
+        # and the second quote is not here at all (so the merge must insert it).
+        shared_cp = self.ASTRAL_TEXT.index(self.TARGET)
+        shared.start_offset, shared.end_offset = shared_cp, shared_cp + len(self.TARGET)
+        db_session.delete(tail)
+        db_session.flush()
+        assert self.ASTRAL_TEXT[shared.start_offset:shared.end_offset] == self.TARGET
+
+        import_project(db_session, old_file, tmp_path / "docs2", user_id=1,
+                       import_mode="merge", target_project_id=project.id)
+        db_session.flush()
+
+        seg_after = db_session.query(Segment).filter(Segment.id == seg.id).first()
+        matched = db_session.query(Excerpt).filter(Excerpt.id == shared_id).first()
+        inserted = db_session.query(Excerpt).filter(Excerpt.uuid == tail_uuid).first()
+
+        # Arm 1 — matched by uuid, so already correct and NOT ours to rewrite.
+        assert seg_after.text[matched.start_offset:matched.end_offset] == self.TARGET, (
+            "a merge-matched excerpt was re-converted: its offsets were already code "
+            "points, so the pre-v5 repair must skip it (#714)"
+        )
+        # Arm 2 — non-vacuity. This row DID come out of the v4 file, so the repair
+        # must still have run; without it the assertion above passes for the wrong
+        # reason (a repair that simply stopped working).
+        assert inserted is not None
+        assert seg_after.text[inserted.start_offset:inserted.end_offset] == self.TAIL, (
+            "an excerpt this import INSERTED from a v4 archive was left in the UTF-16 "
+            "basis — the #714 fix must narrow the repair, not disable it"
+        )

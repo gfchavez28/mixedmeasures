@@ -9,6 +9,7 @@ import re
 import shutil
 from datetime import datetime, timezone
 from .config import get_settings, get_backup_dir, resource_base
+from .startup_errors import FatalStartupError
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,30 @@ def set_key_provider(provider: KeyProvider) -> None:
     _key_provider = provider
 
 
-class DatabaseUnreadableError(Exception):
+class PreMigrationBackupError(FatalStartupError):
+    """The pre-migration backup was ATTEMPTED and failed (#692).
+
+    Sibling of ``DatabaseUnreadableError`` and raised for the same reason: the
+    startup migration is the only destructive path in the app, and this backup is
+    its only guard. It used to be best-effort — every exception was swallowed to a
+    ``logger.warning`` and ``command.upgrade()`` ran on the very next line — so the
+    guard was absent precisely in the disk-full scenario it exists for. In a
+    packaged Electron app a warning is not a user-visible event, so the failure was
+    invisible as well as unhandled.
+
+    ⚠️ This is NOT raised when there is simply nothing to back up. A new or empty
+    database returns ``None`` from ``_backup_database`` and the migration proceeds
+    normally — that distinction is the whole fix, because the old code collapsed
+    "skipped, nothing at risk" and "attempted, failed, data at risk" into the same
+    ``None`` and left the caller unable to tell them apart.
+
+    ⚠️ Its message is USER-FACING (#716): it is shown verbatim in the packaged app's
+    crash dialog, which is what `FatalStartupError` membership means. Keep it written
+    as guidance a researcher can act on, not as a diagnostic.
+    """
+
+
+class DatabaseUnreadableError(FatalStartupError):
     """The database file exists and is non-empty but could not be opened.
 
     Raised instead of silently treating the file as "fresh." Under encryption
@@ -245,7 +269,10 @@ def _backup_database(db_path: Path) -> Path | None:
 
     Checkpoints the WAL first so the backup is self-contained.
     Keeps up to 5 most recent backups to limit disk usage.
-    Returns the backup path, or None if backup was skipped/failed.
+
+    Returns the backup path, or ``None`` when there was nothing to back up (a new
+    or empty database). **Raises ``PreMigrationBackupError`` when a backup was
+    attempted and failed** — the caller must not migrate in that case (#692).
     """
     if not db_path.exists() or db_path.stat().st_size == 0:
         return None
@@ -264,16 +291,29 @@ def _backup_database(db_path: Path) -> Path | None:
 
         shutil.copy2(str(db_path), str(backup_path))
         logger.info("Database backed up to %s", backup_path)
+    except Exception as e:
+        # #692: the backup is the only guard on the only destructive path. Refuse
+        # rather than warn — a swallowed ENOSPC here is exactly how irreplaceable
+        # coding work gets migrated over with no copy behind it.
+        logger.error("Pre-migration backup FAILED (%s): refusing to migrate.", e)
+        raise PreMigrationBackupError(
+            f"Could not create the pre-migration backup at {backup_path}: {e}. "
+            f"No migration was applied and your data is untouched. Free up disk "
+            f"space (or fix permissions on {backup_dir}) and relaunch."
+        ) from e
 
-        # Prune old backups — keep most recent 5
+    # Pruning is deliberately OUTSIDE the critical section and stays best-effort:
+    # the backup already exists on disk by this point, so a failure to delete an
+    # OLD file is no reason to refuse the migration. Folding this into the try
+    # above would turn a full-but-writable backup dir into a startup failure.
+    try:
         backups = sorted(backup_dir.glob(f"{db_path.stem}_*.db"), reverse=True)
         for old in backups[5:]:
             old.unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("Could not prune old pre-migration backups: %s", e)
 
-        return backup_path
-    except Exception as e:
-        logger.warning("Failed to backup database: %s", e)
-        return None
+    return backup_path
 
 
 def _probe_engine_readable():
@@ -325,7 +365,16 @@ def run_migrations():
         )
         raise
 
-    # Backup before migrating (skips if DB is empty/new)
+    # Backup before migrating (skipped when the DB is empty/new — nothing at risk).
+    # #692: a FAILED backup raises PreMigrationBackupError, which propagates past
+    # command.upgrade() so the destructive step never runs; previously it was a
+    # logger.warning that nobody saw and the migration proceeded anyway.
+    #
+    # ⚠️ This comment used to end "the packaged app turns this into a startup error
+    # dialog" — which was NOT true and is the whole of #716: the message went to
+    # stderr, and the spawned-child dialog said only "the local engine exited
+    # unexpectedly". It is true as of #716 because the error subclasses
+    # FatalStartupError and the lifespan emits it with the MM-FATAL marker.
     if current_rev is not None:
         backup_path = _backup_database(db_path)
         if backup_path:

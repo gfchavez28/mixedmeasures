@@ -69,6 +69,8 @@ import { useCoders } from '@/hooks/useCoders'
 import { useBlindMode } from '@/hooks/useBlindMode'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { optionPositionAria } from '@/lib/listbox-aria'
+import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
 import {
   computeCoverage, distinctVisibleCodeIds, isCodeAppliedByActiveCoder,
   isSegmentCodedVisible, visibleCodeChipRows,
@@ -80,8 +82,10 @@ import {
   UNFREEZE_CONSEQUENCES,
 } from '@/lib/source-kind-copy'
 import { NOW_PLAYING_ROW, SELECTED_ROW } from '@/lib/selection'
+import { useScrollbarGutter } from '@/hooks/useScrollbarGutter'
 import { clipContainsRange, isQuoteExcerpt, isWholeExcerpt } from '@/lib/excerpt-shape'
 import { cn, formatTimecode, formatTimestamp, getCodeColor, parseTimecode } from '@/lib/utils'
+import { MODE_DISABLED_CLASS, modeDisabledProps } from '@/lib/mode-disabled'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
@@ -115,6 +119,20 @@ import VideoPane, { type VideoPaneHandle } from '@/components/VideoPane'
 interface ClipListContext {
   activeDescendantId?: string
 }
+
+/**
+ * #754 — why the segmentation controls are off while the cut set is frozen.
+ *
+ * One string, completing a control's accessible name ("Split clip at playhead —
+ * unavailable while the clip set is frozen") and serving as the sighted
+ * tooltip, so the two cannot say different things. D22: a freeze locks the clip
+ * SET; labelling and quoting stay legal, which is why this names three
+ * operations and not "editing".
+ */
+const FROZEN_OPS_REASON = 'unavailable while the clip set is frozen'
+const FROZEN_BADGE_LABEL =
+  'Segmentation frozen — the team has agreed these clips. '
+  + 'Splitting, merging and deleting clips are unavailable until it is unfrozen.'
 
 const clipListComponents: Components<ObservationSegment, ClipListContext> = {
   List: forwardRef<HTMLDivElement, { style?: CSSProperties; children?: ReactNode; context?: ClipListContext }>(
@@ -356,6 +374,9 @@ export default function ObservationWorkbench() {
   const mediaElementRef = useRef<HTMLMediaElement | null>(null)
   const videoPaneHandleRef = useRef<VideoPaneHandle | null>(null)
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
+  // #741: the header sits outside the scroller, so it pads by the scrollbar's
+  // real width or every trailing column drifts right of the column it names.
+  const clipGutter = useScrollbarGutter()
   const codePanelRef = useRef<CodePanelHandle | null>(null)
   const memoPanelRef = useRef<MemoPanelHandle | null>(null)
   const notesPanelRef = useRef<ObservationNotesPanelHandle | null>(null)
@@ -707,8 +728,16 @@ export default function ObservationWorkbench() {
       const snapshot = queryClient.getQueryData(['observation-segments', projectId, observationId])
       patchClipCodes(clipIds, codeId, action)
       try {
-        await serverCall()
+        const result = await serverCall()
         settleAfterCodeChange()
+        // #678: a partial failure arrives as a 200 body. `settleAfterCodeChange`
+        // here IS the full invalidation (it is aliased to it above), so the clip
+        // list self-corrects and no chip stays stuck — but the coder was still
+        // told nothing. This surface is where the D23 regression landed, when a
+        // two-parent scope defect made EVERY multi-clip chord come back
+        // applied=False inside a 200 and nothing said so.
+        const outcome = collectBulkOutcome(result as Parameters<typeof collectBulkOutcome>[0])
+        if (outcome.hasFailures) toast.warning(describeBulkFailure(outcome, 'clip', action))
       } catch (e) {
         queryClient.setQueryData(['observation-segments', projectId, observationId], snapshot)
         throw e
@@ -768,8 +797,14 @@ export default function ObservationWorkbench() {
       const snapshot = queryClient.getQueryData(['observation-segments', projectId, observationId])
       codesToToggle.forEach(code => patchClipCodes(clipIds, code.id, action))
       try {
-        await Promise.all(codesToToggle.map(code => codingApi.bulkCode(clipIds, code.id, action)))
+        const results = await Promise.all(
+          codesToToggle.map(code => codingApi.bulkCode(clipIds, code.id, action)),
+        )
         settleAfterCodeChange()
+        // #678: fold the N per-code responses so a clip skipped for every code is
+        // reported once rather than N times.
+        const outcome = collectBulkOutcome(results)
+        if (outcome.hasFailures) toast.warning(describeBulkFailure(outcome, 'clip', action))
       } catch (e) {
         queryClient.setQueryData(['observation-segments', projectId, observationId], snapshot)
         throw e
@@ -868,6 +903,18 @@ export default function ObservationWorkbench() {
    * The rail's own composer keeps the observation-level path — that is its job,
    * and it is reachable by clicking into it.
    */
+  /** Open an existing note in the notes panel (#740).
+   *
+   *  Mirrors `CodingWorkbench::handleNoteClick` step for step — expand the
+   *  column, expand the panel, focus it, then ask the panel to reveal the note
+   *  on the next frame (it may have mounted a tick ago). */
+  const handleNoteClick = useCallback((noteId: number) => {
+    rightColumn.expand()
+    expandPanelIfCollapsed('notes')
+    setFocusedPanel('notes')
+    requestAnimationFrame(() => notesPanelRef.current?.focusNote(noteId))
+  }, [rightColumn, expandPanelIfCollapsed])
+
   const openNoteDialog = useCallback((clipId: number | undefined) => {
     setCreateNoteDialog({
       position: coordsFromElement(clipId !== undefined ? `clip-${clipId}` : 'clip-list'),
@@ -1720,19 +1767,34 @@ export default function ObservationWorkbench() {
 
         <span className="w-px self-stretch bg-mm-border-subtle mx-1" aria-hidden />
 
+        {/* #754: on a FROZEN observation these two used to vanish from the tab
+          * order — native `disabled` removes a control from the accessibility
+          * tree's reachable set, so a keyboard user never learned that splitting
+          * and merging exist, nor that the reason is the agreed cut set. They
+          * stay reachable and say why; the transient reasons (no playhead inside
+          * a clip, fewer than two clips selected) stay natively disabled, since
+          * those resolve the moment the researcher does the obvious thing. */}
         <Button
-          variant="ghost" size="icon" className="h-7 w-7"
-          aria-label="Split clip at playhead"
-          disabled={!canSplit}
-          onClick={() => void splitAtPlayhead()}
+          variant="ghost" size="icon" className={cn('h-7 w-7', MODE_DISABLED_CLASS)}
+          title={frozen ? FROZEN_OPS_REASON : undefined}
+          {...modeDisabledProps({
+            label: 'Split clip at playhead',
+            blockedReason: frozen ? FROZEN_OPS_REASON : null,
+            unavailable: !canSplit,
+            onActivate: () => void splitAtPlayhead(),
+          })}
         >
           <Scissors aria-hidden className="h-4 w-4" />
         </Button>
         <Button
-          variant="ghost" size="icon" className="h-7 w-7"
-          aria-label="Merge selected clips"
-          disabled={!canMerge}
-          onClick={() => void mergeSelection()}
+          variant="ghost" size="icon" className={cn('h-7 w-7', MODE_DISABLED_CLASS)}
+          title={frozen ? FROZEN_OPS_REASON : undefined}
+          {...modeDisabledProps({
+            label: 'Merge selected clips',
+            blockedReason: frozen ? FROZEN_OPS_REASON : null,
+            unavailable: !canMerge,
+            onActivate: () => void mergeSelection(),
+          })}
         >
           <Combine aria-hidden className="h-4 w-4" />
         </Button>
@@ -1793,7 +1855,7 @@ export default function ObservationWorkbench() {
             <span className="flex items-center gap-1.5">
               <span
                 role="img"
-                aria-label="Segmentation frozen — the team has agreed these clips"
+                aria-label={FROZEN_BADGE_LABEL}
                 className="flex items-center gap-1 rounded-full bg-mm-blue-cell px-2 py-0.5 text-[11px] font-medium text-mm-blue-text"
               >
                 <Lock aria-hidden className="h-3 w-3" /> Frozen
@@ -2016,10 +2078,11 @@ export default function ObservationWorkbench() {
         <div
           data-testid="clip-column-header"
           className="flex items-start gap-3 px-3.5 py-1.5 border-b border-mm-border-subtle bg-mm-surface text-xs text-mm-text-secondary"
+          style={{ paddingRight: `calc(0.875rem + ${clipGutter.gutter}px)` }}
         >
           <span className="w-28 flex-none">Time</span>
           <span className="flex-1 min-w-0">Label</span>
-          <span className="w-44 flex-none flex items-center gap-1.5">
+          <span data-col="codes" className="w-44 flex-none flex items-center gap-1.5">
             Codes
             {coders.length > 1 && !blind && (
               <CoderFilterPopover
@@ -2034,7 +2097,10 @@ export default function ObservationWorkbench() {
               />
             )}
           </span>
-          <span className="w-16 flex-none text-right">Notes</span>
+          <span data-col="notes" className="w-16 flex-none text-right">Notes</span>
+          {/* Row actions get a track but no name (#740) — the header names data
+              columns; naming this one is what put "Notes" over a delete button. */}
+          <span className="w-8 flex-none" aria-hidden />
         </div>
 
         {clips.length === 0 ? (
@@ -2047,11 +2113,12 @@ export default function ObservationWorkbench() {
           <div className="flex-1 min-h-0">
             <Virtuoso<ObservationSegment, ClipListContext>
               ref={virtuosoRef}
+              scrollerRef={clipGutter.setScroller}
               data={filteredClips}
               context={clipListContext}
               components={clipListComponents}
               computeItemKey={(_i, clip) => clip.id}
-              itemContent={(_index, clip) => {
+              itemContent={(index, clip) => {
                 const selected = selectedClips.includes(clip.id)
                 const { range, duration } = clipTimeLabel(clip)
                 const editing = editingClipId === clip.id
@@ -2087,6 +2154,14 @@ export default function ObservationWorkbench() {
                     id={`clip-${clip.id}`}
                     role="option"
                     aria-selected={selected}
+                    // #751: the real length of the set being arrowed through.
+                    // `index` is Virtuoso's index into `data` (= `filteredClips`),
+                    // not the render window's, so it and `filteredClips.length`
+                    // are the same fact from the same array — which is the point.
+                    // With the search box active this correctly reports the
+                    // FILTERED count; "of 13" while 3 rows are reachable would
+                    // just be a different wrong number.
+                    {...optionPositionAria(index + 1, filteredClips.length)}
                     // "— quoted" joins the composite name (D30): the indicator
                     // beside it is a role="img" sibling, which a browse-mode
                     // reader only meets by touring INTO the row — so a sub-clip
@@ -2141,7 +2216,7 @@ export default function ObservationWorkbench() {
                         {clip.text || 'Unlabeled clip — press F2 to label'}
                       </span>
                     )}
-                    <span className="w-44 flex-none flex items-center pt-0.5">
+                    <span data-col="codes" className="w-44 flex-none flex items-center pt-0.5">
                       {(selected || hasVisibleChips) && !editing && (
                         <InlineCodeActions
                           projectId={projectId}
@@ -2158,7 +2233,13 @@ export default function ObservationWorkbench() {
                         />
                       )}
                     </span>
-                    <span className="w-16 flex-none flex items-center justify-end gap-1 pt-0.5">
+                    {/* #740: this column is what the "Notes" header NAMES — quote
+                        status and the notes themselves. Delete moved to its own
+                        unlabelled track below: a header names a data column, not
+                        a row action, and on a clip with no note (12 of 13 in the
+                        live fixture) this cell was nothing but a trash can under
+                        the word "Notes". */}
+                    <span data-col="notes" className="w-16 flex-none flex items-center justify-end gap-1 flex-wrap pt-0.5">
                       {quoted && (
                         <Quote
                           role="img"
@@ -2166,15 +2247,34 @@ export default function ObservationWorkbench() {
                           className="h-3.5 w-3.5 text-mm-text-faint"
                         />
                       )}
-                      {clip.attached_notes.length > 0 && (
-                        <span
-                          role="img"
-                          aria-label={`${clip.attached_notes.length} note${clip.attached_notes.length === 1 ? '' : 's'}`}
-                          className="w-5 h-5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold flex items-center justify-center"
+                      {/* One badge PER note, carrying its sequence number and
+                          opening it — the SegmentRow affordance (D11). The count
+                          badge it replaces was `role="img"`, so a clip with three
+                          notes offered no way to reach any particular one. The
+                          payload already carried `sequence_number`. */}
+                      {/* #747: numbered by the note's OWN `sequence_number`
+                          again. This rendered by POSITION for one release
+                          because observation notes were all stored as 0 — a
+                          display-side label over a backend gap, which the export
+                          and the Memos & Notes page (both quoting the stored
+                          number) could not use. The numbers are real now, so
+                          expect gaps: deleting note 2 leaves 1 and 3, which is
+                          what a stable label looks like. */}
+                      {clip.attached_notes.map(note => (
+                        <button
+                          key={note.id}
+                          type="button"
+                          aria-label={`Note ${note.sequence_number} on clip ${range}`}
+                          title={`Note ${note.sequence_number} — click to view`}
+                          className="w-5 h-5 rounded-full bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 text-[10px] font-bold flex items-center justify-center hover:bg-amber-200 dark:hover:bg-amber-800/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          onClick={(e) => { e.stopPropagation(); handleNoteClick(note.id) }}
                         >
-                          {clip.attached_notes.length}
-                        </span>
-                      )}
+                          {note.sequence_number}
+                        </button>
+                      ))}
+                    </span>
+                    {/* Row actions — deliberately unlabelled in the header. */}
+                    <span className="w-8 flex-none flex items-center justify-end pt-0.5">
                       <Button
                         variant="ghost" size="icon"
                         className="h-6 w-6 text-mm-text-faint hover:text-destructive"
@@ -2406,6 +2506,8 @@ export default function ObservationWorkbench() {
                 ref={codePanelRef}
                 codes={codes}
                 projectId={projectId}
+                /* #752: this workbench codes CLIPS, not segments. */
+                disabledHint="Select a clip to apply codes."
                 selectedCodesMap={selectedCodesMap}
                 onCodeToggle={handleCodeToggle}
                 onMultiCodeToggle={handleMultiCodeToggle}
@@ -2649,6 +2751,16 @@ export default function ObservationWorkbench() {
 
 interface ObservationNotesPanelHandle {
   focusInput: () => void
+  /** Scroll a specific note into view and flag it (#740).
+   *
+   *  The clip row's note badge used to be a COUNT with `role="img"` — three
+   *  notes on a clip offered no way to reach any particular one, while both
+   *  sibling surfaces render one clickable badge per note. This is the other
+   *  end of that affordance. Deliberately lighter than `NotesPanel.focusNote`:
+   *  that one drives a focused-index/selection state machine this panel does
+   *  not have, and porting it to say "here it is" would be the expensive half
+   *  of a cheap fix. */
+  focusNote: (noteId: number) => void
 }
 
 const ObservationNotesPanel = forwardRef<ObservationNotesPanelHandle, {
@@ -2671,8 +2783,30 @@ const ObservationNotesPanel = forwardRef<ObservationNotesPanelHandle, {
   onJumpToClip,
 }, ref) {
   const inputRef = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  const [flaggedNoteId, setFlaggedNoteId] = useState<number | null>(null)
+  const flagTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (flagTimer.current) clearTimeout(flagTimer.current) }, [])
+
   useImperativeHandle(ref, () => ({
     focusInput: () => inputRef.current?.focus(),
+    focusNote: (noteId: number) => {
+      setFlaggedNoteId(noteId)
+      if (flagTimer.current) clearTimeout(flagTimer.current)
+      // The flag is transient: it answers "which one did I click?" and then
+      // gets out of the way. It is NOT selection, but it borrows the selection
+      // recipe because that is the single source for "this is the one" — and
+      // `SELECTED_ROW` draws its bar as an inset shadow, so applying it cannot
+      // shift the row's layout (lib/selection.ts).
+      flagTimer.current = setTimeout(() => setFlaggedNoteId(null), 2000)
+      // rAF, because the panel may have been collapsed a tick ago and an
+      // unmounted node cannot be scrolled to.
+      requestAnimationFrame(() => {
+        listRef.current
+          ?.querySelector(`[data-note-id="${noteId}"]`)
+          ?.scrollIntoView({ block: 'nearest' })
+      })
+    },
   }), [])
 
   return (
@@ -2712,7 +2846,7 @@ const ObservationNotesPanel = forwardRef<ObservationNotesPanelHandle, {
       </div>
 
       {/* Notes list */}
-      <div className="flex-1 overflow-y-auto">
+      <div ref={listRef} className="flex-1 overflow-y-auto">
         {notes.length === 0 ? (
           <div className="p-4 text-sm text-mm-text-muted text-center">
             No notes yet
@@ -2723,7 +2857,10 @@ const ObservationNotesPanel = forwardRef<ObservationNotesPanelHandle, {
             return (
               <div
                 key={note.id}
-                className="px-3 py-2 border-b border-mm-border-subtle hover:bg-mm-surface-hover cursor-pointer group"
+                data-note-id={note.id}
+                className={`px-3 py-2 border-b border-mm-border-subtle hover:bg-mm-surface-hover cursor-pointer group ${
+                  note.id === flaggedNoteId ? SELECTED_ROW : ''
+                }`}
                 onClick={() => {
                   if (note.segment_id != null && clip) onJumpToClip(note.segment_id)
                 }}

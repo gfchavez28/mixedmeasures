@@ -27,7 +27,7 @@ const ThemeMentionList = forwardRef<ThemeMentionListRef, ThemeMentionListProps>(
 
     // Reset focus when items change
     useEffect(() => {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset highlight to top when the mention list changes (external editor-driven)
+      // reset highlight to top when the mention list changes (external editor-driven)
       setFocusIndex(0)
     }, [items])
 

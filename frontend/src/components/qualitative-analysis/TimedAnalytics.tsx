@@ -5,12 +5,15 @@ import { observationsApi, type ObservationSegment } from '@/lib/api'
 import SegmentedControl from '@/components/ui/segmented-control'
 import { coderColor, coderInitials } from '@/lib/coder-color'
 import { formatTimecode } from '@/lib/utils'
-import { unionIntervals, coveredSeconds } from '@/lib/clip-timeline'
 import {
   buildCodelineLanes,
   computeTimedRows,
   computeTimedRowsByCoder,
+  coveredTotalSeconds,
   detailVisible,
+  formatTimedRate,
+  formatTimedSeconds,
+  formatTimedShare,
   timedExtent,
   type CodelineCategoryGroup,
   type CoderInclude,
@@ -72,20 +75,52 @@ interface Props {
    * exact silent-wrong-layer case DEC-6c-7 refuses (live-drive find).
    */
   consensusScope?: boolean
+  /**
+   * Chart-label size from the material's `formatting` (#686). Every sibling
+   * qualitative component honours it; this one hardcoded its sizes, so the
+   * researcher's choice silently did nothing — on the analysis view as well as
+   * on the canvas.
+   *
+   * The codeline deliberately uses TWO sizes (a recessive ruler under slightly
+   * larger lane labels), so they scale RELATIVE to this rather than both
+   * snapping to it — at the default of 12 the rendering is byte-identical to
+   * what shipped in slab 6c.
+   */
+  labelFontSize?: number
+  /**
+   * Whether to offer the "By code / By code × coder" toggle (#652 slab 4).
+   *
+   * False on the canvas: a written document is not an interactive analysis
+   * surface — the same reasoning that omits `ChartExportWrapper`'s per-chart
+   * export buttons and the charts' click-through handlers from an embed. It
+   * would also silently forget its position on every remount, because the mode
+   * is per-observation local state that no material config records (#685).
+   *
+   * ⚠️ Deliberately NOT folded into `multiCoder`: that flag also drives the
+   * mark's coder underline and — more importantly — the "airtime pools all
+   * visible coders' marks" disclosure, which is a #503-class honesty line that
+   * must survive on the canvas.
+   */
+  showTableModeToggle?: boolean
 }
 
 const TRACK_HEIGHT = 10
 const TRACK_GAP = 2
+/** Matches `DEFAULT_FORMATTING.labelFontSize`; the offsets below reproduce the
+ *  original hardcoded 10px ruler / 11px lane labels at that value. */
+const DEFAULT_LABEL_FONT_SIZE = 12
 
 const codeColor = (c: TimedCodeLite): string => c.color || c.category_color || '#6b7280'
 
-const pct = (f: number | null): string => (f == null ? '—' : `${Math.round(f * 100)}%`)
-const rate = (r: number | null): string => (r == null ? '—' : `${r.toFixed(2)}/min`)
-const secs = (s: number | null): string => (s == null ? '—' : formatTimecode(s))
+// Single-sourced in lib/timed-analytics so the canvas export's flattened table
+// formats identically (#652 slab 4).
+const pct = formatTimedShare
+const rate = formatTimedRate
+const secs = formatTimedSeconds
 
 export default function TimedAnalytics({
   projectId, observations, codes, categories, include, multiCoder, coderMap,
-  consensusScope = false,
+  consensusScope = false, labelFontSize, showTableModeToggle = true,
 }: Props) {
   const clipQueries = useQueries({
     queries: observations.map(o => ({
@@ -124,6 +159,8 @@ export default function TimedAnalytics({
           include={include}
           multiCoder={multiCoder}
           coderMap={coderMap}
+          labelFontSize={labelFontSize}
+          showTableModeToggle={showTableModeToggle}
         />
       ))}
     </div>
@@ -131,7 +168,8 @@ export default function TimedAnalytics({
 }
 
 function ObservationTimedBlock({
-  obs, clips, loading, codes, categories, include, multiCoder, coderMap,
+  obs, clips, loading, codes, categories, include, multiCoder, coderMap, labelFontSize,
+  showTableModeToggle,
 }: {
   obs: TimedObservationLite
   clips: ObservationSegment[] | undefined
@@ -141,6 +179,8 @@ function ObservationTimedBlock({
   include: CoderInclude
   multiCoder: boolean
   coderMap: ReadonlyMap<number, TimedCoderLite>
+  labelFontSize?: number
+  showTableModeToggle?: boolean
 }) {
   const [tableMode, setTableMode] = useState<'code' | 'coder'>('code')
 
@@ -166,17 +206,12 @@ function ObservationTimedBlock({
     [clips, codeIds, include, categories, codeToCategoryId],
   )
 
-  // The anchor for the don't-sum disclosure: all selected codes' visible marks,
-  // pooled and unioned once — what "covered by the selected coding" means.
-  const coveredTotal = useMemo(() => {
-    if (extent == null || !clips) return null
-    const codeSet = new Set(codeIds)
-    const intervals = clips.flatMap(clip =>
-      clip.applied_code_details.some(d => codeSet.has(d.code_id) && detailVisible(d.user_id, include))
-        ? [{ start: clip.start_time, end: clip.end_time }]
-        : [])
-    return coveredSeconds(unionIntervals(intervals), extent)
-  }, [clips, codeIds, include, extent])
+  // The anchor for the don't-sum disclosure — see `coveredTotalSeconds`, which
+  // the canvas export reuses.
+  const coveredTotal = useMemo(
+    () => (clips ? coveredTotalSeconds(clips, codeIds, include, extent) : null),
+    [clips, codeIds, include, extent],
+  )
 
   const totalMarks = rows.reduce((s, r) => s + r.marks, 0)
   const totalPointMarks = rows.reduce((s, r) => s + r.pointMarks, 0)
@@ -213,7 +248,7 @@ function ObservationTimedBlock({
             {formatTimecode(extent)}{durationKnown ? '' : ' marked'}
           </span>
         )}
-        {multiCoder && (
+        {multiCoder && showTableModeToggle && (
           <span className="ml-auto">
             <SegmentedControl
               options={[
@@ -242,6 +277,7 @@ function ObservationTimedBlock({
               codeById={codeById}
               multiCoder={multiCoder}
               coderMap={coderMap}
+              labelFontSize={labelFontSize}
             />
           )}
 
@@ -277,19 +313,23 @@ function ObservationTimedBlock({
  * the coder underline is backed by the title + the by-coder table.
  */
 function Codeline({
-  groups, extent, codeById, multiCoder, coderMap,
+  groups, extent, codeById, multiCoder, coderMap, labelFontSize,
 }: {
   groups: CodelineCategoryGroup[]
   extent: number
   codeById: ReadonlyMap<number, TimedCodeLite>
   multiCoder: boolean
   coderMap: ReadonlyMap<number, TimedCoderLite>
+  labelFontSize?: number
 }) {
   const ticks = [0, 0.25, 0.5, 0.75, 1]
+  const base = labelFontSize ?? DEFAULT_LABEL_FONT_SIZE
+  const rulerSize = Math.max(6, base - 2)
+  const laneSize = Math.max(6, base - 1)
   return (
     <div aria-hidden="true" className="select-none rounded-lg border border-mm-surface-border bg-mm-surface p-2">
       {/* Ruler — recessive, text tokens only. */}
-      <div className="relative h-4 ml-[8.5rem] mr-1 text-[10px] text-mm-text-faint">
+      <div className="relative h-4 ml-[8.5rem] mr-1 text-mm-text-faint" style={{ fontSize: rulerSize }}>
         {ticks.map(t => (
           <span
             key={t}
@@ -303,7 +343,7 @@ function Codeline({
       {groups.map(group => (
         <div key={group.key}>
           {group.label && (
-            <div className="text-[11px] font-medium text-mm-text-muted mt-1.5 mb-0.5 truncate">{group.label}</div>
+            <div className="font-medium text-mm-text-muted mt-1.5 mb-0.5 truncate" style={{ fontSize: laneSize }}>{group.label}</div>
           )}
           {group.lanes.map(lane => {
             const code = codeById.get(lane.codeId)
@@ -314,7 +354,7 @@ function Codeline({
                     className="w-2 h-2 rounded-full shrink-0"
                     style={{ background: code ? codeColor(code) : undefined }}
                   />
-                  <span className="text-[11px] text-mm-text truncate">{code?.name ?? `Code ${lane.codeId}`}</span>
+                  <span className="text-mm-text truncate" style={{ fontSize: laneSize }}>{code?.name ?? `Code ${lane.codeId}`}</span>
                 </span>
                 <div
                   className="relative rounded bg-mm-bg mr-1"

@@ -159,11 +159,12 @@ export function ValueLabelRows({
 
       <div className="max-h-72 overflow-y-auto">
         <table className="w-full text-sm">
+          <caption className="sr-only">Value labels: each numeric code and the label shown for it.</caption>
           <thead>
             <tr className="text-xs text-mm-text-muted">
               <th scope="col" className="text-left py-1 pr-2 w-24">Code</th>
               <th scope="col" className="text-left py-1 px-2">Label</th>
-              <th scope="col" className="w-8"></th>
+              <th scope="col" className="w-8"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody>
@@ -195,7 +196,7 @@ export function ValueLabelRows({
                     data-row-remove={i}
                     onClick={() => removeRow(i)}
                     aria-label={`Remove row ${i + 1}`}
-                    className="p-1.5 -m-1.5 rounded text-mm-border-medium hover:text-red-500 transition-colors"
+                    className="p-1.5 -m-1.5 rounded text-mm-text-faint hover:text-red-500 transition-colors"
                   >
                     <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
                   </button>

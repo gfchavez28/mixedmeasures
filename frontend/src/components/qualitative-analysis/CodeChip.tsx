@@ -39,14 +39,38 @@ export default function CodeChip({ code, size = 'sm', onClick, coder, truncate }
     >
       {truncate ? <span className="truncate min-w-0">{code.name}</span> : code.name}
       {coder && (
-        <span
-          className={`inline-flex items-center justify-center rounded-full font-semibold leading-none px-1 text-[8px] shrink-0${coder.archived ? ' opacity-60 ring-1 ring-current' : ''}`}
-          style={{ backgroundColor: badgeColor, color: getContrastColor(badgeColor), minWidth: '12px', height: '12px' }}
-          aria-label={`coded by ${coder.username}${coder.archived ? ' (archived)' : ''}`}
-          title={`coded by ${coder.username}${coder.archived ? ' (archived)' : ''}`}
-        >
-          {coderInitials(coder.username)}
-        </span>
+        <>
+          {/*
+            #753 — the initials are a DUAL ENCODING of the badge colour, for
+            sighted colour-blind readers. They are not information a screen
+            reader needs, and the attribution beside them is.
+
+            Measured in Chrome's accessibility tree, because this is a place
+            reasoning goes wrong in both directions. The badge's `aria-label` DID
+            reach the chip's name (naming-prohibited on `generic` is not applied
+            here, so "the label is being dropped" is false) — but the "TE" text
+            node stayed in the tree as a child regardless, which is what NVDA
+            read out beside the name. `role="img"` does not prune it either;
+            only `aria-hidden` does, and hiding the span alone would take the
+            label with it and leave the chip saying nothing about who coded it.
+
+            So: hide the visual badge, and carry the attribution as its own text.
+            It contributes through name-from-contents, which works for the
+            read-only `<span>` chip too — an `aria-label` there would be a bare
+            span with no role, the shape #700 found silently dropped.
+          */}
+          <span
+            className={`inline-flex items-center justify-center rounded-full font-semibold leading-none px-1 text-[8px] shrink-0${coder.archived ? ' opacity-60 ring-1 ring-current' : ''}`}
+            style={{ backgroundColor: badgeColor, color: getContrastColor(badgeColor), minWidth: '12px', height: '12px' }}
+            aria-hidden="true"
+            title={`coded by ${coder.username}${coder.archived ? ' (archived)' : ''}`}
+          >
+            {coderInitials(coder.username)}
+          </span>
+          <span className="sr-only">
+            coded by {coder.username}{coder.archived ? ' (archived)' : ''}
+          </span>
+        </>
       )}
     </Tag>
   )

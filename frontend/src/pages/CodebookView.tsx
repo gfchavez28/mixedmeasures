@@ -1186,7 +1186,7 @@ export default function CodebookView() {
       {/* Status bar */}
       <div className="px-4 py-1.5 border-t border-mm-border-subtle text-xs text-mm-text-faint flex items-center gap-3 shrink-0">
         <span>{filteredTotalCodes} codes{cb.hiddenCodeIds.size > 0 ? ` (${cb.hiddenCodeIds.size} hidden)` : ''}</span>
-        <span className="text-mm-border-medium">{'\u00b7'}</span>
+        <span className="text-mm-text-faint">{'\u00b7'}</span>
         <span>{totalCategories} categories</span>
 
         {/* Health badges (use original treeData for diagnostics) */}
@@ -1195,7 +1195,7 @@ export default function CodebookView() {
           if (healthTotal === 0) {
             return (
               <>
-                <span className="text-mm-border-medium">{'\u00b7'}</span>
+                <span className="text-mm-text-faint">{'\u00b7'}</span>
                 <span className="flex items-center gap-1 text-mm-text-muted">
                   <CircleCheck className="w-3 h-3 text-green-500" />
                   All clear
@@ -1210,7 +1210,7 @@ export default function CodebookView() {
           if (diagnostics.lowCoverage > 0) pills.push({ label: '1-source', count: diagnostics.lowCoverage })
           return (
             <>
-              <span className="text-mm-border-medium">{'\u00b7'}</span>
+              <span className="text-mm-text-faint">{'\u00b7'}</span>
               <div className="relative inline-flex items-center">
                 <button
                   onClick={() => setHealthPopover(p => !p)}
@@ -1251,17 +1251,17 @@ export default function CodebookView() {
           )
         })()}
 
-        <span className="text-mm-border-medium">{'\u00b7'}</span>
+        <span className="text-mm-text-faint">{'\u00b7'}</span>
         {cb.mode === 'tree' && <span>Cat: {cb.catFormat} · Codes: {cb.codeFormat}</span>}
         {multiSelect.size > 0 && (
           <>
-            <span className="text-mm-border-medium">{'\u00b7'}</span>
+            <span className="text-mm-text-faint">{'\u00b7'}</span>
             <span className="text-mm-blue-text">{multiSelect.size} selected</span>
           </>
         )}
         {cb.search && (
           <>
-            <span className="text-mm-border-medium">{'\u00b7'}</span>
+            <span className="text-mm-text-faint">{'\u00b7'}</span>
             <span>Filter: &ldquo;{cb.search}&rdquo; ({searchMatchCount} match{searchMatchCount !== 1 ? 'es' : ''})</span>
           </>
         )}

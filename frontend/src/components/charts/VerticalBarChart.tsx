@@ -32,6 +32,7 @@ import type {
   SortOrder,
 } from '@/lib/chart-data'
 import type { RechartsTooltipProps, RechartsPayloadEntry, ChartDataRow } from '@/lib/chart-types'
+import { ChartFigure } from './ChartFigure'
 
 interface VerticalBarChartProps {
   frequencyData?: BarDatum[]
@@ -246,7 +247,7 @@ export default function VerticalBarChart({
     const dataLabel = makeVerticalDataLabel(fmt, display === 'count' ? '' : '%', colors)
 
     return (
-      <div role="img" aria-label="Vertical bar chart">
+      <ChartFigure label="Vertical bar chart">
         <ResponsiveContainer width="100%" height={360}>
           <BarChart data={chartData} margin={{ top: topMargin, right: 20, bottom: 80, left: 20 }}>
             <CartesianGrid stroke={colors.grid} vertical={false} />
@@ -276,7 +277,7 @@ export default function VerticalBarChart({
             </Bar>
           </BarChart>
         </ResponsiveContainer>
-      </div>
+      </ChartFigure>
     )
   }
 
@@ -299,9 +300,9 @@ export default function VerticalBarChart({
     const dataLabel = makeVerticalDataLabel(fmt, suffix, colors)
 
     return (
-      <div role="img" aria-label="Vertical bar chart">
+      <ChartFigure label="Vertical bar chart">
         {isLog && logExcluded > 0 && (
-          <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 dark:text-amber-400 dark:bg-amber-950/30 dark:border-amber-800 rounded px-2 py-1 mb-2">
+          <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 dark:text-amber-400 dark:bg-amber-950/30 dark:border-amber-800 rounded px-2 py-1 mb-2">
             {logExcluded} value{logExcluded > 1 ? 's' : ''} ≤ 0 excluded from log scale
           </div>
         )}
@@ -338,7 +339,7 @@ export default function VerticalBarChart({
         {isLog && (
           <div className="text-[11px] text-mm-text-faint mt-1 text-right">Log scale</div>
         )}
-      </div>
+      </ChartFigure>
     )
   }
 
@@ -366,9 +367,9 @@ export default function VerticalBarChart({
     const yDomain = buildYDomain(false, isLog ? allValues : undefined)
 
     return (
-      <div role="img" aria-label="Vertical grouped bar chart">
+      <ChartFigure label="Vertical grouped bar chart">
         {isLog && logExcludedScalar > 0 && (
-          <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 dark:text-amber-400 dark:bg-amber-950/30 dark:border-amber-800 rounded px-2 py-1 mb-2">
+          <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 dark:text-amber-400 dark:bg-amber-950/30 dark:border-amber-800 rounded px-2 py-1 mb-2">
             {logExcludedScalar} value{logExcludedScalar > 1 ? 's' : ''} ≤ 0 excluded from log scale
           </div>
         )}
@@ -414,7 +415,7 @@ export default function VerticalBarChart({
         {isLog && (
           <div className="text-[11px] text-mm-text-faint mt-1 text-right">Log scale</div>
         )}
-      </div>
+      </ChartFigure>
     )
   }
 
@@ -436,7 +437,7 @@ export default function VerticalBarChart({
     const yDomain = buildYDomain(display !== 'count')
 
     return (
-      <div role="img" aria-label="Vertical grouped frequency bar chart">
+      <ChartFigure label="Vertical grouped frequency bar chart">
         <ResponsiveContainer width="100%" height={360}>
           <BarChart data={chartData} margin={{ top: topMargin, right: 20, bottom: 80, left: 20 }}>
             <CartesianGrid stroke={colors.grid} vertical={false} />
@@ -473,7 +474,7 @@ export default function VerticalBarChart({
             ))}
           </BarChart>
         </ResponsiveContainer>
-      </div>
+      </ChartFigure>
     )
   }
 

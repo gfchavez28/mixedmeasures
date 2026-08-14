@@ -41,6 +41,7 @@ import { pickGroupDifferenceTest, groupDifferenceTestLabel } from '@/lib/group-t
 import { ChartErrorBoundary } from '@/components/ChartErrorBoundary'
 import ChartTypeToolbar from '@/components/charts/ChartTypeToolbar'
 import AnalysisChartRenderer from '@/components/analysis/AnalysisChartRenderer'
+import { compareScales, type ScaleAgreement } from '@/lib/scale-comparison'
 import CorrelationsComparisonsContent from '@/components/analysis/CorrelationsComparisonsContent'
 import { DataQualityContent } from '@/components/analysis/DataQualityTab'
 import AnalysisSidebar from '@/components/analysis/AnalysisSidebar'
@@ -100,8 +101,11 @@ function formatTestResult(test: StatisticalTestResponse): string {
     return `t(${typeof rd.df === 'number' ? rd.df.toFixed(1) : rd.df}) = ${rd.t_statistic}, ${formatPValue(rd.p_value)}, d = ${rd.cohens_d} (${rd.effect_size_label}) \u2014 ${rd.group1_label} (M = ${rd.group1_mean}) vs ${rd.group2_label} (M = ${rd.group2_mean})`
   }
   if (test.test_type === 'one_way_anova') {
+    // #742: the label is classified from eta-squared, so it sits with
+    // eta-squared. It used to trail the whole string, i.e. immediately after
+    // omega-squared, which reads as describing the number it does not describe.
     const omegaStr = rd.omega_squared != null ? `, \u03C9\u00B2 = ${rd.omega_squared}` : ''
-    return `F(${rd.df_between}, ${rd.df_within}) = ${rd.f_statistic}, ${formatPValue(rd.p_value)}, \u03B7\u00B2 = ${rd.eta_squared}${omegaStr} (${rd.effect_size_label})`
+    return `F(${rd.df_between}, ${rd.df_within}) = ${rd.f_statistic}, ${formatPValue(rd.p_value)}, \u03B7\u00B2 = ${rd.eta_squared} (${rd.effect_size_label})${omegaStr}`
   }
   if (test.test_type === 'split_half') {
     const negNote = rd.negative_half_correlation ? ' — negative half-correlation, scale may lack internal consistency' : ''
@@ -489,6 +493,35 @@ export default function AnalysisView() {
     analysisColumnsData, columnsData, domainsData,
   })
 
+  /**
+   * #693 — do the items behind the charted scale scores share a scale?
+   *
+   * Distinct from `hasMixedScales` above, which asks whether the SELECTED
+   * METRICS disagree with each other (and gates chart types on it). This asks
+   * whether the items INSIDE one domain aggregate do — the question that
+   * decides whether the score means anything, and the one nothing on this
+   * screen was asking. Detection is shared with the crosswalk grid and the
+   * domain picker so all three reach the same verdict.
+   *
+   * `mismatch` outranks `unknown`: a demonstrated disagreement is the more
+   * actionable statement, and only one notice is rendered.
+   */
+  const scaleScoreAgreement = useMemo<ScaleAgreement | null>(() => {
+    const domains = domainsData?.domains
+    if (!domains?.length) return null
+    const byId = new Map(domains.map(d => [d.id, d]))
+    let sawUnknown = false
+    for (const m of orderedMetrics) {
+      if (m.input_source_type !== 'dataset_domain') continue
+      const domain = byId.get(m.input_source_id)
+      if (!domain) continue
+      const verdict = compareScales(domain.members)
+      if (verdict === 'mismatch') return 'mismatch'
+      if (verdict === 'unknown') sawUnknown = true
+    }
+    return sawUnknown ? 'unknown' : null
+  }, [orderedMetrics, domainsData])
+
   // Auto-select top two scale values for proportion "values" mode when none are selected
   useEffect(() => {
     if (proportionMode === 'values' && proportionValues.length === 0 && availableScaleValues.length >= 2) {
@@ -624,7 +657,7 @@ export default function AnalysisView() {
         mann_whitney_u: 'Mann-Whitney U test',
         kruskal_wallis: 'Kruskal-Wallis H test',
       }
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- ARIA announcement when comparison test type changes
+      // ARIA announcement when comparison test type changes
       setCompAnnouncement(`Test changed to ${labels[currentType] || currentType}`)
     }
     prevCompTestType.current = currentType
@@ -1508,6 +1541,7 @@ export default function AnalysisView() {
                   divergingCenterAuto={divergingCenterAuto}
                   hasMixedScales={hasMixedScales}
                   hasMixedTypes={hasMixedTypes}
+                  scaleScoreAgreement={scaleScoreAgreement}
                   showErrorBand={showErrorBand}
                   lineStyle={lineStyle}
                   lineOverlay={lineOverlay}

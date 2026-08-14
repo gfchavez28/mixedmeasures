@@ -10,6 +10,7 @@ import { flushSync } from 'react-dom'
 // to avoid bundling them in the main chunk (only needed on user-triggered export)
 
 import type { MetricDefinitionResponse } from './api'
+import { safeFilename } from './filename'
 import {
   shapeFrequencyBars,
   shapeScalarBars,
@@ -144,8 +145,9 @@ export async function exportAsPng(element: HTMLElement, filename: string, pixelR
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/** Download filenames follow ONE client rule — see `lib/filename.ts` (#734). */
 function sanitizeFilename(name: string): string {
-  return name.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80)
+  return safeFilename(name, { fallback: 'chart' })
 }
 
 // ── Chart grouping for batch export ──────────────────────────────────────────

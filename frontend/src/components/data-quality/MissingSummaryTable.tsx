@@ -75,6 +75,7 @@ export default function MissingSummaryTable({
   return (
     <div className="overflow-x-auto border rounded-lg">
       <table className="border-collapse text-[13px] w-full">
+        <caption className="sr-only">Missing data by variable.</caption>
         <thead>
           <tr>
             {/* Variable — sticky */}

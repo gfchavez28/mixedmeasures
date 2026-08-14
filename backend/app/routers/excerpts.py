@@ -17,7 +17,7 @@ from ..models.note import Note
 from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from ..models.code_application import CodeApplication
 from ..models.code import Code
-from ..models.excerpt import whole_segment_excerpt_filter
+from ..models.excerpt import whole_segment_excerpt_filter, excerpt_source_pair
 from ..models.participant import Participant
 from ..schemas.excerpt import (
     ExcerptCreate,
@@ -82,6 +82,12 @@ def _excerpt_to_response(excerpt: Excerpt) -> ExcerptResponse:
             created_at=excerpt.note.created_at,
         )
 
+    # #736: the RESOLVED source, so a consumer never has to enumerate parents.
+    # The per-parent `conversation_name`/`observation_name` below stay for their
+    # existing readers, but nothing new should reach for them — a document quote
+    # is exactly what that enumeration was missing.
+    source_kind, source_name = excerpt_source_pair(excerpt)
+
     return ExcerptResponse(
         id=excerpt.id,
         segment_id=excerpt.segment_id,
@@ -91,6 +97,8 @@ def _excerpt_to_response(excerpt: Excerpt) -> ExcerptResponse:
         start_time=excerpt.start_time,
         end_time=excerpt.end_time,
         excerpt_text=excerpt_text,
+        source_kind=source_kind,
+        source_name=source_name,
         conversation_id=conversation_id,
         conversation_name=conversation_name,
         observation_id=observation_id,
@@ -507,7 +515,9 @@ async def export_excerpts_csv(
 
     for exc in excerpts:
         resp = _excerpt_to_response(exc)
-        source_name = resp.conversation_name or ""
+        # #736: one dispatch, shared with the response builder and the Excel
+        # Quotes sheet. This block used to hand-roll its own.
+        source, source_name = resp.source_kind, resp.source_name
         # Time-range columns (slab 5, D32): a time excerpt emits its OWN range;
         # a whole-clip excerpt emits the CLIP's range (its label is often "",
         # so without the range the row would be blank where it matters most);
@@ -524,28 +534,26 @@ async def export_excerpts_csv(
                 duration = format_timecode(exc.end_time - exc.start_time)
             else:
                 excerpt_type = "whole-segment"
-            if seg is not None and seg.document_id is not None:
-                source = "document"
-                source_name = seg.document.name if seg.document else ""
-            elif seg is not None and seg.observation_id is not None:
-                source = "observation"
-                source_name = seg.observation.name if seg.observation else ""
-                if exc.start_time is None and seg.start_time is not None and seg.end_time is not None:
-                    range_start = format_timecode(seg.start_time)
-                    range_end = format_timecode(seg.end_time)
-                    duration = format_timecode(seg.end_time - seg.start_time)
-            else:
-                source = "conversation"
+            if (
+                seg is not None and seg.observation_id is not None
+                and exc.start_time is None
+                and seg.start_time is not None and seg.end_time is not None
+            ):
+                range_start = format_timecode(seg.start_time)
+                range_end = format_timecode(seg.end_time)
+                duration = format_timecode(seg.end_time - seg.start_time)
         else:
             excerpt_type = "text"
-            source = "text"
         note_text = resp.note.content if resp.note else ""
         writer.writerow([
             exc.id,
             source,
             csv_safe(source_name),
             csv_safe(resp.speaker_name or ""),
-            resp.segment_timestamp or "",
+            # #733: `or ""` blanked a segment starting at exactly 0.0 — the first
+            # turn of a timestamped transcript, or any clip at the top of a
+            # recording. `export.py:147` always had this right.
+            resp.segment_timestamp if resp.segment_timestamp is not None else "",
             range_start,
             range_end,
             duration,

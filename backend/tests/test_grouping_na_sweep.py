@@ -169,9 +169,59 @@ IS_NA_ALLOWLIST: dict[str, int] = {
 }
 
 
+# ── The scan's own population (#730) ─────────────────────────────────────────
+# Every arm below asserts an EXPECTED set, and TWO of those sets are empty —
+# `assert hits == {}` and `assert hits == IS_NA_ALLOWLIST`, the latter emptied by
+# the successful #592 slab-5 cleanup. That assertion shape passes just as happily
+# when the scan finds nothing AT ALL, and `Path.rglob` on a mistyped root yields
+# `[]` rather than raising (measured, 3.12.3). So one typo in `APP_DIR` would
+# silently convert both arms into permanent passes — including the `_is_na` arm
+# this project cites as proof the #592 class is closed.
+#
+# The population is therefore asserted INSIDE `_scan`, not in a test beside it:
+# the protection travels with every caller, present and future, instead of
+# depending on whoever adds the fourth arm remembering that it needs one.
+_MIN_APP_FILES = 100  # 163 as of 2026-08-09 — a floor for a BAD ROOT, not a growth pin
+_POPULATION_SENTINELS = (
+    "services/missing_values.py",  # the predicate owner (excluded from the _is_na arm)
+    "services/grouping.py",        # THE loader, and an allowlisted three-column site
+)
+
+
+def _app_files() -> list[Path]:
+    """Every `app/` module, with the walk proven non-vacuous before it is used."""
+    files = sorted(APP_DIR.rglob("*.py"))
+    assert len(files) >= _MIN_APP_FILES, (
+        f"This sweep's population is {len(files)} file(s) under {APP_DIR} — "
+        f"expected at least {_MIN_APP_FILES}. The scan is looking at the wrong "
+        "tree, and because rglob returns [] for a bad path instead of raising, "
+        "every assertion in this file would otherwise pass VACUOUSLY (#730). "
+        "Fix APP_DIR — do NOT lower this floor."
+    )
+    rels = {p.relative_to(APP_DIR).as_posix() for p in files}
+    missing = [s for s in _POPULATION_SENTINELS if s not in rels]
+    assert not missing, (
+        f"This sweep cannot see {missing} under {APP_DIR}. A file COUNT alone "
+        "cannot tell this tree from some other tree that also contains .py "
+        "files; these are the modules the sweep exists to police, so their "
+        "absence means the root is wrong even though the count looked fine."
+    )
+    return files
+
+
+def test_the_sweep_can_see_the_app_tree():
+    """Guard the guard (#730): name the vacuity failure on its own, so a broken
+    root reports as 'the scan is blind' rather than as three passing arms.
+
+    `_scan` asserts this too — that is the load-bearing copy, because it cannot
+    be forgotten by a future arm. This test exists so the failure has a name.
+    """
+    assert len(_app_files()) >= _MIN_APP_FILES
+
+
 def _scan(pattern: re.Pattern, *, exclude: set[str] = frozenset()) -> dict[str, int]:
     hits: dict[str, int] = {}
-    for path in sorted(APP_DIR.rglob("*.py")):
+    for path in _app_files():
         rel = path.relative_to(APP_DIR).as_posix()
         if rel in exclude:
             continue

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ..database import open_raw_connection
 from ..models.conversation import VIDEO_FORMATS
+from .archive_safety import assert_expanded_size_within_limit
 from ..schemas.backup import (
     BackupInfo,
     BackupManifest,
@@ -28,7 +29,7 @@ from ..schemas.backup import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 MANIFEST_FORMAT_VERSION = 1
 STALE_HOURS = 24
 
@@ -297,10 +298,25 @@ def validate_backup(zip_path: Path) -> RestorePreview:
             if "database.db" not in names:
                 raise ValueError("Invalid backup: missing database.db")
 
-            # Zip-slip prevention
+            # Zip-slip prevention. ⚠️ This path is NOT vulnerable the way
+            # `project_portability.py`'s was (#688): restore extracts with
+            # `zf.extract()`, which applies CPython's own member sanitisation
+            # (`os.path.splitdrive` strips the drive on Windows, `..`/absolute
+            # components are stripped), so a `C:/evil.txt` member lands at
+            # `dest/evil.txt` rather than escaping. The scan below is therefore
+            # belt-and-braces here, and is deliberately left in place: the safety
+            # rests on WHICH zipfile API is called, not on this check, so if restore
+            # is ever moved onto `zf.open()`/`writestr` for streaming — exactly what
+            # made the sibling exploitable — this becomes the only defence and must
+            # be swapped for `archive_safety.assert_member_within`.
             for name in names:
                 if name.startswith("/") or ".." in name:
                     raise ValueError(f"Invalid backup: suspicious path '{name}'")
+
+            # #696: the archive is bounded; its expansion was not. Refuse here, at
+            # validate time, so a bomb is rejected BEFORE the pre-restore safety
+            # backup is taken and before anything is staged.
+            assert_expanded_size_within_limit(zf)
 
             manifest_data = json.loads(zf.read("manifest.json"))
             manifest = BackupManifest(**manifest_data)
@@ -399,10 +415,19 @@ def restore_from_backup(
     tmp_dir = tempfile.mkdtemp()  # db + documents staging (small payloads)
     try:
         with zipfile.ZipFile(str(zip_path), "r") as zf:
-            # Zip-slip prevention during extraction
+            # Zip-slip prevention during extraction (see validate_backup for why
+            # this path is safe by virtue of `zf.extract`, and what would change
+            # that). Re-run here rather than trusting validate_backup — restore is
+            # reachable independently.
             for member in zf.namelist():
                 if member.startswith("/") or ".." in member:
                     raise ValueError(f"Suspicious path in backup: {member}")
+
+            # #696: re-check the expansion cap on the destructive path too. The
+            # staging design (#550) already makes an ENOSPC abort cleanly with the
+            # install untouched — but "aborts cleanly after filling the disk" is
+            # still exhaustion, and this refuses before writing a byte.
+            assert_expanded_size_within_limit(zf)
 
             # ---- Staging phase: extract EVERYTHING before mutating anything.
             # An ENOSPC/IO failure here (the likeliest failure on a multi-GB

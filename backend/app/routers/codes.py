@@ -312,62 +312,6 @@ async def reorder_codes_in_category(
     return {"status": "ok"}
 
 
-@router.get("/{code_id}/segments")
-async def get_code_segments(
-    project_id: int,
-    code_id: int,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get all segments that have this code applied, grouped by conversation."""
-    _get_project_or_404(db, project_id, user.id)
-    code = db.query(Code).filter(
-        Code.id == code_id,
-        Code.project_id == project_id
-    ).first()
-
-    if not code:
-        raise HTTPException(status_code=404, detail="Code not found")
-
-    # Get all segments with this code — eager load to avoid N+1, exclude soft-deleted
-    applications = db.query(CodeApplication).options(
-        joinedload(CodeApplication.segment).joinedload(Segment.conversation),
-        joinedload(CodeApplication.segment).joinedload(Segment.speaker),
-    ).join(Segment).filter(
-        CodeApplication.code_id == code_id,
-        Segment.merged_into_id == None,
-        Segment.split_into_id == None,
-    ).all()
-
-    # Group by conversation
-    conversations = {}
-    for app in applications:
-        segment = app.segment
-        if not segment:
-            continue
-
-        conversation_id = segment.conversation_id
-        if conversation_id not in conversations:
-            conversations[conversation_id] = {
-                "conversation_id": conversation_id,
-                "conversation_name": segment.conversation.name if segment.conversation else "Unknown",
-                "segments": []
-            }
-
-        conversations[conversation_id]["segments"].append({
-            "id": segment.id,
-            "sequence_order": segment.sequence_order,
-            "speaker_name": segment.speaker.name if segment.speaker else None,
-            "text": segment.text,
-            "start_time": segment.start_time
-        })
-
-    return {
-        "code": code_to_response(code, db),
-        "conversations": list(conversations.values())
-    }
-
-
 @router.post("/bulk-move", response_model=BulkMoveResponse)
 async def bulk_move_codes(
     project_id: int,

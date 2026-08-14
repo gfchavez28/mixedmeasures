@@ -17,6 +17,7 @@ from ..models.document import Document, SegmentationMode
 from ..models.segment import Segment
 from ..models.code_application import CodeApplication
 from ..models.note import Note
+from ..services.note_numbering import next_note_sequence
 from ..schemas.document import (
     DocumentListItem,
     DocumentDetailResponse,
@@ -396,9 +397,12 @@ async def get_document(
             [n for n in seg.attached_notes if not n.is_archived],
             key=lambda n: n.id
         )
+        # #747: was `idx + 1`. Documents stored 0 for every note, so this read
+        # path invented a label — which is why documents looked correct on screen
+        # while the same note exported as `N-0`. The number is real now.
         attached_notes = [
-            SegmentNoteInfo(id=n.id, sequence_number=idx + 1)
-            for idx, n in enumerate(active_notes)
+            SegmentNoteInfo(id=n.id, sequence_number=n.sequence_number)
+            for n in active_notes
         ]
         has_note = len(active_notes) > 0
 
@@ -787,8 +791,11 @@ async def create_document_note(
         conversation_id=None,
         dataset_value_id=None,
         content=data.content,
-        sequence_number=0,
     )
+    # #747: was a literal 0 — the two read paths below hid it by renumbering
+    # positionally, which is why documents looked correct while the same note
+    # exported as `N-0`.
+    note.sequence_number = next_note_sequence(db, note)
     db.add(note)
     db.commit()
     db.refresh(note)
@@ -855,9 +862,10 @@ def _segment_to_doc_response(seg: Segment) -> DocumentSegmentResponse:
         [n for n in seg.attached_notes if not n.is_archived],
         key=lambda n: n.id
     )
+    # #747: see the sibling site above — the stored number is real now.
     attached_notes = [
-        SegmentNoteInfo(id=n.id, sequence_number=idx + 1)
-        for idx, n in enumerate(active_notes)
+        SegmentNoteInfo(id=n.id, sequence_number=n.sequence_number)
+        for n in active_notes
     ]
     has_note = len(active_notes) > 0
     excerpt_info = None
@@ -939,13 +947,15 @@ async def split_document_segments(
     from ..services.segment_operations import split_segment
 
     document = _get_document_or_404(db, project_id, document_id, user.id)
+    report: dict = {}
     new_segments, deleted_ids = split_segment(
         db, data.ranges, 'document', document_id,
-        document.project_id, user.id,
+        document.project_id, user.id, report=report,
     )
     return DocumentSplitResponse(
         new_segments=[_segment_to_doc_response(s) for s in new_segments],
         deleted_segment_ids=deleted_ids,
+        quote_notes_stayed=report.get("quote_notes_stayed", 0),
     )
 
 

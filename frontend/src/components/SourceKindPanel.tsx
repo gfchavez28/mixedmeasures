@@ -89,6 +89,7 @@ export default function SourceKindPanel({
             <div className="mt-3 space-y-4">
               <div className="overflow-x-auto">
                 <table className="w-full text-xs border-collapse">
+                  <caption className="sr-only">Where a recording can live: coding a transcript in a Conversation versus coding the timeline in an Observation.</caption>
                   <thead>
                     <tr className="text-left text-mm-text-muted">
                       <th scope="col" className="py-1 pr-4 font-medium">Source</th>

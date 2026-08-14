@@ -170,6 +170,7 @@ export function DatasetDotButton({
   // "left click ALSO opens the picker" as confusing).
   const popoverContent = (
     <PopoverContent
+      aria-label="Dataset color"
       align="start"
       className="w-auto p-3"
       onClick={(e) => e.stopPropagation()}

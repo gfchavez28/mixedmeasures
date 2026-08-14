@@ -516,7 +516,9 @@ async def export_study_excel(
 
         for row_num, exc in enumerate(excerpts, 2):
             resp = _excerpt_to_response(exc)
-            source_name = resp.conversation_name or ""
+            # #736: one dispatch, shared with the response builder and the
+            # excerpts CSV. This block used to hand-roll its own copy.
+            source_kind, source_name = resp.source_kind, resp.source_name
             range_start = range_end = duration = ""
             if exc.segment_id is not None:
                 seg = exc.segment
@@ -529,12 +531,7 @@ async def export_study_excel(
                     duration = format_timecode(exc.end_time - exc.start_time)
                 else:
                     excerpt_type = "whole-segment"
-                if seg is not None and seg.document_id is not None:
-                    source_kind = "document"
-                    source_name = seg.document.name if seg.document else ""
-                elif seg is not None and seg.observation_id is not None:
-                    source_kind = "observation"
-                    source_name = seg.observation.name if seg.observation else ""
+                if seg is not None and seg.observation_id is not None:
                     # A whole-clip quote's identity IS the clip's range — its
                     # label is often blank, so without this the row would be
                     # emptiest exactly where it matters most (mirrors the CSV).
@@ -542,17 +539,20 @@ async def export_study_excel(
                         range_start = format_timecode(seg.start_time)
                         range_end = format_timecode(seg.end_time)
                         duration = format_timecode(seg.end_time - seg.start_time)
-                else:
-                    source_kind = "conversation"
             else:
                 excerpt_type = "text"
-                source_kind = "text"
 
             ws_quotes.cell(row=row_num, column=1, value=exc.id)
             ws_quotes.cell(row=row_num, column=2, value=source_kind)
             excel_set_safe(ws_quotes.cell(row=row_num, column=3), source_name)
             excel_set_safe(ws_quotes.cell(row=row_num, column=4), resp.speaker_name or "")
-            ws_quotes.cell(row=row_num, column=5, value=resp.segment_timestamp or "")
+            # #733: `or ""` blanked a segment starting at exactly 0.0 — the
+            # first turn of a timestamped transcript, or a clip at the top of a
+            # recording. The CSV sibling carried the identical defect.
+            ws_quotes.cell(
+                row=row_num, column=5,
+                value=resp.segment_timestamp if resp.segment_timestamp is not None else "",
+            )
             ws_quotes.cell(row=row_num, column=6, value=range_start)
             ws_quotes.cell(row=row_num, column=7, value=range_end)
             ws_quotes.cell(row=row_num, column=8, value=duration)

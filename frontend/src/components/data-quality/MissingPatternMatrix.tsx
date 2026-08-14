@@ -51,6 +51,7 @@ export default function MissingPatternMatrix({ data }: MissingPatternMatrixProps
 
       <div className="overflow-x-auto">
         <table className="border-collapse text-[12px]">
+          <caption className="sr-only">Missing-data patterns: which variables are missing together, and how often.</caption>
           <thead>
             <tr>
               <th className="px-2 py-1.5 text-center font-medium text-mm-text-muted border-b border-mm-border-subtle bg-mm-surface" style={{ minWidth: 32 }}>

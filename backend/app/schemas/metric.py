@@ -361,10 +361,13 @@ class CrossTabCell(BaseModel):
 
 
 class ChiSquareResult(BaseModel):
-    statistic: float
-    p_value: float
+    statistic: float | None = None
+    p_value: float | None = None
     df: int
-    cramers_v: float
+    # #689: a table with a single effective row or column cannot express
+    # association at all; V was reported as a measured 0.
+    cramers_v: float | None = None
+    undefined_reason: str | None = None
 
 
 class CrossTabResponse(BaseModel):

@@ -7,7 +7,6 @@ import type {
   DemographicFilter,
   SourceFrequenciesResponse,
   SaturationResponse,
-  CodeFrequencySummary,
 } from '@/lib/api'
 import type { QualitativeAnalysisState, QualitativeAnalysisActions } from '@/hooks/useQualitativeAnalysis'
 import ChartExportWrapper from '@/components/charts/ChartExportWrapper'
@@ -55,13 +54,18 @@ function getMetricDescription(
 
 export interface DescriptivesSidebarProps {
   qa: QualitativeAnalysisState & QualitativeAnalysisActions
-  codes: { id: number; name: string; is_active: boolean }[]
+  /**
+   * The entities on the chart's CODE AXIS — categories under
+   * `codeMode === 'categories'`, active codes otherwise (#675). Decided by the
+   * view, which is the one place that knows the mode.
+   */
+  axisEntities: { id: number; name: string }[]
   demoFilters: DemographicFilter[]
   onValueModeChange: (mode: QualitativeAnalysisState['valueMode']) => void
   onOrientationChange: (orient: QualitativeAnalysisState['orientation']) => void
 }
 
-export function DescriptivesSidebar({ qa, codes, demoFilters, onValueModeChange, onOrientationChange }: DescriptivesSidebarProps) {
+export function DescriptivesSidebar({ qa, axisEntities, demoFilters, onValueModeChange, onOrientationChange }: DescriptivesSidebarProps) {
   const [chartOptionsOpen, setChartOptionsOpen] = useState(false)
 
   return (
@@ -93,7 +97,8 @@ export function DescriptivesSidebar({ qa, codes, demoFilters, onValueModeChange,
             onFormattingChange={qa.onFormattingChange}
             customOrder={qa.customOrder}
             onCustomOrderChange={qa.setCustomOrder}
-            codes={codes.filter(c => c.is_active).map(c => ({ id: c.id, name: c.name }))}
+            axisEntities={axisEntities}
+            categoryMode={qa.codeMode === 'categories'}
             groupBy={qa.groupBy}
             onGroupByChange={qa.setGroupBy}
             demoFilters={demoFilters}
@@ -128,7 +133,6 @@ export interface DescriptivesContentProps {
   sourceFreqLoading: boolean
   saturationData: SaturationResponse | undefined
   saturationLoading: boolean
-  freqData: CodeFrequencySummary | undefined
   onChartTypeChange: (type: QualitativeAnalysisState['chartType']) => void
   // ── Timeline chart type (slab 6c, §8q) ──
   projectId: number
@@ -147,7 +151,7 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
     conversationSourceCount, descriptivesN,
     sourceFreqData, sourceFreqLoading,
     saturationData, saturationLoading,
-    freqData, onChartTypeChange,
+    onChartTypeChange,
     projectId, timedObservations, timedCodes, timedCategories,
     coderInclude, multiCoder, coderMap,
   } = props
@@ -209,6 +213,7 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
             multiCoder={multiCoder}
             coderMap={coderMap}
             consensusScope={qa.layerScope === 'consensus'}
+            labelFontSize={qa.formatting.labelFontSize}
           />
         ) : qa.chartType === 'saturation' ? (
           saturationLoading ? (
@@ -227,6 +232,7 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
                 denominatorMode={qa.denominatorMode}
                 orientation={qa.orientation}
                 sortOrder={qa.sortOrder}
+                customOrder={qa.customOrder}
                 showSummaryRow={qa.showSummaryRow}
                 showRowN={qa.showRowN}
                 heatmapPreset={qa.formatting.heatmapPreset}
@@ -244,6 +250,7 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
                 valueMode={qa.valueMode}
                 denominatorMode={qa.denominatorMode}
                 sortOrder={qa.sortOrder}
+                customOrder={qa.customOrder}
                 groupBy={qa.groupBy}
                 labelFontSize={qa.formatting.labelFontSize}
                 dataFontSize={qa.formatting.dataLabelFontSize}
@@ -256,6 +263,7 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
                 data={sourceFreqData}
                 orientation={qa.orientation}
                 sortOrder={qa.sortOrder}
+                customOrder={qa.customOrder}
                 valueMode={qa.valueMode}
                 denominatorMode={qa.denominatorMode}
                 labelFontSize={qa.formatting.labelFontSize}
@@ -264,19 +272,14 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
                 onBarClick={qa.viewCodeInContent}
               />
             )}
+            {/* #749: one payload. The per-kind columns used to arrive from
+                `freqData` (code-frequencies), which reads an unselected kind as
+                ALL of that kind — so the table mixed two scopes. */}
             {qa.chartType === 'summary' && (
               <QualSummaryTable
                 data={sourceFreqData}
                 onCodeClick={qa.viewCodeInContent}
                 categoryMode={qa.codeMode === 'categories'}
-                frequencies={freqData?.frequencies}
-                source={qa.source}
-                totalCoded={freqData?.total_coded_segments}
-                totalConversations={freqData?.total_conversations}
-                totalParticipants={freqData?.total_participants}
-                unlinkedSpeakerCount={freqData?.unlinked_speaker_count}
-                totalCodedComments={freqData?.total_coded_texts ?? 0}
-                totalRecords={freqData?.total_rows ?? 0}
               />
             )}
           </>

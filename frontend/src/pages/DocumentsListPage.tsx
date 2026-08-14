@@ -60,7 +60,7 @@ export default function DocumentsListPage() {
       result = result.filter(d => d.name.toLowerCase().includes(q))
     }
     const sorted = [...result].sort((a, b) => {
-      let cmp = 0
+      let cmp: number
       if (sortBy === 'name') {
         cmp = a.name.localeCompare(b.name)
       } else if (sortBy === 'date') {

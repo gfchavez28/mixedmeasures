@@ -8,10 +8,10 @@
  * Supports: horizontal_bar, heatmap, vertical_bar, stacked_bar, line.
  * Unsupported chart types fall back to a text label.
  */
-import { useMemo } from 'react'
+import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
-import { metricsApi } from '@/lib/api'
+import { metricsApi, codeAnalysisApi } from '@/lib/api'
 import type { MetricDefinitionResponse } from '@/lib/api'
 import {
   detectChartType,
@@ -36,7 +36,16 @@ import FrequencyBarChart from '@/components/charts/FrequencyBarChart'
 import StackedHorizontalBarChart from '@/components/charts/StackedHorizontalBarChart'
 import VerticalBarChart from '@/components/charts/VerticalBarChart'
 import LineChartComponent from '@/components/charts/LineChart'
-import { extractComputeParams, buildRequest } from './inline-chart-params'
+import {
+  extractComputeParams,
+  buildRequest,
+  extractQualComputeParams,
+  buildQualSaturationParams,
+  buildQualComparisonRequest,
+  qualChartKind,
+  qualChartHasEnoughToFetch,
+} from './inline-chart-params'
+import QualChartRouter from './QualChartRouter'
 import { isQualitativeMaterialConfig } from '@/lib/material-kind'
 
 // ── Props ────────────────────────────────────────────────────────────────────
@@ -47,6 +56,12 @@ export interface InlineChartRendererProps {
   content: Record<string, unknown>
   isStale?: boolean
   onRefresh?: () => void
+  /**
+   * The heading the embed already renders above this component (the material's
+   * name). Passed in only so an identical config-side title is not printed a
+   * second line below it — a config `title` that differs is still shown.
+   */
+  embedTitle?: string | null
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -67,9 +82,16 @@ export default function InlineChartRenderer({
   content,
   isStale,
   onRefresh,
+  embedTitle,
 }: InlineChartRendererProps) {
+  // #652: a material is quantitative or qualitative by its CONFIG — the same
+  // discriminator the "Open in Analysis" link routes on. Both branches' queries
+  // are declared unconditionally and gated by `enabled`, so hook order is
+  // stable across a config change.
+  const isQual = useMemo(() => isQualitativeMaterialConfig(content), [content])
+
   const params = useMemo(() => extractComputeParams(content), [content])
-  const hasSelection = params.columnIds.length > 0 || params.domainIds.length > 0
+  const hasSelection = !isQual && (params.columnIds.length > 0 || params.domainIds.length > 0)
 
   const request = useMemo(
     () => (hasSelection ? buildRequest(params) : null),
@@ -83,6 +105,65 @@ export default function InlineChartRenderer({
     staleTime: 5 * 60 * 1000,
   })
 
+  // ── Qualitative branch (#652 slabs 1–2) ─────────────────────────────────
+  //
+  // One query per endpoint, all declared unconditionally and gated by `enabled`
+  // on the SAME derived kind, so hook order never depends on the config.
+  const qualParams = useMemo(() => extractQualComputeParams(content), [content])
+  const kind = isQual ? qualChartKind(qualParams) : null
+  const qualEnabled = kind !== null && qualChartHasEnoughToFetch(qualParams)
+  const isSourceFrequencyChart =
+    kind === 'heatmap' || kind === 'bar' || kind === 'stacked_bar' || kind === 'summary'
+  const isComparison = kind === 'comparison_table' || kind === 'comparison_bar'
+
+  const {
+    data: qualData,
+    isLoading: qualLoading,
+    isError: qualError,
+  } = useQuery({
+    // The coder scope rides inside `request`, so a material saved under a
+    // narrowed coder filter can never read another material's cache entry
+    // (the #454 keying rule, satisfied by construction here because the embed
+    // sends exactly the scope it stored).
+    queryKey: ['canvas-qual-chart', projectId, materialId, qualParams.request],
+    queryFn: () => codeAnalysisApi.sourceFrequencies(projectId, qualParams.request),
+    enabled: qualEnabled && isSourceFrequencyChart,
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const saturationParams = useMemo(() => buildQualSaturationParams(qualParams), [qualParams])
+  const {
+    data: qualSaturation,
+    isLoading: saturationLoading,
+    isError: saturationError,
+  } = useQuery({
+    queryKey: ['canvas-qual-saturation', projectId, materialId, saturationParams],
+    queryFn: () => codeAnalysisApi.saturation(projectId, saturationParams),
+    enabled: qualEnabled && kind === 'saturation',
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const comparisonRequest = useMemo(() => buildQualComparisonRequest(qualParams), [qualParams])
+  const {
+    data: qualComparison,
+    isLoading: comparisonLoading,
+    isError: comparisonError,
+  } = useQuery({
+    queryKey: ['canvas-qual-comparison', projectId, materialId, comparisonRequest],
+    queryFn: () => codeAnalysisApi.demographicComparison(projectId, comparisonRequest!),
+    enabled: qualEnabled && isComparison && comparisonRequest != null,
+    staleTime: 5 * 60 * 1000,
+  })
+
+  // Co-occurrence fetches for itself, so its N arrives by callback rather than
+  // from a payload we hold. The setter is guarded because the child reports on
+  // every data change and an unconditional set would re-render in a loop.
+  const [cooccurrenceN, setCooccurrenceN] = useState<number | null>(null)
+  const handleCooccurrenceLoad = useCallback((info: { totalSegments: number; totalComments: number }) => {
+    const next = info.totalSegments + info.totalComments
+    setCooccurrenceN(prev => (prev === next ? prev : next))
+  }, [])
+
   // #652: `content.auto_name` was read here and is NEVER populated — on ANY
   // path. `auto_name` is a sibling field in the create-material payload
   // (AnalysisView:1093 / QualitativeAnalysisView:737) and a sibling COLUMN on
@@ -91,8 +172,16 @@ export default function InlineChartRenderer({
   // quant chart whose column was deleted showed "Untitled / Chart unavailable".
   // The real title is rendered by ChartEmbedView directly above this component
   // (the only mount site), so the fallbacks below carry no name at all.
-  const chartTitle = (content.chart_title as string) ?? (content.title as string) ?? ''
+  const rawChartTitle = (content.chart_title as string) ?? (content.title as string) ?? ''
+  // The embed already prints the material's name as its heading. When the
+  // researcher's chart title is the same string, printing it again is just a
+  // duplicated line; when it differs, both carry information and both stay.
+  const chartTitle = rawChartTitle && rawChartTitle === embedTitle ? '' : rawChartTitle
   const chartSubtitle = (content.chart_subtitle as string) ?? (content.subtitle as string) ?? ''
+  // The analysis view renders a footnote under every chart (`ChartExportWrapper`)
+  // and researchers use it for the methods note. It was never carried onto the
+  // canvas, so that note silently vanished on the surface meant for writing up.
+  const chartFootnote = (content.footnote as string) ?? ''
 
   // Resolve chart type: prefer explicit from config, then detect from metrics
   const configChartType = (content.chart_type as ChartType) ?? null
@@ -105,48 +194,9 @@ export default function InlineChartRenderer({
 
   const formatting = useMemo(() => extractFormatting(content), [content])
 
-  // ── Empty / loading / error states ──────────────────────────────────────
-
-  if (!hasSelection) {
-    // A qualitative material is not "unconfigured" — it is fully configured and
-    // this renderer cannot read it (#652: it only understands dataset_column /
-    // dataset_domain sources). Saying "No data configured" about a chart the
-    // researcher just built and saved is the misleading half of the bug; the
-    // link immediately below now routes correctly, so point at it.
-    if (isQualitativeMaterialConfig(content)) {
-      return (
-        <div className="text-sm text-mm-text-faint py-4 text-center" role="status">
-          Qualitative charts can&rsquo;t be drawn on the canvas yet.
-          <br />
-          Open it in Analysis to view this chart.
-        </div>
-      )
-    }
-    return (
-      <div className="text-sm text-mm-text-faint py-4 text-center" role="status">
-        No data configured
-      </div>
-    )
-  }
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-8 text-mm-text-faint text-sm gap-2" role="status">
-        <RefreshCw className="w-4 h-4 animate-spin" />
-        Loading chart...
-      </div>
-    )
-  }
-
-  if (isError || metrics.length === 0) {
-    return (
-      <div className="text-sm text-mm-text-faint py-4 text-center" role="status">
-        Chart unavailable
-      </div>
-    )
-  }
-
-  // ── Chart rendering ────────────────────────────────────────────────────
+  // ── Shared chrome ───────────────────────────────────────────────────────
+  // Defined before the early returns so both branches print the same title /
+  // subtitle / footnote furniture around whatever they draw.
 
   const staleIndicator = isStale && (
     <div className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400 mb-2">
@@ -176,18 +226,148 @@ export default function InlineChartRenderer({
     </div>
   )
 
-  return (
+  /**
+   * `data-chart-capture-root` marks the clean subtree `captureCanvasChartPngs`
+   * rasterizes for the HTML / PDF / docx exports — so everything inside this
+   * frame, and nothing outside it, is what lands in an exported document.
+   */
+  const frame = (children: ReactNode, chartN?: number | null) => (
     <div className="max-w-[640px]" data-chart-capture-root>
       {staleIndicator}
       {titleBlock}
-      <ChartRouter
-        chartType={chartType}
-        metrics={metrics}
-        metricType={params.metricType}
-        formatting={formatting}
-        content={content}
-      />
+      {chartN != null && (
+        <div className="text-mm-text-secondary mb-2" style={{ fontSize: formatting.labelFontSize, fontWeight: 500 }}>
+          N = {chartN}
+        </div>
+      )}
+      {children}
+      {chartFootnote && (
+        <div className="mt-3 text-mm-text-muted" style={{ fontSize: 11, fontStyle: 'italic' }}>
+          {chartFootnote}
+        </div>
+      )}
     </div>
+  )
+
+  const notice = (message: ReactNode) => (
+    <div className="text-sm text-mm-text-faint py-4 text-center" role="status">
+      {message}
+    </div>
+  )
+
+  const spinner = (
+    <div className="flex items-center justify-center py-8 text-mm-text-faint text-sm gap-2" role="status">
+      <RefreshCw className="w-4 h-4 animate-spin" aria-hidden />
+      Loading chart...
+    </div>
+  )
+
+  // ── Qualitative branch (#652 slab 1) ────────────────────────────────────
+
+  if (isQual) {
+    if (kind === null) {
+      // Since slab 4 nothing REACHABLE lands here — the only kind left without a
+      // case is `qual_content`, which the save gate cannot produce. Kept because
+      // it is what makes a tenth kind added to `qualChartKind` fail visibly
+      // instead of rendering blank. The message still names what is true of THIS
+      // chart rather than making a blanket claim about qualitative charts.
+      return notice(
+        <>
+          This chart type can&rsquo;t be drawn on the canvas yet.
+          <br />
+          Open it in Analysis to view it.
+        </>,
+      )
+    }
+    if (!qualEnabled) {
+      // Distinguishable from the above on purpose: the type IS supported, but
+      // the saved config lacks what that particular chart needs — and what it
+      // needs differs per kind, so the sentence does too.
+      return notice(
+        isComparison
+          ? 'This comparison has no grouping variable selected.'
+          : 'This chart has no codes or sources selected.',
+      )
+    }
+
+    if (kind === 'saturation') {
+      if (saturationLoading) return spinner
+      if (saturationError || !qualSaturation) return notice('Chart unavailable')
+      // Deliberately no N: the analysis view's saturation chart shows none
+      // either, because the N it displays comes from the source-frequencies
+      // payload and that query is disabled for this chart type.
+      return frame(<QualChartRouter projectId={projectId} params={qualParams} formatting={formatting} saturation={qualSaturation} />)
+    }
+
+    if (isComparison) {
+      if (comparisonLoading) return spinner
+      if (comparisonError || !qualComparison) return notice('Chart unavailable')
+      const comparisonN = Object.values(qualComparison.group_totals ?? {})
+        .reduce((sum, g) => sum + g.total_segments, 0)
+      return frame(
+        <QualChartRouter projectId={projectId} params={qualParams} formatting={formatting} comparison={qualComparison} />,
+        qualParams.showChartN ? comparisonN : null,
+      )
+    }
+
+    if (kind === 'timeline') {
+      // Self-fetching like co-occurrence, so no loading/error gate here — the
+      // child renders its own states (including the two the canvas owns).
+      //
+      // ⚠️ `chartN` is explicitly null, never `showChartN`'s value: the analysis
+      // view suppresses N for this chart type (`DescriptivesPanel.tsx:199` —
+      // "the descriptives N counts segments/texts, not this chart's unit"), and
+      // the source-frequencies query is disabled here anyway, so passing it
+      // through would print an N from a payload this chart never used.
+      return frame(
+        <QualChartRouter projectId={projectId} params={qualParams} formatting={formatting} />,
+        null,
+      )
+    }
+
+    if (kind === 'cooccurrence') {
+      // No loading/error gate here — this is the one component that owns its
+      // query, so it renders its own states.
+      return frame(
+        <QualChartRouter
+          projectId={projectId}
+          params={qualParams}
+          formatting={formatting}
+          onCooccurrenceLoad={qualParams.showChartN ? handleCooccurrenceLoad : undefined}
+        />,
+        qualParams.showChartN ? cooccurrenceN : null,
+      )
+    }
+
+    if (qualLoading) return spinner
+    if (qualError || !qualData) return notice('Chart unavailable')
+
+    return frame(
+      <QualChartRouter
+        projectId={projectId}
+        params={qualParams}
+        formatting={formatting}
+        data={qualData}
+      />,
+      // Mirrors the analysis view's `descriptivesN`, from the same field.
+      qualParams.showChartN ? qualData.totals?.coded_segments ?? null : null,
+    )
+  }
+
+  // ── Quantitative branch ─────────────────────────────────────────────────
+
+  if (!hasSelection) return notice('No data configured')
+  if (isLoading) return spinner
+  if (isError || metrics.length === 0) return notice('Chart unavailable')
+
+  return frame(
+    <ChartRouter
+      chartType={chartType}
+      metrics={metrics}
+      metricType={params.metricType}
+      formatting={formatting}
+      content={content}
+    />,
   )
 }
 

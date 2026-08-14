@@ -48,6 +48,7 @@ configure_app_logging()
 
 logger = logging.getLogger(__name__)
 from .database import run_migrations, SessionLocal
+from .startup_errors import emit_fatal_startup
 from .models.user import Session as SessionModel
 from slowapi.errors import RateLimitExceeded
 from starlette.responses import JSONResponse
@@ -225,19 +226,33 @@ def _check_production_safety():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    run_migrations()
-    get_documents_dir().mkdir(parents=True, exist_ok=True)
-    get_media_dir().mkdir(parents=True, exist_ok=True)
-    get_backup_dir().mkdir(parents=True, exist_ok=True)
-    cleanup_expired_sessions()
-    repair_reverse_recodes()
-    # File IO, unlike the DB-only pass above, so it goes to a thread — the same
-    # reason `copy_recording` does (media IO on the event loop is what stalls
-    # Electron's /health probe). Bounded: the IS NULL filter means a settled
-    # install does one query and opens nothing.
-    from .services.media_backfill import run_media_duration_backfill
-    await asyncio.to_thread(run_media_duration_backfill, SessionLocal)
-    _check_production_safety()
+    #
+    # #716: every failure in THIS block is fatal — uvicorn logs a traceback, exits 3,
+    # and the packaged app's only visible symptom is "the local engine exited
+    # unexpectedly". `emit_fatal_startup` puts one marked line on stderr that Electron
+    # lifts into the crash dialog, so a message like #692's "free up disk space and
+    # relaunch" actually reaches the person who can act on it.
+    #
+    # `Exception`, not `BaseException`: a cancellation during startup is a shutdown,
+    # not a fault, and must not be reported as one. Re-raised unchanged — this
+    # REPORTS, it never handles, so uvicorn still refuses to serve.
+    try:
+        run_migrations()
+        get_documents_dir().mkdir(parents=True, exist_ok=True)
+        get_media_dir().mkdir(parents=True, exist_ok=True)
+        get_backup_dir().mkdir(parents=True, exist_ok=True)
+        cleanup_expired_sessions()
+        repair_reverse_recodes()
+        # File IO, unlike the DB-only pass above, so it goes to a thread — the same
+        # reason `copy_recording` does (media IO on the event loop is what stalls
+        # Electron's /health probe). Bounded: the IS NULL filter means a settled
+        # install does one query and opens nothing.
+        from .services.media_backfill import run_media_duration_backfill
+        await asyncio.to_thread(run_media_duration_backfill, SessionLocal)
+        _check_production_safety()
+    except Exception as exc:
+        emit_fatal_startup(exc)
+        raise
 
     # Start periodic auto-backup + consensus staleness sweep
     auto_backup_task = asyncio.create_task(_auto_backup_loop())
@@ -260,7 +275,7 @@ _startup_settings = get_settings()
 app = FastAPI(
     title="Mixed Measures",
     description="Mixed-methods research analysis platform",
-    version="1.3.0",
+    version="1.3.1",
     lifespan=lifespan,
     docs_url="/docs" if _startup_settings.enable_api_docs else None,
     redoc_url="/redoc" if _startup_settings.enable_api_docs else None,

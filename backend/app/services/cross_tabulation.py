@@ -17,6 +17,7 @@ from ..models.recode import RecodeDefinition
 # shape from the shared grouping loader — a paired two-column join — so filter inline).
 from .missing_values import column_missing_rules, is_missing
 from .grouping import order_value_labels
+from .undefined_stats import DEGENERATE, finite_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -198,12 +199,19 @@ def compute_cross_tabulation(
             ])
             chi2, p, df, _ = chi2_contingency(observed)
             min_dim = min(len(all_row_vals), len(all_col_vals)) - 1
-            cramers_v = float(np.sqrt(chi2 / (n_shared * min_dim))) if n_shared > 0 and min_dim > 0 else 0
+            # #689: a degenerate table (a single effective row or column) gives
+            # `min_dim == 0`, and V was reported as a measured 0 — "no
+            # association" for a table that cannot express association at all.
+            cramers_v = (
+                finite_or_none(np.sqrt(chi2 / (n_shared * min_dim)), 3)
+                if n_shared > 0 and min_dim > 0 else None
+            )
             chi_result = {
-                "statistic": round(float(chi2), 3),
-                "p_value": round(float(p), 4),
+                "statistic": finite_or_none(chi2, 3),
+                "p_value": finite_or_none(p, 4),
                 "df": int(df),
-                "cramers_v": round(cramers_v, 3),
+                "cramers_v": cramers_v,
+                "undefined_reason": None if cramers_v is not None else DEGENERATE,
             }
         except (ZeroDivisionError, ValueError, TypeError) as exc:
             logger.warning("Chi-square computation failed: %s", exc)

@@ -40,11 +40,16 @@ const FILTER_CHIP_COLORS: Record<FilterType, { active: string; inactive: string 
   project:      { active: 'bg-purple-600 text-white dark:bg-purple-500 dark:text-white', inactive: 'bg-purple-50 text-purple-700 hover:bg-purple-100 dark:bg-purple-900/20 dark:text-purple-300 dark:hover:bg-purple-900/30' },
   conversation: { active: 'bg-teal-600 text-white dark:bg-teal-500 dark:text-white', inactive: 'bg-teal-50 text-teal-700 hover:bg-teal-100 dark:bg-teal-900/20 dark:text-teal-300 dark:hover:bg-teal-900/30' },
   code:         { active: 'bg-emerald-600 text-white dark:bg-emerald-500 dark:text-white', inactive: 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:text-emerald-300 dark:hover:bg-emerald-900/30' },
-  // eslint-disable-next-line no-restricted-syntax -- categorical entity-color map hue (DESIGN.md §5 carve-out; siblings raw, not the mm-blue "selected" token)
+  // eslint-disable-next-line no-restricted-syntax -- categorical entity-color map hue (the internal design notes carve-out; siblings raw, not the mm-blue "selected" token)
   code_category:{ active: 'bg-blue-600 text-white dark:bg-blue-500 dark:text-white', inactive: 'bg-blue-50 text-blue-700 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-300 dark:hover:bg-blue-900/30' },
   analysis:     { active: 'bg-orange-600 text-white dark:bg-orange-500 dark:text-white', inactive: 'bg-orange-50 text-orange-700 hover:bg-orange-100 dark:bg-orange-900/20 dark:text-orange-300 dark:hover:bg-orange-900/30' },
   dataset:      { active: 'bg-sky-600 text-white dark:bg-sky-500 dark:text-white', inactive: 'bg-sky-50 text-sky-700 hover:bg-sky-100 dark:bg-sky-900/20 dark:text-sky-300 dark:hover:bg-sky-900/30' },
   canvas:       { active: 'bg-indigo-600 text-white dark:bg-indigo-500 dark:text-white', inactive: 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-900/20 dark:text-indigo-300 dark:hover:bg-indigo-900/30' },
+  // #681. `document` is indigo in ENTITY_TYPE_COLORS but indigo is already
+  // `canvas` in THIS row, so it takes violet here — the two maps have diverged
+  // before (canvas is amber there, indigo here) despite the comment above.
+  document:     { active: 'bg-violet-600 text-white dark:bg-violet-500 dark:text-white', inactive: 'bg-violet-50 text-violet-700 hover:bg-violet-100 dark:bg-violet-900/20 dark:text-violet-300 dark:hover:bg-violet-900/30' },
+  observation:  { active: 'bg-rose-600 text-white dark:bg-rose-500 dark:text-white', inactive: 'bg-rose-50 text-rose-700 hover:bg-rose-100 dark:bg-rose-900/20 dark:text-rose-300 dark:hover:bg-rose-900/30' },
 }
 
 const CREATABLE_ENTITY_TYPES: { value: string; label: string }[] = [

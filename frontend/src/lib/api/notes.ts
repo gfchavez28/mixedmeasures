@@ -73,10 +73,27 @@ export interface AllNotesDocument {
   notes: AllNotesDocNote[]
 }
 
+export interface AllNotesObservationNote {
+  id: number
+  content: string
+  sequence_number: number
+  segment_id: number | null
+  /** The clip's LABEL (often ''), not transcript text. */
+  segment_text: string | null
+  created_at: string
+}
+
+export interface AllNotesObservation {
+  observation_id: number
+  observation_name: string
+  notes: AllNotesObservationNote[]
+}
+
 export interface AllNotesResponse {
   conversations: AllNotesConversation[]
   texts: AllNotesColumn[]
   documents: AllNotesDocument[]
+  observations: AllNotesObservation[]
 }
 
 /**

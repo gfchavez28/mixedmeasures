@@ -3,7 +3,7 @@
  *
  * Pure, testable. Consumes the SAME `CodebookTreeResponse` the Tree renders, so
  * the treemap's numbers are inherently consistent with the Tree (no separate
- * count path — see CLAUDE.md on the codebook count seam). Renders a squarified
+ * count path — see the internal design notes on the codebook count seam). Renders a squarified
  * treemap: categories nest their codes; tile area = the chosen measure.
  *
  * Honest-data rules (researchers must not be misled):

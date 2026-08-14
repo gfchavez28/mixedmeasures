@@ -7,3 +7,15 @@ This product bundles third-party open-source components, each under its own
 license. See the dependency manifests (frontend/package.json,
 backend/requirements.txt) and the vendored license files (e.g. the SIL Open
 Font License texts in frontend/src/assets/fonts/) for those terms.
+
+Dual-licensed dependencies — license elections
+----------------------------------------------
+
+Where a bundled component offers a choice of licenses, Mixed Measures elects the
+permissive option. Recording the election explicitly, rather than leaving it to
+be inferred:
+
+  jszip 3.10.1 — offered as "MIT OR GPL-3.0-or-later". Mixed Measures elects the
+  MIT option. The GPL-3.0-or-later option is not exercised and no part of this
+  product is distributed under it.
+

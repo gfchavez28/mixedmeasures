@@ -10,7 +10,7 @@ import {
   BarChart3,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { correlationsApi, comparisonsApi } from '@/lib/api'
+import { correlationsApi, comparisonsApi, downloadBlob } from '@/lib/api'
 import type {
   CorrelationMatrixResponse,
   ScatterMatrixResponse,
@@ -87,17 +87,6 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
   const corrToolbarRef = useRef<HTMLDivElement>(null)
   const compToolbarRef = useRef<HTMLDivElement>(null)
 
-  const downloadBlob = useCallback((blob: Blob, filename: string) => {
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-  }, [])
-
   const handleToolbarKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
     const buttons = e.currentTarget.querySelectorAll<HTMLButtonElement>('button:not([disabled])')
     if (!buttons || buttons.length === 0) return
@@ -112,35 +101,37 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
 
   const handleExportCorrelationCsv = useCallback(async () => {
     try {
-      const blob = await correlationsApi.correlationMatrixCsv(pid, {
+      const { blob, filename } = await correlationsApi.correlationMatrixCsv(pid, {
         column_ids: rcColumnIds,
         domain_ids: rcDomainIds,
         correlation_type: corrType,
         bonferroni: bonferroniOn,
       })
-      downloadBlob(blob, `correlation_matrix_${corrType}.csv`)
+      downloadBlob(blob, filename)
     } catch {
       toast.error('Failed to export correlation matrix')
     }
-  }, [pid, rcColumnIds, rcDomainIds, corrType, bonferroniOn, downloadBlob])
+  }, [pid, rcColumnIds, rcDomainIds, corrType, bonferroniOn])
 
   const handleExportScatterCsv = useCallback(async () => {
     try {
-      const blob = await correlationsApi.scatterDataCsv(pid, {
+      const { blob, filename } = await correlationsApi.scatterDataCsv(pid, {
         column_ids: rcColumnIds,
         domain_ids: rcDomainIds,
         id_type: rcColumnIds.length > 0 ? 'column' : 'domain',
       })
-      downloadBlob(blob, 'scatter_data.csv')
+      downloadBlob(blob, filename)
     } catch {
       toast.error('Failed to export scatter data')
     }
-  }, [pid, rcColumnIds, rcDomainIds, downloadBlob])
+  }, [pid, rcColumnIds, rcDomainIds])
 
   const handleExportComparisonCsv = useCallback(async () => {
     if (!compareBy) return
     try {
-      const blob = await comparisonsApi.groupComparisonCsv(pid, {
+      // #743: the server names this after the GROUPING column; inventing a
+      // constant here made every export overwrite the last one.
+      const { blob, filename } = await comparisonsApi.groupComparisonCsv(pid, {
         column_ids: rcColumnIds,
         domain_ids: rcDomainIds,
         grouping_column_id: compareBy,
@@ -149,11 +140,11 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
         exclude_groups: excludeGroups.length > 0 ? excludeGroups : undefined,
         nonparametric: nonparametric || undefined,
       })
-      downloadBlob(blob, 'group_comparison.csv')
+      downloadBlob(blob, filename)
     } catch {
       toast.error('Failed to export group comparison')
     }
-  }, [pid, rcColumnIds, rcDomainIds, compareBy, compareBy2, testType, excludeGroups, nonparametric, downloadBlob])
+  }, [pid, rcColumnIds, rcDomainIds, compareBy, compareBy2, testType, excludeGroups, nonparametric])
 
   return (
     <div className="space-y-6" role="tabpanel" id="tabpanel-rc" aria-labelledby="tab-rc">

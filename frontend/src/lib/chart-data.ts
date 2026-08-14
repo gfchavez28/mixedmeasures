@@ -612,6 +612,8 @@ export interface BarDatum {
   metricId?: number
   ciLower?: number
   ciUpper?: number
+  /** result_data.ci_method — what the interval is OVER (#715). See lib/ci-label.ts. */
+  ciMethod?: string
 }
 
 export interface HeatmapCell {
@@ -642,6 +644,7 @@ export interface DumbbellDot {
   n: number
   ciLower?: number
   ciUpper?: number
+  ciMethod?: string
 }
 
 export interface DumbbellRow {
@@ -744,7 +747,7 @@ export interface GroupedScalarSection {
   metricId: number
   metricName: string
   metricFullLabel?: string
-  groups: { groupValue: string; value: number; n: number; ciLower?: number; ciUpper?: number }[]
+  groups: { groupValue: string; value: number; n: number; ciLower?: number; ciUpper?: number; ciMethod?: string }[]
 }
 
 /** Extract sorted unique group values from metrics (numeric-aware, #406). */
@@ -841,6 +844,7 @@ export function shapeScalarBars(
         metricId: m.id,
         ciLower: rd.ci_lower ?? undefined,
         ciUpper: rd.ci_upper ?? undefined,
+        ciMethod: rd.ci_method as string | undefined,
       }
     })
 }
@@ -870,6 +874,7 @@ export function shapeGroupedScalarBars(
           n: result.valid_n,
           ciLower: rd.ci_lower ?? undefined,
           ciUpper: rd.ci_upper ?? undefined,
+          ciMethod: rd.ci_method as string | undefined,
         })
       }
       return { metricId: m.id, metricName: dl, metricFullLabel: fl, groups }
@@ -1090,6 +1095,7 @@ export function shapeDumbbellRows(
             n: r.valid_n,
             ciLower: d.ci_lower ?? undefined,
             ciUpper: d.ci_upper ?? undefined,
+            ciMethod: d.ci_method as string | undefined,
           }
         })
         .sort((a, b) => groupValues.indexOf(a.groupValue) - groupValues.indexOf(b.groupValue)),
@@ -1474,6 +1480,18 @@ export interface SummaryStatsRow {
   median: number | null
   ciLower: number | null
   ciUpper: number | null
+  ciMethod?: string
+  /**
+   * #693 — how the value was computed, and what its `n` pools.
+   *
+   * Only a domain aggregate carries these; they ride the wire rather than
+   * being inferred from the metric type, for the same reason `ciMethod` does.
+   * See `lib/aggregate-basis.ts`.
+   */
+  aggregationBasis?: string
+  memberCount?: number | null
+  memberNMin?: number | null
+  memberNMax?: number | null
 }
 
 /**
@@ -1515,6 +1533,11 @@ export function shapeSummaryStats(
         median: rd.median ?? null,
         ciLower: rd.ci_lower ?? null,
         ciUpper: rd.ci_upper ?? null,
+        ciMethod: rd.ci_method as string | undefined,
+        aggregationBasis: rd.aggregation_basis as string | undefined,
+        memberCount: (rd.member_count as number | null) ?? null,
+        memberNMin: (rd.member_n_min as number | null) ?? null,
+        memberNMax: (rd.member_n_max as number | null) ?? null,
       }
     })
 }
@@ -1699,6 +1722,7 @@ export interface LineChartPoint {
   ciLower?: number
   ciUpper?: number
   ciRange?: [number, number]
+  ciMethod?: string
   color?: string
 }
 
@@ -1742,6 +1766,7 @@ export function shapeLineChart(
           n: r.valid_n,
           ciLower: rd.ci_lower ?? undefined,
           ciUpper: rd.ci_upper ?? undefined,
+          ciMethod: rd.ci_method as string | undefined,
           ciRange: rd.ci_lower != null && rd.ci_upper != null
             ? [rd.ci_lower, rd.ci_upper] as [number, number]
             : undefined,
@@ -1774,6 +1799,7 @@ export function shapeLineChart(
         n: r.valid_n,
         ciLower: rd.ci_lower ?? undefined,
         ciUpper: rd.ci_upper ?? undefined,
+        ciMethod: rd.ci_method as string | undefined,
         ciRange: rd.ci_lower != null && rd.ci_upper != null
           ? [rd.ci_lower, rd.ci_upper] as [number, number]
           : undefined,
@@ -1980,7 +2006,7 @@ export function jitterOffset(rowId: number): number {
  * Shape GroupComparisonResponse rows into DumbbellData for the DumbbellChart.
  */
 export function shapeComparisonDumbbell(
-  rows: { label: string; full_label: string; source_id: number; group_stats: { group: string; mean: number; n: number; ci_lower: number | null; ci_upper: number | null }[] }[],
+  rows: { label: string; full_label: string; source_id: number; group_stats: { group: string; mean: number | null; n: number; ci_lower: number | null; ci_upper: number | null }[] }[],
   groups: string[],
 ): DumbbellData {
   return {
@@ -1989,15 +2015,20 @@ export function shapeComparisonDumbbell(
       label: row.label,
       fullLabel: row.full_label,
       metricId: row.source_id,
-      dots: row.group_stats
-        .filter(gs => groups.includes(gs.group) && gs.n > 0)
-        .map(gs => ({
-          groupValue: gs.group,
-          value: gs.mean,
-          n: gs.n,
-          ciLower: gs.ci_lower ?? gs.mean,
-          ciUpper: gs.ci_upper ?? gs.mean,
-        })),
+      // #689: an empty group now has `mean: null` rather than a fabricated 0.0.
+      // The `n > 0` filter already excluded these dots; the null check is the
+      // honest predicate for the same set and is what narrows the type.
+      dots: row.group_stats.flatMap(gs =>
+        groups.includes(gs.group) && gs.n > 0 && gs.mean != null
+          ? [{
+              groupValue: gs.group,
+              value: gs.mean,
+              n: gs.n,
+              ciLower: gs.ci_lower ?? gs.mean,
+              ciUpper: gs.ci_upper ?? gs.mean,
+            }]
+          : [],
+      ),
     })),
   }
 }
@@ -2006,21 +2037,23 @@ export function shapeComparisonDumbbell(
  * Shape GroupComparisonResponse rows into GroupedScalarSection[] for GroupedScalarBarChart.
  */
 export function shapeComparisonGroupedBars(
-  rows: { label: string; full_label: string; source_id: number; group_stats: { group: string; mean: number; n: number; ci_lower: number | null; ci_upper: number | null }[] }[],
+  rows: { label: string; full_label: string; source_id: number; group_stats: { group: string; mean: number | null; n: number; ci_lower: number | null; ci_upper: number | null }[] }[],
   groups: string[],
 ): GroupedScalarSection[] {
   return rows.map(row => ({
     metricId: row.source_id,
     metricName: row.label,
     metricFullLabel: row.full_label,
-    groups: row.group_stats
-      .filter(gs => groups.includes(gs.group) && gs.n > 0)
-      .map(gs => ({
-        groupValue: gs.group,
-        value: gs.mean,
-        n: gs.n,
-        ciLower: gs.ci_lower ?? gs.mean,
-        ciUpper: gs.ci_upper ?? gs.mean,
-      })),
+    groups: row.group_stats.flatMap(gs =>
+      groups.includes(gs.group) && gs.n > 0 && gs.mean != null
+        ? [{
+            groupValue: gs.group,
+            value: gs.mean,
+            n: gs.n,
+            ciLower: gs.ci_lower ?? gs.mean,
+            ciUpper: gs.ci_upper ?? gs.mean,
+          }]
+        : [],
+    ),
   }))
 }

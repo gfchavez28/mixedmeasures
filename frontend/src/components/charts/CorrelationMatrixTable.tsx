@@ -4,6 +4,7 @@ import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import { getCorrCellStyle, getSignificanceStars, formatP, formatPValue, type ChartFormatting } from '@/lib/chart-data'
 import { useTheme } from '@/lib/theme-context'
 import type { CorrelationCell } from '@/lib/api'
+import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
 
 type CellFormat = 'r_stars' | 'r_p' | 'r_only'
 
@@ -30,6 +31,11 @@ function formatR(r: number): string {
 }
 
 function formatCellContent(cell: CorrelationCell, format: CellFormat, sigLevels: CorrelationMatrixProps['sigLevels']): React.ReactNode {
+  // #689: not computable — too few shared rows, or a column with no variance.
+  // The old cell rendered `.00 (1.00)`, which reads as a measured null result.
+  if (cell.r == null || cell.p == null) {
+    return <span className="text-mm-text-faint">{NO_VALUE}</span>
+  }
   const rStr = formatR(cell.r)
   const stars = getSignificanceStars(cell.p, sigLevels)
 
@@ -162,15 +168,23 @@ export default function CorrelationMatrixTable({
                     return <td key={j} className="border border-mm-border-subtle" />
                   }
 
-                  const style = getCorrCellStyle(cell.r, isDark, effectivePreset)
+                  // An undefined cell gets no heat — a coloured tile is itself a
+                  // claim about effect direction and size (#689).
+                  const style = cell.r != null
+                    ? getCorrCellStyle(cell.r, isDark, effectivePreset)
+                    : undefined
+                  const reasonText = undefinedTooltip(cell.undefined_reason)
+                  const describe = cell.r != null && cell.p != null
+                    ? `r = ${cell.r.toFixed(2)}, ${formatPValue(cell.p)}, n = ${cell.n}`
+                    : `${reasonText} n = ${cell.n}`
 
                   return (
                     <td
                       key={j}
                       className="px-2 py-1.5 text-center border border-mm-border-subtle transition-transform hover:scale-105 cursor-default tabular-nums"
                       style={{ ...style, minWidth: 52 }}
-                      title={`r = ${cell.r.toFixed(2)}, ${formatPValue(cell.p)}, n = ${cell.n}`}
-                      aria-label={`${fullLabels[i]} and ${fullLabels[j]}: r = ${cell.r.toFixed(2)}, p ${cell.p < 0.001 ? 'less than .001' : '= ' + formatP(cell.p)}, n = ${cell.n}`}
+                      title={describe}
+                      aria-label={`${fullLabels[i]} and ${fullLabels[j]}: ${describe}`}
                     >
                       {formatCellContent(cell, cellFormat, sigLevels)}
                     </td>
@@ -187,7 +201,7 @@ export default function CorrelationMatrixTable({
         {sigLevels.show_05 && <span>* p &lt; .05</span>}
         {sigLevels.show_01 && <span>** p &lt; .01</span>}
         {sigLevels.show_001 && <span>*** p &lt; .001</span>}
-        <span className="text-mm-border-medium">|</span>
+        <span className="text-mm-text-faint">|</span>
         <span>Hover cells for details</span>
       </div>
     </div>

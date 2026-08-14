@@ -688,6 +688,23 @@ def build_theme_response(theme: CanvasTheme) -> dict:
 
 SNAPSHOT_MAX = 10
 
+# #750 — how the rotation decides which snapshot is "oldest".
+#
+# The `id` tiebreaker is LOAD-BEARING, not tidiness. `CanvasSnapshot.created_at`
+# defaults to `func.now()`, which SQLite renders at SECOND precision, so any
+# snapshots taken inside the same second carry an IDENTICAL timestamp (measured:
+# a burst of 11 shares one value). `ORDER BY created_at` alone then leaves their
+# relative order to the sorter, which SQLite does not guarantee to be stable —
+# and the row the rotation deletes is a researcher's saved canvas state.
+#
+# ⚠️ Kept as a named constant because it is the ONLY thing a guard can hold onto:
+# under a rowid-ordered scan with a stable sort the two orderings agree, so no
+# behavioural test can tell them apart. `test_canvas.py` asserts on THIS object
+# rather than re-typing the clause (a re-typed copy validates the copy — #729).
+# `list_snapshots` has always carried its own tiebreaker; the writer that DELETES
+# did not, so the reader and the writer disagreed about which snapshot is oldest.
+SNAPSHOT_ROTATION_ORDER = (CanvasSnapshot.created_at.asc(), CanvasSnapshot.id.asc())
+
 
 def create_snapshot(db: Session, canvas_id: int, name: str) -> CanvasSnapshot:
     canvas_obj = db.query(Canvas).filter(Canvas.id == canvas_id).first()
@@ -748,11 +765,11 @@ def create_snapshot(db: Session, canvas_id: int, name: str) -> CanvasSnapshot:
     db.add(snapshot)
     db.flush()
 
-    # Enforce rotation limit
+    # Enforce rotation limit — ordering per SNAPSHOT_ROTATION_ORDER (#750).
     all_snapshots = (
         db.query(CanvasSnapshot)
         .filter(CanvasSnapshot.canvas_id == canvas_id)
-        .order_by(CanvasSnapshot.created_at.asc())
+        .order_by(*SNAPSHOT_ROTATION_ORDER)
         .all()
     )
     if len(all_snapshots) > SNAPSHOT_MAX:

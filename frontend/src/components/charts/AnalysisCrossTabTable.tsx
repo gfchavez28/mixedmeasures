@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import type { AnalysisCrossTabResponse } from '@/lib/api'
 import { resolveHeatmapColors, DISPLAY_PRECISION, mergeFormatting, formatPValue } from '@/lib/chart-data'
+import { formatStat, undefinedTooltip } from '@/lib/stat-format'
 import { useChartColors } from '@/lib/theme-context'
 import type { ChartFormatting } from '@/lib/chart-data'
 
@@ -101,7 +102,14 @@ export default function AnalysisCrossTabTable({
   const chiSquareText = useMemo(() => {
     if (!data.chi_square) return null
     const { statistic, df, p_value, cramers_v } = data.chi_square
-    return `χ²(${df}) = ${statistic.toFixed(2)}, ${formatPValue(p_value)}, V = ${cramers_v.toFixed(2)}`
+    if (statistic == null || p_value == null) return null
+    // #689: V is undefined for a table with a single effective row or column —
+    // it cannot express association, which is not the same as measuring none.
+    // The chi-square itself still stands, so report it and say why V is absent.
+    const v = cramers_v != null
+      ? `V = ${formatStat(cramers_v)}`
+      : undefinedTooltip(data.chi_square.undefined_reason)
+    return `χ²(${df}) = ${formatStat(statistic)}, ${formatPValue(p_value)}, ${v}`
   }, [data.chi_square])
 
   const grandTotal = data.n_shared

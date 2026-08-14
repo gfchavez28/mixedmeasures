@@ -211,7 +211,7 @@ class TestCodebookTree:
         pid = _seed(db_session)
         u = db_session.get(User, 1)
         # All Query-defaulted params passed explicitly — a Query() default leaks
-        # its sentinel object into direct calls (backend/tests/CLAUDE.md).
+        # its sentinel object into direct calls (backend/tests/the internal design notes).
         tree = _run(get_codebook_tree(
             pid, conversation_ids=None, text_column_ids=None,
             exclude_facilitator=True, include_inactive=False,

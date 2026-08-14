@@ -3,20 +3,20 @@ import api from './client'
 // Search types
 export interface SegmentSearchResult {
   id: number
-  // #569 deprecation pair: conversation_id is overloaded with the document id on
-  // doc hits (one-release beat) and null on observation hits; source_type is the
-  // deprecated alias of source_kind. New consumers read source_kind + source_id.
-  conversation_id: number | null
-  conversation_name: string
+  // #569 RETIRED 2026-08-09 (the one-release beat ended at the cut after v1.3.0):
+  // `conversation_id` — overloaded with the DOCUMENT id on doc hits — and
+  // `source_type` are both GONE. `source_kind` + `source_id` is the honest pair and
+  // the only way to identify a hit's source. Route via `lib/search-source.ts`;
+  // never re-introduce an id field that means different things per kind.
+  conversation_name: string // the SOURCE display name (conversation/document/observation)
   speaker_name: string | null
   is_facilitator: boolean
   start_time: number | null // clip hits: the clip's start (timecode subtitle)
   text: string
   sequence_order: number
   is_quoted: boolean
-  source_type?: string // deprecated alias of source_kind
-  source_kind?: string // "conversation" | "document" | "observation"
-  source_id?: number | null // the id in source_kind's namespace — the honest pair
+  source_kind: string // "conversation" | "document" | "observation"
+  source_id: number | null // the id in source_kind's namespace
 }
 
 export interface CodeSearchResult {
@@ -40,17 +40,15 @@ export interface ConversationSearchResult {
 
 export interface NoteSearchResult {
   id: number
-  // Nullable since 4b (#569): observation notes carry null; conv/doc hits keep
-  // the (doc-overloaded) id one release. New consumers read source_kind + source_id.
-  conversation_id: number | null
-  conversation_name: string
+  // #569 RETIRED 2026-08-09 — see SegmentSearchResult above. `conversation_id` and
+  // `source_type` are gone; `source_kind` + `source_id` identify the source.
+  conversation_name: string // the SOURCE display name (conversation/document/observation)
   segment_id: number | null
   segment_text_preview: string | null
   content: string
   sequence_number: number
-  source_type?: string // deprecated alias of source_kind
-  source_kind?: string // "conversation" | "document" | "observation"
-  source_id?: number | null // the id in source_kind's namespace — the honest pair
+  source_kind: string // "conversation" | "document" | "observation"
+  source_id: number | null // the id in source_kind's namespace
 }
 
 export interface MemoSearchResult {

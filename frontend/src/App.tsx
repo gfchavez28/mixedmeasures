@@ -3,6 +3,7 @@ import { Routes, Route, Navigate, useParams } from 'react-router'
 import { Toaster } from 'sonner'
 import { AuthProvider, useAuth } from '@/lib/auth-context'
 import { ThemeProvider } from '@/lib/theme-context'
+import { ZoomProvider } from '@/lib/zoom-context'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import Dashboard from '@/pages/Dashboard'
 import ProjectLayout from '@/layouts/ProjectLayout'
@@ -141,9 +142,11 @@ export default function App() {
   return (
     <AuthProvider>
       <ThemeProvider>
-        <TooltipProvider>
-          <AppRoutes />
-        </TooltipProvider>
+        <ZoomProvider>
+          <TooltipProvider>
+            <AppRoutes />
+          </TooltipProvider>
+        </ZoomProvider>
         <Toaster
           position="bottom-right"
           toastOptions={{

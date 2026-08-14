@@ -7,7 +7,7 @@
 //
 // The non-GUI logic lives in ./backend-process.js (unit-tested headlessly).
 
-const { app, BrowserWindow, Menu, dialog, shell, safeStorage, ipcMain, session } = require('electron')
+const { app, BrowserWindow, Menu, clipboard, dialog, shell, safeStorage, ipcMain, session } = require('electron')
 const { spawn, spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -21,6 +21,8 @@ const {
   stopBackend,
 } = require('./backend-process')
 const { resolveKey, saveRecoveryKeyToFile } = require('./key-manager')
+const { clampZoomFactor } = require('./zoom')
+const { createFatalLineCollector, crashDialogText, crashDialogClipboardText } = require('./fatal-error')
 const {
   canAutoUpdate,
   readAutoCheck,
@@ -48,9 +50,20 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 }
 
+// How long 'exit' waits for stdio to drain before reporting without it (#716).
+// Short enough to be invisible next to a crash dialog, long enough that the fatal
+// line — already written and flushed before the process died — has arrived.
+const STDIO_DRAIN_GRACE_MS = 250
+
 let backend = null
 let backendExited = false
 let isQuitting = false
+// #724: module scope on purpose. These used to live inside startBackend's closure, so
+// the startup `catch` could not see them — it showed its own generic dialog, called
+// app.quit(), and `isQuitting` then suppressed the fatal one. Whichever path arrives
+// first now reports THE SAME dialog, once.
+let fatalCollector = null
+let crashReported = false
 let mainWindow = null
 let splashWindow = null
 let updater = null
@@ -131,21 +144,72 @@ function startBackend(port, encryptionKeyHex, loopbackToken) {
     loopbackToken,
   })
   const child = spawn(exe, [], { env, stdio: ['ignore', 'pipe', 'pipe'] })
-  child.stdout.on('data', (d) => process.stdout.write(`[backend] ${d}`))
-  child.stderr.on('data', (d) => process.stderr.write(`[backend] ${d}`))
+  // #716: the backend marks a fatal STARTUP failure with MM-FATAL so its recovery
+  // instructions can reach the crash dialog instead of dying in a pipe. Everything
+  // still passes through to our own stderr unchanged — this only observes.
+  const fatal = createFatalLineCollector()
+  fatalCollector = fatal
+  // ⚠️ The prefix and the payload are written SEPARATELY, and the payload is written
+  // as the raw Buffer. `${d}` would decode each chunk on its own — the #723 defect —
+  // and mangle a multi-byte character split across a chunk boundary in the developer's
+  // terminal too. Writing the bytes through untouched needs no decoder at all, so this
+  // stays a single-mechanism fix: the collector is the ONE place stderr is decoded.
+  child.stdout.on('data', (d) => { process.stdout.write('[backend] '); process.stdout.write(d) })
+  child.stderr.on('data', (d) => {
+    fatal.push(d)
+    process.stderr.write('[backend] ')
+    process.stderr.write(d)
+  })
+
+  // ⚠️ 'exit' fires when the PROCESS ends; 'close' fires once its stdio has drained
+  // too. The fatal line is written immediately before the process dies, so reporting
+  // on 'exit' can race the last stderr chunk and show the generic text for a failure
+  // we were told the cause of. So: flag on 'exit' (waitForHealth's isExited depends
+  // on that being prompt), REPORT on 'close' — with a short fallback timer, because a
+  // stdio handle held open elsewhere would otherwise mean no dialog at all, which is
+  // worse than an occasionally-generic one.
+  const report = (code, signal) => reportCrash({ code, signal })
   child.on('exit', (code, signal) => {
     backendExited = true
-    if (!isQuitting) onBackendCrash(code, signal)
+    if (!isQuitting) setTimeout(() => report(code, signal), STDIO_DRAIN_GRACE_MS)
   })
+  child.on('close', (code, signal) => report(code, signal))
   return child
 }
 
-function onBackendCrash(code, signal) {
-  // The backend died while the app was running (not during a clean quit).
-  dialog.showErrorBox(
-    'Mixed Measures engine stopped',
-    `The local engine exited unexpectedly (code ${code}, signal ${signal}). The app will close.`,
-  )
+/**
+ * Show the one crash dialog and quit. Every failure path routes through here (#724).
+ *
+ * The dialog is deliberately an OS-native one rather than a BrowserWindow: it has to
+ * appear before the app has a window (or after its window is gone), and the platform
+ * dialog is what screen readers already announce without any ARIA work of ours.
+ */
+function reportCrash({ code = null, signal = null, error = null }) {
+  if (crashReported || isQuitting) return
+  crashReported = true
+  closeSplash() // it is frameless and always-on-top; leaving it behind the dialog looks broken
+  const text = crashDialogText({
+    code,
+    signal,
+    fatalLines: fatalCollector ? fatalCollector.lines() : [],
+    startupError: error,
+  })
+  // "Copy details" exists because the guidance names a PATH the researcher is being
+  // asked to act on, and a native message box is not selectable — without this the
+  // only way to report it onward is to retype it from a screenshot.
+  const COPY = 0
+  const QUIT = 1
+  const choice = dialog.showMessageBoxSync({
+    type: 'error',
+    title: text.title,
+    message: text.message,
+    detail: text.detail,
+    buttons: ['Copy details', 'Quit'],
+    defaultId: QUIT,
+    cancelId: QUIT,
+    noLink: true,
+  })
+  if (choice === COPY) clipboard.writeText(crashDialogClipboardText(text))
   app.quit()
 }
 
@@ -171,6 +235,13 @@ function createMainWindow(port) {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
+    // #706: the data surfaces carry hard pixel floors — ByTextTable pins a 300px
+    // sticky column, DatasetGridComponents pins 160px sticky cells — so below a
+    // certain width they OVERLAP rather than reflow. 1280×720 is the minimum the
+    // 2026-07-03 UX review drove the app at, so that is the number rather than an
+    // invented one.
+    minWidth: 1280,
+    minHeight: 720,
     show: false,
     autoHideMenuBar: true, // no menu bar reserved on Win/Linux (macOS uses the system bar)
     webPreferences: {
@@ -285,6 +356,19 @@ async function startup() {
         showSaveDialog: (opts) => dialog.showSaveDialog(mainWindow, opts),
       }),
     )
+    // Page zoom (#697). ONE verb, and main is the only place `setZoomFactor` is
+    // called — the renderer owns the preference (localStorage `mm-zoom`, like the
+    // theme) and asks main to apply it. Everything arriving here is untrusted, so it
+    // is clamped; see zoom.js for why the state does not live in main and why CSS
+    // zoom was rejected. Returns the APPLIED factor so a clamped request does not
+    // leave the Settings control showing a value the window is not at.
+    ipcMain.handle('zoom:set', (_event, factor) => {
+      const applied = clampZoomFactor(factor)
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.setZoomFactor(applied)
+      }
+      return applied
+    })
     // Stable across launches (an internal audit): origin-keyed localStorage (theme,
     // panel/workbench prefs) would otherwise silently reset every launch.
     const port = await resolveAppPort({
@@ -311,9 +395,11 @@ async function startup() {
     await createMainWindow(port)
     updater = setupUpdater()
   } catch (err) {
-    closeSplash()
-    dialog.showErrorBox('Mixed Measures failed to start', String((err && err.message) || err))
-    app.quit()
+    // #724: route through the ONE reporter. When the backend died on its way up it has
+    // usually already told us why (MM-FATAL), and `waitForHealth` only ever reports the
+    // symptom — "Backend process exited before it became healthy". Ranking lives in
+    // crashDialogText, so the cause wins over the symptom no matter which arrives first.
+    reportCrash({ error: err })
   }
 }
 

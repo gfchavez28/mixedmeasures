@@ -111,6 +111,7 @@ export default function QualCooccurrence({
       {/* Matrix */}
       <div className="overflow-x-auto border rounded-lg">
         <table style={{ borderCollapse: 'collapse', fontSize: labelFontSize ?? 12 }}>
+          <caption className="sr-only">Code co-occurrence matrix: how often each pair of codes is applied together.</caption>
           <thead>
             <tr>
               <th scope="col" className="sticky left-0 z-10 bg-mm-bg px-2 py-1.5 border-b border-r min-w-[120px]" />

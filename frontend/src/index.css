@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* Self-hosted fonts (no Google CDN — privacy + offline/Electron, CLAUDE.md #3).
+/* Self-hosted fonts (no Google CDN — privacy + offline/Electron, the internal design notes #3).
  * Variable woff2, latin + latin-ext subsets, weights matching prior CDN request
  * (Jakarta 300-700, JetBrains Mono 400-500). Vite hashes the relative URLs into
  * the build. Other scripts (cyrillic/greek/vietnamese) fall back to system fonts.
@@ -129,14 +129,28 @@
     --secondary: 148 8% 96%;
     --secondary-foreground: 152 56% 32%;
     --muted: 152 8% 94%;
-    --muted-foreground: 200 6% 42%;  /* #394: AA on off-white surfaces (was 44% → 4.32:1 on tab bg) */
+    /* #394 moved this 44%->42% for the tab background; #7 found it still at
+       4.43:1 on --mm-bg. 41% clears 4.5:1 everywhere it actually lands. */
+    --muted-foreground: 200 6% 41%;
     --accent: 148 8% 96%;
     --accent-foreground: 152 56% 32%;
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
     --border: 152 7% 80%;
-    --input: 152 7% 80%;
-    --ring: 152 56% 42%;
+    /* #699(c): the CONTROL boundary, split from --border on purpose.
+       Input/Textarea/SelectTrigger are all `bg-transparent`, so this 1px line is
+       the ONLY thing identifying the control — SC 1.4.11 territory, not
+       decoration. At the shared 80% it measured 1.33:1 on --mm-bg and 1.54:1 on
+       --card; 51% is the first value clearing 3:1 on BOTH (3.04 / 3.53), with
+       --mm-bg the binding side. --border keeps 80%: a table gridline or a card
+       edge carries no information a reader needs, and raising it would turn
+       every divider in the app into a hard rule. */
+    --input: 152 7% 51%;
+    /* #6: 42% measured 2.99:1 on cards/panels and 2.57:1 on the app background,
+       below the 3:1 that WCAG 2.2 SC 1.4.11 requires for a focus indicator. 36%
+       clears every light surface at 3.40:1. The dark theme was already fine
+       (5.48-6.26:1) — light was the failing side here, the exact inverse of #645. */
+    --ring: 152 56% 36%;
     --radius: 0.375rem;
 
     /* ── Mixed Measures custom tokens ── */
@@ -149,12 +163,23 @@
     --mm-chrome-text-muted: 172 20% 80%;  /* #394: AA on the lighter nav count-badge bg (was 4.14:1) */
     --mm-text: 200 12% 16%;
     --mm-text-secondary: 200 8% 34%;
-    /* #394: muted/faint darkened to meet WCAG AA 4.5:1 for small text. Faint was
-       62% L (≈2.6:1 on white — failing); 45% is the lightest that clears 4.5:1.
-       Muted nudged 44%→42% so it also passes on off-white surfaces (was 4.32 on
-       the #eef1f0 tab bg). Faint stays lighter than muted (hierarchy preserved). */
+    /* #394: muted/faint darkened to meet WCAG AA 4.5:1 for small text (faint was
+       62% L ≈ 2.6:1 on white). ⚠️ #394's closing claim — "faint stays lighter than
+       muted, hierarchy preserved" — is NO LONGER TRUE and was left standing here
+       for one release: #7 retired the faint tier by value, so the two are equal.
+       See the --mm-text-faint comment below for why that tier cannot exist at AA. */
     --mm-text-muted: 200 6% 40%;  /* #434: AA on the ~6% speaker/striped-row tints (42%→4.43:1 on #e9eceb) */
-    --mm-text-faint: 200 5% 45%;
+    /* #7 - THE FOURTH TEXT TIER IS RETIRED BY VALUE. Read this before 'restoring'
+       a dimmer faint: at AA it cannot exist. To clear 4.5:1 on --mm-bg /
+       --mm-surface / --mm-surface-hover this token needs L<=41.5%, and
+       --mm-text-muted is at 40% — a 1.5pp gap nobody can see. In dark it is worse
+       (needs >=56.5% against muted's 56%). There is simply no room between
+       'dimmer than muted' and 'readable', so faint now equals muted.
+       The NAME is kept deliberately: ~665 call sites use it, and an accessibility
+       fix should not also be a 665-site rename. If a genuinely dimmer tier is ever
+       wanted it must come with a rule that confines it to >=18px text or to
+       non-text UI, which is what would make a lower ratio legal. */
+    --mm-text-faint: 200 6% 40%;
     --mm-border-subtle: 152 6% 87%;
     --mm-border-medium: 152 7% 80%;
     --mm-card-shadow: 0 1px 2px 0 rgba(0,0,0,0.04), 0 1px 1px -1px rgba(0,0,0,0.03);
@@ -165,18 +190,29 @@
     --mm-purple: 262 50% 58%;
     --mm-purple-text: 261 36% 47%;
     --mm-blue: 210 70% 52%;
-    --mm-blue-text: 204 36% 40%;  /* #394: AA on the light active-tab pill bg (was 3.84:1) */
+    /* THE SELECTION TEXT COLOUR. #394 moved this 36%->40% for the active-tab pill;
+       #7 found it still below AA on the selection tint itself — 4.28:1 over
+       --mm-surface and 3.76:1 over --mm-bg (lib/selection.ts paints SELECTED_TINT
+       at 20% light / 30% dark). Neither external review caught this; the contrast
+       matrix did, because it composites the tint the way the app actually paints it
+       instead of testing against a solid --mm-blue no call site uses. 35% clears
+       every real selection background, the pill included. */
+    --mm-blue-text: 204 36% 35%;
     --mm-blue-cell: 210 60% 93%;  /* #480: OPAQUE selected-cell bg (sticky cells can't use the alpha tint) */
     --mm-teal: 174 60% 42%;
     --mm-teal-text: 170 40% 30%;
     --mm-media-well: 204 12% 20%;  /* video letterbox fill — deep neutral in the app's hue family, never raw black (§7.5) */
     --mm-canvas: 45 70% 50%;
-    --mm-canvas-text: 42 52% 40%;
+    /* #7: 3.12-3.73:1 against its real background (a 6-12% --mm-canvas tint over
+       the page or a card), not the 4.5:1 its 12-13px size needs. 32% clears the
+       worst of those composites. */
+    --mm-canvas-text: 42 52% 32%;
     /* Context column backgrounds */
     --mm-ctx-demo: 174 40% 95%;
     --mm-ctx-demo-text: 174 35% 35%;
     --mm-ctx-comments: 28 60% 95%;
-    --mm-ctx-comments-text: 28 55% 40%;
+    /* #7: 4.45:1 on its own --mm-ctx-comments header background — just under AA. */
+    --mm-ctx-comments-text: 28 55% 39%;
     --mm-ctx-responses: 230 40% 95%;
     --mm-ctx-responses-text: 230 35% 40%;
 
@@ -217,7 +253,9 @@
     --destructive: 0 62% 50%;
     --destructive-foreground: 0 0% 100%;
     --border: 230 6% 20%;
-    --input: 230 6% 20%;
+    /* #699(c) — 20% measured 1.41:1 on --background and 1.23:1 on --card; 44%
+       is the first clearing 3:1 on both (3.48 / 3.05, --card binding). */
+    --input: 230 6% 44%;
     --ring: 152 52% 44%;
 
     --mm-bg: 230 14% 9%;
@@ -236,7 +274,10 @@
     --mm-text: 40 12% 90%;
     --mm-text-secondary: 40 8% 72%;
     --mm-text-muted: 200 6% 56%;
-    --mm-text-faint: 200 4% 42%;
+    /* #7: was 42% = 2.74:1 on --mm-surface-hover, below even the 3:1 large-text
+       floor. Matches --mm-text-muted; see the light-theme comment for why the
+       tier is retired rather than nudged. */
+    --mm-text-faint: 200 6% 56%;
     --mm-border-subtle: 230 4% 16%;
     --mm-border-medium: 200 10% 24%;
     --mm-green: 152 52% 44%;

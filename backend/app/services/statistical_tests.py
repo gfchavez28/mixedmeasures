@@ -18,6 +18,7 @@ from ..models.statistical_test import StatisticalTest
 from ..models.analysis_domain import AnalysisDomain
 from ..models.dataset import DatasetColumn, DatasetRow, Dataset
 from .grouping import order_value_labels
+from .undefined_stats import finite_or_none
 from .metrics import (
     resolve_dataset_column,
     resolve_dataset_domain,
@@ -44,6 +45,30 @@ def _classify_effect_cohens_d(d: float) -> str:
     if d >= COHENS_D_THRESHOLDS["small"]:
         return "small"
     return "negligible"
+
+
+def pooled_cohens_d(
+    m1: float, s1: float, n1: int,
+    m2: float, s2: float, n2: int,
+) -> float | None:
+    """Cohen's d on the pooled SD — THE implementation, shared by both callers.
+
+    This block existed twice, byte-identical, in `comparisons.py` and here
+    (#689's own note). #733's lesson is that a second copy does not merely
+    drift: it propagates a defect verbatim, and both copies collapsed an
+    undefined d to `0.0` in exactly the same way.
+
+    Returns ``None`` when the pooled SD is zero — every value in both groups is
+    identical, so "no difference in SD units" is not a measurement of zero
+    effect, it is the absence of a scale to measure on (#689).
+    """
+    denom = n1 + n2 - 2
+    if denom <= 0:
+        return None
+    pooled_var = ((n1 - 1) * s1 ** 2 + (n2 - 1) * s2 ** 2) / denom
+    if pooled_var <= 0:
+        return None
+    return finite_or_none((m1 - m2) / math.sqrt(pooled_var))
 
 
 def _classify_effect_eta_squared(eta2: float) -> str:
@@ -327,6 +352,17 @@ def compute_independent_t_test(db: Session, test: StatisticalTest) -> dict:
     # Welch's t-test
     t_stat, p_value = ttest_ind(g1_values, g2_values, equal_var=False)
 
+    # #689: both groups constant ⇒ t is ±inf or nan. This path SAVES its result
+    # (`json.dumps` into `result_data`), so an unguarded one writes a literal
+    # `Infinity` into the database — invalid JSON that then 500s every read of
+    # that test. Refuse the same way this function already refuses a group with
+    # fewer than 2 observations: an explicit, readable ValueError.
+    if finite_or_none(t_stat) is None or finite_or_none(p_value) is None:
+        raise ValueError(
+            f"'{g1_label}' and '{g2_label}' each have no variation "
+            "(every value is identical), so a t-test is undefined."
+        )
+
     n1, n2 = len(g1_values), len(g2_values)
     m1, m2 = statistics.mean(g1_values), statistics.mean(g2_values)
     s1, s2 = statistics.stdev(g1_values), statistics.stdev(g2_values)
@@ -343,10 +379,15 @@ def compute_independent_t_test(db: Session, test: StatisticalTest) -> dict:
     if not math.isfinite(df):
         df = n1 + n2 - 2
 
-    # Cohen's d (pooled SD)
-    pooled_var = ((n1 - 1) * s1 ** 2 + (n2 - 1) * s2 ** 2) / (n1 + n2 - 2)
-    pooled_sd = math.sqrt(pooled_var) if pooled_var > 0 else 0
-    cohens_d = (m1 - m2) / pooled_sd if pooled_sd > 0 else 0.0
+    # Cohen's d — the shared implementation; this block used to be a
+    # byte-identical copy of the one in `comparisons.py` (#689/#733).
+    # Unreachable-by-construction now that a non-finite t has already raised.
+    cohens_d = pooled_cohens_d(m1, s1, n1, m2, s2, n2)
+    if cohens_d is None:
+        raise ValueError(
+            f"'{g1_label}' and '{g2_label}' have no pooled variation, "
+            "so Cohen's d is undefined."
+        )
 
     return {
         "t_statistic": round(float(t_stat), STATS_PRECISION),
@@ -401,6 +442,18 @@ def compute_one_way_anova(db: Session, test: StatisticalTest) -> dict:
     group_arrays = [group_values[label] for label in sorted_labels]
 
     f_stat, p_value = f_oneway(*group_arrays)
+
+    # #689: internally-constant groups ⇒ F is inf (means differ) or nan (they
+    # do not), and with every value identical the omega term below divides
+    # `0 / 0`. This result is SAVED, so an unguarded one either writes literal
+    # `Infinity` into `result_data` or raises ZeroDivisionError mid-compute.
+    # (One check, not two: `ss_total == 0` means every value equals the grand
+    # mean, which is exactly the case where scipy returns nan — verified.)
+    if finite_or_none(f_stat) is None or finite_or_none(p_value) is None:
+        raise ValueError(
+            "The groups have no variation (every value is identical), "
+            "so an ANOVA is undefined."
+        )
 
     # Compute eta-squared
     grand_mean = statistics.mean([v for arr in group_arrays for v in arr])

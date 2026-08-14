@@ -32,6 +32,13 @@ the single-page app that the backend serves same-origin at
   is unit-tested headlessly. `main.js` owns the GUI/IPC edges; this file owns the
   rules.
 - `updater.test.js` — `node --test` suite for the above.
+- `fatal-error.js` — turns a backend startup failure into dialog text (#716). Same
+  Electron-free split as the two above: it scans the child's stderr for the
+  `MM-FATAL:` line the backend writes (`backend/app/startup_errors.py`) and composes
+  the crash dialog, falling back to the generic sentence when there is none. ⚠️ The
+  prefix is a contract **mirrored by hand in two languages with no codegen**, so each
+  side's suite can stay green while the two drift.
+- `fatal-error.test.js` — `node --test` suite for the above.
 - `preload.js` — minimal hardened context bridge (`window.mmDesktop`).
 - `splash.html` — shown while the backend starts.
 - `scripts/update-manifest.js` — release-pipeline tool: re-patches
@@ -105,10 +112,21 @@ patch/merge tool (round-trip fidelity, hash recomputation, arch-merge dedup,
 version-mismatch refusal), and the updater state machine (offline is swallowed,
 a periodic check never interrupts an in-flight download, install refuses unless an
 update is staged, and the auto-check preference defaults on even when its config
-file is missing or corrupt).
+file is missing or corrupt), and the fatal-startup reader (#716 — a marker split
+across two stderr chunks is still collected, developer noise and tracebacks never
+reach the dialog, and the body is capped).
 
-CI runs this suite as `npm ci && npm test` on **Node 20**. Local development may
-be on a newer Node; validate the lockfile there before relying on it.
+⚠️ **What the headless suite cannot prove: that the crash dialog appears.** The
+backend is only a spawned child in a packaged build, so #716's last mile is a
+packaged-build check — it is on the RELEASING §4b list and #716 stays open until it
+passes. In dev the backend's stderr goes to the terminal and looks fine, which is
+how the original gap survived.
+
+CI runs this suite as `npm ci && npm test` on **Node 24** (#635 — Node 20 went EOL
+2026-04-30). Local development may be on a different Node; validate the lockfile
+under CI's version before relying on it, and prove it with `npm ci` rather than
+with `npm audit`'s vulnerability count — a lockfile `npm ci` refuses to install
+still reports "0 vulnerabilities" (#726).
 
 A windowed smoke test still needs a display: launch with `npm start`, create a
 project, import a CSV, code a segment, run a statistic, export a file, then quit

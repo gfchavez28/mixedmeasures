@@ -43,8 +43,6 @@ export const codesApi = {
     api.post<Code>(`/projects/${projectId}/codes`, data).then(res => res.data),
   update: (projectId: number, id: number, data: Partial<Code>) =>
     api.patch<Code>(`/projects/${projectId}/codes/${id}`, data).then(res => res.data),
-  getSegments: (projectId: number, id: number) =>
-    api.get(`/projects/${projectId}/codes/${id}/segments`).then(res => res.data),
   reorderInCategory: (projectId: number, categoryId: number | null, orderedCodeIds: number[]) =>
     api.post(`/projects/${projectId}/codes/reorder-in-category`, {
       category_id: categoryId,

@@ -2,7 +2,7 @@
 
 Two regression classes:
 1. M10 — every packaging-relevant bare-named field must ALSO bind its MM_-prefixed
-   name (CLAUDE.md documents MM_INACTIVITY_TIMEOUT_MINUTES; before this fix it was
+   name (the internal design notes documents MM_INACTIVITY_TIMEOUT_MINUTES; before this fix it was
    silently ignored — the same class as the P2 live-Swagger bug).
 2. L1 — when BOTH names are set, the MM_ name must WIN: the Electron spawn env's
    MM_ hardening must beat a stray bare-named var exported in the user's shell.

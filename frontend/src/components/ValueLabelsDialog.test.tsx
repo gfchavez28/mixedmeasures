@@ -7,6 +7,7 @@
  * missing values (the seeded scale labels used to lock Apply), and seeding is
  * once-per-open (a frequencies refetch must never wipe in-progress edits).
  */
+import { describeRecoveredUnmapped, describeMissingValueChanges } from '@/lib/missing-values-copy'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
@@ -33,7 +34,6 @@ vi.mock('@/lib/api', async () => {
 import {
   ValueLabelsDialog,
   buildValueLabelPayload,
-  describeRecoveredUnmapped,
 } from './ValueLabelsDialog'
 import { labelRowsTouched } from './ValueLabelRows'
 
@@ -313,5 +313,48 @@ describe('describeRecoveredUnmapped (#609d)', () => {
     expect(msg).toContain('+2 more')
     expect(msg).toContain('have no codes yet')
     expect(msg).not.toContain('"f"')
+  })
+})
+
+
+describe('describeMissingValueChanges (#680)', () => {
+  const base = { nulled_rows: 0, labelled_rows: 0, stripped_scale_points: 0, recovered_rows: 0 }
+
+  it('says nothing when nothing changed, so the caller keeps its plain success', () => {
+    expect(describeMissingValueChanges(base)).toBeNull()
+  })
+
+  it('reports cells removed from analysis', () => {
+    expect(describeMissingValueChanges({ ...base, nulled_rows: 47 }))
+      .toBe('47 cells no longer counted in analysis.')
+  })
+
+  /**
+   * The one that matters: `labelled_rows` is a SUBSET of `nulled_rows`
+   * (`schemas/recode.py:201`). Rendering them as siblings would say 94 cells
+   * were touched when 47 were — an overstatement in a disclosure about the
+   * researcher's own data.
+   */
+  it('renders relabelled cells as a qualifier, never as a second population', () => {
+    const msg = describeMissingValueChanges({ ...base, nulled_rows: 47, labelled_rows: 12 })!
+    expect(msg).toBe('47 cells no longer counted in analysis, 12 relabelled.')
+    expect(msg).not.toMatch(/12 cells/)
+  })
+
+  it('reports recovery on un-declare', () => {
+    expect(describeMissingValueChanges({ ...base, recovered_rows: 12 }))
+      .toBe('12 cells counted again.')
+  })
+
+  it('reports stripped scale points', () => {
+    expect(describeMissingValueChanges({ ...base, nulled_rows: 3, stripped_scale_points: 1 }))
+      .toBe('3 cells no longer counted in analysis; 1 scale point removed.')
+  })
+
+  it('pluralises every count independently (#640 was "Preview (1 rows)")', () => {
+    expect(describeMissingValueChanges({ ...base, nulled_rows: 1, stripped_scale_points: 2 }))
+      .toBe('1 cell no longer counted in analysis; 2 scale points removed.')
+    expect(describeMissingValueChanges({ ...base, recovered_rows: 1 }))
+      .toBe('1 cell counted again.')
   })
 })

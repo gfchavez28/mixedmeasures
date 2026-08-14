@@ -427,7 +427,7 @@ def _second_tenant(db, *, pid=741, obs_id=7410, owner_id=9):
 
     Ids deliberately differ from one another: `_obs_project` gives the project
     and the observation the SAME id, so a confusion between the two coincides
-    there and hides (the coinciding-identifiers rule in tests/CLAUDE.md). Here
+    there and hides (the coinciding-identifiers rule in tests/the internal design notes). Here
     741 != 7410 != 740, so a scope that reads the wrong one cannot pass by luck.
     """
     db.add(User(id=owner_id, username="Other coder", password_hash=None,

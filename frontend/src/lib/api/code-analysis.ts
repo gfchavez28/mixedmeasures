@@ -13,6 +13,12 @@ export interface CodeFrequencyItem {
   segment_percentage: number
   conversation_count: number
   conversation_percentage: number
+  // Emitted since Observations; the client type omitted both for a year, which
+  // is why the summary table could only model two source kinds (#679).
+  document_count: number
+  document_percentage: number
+  observation_count: number
+  observation_percentage: number
   participant_count: number
   participant_percentage: number
   text_count: number
@@ -222,8 +228,20 @@ export interface SourceGroupData {
   code_counts: Record<string, CodeCountEntry>
 }
 
+/**
+ * The kinds of source a code can be applied in — THE enumeration (#679).
+ *
+ * Declared once, here, because this is the type a new backend source kind must
+ * touch: it is the shape of the wire. Every consumer that renders per-kind
+ * columns, labels or icons should key a `Record<SourceKind, …>` off this, so a
+ * fifth kind is a compile error at each consumer rather than a silently missing
+ * column (which is exactly what #679 was — a table modelling two kinds while
+ * the payload carried four).
+ */
+export type SourceKind = 'conversation' | 'text_column' | 'document' | 'observation'
+
 export interface SourceEntry {
-  source_type: 'conversation' | 'text_column' | 'document' | 'observation'
+  source_type: SourceKind
   source_id: number
   source_label: string
   dataset_id: number | null
@@ -245,6 +263,16 @@ export interface SourceFrequenciesTotals {
   total_documents: number
   total_observations: number
   total_text_columns: number
+  /**
+   * #749 — `coded_segments` above pools transcript segments AND coded texts.
+   * These split it, so a "% of coded texts" is never divided by a total that
+   * also counted segments.
+   */
+  coded_transcript_segments: number
+  coded_texts: number
+  total_participants: number
+  total_records: number
+  unlinked_speaker_count: number
 }
 
 export interface CodeInfo {
@@ -256,6 +284,15 @@ export interface CodeInfo {
   category_color?: string | null
   is_universal: boolean
   numeric_id: number
+  /**
+   * #749 — the two counts a client CANNOT derive from `sources`: one
+   * participant speaks across conversations and one record can be coded in
+   * several text columns, so summing per-source counts double-counts them.
+   * Under `aggregation: 'category'` these are per-CATEGORY, keyed by the same
+   * id the `codes` entry carries.
+   */
+  participant_count: number
+  record_count: number
 }
 
 export interface SourceFrequenciesResponse {

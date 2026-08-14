@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { isQualitativeMaterialConfig, materialAnalysisPath } from './material-kind'
+import { isQualitativeMaterialConfig, materialAnalysisPath, describeMissingRefs } from './material-kind'
+import type { MaterialRefKind } from './api/materials'
 
 /**
  * #652 slab 0 — the canvas embed's "Open in Analysis" sent every QUALITATIVE
@@ -81,5 +82,60 @@ describe('materialAnalysisPath', () => {
   it('accepts string ids (route params arrive as strings)', () => {
     expect(materialAnalysisPath('3', '1', QUAL_CONFIG))
       .toBe('/projects/3/analysis/qualitative?material=1')
+  })
+})
+
+/**
+ * #652 slab 3 — the "sources missing" sentence.
+ *
+ * The old copy read *"N referenced columns or domains no longer exist"*, which
+ * was accurate only while those were the only kinds ever collected. Once slab 3
+ * started reporting codes and sources it would have named the wrong nouns — the
+ * same shape as the empty-state copy that told a researcher their observation
+ * note did not exist (#676).
+ */
+describe('describeMissingRefs', () => {
+  const refs = (...kinds: MaterialRefKind[]) => kinds.map(type => ({ type }))
+
+  it('names the kind, not a generic "reference"', () => {
+    // "1 conversation" tells the researcher where to look; "1 reference" does not.
+    expect(describeMissingRefs(refs('conversation')))
+      .toBe('1 conversation referenced here no longer exists.')
+  })
+
+  it('pluralises within a kind', () => {
+    expect(describeMissingRefs(refs('code', 'code', 'code')))
+      .toBe('3 codes referenced here no longer exist.')
+  })
+
+  it('lists several kinds rather than collapsing them', () => {
+    expect(describeMissingRefs(refs('conversation', 'observation', 'observation')))
+      .toBe('1 conversation and 2 observations referenced here no longer exist.')
+  })
+
+  it('joins three or more kinds with commas and a final "and"', () => {
+    expect(describeMissingRefs(refs('code', 'conversation', 'document')))
+      .toBe('1 code, 1 conversation and 1 document referenced here no longer exist.')
+  })
+
+  it('never says "columns or domains" when neither is missing', () => {
+    const msg = describeMissingRefs(refs('observation'))
+    expect(msg).not.toContain('column')
+    expect(msg).not.toContain('domain')
+  })
+
+  it('still handles the original quantitative kinds', () => {
+    expect(describeMissingRefs(refs('column', 'domain')))
+      .toBe('1 column and 1 domain referenced here no longer exist.')
+  })
+
+  it('degrades to the raw token for a kind a newer server invented', () => {
+    // Rendering "undefined" would be worse than an unpolished noun.
+    expect(describeMissingRefs([{ type: 'interview' as MaterialRefKind }]))
+      .toBe('1 interview referenced here no longer exists.')
+  })
+
+  it('returns nothing when nothing is missing', () => {
+    expect(describeMissingRefs([])).toBe('')
   })
 })

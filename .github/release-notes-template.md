@@ -2,11 +2,14 @@ Mixed Measures **__VERSION__** — a local-first desktop workspace for mixed-met
 
 **What's new in this release**
 
-- **Observations — code a recording without a transcript.** For recordings of *events* rather than conversations (a classroom, a clinic visit, a usability session): mark clips directly on the recording's own timeline with keyboard in/out points and J-K-L transport. Clips carry codes, notes and quotes, and flow into search, the Canvas and your qualitative analysis.
-- **Reliability for video, both ways of cutting.** Let each coder mark their own boundaries and get unitizing agreement (Krippendorff's alpha at 100 ms) plus time-binned kappa — or freeze the clip set once the team agrees the cuts, and the ordinary kappa, side-by-side reconciliation and consensus layer all work on video unchanged.
-- **Timed analytics** — duration, frequency, rate per minute, share of session airtime, bout length, and a stacked codeline of the whole session.
-- **Declared value labels and missing values.** Give a numbers-only column a code-to-label dictionary, and tell any column which of its values mean "missing" (individual codes or a range like `-99 THRU -1`). Every analysis, chart and export honours it consistently.
-- ⚠️ **If you have imported SPSS `.sav` data before, please re-import it** — earlier versions discarded values SPSS flagged as user-missing, and the data already imported cannot be repaired in place. A few other numbers change in this release too.
+A correctness and accessibility release. Nothing new to learn — this fixes numbers that
+were wrong or wrongly labelled, and makes a large part of the app usable without a mouse.
+
+- ⚠️ **If you have reported an effect size from a group comparison, please check which statistic it was.** The comparison table took its effect-size *heading* from the number of groups while the *number* came from the test that ran, so the two could disagree — Cohen's *d* shown under an ω² heading is the common case. Fixed, but a figure already copied out may carry the wrong label.
+- ⚠️ **A statistic that could not be computed used to show `0.00`**, which reads as "no relationship" when the truth is "not computable". It now shows `—` with the reason. Worth re-checking any table where you recorded a zero.
+- **Scale scores say what they averaged**, over how many people (`3 items · n 210–260` rather than a pooled total), and warn when their items sit on different scales.
+- **Qualitative charts can now be embedded in a Canvas** — code frequency, co-occurrence, saturation, comparisons, the summary table and the timeline all draw, and export as images. This was a stated limitation in 1.3.0.
+- **Accessibility** was the bulk of the work: the codebook and picker trees are keyboard-reachable and announce their structure, the variable-group grid costs one tab stop instead of one per cell, text inputs have a visible border, and a screen-reader pass ran against the Observations workbench for the first time — its six findings are all fixed here.
 - Full details, and the upgrade notes, in the [changelog](https://github.com/__REPO__/blob/main/CHANGELOG.md).
 
 ## Which file should I download?

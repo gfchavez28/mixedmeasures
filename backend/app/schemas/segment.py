@@ -115,6 +115,10 @@ class SegmentSplitRequest(BaseModel):
 class SegmentSplitResponse(BaseModel):
     new_segments: list[SegmentResponse]
     deleted_segment_ids: list[int]
+    quote_notes_stayed: int = 0
+    """#712 — notes that stayed on the original segment. They are not lost: an
+    unsplit restores them. Disclosed HERE because the link is unrecoverable
+    afterwards."""
 
 
 class SegmentUnsplitResponse(BaseModel):

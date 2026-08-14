@@ -37,7 +37,18 @@ export default tseslint.config(
       'react-hooks/set-state-in-effect': 'warn',
       'react-hooks/preserve-manual-memoization': 'warn',
       'react-hooks/immutability': 'warn',
-      // #481 — DESIGN.md §11: ban raw Tailwind neutral/blue palette utilities
+      // ⚠️ `use-memo` and `purity` arrived in the plugin's RECOMMENDED set at
+      // ERROR severity in 7.1.1 (the eslint@10 bump, #727). Held at `warn` with
+      // the rest of the compiler-readiness family rather than fixed inside a
+      // toolchain upgrade, because both current hits are behaviour-sensitive and
+      // neither is a defect: `useCanvasEditor.ts:135` passes `!!mentionItems` in a
+      // dep list (the rule wants only simple expressions — hoisting the boolean is
+      // the fix, and that file is the canvas schema-cleaner seam), and
+      // `auth-context.tsx:23` does `useRef(Date.now())`, where the argument is read
+      // on the first render only. Triage belongs with #401, not here.
+      'react-hooks/use-memo': 'warn',
+      'react-hooks/purity': 'warn',
+      // #481 — the internal design notes: ban raw Tailwind neutral/blue palette utilities
       // (always mm-*/shadcn tokens or lib/selection.ts). Status & entity palettes
       // (amber/emerald/rose/purple/teal/orange/sky/indigo) stay allowed by design.
       // Deliberate exceptions (entity-color maps, data-viz fills) carry an inline
@@ -45,11 +56,11 @@ export default tseslint.config(
       'no-restricted-syntax': ['error',
         {
           selector: "Literal[value=/\\b(?:blue|gray|slate|zinc|stone)-\\d/]",
-          message: 'Raw Tailwind palette banned (DESIGN.md §11) — use mm-*/shadcn tokens or lib/selection.ts.',
+          message: 'Raw Tailwind palette banned (the internal design notes) — use mm-*/shadcn tokens or lib/selection.ts.',
         },
         {
           selector: "TemplateElement[value.raw=/\\b(?:blue|gray|slate|zinc|stone)-\\d/]",
-          message: 'Raw Tailwind palette banned (DESIGN.md §11) — use mm-*/shadcn tokens or lib/selection.ts.',
+          message: 'Raw Tailwind palette banned (the internal design notes) — use mm-*/shadcn tokens or lib/selection.ts.',
         },
       ],
     },
