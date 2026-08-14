@@ -1341,6 +1341,16 @@ def test_snapshot_rotation_breaks_created_at_ties_deterministically(db_session):
     So the guard holds the ordering OBJECT the query uses. Re-typing the clause
     here would validate a copy (#729); reading `SNAPSHOT_ROTATION_ORDER` fails the
     moment the tiebreaker leaves the query.
+
+    ⚠️ The tie precondition asks for AT LEAST ONE tie, not for every row to share a
+    timestamp — that stronger form was time-dependent and went red on CI 2026-08-14
+    (`15:15:05` and `15:15:06`: the burst straddled a second boundary on a slower
+    runner, which says nothing about the rotation). One tie is also the honest
+    condition: the tiebreaker is load-bearing as soon as TWO rows collide, so
+    "some rows tie" is exactly what makes this test meaningful, and demanding more
+    only bought flakiness. Do not tighten it back — and do not "fix" it by freezing
+    the clock either, which would assert the tie into existence and stop detecting
+    the sub-second-precision change the message warns about.
     """
     p = _create_project(db_session)
     c = _create_canvas(db_session, p.id)
@@ -1349,9 +1359,12 @@ def test_snapshot_rotation_breaks_created_at_ties_deterministically(db_session):
 
     surviving = db_session.query(CanvasSnapshot).filter(
         CanvasSnapshot.canvas_id == c.id).all()
-    assert len({s.created_at for s in surviving}) == 1, (
-        "snapshots no longer tie on created_at — if the column gained sub-second "
-        "precision the tiebreaker may be redundant; re-decide rather than delete"
+    distinct_created = {s.created_at for s in surviving}
+    assert len(distinct_created) < len(surviving), (
+        "no two snapshots tie on created_at, so the tiebreaker decides nothing here "
+        "— if the column gained sub-second precision it may be redundant; re-decide "
+        f"rather than delete. Got {len(distinct_created)} distinct timestamps across "
+        f"{len(surviving)} rows"
     )
 
     ordered_cols = [str(clause.element) for clause in SNAPSHOT_ROTATION_ORDER]
