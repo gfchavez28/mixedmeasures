@@ -39,12 +39,50 @@ the single-page app that the backend serves same-origin at
   prefix is a contract **mirrored by hand in two languages with no codegen**, so each
   side's suite can stay green while the two drift.
 - `fatal-error.test.js` — `node --test` suite for the above.
+- `packaged-files.test.js` — the guard on `build.files` (#761). See below.
+- `build-config.test.js` — the guard on the rest of `build` (#759). Validates the
+  config against the **installed** `app-builder-lib/scheme.json`, so a key the next
+  electron-builder major removes fails `npm test` on the bump commit instead of
+  failing config validation mid-release. Also pins the publisher-name invariants
+  that now straddle two files (see Auto-update below), since `release.yml` is
+  otherwise outside everything `npm test` can see.
 - `preload.js` — minimal hardened context bridge (`window.mmDesktop`).
 - `splash.html` — shown while the backend starts.
 - `scripts/update-manifest.js` — release-pipeline tool: re-patches
   `latest-mac.yml` after the DMG staple rewrites the artifact, and merges the mac
   legs' per-arch manifests into the one file the auto-updater reads.
   Dependency-free; exercised by `release.yml`. Unit tests alongside it.
+
+## 🔴 `build.files` is a deny-by-default allow-list — and nothing but a launch tests it (#761)
+
+`package.json`'s `build.files` names every file electron-builder puts in `app.asar`.
+A module that isn't listed is simply **absent from the shipped app**, and *no gate can
+see it*: `npm test`, tsc, lint and the full signed 4-platform matrix all pass, because
+the miss only surfaces when Electron evaluates the `require` **at runtime, in the
+packaged app**. In dev, `electron .` loads from this directory, where every file
+plainly exists.
+
+That is not hypothetical — it shipped. **v1.3.1's first cut built green on all five
+jobs, signed and notarized, and died on first launch** with `Cannot find module
+'./zoom'`. Both modules added that release, `zoom.js` and `fatal-error.js`, had never
+joined the list. ⚠️ **The second one is the crash reporter**, so the machinery built to
+explain a fatal startup failure was itself missing — and the §4b block owed for
+#716/#723/#724 could not have passed on that build.
+
+**`packaged-files.test.js` now derives the requirement instead of restating it.** It
+walks the require graph transitively from the declared entry points and fails naming
+any module absent from `build.files`, so **a new module is covered the moment `main.js`
+requires it** — nobody has to remember the guard exists. Companion assertions cover the
+inverse rot: a dangling entry for a deleted file, a dropped entry point (which would
+make the walk pass vacuously), and a `.test.js` leaking into the package.
+
+Two things to preserve if you touch it: **`preload.js` is seeded explicitly** (Electron
+loads it from a path string in `webPreferences`, never a `require`, so the walk cannot
+discover it), and **comments are stripped before scanning** — the guard's own header
+names `require('./zoom')` in prose, and a naive scan matches that.
+
+This is the codebase's **enumeration debt** shape, with the standing remedy applied:
+derive the enumeration from the artifact the next variant must touch.
 
 ## Auto-update
 
@@ -63,11 +101,21 @@ Four things are load-bearing when changing anything here:
   dependencies do not need listing.)
 - **`electron-updater` is a runtime dependency**, pinned exact. In
   `devDependencies` it would not be packaged at all.
-- **`win.publisherName` must stay pinned** to the signing certificate's full
+- **The publisher name must stay pinned** to the signing certificate's full
   Distinguished Name. `electron-updater` skips Windows update signature
   verification entirely when it is absent, and it compares every DN field, so a
   bare common name only warns. Re-read it from a signed build's Authenticode
-  output rather than typing it from memory.
+  output rather than typing it from memory (`Get-AuthenticodeSignature` →
+  `SignerCertificate.Subject`). ⚠️ **It lives in `release.yml`, not
+  `package.json`** (#759 Half 2): electron-builder 26 removed `win.publisherName`
+  and gave each signing manager its own — we sign with Azure Trusted Signing, so
+  the key is `win.azureSignOptions.publisherName`, passed inside the workflow's
+  existing `AZURE_TENANT_ID` guard. It must NOT move back into `package.json`,
+  because v26 selects the signing manager by the mere *presence* of
+  `azureSignOptions` and would then engage Azure signing on the unsigned path.
+  Two non-obvious couplings: setting `verifyUpdateCodeSignature: false` also
+  strips the name from `app-update.yml` as a side effect, and the whole thing is
+  invisible to a fresh install — only an actual update exercises it.
 - **A new key under `build` must exist in `app-builder-lib`'s JSON schema**, or
   electron-builder fails the build.
 

@@ -5,6 +5,57 @@ All notable changes to Mixed Measures are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-08-15
+
+A security and packaging patch. There is no new capability here and nothing in
+your projects changes. **Linux users should update**: the AppImage published up
+to and including 1.3.1 could load code from the folder it was launched from.
+
+### Upgrade notes
+
+- **Linux (AppImage): please update, and prefer launching from a folder only you
+  can write to.** Every Mixed Measures AppImage up to 1.3.1 was built with a
+  packaging tool that wrote a startup script placing the *current working
+  directory* on the system library search path. Anyone able to write a file into
+  the folder you launch the AppImage from could therefore have had their code
+  loaded into the app. This was a defect in the build tool, not in Mixed Measures'
+  own code, and it is fixed by rebuilding with the corrected tool — so it is fixed
+  simply by installing 1.3.2. There is no sign it was exploited, and it did not
+  affect the Windows or macOS builds.
+- **Windows: this release changes how updates verify their signature.** The
+  publisher name the updater checks a download against moved as part of the
+  packaging upgrade. Updating to 1.3.2 works normally; the change matters for
+  updates *after* it.
+- **Everyone else: nothing to do.** No database migration, no format change, and
+  `.mmproject` / `.mmbackup` files are unaffected in both directions.
+
+### Fixed
+
+- **Linux AppImage: arbitrary code could be loaded from the launch directory**
+  (CVE-2026-54672, high). The generated startup script set `LD_LIBRARY_PATH`,
+  `PATH`, `XDG_DATA_DIRS` and `GSETTINGS_SCHEMA_DIR` with a trailing empty entry,
+  which the dynamic linker resolves to the current directory. Fixed by upgrading
+  the packaging toolchain; the corrected script guards every one of those
+  variables.
+- **The "could not start" dialog mangled non-English folder names.** When the
+  backend failed to start, the recovery message names the folder it could not
+  open — and any character outside the Windows default encoding was replaced or
+  dropped, so the dialog could point at a path that does not exist. It now
+  carries its own text encoding end to end. A folder name containing a
+  non-breaking space was corrupted by a separate bug in the same message and is
+  fixed too.
+- **Merging a colleague's copy of a project no longer accepts edited transcripts.**
+  If two people held the same project and one corrected the wording of a segment,
+  a merge would keep one side's text while re-anchoring the other side's
+  highlights onto it — silently attaching quotes to words nobody had quoted. The
+  merge now refuses, names the affected segments, and asks which text is correct.
+
+### Changed
+
+- The desktop packaging toolchain (electron-builder) was upgraded a major
+  version, and the Python bundler is now pinned exactly so a given release is
+  always built by the same toolchain.
+
 ## [1.3.1] - 2026-08-14
 
 A correctness and accessibility release. No new capability to speak of — this
@@ -515,7 +566,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.1.1...v1.2.0

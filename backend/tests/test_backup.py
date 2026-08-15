@@ -114,7 +114,7 @@ def test_create_backup_manifest_fields(tmp_path):
         manifest = json.loads(zf.read("manifest.json"))
 
     assert manifest["format_version"] == 1
-    assert manifest["app_version"] == "1.3.1"
+    assert manifest["app_version"] == "1.3.2"
     assert "created_at" in manifest
     assert manifest["backup_type"] == "auto"
     assert manifest["db_size_bytes"] > 0

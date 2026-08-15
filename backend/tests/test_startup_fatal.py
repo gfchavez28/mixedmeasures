@@ -221,35 +221,81 @@ class TestCrossLanguageContract:
 
 
 class TestNonAsciiSurvivesTheMarkerLine:
-    """Why `PYTHONIOENCODING=utf-8` is pinned in the Electron spawn env.
+    """The marker line is UTF-8 **bytes** on the wire, whatever the stream's encoding.
 
-    The message interpolates a real filesystem path, and a Windows profile directory
-    is routinely non-ASCII. This does not raise — `sys.stderr` defaults to
-    ``errors='backslashreplace'`` — which is worse than a crash, because the line
-    still arrives and the path inside it is silently unusable.
+    #762: `PYTHONIOENCODING=utf-8` in the Electron spawn env does NOT reach the frozen
+    interpreter. Measured against the shipped v1.3.1 `mm-backend.exe` and reproduced in
+    a minimal PyInstaller build — the variable is present in the child's `os.environ`
+    and `sys.stderr.encoding` is `cp1252` anyway. So the emitter encodes the line
+    itself; these assert the BYTES, because a string assertion cannot see the defect.
     """
 
-    PATH_MSG = "Could not create the pre-migration backup at C:\\Users\\李明\\backups."
+    #: A character cp1252 CANNOT encode → backslashreplace escapes (visibly wrong).
+    CJK_MSG = "Could not create the pre-migration backup at C:\\Users\\李明\\backups."
+    #: A character cp1252 CAN encode → a lone 0xC9 byte. THIS is the one that shipped:
+    #: it is not valid UTF-8, so the reader's StringDecoder yields U+FFFD and the path
+    #: silently names nowhere. The suite had no Latin-1 case at all before #762.
+    LATIN1_MSG = "Could not create the pre-migration backup at C:\\Users\\gchav\\Évaluation\\backups."
 
-    def _emit_through(self, encoding: str) -> str:
+    def _emit_bytes(self, msg: str, encoding: str) -> bytes:
+        """Emit through a stream whose TEXT layer uses `encoding` — as PyInstaller's does."""
         raw = io.BytesIO()
         stream = io.TextIOWrapper(raw, encoding=encoding, errors="backslashreplace", newline="")
-        emit_fatal_startup(PreMigrationBackupError(self.PATH_MSG), stream=stream)
+        emit_fatal_startup(PreMigrationBackupError(msg), stream=stream)
         stream.flush()
-        return raw.getvalue().decode(encoding, errors="replace")
+        return raw.getvalue()
 
-    def test_a_utf8_stream_carries_the_path_intact(self):
-        assert self.PATH_MSG in self._emit_through("utf-8")
+    @pytest.mark.parametrize("encoding", ["utf-8", "cp1252", "ascii"])
+    @pytest.mark.parametrize("attr", ["CJK_MSG", "LATIN1_MSG"])
+    def test_the_bytes_are_utf8_whatever_the_stream_encoding_is(self, encoding, attr):
+        msg = getattr(self, attr)
+        out = self._emit_bytes(msg, encoding)
+        # Decoding as UTF-8 must round-trip the path exactly — no escapes, no U+FFFD.
+        assert msg in out.decode("utf-8"), f"path did not survive a {encoding} stream"
 
-    def test_a_legacy_windows_codepage_mangles_it_silently(self):
-        """The failure mode the env var exists to prevent — pinned, not assumed."""
-        out = self._emit_through("cp1252")
-        assert MM_FATAL_PREFIX in out, "the line still arrives, which is what makes this quiet"
-        assert "李明" not in out
-        assert "\\u674e\\u660e" in out, (
-            "expected backslashreplace escapes — if this changed, re-check whether "
-            "PYTHONIOENCODING is still the right fix"
+    def test_the_latin1_case_is_a_raw_byte_not_an_escape(self):
+        """Why the pre-#762 guard could not see this: the two failures differ.
+
+        cp1252 CAN encode É, so there is no backslashreplace escape to notice — just
+        one byte that is not UTF-8. Pinned so nobody "simplifies" the two cases into
+        one and re-loses the half that shipped.
+        """
+        text_layer_bytes = self.LATIN1_MSG.encode("cp1252")
+        assert b"\xc9" in text_layer_bytes and b"\\u" not in text_layer_bytes
+        # ...and that is exactly what the emitter must NOT produce.
+        assert b"\xc3\x89" in self._emit_bytes(self.LATIN1_MSG, "cp1252")
+
+    def test_a_stream_with_no_byte_layer_still_gets_the_line(self):
+        """A StringIO has no `.buffer`; the text write is the honest fallback."""
+        buf = io.StringIO()
+        emit_fatal_startup(PreMigrationBackupError(self.LATIN1_MSG), stream=buf)
+        assert self.LATIN1_MSG in buf.getvalue()
+
+
+class TestPathWhitespaceIsNotDestroyed:
+    """`str.split()` with no argument eats 29 Unicode whitespace characters (#762).
+
+    A folder name may legitimately contain a NO-BREAK SPACE. Collapsing it to a plain
+    space makes the dialog name a directory that does not exist — the same class of
+    silent unusability as the encoding half, reached from the other side.
+    """
+
+    @pytest.mark.parametrize(
+        "char, name",
+        [("\u00a0", "NO-BREAK SPACE"), ("\u2007", "FIGURE SPACE"), ("\u202f", "NARROW NBSP")],
+    )
+    def test_a_printable_space_in_a_path_survives(self, char, name):
+        msg = f"Could not create the pre-migration backup at C:\\Users\\My{char}Project\\backups."
+        assert char in fatal_startup_message(PreMigrationBackupError(msg)), (
+            f"{name} was destroyed — the message now names a folder that does not exist"
         )
+
+    @pytest.mark.parametrize("char", ["\n", "\r", "\t", "\x0b", "\x85", "\u2028"])
+    def test_a_line_breaker_is_still_flattened(self, char):
+        """The channel is line-oriented, so these must NOT survive — both directions."""
+        msg = fatal_startup_message(RuntimeError(f"before{char}after"))
+        assert char not in msg
+        assert "before after" in msg
 
 
 class TestLifespanReportsBeforeItReraises:

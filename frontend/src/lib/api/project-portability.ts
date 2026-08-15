@@ -134,16 +134,37 @@ export interface MergeDivergenceDetail {
    * the segmentation is settled at all. It needs its own copy — "re-segment to
    * match" is the wrong instruction in both of its directions.
    */
-  kind: 'segmentation' | 'segmentation_freeze' | 'codebook'
+  kind: MergeDivergenceKind
   diverged_sources?: {
     name: string
     file_segments?: number
     local_segments?: number
     /** `segmentation_freeze` only: which side had frozen its segmentation. */
     frozen_side?: 'local' | 'file'
+    /** `segment_text` (#694) only: how many of the source's segments were edited. */
+    changed_segments?: number
+    /** `segment_text` only. */
+    total_segments?: number
   }[]
   diverged_codes?: string[]
 }
+
+/**
+ * Every refusal the merge gate can raise. Kept as its own exported union because
+ * `MergeProject`'s renderer builds an object keyed by it with `satisfies
+ * Record<MergeDivergenceKind, …>` — so adding a kind here is a COMPILE ERROR until
+ * the screen that explains it exists.
+ *
+ * ⚠️ Before #694 the renderer was a ternary chain whose final `else` was the codebook
+ * branch, and this union was not exhaustively consumed. A new backend kind therefore
+ * rendered "codebooks differ" over an empty list: a confident, wrong diagnosis with a
+ * remedy that could not work. Do not reintroduce a fall-through default here.
+ */
+export type MergeDivergenceKind =
+  | 'segmentation'
+  | 'segmentation_freeze'
+  | 'codebook'
+  | 'segment_text'
 
 export interface ProjectImportResult {
   project_id: number

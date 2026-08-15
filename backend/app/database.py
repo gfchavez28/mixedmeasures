@@ -278,12 +278,18 @@ def _backup_database(db_path: Path) -> Path | None:
         return None
 
     backup_dir = get_backup_dir()
-    backup_dir.mkdir(parents=True, exist_ok=True)
-
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     backup_path = backup_dir / f"{db_path.stem}_{timestamp}.db"
 
     try:
+        # CREATING the directory is part of making the backup, so it belongs INSIDE
+        # the guard. It used to sit above the try, where an unwritable parent (a
+        # locked-down profile, a read-only volume, a synced folder mid-reconcile)
+        # raised a bare PermissionError that the lifespan framed as "Mixed Measures
+        # could not start. PermissionError: …" — the generic wording, for the exact
+        # situation #692 wrote actionable guidance for. Same failure, same user, and
+        # the message that names the folder and the fix was one line away.
+        backup_dir.mkdir(parents=True, exist_ok=True)
         # Checkpoint WAL so the .db file is self-contained (keyed if encrypted)
         conn = open_raw_connection(db_path)
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

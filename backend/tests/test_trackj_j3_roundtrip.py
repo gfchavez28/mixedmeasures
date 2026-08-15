@@ -8,6 +8,7 @@ import asyncio
 import io
 import os
 import uuid as _uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from app.models.code import Code
 from app.models.code_equivalence_group import CodeEquivalenceGroup
 from app.models.code_application import CodeApplication
 from app.models.conversation import Conversation
+from app.models.observation import Observation
 from app.models.segment import Segment
 from app.models.user import User
 from app.models.audit import AuditEntry
@@ -908,6 +910,91 @@ class TestMergeStructuredDivergence:
             import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge", target_project_id=p.id)
         assert ei.value.payload["kind"] == "codebook"
         assert "Beta" in ei.value.payload["diverged_codes"]
+
+
+class TestMergeRefusesEditedSegmentText:
+    """#694 — the segments match but the WORDS changed.
+
+    The gate compared uuid SETS and never the text, so a colleague who fixed a
+    transcription typo kept every uuid and count and merged cleanly — while their
+    codings, and their char-range quote offsets, were made against text this project
+    does not have. A merge keeps the TARGET's field values, so their quotes get
+    re-anchored onto different words. Same class as #687 from the other end.
+    """
+
+    def test_edited_text_is_refused_with_its_own_kind(self, db_session, tmp_path):
+        db = db_session
+        p, conv, seg = _seed_coded(db, "TextDiv")
+        f = _export_to_file(db, p.id, tmp_path / "docs", tmp_path / "td.mmproject")
+        # Same segment, same uuid, same count — one corrected word.
+        seg.text = "hello worlds"
+        db.flush()
+        with pytest.raises(MergeDivergenceError) as ei:
+            import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge", target_project_id=p.id)
+        payload = ei.value.payload
+        assert payload["kind"] == "segment_text", (
+            "must NOT reuse 'segmentation' — the remedy differs, and the frontend "
+            "renders a different screen per kind"
+        )
+        assert payload["diverged_sources"][0]["changed_segments"] == 1
+        assert payload["diverged_sources"][0]["total_segments"] == 1
+        # The payload reaches a browser and any request log: counts, never the text.
+        assert "hello world" not in str(payload)
+
+    def test_identical_text_still_merges(self, db_session, tmp_path):
+        """The two-sided half: an untouched copy must not start refusing."""
+        db = db_session
+        p, conv, seg = _seed_coded(db, "TextSame")
+        f = _export_to_file(db, p.id, tmp_path / "docs", tmp_path / "ts.mmproject")
+        import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge", target_project_id=p.id)
+
+    def test_segmentation_divergence_still_wins(self, db_session, tmp_path):
+        """Both diverged → report segmentation: it is the deeper refusal.
+
+        With different unit sets the segments are not pairwise comparable, so a text
+        report would be noise on top of a refusal the user must fix first.
+
+        ⚠️ This pins the raise ORDER, not the loop's `continue` — mutating that
+        `continue` to `pass` leaves this green, because the segmentation block raises
+        before the text block is reached. Do not read it as covering the short-circuit.
+        """
+        db = db_session
+        p, conv, seg = _seed_coded(db, "BothDiv")
+        f = _export_to_file(db, p.id, tmp_path / "docs", tmp_path / "bd.mmproject")
+        seg.text = "hello worlds"
+        db.add(Segment(conversation_id=conv.id, sequence_order=1, text="extra chunk"))
+        db.flush()
+        with pytest.raises(MergeDivergenceError) as ei:
+            import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge", target_project_id=p.id)
+        assert ei.value.payload["kind"] == "segmentation"
+
+    def test_a_frozen_observations_clip_LABEL_may_still_be_edited(self, db_session, tmp_path):
+        """⚠️ The case a naive implementation breaks — and it is a LEGAL edit.
+
+        A clip's `text` is a LABEL: annotation, not material. D22 keeps label edits
+        legal on a frozen observation, and a clip's quotes are TIME-range, so there are
+        no character offsets for an edited label to invalidate. A frozen observation
+        goes through the segmentation gate like a transcript, so it reaches this code —
+        comparing its label would refuse a merge the design explicitly permits.
+        """
+        db = db_session
+        p = _make_project(db, "ObsLabel")
+        obs = Observation(
+            project_id=p.id, name="Session 1",
+            segmentation_frozen_at=datetime.now(timezone.utc),  # frozen ⇒ NOT exempt
+        )
+        db.add(obs)
+        db.flush()
+        clip = Segment(observation_id=obs.id, sequence_order=0, text="child speaks",
+                       start_time=0.0, end_time=5.0)
+        db.add(clip)
+        _add_code(db, p.id, 0, "Alpha")
+        db.flush()
+        f = _export_to_file(db, p.id, tmp_path / "docs", tmp_path / "ol.mmproject")
+        clip.text = "child speaks to peer"  # relabelled — legal under D22
+        db.flush()
+        # Must NOT raise: the clip set is unchanged, and a label is not material.
+        import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge", target_project_id=p.id)
 
 
 class TestMergeEndpoint:

@@ -71,11 +71,16 @@ test('buildSpawnEnv injects absolute userData paths + the packaged flags', () =>
 })
 
 test('buildSpawnEnv pins the child stdio encoding to UTF-8 (#723)', () => {
-  // Python picks the LOCALE encoding for a pipe and sys.stderr defaults to
-  // errors='backslashreplace', so on a non-UTF-8 Windows the #716 fatal line arrives
-  // with a mangled path (C:\Users\\u674e\u660e\backups) — no exception, no missing
-  // line, just guidance the researcher cannot act on. The Electron side decodes
-  // UTF-8, so this is the half of the contract that lives here.
+  // ⚠️ #762 — THIS TEST PROVES THE ENV DICT IS BUILT, AND NOTHING MORE. The frozen
+  // interpreter IGNORES PYTHONIOENCODING: measured against the shipped v1.3.1 binary
+  // and a minimal PyInstaller build, the variable arrives in the child's os.environ
+  // and sys.stderr.encoding is cp1252 regardless (PYTHONUTF8 and
+  // PYTHONLEGACYWINDOWSSTDIO are ignored the same way). What actually makes the fatal
+  // line UTF-8 is backend/app/startup_errors.py::_write_marker_line, which encodes it
+  // and writes BYTES to sys.stderr.buffer. The var is kept because it is still correct
+  // for an unfrozen backend — do not let this assertion read as coverage of the fix.
+  // This is the canonical instance of "a unit test proves an env dict is built, never
+  // that the frozen runtime honors it".
   const env = buildSpawnEnv({ port: 1, userData: '/u' })
   assert.equal(env.PYTHONIOENCODING, 'utf-8')
   // NOT PYTHONUTF8: that flips UTF-8 mode globally, including the FILESYSTEM

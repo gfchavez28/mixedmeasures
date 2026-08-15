@@ -2,14 +2,12 @@ Mixed Measures **__VERSION__** — a local-first desktop workspace for mixed-met
 
 **What's new in this release**
 
-A correctness and accessibility release. Nothing new to learn — this fixes numbers that
-were wrong or wrongly labelled, and makes a large part of the app usable without a mouse.
+A security and packaging patch. There is no new capability here and nothing in your
+projects changes.
 
-- ⚠️ **If you have reported an effect size from a group comparison, please check which statistic it was.** The comparison table took its effect-size *heading* from the number of groups while the *number* came from the test that ran, so the two could disagree — Cohen's *d* shown under an ω² heading is the common case. Fixed, but a figure already copied out may carry the wrong label.
-- ⚠️ **A statistic that could not be computed used to show `0.00`**, which reads as "no relationship" when the truth is "not computable". It now shows `—` with the reason. Worth re-checking any table where you recorded a zero.
-- **Scale scores say what they averaged**, over how many people (`3 items · n 210–260` rather than a pooled total), and warn when their items sit on different scales.
-- **Qualitative charts can now be embedded in a Canvas** — code frequency, co-occurrence, saturation, comparisons, the summary table and the timeline all draw, and export as images. This was a stated limitation in 1.3.0.
-- **Accessibility** was the bulk of the work: the codebook and picker trees are keyboard-reachable and announce their structure, the variable-group grid costs one tab stop instead of one per cell, text inputs have a visible border, and a screen-reader pass ran against the Observations workbench for the first time — its six findings are all fixed here.
+- 🔴 **Linux: please update.** Every Mixed Measures AppImage up to 1.3.1 was built with a packaging tool that put the *folder you launch the app from* on the system library search path — so anyone able to write a file into that folder could have had their code loaded into the app (CVE-2026-54672). This was a defect in the build tool rather than in Mixed Measures itself, and installing 1.3.2 fixes it. There is no sign it was exploited. **Windows and macOS builds were not affected.**
+- **The "could not start" message now reads correctly in every language.** If the app failed to launch, the recovery message names the folder it could not open — and accented, non-Latin or unusually-spaced folder names were being garbled, so it could point at a path that does not exist.
+- **Merging a colleague's copy no longer accepts edited transcripts.** If two people held the same project and one corrected the wording of a segment, a merge could attach the other person's highlights to words nobody had quoted. It now stops, names the segments, and asks which text is correct.
 - Full details, and the upgrade notes, in the [changelog](https://github.com/__REPO__/blob/main/CHANGELOG.md).
 
 ## Which file should I download?

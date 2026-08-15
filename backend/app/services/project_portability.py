@@ -1100,6 +1100,9 @@ def _assert_merge_compatible(
         )
     # File: parent uuid -> set of VISIBLE (non-soft-deleted) segment uuids.
     file_segs: dict[str, set] = {}
+    # File: parent uuid -> {segment uuid: text}, for TEXT sources ONLY (#694).
+    # Deliberately not populated for observations — see the text gate below.
+    file_seg_text: dict[str, dict[str, str]] = {}
     for s in data.get("segments", []):
         if s.get("merged_into_id") is not None or s.get("split_into_id") is not None:
             continue
@@ -1125,15 +1128,18 @@ def _assert_merge_compatible(
         # uuid like any other source).
         if s.get("observation_id") is not None and s["observation_id"] in open_obs_oldids:
             continue
-        parent_uuid = (
+        text_parent_uuid = (
             conv_uuid_by_oldid.get(s.get("conversation_id"))
             or doc_uuid_by_oldid.get(s.get("document_id"))
-            or obs_uuid_by_oldid.get(s.get("observation_id"))
         )
+        parent_uuid = text_parent_uuid or obs_uuid_by_oldid.get(s.get("observation_id"))
         if parent_uuid:
             file_segs.setdefault(parent_uuid, set()).add(s["uuid"])
+            if text_parent_uuid:
+                file_seg_text.setdefault(parent_uuid, {})[s["uuid"]] = s.get("text") or ""
 
     diverged = []
+    text_diverged: list[tuple[str, int, int]] = []
     for parent_uuid, file_set in file_segs.items():
         local_conv = db.query(Conversation).filter(Conversation.uuid == parent_uuid).first()
         local_doc = (
@@ -1147,7 +1153,9 @@ def _assert_merge_compatible(
         local_parent = local_conv or local_doc or local_obs
         if local_parent is None:
             continue  # a NEW source the colleague added — additive, not divergence
-        seg_q = db.query(Segment.uuid).filter(
+        # `text` rides the SAME query the uuid check already runs — one extra column,
+        # no extra round trip. It is only READ for text sources (#694, below).
+        seg_q = db.query(Segment.uuid, Segment.text).filter(
             Segment.merged_into_id.is_(None), Segment.split_into_id.is_(None)
         )
         # The FK column MUST be chosen by the parent's KIND. The three tables have
@@ -1160,9 +1168,45 @@ def _assert_merge_compatible(
             seg_q = seg_q.filter(Segment.document_id == local_parent.id)
         else:
             seg_q = seg_q.filter(Segment.observation_id == local_parent.id)
-        local_set = {u for (u,) in seg_q.all() if u}
+        local_rows = [(u, t) for (u, t) in seg_q.all() if u]
+        local_set = {u for u, _ in local_rows}
         if file_set != local_set:
             diverged.append((getattr(local_parent, "name", "?"), len(file_set), len(local_set)))
+            # Short-circuit ONLY. What makes segmentation win is the raise ORDER below
+            # (its block runs first), not this line — verified by mutation: replacing
+            # this `continue` with `pass` leaves the whole suite green. It is kept
+            # because comparing text across mismatched unit sets is wasted work whose
+            # every "difference" is really the uuid mismatch already being reported.
+            continue
+
+        # ── Segment-text gate (#694) ────────────────────────────────────
+        # The uuid sets match, so the two copies agree on the UNITS. They can still
+        # disagree on the WORDS: a colleague who corrects a transcription typo keeps
+        # the segment's uuid and the count, so every check above passes — while their
+        # codings, and especially their char-range quote offsets, were made against
+        # text this project does not have. A merge KEEPS the target's field values
+        # (J3-2 trap 2), so their text is discarded and their quotes are re-anchored
+        # onto ours, silently pointing at the wrong words. Same class as #687, reached
+        # from the other end.
+        #
+        # ⚠️ TEXT SOURCES ONLY — never observations. A clip's `text` is a LABEL, i.e.
+        # annotation rather than material: D22 keeps label edits legal on a frozen
+        # observation, and a clip's quotes are TIME-range, so there are no character
+        # offsets for an edited label to invalidate. Comparing labels here would refuse
+        # a merge for an edit the design explicitly permits. `file_seg_text` is only
+        # populated for conv/doc, so this is enforced by construction rather than by a
+        # parent check that a later edit could drop.
+        #
+        # ⚠️ Compared RAW — no whitespace or unicode normalization. Offsets are code
+        # points (#687), so ANY edit shifts every offset after it; normalizing would
+        # accept exactly the differences that break a quote.
+        file_text = file_seg_text.get(parent_uuid)
+        if file_text:
+            changed = sum(1 for u, t in local_rows if file_text.get(u, "") != (t or ""))
+            if changed:
+                text_diverged.append(
+                    (getattr(local_parent, "name", "?"), changed, len(local_set))
+                )
 
     if diverged:
         detail = "; ".join(f"'{n}' (file {fc} vs local {lc} segments)" for n, fc, lc in diverged[:5])
@@ -1177,6 +1221,29 @@ def _assert_merge_compatible(
                 "diverged_sources": [
                     {"name": n, "file_segments": fc, "local_segments": lc}
                     for n, fc, lc in diverged
+                ],
+            },
+        )
+
+    if text_diverged:
+        detail = "; ".join(
+            f"'{n}' ({c} of {t} segments)" for n, c, t in text_diverged[:5]
+        )
+        raise MergeDivergenceError(
+            f"The text differs in {len(text_diverged)} source(s): {detail}"
+            f"{'…' if len(text_diverged) > 5 else ''}. The segments match, so this copy "
+            "was coded against edited words — quotes would be re-anchored onto text "
+            "their author never saw. Decide whose text is correct first: re-export from "
+            "the copy that has the correction, or ask for a copy re-exported from this "
+            "project.",
+            {
+                "error": "merge_divergence",
+                "kind": "segment_text",
+                # Counts only — the segment text is research data and this payload
+                # reaches a browser and any request log.
+                "diverged_sources": [
+                    {"name": n, "changed_segments": c, "total_segments": t}
+                    for n, c, t in text_diverged
                 ],
             },
         )

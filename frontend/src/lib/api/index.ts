@@ -428,6 +428,7 @@ export type {
   MergeCoderPreview,
   MergeReport,
   MergeDivergenceDetail,
+  MergeDivergenceKind,
   CoderMapping,
   CoderMappingDecision,
   MergeCodeCandidate,

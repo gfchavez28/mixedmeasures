@@ -109,14 +109,24 @@ function buildSpawnEnv({ port, userData, baseEnv = {}, encryptionKeyHex = null, 
     MM_CORS_ORIGINS: '',
     MM_PACKAGED: '1',
     PYTHONDONTWRITEBYTECODE: '1',
-    // #723: pin the child's stdio encoding so the two processes agree on UTF-8.
-    // Python picks the LOCALE encoding for a pipe, and `sys.stderr` defaults to
-    // `errors='backslashreplace'` — so on a non-UTF-8 Windows the #716 fatal line
-    // arrives as `C:\Users\\u674e\u660e\backups` (measured). No exception, no
-    // missing line, just a path the researcher cannot act on — and the Electron
-    // side, which decodes UTF-8, cannot repair it. ⚠️ Deliberately NOT `PYTHONUTF8`:
-    // that flips UTF-8 mode globally including the FILESYSTEM encoding on Windows,
-    // which is a far larger blast radius than this needs.
+    // #723: ask for UTF-8 stdio so the two processes agree on an encoding.
+    //
+    // ⚠️ #762 — THIS DOES NOT TAKE EFFECT IN THE PACKAGED APP, and nothing here can
+    // make it. Measured against the shipped v1.3.1 `mm-backend.exe`, and reproduced
+    // in a minimal PyInstaller build: the variable ARRIVES (the child's own
+    // `os.environ` reports `'utf-8'`) and `sys.stderr.encoding` is `'cp1252'`
+    // regardless. `PYTHONUTF8=1` and `PYTHONLEGACYWINDOWSSTDIO=1` are ignored the
+    // same way — PyInstaller configures the frozen interpreter's stdio itself. The
+    // unit test below proves this dict is BUILT; it never proved the frozen runtime
+    // honors it, which is the whole lesson.
+    //
+    // Kept, not deleted: it is still correct for an UNFROZEN backend, and it costs
+    // nothing. But the guarantee now lives where we control both ends —
+    // `backend/app/startup_errors.py::_write_marker_line` encodes the marker line to
+    // UTF-8 itself and writes bytes to `sys.stderr.buffer`. Do not re-describe this
+    // variable as the fix. ⚠️ Deliberately NOT `PYTHONUTF8` either way: it flips
+    // UTF-8 mode globally including the FILESYSTEM encoding on Windows, a far larger
+    // blast radius than this needs — and it is inert here anyway.
     PYTHONIOENCODING: 'utf-8',
   }
   if (encryptionKeyHex) {

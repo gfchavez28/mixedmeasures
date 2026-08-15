@@ -367,19 +367,43 @@ jobs:
           fi
 
           # Enable Azure Trusted Signing only when its service principal is configured.
+          #
+          # publisherName (#759 Half 2, electron-builder 26): this is what electron-updater
+          # compares a downloaded update's Authenticode subject against. It lived in
+          # package.json as `win.publisherName` until v26 REMOVED that key
+          # (WindowsConfiguration.additionalProperties is false, so a stale key fails config
+          # validation outright). v26 has TWO homes for it, one per signing manager, and the
+          # manager is chosen by PRESENCE alone (winPackager.js: `if (azureSignOptions != null)`):
+          # signtool reads win.signtoolOptions.publisherName, Azure reads
+          # win.azureSignOptions.publisherName. We sign with Azure Trusted Signing, so it goes
+          # here — under signtoolOptions it would be filed with the manager that never runs.
+          #
+          # ⚠ It must NOT go back into package.json. Because the manager is selected on presence,
+          # an azureSignOptions block there would be non-null on EVERY build and engage Azure
+          # signing on the credential-free unsigned path this workflow deliberately supports.
+          #
+          # The value is the signing certificate's full DN, re-read from the shipped signed
+          # v1.3.1 binary (Get-AuthenticodeSignature → SignerCertificate.Subject), not typed
+          # from memory. electron-updater compares EVERY DN field and skips verification
+          # entirely when the name is absent — so the verify gate below asserts it actually
+          # reached the built app's app-update.yml, which is the file the installed client reads.
+          #
           # The RFC-3161 TIMESTAMP is NOT optional: Azure Trusted Signing certs are short-lived
           # (~3 days), so an un-timestamped signature silently goes invalid days after the build
-          # and Windows shows "Unknown publisher" to every user (the v1.0.0 win defect). electron-
-          # builder 25's Invoke-TrustedSigning wrapper sets NO timestamp by default; the two
-          # TimestampRfc3161/TimestampDigest keys below flow through to the cmdlet via its
-          # extraSigningArgs spread (windowsSignAzureManager.js). Ref: electron-builder#8626.
-          # The verify gate near the end of this job hard-fails if the timestamp is ever missing.
+          # and Windows shows "Unknown publisher" to every user (the v1.0.0 win defect). These
+          # keys were capitalised for v25, whose wrapper set no timestamp default and passed them
+          # through its extraSigningArgs spread (Ref: electron-builder#8626). v26 fixed that
+          # upstream and reads lowercase timestampRfc3161/timestampDigest, destructuring them out
+          # of extraSigningArgs — a capitalised key now lands in the spread and is then OVERWRITTEN
+          # by v26's own default, so the old spelling worked only by coincidence. Lowercased so the
+          # values are the ones actually used. The verify gate hard-fails if a timestamp is missing.
           if [ "${{ matrix.eb_target }}" = "win" ] && [ -n "${AZURE_TENANT_ID:-}" ]; then
             ARGS+=( "--config.win.azureSignOptions.endpoint=${AZURE_ENDPOINT}" \
                     "--config.win.azureSignOptions.codeSigningAccountName=${AZURE_CODE_SIGNING_NAME}" \
                     "--config.win.azureSignOptions.certificateProfileName=${AZURE_CERT_PROFILE}" \
-                    "--config.win.azureSignOptions.TimestampRfc3161=http://timestamp.acs.microsoft.com" \
-                    "--config.win.azureSignOptions.TimestampDigest=SHA256" )
+                    "--config.win.azureSignOptions.publisherName=CN=George Chavez, O=George Chavez, L=Washington, S=dc, C=US" \
+                    "--config.win.azureSignOptions.timestampRfc3161=http://timestamp.acs.microsoft.com" \
+                    "--config.win.azureSignOptions.timestampDigest=SHA256" )
           fi
 
           echo "electron-builder ${ARGS[*]}"
@@ -563,6 +587,33 @@ jobs:
 
           Check "Authenticode status is Valid"            ($sig.Status -eq 'Valid')
           Check "signature carries an RFC-3161 timestamp" ($timestamped)
+
+          # publisherName reached the packaged manifest (#759 Half 2). app-update.yml is the
+          # file the INSTALLED client reads; electron-updater skips Windows update signature
+          # verification entirely when publisherName is absent, so a dropped or mistyped
+          # --config.win.azureSignOptions.publisherName is a SILENT security downgrade that
+          # every other gate here passes. A fresh install cannot surface it either — only an
+          # actual update can — which is why it is asserted at build time instead.
+          # Compared against the real signing certificate's Subject, so this also catches the
+          # DN drifting away from the cert (electron-updater compares every DN field).
+          $manifest = 'release/win-unpacked/resources/app-update.yml'
+          if (-not (Test-Path $manifest)) {
+            Write-Host "FAIL  app-update.yml not found at $manifest"; $fail = $true
+          } else {
+            $yml = Get-Content $manifest -Raw
+            # Machine-generated, tiny: accept the block-list form and the scalar form.
+            $names = @()
+            if ($yml -match '(?m)^publisherName:\s*$') {
+              $names = @([regex]::Matches($yml, '(?m)^\s+-\s*(.+?)\s*$') | ForEach-Object { $_.Groups[1].Value })
+            } elseif ($yml -match '(?m)^publisherName:\s*(\S.*?)\s*$') {
+              $names = @($Matches[1].Trim('"',"'"))
+            }
+            Write-Host "app-update.yml publisherName: $(if ($names) { $names -join ' | ' } else { '<absent>' })"
+            Check "app-update.yml carries a publisherName" ($names.Count -gt 0)
+            if ($names.Count -gt 0 -and $sig.SignerCertificate) {
+              Check "publisherName matches the signing certificate Subject" ($names -contains $publisher)
+            }
+          }
 
           if ($fail) { Write-Host "WINDOWS SIGNING GATE: FAIL"; exit 1 }
           $mode = if ($signed) { 'signed — enforced' } else { 'unsigned — informational' }

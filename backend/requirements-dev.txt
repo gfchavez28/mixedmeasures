@@ -3,4 +3,13 @@ pytest>=8.0.0
 httpx>=0.27.0
 pip-audit>=2.7.0,<3.0.0
 # Packaging (P0+). Build tool only — frozen into the desktop bundle, not a runtime dep.
-pyinstaller>=6.20.0,<7.0.0
+# EXACT-pinned for REPRODUCIBILITY, not security (#762, the numbers-stack lesson from
+# f44c43e). The frozen interpreter's stdio behaviour is a property of the FREEZER, not of
+# our source — that is the whole of #762 — so a range means the shipped binary's toolchain
+# is whatever the runner resolved that day, and a packaged-only defect cannot be reasoned
+# about or reproduced. It was not hypothetical: 6.22.0 published 2026-08-08, six days
+# before the v1.3.1 cut, so CI froze that release on a version never run locally (this
+# venv is on 6.20.0) and against the "wait several days on minor bumps" policy.
+# 6.20.0 (2026-04-22) is the soaked version actually in hand, so local and CI now freeze
+# with the same one. Bump deliberately, and re-run the packaged smoke (RELEASING §4b).
+pyinstaller==6.20.0

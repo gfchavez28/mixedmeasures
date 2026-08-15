@@ -9,7 +9,7 @@ import { toast } from 'sonner'
 import { projectPortabilityApi, codesApi, ApiError } from '@/lib/api'
 import type {
   ImportValidationResult, MergeCoderPreview, MergeCodePreview, MergeReport,
-  MergeDivergenceDetail, CoderMappingDecision, CodeMappingDecision, Code,
+  MergeDivergenceDetail, MergeDivergenceKind, CoderMappingDecision, CodeMappingDecision, Code,
 } from '@/lib/api'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useCoders } from '@/hooks/useCoders'
@@ -823,22 +823,66 @@ function ReportStep({ report, targetId, navigate }: {
 
 // ── Divergence-refusal step (segmentation; codebook is handled by reconcile) ──
 
+/**
+ * One heading per refusal the gate can raise.
+ *
+ * `satisfies Record<MergeDivergenceKind, string>` is the point of this constant: it
+ * makes a new backend `kind` a COMPILE ERROR here. Before #694 the headings were a
+ * ternary chain ending in the codebook branch, so an unhandled kind rendered
+ * "codebooks differ" above an empty list — a wrong diagnosis with a remedy that could
+ * not work. Do not collapse this back into a chain with a fall-through default.
+ */
+const DIVERGENCE_TITLE = {
+  segmentation: "Can't merge yet — segmentation differs",
+  segmentation_freeze: "Can't merge yet — one side's clips are frozen",
+  codebook: "Can't merge yet — codebooks differ",
+  segment_text: "Can't merge yet — the text was edited",
+} satisfies Record<MergeDivergenceKind, string>
+
 function DivergedStep({ divergence, onBack }: { divergence: MergeDivergenceDetail; onBack: () => void }) {
   return (
     <Card>
       <CardContent className="py-6 space-y-4">
         <div className="flex items-center gap-2 text-mm-text">
           <TriangleAlert className="w-5 h-5 text-amber-600 dark:text-amber-400" />
-          <h2 className="text-lg font-medium">
-            {divergence.kind === 'segmentation'
-              ? "Can't merge yet — segmentation differs"
-              : divergence.kind === 'segmentation_freeze'
-                ? "Can't merge yet — one side's clips are frozen"
-                : "Can't merge yet — codebooks differ"}
-          </h2>
+          <h2 className="text-lg font-medium">{DIVERGENCE_TITLE[divergence.kind]}</h2>
         </div>
 
-        {divergence.kind === 'segmentation_freeze' ? (
+        {divergence.kind === 'segment_text' ? (
+          <>
+            <p className="text-sm text-mm-text-muted">
+              These sources have the same segments on both sides, but the words inside them
+              differ — someone edited the text after the copy was shared. Their codings, and
+              any quotes they marked inside a segment, were made against text this project
+              does not have, so merging would re-anchor those quotes onto different words.
+            </p>
+            <ScrollableTable maxHeight="40vh" className="rounded-md border border-mm-surface-border bg-mm-surface">
+              <table className="w-full text-sm border-collapse">
+                <caption className="sr-only">Sources whose segment text was edited</caption>
+                <thead>
+                  <tr className="border-b text-left text-mm-text-muted">
+                    <th scope="col" className="px-3 py-2 font-medium">Source</th>
+                    <th scope="col" className="px-3 py-2 font-medium text-right">Segments edited</th>
+                    <th scope="col" className="px-3 py-2 font-medium text-right">Segments in source</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(divergence.diverged_sources ?? []).map((s, i) => (
+                    <tr key={i} className="border-b last:border-b-0">
+                      <th scope="row" className="px-3 py-2 font-normal text-left">{s.name}</th>
+                      <td className="px-3 py-2 text-right tabular-nums">{s.changed_segments}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{s.total_segments}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </ScrollableTable>
+            <p className="text-sm text-mm-text-muted">
+              Decide whose text is correct before merging: re-export from the copy that has the
+              correction, or ask for a copy re-exported from this project.
+            </p>
+          </>
+        ) : divergence.kind === 'segmentation_freeze' ? (
           <>
             <p className="text-sm text-mm-text-muted">
               {divergence.diverged_sources?.[0]?.frozen_side === 'local'
