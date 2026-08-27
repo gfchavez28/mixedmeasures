@@ -135,7 +135,9 @@ const UnassignedCard = memo(function UnassignedCard({
   const draggable = useDraggable({ id: dragId })
 
   const baseClass = isSelected
-    ? 'bg-mm-blue/15 text-mm-blue border-mm-blue/40'
+    // #852: `text-mm-blue-text`, not the raw `--mm-blue` fill hue — the latter
+    // reads ~3.2:1 as text on its own 15% tint. Same fix as `DatasetTabs`.
+    ? 'bg-mm-blue/15 text-mm-blue-text border-mm-blue/40'
     : isSearchMatch
       ? 'bg-sky-200 dark:bg-sky-900 border-sky-600 text-mm-text'
       : 'bg-mm-surface border-mm-border-subtle text-mm-text hover:border-mm-border-medium'

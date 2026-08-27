@@ -12,6 +12,7 @@ import type {
   QualRelView,
   QualCooccurrenceLevel,
   QualComparisonChartMode,
+  QualTimelineTableMode,
   QualContentMode,
   QuoteGroupBy,
   QuoteSort,
@@ -38,6 +39,7 @@ function getDefaultForKey(key: string): string {
     case 'contentMode': return 'by-code'
     case 'showProp': return '0'
     case 'compMode': return 'table'
+    case 'timedMode': return 'code'
     case 'coPreset': return 'green'
     case 'compPalette': return 'default'
     case 'showEffect': return '1'
@@ -94,6 +96,8 @@ export interface QualitativeAnalysisState {
   showProportion: boolean
   cooccurrencePreset: string
   comparisonChartMode: QualComparisonChartMode
+  /** #685 — the Timeline's table breakdown, a per-CHART property so it survives a save. */
+  timelineTableMode: QualTimelineTableMode
   comparisonPalette: string
   showEffectSize: boolean
   groupBy: string | null
@@ -164,6 +168,7 @@ export interface QualitativeAnalysisActions {
   setShowProportion: (show: boolean) => void
   setCooccurrencePreset: (preset: string) => void
   setComparisonChartMode: (mode: QualComparisonChartMode) => void
+  setTimelineTableMode: (mode: QualTimelineTableMode) => void
   setComparisonPalette: (palette: string) => void
   setShowEffectSize: (show: boolean) => void
   setGroupBy: (groupBy: string | null) => void
@@ -194,7 +199,8 @@ export interface QualitativeAnalysisActions {
   onFormattingChange: (patch: Partial<ChartFormatting>) => void
   setCustomOrder: (ids: number[]) => void
   viewCodeInContent: (codeId: number) => void
-  buildCurrentConfig: () => Record<string, unknown>
+  /** #683 — takes the BLIND-FORCED coder scope; required so a caller cannot forget it. */
+  buildCurrentConfig: (effectiveCoderIds: number[]) => Record<string, unknown>
   loadMaterial: (element: MaterialResponse) => void
   setUrlParam: (key: string, value: string) => void
 }
@@ -245,6 +251,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
   const showPropRaw = searchParams.get('showProp') ?? '0'
   const coPresetRaw = searchParams.get('coPreset') || 'green'
   const compModeRaw = searchParams.get('compMode') || 'table'
+  const timedModeRaw = searchParams.get('timedMode') === 'coder' ? 'coder' : 'code'
   const compPaletteRaw = searchParams.get('compPalette') || 'default'
   const showEffectRaw = searchParams.get('showEffect') ?? '1'
   const showSumRaw = searchParams.get('showSum') ?? '1'
@@ -299,6 +306,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
   const showProportion = showPropRaw === '1'
   const cooccurrencePreset = coPresetRaw
   const comparisonChartMode = compModeRaw as QualComparisonChartMode
+  const timelineTableMode = timedModeRaw as QualTimelineTableMode
   const comparisonPalette = compPaletteRaw
   const showEffectSize = showEffectRaw !== '0'
   const showSummaryRow = showSumRaw !== '0'
@@ -461,6 +469,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
   const setShowProportion = useCallback((v: boolean) => setUrlParam('showProp', v ? '1' : '0'), [setUrlParam])
   const setCooccurrencePreset = useCallback((v: string) => setUrlParam('coPreset', v), [setUrlParam])
   const setComparisonChartMode = useCallback((v: QualComparisonChartMode) => setUrlParam('compMode', v), [setUrlParam])
+  const setTimelineTableMode = useCallback((v: QualTimelineTableMode) => setUrlParam('timedMode', v), [setUrlParam])
   const setComparisonPalette = useCallback((v: string) => setUrlParam('compPalette', v), [setUrlParam])
   const setShowEffectSize = useCallback((v: boolean) => setUrlParam('showEffect', v ? '1' : '0'), [setUrlParam])
   const setShowSummaryRow = useCallback((v: boolean) => setUrlParam('showSum', v ? '1' : '0'), [setUrlParam])
@@ -570,7 +579,25 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
 
   // ── Palette config ───────────────────────────────────────────────────
 
-  const buildCurrentConfig = useCallback((): Record<string, unknown> => {
+  /**
+   * #683 — `effectiveCoderIds` is a REQUIRED parameter, not an optional
+   * override, and that is the whole point: the hook does not know about blind
+   * mode (it lives in `QualitativeAnalysisView`), so a caller that forgot to
+   * pass the blind-forced scope would silently persist `[]` = "no filter" and
+   * the canvas embed would replay MORE than the researcher saw. Making it
+   * required means a new caller cannot forget — the same shape as the ownership
+   * helpers taking a required `user_id`.
+   *
+   * ⚠️ The sibling that already did this is `handleDescriptivesExport` (#499),
+   * ~20 lines below the materials handler: it threads `effectiveCoderIncludeCsv`
+   * so the CSV matches the on-screen numbers. This is that flow, ported.
+   *
+   * ⚠️ `layer_scope` deliberately takes NO equivalent: there is no
+   * `effectiveLayerScope` — blind never forces it, and the one effect that
+   * touches it corrects the state itself — so the raw value is already the
+   * effective one. One arm, not two.
+   */
+  const buildCurrentConfig = useCallback((effectiveCoderIds: number[]): Record<string, unknown> => {
     const config: Record<string, unknown> = {
       tab,
       source,
@@ -582,7 +609,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
       observation_ids: Array.from(selectedObservationIds),
       exclude_facilitator: excludeFacilitator,
       participant_ids: participantIds,
-      coder_ids: coderIds,
+      coder_ids: effectiveCoderIds,
       layer_scope: layerScope,
       chart_type: chartType,
       value_mode: valueMode,
@@ -594,6 +621,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
       show_proportion: showProportion,
       cooccurrence_preset: cooccurrencePreset,
       comparison_chart_mode: comparisonChartMode,
+      timeline_table_mode: timelineTableMode,
       comparison_palette: comparisonPalette,
       show_effect_size: showEffectSize,
       group_by: groupBy,
@@ -626,9 +654,9 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     return config
   }, [
     tab, source, codeMode, selectedCodeIds, selectedConversationIds,
-    selectedTextColumnIds, selectedDocumentIds, selectedObservationIds, excludeFacilitator, participantIds, coderIds, layerScope,
+    selectedTextColumnIds, selectedDocumentIds, selectedObservationIds, excludeFacilitator, participantIds, layerScope,
     chartType, valueMode, denominatorMode, sortOrder, orientRaw,
-    relView, cooccurrenceLevel, showProportion, cooccurrencePreset, comparisonChartMode, comparisonPalette, showEffectSize, showSummaryRow, showRowN, showChartN, groupBy, contentMode, contentCodeId, contentSource,
+    relView, cooccurrenceLevel, showProportion, cooccurrencePreset, comparisonChartMode, timelineTableMode, comparisonPalette, showEffectSize, showSummaryRow, showRowN, showChartN, groupBy, contentMode, contentCodeId, contentSource,
     descTitle, descSubtitle, descFootnote, relTitle, relSubtitle, relFootnote,
     formatting, customOrder,
   ])
@@ -716,6 +744,8 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
       // Comparison chart mode
       if (config.comparison_chart_mode && config.comparison_chart_mode !== 'table') next.set('compMode', config.comparison_chart_mode)
       else next.delete('compMode')
+      if (config.timeline_table_mode === 'coder') next.set('timedMode', 'coder')
+      else next.delete('timedMode')
 
       // Comparison palette
       if (config.comparison_palette && config.comparison_palette !== 'default') next.set('compPalette', config.comparison_palette)
@@ -807,6 +837,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     showProportion,
     cooccurrencePreset,
     comparisonChartMode,
+    timelineTableMode,
     comparisonPalette,
     showEffectSize,
     showSummaryRow,
@@ -859,6 +890,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     setShowProportion,
     setCooccurrencePreset,
     setComparisonChartMode,
+    setTimelineTableMode,
     setComparisonPalette,
     setShowEffectSize,
     setShowSummaryRow,

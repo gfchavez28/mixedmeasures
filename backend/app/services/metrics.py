@@ -47,8 +47,22 @@ STATS_PRECISION = 4        # round(x, 4) for proportions, means, and descriptive
 # the server did; a basis that lies is worse than no basis at all.
 AGGREGATION_BASIS_UNWEIGHTED_ITEM_MEANS = "unweighted_item_means"
 
+# ── What kind of interval a payload carries (#690/#715, extended by queue #42) ─
+# `ci_method` rides the wire and `frontend/src/lib/ci-label.ts` DISPLAYS it —
+# never derives it. The values below are the vocabulary; the client mirror is
+# enumeration-checked, so a value added here without a label there is a
+# TypeScript error rather than a silent fall-through to a bare "95% CI".
+#
+# ⚠️ A per-category interval is a different CLAIM from a single-proportion one,
+# not a different rendering of the same claim, which is why it takes its own
+# value. See `compute_frequency_distribution` for the multinomial caveat.
+CI_METHOD_T_INTERVAL = "t_interval"
+CI_METHOD_WILSON = "wilson"
+CI_METHOD_ITEM_LEVEL_T = "item_level_t"
+CI_METHOD_WILSON_PER_CATEGORY = "wilson_per_category"
+
 # ── t-distribution critical values (two-tailed 95% CI, α=0.025 each tail) ────
-# Precomputed t.ppf(0.975, df) for df 1..200 + ∞ (z=1.96).
+# Precomputed t.ppf(0.975, df) for df 1..200 + ∞ (the ∞ tail is `_Z_975`).
 # Avoids scipy dependency; uses linear interpolation for df > 200.
 _T_CRIT_975: dict[int, float] = {
     1: 12.7062, 2: 4.3027, 3: 3.1824, 4: 2.7764, 5: 2.5706,
@@ -61,13 +75,35 @@ _T_CRIT_975: dict[int, float] = {
 }
 
 _T_CRIT_SORTED_DFS = sorted(_T_CRIT_975.keys())
-_Z_975 = 1.96  # Normal approximation for df → ∞
+
+# The two-tailed 95% normal quantile, EXACT rather than the textbook 1.96 (#768).
+#
+# ⚠️ The rounding is visible at the precision we display. Measured against R's
+# `prop.test(x, n, correct = FALSE)$conf.int`, which is the same uncorrected
+# Wilson interval `_ci_wilson` computes: with 1.96 the 0-of-50 case reports an
+# upper bound of **7.14** where R reports **7.13**; with the exact quantile every
+# case agrees to the displayed 2 decimal places. That case is not exotic — since
+# #591 put declared-but-unchosen levels back on the axis, a zero-count category
+# is exactly where a proportion interval gets read.
+#
+# Written as a literal, NOT `scipy.stats.norm.ppf(0.975)`, deliberately: the
+# lookup table above exists to keep this module import-free on a hot path, and a
+# module-level scipy import would undo that for one number. Provenance, so it can
+# be re-derived: `scipy.stats.norm.ppf(0.975)` == `qnorm(0.975)` in R.
+#
+# Single-sourced — `comparisons.py` imports this rather than keeping its own copy
+# (it held a second `1.96`, and two CI computations in one app disagreeing about
+# the same constant is the #733 class). A configurable confidence level (B9 /
+# queue #42's sibling) replaces this constant in ONE place because of that.
+_Z_975 = 1.959963984540054
 
 
 def _t_critical(df: int) -> float:
     """Return t-critical value for 95% CI (two-tailed) at given degrees of freedom.
 
-    Uses lookup table with linear interpolation.  For df > 200, returns 1.96 (z).
+    Uses lookup table with linear interpolation. For df > 200, returns the
+    normal quantile `_Z_975` — which also brings this tail into agreement with
+    the R export's own `qt(0.975, n-1)` at large n (#768).
     """
     if df <= 0:
         return float('inf')
@@ -91,7 +127,7 @@ def _t_critical(df: int) -> float:
 
 
 def _ci_mean(
-    mean_val: float, std_dev: float, n: int, *, method: str = "t_interval"
+    mean_val: float, std_dev: float, n: int, *, method: str = CI_METHOD_T_INTERVAL
 ) -> dict | None:
     """Compute 95% CI for a mean using t-distribution. Returns None if n < 3.
 
@@ -144,7 +180,7 @@ def _ci_wilson(proportion: float, n: int) -> dict | None:
         "ci_lower": round(ci_lower, PERCENTAGE_PRECISION),
         "ci_upper": round(ci_upper, PERCENTAGE_PRECISION),
         "ci_level": 0.95,
-        "ci_method": "wilson",
+        "ci_method": CI_METHOD_WILSON,
     }
 
 
@@ -391,7 +427,7 @@ def find_or_create_metric(
     exclude_json = json.dumps(exclude_values) if exclude_values else None
 
     # Auto-name from source
-    name = _auto_name_metric(db, source_type, source_id, metric_type)
+    name = _auto_name_metric(db, source_type, source_id, metric_type, config)
 
     # Auto-assign sequence_order
     from sqlalchemy import func as sa_func
@@ -425,14 +461,39 @@ def find_or_create_metric(
 
 def _auto_name_metric(
     db: Session, source_type: str, source_id: int, metric_type: str,
+    config: dict | None = None,
 ) -> str:
-    """Generate a name for an auto-created metric."""
+    """Generate a name for an auto-created metric.
+
+    ⚠️ **`config` is not decoration — without it a DECOMPOSED domain's metrics
+    are indistinguishable from each other and from the domain aggregate
+    (#823k, 2026-08-25).**
+
+    `quick_compute` expands a domain into one metric per constituent column when
+    `decompose` is on, so a three-item scale legitimately produces four rows: the
+    aggregate plus one per item. They differ ONLY in `config`
+    (`decompose_column_ids` / `decompose_label`), which this function could not
+    see — so all four were named after the domain and read as duplicates.
+
+    🔴 **The filed report called them "duplicate metric definitions … from
+    switching chart type" and asked for de-duplication. They are NOT duplicates:
+    measured on the real corpus, ids 69-72 are the aggregate plus `fair A3`,
+    `helpful A3` and `trust A3`. De-duplicating would have DELETED three real
+    computations.** `find_or_create_metric` already keys on `config`, so the
+    reuse that report assumed was missing has always worked.
+    """
     type_label = {
         "frequency_distribution": "Freq. Dist.",
         "proportion": "Proportion",
         "mean": "Mean",
         "domain_aggregate": "Domain Agg.",
     }.get(metric_type, metric_type)
+
+    # The item a decomposed metric actually computes. APPENDED rather than
+    # replacing the domain name: the domain is still what the researcher
+    # selected, and the item alone would lose that context.
+    decompose_label = (config or {}).get("decompose_label")
+    suffix = f" · {decompose_label}" if decompose_label else ""
 
     if source_type == "dataset_column":
         col = db.query(DatasetColumn).filter(DatasetColumn.id == source_id).first()
@@ -441,11 +502,11 @@ def _auto_name_metric(
             # Truncate to keep name reasonable
             if len(source_label) > 60:
                 source_label = source_label[:57] + "..."
-            return f"{type_label}: {source_label}"
+            return f"{type_label}: {source_label}{suffix}"
     elif source_type == "dataset_domain":
         domain = db.query(AnalysisDomain).filter(AnalysisDomain.id == source_id).first()
         if domain:
-            return f"{type_label}: {domain.name}"
+            return f"{type_label}: {domain.name}{suffix}"
 
     return f"{type_label}: Source {source_id}"
 
@@ -1119,10 +1180,43 @@ def compute_frequency_distribution(
         if key not in counts:
             counts[key] = 0
 
+    # ── Margin of error, per response category (queue #42) ───────────────────
+    #
+    # "What % chose each option" is the most-reported number in survey work and
+    # it shipped with no interval at all, while Wilson was already implemented
+    # and wired to the threshold-`proportion` metric.
+    #
+    # ⚠️ **A per-category interval on a multinomial is a per-category BINOMIAL
+    # interval, not a simultaneous one.** Each is a statement about ONE category
+    # against everything else; they do not jointly cover at 95%. That is why
+    # `ci_method` takes a NEW value rather than reusing `"wilson"` — a client
+    # cannot tell the two apart from the numbers, and B9's governing rule is
+    # that an interval must say what kind it is.
+    #
+    # ⚠️ **Keys are deliberately NOT `ci_lower`/`ci_upper`.** Those are SCALARS
+    # on every other metric type and five shaping functions read them as
+    # numbers; a same-named field holding a dict here is the type-overloading
+    # trap, and it would fail silently in JS rather than loudly.
+    #
+    # Wilson (not Wald) is what makes the structural zeros #591 put back on the
+    # axis reportable: at p = 0 Wald gives the degenerate [0, 0] while Wilson
+    # gives an honest upper bound — "nobody chose it, and with this n the true
+    # rate could still be as high as X" is the useful statement.
+    ci_lower_by_label: dict[str, float | None] = {}
+    ci_upper_by_label: dict[str, float | None] = {}
+    for key in order:
+        ci = _ci_wilson(counts.get(key, 0) / valid_n, valid_n) if valid_n > 0 else None
+        ci_lower_by_label[key] = ci["ci_lower"] if ci else None
+        ci_upper_by_label[key] = ci["ci_upper"] if ci else None
+
     result_data = {
         "counts": counts,
         "percentages": percentages,
         "scale_order": order,
+        "ci_lower_by_label": ci_lower_by_label,
+        "ci_upper_by_label": ci_upper_by_label,
+        "ci_level": 0.95,
+        "ci_method": CI_METHOD_WILSON_PER_CATEGORY,
     }
     return result_data, valid_n, total_n
 
@@ -1185,7 +1279,7 @@ def compute_proportion(
     if ci:
         result_data.update(ci)
     else:
-        result_data.update({"ci_lower": None, "ci_upper": None, "ci_level": 0.95, "ci_method": "wilson"})
+        result_data.update({"ci_lower": None, "ci_upper": None, "ci_level": 0.95, "ci_method": CI_METHOD_WILSON})
 
     return result_data, valid_n, total_n
 
@@ -1241,7 +1335,7 @@ def compute_mean(rows: list[ResolvedRow]) -> tuple[dict, int, int]:
     if ci:
         result_data.update(ci)
     else:
-        result_data.update({"ci_lower": None, "ci_upper": None, "ci_level": 0.95, "ci_method": "t_interval"})
+        result_data.update({"ci_lower": None, "ci_upper": None, "ci_level": 0.95, "ci_method": CI_METHOD_T_INTERVAL})
 
     return result_data, valid_n, total_n
 
@@ -1302,11 +1396,11 @@ def compute_domain_aggregate(
     # CI for the aggregate: treat the k column-level scalars as the sample, so this
     # interval is over ITEMS, not respondents (#690). The label rides in rather than
     # being stamped on afterwards — see `_ci_mean`'s docstring for why.
-    ci_data: dict = {"ci_lower": None, "ci_upper": None, "ci_level": 0.95, "ci_method": "item_level_t"}
+    ci_data: dict = {"ci_lower": None, "ci_upper": None, "ci_level": 0.95, "ci_method": CI_METHOD_ITEM_LEVEL_T}
     k = len(scalars)
     if k >= 3 and aggregate_value is not None:
         item_sd = statistics.stdev(scalars)
-        ci = _ci_mean(aggregate_value, item_sd, k, method="item_level_t")
+        ci = _ci_mean(aggregate_value, item_sd, k, method=CI_METHOD_ITEM_LEVEL_T)
         if ci:
             ci_data = ci
 

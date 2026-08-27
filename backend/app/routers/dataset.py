@@ -9,10 +9,12 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import case, func
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import and_, case, func, or_
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from ..auth import get_current_user
 from ..database import get_db
@@ -26,6 +28,7 @@ from ..models.dataset import (
 )
 from ..models.participant import Participant
 from ..schemas.dataset import (
+    PrimaryRecodeSummary,
     DatasetPreviewResponse,
     DatasetColumnPreview,
     DatasetImportRequest,
@@ -37,6 +40,7 @@ from ..schemas.dataset import (
     DatasetRowSummary,
     DatasetValueResponse,
     DatasetRowDetail,
+    DatasetRowPosition,
     DatasetValueCell,
     DatasetDataRow,
     DatasetDataResponse,
@@ -70,6 +74,7 @@ from ..schemas.dataset import (
 )
 from ..models.recode import RecodeDefinition, RecodeType
 from ..services.dataset_import import (
+    DatasetTooLargeError,
     preview_dataset_csv,
     import_dataset_csv,
     parse_header,
@@ -94,7 +99,7 @@ from ..services.recode import (
     apply_definition_to_column,
     clear_value_numeric,
     compute_value,
-    effective_reverse_offset,
+    definition_reflection_offset,
 )
 from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
 from ..models.metric import MetricDefinition
@@ -136,6 +141,35 @@ def _safe_json_loads(text: str | None, fallback=None):
         return fallback
 
 
+def _mapping_remaps_codes(mapping_json: str | None) -> bool:
+    """Does this mapping send a NUMERIC key somewhere other than itself?
+
+    A flip (`{"1": 5}`) or a collapse (`{"1": 1, "2": 1}`) means `value_numeric`
+    is the rule's OUTPUT rather than the response's own code. Used to describe
+    the rule in the Variables view.
+
+    ⚠️ **A SHAPE test — NOT the #793 guard.** Blind to a hand-flip keyed on
+    LABELS, which carries no numeric key to judge. The authority is
+    `value_labels.code_identity_violation`, which reads the stored cells and
+    cannot run per column across a list response. Non-numeric keys are skipped
+    rather than judged: on a labelled column the keys ARE the labels, and
+    `value_numeric` is the code — the ordinary case.
+    """
+    try:
+        mapping = json.loads(mapping_json) if mapping_json else {}
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(mapping, dict):
+        return False
+    for key, value in mapping.items():
+        try:
+            if float(key) != float(value):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
     """Convert a DatasetColumn ORM object to response schema."""
     scale_labels = None
@@ -155,6 +189,29 @@ def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
             scale_values = None
 
     eq_group = getattr(q, 'equivalence_group', None)
+
+    # The rule driving this column's value_numeric (the Variables view states it
+    # per variable). Read from the loaded relationship rather than a query, so
+    # `list_columns` pays ONE selectinload for the whole dataset and the
+    # single-column callers pay one lazy load for their one column. `/data`
+    # already has it loaded.
+    #
+    # ⚠️ Computed HERE rather than at the list endpoint on purpose: every caller
+    # of this builder then returns an accurate value, so `None` can only ever
+    # mean "no primary" — never "this endpoint did not look". That distinction
+    # is the one the stated-basis family keeps being bitten by.
+    primary_recode = None
+    primary = next((d for d in q.recode_definitions if d.is_primary), None)
+    if primary is not None:
+        rtype = primary.recode_type
+        rtype = rtype.value if hasattr(rtype, "value") else rtype
+        primary_recode = PrimaryRecodeSummary(
+            id=primary.id,
+            name=primary.name,
+            recode_type=rtype,
+            remaps_codes=_mapping_remaps_codes(primary.mapping),
+        )
+
     return DatasetColumnResponse(
         id=q.id,
         column_code=q.column_code,
@@ -178,6 +235,16 @@ def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
         depends_on_column_ids=_safe_json_loads(q.depends_on_column_ids) if q.depends_on_column_ids else None,
         stale=q.stale,
         demographic_subtype=q.demographic_subtype,
+        primary_recode=primary_recode,
+        # Decision B provenance. The ID rides the wire and the LABEL does not,
+        # deliberately: `lib/dataset-column-label.ts::columnDisplayLabel` is the
+        # single source for how a column is named (#575), the Variables view
+        # already holds every column of the dataset, and resolving here would be
+        # both a second naming rule and a lazy load per column. `derived_via` is
+        # a snapshot of the rule's name, so it survives the source column's
+        # deletion — which nulls the FK by design.
+        derived_from_column_id=q.derived_from_column_id,
+        derived_via=q.derived_via,
         equivalence_group_id=q.equivalence_group_id,
         equivalence_group_label=eq_group.label if eq_group else None,
         show_in_participant_profile=q.show_in_participant_profile,  # #353
@@ -208,13 +275,26 @@ async def preview_dataset(
         # numeric_min/max all read the substantive set, so an overlay afterwards
         # cannot reach them. Without this, a preserved "Refused" reads as real
         # text and flips a column's suggested type.
-        result = preview_dataset_csv(
+        # #796: OFF THE EVENT LOOP. Inference is pure Python over every cell and
+        # MEASURED at 9.8s on a 75,700 x 41 workbook — running it inline froze
+        # the whole backend for that long, `/health` included (the Electron probe
+        # the media path threadpools for). Its two neighbours in
+        # `_upload_to_csv_text` were already threadpooled for the same reason;
+        # this call was the one that was not. Safe to move: `preview_dataset_csv`
+        # is pure — a str in, a dict out, no Session.
+        result = await run_in_threadpool(
+            preview_dataset_csv,
             text,
             missing_rules_by_column=(
                 {n: m.missing_rules for n, m in sav_meta.items() if m.missing_rules}
                 if sav_meta else None
             ),
         )
+    except DatasetTooLargeError as e:
+        # #803: caught BEFORE the generic arm. This file parses fine; it is
+        # simply too big, and saying "check the file format" would send the
+        # researcher hunting a fault that does not exist (#797).
+        raise HTTPException(status_code=400, detail=str(e))
     except (ValueError, csv.Error, TypeError) as e:
         logger.warning("CSV parse failed: %s", e)
         raise HTTPException(status_code=400, detail="Unable to parse CSV file. Check the file format and try again.")
@@ -322,6 +402,11 @@ async def import_dataset(
             source=config.source,
             participant_link_column_index=config.participant_link_column_index,
         )
+    except DatasetTooLargeError as e:
+        # #803: same reason as the preview arm — this file is fine, it is too
+        # big, and "check the file format" would be a wrong diagnosis (#797).
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
     except (ValueError, csv.Error, TypeError, KeyError) as e:
         db.rollback()
         logger.warning("Dataset import failed: %s", e)
@@ -788,7 +873,14 @@ async def list_columns(
 
     columns = (
         db.query(DatasetColumn)
-        .options(joinedload(DatasetColumn.equivalence_group))
+        .options(
+            joinedload(DatasetColumn.equivalence_group),
+            # ONE extra query for the whole dataset instead of one per column
+            # when `_column_to_response` reads the primary. A dataset is capped
+            # at 500 columns, so a lazy load here would be up to 500 round trips
+            # on the Variables view's only query.
+            selectinload(DatasetColumn.recode_definitions),
+        )
         .filter(DatasetColumn.dataset_id == dataset_id)
         .order_by(DatasetColumn.sequence_order)
         .all()
@@ -885,6 +977,65 @@ async def get_row(
     )
 
 
+# ── Grid paging (#800) ───────────────────────────────────────────────────────
+# The default is what the grid asks for when it doesn't say. Sized from the
+# MEASURED cost: the unpaginated endpoint returned 226 MB of JSON for 75,699
+# rows, i.e. ~3 KB per row at 41 columns — so 200 rows is ~600 KB, and ~8,200
+# cells of DOM, which is the order the grid already renders comfortably today
+# (the largest pre-existing dataset in the corpus is 120 rows).
+# ⚠️ Raising MAX_DATASET_PAGE_SIZE re-opens the payload problem in proportion;
+# it is a bound on what a caller may ASK for, not a tuning knob.
+DATASET_PAGE_SIZE = 200
+MAX_DATASET_PAGE_SIZE = 1_000
+
+
+def dataset_row_order():
+    """THE grid's row ordering, in one place (#834/#835).
+
+    ⚠️ **Single-sourced because a second reader now exists.** `get_dataset_data`
+    returns a PAGE at an offset, and `get_row_position` answers "which page holds
+    this row?" — a question that is only answerable against the SAME ordering.
+    Two hand-written `order_by` clauses would agree today and diverge the first
+    time either is touched, and the failure is silent: the jump simply lands on
+    the wrong page, which reads as "the record isn't there".
+
+    ⚠️ **The two-key shape is load-bearing and is NOT `id` alone.** MEASURED
+    2026-08-25: `submitted_at` is NULL for 100% of rows in all eight local
+    datasets, so `ORDER BY id` and this clause agree on every corpus that exists
+    — a coincidence, not a contract. A dataset imported with submission
+    timestamps orders by those first, and a position resolver written against
+    `id` would then be wrong for every row. Do not "simplify" this to `id`
+    because the corpus cannot tell the difference.
+    """
+    return (DatasetRow.submitted_at.asc().nulls_last(), DatasetRow.id.asc())
+
+
+def rows_before(dataset_id: int, row: DatasetRow):
+    """The count-filter for rows that sort BEFORE ``row`` under `dataset_row_order`.
+
+    Expresses the same two-key ordering as a boolean, which is what turns an
+    ordering into an ordinal. Kept beside the ordering it mirrors so the pair
+    cannot drift.
+
+    NULLS LAST means a NULL-``submitted_at`` row sorts after every dated one, so
+    the two branches are genuinely different predicates rather than one with a
+    coalesce.
+    """
+    if row.submitted_at is None:
+        # Every dated row precedes it, then NULL-dated rows with a lower id.
+        return or_(
+            DatasetRow.submitted_at.isnot(None),
+            and_(DatasetRow.submitted_at.is_(None), DatasetRow.id < row.id),
+        )
+    return and_(
+        DatasetRow.submitted_at.isnot(None),
+        or_(
+            DatasetRow.submitted_at < row.submitted_at,
+            and_(DatasetRow.submitted_at == row.submitted_at, DatasetRow.id < row.id),
+        ),
+    )
+
+
 @router.get(
     "/{dataset_id}/data",
     response_model=DatasetDataResponse,
@@ -892,10 +1043,35 @@ async def get_row(
 async def get_dataset_data(
     project_id: int,
     dataset_id: int,
+    # ⚠️ `Annotated[...] = <value>`, NOT `= Query(<value>)`. FastAPI resolves a
+    # `Query(...)` default only through the HTTP layer, so the many tests that
+    # call this coroutine DIRECTLY would receive the `Query` object itself as
+    # the value — three of them failed exactly that way. With Annotated the
+    # default is a real int and both entry points agree.
+    limit: Annotated[int, Query(ge=1, le=MAX_DATASET_PAGE_SIZE)] = DATASET_PAGE_SIZE,
+    offset: Annotated[int, Query(ge=0)] = 0,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get full dataset data as a spreadsheet-like grid (columns as columns, rows as rows)."""
+    """One PAGE of dataset data as a spreadsheet-like grid (#800).
+
+    ⚠️ **This used to return every row with every value in one response.**
+    MEASURED on a 75,699 x 41 import (3,103,659 values): **90.1s, 226 MB of
+    JSON, ~5.9 GB peak RSS** — on the 2 GB VPS this project targets that request
+    is an OOM kill, not a slow response, and the client aborted at its 30s
+    default long before it could arrive.
+
+    ``total_rows`` is the count for the WHOLE dataset, not the page — every
+    caller that displays "N records" needs the total, and `DatasetResponse.
+    row_count` carries the same number for the same reason.
+
+    ⚠️ ``linked_participants`` is deliberately DATASET-scoped rather than
+    page-scoped. It backs the picker's already-linked guard, and deriving it
+    from the loaded page would let a researcher pick a participant already
+    linked on another page — refused by ``uq_dataset_rows_dataset_participant``,
+    so a 409 rather than corruption, but an offer we should never have made. It
+    is bounded by the number of LINKED participants, not by row count.
+    """
     ds = _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     # Columns ordered by sequence, with recode definitions and equivalence group eager-loaded
@@ -913,7 +1089,31 @@ async def get_dataset_data(
         .all()
     )
 
-    # Rows with values and participant eagerly loaded
+    # The dataset's TOTAL row count — the page below cannot supply it.
+    total_rows = (
+        db.query(func.count(DatasetRow.id))
+        .filter(DatasetRow.dataset_id == dataset_id)
+        .scalar()
+    ) or 0
+
+    # Dataset-scoped already-linked map (see the docstring). Bounded by linked
+    # participants, so it stays small even on a 75,699-row dataset.
+    linked_participants = {
+        str(pid_): ident or ""
+        for pid_, ident in db.query(DatasetRow.participant_id, DatasetRow.row_identifier)
+        .filter(
+            DatasetRow.dataset_id == dataset_id,
+            DatasetRow.participant_id.isnot(None),
+        )
+        .all()
+    }
+
+    # ONE PAGE of rows, values and participant eagerly loaded.
+    # ⚠️ VERIFIED, not assumed: `joinedload` of a COLLECTION plus `limit` is the
+    # classic trap where LIMIT counts JOINed rows instead of entities.
+    # SQLAlchemy 2.0 wraps this in a subquery (`anon_1`) — checked against the
+    # real 75,699-row dataset: limit 5 returns 5 entities, each with all 41
+    # values. Do not "optimise" the subquery away.
     rows = (
         db.query(DatasetRow)
         .options(
@@ -921,7 +1121,9 @@ async def get_dataset_data(
             joinedload(DatasetRow.participant),
         )
         .filter(DatasetRow.dataset_id == dataset_id)
-        .order_by(DatasetRow.submitted_at.asc().nulls_last(), DatasetRow.id.asc())
+        .order_by(*dataset_row_order())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
 
@@ -934,7 +1136,8 @@ async def get_dataset_data(
         color=ds.color,
         created_at=ds.created_at,
         column_count=len(columns),
-        row_count=len(rows),
+        # The DATASET's count, never the page's — this drives "N records".
+        row_count=total_rows,
     )
 
     # Build data rows
@@ -985,14 +1188,14 @@ async def get_dataset_data(
             # the client cannot compute this (it has neither the recognized-N/A
             # rule nor the declaration), and a client mirror would be the #578
             # display-vs-storage drift class.
+            # #602: computed by the SHARED `definition_reflection_offset`, which
+            # the definition endpoints also use — one field name, one population
+            # rule. It is no longer gated on `reverse` here: a `scale_map`'s
+            # offset is what the reverse editor's DRAFT preview must show, and a
+            # field populated on one payload but not the other is how a reader
+            # ends up believing the wrong one. Non-numeric mappings yield None.
             rtype = d.recode_type.value if hasattr(d.recode_type, "value") else str(d.recode_type)
-            rev_offset = None
-            if rtype == "reverse":
-                rev_offset = effective_reverse_offset(
-                    mapping,
-                    {v.lower() for v in (exclude_values or [])},
-                    parse_missing_rules(q.missing_values),
-                )
+            rev_offset = definition_reflection_offset(d, q.missing_values)
 
             defs.append(RecodeDefinitionSummary(
                 id=d.id,
@@ -1016,6 +1219,75 @@ async def get_dataset_data(
         dataset=dataset_resp,
         columns=data_columns,
         rows=data_rows,
+        total_rows=total_rows,
+        offset=offset,
+        limit=limit,
+        linked_participants=linked_participants,
+    )
+
+
+@router.get(
+    "/{dataset_id}/rows/{row_id}/position",
+    response_model=DatasetRowPosition,
+)
+async def get_row_position(
+    project_id: int,
+    dataset_id: int,
+    row_id: int,
+    limit: Annotated[int, Query(ge=1, le=MAX_DATASET_PAGE_SIZE)] = DATASET_PAGE_SIZE,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Where does this row sit in the grid, and which page holds it? (#834)
+
+    The search hit that sent a researcher here knows a `row_id`; the grid is
+    addressed by `offset`. Only the server can bridge the two, because the
+    position is an ordinal under `dataset_row_order()` and the client holds one
+    page.
+
+    ⚠️ **This is deliberately a SEPARATE round trip rather than a `?row=`
+    parameter on `/data`.** Letting `/data` resolve the row and return whichever
+    page contains it would make the offset a property of the RESPONSE — and the
+    grid's React Query key carries the offset (#800), with ten optimistic-patch
+    and rollback sites keyed on it (`setQueryData` is EXACT-match while
+    `invalidateQueries` is PREFIX-match). A client that cannot know its own key
+    until the response lands would write patches where nothing reads. Resolving
+    first, then paging normally, keeps that invariant intact for one extra
+    ~2.6ms query.
+
+    ⚠️ ``limit`` must be the SAME page size the caller will then request, or the
+    returned ``offset`` addresses a page boundary the grid does not use.
+    """
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
+
+    row = (
+        db.query(DatasetRow)
+        .filter(DatasetRow.id == row_id, DatasetRow.dataset_id == dataset_id)
+        .first()
+    )
+    if not row:
+        # Scoped to the dataset on purpose: a row id from ANOTHER dataset is a
+        # 404 here, never a position in this one.
+        raise HTTPException(status_code=404, detail="Row not found")
+
+    index = (
+        db.query(func.count(DatasetRow.id))
+        .filter(DatasetRow.dataset_id == dataset_id, rows_before(dataset_id, row))
+        .scalar()
+    ) or 0
+
+    total_rows = (
+        db.query(func.count(DatasetRow.id))
+        .filter(DatasetRow.dataset_id == dataset_id)
+        .scalar()
+    ) or 0
+
+    return DatasetRowPosition(
+        row_id=row.id,
+        index=index,
+        offset=(index // limit) * limit,
+        limit=limit,
+        total_rows=total_rows,
     )
 
 
@@ -2218,12 +2490,22 @@ async def preview_computed_column(
     col_name_map = {c.id: c.column_code or c.column_text for c in existing_cols}
 
     preview_rows = []
+    # #823d — the preview used to swallow a per-row evaluation error into a
+    # silent null, so a formula that CANNOT run reported "Valid" with five empty
+    # rows while `evaluate_computed_column` (no per-row catch) 400s the save.
+    # Two surfaces, two answers, and the one the researcher sees first was the
+    # reassuring one. The rows still render — a blank cell is honest — but the
+    # reason now rides the `warnings` channel the panel already displays, so
+    # preview and save agree that something is wrong.
+    eval_error: str | None = None
     for rid in row_ids:
         rd = row_data.get(rid, {})
         try:
             vt, vn = eval_expr(result.resolved_ast, rd)
-        except ComputedExpressionError:
+        except ComputedExpressionError as e:
             vt, vn = None, None
+            if eval_error is None:
+                eval_error = str(e)
         source_vals = {col_name_map.get(cid, str(cid)): pair[0] for cid, pair in rd.items() if cid in dep_ids}
         preview_rows.append({
             "row_id": rid,
@@ -2231,6 +2513,11 @@ async def preview_computed_column(
             "result_text": vt,
             "result_numeric": vn,
         })
+
+    if eval_error is not None:
+        result.warnings.append(
+            f"This expression could not be evaluated on the first rows: {eval_error}"
+        )
 
     # Generate R code equivalent
     r_code = None

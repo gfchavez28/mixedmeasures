@@ -6,6 +6,8 @@ import {
   VALUE_NUMERIC_TYPES,
   CROSSWALK_INELIGIBLE_TYPES,
   isCrosswalkEligible,
+  VARIABLE_RULES_INELIGIBLE_TYPES,
+  variableRulesRefusal,
   TYPE_BADGE_CLASSES,
 } from './dataset-constants'
 
@@ -79,5 +81,49 @@ describe('column-type eligibility sets', () => {
     expect(isCrosswalkEligible('ordinal')).toBe(true)
     expect(isCrosswalkEligible('numeric')).toBe(true)
     expect(isCrosswalkEligible('nominal')).toBe(true)
+  })
+})
+
+// ── Value labels / missing rules / recodes: TWO gates, not one ───────────────
+//
+// 🔴 The bug this predicate exists to prevent: `source` is a gate and it is NOT
+// a type. Folding the value-labels modal into the Variables view dropped the
+// `manual || imported` block it had lived inside, so a COMPUTED variable was
+// offered a seeded value-label dictionary, a missing-value tri-state and a rule
+// editor — and `routers/recode.py` 403s all three for `source == 'computed'`
+// (:889, :958, :431). A type-only predicate cannot see that.
+describe('variableRulesRefusal', () => {
+  it('mirrors the backend type set exactly (VALUE_LABEL_INELIGIBLE_TYPES)', () => {
+    expect([...VARIABLE_RULES_INELIGIBLE_TYPES].sort()).toEqual(['identifier', 'open_text'])
+  })
+
+  it('refuses a computed variable WHATEVER its type', () => {
+    // The arm that was missing. Every one of these types is otherwise fine.
+    for (const column_type of ['numeric', 'ordinal', 'nominal', 'binary', 'percentage']) {
+      expect(variableRulesRefusal({ column_type, source: 'computed' }), column_type)
+        .toBe('computed')
+    }
+  })
+
+  it('names the SOURCE refusal ahead of the type when both apply', () => {
+    // The two need different words on screen: blaming the type would send the
+    // researcher to change a type that is not the reason.
+    expect(variableRulesRefusal({ column_type: 'open_text', source: 'computed' }))
+      .toBe('computed')
+  })
+
+  it('refuses the ineligible types on a collected variable', () => {
+    expect(variableRulesRefusal({ column_type: 'open_text', source: 'imported' }))
+      .toBe('ineligible_type')
+    expect(variableRulesRefusal({ column_type: 'identifier', source: 'manual' }))
+      .toBe('ineligible_type')
+  })
+
+  it('passes an ordinary collected variable, manual or imported', () => {
+    expect(variableRulesRefusal({ column_type: 'ordinal', source: 'imported' })).toBeNull()
+    expect(variableRulesRefusal({ column_type: 'nominal', source: 'manual' })).toBeNull()
+    // `source` is optional on the shape: a caller that has only a type must not
+    // be silently told "computed".
+    expect(variableRulesRefusal({ column_type: 'numeric' })).toBeNull()
   })
 })

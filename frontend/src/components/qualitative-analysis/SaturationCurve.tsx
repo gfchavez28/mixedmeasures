@@ -13,6 +13,7 @@ import { useChartColors } from '@/lib/theme-context'
 import type { SaturationResponse } from '@/lib/api'
 import type { RechartsTooltipProps } from '@/lib/chart-types'
 import { ChartFigure } from '@/components/charts/ChartFigure'
+import { saturationAxisLabel, saturationCaveat } from '@/lib/saturation-ordering'
 
 interface SaturationCurveProps {
   data: SaturationResponse
@@ -55,13 +56,27 @@ export default function SaturationCurve({ data }: SaturationCurveProps) {
 
   const maxCodes = data.total_unique_codes
 
+  // #708(i): the x-axis had NO label at all — only rotated source names — so
+  // nothing on the chart said that the order is import order and that the curve
+  // depends on it. The server names its ordering; this displays it.
+  const axisLabel = saturationAxisLabel(data.ordering)
+  const caveat = saturationCaveat(data.ordering)
+
   return (
     <div>
-      <ChartFigure label="Saturation curve showing cumulative unique codes by source">
+      {/* The caveat goes in the ACCESSIBLE caption too, not just the axis title:
+          a screen-reader user never sees an SVG axis label, and they are reading
+          the same curve for the same report. */}
+      <ChartFigure
+        label={
+          'Saturation curve showing cumulative unique codes by source'
+          + (caveat ? `. ${caveat}` : '')
+        }
+      >
         <ResponsiveContainer width="100%" height={360}>
           <LineChart
             data={chartData}
-            margin={{ top: 8, right: 24, bottom: 40, left: 8 }}
+            margin={{ top: 8, right: 24, bottom: axisLabel ? 56 : 40, left: 8 }}
           >
             <CartesianGrid stroke={chartTheme.grid} strokeDasharray="3 3" />
             <XAxis
@@ -73,6 +88,16 @@ export default function SaturationCurve({ data }: SaturationCurveProps) {
               textAnchor="end"
               height={60}
               interval={0}
+              label={
+                axisLabel
+                  ? {
+                      value: axisLabel,
+                      position: 'insideBottom',
+                      offset: -48,
+                      style: { fontSize: 11, fill: chartTheme.textMuted },
+                    }
+                  : undefined
+              }
             />
             <YAxis
               tick={{ fontSize: 11, fill: chartTheme.text }}
@@ -121,6 +146,10 @@ export default function SaturationCurve({ data }: SaturationCurveProps) {
             No new codes in the last source — potential saturation reached.
           </p>
         )}
+        {/* #708(i): stated NEXT TO the saturation claim above, not only on the
+            axis. "Potential saturation reached" is the sentence a reader will
+            carry into a report, and it is the one the ordering qualifies. */}
+        {caveat && <p className="text-mm-text-faint">{caveat}</p>}
       </div>
     </div>
   )

@@ -2,6 +2,7 @@ import { useMemo, useCallback } from 'react'
 import { useSearchParams } from 'react-router'
 import type { ChartType, SortOrder } from '@/lib/chart-data'
 import { parseIntParam } from '@/lib/utils'
+import { toComparisonChartType, type ComparisonChartType } from '@/lib/comparison-chart-types'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -68,12 +69,10 @@ export function useAnalysisUrlState() {
   const testType = (searchParams.get('testType') || 'auto') as 'auto' | 't_test' | 'anova'
   const nonparametric = searchParams.get('nonparametric') === '1'
   // Sanitize rather than cast: stale deep links may still carry retired values
-  // (e.g. 'forest_plot', removed with #426).
-  const rcChartTypeRaw = searchParams.get('rcChartType')
-  const rcChartType: 'comparison_table' | 'comparison_dumbbell' | 'comparison_grouped_bar' =
-    rcChartTypeRaw === 'comparison_dumbbell' || rcChartTypeRaw === 'comparison_grouped_bar'
-      ? rcChartTypeRaw
-      : 'comparison_table'
+  // (e.g. 'forest_plot', removed with #426). The vocabulary lives in ONE place
+  // (#525b) — this used to re-declare it as a `||` chain that TypeScript could
+  // not check against the union beside it.
+  const rcChartType: ComparisonChartType = toComparisonChartType(searchParams.get('rcChartType'))
   const excludeGroupsRaw = searchParams.get('excludeGroups') || ''
   const excludeGroups = useMemo(() => excludeGroupsRaw ? excludeGroupsRaw.split(',').filter(Boolean) : [], [excludeGroupsRaw])
   const rcPalette = searchParams.get('rcPalette') || 'default'

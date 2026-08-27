@@ -70,6 +70,7 @@ import ReliabilityTab from '@/components/qualitative-analysis/ReliabilityTab'
 import { isReconciliationTabVisible, isIrrTabVisible } from '@/lib/qual-analysis-types'
 import { SELECTED_SEGMENT, SELECTED_ROW } from '@/lib/selection'
 import BlindModeToggle from '@/components/BlindModeToggle'
+import { qualChartHasEnoughToFetch, extractQualComputeParams } from '@/components/canvas/inline-chart-params'
 import { useBlindMode } from '@/hooks/useBlindMode'
 
 
@@ -762,10 +763,49 @@ export default function QualitativeAnalysisView() {
     return `qualitative_${qa.tab}`
   }, [qa.tab, qa.relView])
 
+  /**
+   * The config this save WOULD persist, built on every render so the button can
+   * be gated on it.
+   *
+   * #683 — the EFFECTIVE (blind-forced) coder scope, not the raw filter: a
+   * material saved while blind used to store `[]` = "no filter", so the canvas
+   * embed replayed more than the researcher saw. This is exactly what
+   * `handleDescriptivesExport` already does for the CSV (#499), ported.
+   *
+   * The concrete coder id is stored deliberately, NOT a "whoever is viewing"
+   * role: a material is a FIGURE, and a figure that renders different numbers
+   * per reader is not one. The blind-viewer case belongs to the render layer,
+   * where `resolveTimelineCoderLens` already handles it for the one embed that
+   * prints identity; every other kind renders aggregates.
+   */
+  const pendingMaterialConfig = useMemo(
+    () => qa.buildCurrentConfig(effectiveCoderInclude),
+    [qa.buildCurrentConfig, effectiveCoderInclude], // eslint-disable-line react-hooks/exhaustive-deps -- buildCurrentConfig is the stable identity that closes over the rest
+  )
+
+  /**
+   * #684 — can this be saved at all?
+   *
+   * Runs the EMBED'S OWN predicate on the EXACT config about to be persisted,
+   * rather than reconstructing "is there enough to draw" view-side. The two
+   * cannot disagree because there is only one, and its per-kind branches are
+   * already reasoned (saturation and co-occurrence need nothing; comparisons
+   * need a grouping variable; the rest need codes AND a source) — a blanket
+   * `hasQualSelection` would wrongly block co-occurrence.
+   *
+   * The canvas's own empty state for an under-specified figure ALREADY EXISTS
+   * (`InlineChartRenderer` renders a per-kind notice), so this gate is the whole
+   * of #684 — the entry's second arm was already built.
+   */
+  const canAddToMaterials = useMemo(
+    () => qualChartHasEnoughToFetch(extractQualComputeParams(pendingMaterialConfig)),
+    [pendingMaterialConfig],
+  )
+
   // qa.buildCurrentConfig is stable but compiler infers full qa object
   const handleAddToMaterials = useCallback(async () => {
     const collectionId = await ensureCollectionId()
-    const config = qa.buildCurrentConfig()
+    const config = pendingMaterialConfig
     addToMaterialsMutation.mutate({
       collectionId,
       material_type: getMaterialType(),
@@ -773,7 +813,9 @@ export default function QualitativeAnalysisView() {
       auto_name: generateAutoName(),
       source_tab: getSourceTab(),
     })
-  }, [ensureCollectionId, qa.buildCurrentConfig, addToMaterialsMutation, getMaterialType, generateAutoName, getSourceTab]) // eslint-disable-line react-hooks/exhaustive-deps -- qa destructured access; individual properties listed
+    // The directive that sat here is gone with its reason: the callback no
+    // longer reaches into `qa` at all — it consumes the memoized config above.
+  }, [ensureCollectionId, pendingMaterialConfig, addToMaterialsMutation, getMaterialType, generateAutoName, getSourceTab])
 
   const handleDescriptivesExport = useCallback(() => {
     const params: Record<string, string> = {}
@@ -1060,7 +1102,12 @@ export default function QualitativeAnalysisView() {
           </Button>
         )}
         {qa.tab !== 'content' && qa.tab !== 'quoteboard' && qa.tab !== 'reconciliation' && qa.tab !== 'irr' && (
-          <Button size="sm" onClick={handleAddToMaterials} disabled={addToMaterialsMutation.isPending}>
+          <Button
+            size="sm"
+            onClick={handleAddToMaterials}
+            disabled={addToMaterialsMutation.isPending || !canAddToMaterials}
+            title={canAddToMaterials ? undefined : 'Select codes and a source first — there is nothing to draw yet'}
+          >
             <SwatchBook className="w-3 h-3 mr-1" />
             Add to Materials
           </Button>
@@ -1423,7 +1470,11 @@ export default function QualitativeAnalysisView() {
         </Panel>
 
         {/* Resize handle */}
-        <PanelResizeHandle className="w-1.5 bg-mm-bg hover:bg-mm-blue/20 active:bg-mm-blue/30 transition-colors cursor-col-resize flex items-center justify-center">
+        {/* A focusable separator with no name announces as bare "separator"
+            (#559) — the library supplies the role and the tab stop, not a label. */}
+        <PanelResizeHandle
+          aria-label="Resize the sidebar"
+          className="w-1.5 bg-mm-bg hover:bg-mm-blue/20 active:bg-mm-blue/30 transition-colors cursor-col-resize flex items-center justify-center">
           <div className="w-0.5 h-8 rounded-full bg-mm-border-medium" />
         </PanelResizeHandle>
 

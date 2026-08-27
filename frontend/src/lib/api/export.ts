@@ -18,18 +18,26 @@ export interface ExportOptions {
 // API functions - Export
 export const exportApi = {
   excel: (projectId: number) =>
-    downloadFromApi(`/projects/${projectId}/export/excel`, 'export.xlsx'),
+    downloadFromApi(`/projects/${projectId}/export/excel`, 'export.xlsx', {
+      label: 'The Excel export',
+    }),
   excelWithOptions: (projectId: number, options: ExportOptions) => {
     const params = new URLSearchParams()
     Object.entries(options).forEach(([key, value]) => {
       params.append(`include_${key}`, String(value))
     })
-    return downloadFromApi(`/projects/${projectId}/export/excel?${params}`, 'export.xlsx')
+    return downloadFromApi(`/projects/${projectId}/export/excel?${params}`, 'export.xlsx', {
+      label: 'The Excel export',
+    })
   },
   csv: (projectId: number) =>
-    downloadFromApi(`/projects/${projectId}/export/csv`, 'export.csv'),
+    downloadFromApi(`/projects/${projectId}/export/csv`, 'export.csv', {
+      label: 'The CSV export',
+    }),
   datasetsExcel: (projectId: number) =>
-    downloadFromApi(`/projects/${projectId}/export/datasets-excel`, 'datasets.xlsx'),
+    downloadFromApi(`/projects/${projectId}/export/datasets-excel`, 'datasets.xlsx', {
+      label: 'The datasets Excel export',
+    }),
   codebook: (projectId: number) =>
     api.get(`/projects/${projectId}/export/codebook`).then(res => res.data),
   codeFrequencies: (projectId: number, params?: CodeAnalysisFilterParams) => {
@@ -74,12 +82,20 @@ export const exportApi = {
     const qs = searchParams.toString()
     return downloadFromApi(`/projects/${projectId}/export/code-cooccurrence${qs ? '?' + qs : ''}`, 'code-cooccurrence.csv')
   },
-  rData: async (projectId: number) => {
-    const response = await api.get(`/projects/${projectId}/export/r-data`, {
-      responseType: 'blob',
-    })
-    return response.data as Blob
-  },
+  /**
+   * #820 — the R export is a download like every other one.
+   *
+   * It used to be the only export that called `api.get` directly, which cost it
+   * three things at once: the API client's **30 s** default (the server takes
+   * 85.6 s on a real survey), the app's toast system (the caller met the
+   * failure with a native `window.alert`), and the server's own filename — the
+   * caller invented `r_data_export.zip`, the anti-pattern `namedBlob`'s
+   * docstring describes (#743).
+   */
+  rData: (projectId: number) =>
+    downloadFromApi(`/projects/${projectId}/export/r-data`, 'r_data_export.zip', {
+      label: 'The R data export',
+    }),
   sourceFrequenciesCsv: (projectId: number, params: Record<string, string>) => {
     const qs = new URLSearchParams(params).toString()
     return downloadFromApi(`/projects/${projectId}/code-analysis/source-frequencies/csv${qs ? '?' + qs : ''}`, 'source-frequencies.csv')

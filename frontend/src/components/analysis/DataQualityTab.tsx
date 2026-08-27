@@ -69,8 +69,17 @@ export function DataQualitySidebar(props: DataQualitySidebarProps) {
             onChange={() => setUrlParam('dqIncludeNA', dqIncludeNA ? '0' : '')}
             className="rounded border-mm-border-medium accent-mm-blue"
           />
-          Count &ldquo;Don&apos;t know&rdquo; / &ldquo;N/A&rdquo; as missing
+          Count auto-detected &ldquo;Don&apos;t know&rdquo; / &ldquo;N/A&rdquo; as missing
         </label>
+        {/* #819 — the toggle names an INFERENCE, and used to discard a
+            DECLARATION too. It governs the tool's own English-phrase defaults
+            only; values the researcher declared on a column are data, not a
+            display option, and every other surface honours them. Saying so is
+            the other half of the fix: without it, "auto-detected" is a
+            distinction the researcher has no reason to notice. */}
+        <p className="text-[10px] text-mm-text-faint leading-snug">
+            Values you declared missing on a variable always count.
+        </p>
       </div>
 
       {/* View Mode */}
@@ -212,7 +221,13 @@ export function DataQualityContent(props: DataQualityContentProps) {
         </div>
       )}
 
-      {/* No missing data */}
+      {/* No missing data.
+
+          ⚠️ #819 — this headline is a strong claim and it was reachable while
+          the panel's own rows printed `N NA = 32,276`. The behaviour fix (a
+          declared missing value is not toggleable) removes that state; this
+          states the definition in force whenever a toggle is off, so the
+          sentence can never again read as unconditional. */}
       {dqSummaryData.total_missing === 0 && (dqIncludeNA || dqIncludeEmpty) && (
         <div className="flex flex-col items-center justify-center py-12 text-emerald-600 dark:text-emerald-400">
           <CircleCheck className="w-8 h-8 mb-2 opacity-60" />
@@ -220,6 +235,17 @@ export function DataQualityContent(props: DataQualityContentProps) {
           <p className="text-xs text-mm-text-faint mt-1">
             All {dqSummaryData.total_cells} values are present across {dqSummaryData.variables.length} variables.
           </p>
+          {(!dqIncludeNA || !dqIncludeEmpty) && (
+            <p className="text-xs text-mm-text-faint mt-1 max-w-md text-center">
+              Under the current definition
+              {!dqIncludeNA && !dqIncludeEmpty
+                ? ''
+                : !dqIncludeNA
+                  ? ', which does not count auto-detected "Don\u2019t know" / "N/A" answers'
+                  : ', which does not count blank cells'}
+              .
+            </p>
+          )}
         </div>
       )}
 

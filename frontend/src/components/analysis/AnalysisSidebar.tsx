@@ -32,7 +32,6 @@ import type {
   MetricDefinitionSummaryResponse,
   MaterialResponse,
   AnalysisColumnsResponse,
-  AnalysisColumnItem,
   AnalysisDemographicItem,
   AnalysisDomainResponse,
   CorrelationMatrixResponse,
@@ -72,6 +71,11 @@ import { OptionsAccordion, AccordionSection, useAccordionState } from '@/compone
 import SegmentedControl from '@/components/ui/segmented-control'
 import SendToCanvasMenu from '@/components/canvas/SendToCanvasMenu'
 import { comparisonGroupChips } from '@/lib/comparison-chips'
+import {
+  analysedDatasetIds,
+  groupingScopeBlock,
+  OTHER_DATASET_NOTE,
+} from '@/lib/grouping-scope'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -183,7 +187,6 @@ export interface AnalysisSidebarProps {
   // Variables picker
   selectedColumnIds: Set<number>
   selectedDomainIds: Set<number>
-  onEditColumn?: (question: AnalysisColumnItem) => void
   // Phase 4.7/4.8 — DomainPickerDetail inline expansion
   domainsFull?: AnalysisDomainResponse[]
   metricsList?: MetricDefinitionSummaryResponse[]
@@ -311,7 +314,7 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
   const {
     pid, activeTab, setUrlParam, setSearchParams,
     materials, activeMaterialId, onLoadMaterial, onDeleteMaterial, onRenameMaterial, onReorderMaterials,
-    selectedColumnIds, selectedDomainIds, onEditColumn,
+    selectedColumnIds, selectedDomainIds,
     domainsFull, metricsList, onCreateScoreMetric, isCreatingScoreMetric,
     selectedMetricIdHint, onPickMetric,
     selectedMetrics, hasAnySelection, isComputing,
@@ -488,6 +491,18 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
     return [...groups].sort()
   }, [comparisonData?.groups, excludeGroups])
 
+  // #827 — the datasets whose rows this comparison is built from. A grouping
+  // column outside them contributes nothing, whatever the participant links say
+  // (measured); a cross-dataset variable group legitimately spans two, and both
+  // qualify.
+  const analysedDatasets = useMemo(
+    () => analysedDatasetIds(
+      { columnIds: [...selectedColumnIds], domainIds: [...selectedDomainIds] },
+      (analysisColumnsData?.datasets ?? []).flatMap(ds => ds.columns),
+    ),
+    [selectedColumnIds, selectedDomainIds, analysisColumnsData],
+  )
+
   // ── Render ──────────────────────────────────────────────────────────────
 
   return (
@@ -581,7 +596,6 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
             expandedDatasetId={expandedDatasetId}
             onToggleDataset={handleToggleDataset}
             onViewAcrossDatasets={onViewAcrossDatasets}
-            onEditColumn={onEditColumn}
             domainsFull={domainsFull}
             metrics={metricsList}
             onCreateScoreMetric={onCreateScoreMetric}
@@ -958,7 +972,15 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                 onToggle={rcAccordion.toggle}
                 idPrefix="rc-comp"
               >
-                {/* Compare By */}
+                {/* Compare By.
+
+                    #827: a grouping column whose dataset the analysis does not
+                    touch cannot group it — the comparison reads that column's
+                    values on the ANALYSED rows, so it contributes nothing. It
+                    stays listed and disabled, carrying the reason: hiding it
+                    would remove the only place the researcher learns the
+                    capability exists and why it does not apply here (the
+                    `Code Text` decision / the identifier-guard precedent). */}
                 <div className="space-y-1.5">
                   <div className="text-[11px] text-mm-text-muted">Compare By</div>
                   <Select
@@ -969,11 +991,17 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                       <SelectValue placeholder="Select a column..." />
                     </SelectTrigger>
                     <SelectContent>
-                      {(analysisColumnsData?.demographics ?? []).map(d => (
-                        <SelectItem key={d.id} value={String(d.id)}>
-                          {d.column_name || d.column_text} ({d.dataset_name})
-                        </SelectItem>
-                      ))}
+                      {(analysisColumnsData?.demographics ?? []).map(d => {
+                        const blocked = groupingScopeBlock(d.dataset_id, analysedDatasets)
+                        return (
+                          <SelectItem key={d.id} value={String(d.id)} disabled={!!blocked}>
+                            {d.column_name || d.column_text} ({d.dataset_name})
+                            {blocked && (
+                              <span className="text-mm-text-faint"> — {OTHER_DATASET_NOTE}</span>
+                            )}
+                          </SelectItem>
+                        )
+                      })}
                     </SelectContent>
                   </Select>
                 </div>
@@ -993,11 +1021,19 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                         <SelectItem value="_none">None</SelectItem>
                         {(analysisColumnsData?.demographics ?? [])
                           .filter(d => d.id !== compareBy)
-                          .map(d => (
-                            <SelectItem key={d.id} value={String(d.id)}>
-                              {d.column_name || d.column_text} ({d.dataset_name})
-                            </SelectItem>
-                          ))}
+                          .map(d => {
+                            // The secondary grouping composites with the primary
+                            // over the SAME rows, so it takes the same gate.
+                            const blocked = groupingScopeBlock(d.dataset_id, analysedDatasets)
+                            return (
+                              <SelectItem key={d.id} value={String(d.id)} disabled={!!blocked}>
+                                {d.column_name || d.column_text} ({d.dataset_name})
+                                {blocked && (
+                                  <span className="text-mm-text-faint"> — {OTHER_DATASET_NOTE}</span>
+                                )}
+                              </SelectItem>
+                            )
+                          })}
                       </SelectContent>
                     </Select>
                   </div>

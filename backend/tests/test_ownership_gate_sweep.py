@@ -49,10 +49,12 @@ GATE_TOKENS = {
 # a reason; an entry that stops being needed fails the test (see UNEXPECTED).
 ALLOWLIST: dict[str, str] = {
     "metrics.py::get_row_matrix_csv": (
-        "gated by delegation — its whole body is `await get_row_matrix(project_id, "
+        "gated by delegation — its whole body is `get_row_matrix(project_id, "
         "metric_ids, user, db)`, and THAT endpoint calls _get_project_or_404. The "
         "AST scan cannot follow the call. If this endpoint ever queries the project "
-        "directly, it must gate itself and this entry must go."
+        "directly, it must gate itself and this entry must go. (#837 dropped the "
+        "`await`: both are now `def`. The delegation — the only thing this entry "
+        "turns on — is unchanged.)"
     ),
 }
 

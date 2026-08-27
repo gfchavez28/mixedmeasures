@@ -1,5 +1,8 @@
-import { useRef, useEffect, useState, useMemo } from 'react'
-import { TableVirtuoso, type TableVirtuosoHandle } from 'react-virtuoso'
+import {
+  useRef, useEffect, useState, useMemo, forwardRef, useImperativeHandle,
+  type MouseEvent as ReactMouseEvent, type RefObject, type Ref,
+} from 'react'
+import { TableVirtuoso, type TableVirtuosoHandle, type TableComponents } from 'react-virtuoso'
 import { SELECTED_CELL } from '@/lib/selection'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
@@ -77,7 +80,128 @@ const QUOTE_COL_CLAMP = { width: QUOTE_COL_W, minWidth: QUOTE_COL_W, maxWidth: Q
 /** Below this container width the frozen band would occlude more than it reveals. */
 const STICKY_RELAX_AT = '@max-[560px]:static'
 
-export default function ByTextTable({
+/**
+ * What the module-scope Virtuoso components need, threaded through the
+ * `context` prop (#826).
+ *
+ * 🔴 **These used to be closed over by inline arrow components declared inside
+ * the render**, so every render handed react-virtuoso NEW component identities
+ * and React destroyed and rebuilt the whole `<table>`. `selectedValueIds` was
+ * among the captured values, so a SELECTION CHANGE guaranteed the remount —
+ * and DOM focus went with the detached node, landing on `<body>`. Proved by
+ * tagging the node across a real keypress: `sameElement: false`,
+ * `oldStillInDocument: false`.
+ *
+ * The ARIA still looked correct in a snapshot (`aria-activedescendant` is set
+ * on the NEW table), and sighted keyboard use was unaffected because the shared
+ * keyboard layer treats focus-on-body as its own — which is exactly why nothing
+ * static and no unit test could see it. `aria-activedescendant` is honoured
+ * only on the element that HAS focus, so a browse-mode reader was told nothing
+ * while the researcher arrowed through 36 records.
+ *
+ * `frontend-a11y.md` states the module-scope rule; three of the four
+ * virtualised coding surfaces already followed it (`transcriptComponents` /
+ * `documentComponents` / `clipListComponents`). This was the fourth.
+ */
+interface ByTextTableContext {
+  activeDescendantId?: string
+  rowCount: number
+  selectedValueIds: number[]
+  dvIdToIndex: Map<number, number>
+  onRowClick: (dvId: number, e: ReactMouseEvent) => void
+  onSelectionChange: (ids: number[]) => void
+  lastCoordsRef: RefObject<FloatingCoords>
+  activeCodes: ByTextTableProps['codes']
+  codeIdToShortcutLabel: Map<number, string>
+  onQuoteToggle: (dvId: number) => void
+  onContextCodeApply?: (dvId: number, codeId: number) => void
+  onContextCreateCode?: (coords: FloatingCoords) => void
+  onContextCreateNote?: (dvId: number, coords: FloatingCoords) => void
+  activeCoderId?: number | null
+}
+
+const byTextComponents: TableComponents<TextCodingResponse, ByTextTableContext> = {
+  Table: function ByTextGrid({ context, ...props }) {
+    // #436: grid semantics so aria-selected is valid on the selectable rows
+    // (a multi-select data grid; native <tr>=row, <td>=cell satisfy the structure).
+    // #484: focusable grid + aria-activedescendant so a screen reader follows the
+    // window-level arrow-nav (rows carry id=`text-${dataset_value_id}`; the last-selected
+    // row is the active descendant — single-step nav announces the moved-to row exactly).
+    return (
+      <table
+        {...props}
+        role="grid"
+        aria-multiselectable="true"
+        tabIndex={0}
+        aria-activedescendant={context?.activeDescendantId}
+        className="min-w-full bg-mm-surface border-separate border-spacing-0"
+        aria-rowcount={context?.rowCount ?? 0}
+        aria-label="Open-text responses with the codes applied to each"
+      />
+    )
+  },
+  TableRow: function ByTextRow({ item, context, ...props }) {
+    if (!context) return <tr {...props} />
+    const isSelected = item ? context.selectedValueIds.includes(item.dataset_value_id) : false
+    return (
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <tr
+            {...props}
+            id={item ? `text-${item.dataset_value_id}` : undefined}
+            className={`cursor-pointer group transition-colors ${isSelected ? 'border-l-[3px] border-[hsl(var(--mm-blue)/0.7)]' : 'hover:bg-mm-surface-hover border-l-[3px] border-l-transparent'}`}
+            aria-rowindex={(item ? context.dvIdToIndex.get(item.dataset_value_id) ?? 0 : 0) + 1}
+            aria-selected={isSelected}
+            onClick={item ? (e) => context.onRowClick(item.dataset_value_id, e) : undefined}
+            onContextMenu={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect()
+              context.lastCoordsRef.current = {
+                x: e.clientX,
+                y: e.clientY,
+                anchorRect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right },
+              }
+              if (item && !context.selectedValueIds.includes(item.dataset_value_id)) {
+                context.onSelectionChange([item.dataset_value_id])
+              }
+            }}
+          />
+        </ContextMenuTrigger>
+        {item && (
+          <TextCodingContextMenu
+            comment={item}
+            activeCodes={context.activeCodes}
+            codeIdToShortcutLabel={context.codeIdToShortcutLabel}
+            onQuoteToggle={context.onQuoteToggle}
+            onContextCodeApply={context.onContextCodeApply}
+            onContextCreateCode={context.onContextCreateCode}
+            onContextCreateNote={context.onContextCreateNote}
+            lastCoordsRef={context.lastCoordsRef}
+            activeCoderId={context.activeCoderId}
+          />
+        )}
+      </ContextMenu>
+    )
+  },
+}
+
+/**
+ * The scroller, exposed to the page (#825).
+ *
+ * `handleJumpToNextUncoded` lives in `TextCodingView` and could only change
+ * `selectedValueIds` — this component owned the Virtuoso ref privately and was
+ * not a `forwardRef`, so **nothing the jump could call moved the viewport.**
+ * Measured: the button advanced `aria-activedescendant` to a row react-virtuoso
+ * had never rendered, `scrollTop` stayed 0, no row carried
+ * `aria-selected="true"`, and the next chord coded a record the researcher
+ * could not see. Both sibling workbenches hold their own ref and call
+ * `scrollToIndex` on the jump path; this one had zero call sites.
+ */
+export interface ByTextTableHandle {
+  /** Bring the row at `index` (into the `comments` array) into view. */
+  scrollToIndex: (index: number) => void
+}
+
+function ByTextTable({
   comments,
   loading,
   selectedValueIds,
@@ -96,8 +220,16 @@ export default function ByTextTable({
   activeCoderId,
   extraCoders,
   showArchived,
-}: ByTextTableProps) {
+}: ByTextTableProps, ref: Ref<ByTextTableHandle>) {
   const virtuosoRef = useRef<TableVirtuosoHandle>(null)
+
+  // The jump path's only channel into the scroller. `align: 'center'` matches
+  // the two sibling workbenches' jump calls.
+  useImperativeHandle(ref, () => ({
+    scrollToIndex: (index: number) => {
+      virtuosoRef.current?.scrollToIndex({ index, align: 'center', behavior: 'smooth' })
+    },
+  }), [])
 
   // Context data for records (loaded on demand)
   const [contextCache, setContextCache] = useState<Record<number, RecordContext>>({})
@@ -210,6 +342,32 @@ export default function ByTextTable({
 
   // Capture right-click coordinates for floating dialogs
   const lastCoordsRef = useRef<FloatingCoords>({ x: 0, y: 0 })
+
+  // #826: everything the module-scope Table/TableRow need, in ONE object whose
+  // identity may change freely — Virtuoso passes it as a prop, so a change
+  // re-renders the table and never remounts it.
+  const listContext = useMemo<ByTextTableContext>(() => ({
+    activeDescendantId: selectedValueIds.length > 0
+      ? `text-${selectedValueIds[selectedValueIds.length - 1]}`
+      : undefined,
+    rowCount: comments.length,
+    selectedValueIds,
+    dvIdToIndex,
+    onRowClick: handleRowClick,
+    onSelectionChange,
+    lastCoordsRef,
+    activeCodes,
+    codeIdToShortcutLabel,
+    onQuoteToggle,
+    onContextCodeApply,
+    onContextCreateCode,
+    onContextCreateNote,
+    activeCoderId,
+  }), [
+    selectedValueIds, comments.length, dvIdToIndex, handleRowClick, onSelectionChange,
+    activeCodes, codeIdToShortcutLabel, onQuoteToggle, onContextCodeApply,
+    onContextCreateCode, onContextCreateNote, activeCoderId,
+  ])
 
   if (loading) {
     return (
@@ -414,71 +572,11 @@ export default function ByTextTable({
           </>
         )
       }}
-      components={{
-        Table: (props) => (
-          // #436: grid semantics so aria-selected is valid on the selectable rows
-          // (a multi-select data grid; native <tr>=row, <td>=cell satisfy the structure).
-          // #484: focusable grid + aria-activedescendant so a screen reader follows the
-          // window-level arrow-nav (rows carry id=`text-${dataset_value_id}`; the last-selected
-          // row is the active descendant — single-step nav announces the moved-to row exactly).
-          <table
-            {...props}
-            role="grid"
-            aria-multiselectable="true"
-            tabIndex={0}
-            aria-activedescendant={
-              selectedValueIds.length > 0
-                ? `text-${selectedValueIds[selectedValueIds.length - 1]}`
-                : undefined
-            }
-            className="min-w-full bg-mm-surface border-separate border-spacing-0"
-            aria-rowcount={comments.length}
-            aria-label="Open-text responses with the codes applied to each"
-          />
-        ),
-        TableRow: ({ item, ...props }) => {
-          const isSelected = item ? selectedValueIds.includes(item.dataset_value_id) : false
-          return (
-            <ContextMenu>
-              <ContextMenuTrigger asChild>
-                <tr
-                  {...props}
-                  id={item ? `text-${item.dataset_value_id}` : undefined}
-                  className={`cursor-pointer group transition-colors ${isSelected ? 'border-l-[3px] border-[hsl(var(--mm-blue)/0.7)]' : 'hover:bg-mm-surface-hover border-l-[3px] border-l-transparent'}`}
-                  aria-rowindex={(item ? dvIdToIndex.get(item.dataset_value_id) ?? 0 : 0) + 1}
-                  aria-selected={isSelected}
-                  onClick={item ? (e) => handleRowClick(item.dataset_value_id, e) : undefined}
-                  onContextMenu={(e) => {
-                    const rect = e.currentTarget.getBoundingClientRect()
-                    lastCoordsRef.current = {
-                      x: e.clientX,
-                      y: e.clientY,
-                      anchorRect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right },
-                    }
-                    if (item && !selectedValueIds.includes(item.dataset_value_id)) {
-                      onSelectionChange([item.dataset_value_id])
-                    }
-                  }}
-                />
-              </ContextMenuTrigger>
-              {item && (
-                <TextCodingContextMenu
-                  comment={item}
-                  activeCodes={activeCodes}
-                  codeIdToShortcutLabel={codeIdToShortcutLabel}
-                  onQuoteToggle={onQuoteToggle}
-                  onContextCodeApply={onContextCodeApply}
-                  onContextCreateCode={onContextCreateCode}
-                  onContextCreateNote={onContextCreateNote}
-                  lastCoordsRef={lastCoordsRef}
-                  activeCoderId={activeCoderId}
-                />
-              )}
-            </ContextMenu>
-          )
-        },
-      }}
+      components={byTextComponents}
+      context={listContext}
     />
     </TooltipProvider>
   )
 }
+
+export default forwardRef(ByTextTable)

@@ -29,7 +29,7 @@ from ..services.code_analysis import (
     _get_ordered_codes,
     _build_cooccurrence_response,
 )
-from ..services.irr import compute_irr
+from ..services.irr import compute_irr, parse_source_token
 from ..services.open_cut_reliability import (
     DEFAULT_BIN_SECONDS,
     compute_binned_kappa,
@@ -415,15 +415,26 @@ async def comment_columns(
 async def inter_rater_reliability(
     project_id: int,
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs to compare; omit = all roster coders"),
+    source: str | None = Query(None, description='Scope to ONE source: "conv:7" | "doc:3" | "obs:2" | "col:16". Omit = pooled across every multi-coder source.'),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Inter-rater reliability (Track J · J2-4): per-code + overall Cohen's κ
     (2 coders) / Krippendorff's α (n) / percent agreement over the human roster,
     source-level engagement (Option B). `available=False` when <2 coders share a
-    source. Universal codes + the consensus layer are excluded by construction."""
+    source. Universal codes + the consensus layer are excluded by construction.
+
+    #829: `source` scopes the whole table to ONE conversation / document / frozen
+    observation / text column. ⚠️ **That is a UNIT filter, never a CODER filter** —
+    the matrix stays all-roster, because a visibility filter must not change a
+    reliability statistic (J2-5). Omitting it keeps the pooled behaviour.
+    """
     _get_project_or_404(db, project_id, user.id)
-    return compute_irr(db, project_id, coder_ids=parse_int_list(coder_ids))
+    return compute_irr(
+        db, project_id,
+        coder_ids=parse_int_list(coder_ids),
+        source=parse_source_token(source),
+    )
 
 
 @router.get("/unitizing-alpha", response_model=UnitizingAlphaResponse)

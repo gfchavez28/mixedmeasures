@@ -160,6 +160,24 @@ export interface ChiSquareResult {
    *  express association, which is not the same as measuring none (#689). */
   cramers_v: number | null
   undefined_reason: string | null
+  /** #591: displayed levels the test could not use. A declared level nobody
+   *  chose is a legitimate row of the TABLE and an illegitimate row of the
+   *  STATISTIC — scipy raises on the all-zero row it produces — so the two
+   *  legitimately differ in dimension and the payload says by how much.
+   *  Absent on older payloads; treat undefined as 0. */
+  omitted_levels?: number
+  /** #709: chi-square is a large-sample approximation. True when >20% of the
+   *  submatrix's expected counts fall below 5, or any falls below 1. The
+   *  figures below are sent with it — a threshold with no number behind it is
+   *  a warning readers learn to dismiss. Absent on older payloads. */
+  low_expected_warning?: boolean
+  cells_below_5?: number
+  cell_count?: number
+  min_expected?: number | null
+  /** #709: Fisher's exact p, 2x2 tables only (scipy implements no r x c
+   *  version). `null` on every other shape — do NOT fall back to chi-square's
+   *  p here; the point is that they are different tests. */
+  fisher_exact_p?: number | null
 }
 
 export interface AnalysisCrossTabResponse {

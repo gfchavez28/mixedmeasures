@@ -16,6 +16,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { stripComments } from './strip-comments'
 
 import {
   LOAD_BEARING_PHRASES,
@@ -40,12 +41,7 @@ function tsFilesUnder(dir: string): string[] {
 }
 
 /** Comments explaining the rule are documentation, not a re-typed gate. */
-function code(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^\s*\/\/.*$/gm, '')
-    .replace(/([^:])\/\/.*$/gm, '$1')
-}
+const code = stripComments
 
 describe('source-kind copy is single-sourced (fail-closed)', () => {
   const files = tsFilesUnder(join(SRC, 'pages'))
@@ -56,7 +52,14 @@ describe('source-kind copy is single-sourced (fail-closed)', () => {
     expect(files.length).toBeGreaterThan(80)
   })
 
-  it.each(LOAD_BEARING_PHRASES)('the phrase %p appears nowhere but the copy module', (phrase) => {
+  // ⚠️ Explicit timeout (#841): `code()` is `stripComments`, which since #838
+  // parses each file with the TypeScript compiler. This scans pages +
+  // components + lib, so the FIRST generated case pays the whole strip —
+  // 4.0 s under full-suite contention, past vitest's 5 s default — and the
+  // remaining seven run in ~30 ms each off the source-text cache. The budget
+  // applies per generated case, which is why it goes here and not on one of
+  // them; same value and same reason as `strip-comments.test.ts`.
+  it.each(LOAD_BEARING_PHRASES)('the phrase %p appears nowhere but the copy module', { timeout: 60_000 }, (phrase) => {
     const offenders = files
       .filter(f => code(readFileSync(f, 'utf8')).toLowerCase().includes(phrase.toLowerCase()))
       .map(f => f.slice(f.indexOf('/src/') + 5))

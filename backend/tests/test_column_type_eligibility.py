@@ -81,3 +81,41 @@ def test_call_sites_alias_the_canonical_objects():
 
     assert _NUMERIC_TYPES is VALUE_NUMERIC_TYPES
     assert NUMERIC_ELIGIBLE_COLUMN_TYPES is SCALE_SCORE_ELIGIBLE_TYPES
+
+
+# ── VALUE_LABEL_INELIGIBLE_TYPES (#589) ─────────────────────────────────────
+
+
+def test_value_label_ineligible_types_membership():
+    """The types a declared code→label dictionary must never reach.
+
+    An EXCLUSION set for the same reason CROSSWALK_INELIGIBLE_TYPES is: "which
+    columns can carry value labels" is an open list, "which cannot" is short and
+    closed. Membership is locked here so a widening is a decision, not a drift.
+    """
+    from app.models.dataset import VALUE_LABEL_INELIGIBLE_TYPES
+    assert VALUE_LABEL_INELIGIBLE_TYPES == {
+        ColumnType.OPEN_TEXT,
+        ColumnType.IDENTIFIER,
+    }
+    # The str-enum property this whole family relies on — the import config
+    # compares a RAW STRING column_type against this set.
+    assert "open_text" in VALUE_LABEL_INELIGIBLE_TYPES
+    assert "identifier" in VALUE_LABEL_INELIGIBLE_TYPES
+    assert "nominal" not in VALUE_LABEL_INELIGIBLE_TYPES
+    assert "ordinal" not in VALUE_LABEL_INELIGIBLE_TYPES
+
+
+def test_the_router_and_the_service_read_the_same_set():
+    """#589's whole point: the router refusing early and the service refusing
+    the operation must agree, or one of them is enforcing a different rule.
+
+    Both import the constant, so this asserts the objects are IDENTICAL rather
+    than merely equal — a re-typed copy would pass an equality check today and
+    drift the first time one side is edited.
+    """
+    from app.models.dataset import VALUE_LABEL_INELIGIBLE_TYPES
+    from app.routers import recode as recode_router
+    from app.services import value_labels as value_labels_service
+    assert recode_router.VALUE_LABEL_INELIGIBLE_TYPES is VALUE_LABEL_INELIGIBLE_TYPES
+    assert value_labels_service.VALUE_LABEL_INELIGIBLE_TYPES is VALUE_LABEL_INELIGIBLE_TYPES

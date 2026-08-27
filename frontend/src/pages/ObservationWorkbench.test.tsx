@@ -473,16 +473,20 @@ describe('slab 3e — the freeze flow', () => {
     expect(btn).toBeDisabled()
   })
 
-  it('frozen: pill + Unfreeze flow with the #615 consequence; deletes disabled; no handles-era edits', async () => {
+  it('frozen: pill + Unfreeze flow with the #615 consequence; deletes blocked; no handles-era edits', async () => {
     getObservation.mockResolvedValue({ ...OBSERVATION, segmentation_frozen_at: '2026-07-17T00:00:00+00:00' })
     unfreezeSegmentation.mockResolvedValue(OBSERVATION)
     renderWorkbench()
     await screen.findAllByRole('option')
 
     expect(screen.getByRole('img', { name: /Segmentation frozen/ })).toBeInTheDocument()
-    // Clip-SET affordances disabled, not hidden.
+    // Clip-SET affordances blocked, not hidden — and since #771 that is #754's
+    // MODE arm rather than a native `disabled`, so the control keeps its name,
+    // announces "unavailable", and says why instead of vanishing.
     for (const btn of screen.getAllByRole('button', { name: /^Delete clip/ })) {
-      expect(btn).toBeDisabled()
+      expect(btn).not.toBeDisabled()
+      expect(btn).toHaveAttribute('aria-disabled', 'true')
+      expect(btn).toHaveAccessibleName(/unavailable while the clip set is frozen$/)
     }
 
     fireEvent.click(screen.getByRole('button', { name: /Unfreeze…/ }))
@@ -529,6 +533,125 @@ describe('slab 3e — the freeze flow', () => {
     const merge = screen.getByRole('button', { name: 'Merge selected clips' })
     expect(merge).toBeDisabled()
     expect(merge).not.toHaveAttribute('aria-disabled')
+  })
+
+  /**
+   * #771 — a row control belongs to the SELECTED row.
+   *
+   * Delete renders on every clip while the productive control beside it renders
+   * only on a selected-or-coded one, so an ordinary uncoded clip's ONE tab stop
+   * was its trash can. Measured on the live fixture: 13 clips, 13 destructive
+   * stops, each reading the clip's whole text — "tab just seems to get stuck on
+   * the trashcan", and the only thing a keyboard tour of the list could reach.
+   */
+  describe('#771: the clip list does not spend a destructive tab stop per row', () => {
+    const deleteButtons = () => screen.getAllByRole('button', { name: /^Delete clip/ })
+
+    it('an unselected clip contributes NO tab stop; the selected one does', async () => {
+      renderWorkbench()
+      const rows = await screen.findAllByRole('option')
+
+      // Nothing selected: every Delete is present (a mouse user still clicks
+      // any row's trash) and none of them is reachable by Tab.
+      expect(deleteButtons().length).toBeGreaterThan(1)
+      for (const btn of deleteButtons()) {
+        expect(btn).toHaveAttribute('tabindex', '-1')
+      }
+
+      fireEvent.click(rows[0])
+      await waitFor(() => expect(rows[0]).toHaveAttribute('aria-selected', 'true'))
+
+      // Exactly the selected row's Delete joins the tab order.
+      const tabbable = deleteButtons().filter(b => b.getAttribute('tabindex') !== '-1')
+      expect(tabbable).toHaveLength(1)
+      expect(rows[0]).toContainElement(tabbable[0])
+    })
+
+    it('the CODE controls on an unselected coded clip are out of the tab order too', async () => {
+      // The half the first #771 fix missed. Gating only Delete left every coded
+      // row's chips, their remove buttons and its Add-code trigger as stops —
+      // 2N+1 per row — so a keyboard tour still walked into rows it had not
+      // selected. Heard on 2026-08-18: Tab "skipped the uncoded clips and just
+      // started moving down the codes for the coded ones".
+      renderWorkbench()
+      const rows = await screen.findAllByRole('option')
+
+      const coded = rows.find(r => within(r).queryByRole('button', { name: /^Remove code/ }))
+      expect(coded).toBeDefined()
+
+      // Nothing selected: present (a mouse user still clicks them), none reachable.
+      for (const btn of within(coded!).getAllByRole('button')) {
+        expect(btn).toHaveAttribute('tabindex', '-1')
+      }
+
+      fireEvent.click(coded!)
+      await waitFor(() => expect(coded!).toHaveAttribute('aria-selected', 'true'))
+
+      const reachable = within(coded!).getAllByRole('button')
+        .filter(b => b.getAttribute('tabindex') !== '-1')
+        .map(b => b.getAttribute('aria-label'))
+      expect(reachable).toEqual(expect.arrayContaining([
+        expect.stringMatching(/^Remove code/),
+        'Add code',
+      ]))
+    })
+
+    it('a remove button reveals itself on focus, not on hover alone', async () => {
+      // ⚠️ TECHNIQUE-ONLY: jsdom computes no layout and resolves no Tailwind, so
+      // this pins the class rather than the pixels. It earns its place because
+      // the control was focusable at `opacity-0` — an invisible focus ring on an
+      // invisible control (WCAG 2.4.7) — while its sibling Add button had
+      // carried `focus:opacity-100` all along. Re-check by eye after touching it.
+      renderWorkbench()
+      const rows = await screen.findAllByRole('option')
+      const coded = rows.find(r => within(r).queryByRole('button', { name: /^Remove code/ }))!
+      const remove = within(coded).getByRole('button', { name: /^Remove code/ })
+
+      expect(remove.className).toContain('focus:opacity-100')
+      expect(remove.className).toContain('group-focus-within/chip:opacity-100')
+    })
+
+    it('names the clip without reading the whole paragraph', async () => {
+      // ⚠️ The shared fixture's longest label is 18 characters, so it cannot
+      // tell a truncating name from a verbatim one — this needs a fixture that
+      // sits where the two DISAGREE, or it passes either way (it did: the first
+      // version of this test survived reverting the truncation). Real clip
+      // labels routinely run to a paragraph; the live fixture's longest is 178.
+      const LONG = 'How to enable audio transcripts for cloud recordings. Account. '
+        + 'To enable the audio transcript feature for all users in the account, '
+        + 'sign into the Zoom web portal as an admin.'
+      listSegments.mockResolvedValue([clip(11, 0, 130, LONG)])
+      renderWorkbench()
+      await screen.findAllByRole('option')
+
+      const name = screen.getByRole('button', { name: /^Delete clip/ }).getAttribute('aria-label')!
+      expect(name).not.toContain(LONG)              // not verbatim…
+      expect(name).toMatch(/…$/)                    // …visibly truncated…
+      expect(name.length).toBeLessThan(LONG.length) // …and materially shorter…
+      expect(name).toMatch(/^Delete clip 0:00\.0/)  // …while still naming the clip
+    })
+
+    it('frozen: the row Delete takes #754\'s MODE arm, not a native disable', async () => {
+      // The arm #754 never converted — its own docstring counts "every Delete"
+      // among what a frozen workbench could not reach, but only the toolbar's
+      // Split and Merge were moved onto modeDisabledProps.
+      getObservation.mockResolvedValue({ ...OBSERVATION, segmentation_frozen_at: '2026-07-17T00:00:00+00:00' })
+      renderWorkbench()
+      const rows = await screen.findAllByRole('option')
+      fireEvent.click(rows[0])
+      await waitFor(() => expect(rows[0]).toHaveAttribute('aria-selected', 'true'))
+
+      const btn = within(rows[0]).getByRole('button', { name: /^Delete clip/ })
+      expect(btn).not.toBeDisabled()                          // reachable…
+      expect(btn).toHaveAttribute('aria-disabled', 'true')    // …announced unavailable…
+      expect(btn).toHaveAccessibleName(/unavailable while the clip set is frozen$/) // …and says why
+      expect(btn).not.toHaveAttribute('tabindex', '-1')       // selected, so it IS the tab stop
+
+      // The click guard is the load-bearing half: aria-disabled changes what a
+      // control announces and nothing about what it does.
+      fireEvent.click(btn)
+      expect(deleteClip).not.toHaveBeenCalled()
+    })
   })
 })
 
@@ -614,6 +737,38 @@ describe('#654 — the clip-row context menu', () => {
     expect(splitItem).not.toHaveAttribute('data-disabled')
     fireEvent.click(splitItem)
     await waitFor(() => expect(splitClip).toHaveBeenCalledWith(1, 5, 11, 1))
+  })
+
+  /**
+   * #775 — the three states of the playhead suffix, which #770 collapsed into
+   * one and got wrong in both directions.
+   *
+   * ⚠️ This test USED to assert `— now playing` for exactly the state below —
+   * a paused player with the playhead stepped inside the clip — and it passed
+   * for as long as it existed. It was pinning the defect: "now playing" is a
+   * claim about the TRANSPORT, and stepping a paused player is not playing.
+   * A long-standing assertion of a suspicious value is evidence about the
+   * TEST (#767's rider), which is why it was rewritten rather than worked
+   * around.
+   */
+  it('#775: a recording that is PARKED under the playhead says paused, not playing', async () => {
+    getObservation.mockResolvedValue({
+      ...OBSERVATION, media_type: 'video' as const, media_filename: 'nasa.mp4',
+      media_format: 'mp4', media_size_bytes: 1234, media_version: 'v1', has_media: true,
+    })
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+
+    fireEvent.click(rows[0])                  // clip 11 (0–130)
+    fireEvent.keyDown(window, { key: '>' })   // playhead → 1.0s, inside clip 11
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/— paused here$/)).toBe(rows[0])
+    })
+    // The falsehood the developer heard on a real observation: a clip that
+    // starts at 0:00 is CONTAINED the moment it is selected, because the
+    // selection seek's lead-in clamps to 0.
+    expect(screen.queryByLabelText(/now playing/)).not.toBeInTheDocument()
   })
 
   it('D22: frozen disables the clip-SET items and leaves annotation alone', async () => {
@@ -1504,7 +1659,10 @@ describe('the ?clip= deep-link (D26)', () => {
     const row = document.getElementById('clip-13')
     expect(row).toHaveAttribute('aria-selected', 'true')
     // The seek is PAUSED — arriving from search must never start the tape.
-    expect(screen.queryByText(/now playing/)).not.toBeInTheDocument()
+    // #770: `queryByText` could NEVER have failed here — "now playing" only
+    // ever appears inside a row's aria-label, never as text — so this asserted
+    // nothing for as long as it existed. Query the accessible name instead.
+    expect(screen.queryByLabelText(/now playing/)).not.toBeInTheDocument()
     // The param really clears (the effect's setSearchParams({}, {replace})).
     await waitFor(() => expect(screen.getByTestId('loc-search')).toHaveTextContent(''))
   })

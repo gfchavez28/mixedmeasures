@@ -87,10 +87,26 @@ def _find_child(el, local_name: str):
 
 
 def _safe_color(value: str | None) -> str | None:
-    """Return `value` iff it is a schema-legal RGB colour, else None."""
-    if value and _RGB_RE.match(value):
-        return value
-    return None
+    """Return `value` iff it is a schema-legal RGB colour, else None.
+
+    The shorthand `#RGB` form is EXPANDED to `#RRGGBB` — the same colour, in the
+    form every consumer actually handles. Applied on both sides, so MM neither
+    stores nor emits a 3-digit value; only accepts one.
+
+    Why bother, given `#RGB` is explicitly legal in RGBType: QualCoder 3.8.2's
+    `color_matcher()` opens with `if len(hex_color) != 7: return "#D8D8D8"`, so a
+    conformant `#0a0` silently becomes light grey rather than green (#760's
+    round-trip, measured 2026-08-16). Being right about the spec does not make a
+    researcher's colours survive the trip. Expanding costs nothing, loses
+    nothing, and is exactly "conservative in what you send" — MM's own picker
+    only ever emits 6-digit anyway, so the shorthand can only ARRIVE by import
+    and would otherwise be re-emitted on the next hop.
+    """
+    if not value or not _RGB_RE.match(value):
+        return None
+    if len(value) == 4:  # "#abc" -> "#aabbcc"; case deliberately left alone
+        return "#" + "".join(ch * 2 for ch in value[1:])
+    return value
 
 
 # ── Shared helpers ──────────────────────────────────────────────────────

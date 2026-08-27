@@ -647,7 +647,14 @@ def extract_text_from_pdf(file_bytes: bytes) -> ExtractedDocument:
 def extract_text_from_txt(file_bytes: bytes) -> ExtractedDocument:
     """Extract paragraphs from a plain text file."""
     try:
-        text = file_bytes.decode("utf-8")
+        # "utf-8-sig", not "utf-8": Windows Notepad's "UTF-8 with BOM" is a
+        # routine way for a researcher to save a transcript, and a plain utf-8
+        # decode leaves U+FEFF at the head of the text. str.strip() does NOT
+        # remove it (U+FEFF is not whitespace), so it would survive into the
+        # FIRST paragraph as an invisible leading character — shifting char
+        # offsets and riding into coding, search and every export. Same root
+        # cause as the .qdc import defect in project_portability. #760.
+        text = file_bytes.decode("utf-8-sig")
     except UnicodeDecodeError:
         text = file_bytes.decode("latin-1")
 

@@ -168,7 +168,7 @@ function renderEmbed(content: Record<string, unknown>, props: Record<string, unk
   return render(
     <TooltipProvider>
       <QueryClientProvider client={qc}>
-        <InlineChartRenderer projectId={3} materialId={1} content={content} {...props} />
+        <InlineChartRenderer projectId={3} materialId={1} content={content} onFigure={() => {}} {...props} />
       </QueryClientProvider>
     </TooltipProvider>,
   )

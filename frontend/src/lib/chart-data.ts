@@ -97,6 +97,16 @@ export interface ChartFormatting {
   dataLabels: DataLabelPosition
   xAxisMin: number | null
   xAxisMax: number | null
+  /**
+   * #522 — manual histogram bin width. `null` = let the data choose
+   * (Freedman–Diaconis), which is the honest default; a number overrides it and
+   * the chart's own footnote says which of the two produced the bins.
+   *
+   * Lives in `formatting` rather than a bespoke URL param because it IS a
+   * display option — like `barSize` — and formatting already rides the material
+   * config, so a saved histogram keeps the bins the researcher chose.
+   */
+  binWidth: number | null
 }
 
 export const DEFAULT_FORMATTING: ChartFormatting = {
@@ -115,6 +125,7 @@ export const DEFAULT_FORMATTING: ChartFormatting = {
   dataLabels: 'outside',
   xAxisMin: null,
   xAxisMax: null,
+  binWidth: null,
 }
 
 /**
@@ -480,6 +491,8 @@ export interface VisibleOptions {
   axisTransform: boolean
   crossTabColumn: boolean
   crossTabDisplay: boolean
+  /** #522 — the histogram's bin-width control. */
+  binWidth: boolean
 }
 
 export function getVisibleOptions(
@@ -491,29 +504,64 @@ export function getVisibleOptions(
   const isScalarBar = (chartType === 'horizontal_bar' || chartType === 'vertical_bar') && !isFreq
   const isFreqBar = (chartType === 'horizontal_bar' || chartType === 'vertical_bar') && isFreq
   const isVerticalBar = chartType === 'vertical_bar'
+  /**
+   * #522 — 🔴 a new ChartType does NOT fail to compile here, and several of the
+   * expressions below are NEGATIVE (`!isCrossTab`, `chartType !== 'table'`), so
+   * an unlisted type silently INHERITS them. Two would have been actively wrong
+   * on a histogram: `sort` (bins are ordered by value — sorting by count
+   * scrambles the axis into nonsense) and `excludeValues` / `hideFromChart`
+   * (they operate on per-value labels, which binning has just replaced). Both
+   * are excluded explicitly below.
+   *
+   * The guard is a POPULATION assertion in `chart-data.test.ts` pinning the
+   * whole histogram row, because the risk is the 25th option added later, not
+   * these 24 regressing — the same shape as the #771 row-control lesson.
+   */
+  const isHistogram = chartType === 'histogram'
 
   return {
-    sort: !isCrossTab,
+    // Bins are ordered by VALUE. There is no other honest order.
+    sort: !isCrossTab && !isHistogram,
     display: (chartType === 'heatmap' || chartType === 'stacked_bar' || isFreqBar) && !isCrossTab,
     scaling: chartType === 'heatmap',
+    // A bin order is derived, not authored.
     scaleOrder: chartType === 'heatmap' || chartType === 'stacked_bar' || isFreqBar || chartType === 'frequency_table' || isCrossTab,
-    groupBy: !isCrossTab,
-    groupFilter: !isCrossTab,
+    groupBy: !isCrossTab && !isHistogram,
+    groupFilter: !isCrossTab && !isHistogram,
     groupOrganization: chartType === 'heatmap' || chartType === 'stacked_bar',
-    excludeValues: !isCrossTab,
+    // Excluding a VALUE is meaningless once values are bins.
+    excludeValues: !isCrossTab && !isHistogram,
     hideFromChart: (chartType === 'heatmap' || chartType === 'stacked_bar' || isFreqBar || chartType === 'frequency_table') && !isCrossTab,
-    showCI: (isScalarBar || chartType === 'dumbbell' || chartType === 'table' || chartType === 'line') && !isCrossTab,
+    // queue #42: frequency BAR charts now carry a per-category Wilson interval,
+    // so the toggle is offered there too. Deliberately NOT `isFreq` in general:
+    // on a stacked bar the categories sum to 100% by construction, and an error
+    // bar on a segment of a fixed whole reads as uncertainty about a
+    // composition it does not have. Heatmap and frequency_table have nowhere to
+    // draw one at all.
+    // 🔴 NOT offered on a histogram, and this is the decision from #522's scope,
+    // not an oversight: queue #42's intervals are PER CATEGORY, so once the
+    // categories are binned they no longer describe the bars drawn. Recomputing
+    // them client-side would put a statistic in the client. Same reasoning that
+    // withholds the toggle from stacked bar — a distribution display is not a
+    // set of proportion estimates. `shapeHistogramBars` also emits no interval
+    // fields, so this is belt AND braces, and the shaper is the falsifiable half.
+    showCI: (isScalarBar || isFreqBar || chartType === 'dumbbell' || chartType === 'table' || chartType === 'line') && !isCrossTab,
     sampleSizes: chartType !== 'table' && chartType !== 'frequency_table' && !isCrossTab,
     groupN: (chartType === 'dumbbell' || chartType === 'line') && !isCrossTab,
     referenceLine: (isScalarBar || chartType === 'dumbbell' || chartType === 'line') && !isCrossTab,
-    barSize: (chartType === 'horizontal_bar' || chartType === 'stacked_bar' || isVerticalBar) && !isCrossTab,
+    // 🔴 NOT on a histogram: the bar width IS the bin width there, so a separate
+    // "Bar width" control both breaks the flush-bar convention and fights the
+    // bin-width control beside it. Enabling it here was my own error in the
+    // first #522 pass — which is worth recording, because the population
+    // assertion below pinned the DECISION and would happily have kept it wrong.
+    barSize: (chartType === 'horizontal_bar' || chartType === 'stacked_bar' || isVerticalBar) && !isCrossTab && !isHistogram,
     heatmapColor: chartType === 'heatmap' || isCrossTab,
     colorPalette: chartType !== 'heatmap' && chartType !== 'table' && chartType !== 'frequency_table' && !isCrossTab && chartType !== null,
     responseColors: (chartType === 'heatmap' || chartType === 'stacked_bar' || isFreqBar) && !isCrossTab,
     pointSize: (chartType === 'dumbbell' || chartType === 'line') && !isCrossTab,
     dataWidth: (chartType === 'horizontal_bar' || chartType === 'stacked_bar' || chartType === 'heatmap') && !isCrossTab,
     proportionThreshold: metricType === 'proportion' && !isCrossTab,
-    dataLabels: (isScalarBar || isFreqBar || chartType === 'stacked_bar') && !isCrossTab,
+    dataLabels: (isScalarBar || isFreqBar || chartType === 'stacked_bar' || isHistogram) && !isCrossTab,
     dataLabelsInsideOnly: chartType === 'stacked_bar',
     axisRange: (isScalarBar || chartType === 'dumbbell' || chartType === 'line') && !isCrossTab,
     divergingLayout: chartType === 'stacked_bar',
@@ -523,6 +571,7 @@ export function getVisibleOptions(
     axisTransform: isScalarBar || chartType === 'dumbbell' || chartType === 'line',
     crossTabColumn: isCrossTab,
     crossTabDisplay: isCrossTab,
+    binWidth: isHistogram,
   }
 }
 
@@ -531,6 +580,7 @@ export function getVisibleOptions(
 export type ChartType =
   | 'heatmap' | 'horizontal_bar' | 'stacked_bar' | 'vertical_bar'
   | 'dumbbell' | 'table' | 'line' | 'frequency_table' | 'cross_tab'
+  | 'histogram'
 
 export type MetricType = MetricTypeFromApi
 
@@ -804,6 +854,13 @@ export function shapeFrequencyBars(
   let scaleOrder: string[] = rd.scale_order || []
   const counts: Record<string, number> = rd.counts || {}
   const percentages: Record<string, number> = rd.percentages || {}
+  // queue #42: per-category margin of error. Parallel maps keyed by label, NOT
+  // the scalar `ci_lower`/`ci_upper` every other metric type carries — five
+  // shaping functions read those as numbers, and a same-named field holding a
+  // dict is the kind of type overloading that fails silently in JS.
+  const ciLower: Record<string, number | null> = rd.ci_lower_by_label || {}
+  const ciUpper: Record<string, number | null> = rd.ci_upper_by_label || {}
+  const ciMethod: string | undefined = rd.ci_method
 
   const hidden = options?.hiddenLabels ? new Set(options.hiddenLabels) : null
   if (hidden) scaleOrder = scaleOrder.filter(l => !hidden.has(l))
@@ -815,6 +872,12 @@ export function shapeFrequencyBars(
     count: counts[label] ?? 0,
     percentage: percentages[label] ?? 0,
     n: result.valid_n,
+    // `?? undefined` rather than `?? 0`: an interval that could not be computed
+    // (n < 2) must be ABSENT, not a zero-width bar sitting on the estimate —
+    // that would read as a precise measurement of nothing.
+    ciLower: ciLower[label] ?? undefined,
+    ciUpper: ciUpper[label] ?? undefined,
+    ciMethod,
   }))
 }
 
@@ -1034,6 +1097,15 @@ export function shapeGroupedFrequencyBars(
     let scaleOrder: string[] = rd.scale_order || []
     const counts: Record<string, number> = rd.counts || {}
     const percentages: Record<string, number> = rd.percentages || {}
+    // queue #42 — the grouped path needs this too, and the reason is not
+    // symmetry: `VerticalBarChart` renders an `ErrorBar` per group series, so
+    // turning the toggle on over a grouped frequency chart would otherwise draw
+    // nothing at all and read as "this data has no uncertainty".
+    // Each group has its own denominator, so each carries its own interval —
+    // which is exactly the comparison a reader wants to make here.
+    const ciLower: Record<string, number | null> = rd.ci_lower_by_label || {}
+    const ciUpper: Record<string, number | null> = rd.ci_upper_by_label || {}
+    const ciMethod: string | undefined = rd.ci_method
 
     if (hidden) scaleOrder = scaleOrder.filter(l => !hidden.has(l))
     if (options?.reverseScale) scaleOrder = [...scaleOrder].reverse()
@@ -1046,6 +1118,9 @@ export function shapeGroupedFrequencyBars(
         count: counts[label] ?? 0,
         percentage: percentages[label] ?? 0,
         n: result.valid_n,
+        ciLower: ciLower[label] ?? undefined,
+        ciUpper: ciUpper[label] ?? undefined,
+        ciMethod,
       })),
     })
   }
@@ -1222,11 +1297,26 @@ export interface ChartTypeInfo {
  * Determine which chart types are available for a given metric type,
  * whether grouping is active, and how many items are selected.
  */
+/**
+ * #522 — above this many distinct response values, one bar per value stops being
+ * a chart and becomes a picket fence (the entry's repro: a 40–91 test score drew
+ * ~42 of them). A continuous variable with more distinct values than this
+ * DEFAULTS to the histogram, which is what jamovi, JASP and SPSS all do.
+ *
+ * Stated rather than tuned silently: below it, a numeric column is usually a
+ * short coded scale where each value is a response option worth seeing.
+ */
+export const HISTOGRAM_DEFAULT_THRESHOLD = 12
+
 export function getApplicableChartTypes(
   currentMetricType: string,
   hasGrouping: boolean,
   itemCount: number,
   scaleCompatible: boolean = true,
+  /** #522 — histogram eligibility: every selected column is continuous. */
+  continuous: boolean = false,
+  /** Distinct response values across the selection, for the default rule. */
+  distinctValueCount: number = 0,
 ): ChartTypeInfo {
   const available: ChartType[] = []
   const reqChange: Partial<Record<ChartType, MetricType[] | null>> = {}
@@ -1252,6 +1342,20 @@ export function getApplicableChartTypes(
     }
     available.push('frequency_table')
     reqChange.frequency_table = null
+    // #522 — the histogram is a single-variable picture, and only for a genuinely
+    // continuous one. It stays VISIBLE with a reason when it does not apply, so a
+    // researcher looking for it learns why rather than not finding it (the
+    // gated-entry-point lesson); `disabledReasons` is the existing mechanism.
+    if (itemCount === 1) {
+      if (continuous) {
+        available.push('histogram')
+        reqChange.histogram = null
+      } else {
+        disabledReasons.histogram = 'Requires a continuous numeric variable'
+      }
+    } else if (itemCount > 1) {
+      disabledReasons.histogram = 'Select a single variable to see its distribution'
+    }
     // table requires switching to scalar metric
     reqChange.table = ['mean', 'proportion']
     if (hasGrouping) {
@@ -1288,7 +1392,9 @@ export function getApplicableChartTypes(
   // Default logic
   let defaultType: ChartType
   if (currentMetricType === 'frequency_distribution') {
-    defaultType = (itemCount >= 2 && scaleCompatible) ? 'heatmap' : 'horizontal_bar'
+    if (itemCount === 1 && continuous && distinctValueCount > HISTOGRAM_DEFAULT_THRESHOLD) {
+      defaultType = 'histogram'
+    } else defaultType = (itemCount >= 2 && scaleCompatible) ? 'heatmap' : 'horizontal_bar'
   } else if (hasGrouping) {
     defaultType = 'dumbbell'
   } else {
@@ -1492,6 +1598,12 @@ export interface SummaryStatsRow {
   memberCount?: number | null
   memberNMin?: number | null
   memberNMax?: number | null
+  /**
+   * #823(e): this row's `n` counts VALUES, not respondents — a `mean` whose
+   * input is a variable GROUP pools every member's values into one list. True
+   * of the statistic, invisible in a bare five-digit number beside a mean.
+   */
+  pooledAcrossDomain?: boolean
 }
 
 /**
@@ -1538,6 +1650,10 @@ export function shapeSummaryStats(
         memberCount: (rd.member_count as number | null) ?? null,
         memberNMin: (rd.member_n_min as number | null) ?? null,
         memberNMax: (rd.member_n_max as number | null) ?? null,
+        // ⚠️ Keyed on the INPUT SOURCE, not on the metric type: `domain_aggregate`
+        // has its own honest label (#693) and a `mean` over a single COLUMN
+        // pools nothing. It is the pairing that makes the number ambiguous.
+        pooledAcrossDomain: metricType === 'mean' && m.input_source_type === 'dataset_domain',
       }
     })
 }
@@ -2056,4 +2172,223 @@ export function shapeComparisonGroupedBars(
         : [],
     ),
   }))
+}
+
+// ── Histogram binning (#522) ────────────────────────────────────────────────
+
+/** How a histogram's bin width was chosen — the stated basis, shown on the chart. */
+export type BinRule = 'freedman_diaconis' | 'sturges' | 'manual' | 'single'
+
+export interface HistogramBin {
+  /** Half-open [lo, hi), except the LAST bin which includes its upper edge. */
+  lo: number
+  hi: number
+  label: string
+  count: number
+}
+
+export interface HistogramResult {
+  bins: HistogramBin[]
+  binWidth: number
+  rule: BinRule
+  /** Labels that did not parse as numbers — never silently folded into a bin. */
+  skippedLabels: string[]
+}
+
+/** Parse a frequency `counts` map into (value, count) pairs, numeric labels only. */
+function numericPairs(counts: Record<string, number>): {
+  pairs: { value: number; count: number }[]
+  skipped: string[]
+} {
+  const pairs: { value: number; count: number }[] = []
+  const skipped: string[] = []
+  for (const [label, n] of Object.entries(counts)) {
+    const v = Number(label)
+    // `Number('')` is 0 and `Number(' ')` is 0 — both are labels, not values.
+    if (label.trim() === '' || !Number.isFinite(v)) skipped.push(label)
+    else pairs.push({ value: v, count: n })
+  }
+  pairs.sort((a, b) => a.value - b.value)
+  return { pairs, skipped }
+}
+
+/**
+ * The q-th quantile of a COUNT-weighted distribution, by linear interpolation
+ * between order statistics (R's type 7 — the default in R, numpy and pandas).
+ *
+ * Stated rather than assumed because the quartiles feed the Freedman–Diaconis
+ * width, so a different convention gives different bins; #522's box-plot half
+ * must name its own method for the same reason, and should reuse this one.
+ */
+function weightedQuantile(pairs: { value: number; count: number }[], q: number): number {
+  const n = pairs.reduce((s, p) => s + p.count, 0)
+  if (n === 0) return NaN
+  if (n === 1) return pairs[0].value
+  const h = (n - 1) * q            // 0-based position among the n order statistics
+  const lo = Math.floor(h)
+  const hi = Math.ceil(h)
+  let seen = 0
+  let vLo = pairs[0].value
+  let vHi = pairs[pairs.length - 1].value
+  let gotLo = false
+  for (const p of pairs) {
+    const first = seen
+    const last = seen + p.count - 1
+    if (!gotLo && lo >= first && lo <= last) { vLo = p.value; gotLo = true }
+    if (hi >= first && hi <= last) { vHi = p.value; break }
+    seen += p.count
+  }
+  return vLo + (h - lo) * (vHi - vLo)
+}
+
+/**
+ * Bin a frequency distribution's per-value counts into histogram bars.
+ *
+ * ⚠️ **Display-side, and EXACT** — summing exact per-value counts into ranges is
+ * not an approximation, which is why #522 chose this over a new backend metric:
+ * it emits no new statistic, so it carries no R round-trip obligation and keeps
+ * the compute core (the entry's own named silent-failure zone) untouched.
+ *
+ * ⚠️ **No confidence interval is emitted, and that is the decision, not an
+ * omission.** Queue #42 put a per-category Wilson interval on this very payload;
+ * once the categories are binned those intervals no longer describe the bars
+ * drawn, and recomputing them here would put a statistic in the CLIENT, which
+ * the stated-basis family forbids. `BarDatum.ciLower/ciUpper` are simply absent,
+ * so `VerticalBarChart` — which draws an error bar only when both are non-null —
+ * suppresses them structurally rather than by a flag anyone can flip.
+ *
+ * ⚠️ **Non-numeric labels are REPORTED, never folded into a bin.** A declared
+ * value label on a numeric column ("Refused") has no position on a number line;
+ * silently dropping it would understate the distribution and silently binning it
+ * would invent one.
+ */
+export function binFrequencyCounts(
+  counts: Record<string, number>,
+  options?: { binWidth?: number | null },
+): HistogramResult {
+  const { pairs, skipped } = numericPairs(counts)
+  const n = pairs.reduce((s, p) => s + p.count, 0)
+  if (pairs.length === 0 || n === 0) {
+    return { bins: [], binWidth: 0, rule: 'manual', skippedLabels: skipped }
+  }
+
+  const min = pairs[0].value
+  const max = pairs[pairs.length - 1].value
+  const span = max - min
+
+  // Every observation identical: one bin is the honest picture, and both width
+  // rules divide by a zero span here.
+  if (span === 0) {
+    return {
+      bins: [{ lo: min, hi: min, label: formatBinLabel(min, min, true), count: n }],
+      binWidth: 0,
+      rule: 'single',
+      skippedLabels: skipped,
+    }
+  }
+
+  let width = options?.binWidth ?? 0
+  let rule: BinRule = 'manual'
+  if (!(width > 0)) {
+    // Freedman–Diaconis: 2 · IQR · n^(-1/3). Preferred over Sturges, which
+    // assumes normality and under-bins anything skewed or heavy-tailed.
+    const iqr = weightedQuantile(pairs, 0.75) - weightedQuantile(pairs, 0.25)
+    if (iqr > 0) {
+      width = 2 * iqr * Math.pow(n, -1 / 3)
+      rule = 'freedman_diaconis'
+    } else {
+      // A degenerate IQR (most mass on one value) gives FD a zero width, so it
+      // cannot be used — fall back rather than divide the span by nothing.
+      const k = Math.max(1, Math.ceil(Math.log2(n) + 1))
+      width = span / k
+      rule = 'sturges'
+    }
+    width = niceBinWidth(width)
+  }
+  if (!(width > 0) || !Number.isFinite(width)) {
+    width = span
+    rule = 'single'
+  }
+
+  const lo0 = Math.floor(min / width) * width
+  const binCount = Math.max(1, Math.min(MAX_HISTOGRAM_BINS, Math.ceil((max - lo0) / width) || 1))
+  const bins: HistogramBin[] = []
+  for (let i = 0; i < binCount; i++) {
+    const lo = lo0 + i * width
+    const hi = lo + width
+    bins.push({ lo, hi, label: formatBinLabel(lo, hi, i === binCount - 1), count: 0 })
+  }
+  for (const p of pairs) {
+    let idx = Math.floor((p.value - lo0) / width)
+    if (idx >= binCount) idx = binCount - 1   // the last bin owns its upper edge
+    if (idx < 0) idx = 0
+    bins[idx].count += p.count
+  }
+  return { bins, binWidth: width, rule, skippedLabels: skipped }
+}
+
+/** Cap so a pathological width cannot generate an unbounded number of bars. */
+export const MAX_HISTOGRAM_BINS = 200
+
+/** Round a raw width to a 1/2/5 × 10^k step so the axis reads in human numbers. */
+function niceBinWidth(raw: number): number {
+  if (!(raw > 0) || !Number.isFinite(raw)) return raw
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)))
+  const scaled = raw / mag
+  const step = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10
+  return step * mag
+}
+
+function trimNum(v: number): string {
+  const r = Math.round(v * 1000) / 1000
+  return String(r)
+}
+
+/** `40–50` for a half-open bin; the last bin says `90–100` and includes 100. */
+function formatBinLabel(lo: number, hi: number, isLast: boolean): string {
+  if (lo === hi) return trimNum(lo)
+  return `${trimNum(lo)}–${trimNum(hi)}${isLast ? '' : ''}`
+}
+
+/**
+ * Shape a frequency-distribution metric as histogram bars.
+ *
+ * Mirrors `shapeFrequencyBars`'s output so `VerticalBarChart` needs no new
+ * branch — minus the interval fields, deliberately (see `binFrequencyCounts`).
+ */
+export function shapeHistogramBars(
+  metric: MetricDefinitionResponse,
+  options?: { binWidth?: number | null },
+): { bars: BarDatum[]; histogram: HistogramResult } {
+  const empty: HistogramResult = { bins: [], binWidth: 0, rule: 'manual', skippedLabels: [] }
+  if (metric.results.length === 0) return { bars: [], histogram: empty }
+  const result = metric.results[0]
+  const rd = result.result_data as JsonRecord
+  const counts: Record<string, number> = rd.counts || {}
+  const histogram = binFrequencyCounts(counts, options)
+  const total = histogram.bins.reduce((s, b) => s + b.count, 0)
+  const bars: BarDatum[] = histogram.bins.map(b => ({
+    label: b.label,
+    value: total > 0 ? (b.count / total) * 100 : 0,
+    count: b.count,
+    percentage: total > 0 ? (b.count / total) * 100 : 0,
+    n: result.valid_n,
+  }))
+  return { bars, histogram }
+}
+
+/** The sentence under the chart: what the bins are, and what was left out. */
+export function describeHistogramBasis(h: HistogramResult): string {
+  const parts: string[] = []
+  if (h.rule === 'single') parts.push('All values identical — one bin.')
+  else if (h.rule === 'manual') parts.push(`Bin width ${trimNum(h.binWidth)} (set manually).`)
+  else if (h.rule === 'freedman_diaconis') parts.push(`Bin width ${trimNum(h.binWidth)} (Freedman–Diaconis).`)
+  else parts.push(`Bin width ${trimNum(h.binWidth)} (Sturges — the interquartile range is zero).`)
+  if (h.skippedLabels.length > 0) {
+    parts.push(
+      `${h.skippedLabels.length} non-numeric ${h.skippedLabels.length === 1 ? 'value' : 'values'} `
+      + `(${h.skippedLabels.join(', ')}) cannot be placed on a number line and are excluded.`,
+    )
+  }
+  return parts.join(' ')
 }

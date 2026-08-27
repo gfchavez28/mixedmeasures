@@ -29,7 +29,7 @@ from ..schemas.backup import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.4.0"
 MANIFEST_FORMAT_VERSION = 1
 STALE_HOURS = 24
 
@@ -132,7 +132,14 @@ def _read_project_summaries(db_path: Path) -> list[ProjectBackupSummary]:
         conn.close()
 
 
-VALID_BACKUP_TYPES = {"manual", "auto", "pre_restore"}
+#: ⚠️ `pre_withdrawal` (#702(3)) is deliberately NOT wired into any
+#: `cleanup_old_backups` rotation. Every other type is either user-initiated or
+#: rotates on a schedule; this one is the ONLY recovery point for an irreversible
+#: removal of a real person's data, taken on a request the researcher will have
+#: recorded. Rotating it away after five more operations would silently delete
+#: the safety net while the operation it protects stays done. Withdrawals are
+#: rare, so the disk cost of keeping them is the right trade.
+VALID_BACKUP_TYPES = {"manual", "auto", "pre_restore", "pre_withdrawal"}
 
 
 def _assert_backup_db_readable(db_path: Path) -> None:

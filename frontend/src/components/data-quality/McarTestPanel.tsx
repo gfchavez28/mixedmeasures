@@ -1,5 +1,6 @@
 import { TriangleAlert, Info, CircleCheck, CircleX } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { describeMcarEstimator } from '@/lib/mcar-basis'
 import type { McarTestResponse } from '@/lib/api'
 
 interface McarTestPanelProps {
@@ -121,6 +122,16 @@ export default function McarTestPanel({
               {/* Details */}
               <div className="text-[10px] text-mm-text-faint space-y-0.5">
                 <div>n = {result.result.n}, {result.result.n_variables} variables, {result.result.n_patterns} patterns</div>
+                {/*
+                  #707(b) — the stated basis, beside the statistic and OUTSIDE the
+                  quotable APA string, the pattern `omitted_levels` established. It
+                  sits inside the existing result `role="status"` deliberately: a
+                  second live region would announce the same result twice, which is
+                  the consecutive-sentences defect #525b caught by listening.
+                */}
+                {describeMcarEstimator(result.result.mcar_estimator) && (
+                  <div>{describeMcarEstimator(result.result.mcar_estimator)}</div>
+                )}
               </div>
             </div>
           )}

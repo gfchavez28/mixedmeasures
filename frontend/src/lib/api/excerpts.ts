@@ -149,14 +149,13 @@ export const excerptsApi = {
     api.get<ExcerptDetailResponse>(`/projects/${projectId}/excerpts/${excerptId}`).then(res => res.data),
   listQuoted: (projectId: number, params?: QuotedExcerptsParams) =>
     api.get<QuotedExcerptsResponse>(`/projects/${projectId}/excerpts/starred`, { params }).then(res => res.data),
-  exportCsv: (projectId: number) =>
-    api.get(`/projects/${projectId}/excerpts/export`, { responseType: 'blob' }).then(res => {
-      const blob = new Blob([res.data], { type: 'text/csv' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'excerpts.csv'
-      a.click()
-      URL.revokeObjectURL(url)
-    }),
+  // #833: `exportCsv` was DELETED here, not given a timeout.
+  //
+  // It had ZERO call sites — `grep -rn "excerptsApi.exportCsv"` was empty — so
+  // the verification pass that filed it as one of six unbudgeted downloads was
+  // wrong about this one. It carried three separate defects (the 30 s client
+  // default, a hand-rolled anchor, and `excerpts.csv` invented over the
+  // server's own `Content-Disposition`, #743) and none of them was reachable.
+  // Fixing dead code hides that it is dead; the quote export users actually
+  // reach is `QuoteBoardView`'s client-side CSV via `lib/csv.ts`.
 }

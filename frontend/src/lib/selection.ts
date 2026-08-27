@@ -105,3 +105,18 @@ export const NOW_PLAYING_BAR = 'ring-2 ring-[hsl(var(--mm-green)/0.75)]'
  * green = playhead), and selection still wins when both apply.
  */
 export const SELECTED_BAR = 'ring-2 ring-[hsl(var(--mm-blue))]'
+
+/**
+ * The keyboard FOCUS indicator (#823f).
+ *
+ * Distinct from every `SELECTED_*` recipe above and deliberately so: selection
+ * is a state of the DATA ("this is the variable I am working on"), focus is a
+ * state of the KEYBOARD. A row can be one, the other, or both, and if the two
+ * shared a treatment a keyboard user could not tell where they were.
+ *
+ * ⚠️ It lives here because it had already been declared TWICE — `TopRail.tsx`
+ * and `UpdateStatusBadge.tsx` — and #823(f) needed a third. A copy does not only
+ * drift; it propagates the original's defect verbatim (#733).
+ */
+export const FOCUS_RING =
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--mm-green)/0.5)] focus-visible:ring-offset-1'

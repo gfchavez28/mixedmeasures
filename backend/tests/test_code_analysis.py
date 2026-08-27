@@ -400,3 +400,64 @@ class TestCodeSegmentsEndpointIsGone:
 
         paths = {getattr(route, "path", None) for route in app.routes}
         assert "/api/projects/{project_id}/code-analysis/codes/{code_id}/segments" in paths
+
+
+class TestSaturationOrderingIsDeclared:
+    """#708(i) — the curve names what its x-axis is ordered BY.
+
+    A saturation curve is entirely order-dependent: a plateau after the twelfth
+    source can be a property of the SEQUENCE rather than of the corpus. Sources
+    are ordered by `created_at` — when each was added to the project, not when
+    fieldwork happened — and that was disclosed only in a docstring, while the
+    chart (which is what goes in the report) said nothing.
+
+    ⚠️ Ordering by fieldwork date is deliberately NOT offered: only
+    `Conversation` has a date field (`conversation_date`, nullable). `Document`
+    and `Observation` have none, so it needs two new columns and a migration
+    before it can mean anything on a mixed corpus. That is why the payload
+    declares ONE ordering rather than accepting a choice.
+    """
+
+    def test_the_payload_names_its_ordering(self, db_session):
+        from app.models.project import Project
+        from app.services.code_analysis import (
+            SATURATION_ORDERING_IMPORT_DATE, get_saturation_data,
+        )
+
+        db_session.add(Project(id=708, name="P708", user_id=1))
+        db_session.flush()
+
+        data = get_saturation_data(db_session, project_id=708)
+        assert data["ordering"] == SATURATION_ORDERING_IMPORT_DATE, (
+            "the client DISPLAYS the ordering and never infers it; an absent "
+            "field makes the chart silently drop its caveat"
+        )
+
+    def test_the_client_knows_the_ordering_the_server_declares(self):
+        """Cross-language pin — hand-mirrored, no codegen (the #710 pattern).
+
+        The client falls back to NO label for an ordering it does not recognise,
+        which is right for old payloads and silent for a new one.
+        """
+        from pathlib import Path
+
+        from app.services import code_analysis as ca
+
+        orderings = {
+            name: getattr(ca, name)
+            for name in dir(ca) if name.startswith("SATURATION_ORDERING_")
+        }
+        assert orderings, "no SATURATION_ORDERING_* constants — scan is misdirected"
+
+        ts = (
+            Path(__file__).resolve().parents[2]
+            / "frontend" / "src" / "lib" / "saturation-ordering.ts"
+        )
+        assert ts.exists(), f"{ts} not found — update this path, do not delete the test"
+        source = ts.read_text(encoding="utf-8")
+
+        for name, value in orderings.items():
+            assert value in source, (
+                f"`saturation-ordering.ts` does not know {name} ({value!r}); the "
+                "chart would render no ordering label at all, with no error."
+            )

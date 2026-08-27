@@ -99,3 +99,28 @@ export function describeMissingRefs(refs: { type: MaterialRefKind }[]): string {
     : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
   return `${list} referenced here no longer ${refs.length === 1 ? 'exists' : 'exist'}.`
 }
+
+/**
+ * #795 — name the variables a chart embed needs recomputed.
+ *
+ * Sibling of `describeMissingRefs` above, and it names the VARIABLES rather
+ * than counting kinds: "a variable needs recomputing" sends a researcher
+ * hunting through forty of them, while the name is the whole of what they need
+ * to act. Caps the list so one embed cannot print a paragraph — the count
+ * carries the rest.
+ */
+export function describeStaleInputs(
+  columns: { column_name?: string | null; column_text?: string | null }[],
+): string {
+  if (columns.length === 0) return ''
+  const names = columns.map(
+    c => (c.column_name?.trim() || c.column_text?.trim() || 'An unnamed variable'),
+  )
+  if (names.length === 1) return `${names[0]} has changed since it was last computed.`
+  const SHOWN = 2
+  if (names.length <= SHOWN) {
+    return `${names.join(' and ')} have changed since they were last computed.`
+  }
+  const rest = names.length - SHOWN
+  return `${names.slice(0, SHOWN).join(', ')} and ${rest} other${rest === 1 ? '' : 's'} have changed since they were last computed.`
+}

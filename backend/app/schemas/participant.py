@@ -131,3 +131,48 @@ class UnlinkDatasetRowRequest(BaseModel):
 class ParticipantListResponse(BaseModel):
     participants: list[ParticipantResponse]
     total: int
+
+
+# ── Withdrawal report (#702(2)) ──────────────────────────────────────────────
+
+
+class WithdrawalConversationTouchpoint(BaseModel):
+    conversation_id: int
+    name: str
+    segments: int = 0
+    code_applications: int = 0
+    excerpts: int = 0
+    notes: int = 0
+
+
+class WithdrawalDatasetTouchpoint(BaseModel):
+    dataset_id: int
+    name: str
+    rows: int = 0
+    responses: int = 0
+    code_applications: int = 0
+    excerpts: int = 0
+    notes: int = 0
+    memos: int = 0
+    row_scores: int = 0
+
+
+class WithdrawalReportResponse(BaseModel):
+    """Everything in the project that traces back to one participant.
+
+    Counts and locations only — never the text. A report reproducing transcript
+    lines or response values would be one more copy of the data a researcher is
+    trying to remove.
+    """
+
+    participant_id: int
+    identifier: str
+    display_name: str | None = None
+    role: str | None = None
+    has_demographics: bool = False
+    # Project-scoped, like `Speaker` itself — and the field that SURVIVES a
+    # participant delete, which is why the report names it.
+    speaker_names: list[str] = []
+    conversations: list[WithdrawalConversationTouchpoint] = []
+    datasets: list[WithdrawalDatasetTouchpoint] = []
+    total_items: int = 0

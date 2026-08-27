@@ -89,6 +89,41 @@ class DatasetColumnConfig(BaseModel):
     # [] = nothing is missing. Filled by the wizard (slab 4) / .sav (slab 5).
     missing_values: list[dict] | None = None
 
+    @field_validator("scale_labels", "scale_values")
+    @classmethod
+    def _cap_scale_metadata(cls, v):
+        # #588: same ceiling as the value-labels endpoint. This path is the one
+        # that mattered — `.sav` import and the wizard both write configs here,
+        # and neither passes through that endpoint's validator.
+        from ..services.value_labels import validate_value_label_count
+        return validate_value_label_count(v, field="scale labels")
+
+    @model_validator(mode="after")
+    def _codes_need_a_labellable_type(self) -> "DatasetColumnConfig":
+        """#589: `cells_are_codes` drives `apply_value_labels`, so the type it
+        asks for must be one that can carry labels.
+
+        Reproduced before the fix: a config of `{"column_type": "open_text",
+        "cells_are_codes": true, "scale_labels": [...]}` imported cleanly —
+        labels substituted into free-form responses, scale metadata written and
+        a primary scale_map minted — which is the exact state
+        `POST …/columns/{id}/value-labels` answers 400 for. Only the wizard
+        prevented it, i.e. the invariant lived in one client.
+
+        This arm gives that a clean 422 at the edge; the load-bearing half is
+        the guard inside `apply_value_labels`, because the import calls the
+        service directly and a schema is not on that path either.
+        """
+        if self.cells_are_codes and not self.skip:
+            from ..models.dataset import VALUE_LABEL_INELIGIBLE_TYPES
+            if self.column_type in VALUE_LABEL_INELIGIBLE_TYPES:
+                raise ValueError(
+                    f"cells_are_codes cannot be used with a {self.column_type} "
+                    "column — value labels would overwrite the cell's own "
+                    "meaning. Use ordinal or nominal for a column of codes."
+                )
+        return self
+
     @field_validator("missing_values")
     @classmethod
     def _normalize_missing_rules(cls, v: list[dict] | None) -> list[dict] | None:
@@ -188,6 +223,33 @@ class DatasetListResponse(BaseModel):
     total: int
 
 
+class PrimaryRecodeSummary(BaseModel):
+    """The rule currently driving a column's ``value_numeric``, or nothing.
+
+    The Variables view states this per variable, because "which rule is in
+    effect" is the fact that makes labels and recodes read as two layers rather
+    than one — and it was previously answerable only by selecting a column and
+    waiting for a second request.
+
+    ⚠️ **Deliberately compact: no mapping.** A mapping can carry
+    ``MAX_VALUE_LABELS`` (500) entries, and a 500-column dataset would put
+    250,000 pairs on a list response nothing on that screen renders. The detail
+    panel fetches the full definition for the ONE selected column.
+    """
+    id: int
+    name: str
+    recode_type: str
+    #: True when the mapping sends a NUMERIC key somewhere other than itself —
+    #: a flip or a collapse, i.e. `value_numeric` is not the response's own code.
+    #:
+    #: ⚠️ **A SHAPE test, and NOT the #793 guard.** It is blind to a hand-flip
+    #: keyed on LABELS, which has no numeric key to judge. The authority is
+    #: `value_labels.code_identity_violation`, which reads the column's stored
+    #: cells and cannot run per column across a list response. Present this as a
+    #: description of the RULE, never as a safety verdict.
+    remaps_codes: bool = False
+
+
 class DatasetColumnResponse(BaseModel):
     id: int
     column_code: str | None = None
@@ -219,6 +281,22 @@ class DatasetColumnResponse(BaseModel):
     demographic_subtype: str | None = None
     equivalence_group_id: int | None = None
     equivalence_group_label: str | None = None
+    # The rule driving this column's value_numeric. `None` means no primary
+    # recode — which for a labelled column means the labels dictionary alone is
+    # in effect. Populated on EVERY payload built by `_column_to_response`, so
+    # `None` always means "no primary", never "not loaded" (the stated-basis
+    # ambiguity this codebase keeps meeting).
+    primary_recode: PrimaryRecodeSummary | None = None
+    # Decision B (2026-08-24) — where a derived variable came from. The ID, not
+    # a label: `columnDisplayLabel` is the single source for naming a column
+    # (#575) and the Variables view already holds every column of the dataset,
+    # so resolving server-side would be a second naming rule AND a lazy load per
+    # column. ⚠️ The two fields degrade INDEPENDENTLY and both readings are
+    # meaningful: deleting the source column nulls the FK (ON DELETE SET NULL)
+    # while `derived_via` survives, so "derived by <rule>, source deleted" stays
+    # sayable. A UI that renders the pair only when BOTH are present loses that.
+    derived_from_column_id: int | None = None
+    derived_via: str | None = None
     # #353: opt-out flag for the participant detail panel. Default True;
     # researchers uncheck per-column for sensitive data in DatasetView.
     show_in_participant_profile: bool = True
@@ -253,6 +331,20 @@ class DatasetRowDetail(BaseModel):
     values: list[DatasetValueResponse]
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class DatasetRowPosition(BaseModel):
+    """Where a row sits in the grid's ordering, and which page holds it (#834).
+
+    ``index`` is 0-based over the WHOLE dataset (not the page), so a caller can
+    display "record N of M" as ``index + 1``. ``offset`` is the page start for
+    ``limit`` — the value the grid puts in its React Query key.
+    """
+    row_id: int
+    index: int
+    offset: int
+    limit: int
+    total_rows: int
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -313,6 +405,17 @@ class DatasetDataColumnResponse(BaseModel):
     depends_on_column_ids: list[int] | None = None
     stale: bool | None = None
     demographic_subtype: str | None = None
+    # Decision B provenance — the THIRD instance of the #586 rule on this class,
+    # and it was caught by DRIVING rather than by any test. The Data view's grid
+    # marks a `source="manual"` column with a pencil and the words "manual
+    # column"; a derived variable is manual (it must be — a computed column is
+    # refused value labels, missing rules and recode definitions, #806), so
+    # without these fields the grid calls a derived variable hand-typed, which is
+    # the opposite of what it is. This schema is built by splatting
+    # `DatasetColumnResponse.model_dump()`, and Pydantic's `extra='ignore'` drops
+    # anything it does not declare — silently, with no type error.
+    derived_from_column_id: int | None = None
+    derived_via: str | None = None
     recode_definitions: list[RecodeDefinitionSummary] = []
     equivalence_group_id: int | None = None
     equivalence_group_label: str | None = None
@@ -336,9 +439,22 @@ class DatasetDataRow(BaseModel):
 
 
 class DatasetDataResponse(BaseModel):
+    """One PAGE of a dataset's grid (#800).
+
+    ⚠️ ``rows`` is the page; ``total_rows`` is the dataset. Anything showing a
+    record count must read ``total_rows`` — the two were the same number until
+    this endpoint was paginated, so every `rows.length` consumer was silently a
+    total-count consumer too.
+    """
     dataset: DatasetResponse
     columns: list[DatasetDataColumnResponse]
     rows: list[DatasetDataRow]
+    total_rows: int
+    offset: int
+    limit: int
+    # participant_id (as a string key, JSON-object friendly) -> row_identifier.
+    # DATASET-scoped, not page-scoped — see the endpoint docstring.
+    linked_participants: dict[str, str] = {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -406,6 +522,15 @@ class ManualColumnCreate(BaseModel):
     numeric_format: str | None = None
     demographic_subtype: str | None = Field(None, max_length=40)
 
+    # #588: the two manual-column schemas were the other half of the uncapped
+    # population — the filed entry named only the endpoint and the import
+    # config. Same shared ceiling.
+    @field_validator("scale_labels", "scale_values")
+    @classmethod
+    def _cap_scale_metadata(cls, v):
+        from ..services.value_labels import validate_value_label_count
+        return validate_value_label_count(v, field="scale labels")
+
     @model_validator(mode="after")
     def validate_type(self) -> "ManualColumnCreate":
         if self.column_type not in ALLOWED_MANUAL_TYPES:
@@ -427,6 +552,12 @@ class ManualColumnUpdate(BaseModel):
     numeric_max: float | None = None
     numeric_format: str | None = None
     demographic_subtype: str | None = Field(None, max_length=40)
+
+    @field_validator("scale_labels", "scale_values")
+    @classmethod
+    def _cap_scale_metadata(cls, v):
+        from ..services.value_labels import validate_value_label_count
+        return validate_value_label_count(v, field="scale labels")
 
 
 ALLOWED_COMPUTED_TYPES = {"numeric", "percentage", "nominal", "ordinal", "binary"}

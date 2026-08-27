@@ -1,9 +1,9 @@
 import { Link } from 'react-router'
+import { FOCUS_RING } from '@/lib/selection'
 import { CircleArrowUp } from 'lucide-react'
 import { useDesktopUpdates } from '@/hooks/useDesktopUpdates'
 
-const FOCUS_RING =
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--mm-green)/0.5)] focus-visible:ring-offset-1'
+// FOCUS_RING is single-sourced in lib/selection.ts (#823f).
 
 /**
  * TopRail auto-update indicator (#29 S3, D3 "notify, never force").

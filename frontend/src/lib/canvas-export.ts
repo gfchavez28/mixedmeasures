@@ -8,6 +8,7 @@
 import {
   metricsApi,
   codeAnalysisApi,
+  comparisonsApi,
   codesApi,
   observationsApi,
   type CanvasDetail,
@@ -15,6 +16,8 @@ import {
   type CanvasThemeRelationship,
   type MetricDefinitionResponse,
   type SourceFrequenciesResponse,
+  type GroupComparisonResponse,
+  type AnalysisCrossTabResponse,
 } from '@/lib/api'
 import { safeFilename } from './filename'
 import {
@@ -37,6 +40,7 @@ import {
   shapeHeatmapRows,
   shapeDumbbellRows,
   shapeLineChart,
+  DISPLAY_PRECISION,
   type ChartType,
 } from '@/lib/chart-data'
 import {
@@ -48,9 +52,15 @@ import {
   buildQualComparisonRequest,
   qualChartKind,
   qualChartHasEnoughToFetch,
+  extractComparisonParams,
+  isComparisonMaterialConfig,
+  isCorrelationMaterialConfig,
+  extractCrossTabParams,
+  isCrossTabMaterialConfig,
   type QualComputeParams,
 } from '@/components/canvas/inline-chart-params'
 import { isQualitativeMaterialConfig } from '@/lib/material-kind'
+import { describeUndefined } from '@/lib/stat-format'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -167,6 +177,70 @@ export async function fetchChartTables(
         }
       }
 
+      // 🔴 #817 — a quantitative COMPARISON must not be run through
+      // `quickCompute` here either. This path is not a fallback for the
+      // renderer: the Markdown export has no images at all, so it is the ONLY
+      // thing a `.md` reader sees, and before this it carried the same wrong
+      // figure the canvas drew — the pooled frequency distribution of the
+      // comparison's own variables, under the comparison's title.
+      //
+      // ⚠️ **Two halves of one fact, in two files.** Fixing the renderer alone
+      // would have left the Markdown export wrong and the HTML/PDF/docx exports
+      // right (they capture the rendered PNG), so the same material would say
+      // different things in different formats.
+      // 🔴 #831 — and a CORRELATION or SCATTER matrix must not reach
+      // `quickCompute` either, for the same reason one bullet up. The renderer
+      // REFUSES to draw these (there is no inline correlation chart), so an
+      // export that quietly emitted a frequency table of the correlation's own
+      // variables would be the #832 divergence again: canvas honest, `.md`
+      // wrong, and nothing to tell the reader which to believe.
+      //
+      // Exporting NOTHING is the honest match for a refusal on screen. The
+      // embed's title and surrounding prose still carry into the document.
+      if (isCorrelationMaterialConfig(chart.config)) {
+        return { materialId: chart.materialId, md: '', html: '' }
+      }
+
+      if (isComparisonMaterialConfig(chart.config)) {
+        const cmp = extractComparisonParams(chart.config)
+        if (cmp.request == null) return { materialId: chart.materialId, md: '', html: '' }
+        const data = await comparisonsApi.groupComparison(projectId, cmp.request)
+        const table = comparisonExportTable(data)
+        if (!table) return { materialId: chart.materialId, md: '', html: '' }
+        return {
+          materialId: chart.materialId,
+          md: mdTable(table.headers, table.rows),
+          html: htmlTable(table.headers, table.rows),
+        }
+      }
+
+      // 🔴 #832 — a CROSS-TAB is the one descriptives type whose data does not
+      // come from `quickCompute`, and #823(g) taught only the renderer that.
+      // Without this branch the fall-through below computes a metric on the
+      // cross-tab's ROW variable alone and emits its marginal frequency
+      // distribution — the second axis silently absent, under the cross-tab's
+      // own title. The canvas drew the right table and `.md` carried a
+      // different one: the same material saying two things, which is exactly
+      // what the #817 comment above exists to prevent.
+      //
+      // ⚠️ The axis derivation and the display mode are SHARED with the
+      // renderer (`extractCrossTabParams`), not re-read from `content` here.
+      if (isCrossTabMaterialConfig(chart.config)) {
+        const ct = extractCrossTabParams(chart.config)
+        // A half-configured cross-tab has no row or no column axis. The
+        // renderer says so on screen; an export emits nothing, exactly as it
+        // does for every other unusable config.
+        if (ct.request == null) return { materialId: chart.materialId, md: '', html: '' }
+        const data = await metricsApi.crossTabulation(projectId, ct.request)
+        const table = crossTabExportTable(data, ct.display, ct.scaleOrder)
+        if (!table) return { materialId: chart.materialId, md: '', html: '' }
+        return {
+          materialId: chart.materialId,
+          md: mdTable(table.headers, table.rows),
+          html: htmlTable(table.headers, table.rows),
+        }
+      }
+
       const params = extractComputeParams(chart.config)
       if (params.columnIds.length === 0 && params.domainIds.length === 0) {
         return { materialId: chart.materialId, md: '', html: '' }
@@ -202,6 +276,100 @@ export async function fetchChartTables(
  * the fact that `QualCooccurrence` normally fetches for itself is irrelevant on
  * this path.
  */
+/**
+ * A group comparison as a plain table, for the Markdown and HTML exports (#817).
+ *
+ * ⚠️ **Mirrors what `GroupComparisonTable` renders, not what the payload
+ * holds** — per group its n and mean, then the test and its p. A dump of every
+ * field would not be the figure the researcher put on the page.
+ *
+ * ⚠️ **A row whose test did not run prints the REASON, never a blank cell.** A
+ * blank is indistinguishable from a broken export (#566), and the reason is
+ * already on the row.
+ */
+/**
+ * The cross-tab grid, shaped exactly as `AnalysisCrossTabTable` draws it (#832).
+ *
+ * ⚠️ **Mirroring the DISPLAY MODE is the point, not a nicety.** The component
+ * shows `count`, `row_pct`, `col_pct` or `total_pct` per `cross_tab_display`,
+ * and reverses BOTH axes when `scaleOrder === 'reversed'`. An export that always
+ * emitted counts in natural order would still be a different table from the one
+ * on screen — a quieter version of the defect this branch exists to close.
+ *
+ * The totals row and column come from the payload's own `row_totals` /
+ * `col_totals` / `n_shared`, reordered with the axes, so they are counts even
+ * when the cells are percentages — as they are in the rendered table.
+ */
+function crossTabExportTable(
+  data: AnalysisCrossTabResponse,
+  display: string,
+  scaleOrder: string,
+): { headers: string[]; rows: string[][] } | null {
+  if (data.row_values.length === 0 || data.col_values.length === 0) return null
+
+  const reversed = scaleOrder === 'reversed'
+  const rowValues = reversed ? [...data.row_values].reverse() : data.row_values
+  const colValues = reversed ? [...data.col_values].reverse() : data.col_values
+  const rowIndex = rowValues.map(v => data.row_values.indexOf(v))
+  const colIndex = colValues.map(v => data.col_values.indexOf(v))
+
+  const isPercent = display !== 'count'
+  const cellValue = (ri: number, ci: number): number => {
+    const cell = data.matrix[rowIndex[ri]]?.[colIndex[ci]]
+    if (!cell) return 0
+    switch (display) {
+      case 'row_pct': return cell.row_pct
+      case 'col_pct': return cell.col_pct
+      case 'total_pct': return cell.total_pct
+      default: return cell.count
+    }
+  }
+  const fmtCell = (v: number): string =>
+    isPercent ? `${v.toFixed(DISPLAY_PRECISION)}%` : String(v)
+
+  const headers = [data.row_column_label, ...colValues, 'Total']
+  const rows = rowValues.map((rv, ri) => [
+    rv,
+    ...colValues.map((_, ci) => fmtCell(cellValue(ri, ci))),
+    String(data.row_totals[rowIndex[ri]] ?? ''),
+  ])
+  rows.push([
+    'Total',
+    ...colIndex.map(i => String(data.col_totals[i] ?? '')),
+    String(data.n_shared),
+  ])
+  return { headers, rows }
+}
+
+function comparisonExportTable(
+  data: GroupComparisonResponse,
+): { headers: string[]; rows: string[][] } | null {
+  if (data.rows.length === 0) return null
+  const headers = [
+    'Variable',
+    ...data.groups.flatMap(g => [`${g} n`, `${g} M`]),
+    'Test',
+    'p',
+  ]
+  const rows = data.rows.map(row => {
+    const cells: string[] = [row.full_label || row.label]
+    for (const g of data.groups) {
+      const stat = row.group_stats.find(s => s.group === g)
+      cells.push(stat ? String(stat.n) : '—')
+      cells.push(stat?.mean != null ? stat.mean.toFixed(2) : '—')
+    }
+    if (row.test) {
+      cells.push(`${row.test.test_type} = ${row.test.statistic.toFixed(3)}`)
+      cells.push(row.test.p.toFixed(4))
+    } else {
+      cells.push(describeUndefined(row.test_omitted_reason) ?? 'Not computed')
+      cells.push('—')
+    }
+    return cells
+  })
+  return { headers, rows }
+}
+
 async function qualChartTable(
   projectId: number,
   params: QualComputeParams,

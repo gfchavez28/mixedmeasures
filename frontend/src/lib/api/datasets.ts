@@ -1,4 +1,5 @@
 import api from './client'
+import { datasetUploadTimeoutMs } from '../dataset-import-formats'
 import type { LinkableRow } from './participants'
 
 // Dataset types
@@ -143,6 +144,19 @@ export interface RecodeDefinition {
   created_at: string
   updated_at: string
   unmapped_values: string[]
+  /**
+   * #602: the authoritative reflection offset for this mapping on this column —
+   * the SAME field, and the same server-side rule, that `RecodeDefinitionSummary`
+   * carries on `/data`. Populated for EVERY definition type, not just `reverse`:
+   * the Recode Workbench's reverse editor previews a DRAFT copied from a
+   * `scale_map` source, and the number that draft must show is the one the save
+   * will produce — i.e. this offset on the SOURCE's row.
+   *
+   * Never re-derive it from `mapping`. The client cannot see the recognized-N/A
+   * rule or the column's missing declaration, so a local `min + max` previewed
+   * "Never → 99" on a mapping the save (correctly) scored 5.
+   */
+  reverse_offset?: number | null
 }
 
 /**
@@ -167,6 +181,69 @@ export interface ApplyValueLabelsResult {
    *  a missing code is never a scale point). Surface these — silently absorbing
    *  them is how a researcher loses a label they thought they set. */
   missing_skipped?: number[]
+  /** #584: definitions this relabel left mapping NOTHING. Substituting labels
+   *  into `value_text` re-keys the column, so any definition still keyed on the
+   *  old cell text stops matching — measured, four of five on a realistic
+   *  column, not just a linked reverse. Reported, never silently re-derived:
+   *  re-deriving changes stored numbers a researcher may already have reported. */
+  staled_definitions?: RecodeDependentInfo[]
+}
+
+/** #584 step 2 — one dependent's re-derive plan row. */
+export interface RederivePlanItem {
+  definition_id: number
+  name: string
+  column_id: number
+  is_primary: boolean
+  /** 'ready' | 'no_change' | 'blocked'. `blocked` is a refusal, not a warning. */
+  status: string
+  changed_keys: string[]
+  detail: string
+}
+
+export interface RederiveResult {
+  updated: number[]
+  skipped: number[]
+  changed_values: number
+}
+
+/** #584's death arm — one mapping key the re-key would rewrite. */
+export interface RekeyRename {
+  old: string
+  new: string
+}
+
+/** #584's death arm — one relabel-killed definition's re-key plan row. */
+export interface RekeyPlanItem {
+  definition_id: number
+  name: string
+  recode_type: string
+  is_primary: boolean
+  /** 'ready' | 'blocked'. There is no 'no_change' arm — every row here is a
+   *  definition that already matches nothing. */
+  status: string
+  renames: RekeyRename[]
+  /** Keys with no code to translate through — why a blocked row is blocked. */
+  unresolved_keys: string[]
+  detail: string
+}
+
+export interface RekeyResult {
+  updated: number[]
+  renamed_keys: number
+}
+
+/** A recode definition affected by a change to something it depends on (#584).
+ *  `reason` says which relationship put it here: `provenance` = it names the
+ *  edited definition as its source and has DRIFTED (it still maps every cell);
+ *  `unmapped` = the column was re-keyed under it and it now maps nothing. */
+export interface RecodeDependentInfo {
+  id: number
+  name: string
+  recode_type: string
+  column_id: number
+  is_primary: boolean
+  reason: 'provenance' | 'unmapped'
 }
 
 export interface MissingValuesResult {
@@ -184,6 +261,23 @@ export interface MissingValuesResult {
   /** Recovered texts the column's recode could not map back to a code — they
    *  stay text-only, for the researcher to map or label. */
   recovered_unmapped: string[]
+  /** Rules that matched NO value in this column (#823a). Server-side, because
+   *  the case that motivates it is invisible on screen: HTML collapses interior
+   *  whitespace, so a sentinel stored with two spaces reads and types as one. */
+  unmatched_rules: string[]
+}
+
+/** #798 — per-column outcomes from a bulk missing declaration. */
+export interface BulkMissingValuesResult {
+  applied: MissingValuesResult[]
+  skipped: Array<{ column_id: number; column_label: string; reason: string }>
+  /** Cells nulled across EVERY applied column — the figure the disclosure must
+   *  quote on a bulk apply (#823b). The per-column `nulled_rows` understated it
+   *  34x on the GSS corpus: 32,276 reported against a true 1,099,939. */
+  nulled_rows_total: number
+  /** Rules that matched nothing on every applied column (#823a) — the
+   *  intersection, not the union; see the backend schema for why. */
+  unmatched_everywhere: string[]
 }
 
 export interface RecodeDefinitionSummary {
@@ -202,8 +296,12 @@ export interface RecodeDefinitionSummary {
    * scale point and must not set the endpoint). Display `offset - code` with
    * this — never re-derive it from `mapping`, which cannot see the
    * recognized-N/A rule or the column's missing declaration and would drift from
-   * what `value_numeric` holds (#578). Null for non-reverse definitions, and
-   * absent on payloads that don't send it (see `reflectReverseValue`).
+   * what `value_numeric` holds (#578). ⚠️ Since #602 this is populated for every
+   * definition type (a `scale_map`'s offset is what the reverse editor's draft
+   * preview needs), so its presence does NOT mean "this def is a reverse" —
+   * branch on `recode_type`, as `EditableCell` does. Null when the mapping has
+   * no numeric scale points, and absent on payloads that don't send it (see
+   * `reflectReverseValue`).
    */
   reverse_offset?: number | null
 }
@@ -224,6 +322,19 @@ export interface CopyToResponse {
   created: number
   skipped: number
   skipped_columns: number[]
+}
+
+export interface PrimaryRecodeSummary {
+  id: number
+  name: string
+  recode_type: string
+  /**
+   * The mapping sends a numeric key somewhere other than itself — a flip or a
+   * collapse. ⚠️ A SHAPE test, blind to a hand-flip keyed on LABELS; it
+   * describes the rule, it is NOT a safety verdict. The authority is the
+   * backend's `code_identity_violation` (#793).
+   */
+  remaps_codes: boolean
 }
 
 export interface DatasetColumn {
@@ -254,12 +365,62 @@ export interface DatasetColumn {
   stale?: boolean | null
   demographic_subtype?: string | null
   recode_definitions?: RecodeDefinitionSummary[]
+  /**
+   * The rule driving this column's `value_numeric`, or null when none.
+   *
+   * ⚠️ Unlike `recode_definitions` — which rides ONLY the `/data` payload —
+   * this is on every column response the backend builds, so `null` always
+   * means "no primary" and never "this endpoint did not look".
+   */
+  primary_recode?: PrimaryRecodeSummary | null
   equivalence_group_id?: number | null
   equivalence_group_label?: string | null
+  /**
+   * Decision B provenance — the variable this one was derived FROM, and the
+   * name of the rule that produced it.
+   *
+   * ⚠️ The two degrade INDEPENDENTLY and both readings are meaningful. Deleting
+   * the source column nulls the FK (ON DELETE SET NULL) while `derived_via`
+   * survives, so "derived by <rule>, source since deleted" stays sayable — a UI
+   * that renders the pair only when BOTH are present throws that away.
+   *
+   * ⚠️ The LABEL is deliberately not on the wire: `columnDisplayLabel` is the
+   * single source for naming a column (#575), and the Variables view already
+   * holds every column of the dataset. Resolve it there.
+   */
+  derived_from_column_id?: number | null
+  derived_via?: string | null
   /** #353: per-column opt-out for the participant detail panel. Default true
    * for new + existing columns (set by Alembic migration server_default='1').
    * Set false to keep a sensitive column out of linked-participant profiles. */
   show_in_participant_profile?: boolean
+}
+
+/** Whether the source's dictionary can be carried onto a derived variable. */
+export interface DeriveLabelCarryPlan {
+  available: boolean
+  /** Populated whenever `available` is false, and the UI MUST render it — the
+   *  four unavailable states send the researcher to four different places. */
+  reason: string | null
+  pairs: [number, string][]
+}
+
+export interface DerivePlan {
+  output_type: 'numeric' | 'categorical'
+  column_type: string
+  mapped: [string, string][]
+  unmapped_values: string[]
+  missing_values_carried: string[]
+  labels: DeriveLabelCarryPlan
+  suggested_name: string
+}
+
+export interface DeriveColumnResult {
+  created_column_id: number
+  values_written: number
+  unmapped_values: string[]
+  missing_values_carried: string[]
+  labels_carried: boolean
 }
 
 export interface ComputedColumnCreate {
@@ -323,11 +484,35 @@ export interface DatasetDataRow {
   values: Record<string, DatasetValueCell>
 }
 
+/** Where a row sits in the grid's ordering, and which page holds it (#834). */
+export interface DatasetRowPosition {
+  row_id: number
+  /** 0-based over the WHOLE dataset, not the page — display as `index + 1`. */
+  index: number
+  /** The page start for `limit` — the value the grid's query key carries. */
+  offset: number
+  limit: number
+  total_rows: number
+}
+
 export interface DatasetDataResponse {
   dataset: Dataset
+  /** One PAGE of rows. For a record count read `total_rows`, never `rows.length` (#800). */
   columns: DatasetColumn[]
   rows: DatasetDataRow[]
+  total_rows: number
+  offset: number
+  limit: number
+  /**
+   * participant_id -> row_identifier, DATASET-scoped (not page-scoped).
+   * Backs the picker's already-linked guard; deriving it from the loaded page
+   * would offer a participant already linked on another page.
+   */
+  linked_participants: Record<string, string>
 }
+
+/** Mirrors backend `routers/dataset.py::DATASET_PAGE_SIZE`. */
+export const DATASET_PAGE_SIZE = 200
 
 export interface LinkParticipantResponse {
   response_id: number
@@ -491,7 +676,10 @@ export const datasetsApi = {
     if (sheetName) formData.append('sheet_name', sheetName)
     return api.post<DatasetPreviewResponse>(
       `/projects/${projectId}/datasets/preview`, formData,
-      { headers: { 'Content-Type': 'multipart/form-data' } },
+      { headers: { 'Content-Type': 'multipart/form-data' },
+        // #796: without this the client's 30s default aborts any real
+        // dataset — the parse is server-side and scales with cells.
+        timeout: datasetUploadTimeoutMs(file.size) },
     ).then(res => res.data)
   },
   import: (projectId: number, file: File, config: DatasetImportConfig) => {
@@ -501,7 +689,10 @@ export const datasetsApi = {
     formData.append('encoding', 'utf-8')
     return api.post<DatasetImportResponse>(
       `/projects/${projectId}/datasets/import`, formData,
-      { headers: { 'Content-Type': 'multipart/form-data' } },
+      { headers: { 'Content-Type': 'multipart/form-data' },
+        // #796: without this the client's 30s default aborts any real
+        // dataset — the parse is server-side and scales with cells.
+        timeout: datasetUploadTimeoutMs(file.size) },
     ).then(res => res.data)
   },
   list: (projectId: number) =>
@@ -514,8 +705,21 @@ export const datasetsApi = {
     api.get(`/projects/${projectId}/datasets/${datasetId}/columns`).then(res => res.data),
   listRows: (projectId: number, datasetId: number) =>
     api.get(`/projects/${projectId}/datasets/${datasetId}/rows`).then(res => res.data),
-  getData: (projectId: number, datasetId: number) =>
-    api.get<DatasetDataResponse>(`/projects/${projectId}/datasets/${datasetId}/data`).then(res => res.data),
+  getData: (projectId: number, datasetId: number, page?: { limit?: number; offset?: number }) =>
+    api.get<DatasetDataResponse>(`/projects/${projectId}/datasets/${datasetId}/data`, {
+      params: { limit: page?.limit ?? DATASET_PAGE_SIZE, offset: page?.offset ?? 0 },
+    }).then(res => res.data),
+  /**
+   * Where a row sits in the grid's ordering, and which page holds it (#834).
+   *
+   * ⚠️ `limit` must match the page size the grid will then request, or the
+   * returned `offset` addresses a boundary the grid does not use.
+   */
+  rowPosition: (projectId: number, datasetId: number, rowId: number, limit: number = DATASET_PAGE_SIZE) =>
+    api.get<DatasetRowPosition>(
+      `/projects/${projectId}/datasets/${datasetId}/rows/${rowId}/position`,
+      { params: { limit } },
+    ).then(res => res.data),
   linkParticipant: (projectId: number, datasetId: number, rowId: number, participantId: number | null) =>
     api.patch<LinkParticipantResponse>(
       `/projects/${projectId}/datasets/${datasetId}/rows/${rowId}/link-participant`,
@@ -576,7 +780,10 @@ export const datasetsApi = {
     if (sheetName) formData.append('sheet_name', sheetName)
     return api.post<DatasetAppendPreviewResponse>(
       `/projects/${projectId}/datasets/${datasetId}/append-preview`, formData,
-      { headers: { 'Content-Type': 'multipart/form-data' } },
+      { headers: { 'Content-Type': 'multipart/form-data' },
+        // #796: without this the client's 30s default aborts any real
+        // dataset — the parse is server-side and scales with cells.
+        timeout: datasetUploadTimeoutMs(file.size) },
     ).then(res => res.data)
   },
   linkByColumn: (projectId: number, datasetId: number, columnId: number) =>
@@ -598,7 +805,10 @@ export const datasetsApi = {
     formData.append('encoding', encoding)
     return api.post<DatasetAppendResponse>(
       `/projects/${projectId}/datasets/${datasetId}/append-import`, formData,
-      { headers: { 'Content-Type': 'multipart/form-data' } },
+      { headers: { 'Content-Type': 'multipart/form-data' },
+        // #796: without this the client's 30s default aborts any real
+        // dataset — the parse is server-side and scales with cells.
+        timeout: datasetUploadTimeoutMs(file.size) },
     ).then(res => res.data)
   },
   reorderColumns: (projectId: number, datasetId: number, orderedColumnIds: number[]) =>
@@ -665,10 +875,70 @@ export const recodeApi = {
     api.delete(
       `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/recodes/${definitionId}`
     ).then(res => res.data),
+  /** #584: definitions that name this one as their source. Fetched ON DEMAND at
+   *  the moment of an edit or delete, because the point is to warn BEFORE the
+   *  change — and because a dependent may live on a DIFFERENT column, which a
+   *  per-column definition list cannot see. */
+  dependents: (projectId: number, datasetId: number, columnId: number, definitionId: number) =>
+    api.get<RecodeDependentInfo[]>(
+      `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/recodes/${definitionId}/dependents`
+    ).then(res => res.data),
+
+  /** #584 step 2: what re-deriving would do. Read-only — the researcher sees
+   *  WHICH values move on WHICH definitions before confirming a change to
+   *  stored numbers. */
+  rederivePlan: (projectId: number, datasetId: number, columnId: number, definitionId: number) =>
+    api.get<RederivePlanItem[]>(
+      `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/recodes/${definitionId}/re-derive/plan`
+    ).then(res => res.data),
+
+  /** #584 step 2: the confirm. ALL OR NOTHING — a blocked dependent 409s the
+   *  whole batch rather than being skipped. */
+  rederive: (projectId: number, datasetId: number, columnId: number, definitionId: number,
+             definitionIds: number[]) =>
+    api.post<RederiveResult>(
+      `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/recodes/${definitionId}/re-derive`,
+      { definition_ids: definitionIds }
+    ).then(res => res.data),
+
+  /** #584's death arm: what re-keying this COLUMN's relabel-killed definitions
+   *  would do. Column-scoped, not definition-scoped — a relabel kills every
+   *  definition keyed on the old cell text, which the provenance lookup above
+   *  cannot see (measured: it finds one of four). An empty array is the
+   *  ordinary answer. */
+  rekeyPlan: (projectId: number, datasetId: number, columnId: number) =>
+    api.get<RekeyPlanItem[]>(
+      `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/re-key/plan`
+    ).then(res => res.data),
+
+  /** #584's death arm: the confirm. ALL OR NOTHING — a blocked definition 409s
+   *  the whole batch rather than being skipped. */
+  rekey: (projectId: number, datasetId: number, columnId: number, definitionIds: number[]) =>
+    api.post<RekeyResult>(
+      `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/re-key`,
+      { definition_ids: definitionIds }
+    ).then(res => res.data),
 
   setPrimary: (projectId: number, datasetId: number, columnId: number, definitionId: number) =>
     api.post<RecodeDefinition>(
       `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/recodes/${definitionId}/set-primary`
+    ).then(res => res.data),
+
+  /** Decision B — what deriving this rule into a NEW variable would do.
+   *  Read-only, and served by the same function the create uses, so the preview
+   *  cannot disagree with the operation. */
+  derivePlan: (projectId: number, datasetId: number, columnId: number, definitionId: number) =>
+    api.get<DerivePlan>(
+      `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/recodes/${definitionId}/derive-plan`
+    ).then(res => res.data),
+
+  deriveColumn: (
+    projectId: number, datasetId: number, columnId: number, definitionId: number,
+    body: { column_text: string; carry_labels: boolean },
+  ) =>
+    api.post<DeriveColumnResult>(
+      `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/recodes/${definitionId}/derive-column`,
+      body
     ).then(res => res.data),
 
   copyTo: (projectId: number, datasetId: number, columnId: number, definitionId: number, targetColumnIds: number[]) =>
@@ -699,6 +969,22 @@ export const recodeApi = {
   // `rules: []` declares that nothing is missing. Touches no scale metadata and
   // never the column type, so it is the only path for a missing-only
   // declaration on a continuous column (e.g. -99 THRU -1 on `age`).
+  /**
+   * #798: apply ONE missing vocabulary to many columns.
+   *
+   * Real survey data carries one sentinel set across every variable — GSS's
+   * five `.x:` codes span all 41 of its columns — while `setMissingValues` is
+   * column-at-a-time. Outcomes are PER COLUMN: a column whose own data makes a
+   * rule label ambiguous (#606) is skipped and named, and the rest still apply.
+   */
+  bulkSetMissingValues: (
+    projectId: number, datasetId: number, columnIds: number[],
+    rules: MissingValueRule[] | null,
+  ) =>
+    api.post<BulkMissingValuesResult>(
+      `/projects/${projectId}/datasets/${datasetId}/columns/bulk-missing-values`,
+      { column_ids: columnIds, rules },
+    ).then(res => res.data),
   setMissingValues: (
     projectId: number, datasetId: number, columnId: number,
     rules: MissingValueRule[] | null,

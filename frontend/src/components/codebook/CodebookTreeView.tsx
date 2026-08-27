@@ -1,5 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, type MouseEvent as ReactMouseEvent } from 'react'
-import { siblingPositions } from '@/hooks/useTreeKeyboardNav'
+import { siblingPositions, firstChildIndex, parentIndex } from '@/hooks/useTreeKeyboardNav'
+import { navigableNodeIds } from './codebook-node-order'
 import type { CodebookTreeResponse, CodebookCategoryNode, CodebookCodeNode } from '@/lib/api'
 import type { CodebookSizing, CodebookFormat } from '@/hooks/useCodebookState'
 import { useChartColors, useTheme } from '@/lib/theme-context'
@@ -196,8 +197,23 @@ export default function CodebookTreeView({
     setTimeout(() => setLiveAnnouncement(''), 1000)
   }, [])
 
-  // Keyboard navigation
-  const [focusedIdx, setFocusedIdx] = useState(-1)
+  /**
+   * Keyboard cursor — the focused node's ID, never its position (#774).
+   *
+   * `focusedIdx` was state, indexing an array that is rebuilt whenever the tree
+   * reflows. Collapsing a category changes both the length AND the order, so the
+   * index kept naming whatever had moved into that slot: measured live, one
+   * ArrowLeft on `cat-2` left the cursor on an unrelated code. The DOM ids that
+   * `aria-activedescendant` already points at are the real cursor; the index is
+   * an implementation detail that was leaking.
+   *
+   * ⚠️ When the focused node DISAPPEARS (its branch collapsed from the mouse, a
+   * search filter, a delete) `indexOf` returns -1 and the cursor is deliberately
+   * empty rather than guessed: the next arrow re-seeds from the top. Landing on
+   * *nothing* is recoverable; silently renaming the cursor to an unrelated node
+   * is the bug this replaced.
+   */
+  const [focusedId, setFocusedId] = useState<string | null>(null)
 
   // Targeting mode hover
   const [hoverCatId, setHoverCatId] = useState<number | null>(null)
@@ -659,7 +675,24 @@ export default function CodebookTreeView({
 
         nodes.push({
           type: 'code',
-          level: 2,          // #701(a): child of the synthetic 'Uncategorized' root
+          /**
+           * A ROOT, because the 'Uncategorized' marker below is not navigable.
+           *
+           * This said `level: 2` — "child of the synthetic 'Uncategorized'
+           * root" — but that marker has `depth: -1`, which the category
+           * renderer returns `null` for, so it is not a treeitem and no key can
+           * reach it. The level therefore promised a parent that does not
+           * exist: ArrowLeft from an uncategorized code walked back to the
+           * LAST CATEGORY instead. Level 1 matches the universal band above,
+           * which is the same shape (a visual grouping with no node of its own).
+           *
+           * ⚠️ The trade is that the 'Uncategorized' grouping is no longer
+           * announced. Making the marker a real treeitem is the other way to
+           * close this, and it is a design call — it would have to be
+           * selectable and answer what Enter does — so it is deliberately NOT
+           * taken here.
+           */
+          level: 1,
           id: `code-${code.id}`,
           x: cx - w / 2,
           y: cy - h / 2,
@@ -707,32 +740,72 @@ export default function CodebookTreeView({
   }, [treeData, catFormat, codeFormat, containerWidth, expandedCategories, matchingCodeIds, ancestorCategoryIds, getScale, rootColorMap])
 
   /**
-   * #701(a) — `aria-setsize` / `aria-posinset` per level.
+   * The NAVIGABLE nodes, in READING order — the one array the keyboard cursor,
+   * the ARIA positions and shift-range selection all index into.
    *
-   * `aria-level` shipped 2026-08-12; without a set size a reader announces the
-   * depth but never "3 of 7", which is the half that tells someone how much of
-   * a branch is left. Derived from the layout's own node order and levels via
-   * the shared `siblingPositions`, so this SVG tree and the three DOM trees
-   * cannot disagree about what counts as a sibling.
+   * ⚠️ **`layout.nodes` is neither navigable-only nor in reading order, and
+   * everything that indexed it directly was wrong in three ways.** It is the
+   * SVG *paint* order: `layoutCategory` lays out a category's child categories,
+   * then its direct codes, and only THEN pushes the category node — because the
+   * category's own `y` is centred on the extent of the children it just placed.
+   * So the array is POST-order, while `firstChildIndex` / `parentIndex` — the
+   * traversal rules this tree shares with the DOM trees (#773) — are specified
+   * on a PRE-order. Measured on project 1 before this existed:
    *
-   * ⚠️ Keyed on `n.id`, not the array index: the label pseudo-node is filtered
-   * out of `nodeOrder` below, so index-based lookup would drift by one from the
-   * moment an `uncategorized-label` exists.
+   *   - ArrowDown walked cat-1's five codes and only then reached cat-1,
+   *     throwing the cursor back UP the screen once per category (cat-1 sits at
+   *     y=319, its codes at y=384–660).
+   *   - ArrowLeft ("go to my parent") from code-8 landed on **cat-1**; code-8
+   *     belongs to cat-2. Wrong for every code, not in an edge case.
+   *   - ArrowRight from a category stepped into the NEXT category's codes.
+   *
+   * It also carries the `uncategorized-label` marker — a `type: 'cat'` node with
+   * `depth: -1` that the category renderer returns `null` for, so it is not a
+   * treeitem at all. Counting it inflated the root set: all 8 navigable roots
+   * announced `aria-setsize="9"`, promising a ninth sibling no key can reach.
+   * Set size is the NAVIGABLE set, never "everything the layout emitted".
+   *
+   * Built from `treeData` rather than by re-sorting `layout.nodes` on geometry:
+   * the codes carry a random y-jitter, so a coordinate sort is one unlucky
+   * fixture away from putting a code above its own category.
    */
-  const nodeAria = useMemo(() => {
-    // `level` is optional on LayoutNode (the label pseudo-node has none); a
-    // missing level is a root, which is what 1 means.
-    const positions = siblingPositions(layout.nodes.map(n => n.level ?? 1))
-    return new Map(layout.nodes.map((n, i) => [n.id, positions[i]]))
-  }, [layout.nodes])
+  const navNodes = useMemo(() => {
+    const byId = new Map(layout.nodes.map(n => [n.id, n]))
+    return navigableNodeIds(treeData, id => byId.has(id))
+      .map(id => byId.get(id))
+      .filter((n): n is LayoutNode => n !== undefined)
+  }, [layout.nodes, treeData])
 
   // ── Flat node order for keyboard navigation ────────────────────────────
 
-  const nodeOrder = useMemo(() => {
-    return layout.nodes
-      .filter(n => n.id !== 'uncategorized-label')
-      .map(n => n.id)
-  }, [layout.nodes])
+  const nodeOrder = useMemo(() => navNodes.map(n => n.id), [navNodes])
+
+  /** #773 — depth per entry of `nodeOrder`, for ArrowRight/ArrowLeft traversal. */
+  const nodeLevels = useMemo(() => navNodes.map(n => n.level ?? 1), [navNodes])
+
+  /** The cursor's position in the CURRENT order, re-derived every render (#774). */
+  const focusedIdx = useMemo(
+    () => (focusedId === null ? -1 : nodeOrder.indexOf(focusedId)),
+    [focusedId, nodeOrder],
+  )
+
+  /**
+   * The node the cursor names, or null. ONE expression, because the focus ring
+   * and `aria-activedescendant` are two halves of one fact — they were computed
+   * separately in three places, which is how they would drift.
+   */
+  const cursorNodeId = focusedIdx >= 0 ? nodeOrder[focusedIdx] : null
+
+  /**
+   * #701(a) — `aria-setsize` / `aria-posinset`, over the navigable set only.
+   *
+   * Derived through the shared `siblingPositions` so this SVG tree and the three
+   * DOM trees cannot disagree about what counts as a sibling.
+   */
+  const nodeAria = useMemo(() => {
+    const positions = siblingPositions(navNodes.map(n => n.level ?? 1))
+    return new Map(navNodes.map((n, i) => [n.id, positions[i]]))
+  }, [navNodes])
 
   // ── Category order for targeting mode navigation ──────────────────────
 
@@ -1157,33 +1230,56 @@ export default function CodebookTreeView({
     switch (e.key) {
       case 'ArrowDown': {
         e.preventDefault()
-        const next = Math.min(focusedIdx + 1, nodeOrder.length - 1)
-        setFocusedIdx(next)
+        // A lost cursor (-1) re-seeds at the top rather than going nowhere.
+        setFocusedId(nodeOrder[Math.min(focusedIdx + 1, nodeOrder.length - 1)] ?? null)
         break
       }
       case 'ArrowUp': {
         e.preventDefault()
-        const next = Math.max(focusedIdx - 1, 0)
-        setFocusedIdx(next)
+        setFocusedId(nodeOrder[Math.max(focusedIdx - 1, 0)] ?? null)
         break
       }
       case 'Home': {
         e.preventDefault()
-        setFocusedIdx(0)
+        setFocusedId(nodeOrder[0] ?? null)
         break
       }
       case 'End': {
         e.preventDefault()
-        setFocusedIdx(nodeOrder.length - 1)
+        setFocusedId(nodeOrder[nodeOrder.length - 1] ?? null)
         break
       }
+      /**
+       * #773 — expansion is only HALF of the horizontal arrows.
+       *
+       * These used to toggle expansion and nothing else, so on this tree they
+       * did nothing observable: every category renders EXPANDED, and expanding
+       * an expanded one is a no-op. Reported from an NVDA pass as "right didn't
+       * do anything" — accurate about the experience, and it read as an inert
+       * handler when in fact only the traversal half was missing.
+       *
+       * The pattern is: ArrowRight opens a closed node, then steps INTO an open
+       * one; ArrowLeft closes an open node, then steps OUT to its parent.
+       *
+       * ⚠️ This tree deliberately does NOT adopt `useTreeKeyboardNav` (#701a) —
+       * it is a spatial SVG node graph on `aria-activedescendant`, and forcing
+       * it through a hook shaped for DOM lists would impose the wrong shape.
+       * The SEMANTICS are matched to the hook on purpose; the mechanism is not.
+       */
       case 'ArrowRight': {
         e.preventDefault()
         const focused = nodeOrder[focusedIdx]
         if (focused?.startsWith('cat-')) {
           const catId = Number(focused.slice(4))
-          setExpandedCategories(prev => new Set(prev).add(catId))
+          if (!expandedCategories.has(catId)) {
+            setExpandedCategories(prev => new Set(prev).add(catId))
+            break
+          }
         }
+        // Open already (or a leaf): step in, via the SHARED rule — the DOM
+        // trees and this SVG one must not hold two ideas of what a child is.
+        const child = firstChildIndex(nodeLevels, focusedIdx)
+        if (child !== null) setFocusedId(nodeOrder[child])
         break
       }
       case 'ArrowLeft': {
@@ -1191,12 +1287,18 @@ export default function CodebookTreeView({
         const focused = nodeOrder[focusedIdx]
         if (focused?.startsWith('cat-')) {
           const catId = Number(focused.slice(4))
-          setExpandedCategories(prev => {
-            const next = new Set(prev)
-            next.delete(catId)
-            return next
-          })
+          if (expandedCategories.has(catId)) {
+            setExpandedCategories(prev => {
+              const next = new Set(prev)
+              next.delete(catId)
+              return next
+            })
+            break
+          }
         }
+        // Closed already (or a leaf): step out to the parent, same shared rule.
+        const parent = parentIndex(nodeLevels, focusedIdx)
+        if (parent !== null) setFocusedId(nodeOrder[parent])
         break
       }
       case 'Enter':
@@ -1227,7 +1329,10 @@ export default function CodebookTreeView({
         break
       }
     }
-  }, [focusedIdx, nodeOrder, selection, onSelect, multiSelect, onMultiSelectChange, targetingMode, onExitTargeting, onTargetingComplete, categoryOrder, targetFocusIdx, handleZoomIn, handleZoomOut, handleZoomFit])
+    // #773: `expandedCategories` and `nodeLevels` are READ here (open-vs-closed
+    // decides whether an arrow toggles or traverses), so they are deps — a
+    // stale set would make ArrowRight step into a branch it had just closed.
+  }, [focusedIdx, nodeOrder, nodeLevels, expandedCategories, selection, onSelect, multiSelect, onMultiSelectChange, targetingMode, onExitTargeting, onTargetingComplete, categoryOrder, targetFocusIdx, handleZoomIn, handleZoomOut, handleZoomFit])
 
   // Show tooltip on keyboard focus change
   useEffect(() => {
@@ -1288,8 +1393,7 @@ export default function CodebookTreeView({
     const color = n.color
     const isSingleSelected = selectedCatId === cat.id
     const isMultiSelected = multiSelect.has(n.id)
-    const focusedId = focusedIdx >= 0 ? nodeOrder[focusedIdx] : null
-    const isFocused = focusedId === n.id
+    const isFocused = cursorNodeId === n.id
     const dimmed = hasAnySelection && getNodeDimmed(n.id)
     const isCompact = catFormat === 'compact'
     const fontSize = isCompact ? (depth === 0 ? 11 : 10) : (depth === 0 ? 13 : 11)
@@ -1418,8 +1522,7 @@ export default function CodebookTreeView({
     const isMultiSel = multiSelect.has(n.id)
     const isSel = isSingleSel || isMultiSel
     const dimmed = hasAnySelection && getNodeDimmed(n.id)
-    const focusedId = focusedIdx >= 0 ? nodeOrder[focusedIdx] : null
-    const isFocused = focusedId === n.id
+    const isFocused = cursorNodeId === n.id
     const isUniversal = n.type === 'universal-code'
 
     const groupOpacity = dimmed ? (targetingMode ? (isUniversal ? 0.5 : 0.3) : 0.15) : 1
@@ -1673,16 +1776,12 @@ export default function CodebookTreeView({
        * for activedescendant rather than something to undo.
        */
       tabIndex={0}
-      aria-activedescendant={
-        focusedIdx >= 0 && focusedIdx < nodeOrder.length
-          ? nodeDomId(nodeOrder[focusedIdx])
-          : undefined
-      }
+      aria-activedescendant={cursorNodeId ? nodeDomId(cursorNodeId) : undefined}
       onFocus={() => {
         // The resting state the roving version never had: entering the tree puts
         // the cursor on the first node so there is something to announce and to
         // arrow away from. Guarded so re-entering does not discard your place.
-        if (focusedIdx < 0 && nodeOrder.length > 0) setFocusedIdx(0)
+        if (focusedIdx < 0 && nodeOrder.length > 0) setFocusedId(nodeOrder[0])
       }}
       onKeyDown={handleKeyDown}
     >

@@ -1330,6 +1330,12 @@ class TestGetFactorMappingTypeFilter:
     numeric} put the group-name strings into the R factor `levels =` slot (bare,
     unquoted → invalid R) with levels/labels inverted. It must be ignored and fall
     through to the column's scale_labels (or None).
+
+    These columns are ORDINAL, so their cell is `value_numeric` and the emitter
+    never queries for observed values — hence `db=None`. A nominal column would
+    need a real session (#765: its levels include values the declaration never
+    named), and passing None there is meant to fail loudly rather than silently
+    drop them.
     """
 
     def _col(self, **kw):
@@ -1350,24 +1356,28 @@ class TestGetFactorMappingTypeFilter:
         col = self._col()  # no scale_labels
         cg = self._recode("category_group", {"None": "Low", "A lot": "High"}, "categorical")
         # Must NOT return the group-name strings as factor levels — falls to None.
-        assert _get_factor_mapping(col, cg) is None
+        assert _get_factor_mapping(None, col, cg) is None
 
     def test_category_group_primary_falls_through_to_scale_labels(self):
         from app.routers.export_r import _get_factor_mapping
         col = self._col(scale_labels=json.dumps(["Poor", "Fair", "Good"]),
                         scale_values=json.dumps([1, 2, 3]))
         cg = self._recode("category_group", {"1": "Low", "2": "Low", "3": "High"}, "categorical")
-        result = _get_factor_mapping(col, cg)
+        result = _get_factor_mapping(None, col, cg)
         # Priority 2 (scale_labels), NOT the group names.
-        assert result == {"values": [1, 2, 3], "labels": ["Poor", "Fair", "Good"]}
+        assert result == {"levels": [1, 2, 3], "labels": ["Poor", "Fair", "Good"],
+                          "codes": [1, 2, 3]}
 
     def test_scale_map_primary_still_used(self):
         from app.routers.export_r import _get_factor_mapping
         col = self._col()
         sm = self._recode("scale_map", {"Poor": 1, "Good": 3, "Excellent": 5})
-        result = _get_factor_mapping(col, sm)
+        result = _get_factor_mapping(None, col, sm)
         assert result is not None
-        assert result["values"] == [1, 3, 5]
+        # #765: `levels` is what the CSV cell carries — the code here, since an
+        # ordinal cell is `value_numeric` and this primary is not a reverse.
+        assert result["levels"] == [1, 3, 5]
+        assert result["codes"] == [1, 3, 5]
         assert result["labels"] == ["Poor", "Good", "Excellent"]
 
     def test_category_group_with_numeric_output_type_still_ignored(self):
@@ -1375,4 +1385,89 @@ class TestGetFactorMappingTypeFilter:
         from app.routers.export_r import _get_factor_mapping
         col = self._col()
         cg = self._recode("category_group", {"None": "Low"}, output_type="numeric")
-        assert _get_factor_mapping(col, cg) is None
+        assert _get_factor_mapping(None, col, cg) is None
+
+
+class TestDemographicOperands:
+    """#823d — a DEMOGRAPHIC column can be read as a number by a formula.
+
+    **The importer assigns this type itself** to `age`, `income`, `sex` and
+    `race`, and `_compute_value_numeric` returns None for it — so every
+    demographic cell carries `value_numeric = NULL`. `IF([age] < 45, …)`
+    therefore validated as *"Valid"*, previewed null for every row, and raised
+    on save, on exactly the columns a researcher wants to band.
+    """
+
+    def _validated(self, expr: str, column_type: str):
+        from app.services.computed_columns import parse, validate, ColumnInfo
+        return validate(
+            parse(expr),
+            [ColumnInfo(id=1, code="age", text="Age", column_type=column_type)],
+        )
+
+    def test_a_demographic_cell_that_parses_is_a_number(self):
+        from app.services.computed_columns import evaluate
+        r = self._validated('IF([age] < 45, "Low", "High")', "demographic")
+        # The cell as the DB actually holds it: text, no value_numeric.
+        assert evaluate(r.resolved_ast, {1: ("42", None)}) == ("Low", None)
+        assert evaluate(r.resolved_ast, {1: ("70", None)}) == ("High", None)
+
+    def test_it_shares_the_importer_s_parse_rather_than_re_implementing_it(self):
+        from app.services.computed_columns import evaluate
+        r = self._validated('IF([age] < 2000, "Low", "High")', "demographic")
+        # Currency/thousands formatting is handled because `_strip_numeric` is
+        # THE cell-to-number rule; a hand-rolled `float()` would raise here.
+        assert evaluate(r.resolved_ast, {1: ("1,200", None)}) == ("Low", None)
+
+    def test_coercion_is_per_CELL_so_text_stays_text(self):
+        from app.services.computed_columns import evaluate, ExpressionError
+        r = self._validated('IF([age] < 45, "Low", "High")', "demographic")
+        # `sex`/`race` are demographic too. A cell that is not a number must not
+        # become one — the column-wide alternative would invent an ordering.
+        with pytest.raises(ExpressionError):
+            evaluate(r.resolved_ast, {1: ("Male", None)})
+
+    def test_nominal_is_deliberately_NOT_coercible(self):
+        from app.services.computed_columns import evaluate, ExpressionError
+        r = self._validated('IF([age] < 45, "Low", "High")', "nominal")
+        # A nominal cell's value_text IS its label (#494) and the `_TXT`
+        # fallback is load-bearing for `==` comparisons on text columns.
+        with pytest.raises(ExpressionError):
+            evaluate(r.resolved_ast, {1: ("42", None)})
+
+    def test_an_ordered_comparison_on_a_text_column_now_warns(self):
+        # Arithmetic had this warning; `<` `>` `<=` `>=` did not — and a banding
+        # formula is built from those. Before, this reported "Valid", no
+        # warnings, and produced nothing.
+        r = self._validated('IF([age] < 45, "Low", "High")', "nominal")
+        assert any("needs numbers" in w for w in r.warnings), r.warnings
+
+    def test_a_coercible_column_does_not_warn(self):
+        # The positive control: a warning on every demographic comparison would
+        # make the honest case noisy and teach researchers to ignore it.
+        r = self._validated('IF([age] < 45, "Low", "High")', "demographic")
+        assert r.warnings == []
+
+    def test_DEMOGRAPHIC_MUST_NOT_JOIN_VALUE_NUMERIC_TYPES(self):
+        """🔴 The filed remedy for #823d, pinned as a refusal.
+
+        MEASURED: `VALUE_NUMERIC_TYPES` is read by `data_quality._classify_value`
+        (via `numeric_eligible`), the MCAR loader and `comparisons.py`. Because
+        every demographic cell's `value_numeric` is NULL, adding the type there
+        classifies each one `na_unusable` — a member of `_ALWAYS_MISSING`, which
+        the UI toggle cannot switch off — so the Data Quality tab would report
+        ~100% missing on `age`, `sex` and `race`. That is #819 pointing the
+        other way. It would also fix nothing: computed columns read
+        `value_numeric`, which stays NULL either way.
+        """
+        from app.models.dataset import (
+            ColumnType,
+            VALUE_NUMERIC_TYPES,
+            SCALE_SCORE_ELIGIBLE_TYPES,
+            NUMERIC_COERCIBLE_TYPES,
+        )
+        assert ColumnType.DEMOGRAPHIC not in VALUE_NUMERIC_TYPES
+        assert ColumnType.DEMOGRAPHIC not in SCALE_SCORE_ELIGIBLE_TYPES
+        assert ColumnType.DEMOGRAPHIC in NUMERIC_COERCIBLE_TYPES
+        # The sets answer different questions and must not converge.
+        assert not (NUMERIC_COERCIBLE_TYPES & VALUE_NUMERIC_TYPES)

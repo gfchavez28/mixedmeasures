@@ -20,6 +20,7 @@ import {
   MetricDefinitionSummaryResponse,
 } from '@/lib/api'
 import DomainPickerDetail from '@/components/analysis/DomainPickerDetail'
+import { variableViewPath } from '@/lib/dataset-routes'
 
 export type PickerMode = 'columns' | 'domains'
 
@@ -35,7 +36,6 @@ interface ColumnPickerProps {
   expandedDatasetId: number | null
   onToggleDataset: (datasetId: number) => void
   onViewAcrossDatasets?: (domainId: number) => void
-  onEditColumn?: (column: AnalysisColumnItem) => void
   // Phase 4.7/4.8 — DomainPickerDetail inline expansion
   domainsFull?: AnalysisDomainResponse[]
   metrics?: MetricDefinitionSummaryResponse[]
@@ -57,7 +57,6 @@ export function ColumnPicker({
   expandedDatasetId,
   onToggleDataset,
   onViewAcrossDatasets,
-  onEditColumn,
   domainsFull,
   metrics,
   onCreateScoreMetric,
@@ -222,7 +221,6 @@ export function ColumnPicker({
             onToggleDataset={onToggleDataset}
             onSelectAllDataset={onSelectAllDataset}
             onViewAcrossDatasets={onViewAcrossDatasets}
-            onEditColumn={onEditColumn}
           />
         )}
       </TabsContent>
@@ -269,7 +267,6 @@ function ColumnsView({
   onToggleDataset,
   onSelectAllDataset,
   onViewAcrossDatasets,
-  onEditColumn,
 }: {
   projectId: number
   datasets: AnalysisDatasetGroup[]
@@ -280,7 +277,6 @@ function ColumnsView({
   onToggleDataset: (dsId: number) => void
   onSelectAllDataset: (datasetId: number, columnIds: number[], select: boolean) => void
   onViewAcrossDatasets?: (domainId: number) => void
-  onEditColumn?: (column: AnalysisColumnItem) => void
 }) {
   if (datasets.length === 0) {
     return <div className="px-3 py-2 text-xs text-mm-text-faint italic">No variables found</div>
@@ -352,7 +348,6 @@ function ColumnsView({
                   equivInfo={equivInfo}
                   onToggleColumn={onToggleColumn}
                   onViewAcrossDatasets={onViewAcrossDatasets}
-                  onEditColumn={onEditColumn}
                 />
               </div>
             )}
@@ -371,7 +366,6 @@ function ColumnListbox({
   equivInfo,
   onToggleColumn,
   onViewAcrossDatasets,
-  onEditColumn,
 }: {
   projectId: number
   columns: AnalysisColumnItem[]
@@ -380,7 +374,6 @@ function ColumnListbox({
   equivInfo: EquivInfo
   onToggleColumn: (id: number) => void
   onViewAcrossDatasets?: (domainId: number) => void
-  onEditColumn?: (column: AnalysisColumnItem) => void
 }) {
   const { focusedIndex, getItemProps, listProps } = useListKeyboardNav({
     itemCount: columns.length,
@@ -414,7 +407,6 @@ function ColumnListbox({
             onToggle={() => onToggleColumn(q.id)}
             onMouseEnter={itemProps.onMouseEnter}
             onViewAcrossDatasets={onViewAcrossDatasets}
-            onEditColumn={onEditColumn}
             dataFocused={itemProps['data-focused']}
           />
         )
@@ -435,7 +427,6 @@ function ColumnRow({
   onToggle,
   onMouseEnter,
   onViewAcrossDatasets,
-  onEditColumn,
   dataFocused,
 }: {
   projectId: number
@@ -449,7 +440,6 @@ function ColumnRow({
   onToggle: () => void
   onMouseEnter: () => void
   onViewAcrossDatasets?: (domainId: number) => void
-  onEditColumn?: (column: AnalysisColumnItem) => void
   dataFocused?: boolean
 }) {
   const label = q.column_name || q.column_text
@@ -524,18 +514,20 @@ function ColumnRow({
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        {onEditColumn && (
-          <ContextMenuItem onClick={() => onEditColumn(q)}>
-            Column Details...
-          </ContextMenuItem>
-        )}
+        {/* 🔴 "Column Details…" is GONE from here, and it was the worst of its
+            three copies: it saved through the manual-only PATCH and carried NO
+            source gate at all, so it 403'd on every imported and computed
+            column — which in a real corpus is nearly all of them. The popover
+            had the #575 gate; this sibling and the Data view's context menu
+            never got it. One home now, one line below, where the gate lives
+            once (design note E — the popover thinning). */}
         <ContextMenuItem asChild>
           <a
-            href={`/projects/${projectId}/datasets/${q.dataset_id}/recode?column=${q.id}`}
+            href={variableViewPath(projectId, q.dataset_id, q.id)}
             target="_blank"
             rel="noopener noreferrer"
           >
-            Edit in Recode Workbench
+            Edit in the Variables view
           </a>
         </ContextMenuItem>
       </ContextMenuContent>

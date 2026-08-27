@@ -1,10 +1,16 @@
 from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
+from ..models.memo import MEMO_ENTITY_TYPES
 from .common import UTCTimestamp
+
+#: DERIVED from the model's vocabulary, never re-typed (#780). The literal that
+#: used to live here was one of five hand-maintained copies; this one cannot
+#: drift from `MEMO_ENTITY_TYPES` because it is built from it.
+_ENTITY_TYPE_PATTERN = rf'^({"|".join(MEMO_ENTITY_TYPES)})$'
 
 
 class MemoCreate(BaseModel):
-    entity_type: str = Field(..., pattern=r'^(project|conversation|observation|document|code|code_category|analysis|dataset|dataset_row|dataset_column|canvas)$')
+    entity_type: str = Field(..., pattern=_ENTITY_TYPE_PATTERN)
     entity_id: int
     title: str | None = Field(None, max_length=255)
     content: str = ""

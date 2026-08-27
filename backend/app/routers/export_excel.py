@@ -29,8 +29,13 @@ from ..models.metric import MetricDefinition
 from ..models.excerpt import Excerpt, segment_has_any_quote_filter
 from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
 from ..models.equivalence_group import EquivalenceGroup
+from ..services.grouping import MISSING_GROUP_LABEL
 from ..services.recode import compute_value
-from ..services.missing_values import parse_missing_rules
+from ..services.missing_values import (
+    describe_missing_rules,
+    is_missing,
+    parse_missing_rules,
+)
 from ..services.metrics import resolve_input_source_labels
 from ..services.coding_layers import (
     CONSENSUS_ORIGIN,
@@ -57,7 +62,7 @@ router = APIRouter(tags=["export"])
 
 
 @router.get("/excel")
-async def export_study_excel(
+def export_study_excel(
     project_id: int,
     include_coded_data: bool = True,
     include_matrix: bool = True,
@@ -648,7 +653,7 @@ async def export_study_excel(
 
 
 @router.get("/datasets-excel")
-async def export_datasets_excel(
+def export_datasets_excel(
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -751,6 +756,7 @@ async def export_datasets_excel(
                     "text": column.column_text,
                     "type": column.column_type.value,
                     "scale_labels": scale_labels_str,
+                    "missing": describe_missing_rules(missing_rules_by_col.get(column.id)),
                     "source": column.source or "imported",
                     "recode_name": "",
                     "recode_type": "",
@@ -779,6 +785,7 @@ async def export_datasets_excel(
                         "text": column.column_text,
                         "type": column.column_type.value,
                         "scale_labels": scale_labels_str,
+                        "missing": describe_missing_rules(missing_rules_by_col.get(column.id)),
                         "source": column.source or "imported",
                         "recode_name": rd.name + (" (primary)" if rd.is_primary else ""),
                         "recode_type": rd.recode_type.value if hasattr(rd.recode_type, 'value') else str(rd.recode_type),
@@ -825,16 +832,38 @@ async def export_datasets_excel(
                 if answer is None:
                     ws.cell(row=row_idx, column=col_idx, value="")
                 elif recode_def is None:
-                    # Raw value column — value_text is respondent free-text,
-                    # exported UN-blanked ON PURPOSE (#592 §I.10 / #611e): this
-                    # sheet is the researcher's raw-data escape hatch, so a
-                    # declared-missing "99" or a recognized "N/A" stays visible
-                    # here — the deliberate ASYMMETRY with the R export's
-                    # _text_cell, which blanks missing cells because R would
-                    # otherwise keep them as factor groups the tool's own
-                    # analyses exclude. The recode columns beside this one DO
-                    # honor the declaration (NULL under the missing rules).
-                    excel_set_safe(ws.cell(row=row_idx, column=col_idx), answer.value_text or "")
+                    # Raw value column.
+                    #
+                    # 🔴 **A missing cell is EMPTY here, matching the R export
+                    # (#822, 2026-08-25) — and this REVERSES the #592 §I.10 /
+                    # #611e decision that used to sit in this comment.** That
+                    # decision made this sheet a raw-data escape hatch where a
+                    # declared "99" or a recognized "N/A" stayed visible; the
+                    # cost, measured on a real survey, is that the two exports
+                    # of one project disagreed about what the sample IS. R
+                    # blanked and Excel wrote the sentinel text (1,099,939
+                    # cells), so a recipient comparing them got a different N,
+                    # and anyone averaging a column in Excel silently included
+                    # "No answer" rows — a text sentinel in a numeric column is
+                    # a trap in the tool people actually open it in.
+                    #
+                    # ⚠️ **IDENTIFIER columns are the exception, and it is
+                    # carried over from R deliberately (#533): an ID is a join
+                    # key, not an analysis value.** Blanking an "N/A"-looking
+                    # identifier would make the Excel export unjoinable exactly
+                    # where the R export stays joinable — the same divergence
+                    # this fix exists to remove, pointing the other way.
+                    #
+                    # The DISTINCTION between "Do not know", "No answer" and
+                    # "Inapplicable" is preserved by the Data Dictionary's
+                    # Missing Values column, not by the cell.
+                    raw_text = answer.value_text or ""
+                    if (
+                        column.column_type != ColumnType.IDENTIFIER
+                        and is_missing(raw_text, missing_rules_by_col.get(column.id))
+                    ):
+                        raw_text = ""
+                    excel_set_safe(ws.cell(row=row_idx, column=col_idx), raw_text)
                 elif recode_def.is_primary:
                     # Primary recode: use stored value_numeric
                     val = answer.value_numeric
@@ -857,8 +886,14 @@ async def export_datasets_excel(
     ws_dict = wb.create_sheet("Data Dictionary")
     worksheets.append(ws_dict)
 
+    # #822: "Missing Values" sits beside the scale it qualifies. Without it the
+    # export whose stated purpose is "with Data Dictionary" shipped a file in
+    # which the single most important interpretive fact about a column — which
+    # of its codes are non-answers — was absent, and (since the cells are now
+    # blanked to match R) unrecoverable from the data sheet.
     dict_headers = ["Dataset", "Code", "Column label", "Type", "Scale Labels",
-                     "Source", "Recode Name", "Recode Type", "Mapping"]
+                     "Missing Values", "Source", "Recode Name", "Recode Type",
+                     "Mapping"]
     for col_idx, header in enumerate(dict_headers, 1):
         cell = ws_dict.cell(row=1, column=col_idx, value=header)
         cell.fill = header_fill
@@ -871,10 +906,11 @@ async def export_datasets_excel(
         excel_set_safe(ws_dict.cell(row=row_idx, column=3), row_data["text"])
         ws_dict.cell(row=row_idx, column=4, value=row_data["type"])
         excel_set_safe(ws_dict.cell(row=row_idx, column=5), row_data["scale_labels"])
-        ws_dict.cell(row=row_idx, column=6, value=row_data["source"])
-        excel_set_safe(ws_dict.cell(row=row_idx, column=7), row_data["recode_name"])
-        ws_dict.cell(row=row_idx, column=8, value=row_data["recode_type"])
-        excel_set_safe(ws_dict.cell(row=row_idx, column=9), row_data["mapping"])
+        excel_set_safe(ws_dict.cell(row=row_idx, column=6), row_data["missing"])
+        ws_dict.cell(row=row_idx, column=7, value=row_data["source"])
+        excel_set_safe(ws_dict.cell(row=row_idx, column=8), row_data["recode_name"])
+        ws_dict.cell(row=row_idx, column=9, value=row_data["recode_type"])
+        excel_set_safe(ws_dict.cell(row=row_idx, column=10), row_data["mapping"])
 
     # ==================== Computed Metrics Sheets ====================
 
@@ -1037,11 +1073,28 @@ async def export_datasets_excel(
                 # Section header
                 ws_detail.cell(row=detail_row, column=1, value="FREQUENCY DISTRIBUTIONS")
                 ws_detail.cell(row=detail_row, column=1).font = Font(bold=True, size=12)
-                ws_detail.merge_cells(start_row=detail_row, start_column=1, end_row=detail_row, end_column=5)
+                ws_detail.merge_cells(start_row=detail_row, start_column=1, end_row=detail_row, end_column=7)
+                detail_row += 1
+
+                # queue #42: the interval must say what KIND it is, and a
+                # spreadsheet has no tooltip to put that in — so the disclosure
+                # is a row of its own. Without it a reader would reasonably take
+                # seven categories' intervals as jointly covering at 95%, which
+                # is the one thing per-category binomial intervals do not do.
+                ws_detail.cell(
+                    row=detail_row, column=1,
+                    value="95% Wilson score interval, computed separately for each response "
+                          "option (binomial, not simultaneous across options).",
+                )
+                ws_detail.cell(row=detail_row, column=1).font = Font(italic=True, size=9)
+                ws_detail.merge_cells(start_row=detail_row, start_column=1, end_row=detail_row, end_column=7)
                 detail_row += 1
 
                 # Column headers
-                freq_headers = ["Metric", "Response Option", "Count", "Percentage", "Valid N"]
+                freq_headers = [
+                    "Metric", "Response Option", "Count", "Percentage",
+                    "95% CI Lower", "95% CI Upper", "Valid N",
+                ]
                 for col_idx, header in enumerate(freq_headers, 1):
                     cell = ws_detail.cell(row=detail_row, column=col_idx, value=header)
                     cell.fill = header_fill
@@ -1058,11 +1111,31 @@ async def export_datasets_excel(
                     source_label = label_map.get(
                         (metric.input_source_type, metric.input_source_id), metric.name
                     )
-                    distribution = rd.get("distribution", {})
+                    # #766: this read `rd.get("distribution", {})` — a key NO
+                    # producer has ever written. `compute_frequency_distribution`
+                    # returns `counts` / `percentages` / `scale_order`, so the
+                    # loop below ran zero times and every Excel export emitted
+                    # this section as bare headers. `frequency_distribution` is
+                    # the DEFAULT metric type, so that is the most common metric
+                    # in the app, absent from the export, silently, with no test
+                    # covering the section.
+                    #
+                    # Iterate `scale_order`, not the dict: that is the ordering
+                    # seam (#406, numeric-aware) and it is what puts a declared
+                    # level nobody chose in its declared place rather than at the
+                    # end — the zero-fill (#577/#591) means those keys exist here.
+                    counts = rd.get("counts", {}) or {}
+                    percentages = rd.get("percentages", {}) or {}
+                    order = rd.get("scale_order") or list(counts.keys())
+                    # queue #42. Absent on rows computed before it — those export
+                    # blank CI cells rather than a fabricated interval.
+                    ci_lower = rd.get("ci_lower_by_label", {}) or {}
+                    ci_upper = rd.get("ci_upper_by_label", {}) or {}
                     valid_n = result.valid_n
 
                     first_row = True
-                    for option, count in distribution.items():
+                    for option in order:
+                        count = counts.get(option, 0)
                         excel_set_safe(
                             ws_detail.cell(row=detail_row, column=1),
                             source_label if first_row else "",
@@ -1070,17 +1143,30 @@ async def export_datasets_excel(
                         # `option` is a scale-label key, user-supplied.
                         excel_set_safe(ws_detail.cell(row=detail_row, column=2), option)
                         ws_detail.cell(row=detail_row, column=3, value=count)
-                        pct = (count / valid_n * 100) if valid_n else 0
-                        ws_detail.cell(row=detail_row, column=4,
-                                       value=round(pct, EXPORT_VALUE_PRECISION))
+                        # Read the percentage the server computed; do NOT
+                        # recompute it from count/valid_n. That was a second
+                        # copy of one fact (#733) — and the two would diverge the
+                        # moment the denominator rule changes, which #592 already
+                        # did once for declared-missing values.
+                        pct = percentages.get(option)
+                        if pct is not None:
+                            ws_detail.cell(row=detail_row, column=4,
+                                           value=round(pct, EXPORT_VALUE_PRECISION))
+                        lo, hi = ci_lower.get(option), ci_upper.get(option)
+                        if lo is not None:
+                            ws_detail.cell(row=detail_row, column=5,
+                                           value=round(lo, EXPORT_VALUE_PRECISION))
+                        if hi is not None:
+                            ws_detail.cell(row=detail_row, column=6,
+                                           value=round(hi, EXPORT_VALUE_PRECISION))
                         if first_row:
-                            ws_detail.cell(row=detail_row, column=5, value=valid_n)
+                            ws_detail.cell(row=detail_row, column=7, value=valid_n)
                         first_row = False
                         detail_row += 1
 
                     if metric.stale:
-                        for r in range(detail_row - len(distribution), detail_row):
-                            for c in range(1, 6):
+                        for r in range(detail_row - len(order), detail_row):
+                            for c in range(1, 8):
                                 ws_detail.cell(row=r, column=c).fill = stale_fill
 
                     detail_row += 1  # blank row separator
@@ -1208,7 +1294,7 @@ async def export_datasets_excel(
                     # rather than emitting a blank-looking group (#506).
                     excel_set_safe(
                         ws_grouped.cell(row=group_row, column=7),
-                        "(Missing)" if result.group_value is None else result.group_value,
+                        MISSING_GROUP_LABEL if result.group_value is None else result.group_value,
                     )
                     if value is not None:
                         ws_grouped.cell(row=group_row, column=8, value=round(value, EXPORT_VALUE_PRECISION))

@@ -52,8 +52,39 @@ export default function QualComparisonTable({
   showEffectSize = true,
   onCodeClick,
 }: QualComparisonTableProps) {
-  const { groups, group_totals, codes: entries } = data
+  const { groups, group_totals, codes: allEntries } = data
   const is2Group = groups.length === 2
+
+  /**
+   * #830(g): a code applied NOWHERE is not a row of this table by default.
+   *
+   * Measured on the Ferncrest corpus: 32 rows, 20 of them reading `– – – 0`,
+   * on a 12-code result. The payload is the whole codebook, which is right —
+   * the server cannot know whether a researcher wants to see what went unused
+   * — but the default reading of a comparison table is "how do these groups
+   * differ", and two thirds of it answering "not at all, about a code nobody
+   * applied" is what makes the twelve real rows hard to find.
+   *
+   * ⚠️ The count is STATED and the rows stay one click away. An unused code IS
+   * a finding for some questions ("did anyone use my new code?"), so this
+   * hides them, never drops them — the Batch B rule that a bound chosen for
+   * readability must not silently decide relevance.
+   */
+  const [showEmpty, setShowEmpty] = useState(false)
+  const emptyCount = useMemo(
+    () => allEntries.filter(e => Object.values(e.by_group).every(s => (s?.count ?? 0) === 0)).length,
+    [allEntries],
+  )
+  // ⚠️ If EVERY code is unused, hiding them leaves a table with a header and
+  // nothing under it, which reads as a broken screen rather than an answer.
+  const hidingWouldEmptyTheTable = emptyCount === allEntries.length
+  const hideEmpty = !showEmpty && !hidingWouldEmptyTheTable && emptyCount > 0
+  const entries = useMemo(
+    () => (hideEmpty
+      ? allEntries.filter(e => !Object.values(e.by_group).every(s => (s?.count ?? 0) === 0))
+      : allEntries),
+    [allEntries, hideEmpty],
+  )
   const [sortKey, setSortKey] = useState<SortKey>(is2Group ? 'delta' : 'p')
   const [sortDir, setSortDir] = useState<SortDir>(is2Group ? 'desc' : 'asc')
 
@@ -104,9 +135,29 @@ export default function QualComparisonTable({
 
   return (
     <div>
+      {/* #830(g): the hidden rows are DECLARED, never quietly dropped. */}
+      {emptyCount > 0 && !hidingWouldEmptyTheTable && (
+        <div className="flex items-center gap-2 pb-1.5 text-[11px] text-mm-text-muted">
+          <span>
+            {showEmpty
+              ? `Showing all ${allEntries.length} codes, including ${emptyCount} applied to nothing in this comparison.`
+              : `${emptyCount} of ${allEntries.length} codes were applied to nothing here and are hidden.`}
+          </span>
+          <button
+            type="button"
+            className="underline hover:text-mm-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mm-blue rounded"
+            onClick={() => setShowEmpty(v => !v)}
+          >
+            {showEmpty ? 'Hide unused codes' : 'Show them'}
+          </button>
+        </div>
+      )}
       <div className="overflow-x-auto border rounded-lg">
         <table className="w-full text-xs" style={{ borderCollapse: 'collapse' }}>
-          <caption className="sr-only">Code frequencies compared across demographic groups.</caption>
+          <caption className="sr-only">
+            Code frequencies compared across demographic groups.
+            {hideEmpty ? ` ${emptyCount} codes applied to nothing in this comparison are hidden.` : ''}
+          </caption>
           <thead>
             {/* Group header row for multi-group */}
             {!is2Group && (

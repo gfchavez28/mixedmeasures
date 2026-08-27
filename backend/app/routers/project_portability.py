@@ -33,6 +33,7 @@ from ..services.codebook_exchange import (
 from ..services.project_portability import (
     MAX_UPLOAD_SIZE,
     MergeDivergenceError,
+    ProjectTooLargeError,
     build_merge_coder_preview,
     build_merge_code_preview,
     export_project,
@@ -114,6 +115,11 @@ async def export_project_endpoint(
     docs_dir, media_dir = _get_data_dirs()
     try:
         buf = export_project(db, project_id, docs_dir, media_dir, include_media=include_media)
+    except ProjectTooLargeError as e:
+        # #842: caught BEFORE the generic arm. The project exists and is perfectly
+        # readable — it is simply too large to put in one archive, and answering 404
+        # would tell the researcher it was not found (#797's defect exactly).
+        raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
         raise HTTPException(404, str(e))
     slug = _slugify(project.name)
@@ -163,6 +169,10 @@ async def duplicate_project_endpoint(
 
     try:
         buf = export_project(db, project_id, docs_dir, media_dir)
+    except ProjectTooLargeError as e:
+        # #842 — Duplicate Project runs through the SAME export machinery, which is
+        # why it broke too and why nobody connected the two. Same refusal, same words.
+        raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
         raise HTTPException(404, str(e))
 
@@ -482,7 +492,13 @@ async def import_codebook_endpoint(
     # multi-tenant auth a file holder could inject codes into any project.
     _get_project_or_404(db, project_id, user.id)
     content = await read_upload_with_limit(file, 10 * 1024 * 1024)
-    content_str = content.decode("utf-8")
+    # "utf-8-sig" strips a leading BOM if present and is byte-identical to "utf-8"
+    # when absent. REQUIRED for foreign files: QualCoder writes its codebook with
+    # encoding='utf-8-sig' (refi.py::export_codebook), and a plain utf-8 decode
+    # leaves U+FEFF at the head — which str.lstrip() does NOT remove (it is not
+    # whitespace), so the XML sniff below missed and every QualCoder .qdc was
+    # rejected as malformed JSON: "Unexpected UTF-8 BOM". #760.
+    content_str = content.decode("utf-8-sig")
 
     # Detect format by content (XML vs JSON)
     is_xml = content_str.lstrip().startswith("<?xml") or content_str.lstrip().startswith("<")

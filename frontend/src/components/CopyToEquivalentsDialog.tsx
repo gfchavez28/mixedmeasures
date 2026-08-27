@@ -225,6 +225,10 @@ export function CopyToEquivalentsDialog({
             output_type: def.output_type,
             mapping,
             exclude_values: excludeValues?.length ? excludeValues : null,
+            // #587: provenance, as in CopyRecodeDialog — the sibling copy path
+            // the issue did not name. See that file for why routing through the
+            // backend `copy_to` endpoint would be wrong here.
+            source_definition_id: def.id,
           })
           success++
         } catch {

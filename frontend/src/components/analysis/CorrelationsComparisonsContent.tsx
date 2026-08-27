@@ -8,6 +8,8 @@ import {
   Table,
   GitCompareArrows,
   BarChart3,
+  BoxSelect,
+  Spline,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { correlationsApi, comparisonsApi, downloadBlob } from '@/lib/api'
@@ -26,8 +28,29 @@ import CorrelationMatrixTable from '@/components/charts/CorrelationMatrixTable'
 import ScatterMatrix from '@/components/charts/ScatterMatrix'
 import GroupComparisonTable from '@/components/charts/GroupComparisonTable'
 import DumbbellChart from '@/components/charts/DumbbellChart'
+import BoxPlotChart from '@/components/charts/BoxPlotChart'
+import QQPlotChart from '@/components/charts/QQPlotChart'
 import GroupedScalarBarChart from '@/components/charts/GroupedScalarBarChart'
 import ComparisonTestStrip from '@/components/analysis/ComparisonTestStrip'
+import {
+  COMPARISON_CHART_TYPES,
+  COMPARISON_CHART_LABELS,
+  type ComparisonChartType,
+} from '@/lib/comparison-chart-types'
+import ComparisonUnavailable from '@/components/analysis/ComparisonUnavailable'
+
+/**
+ * ⚠️ `satisfies Record<ComparisonChartType, …>` so a new output type is a
+ * COMPILE error here until it has an icon — the point of single-sourcing the
+ * vocabulary (#525b). Icons stay in the component because they are a UI import.
+ */
+const COMPARISON_CHART_ICONS = {
+  comparison_table: Table,
+  comparison_dumbbell: GitCompareArrows,
+  comparison_grouped_bar: BarChart3,
+  comparison_box: BoxSelect,
+  comparison_qq: Spline,
+} satisfies Record<ComparisonChartType, typeof Table>
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -56,7 +79,7 @@ export interface CorrelationsComparisonsContentProps {
   compareBy2: number | null
   testType: 'auto' | 't_test' | 'anova'
   nonparametric: boolean
-  rcChartType: 'comparison_table' | 'comparison_dumbbell' | 'comparison_grouped_bar'
+  rcChartType: ComparisonChartType
   comparisonData: GroupComparisonResponse | undefined
   isComparisonFetching: boolean
   excludeGroups: string[]
@@ -281,11 +304,10 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
                 className="flex items-center gap-0.5 p-1 bg-mm-bg rounded-lg border flex-wrap"
                 onKeyDown={handleToolbarKeyDown}
               >
-                {([
-                  { type: 'comparison_table' as const, icon: Table, label: 'Table' },
-                  { type: 'comparison_dumbbell' as const, icon: GitCompareArrows, label: 'Dumbbell' },
-                  { type: 'comparison_grouped_bar' as const, icon: BarChart3, label: 'Grouped' },
-                ]).map(({ type, icon: Icon, label }) => (
+                {COMPARISON_CHART_TYPES.map(type => {
+                  const Icon = COMPARISON_CHART_ICONS[type]
+                  const label = COMPARISON_CHART_LABELS[type]
+                  return (
                   <button
                     key={type}
                     className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs transition-colors ${
@@ -301,7 +323,8 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
                     <Icon className="w-3.5 h-3.5" />
                     {label}
                   </button>
-                ))}
+                  )
+                })}
               </div>
               <div className="ml-auto">
                 <button
@@ -377,6 +400,46 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
                 </ChartExportWrapper>
               )}
 
+              {/* #522b — one box per group, per comparison ROW. A box plot is a
+                  single variable's distribution across groups, so several
+                  selected variables draw several charts rather than one crowded
+                  one; `rows` is already per-variable. */}
+              {rcChartType === 'comparison_box' && comparisonData.rows.map(row => (
+                <ChartExportWrapper
+                  key={row.source_id}
+                  title={`${row.full_label} by ${comparisonData.group_column_label}`}
+                  supportsSvg={false}
+                  filename={`comparison-box-${row.label}`}
+                >
+                  <BoxPlotChart
+                    groups={row.group_stats}
+                    formatting={rcFormatting}
+                    valueLabel={row.full_label}
+                  />
+                  <ComparisonTestStrip rows={[row]} sigLevels={sigLevels} nonparametric={nonparametric} />
+                </ChartExportWrapper>
+              ))}
+
+              {/* #525b — one Q–Q panel per comparison ROW, not per group:
+                  normality is a property of the model's RESIDUALS, which is
+                  also why Levene already rides the row. Per-group panels would
+                  multiply without bound (nine groups × five variables = 45). */}
+              {rcChartType === 'comparison_qq' && comparisonData.rows.map(row => (
+                <ChartExportWrapper
+                  key={row.source_id}
+                  title={`${row.full_label} by ${comparisonData.group_column_label} — normal Q–Q`}
+                  supportsSvg={false}
+                  filename={`comparison-qq-${row.label}`}
+                >
+                  <QQPlotChart
+                    qq={row.qq}
+                    formatting={rcFormatting}
+                    valueLabel={row.full_label}
+                  />
+                  <ComparisonTestStrip rows={[row]} sigLevels={sigLevels} nonparametric={nonparametric} />
+                </ChartExportWrapper>
+              ))}
+
               {rcChartType === 'comparison_grouped_bar' && (
                 <ChartExportWrapper
                   title={`Group Comparison: ${comparisonData.group_column_label}`}
@@ -395,9 +458,11 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
               )}
             </>
           ) : comparisonData ? (
-            <div className="flex flex-col items-center justify-center py-16 text-mm-text-faint text-sm">
-              <p>No comparison data available. The selected demographic may have fewer than 2 groups.</p>
-            </div>
+            <ComparisonUnavailable
+              pid={pid}
+              reason={comparisonData.unavailable_reason}
+              domainIds={rcDomainIds}
+            />
           ) : null}
         </div>
       )}

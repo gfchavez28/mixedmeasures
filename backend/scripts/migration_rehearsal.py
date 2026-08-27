@@ -27,7 +27,7 @@ migrations (RELEASING §4c).
 
 Usage (from backend/, venv active, sqlcipher3 installed):
 
-    python scripts/migration_rehearsal.py --from-revision b3f1d9a7c2e5
+    python scripts/migration_rehearsal.py --from-revision b8e4c2a70d19   # v1.4.0
 
 `--from-revision` is the Alembic head of the PREVIOUS release. Find it with:
 
@@ -80,47 +80,61 @@ def _cols(conn, table: str) -> set[str]:
     return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
 
-# ── What THIS release's migrations must CHANGE ───────────────────────────────
+# ── What THIS release's migration must do ────────────────────────────────────
 #
 # ⚠️ **Review this block at every cut, exactly like `--from-revision`.** It is the
-# half the script was missing: v1.3.0 carried only STRUCTURAL migrations (table
-# rebuilds), where "every row and every link is unchanged" is the whole of
+# half the script was missing at v1.3.1: v1.3.0 carried only STRUCTURAL migrations
+# (table rebuilds), where "every row and every link is unchanged" is the whole of
 # correctness. A DATA-REPAIR migration inverts that — the rows it is supposed to
-# rewrite MUST move, and a corpus on which it no-ops proves nothing while exiting
-# 0.
+# rewrite MUST move, and a corpus on which it no-ops proves nothing while exiting 0.
 #
-# Both v1.3.1 migrations are repairs, and the pre-existing corpus made both
-# guaranteed no-ops: `a1b2c3d4e5f7` only touches char-range excerpts on segments
-# containing an ASTRAL character (the corpus text was ASCII), and
-# `b8e4c2a70d19` is scoped `WHERE conversation_id IS NULL` (the corpus's one note
-# was a conversation note). Every fixture below is therefore placed where the old
-# and new behaviour DISAGREE, with an untouched sibling beside it — a migration
-# that converted everything is as wrong as one that converted nothing, and only
-# the pair can tell them apart.
+# ── v1.4.0 (2026-08-27) — STRUCTURAL, and the two v1.3.1 fixtures CHANGE SIDES ──
+#
+# This cut carries exactly one migration, `d7f3a91c8b24` (Decision B provenance),
+# and it is a rebuild: `batch_alter_table('dataset_columns', recreate='always')`
+# to add `derived_from_column_id` + `derived_via`. So invariance IS correctness
+# here, and the interesting table is `dataset_columns` — whose children
+# (`dataset_values`, `recode_definitions`) are the cascade canaries, because
+# SQLite's DROP+RENAME would take them with it if `PRAGMA foreign_keys` were ever
+# left ON.
+#
+# 🔴 The v1.3.1 repairs (`a1b2c3d4e5f7` astral offsets, `b8e4c2a70d19` note
+# numbering) now sit AT OR BELOW `--from-revision`, so they DO NOT RUN in this
+# rehearsal. Their fixtures are kept, but seeded at their POST-repair values — the
+# state a real v1.3.2 database is already in — and asserted as rows this release
+# must NOT touch. Deleting them would throw away coverage of the shapes a rebuild
+# damages; leaving them on the "must change" side would fail for the wrong reason,
+# which is what this script did as written.
+#
+# What v1.4.0 must CHANGE is the schema, so the "must change" assertions below are
+# structural — plus one BEHAVIOURAL check. Reflecting the FK back only re-reads
+# what the migration wrote; deleting a source column and watching the dependent
+# go NULL is the assertion that the declared `ON DELETE SET NULL` is real.
 
-# #687 — offsets are UTF-16 code UNITS before the repair, code POINTS after.
+# The v1.3.1 fixtures, now seeded post-repair and asserted INVARIANT.
 #
 #   text          "🙂 alpha"
-#   code points   [🙂][ ][a][l][p][h][a]        → "alpha" is 2..7
-#   UTF-16 units  [🙂 = 2 units][ ][a]…         → "alpha" is 3..8
-#
-# So the buggy value a browser stored is (3, 8) and the repaired value is (2, 7);
-# both resolve to "alpha", which is the point. Written out rather than computed,
-# so this is an independent expectation and not a second copy of the migration.
+#   code points   [🙂][ ][a][l][p][h][a]        → "alpha" is 2..7   ← stored today
+#   UTF-16 units  [🙂 = 2 units][ ][a]…         → "alpha" is 3..8   ← the old bug
 ASTRAL_SEGMENT_TEXT = "\U0001F642 alpha"
 ASTRAL_EXCERPT_ID = 3
-ASTRAL_OFFSETS_BEFORE = (3, 8)
-ASTRAL_OFFSETS_AFTER = (2, 7)
+ASTRAL_OFFSETS = (2, 7)
 
-# #747 — non-conversation notes were written with a literal 0 and are numbered
-# 1..N per parent, in id order. Conversation notes already held real numbers and
-# are deliberately NOT touched (a researcher may have cited them).
-NOTE_SEQ_AFTER = [
-    (1, 1),   # conversation note — untouched, still 1
+# #747 numbering as a repaired database already holds it: 1..N per parent, in id
+# order, restarting for each parent. Nothing in this release may renumber these.
+NOTE_SEQ_INVARIANT = [
+    (1, 1),   # conversation note
     (2, 1),   # document 1, first by id
     (3, 2),   # document 1, second by id
     (4, 1),   # observation clip — its own parent, so numbering restarts
 ]
+
+# `dataset_columns` is the table this release REBUILDS. Ids are deliberately
+# NON-CONTIGUOUS: a rebuild that renumbers instead of preserving ids breaks every
+# child FK, and contiguous ids would let that pass.
+DC_SOURCE, DC_TARGET, DC_EQUIV, DC_PLAIN = 41, 47, 53, 61
+NEW_COLUMNS = ("derived_from_column_id", "derived_via")
+NEW_INDEX = "ix_dataset_columns_derived_from_column_id"
 
 
 def seed(db_path: Path) -> dict:
@@ -176,27 +190,28 @@ def seed(db_path: Path) -> dict:
       "created_at, updated_at) VALUES (1,1,10,NULL,NULL,?,?), (2,1,11,4,18,?,?)",
       (NOW, NOW, NOW, NOW))
 
-    # #687: an astral segment + a char-range quote carrying UTF-16 offsets. Its
-    # ASCII sibling above (excerpt 2, segment 11) is the other half of the pair —
-    # it must come through untouched.
+    # An astral segment + a char-range quote at REPAIRED (code-point) offsets, as a
+    # v1.3.2 database already holds them. Its ASCII sibling above (excerpt 2,
+    # segment 11) is the other half of the pair. Both must come through untouched:
+    # astral text is where a careless rebuild-and-recopy would mangle encoding.
     x("INSERT INTO segments (id, conversation_id, sequence_order, text, created_at, "
       "is_starred, is_merge_result, is_split_result) VALUES (19,1,19,?,?,0,0,0)",
       (ASTRAL_SEGMENT_TEXT, NOW))
     x("INSERT INTO excerpt (id, project_id, segment_id, start_offset, end_offset, "
       "created_at, updated_at) VALUES (?,1,19,?,?,?,?)",
-      (ASTRAL_EXCERPT_ID, *ASTRAL_OFFSETS_BEFORE, NOW, NOW))
+      (ASTRAL_EXCERPT_ID, *ASTRAL_OFFSETS, NOW, NOW))
 
     x("INSERT INTO notes (id, conversation_id, segment_id, content, sequence_number, "
       "is_archived, created_at, updated_at) VALUES (1,1,10,'a note',1,0,?,?)", (NOW, NOW))
 
-    # #747: the notes the pre-fix writers stored as a literal 0. Two on one
-    # document (so the per-parent numbering has to produce 1 then 2) and one on an
-    # observation clip (so it has to RESTART at 1 rather than continue to 3).
+    # Notes at their REPAIRED numbering (#747 already ran below --from-revision):
+    # two on one document (1 then 2) and one on an observation clip (restarts at 1).
+    # Nothing in this release may renumber them.
     note_cols = _cols(conn, "notes")
     if "documents" in have and "document_id" in note_cols:
         x("INSERT INTO notes (id, document_id, segment_id, content, sequence_number, "
-          "is_archived, created_at, updated_at) VALUES (2,1,20,'doc note a',0,0,?,?), "
-          "(3,1,21,'doc note b',0,0,?,?)", (NOW, NOW, NOW, NOW))
+          "is_archived, created_at, updated_at) VALUES (2,1,20,'doc note a',1,0,?,?), "
+          "(3,1,21,'doc note b',2,0,?,?)", (NOW, NOW, NOW, NOW))
     else:
         skipped.append("document notes")
     if "observations" in have and "observation_id" in note_cols:
@@ -205,18 +220,66 @@ def seed(db_path: Path) -> dict:
         x("INSERT INTO segments (id, observation_id, sequence_order, text, created_at, "
           "is_starred, is_merge_result, is_split_result) VALUES (30,1,1,'clip',?,0,0,0)", (NOW,))
         x("INSERT INTO notes (id, observation_id, segment_id, content, sequence_number, "
-          "is_archived, created_at, updated_at) VALUES (4,1,30,'clip note',0,0,?,?)", (NOW, NOW))
+          "is_archived, created_at, updated_at) VALUES (4,1,30,'clip note',1,0,?,?)", (NOW, NOW))
     else:
         skipped.append("observation notes")
 
+    # ── dataset_columns: THE table this release rebuilds ──────────────────────
+    #
+    # Four columns on deliberately NON-CONTIGUOUS ids, each carrying a different
+    # kind of dependant, because a DROP+RENAME can fail in four different ways:
+    #   * dataset_values     — the FK children, and the cascade canary
+    #   * recode_definitions — a second child table, on a different FK
+    #   * equivalence_group  — exercises the PARTIAL unique index the migration's
+    #                          own docstring flags as the reflection risk
+    #   * an untouched plain column — the sibling that proves the rebuild did not
+    #                          simply rewrite everything
     if "dataset_columns" in have:
         x("INSERT INTO datasets (id, project_id, name, created_at) VALUES (1,1,'Survey',?)", (NOW,))
-        extra = ", show_in_participant_profile" if "show_in_participant_profile" in _cols(conn, "dataset_columns") else ""
+        dc_cols = _cols(conn, "dataset_columns")
+        extra = ", show_in_participant_profile" if "show_in_participant_profile" in dc_cols else ""
         val = ", 0" if extra else ""
-        x(f"INSERT INTO dataset_columns (id, dataset_id, column_text, column_type, "
-          f"sequence_order, source{extra}) VALUES (1,1,'Age','numeric',1,'imported'{val})")
-        x("INSERT INTO dataset_rows (id, dataset_id, created_at) VALUES (1,1,?)", (NOW,))
-        x("INSERT INTO dataset_values (id, row_id, column_id, value_text) VALUES (1,1,1,'34')")
+
+        grp = "equivalence_groups" in have and "equivalence_group_id" in dc_cols
+        if grp:
+            x("INSERT INTO equivalence_groups (id, project_id, label, sequence_order, "
+              "origin, created_at, updated_at) VALUES (1,1,'Trust items',1,'human',?,?)", (NOW, NOW))
+        else:
+            skipped.append("equivalence group")
+
+        for cid, name, ctype, seq in (
+            (DC_SOURCE, "Trust",           "ordinal",   1),
+            (DC_TARGET, "Trust (recoded)", "numeric",   2),
+            (DC_EQUIV,  "Fair",            "ordinal",   3),
+            (DC_PLAIN,  "Comments",        "open_text", 4),
+        ):
+            src = "manual" if cid == DC_TARGET else "imported"
+            x(f"INSERT INTO dataset_columns (id, dataset_id, column_text, column_type, "
+              f"sequence_order, source{extra}) VALUES (?,1,?,?,?,?{val})",
+              (cid, name, ctype, seq, src))
+        # Exactly one column in the group: the partial index is UNIQUE on
+        # (equivalence_group_id, dataset_id), so a second would be a constraint
+        # violation rather than extra coverage.
+        if grp:
+            x("UPDATE dataset_columns SET equivalence_group_id=1 WHERE id=?", (DC_EQUIV,))
+
+        x("INSERT INTO dataset_rows (id, dataset_id, created_at) VALUES (1,1,?), (2,1,?)",
+          (NOW, NOW))
+        vid = 1
+        for rid in (1, 2):
+            for cid, text in ((DC_SOURCE, "4"), (DC_TARGET, "2"),
+                              (DC_EQUIV, "3"), (DC_PLAIN, "a free-text answer")):
+                x("INSERT INTO dataset_values (id, row_id, column_id, value_text) "
+                  "VALUES (?,?,?,?)", (vid, rid, cid, text))
+                vid += 1
+
+        if "recode_definitions" in have:
+            x("INSERT INTO recode_definitions (id, column_id, name, recode_type, output_type, "
+              "mapping, is_primary, is_auto_detected, sequence_order, created_at, updated_at) "
+              "VALUES (1,?,'Trust 2-point','scale_map','numeric','{\"4\": 2.0}',0,0,1,?,?)",
+              (DC_SOURCE, NOW, NOW))
+        else:
+            skipped.append("recode_definitions")
     else:
         skipped.append("dataset_columns")
 
@@ -226,22 +289,39 @@ def seed(db_path: Path) -> dict:
                    for t in sorted(have & {
                        "users", "projects", "conversations", "documents", "segments",
                        "codes", "code_applications", "excerpt", "notes",
-                       "datasets", "dataset_columns", "dataset_rows", "dataset_values"})},
+                       "datasets", "dataset_columns", "dataset_rows", "dataset_values",
+                       "recode_definitions", "equivalence_groups"})},
         "apps": conn.execute(
             "SELECT id, segment_id, code_id FROM code_applications ORDER BY id").fetchall(),
         "segment_links": conn.execute(
             "SELECT id, conversation_id, document_id, merged_into_id, split_into_id "
             "FROM segments ORDER BY id").fetchall(),
         "segment_text": conn.execute("SELECT id, text FROM segments ORDER BY id").fetchall(),
-        # The astral excerpt is EXCLUDED: this release is supposed to rewrite it,
-        # so a before/after comparison would fail for the right reason. It is
-        # asserted against ASTRAL_OFFSETS_AFTER instead.
+        # ⚠️ v1.4.0: the astral excerpt is now INCLUDED. Its repair ran below
+        # --from-revision, so this release must leave it exactly where it is.
         "excerpts": conn.execute(
             "SELECT id, segment_id, start_offset, end_offset FROM excerpt "
-            f"WHERE id <> {ASTRAL_EXCERPT_ID} ORDER BY id").fetchall(),
-        # Parentage only — `sequence_number` is what this release rewrites.
+            "ORDER BY id").fetchall(),
+        # ⚠️ v1.4.0: `sequence_number` is now INCLUDED, for the same reason.
         "notes": conn.execute(
-            "SELECT id, conversation_id, segment_id FROM notes ORDER BY id").fetchall(),
+            "SELECT id, conversation_id, segment_id, sequence_number "
+            "FROM notes ORDER BY id").fetchall(),
+        # The rebuilt table and both of its child tables, by identity.
+        "dataset_columns": conn.execute(
+            "SELECT id, dataset_id, column_text, column_type, sequence_order, source, "
+            "equivalence_group_id FROM dataset_columns ORDER BY id").fetchall()
+            if "dataset_columns" in have else [],
+        "dataset_values": conn.execute(
+            "SELECT id, row_id, column_id, value_text FROM dataset_values ORDER BY id"
+        ).fetchall() if "dataset_values" in have else [],
+        "recode_defs": conn.execute(
+            "SELECT id, column_id, name, is_primary FROM recode_definitions ORDER BY id"
+        ).fetchall() if "recode_definitions" in have else [],
+        # Every index on the rebuilt table, so a silently-dropped one is caught.
+        "dc_indexes": sorted(
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='dataset_columns' AND name NOT LIKE 'sqlite_%'")),
     }
     conn.close()
     if skipped:
@@ -280,32 +360,73 @@ def verify(db_path: Path, before: dict) -> list[str]:
          "SELECT id, conversation_id, document_id, merged_into_id, split_into_id "
          "FROM segments ORDER BY id", "segment_links")
     same("segment text", "SELECT id, text FROM segments ORDER BY id", "segment_text")
-    same("excerpt shape (the rows this release must NOT touch)",
-         "SELECT id, segment_id, start_offset, end_offset FROM excerpt "
-         f"WHERE id <> {ASTRAL_EXCERPT_ID} ORDER BY id", "excerpts")
-    same("notes parentage",
-         "SELECT id, conversation_id, segment_id FROM notes ORDER BY id", "notes")
+    same("excerpt shape, astral offsets INCLUDED (v1.4.0 must not touch them)",
+         "SELECT id, segment_id, start_offset, end_offset FROM excerpt ORDER BY id",
+         "excerpts")
+    same("notes parentage AND numbering (v1.4.0 must not renumber)",
+         "SELECT id, conversation_id, segment_id, sequence_number FROM notes ORDER BY id",
+         "notes")
+    same("dataset_columns rows (the REBUILT table — ids must be preserved)",
+         "SELECT id, dataset_id, column_text, column_type, sequence_order, source, "
+         "equivalence_group_id FROM dataset_columns ORDER BY id", "dataset_columns")
+    same("dataset_values parentage (the cascade canary for the rebuild)",
+         "SELECT id, row_id, column_id, value_text FROM dataset_values ORDER BY id",
+         "dataset_values")
+    same("recode_definitions parentage (the rebuilt table's second child)",
+         "SELECT id, column_id, name, is_primary FROM recode_definitions ORDER BY id",
+         "recode_defs")
 
-    # ── What this release's migrations must have CHANGED ──────────────────
+    # ── What this release must have CHANGED: the schema ───────────────────
     #
-    # Without these, both v1.3.1 migrations are no-ops on this corpus and the
-    # script exits 0 having proven nothing about either.
-    got = x("SELECT start_offset, end_offset FROM excerpt WHERE id = ?",
-            (ASTRAL_EXCERPT_ID,)).fetchone()
-    if got is None:
-        fails.append(f"excerpt {ASTRAL_EXCERPT_ID} (astral) disappeared in the upgrade")
-    elif tuple(got) != ASTRAL_OFFSETS_AFTER:
-        fails.append(
-            f"#687 astral offsets: expected {ASTRAL_OFFSETS_AFTER} "
-            f"(UTF-16 {ASTRAL_OFFSETS_BEFORE} converted to code points), got {tuple(got)}"
-        )
+    # v1.4.0 carries no data repair, so "nothing moved" above IS correctness. What
+    # must be different is the shape of the rebuilt table. Assert it positively —
+    # a rebuild that silently no-opped would pass every invariance check above.
+    dc_cols = _cols(conn, "dataset_columns")
+    for c in NEW_COLUMNS:
+        if c not in dc_cols:
+            fails.append(f"d7f3a91c8b24: column `{c}` absent after the upgrade")
+    if all(c in dc_cols for c in NEW_COLUMNS):
+        nonnull = x("SELECT COUNT(*) FROM dataset_columns WHERE derived_from_column_id "
+                    "IS NOT NULL OR derived_via IS NOT NULL").fetchone()[0]
+        if nonnull:
+            fails.append(f"d7f3a91c8b24: {nonnull} pre-existing column(s) came out of the "
+                         "migration with provenance set — it must add the fields EMPTY")
 
-    want_seq = [(nid, seq) for nid, seq in NOTE_SEQ_AFTER
-                if x("SELECT 1 FROM notes WHERE id = ?", (nid,)).fetchone()]
-    got_seq = x("SELECT id, sequence_number FROM notes WHERE id IN "
-                f"({','.join(str(n) for n, _ in want_seq)}) ORDER BY id").fetchall()
-    if [tuple(r) for r in got_seq] != want_seq:
-        fails.append(f"#747 note numbering: expected {want_seq}, got {[tuple(r) for r in got_seq]}")
+    idx_now = sorted(r[0] for r in x(
+        "SELECT name FROM sqlite_master WHERE type='index' "
+        "AND tbl_name='dataset_columns' AND name NOT LIKE 'sqlite_%'"))
+    if NEW_INDEX not in idx_now:
+        fails.append(f"d7f3a91c8b24: index `{NEW_INDEX}` absent after the upgrade")
+    # The rebuild REPLAYS reflected indexes, including the partial
+    # ix_equivalence_unique_column_per_dataset. Losing one is silent and permanent.
+    lost = set(before["dc_indexes"]) - set(idx_now)
+    if lost:
+        fails.append(f"indexes lost in the dataset_columns rebuild: {sorted(lost)}")
+
+    # ── BEHAVIOURAL: the FK actually does what it declares ────────────────
+    #
+    # Reflecting the FK back only re-reads what the migration wrote. Deleting a
+    # source column and watching the dependant degrade is the assertion that
+    # `ON DELETE SET NULL` is live — and it is the property the migration's own
+    # docstring rests on ("degrades the trail rather than leaving a dangling id").
+    # ⚠️ MUTATES the DB (the delete cascades), so it must run LAST.
+    if all(c in dc_cols for c in NEW_COLUMNS) and \
+            x("SELECT 1 FROM dataset_columns WHERE id=?", (DC_SOURCE,)).fetchone():
+        conn.execute("PRAGMA foreign_keys=ON")
+        x("UPDATE dataset_columns SET derived_from_column_id=?, derived_via=? WHERE id=?",
+          (DC_SOURCE, "Trust 2-point", DC_TARGET))
+        x("DELETE FROM dataset_columns WHERE id=?", (DC_SOURCE,))
+        conn.commit()
+        got = x("SELECT derived_from_column_id, derived_via FROM dataset_columns "
+                "WHERE id=?", (DC_TARGET,)).fetchone()
+        if got is None:
+            fails.append("ON DELETE SET NULL: the DEPENDENT column was deleted too — "
+                         "the FK is behaving as CASCADE")
+        elif got[0] is not None:
+            fails.append(f"ON DELETE SET NULL did not fire: derived_from_column_id={got[0]}")
+        elif got[1] != "Trust 2-point":
+            fails.append(f"the snapshotted rule name was lost with the link: {got[1]!r} "
+                         "— `derived_via` is a string precisely so it survives this")
 
     conn.close()
     return fails

@@ -1,0 +1,41 @@
+/* The "here is the record you searched for" flash (#834).
+ *
+ * A deep link from universal search lands on one cell of a 48-column grid. Cell
+ * SELECTION already gives it a ring, but selection means "this is where the
+ * cursor is" — it does not say "this is the thing you were looking for", and on
+ * a wide grid a 1px ring is easy to miss after a scroll. So the landing gets a
+ * transient state on top of the selection, which fades.
+ *
+ * Follows `components/crosswalk/crosswalk.css` exactly, including the split: the
+ * ANIMATION is behind `prefers-reduced-motion: no-preference`, and the static
+ * colour change applies regardless — a reduced-motion user still gets a visible
+ * marker, just without the pulse. Do not collapse the two blocks.
+ *
+ * Amber, matching the crosswalk's "look here" flash rather than the blue
+ * selection family (`lib/selection.ts`), so the two read as different facts.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes dataset-found-pulse {
+    0% {
+      box-shadow: inset 0 0 0 0 rgba(217, 119, 6, 0);
+    }
+    30% {
+      box-shadow: inset 0 0 0 3px rgba(217, 119, 6, 0.55);
+    }
+    100% {
+      box-shadow: inset 0 0 0 0 rgba(217, 119, 6, 0);
+    }
+  }
+
+  .dataset-found-flash {
+    animation: dataset-found-pulse 1800ms ease-out 1;
+  }
+}
+
+.dataset-found-flash {
+  background-color: rgb(254, 243, 199) !important;
+}
+
+:root.dark .dataset-found-flash {
+  background-color: rgba(120, 53, 15, 0.45) !important;
+}

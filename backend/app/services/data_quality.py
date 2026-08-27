@@ -15,6 +15,30 @@ from ..services.missing_values import is_missing, parse_missing_rules
 logger = logging.getLogger(__name__)
 
 
+# ── Little's MCAR: the stated basis (#707(b)) ────────────────────────────────
+#
+# The NINTH member of the STATED-BASIS FAMILY: the server states how a number was
+# produced and the client DISPLAYS that, never inferring it.
+#
+# 🔴 Why this one needs a basis rather than a warning. Little's test is DEFINED
+# over maximum-likelihood (EM) estimates of mu and Sigma. This implementation uses
+# `np.nanmean` plus a pooled pairwise available-case covariance — an approximation
+# that biases the statistic under substantial missingness, which is exactly the
+# regime a researcher reaches for it in. That divergence is real on EVERY run.
+#
+# ⚠️ It is deliberately NOT appended to `warnings_list`. Those warnings are
+# CONDITIONAL — they fire on degeneracy (a pseudo-inverse, a clamped statistic) —
+# and a reader learns to treat that channel as "something unusual happened here".
+# The estimator is a property of the method, true every time, so it rides the
+# payload as a basis and renders beside the statistic.
+#
+# ⚠️ And it must NOT be a hardcoded client string. The day the EM loop lands
+# (#707(b)'s expensive half), a client that hardcodes "available-case" keeps
+# describing EM numbers as available-case — each half individually correct, the
+# pair wrong. Adding a value here forces a COMPILE error in `lib/mcar-basis.ts`.
+MCAR_ESTIMATOR_AVAILABLE_CASE = "available_case"
+
+
 # ── Missingness classification ───────────────────────────────────────────────
 
 
@@ -47,21 +71,64 @@ def _classify_value(
     ``missing_rules`` is the column's parsed declaration (#592; None = the
     recognized-N/A defaults), which still classifies the text so a DECLARED
     column reports its refusals as missing even before any recode touches them.
+
+    🔴 **THREE DISTINCT FACTS USED TO SHARE THE CLASS ``"na"``, AND ONE UI
+    TOGGLE DISCARDED ALL THREE (#819).** They are separated here because they
+    are answers to different questions, and only the first is the tool's own
+    inference:
+
+    * ``na_default`` — the text matched the recognized-N/A DEFAULTS ("N/A",
+      "Don't know", "Prefer not to say"). This is a GUESS the tool made about an
+      undeclared column, and it is exactly what the *"Count "Don't know" / "N/A"
+      as missing"* checkbox names. A researcher may reasonably want to see the
+      count without it.
+    * ``na_declared`` — the researcher DECLARED this value missing on this
+      column. That is not an inference to be toggled off; it is a statement
+      about the data, and every other surface in the app honours it. Measured:
+      unticking the checkbox on a column with 42.6% declared-missing cells
+      produced *"No missing data detected — All 227097 values are present"*
+      beside a row still printing ``N NA = 32,276``.
+    * ``na_unusable`` — a numeric-eligible cell whose ``value_numeric`` is NULL
+      for some other reason (a recode's ``exclude_values``, an unmapped label, a
+      failed parse). #595's convergence: analysis will not use this cell. Also
+      not an inference about text, so also not the checkbox's business.
+
+    ⚠️ ``n_na`` in the response stays the SUM of the three, so the payload field
+    keeps its meaning.
     """
     if value_text is None or value_text.strip() == "":
         return "empty"
-    if is_missing(value_text, missing_rules):
-        return "na"
+    if missing_rules is not None:
+        if is_missing(value_text, missing_rules):
+            return "na_declared"
+    elif is_missing(value_text, None):
+        return "na_default"
     if numeric_eligible and value_numeric is None:
-        return "na"
+        return "na_unusable"
     return "valid"
 
 
+#: The classes a UI toggle may NOT switch off. See `_classify_value` (#819).
+_ALWAYS_MISSING = frozenset({"na_declared", "na_unusable"})
+
+#: Every class that counts toward the reported `n_na`.
+_NA_CLASSES = frozenset({"na_declared", "na_default", "na_unusable"})
+
+
 def _is_missing(classification: str, include_na: bool, include_empty: bool) -> bool:
-    """Check if a classified value counts as missing given toggle settings."""
+    """Does a classified value count as missing, given the toggles?
+
+    ⚠️ **The toggles govern the tool's own INFERENCES, never the researcher's
+    declaration (#819).** ``include_na`` names the recognized-N/A defaults, so
+    it decides ``na_default`` alone; a declared missing value and a cell
+    analysis cannot use are facts about the data, and a display option that
+    silently overruled them made the panel contradict its own table.
+    """
     if classification == "empty":
         return include_empty
-    if classification == "na":
+    if classification in _ALWAYS_MISSING:
+        return True
+    if classification == "na_default":
         return include_na
     return False
 
@@ -211,7 +278,7 @@ def compute_missing_summary(
 
             if cls == "empty":
                 n_empty += 1
-            elif cls == "na":
+            elif cls in _NA_CLASSES:
                 n_na += 1
 
             if _is_missing(cls, include_na, include_empty):
@@ -422,7 +489,12 @@ def compute_littles_mcar(
             # feeds 99.0 straight into MCAR. Invisible before #592 (99 carried
             # value_numeric = 99.0 anyway); slab 3's NULL is what exposed it.
             # Text N/A never hit this — only sentinels whose TEXT parses.
-            if cls == "na":
+            #
+            # ⚠️ #819 split `"na"` into three classes; this test reads the SET so
+            # it keeps covering all of them. Written as `cls == "na"` it would
+            # have gone silently dead the moment the classes were renamed —
+            # a guard that matches nothing passes every test it has.
+            if cls in _NA_CLASSES:
                 continue  # stays np.nan
 
             # Use value_numeric if available, else try parsing value_text.
@@ -621,5 +693,6 @@ def compute_littles_mcar(
             "n_variables": p,
             "apa_string": apa,
             "interpretation": interpretation,
+            "mcar_estimator": MCAR_ESTIMATOR_AVAILABLE_CASE,
         },
     }

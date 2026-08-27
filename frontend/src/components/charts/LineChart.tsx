@@ -20,7 +20,7 @@ import {
   LINE_DASH_PATTERNS,
   computeLogDomain,
 } from '@/lib/chart-data'
-import { ciCaveat, isItemLevelCi } from '@/lib/ci-label'
+import { ciCaveat, ciQualifier } from '@/lib/ci-label'
 import { useChartColors } from '@/lib/theme-context'
 import type {
   LineChartData,
@@ -90,8 +90,9 @@ function LineTooltip({ active, payload, label }: RechartsTooltipProps) {
               {ciLower != null && ciUpper != null && (
                 <span className="text-mm-text-faint" title={ciCaveat(ciMethod)}>
                   [{ciLower.toFixed(DISPLAY_PRECISION)}, {ciUpper.toFixed(DISPLAY_PRECISION)}]
-                  {/* #715 — see GroupedScalarBarChart: a bare range must say when it is over items. */}
-                  {isItemLevelCi(ciMethod) && ' across items'}
+                  {/* #715 — see GroupedScalarBarChart: a bare range must say what
+                      kind it is, and the vocabulary lives in ONE place. */}
+                  {ciQualifier(ciMethod)}
                 </span>
               )}
             </div>

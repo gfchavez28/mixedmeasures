@@ -33,6 +33,24 @@ export interface UseCanvasEditorOptions {
   /** Accessible label for the editor (read by screen readers) */
   ariaLabel?: string
   onBlur?: (json: Record<string, unknown>) => void
+  /**
+   * Re-create the editor when `content` changes (#848).
+   *
+   * 🔴 **OPT-IN, and it must stay that way.** `useEditor` binds `content` ONCE at
+   * creation and never re-reads it, so a component instance that survives a
+   * re-render with different `content` keeps showing the old prose. That is
+   * harmless while editing — the editor IS the source of truth there, and
+   * re-creating it mid-typing would destroy the researcher's work — but it is a
+   * wrong-information defect on a READ-ONLY renderer, where the content prop is
+   * the source of truth.
+   *
+   * Measured on Canvas Compare: an added, empty theme rendered the FIRST theme's
+   * full prose under its own heading, because React reused the instance across a
+   * list whose membership changed. Stable keys fix that particular collision;
+   * this flag closes the class, so a later refetch under an unchanged key cannot
+   * reintroduce it.
+   */
+  recreateOnContentChange?: boolean
 }
 
 export interface UseCanvasEditorReturn {
@@ -57,6 +75,7 @@ export function useCanvasEditor({
   starterKitOverrides,
   ariaLabel,
   onBlur,
+  recreateOnContentChange = false,
 }: UseCanvasEditorOptions): UseCanvasEditorReturn {
   // Mention popup state (rendered via React, not tippy.js)
   const [mentionPopup, setMentionPopup] = useState<MentionPopupState | null>(null)
@@ -154,15 +173,22 @@ export function useCanvasEditor({
     return cleanCanvasContent(content as JSONContent, allowedNodes, allowedMarks)
   }, [content, extensions])
 
-  const editor = useEditor({
-    extensions,
-    content: cleaned ?? undefined,
-    editable,
-    editorProps: ariaLabel ? { attributes: { 'aria-label': ariaLabel } } : {},
-    onBlur({ editor: ed }) {
-      onBlur?.(ed.getJSON() as Record<string, unknown>)
+  const editor = useEditor(
+    {
+      extensions,
+      content: cleaned ?? undefined,
+      editable,
+      editorProps: ariaLabel ? { attributes: { 'aria-label': ariaLabel } } : {},
+      onBlur({ editor: ed }) {
+        onBlur?.(ed.getJSON() as Record<string, unknown>)
+      },
     },
-  })
+    // ⚠️ `undefined` — NOT `[]` — when the flag is off, so the writable callers'
+    // behaviour is byte-for-byte what it was before this parameter existed.
+    // React Query's structural sharing keeps `content` referentially stable when
+    // the data is unchanged, so `cleaned` only moves when the prose really did.
+    recreateOnContentChange ? [cleaned] : undefined,
+  )
 
   return { editor, mentionPopup, mentionListRef, rewrites }
 }

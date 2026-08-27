@@ -16,7 +16,8 @@ import type { CanvasTheme, SourceFrequenciesResponse } from '@/lib/api'
 vi.mock('html-to-image', () => ({ toPng: vi.fn() }))
 
 vi.mock('@/lib/api', () => ({
-  metricsApi: { quickCompute: vi.fn() },
+  metricsApi: { quickCompute: vi.fn(), crossTabulation: vi.fn() },
+  comparisonsApi: { groupComparison: vi.fn() },
   codeAnalysisApi: {
     sourceFrequencies: vi.fn(),
     frequencies: vi.fn(),
@@ -30,7 +31,7 @@ vi.mock('@/lib/api', () => ({
   observationsApi: { list: vi.fn(), listSegments: vi.fn() },
 }))
 
-import { codeAnalysisApi, metricsApi, codesApi, observationsApi } from '@/lib/api'
+import { codeAnalysisApi, metricsApi, codesApi, observationsApi, comparisonsApi } from '@/lib/api'
 import { toPng } from 'html-to-image'
 import { fetchChartTables, captureCanvasChartPngs } from './canvas-export'
 
@@ -292,6 +293,131 @@ describe('fetchChartTables — qualitative embeds', () => {
   })
 })
 
+/**
+ * 🔴 #832 — the EXPORT must draw the same cross-tab the canvas draws.
+ *
+ * `cross_tab` is the one #823(g) type whose data does not come from
+ * `quickCompute`, and #823(g) taught only `InlineChartRenderer` about it. The
+ * export kept falling through to `metricsToMarkdownTable`, which has cases for
+ * `frequency_distribution`, `dumbbell` and `line` and a scalar-bar default —
+ * **no `cross_tab` case at all** — so it emitted the ROW variable's marginal
+ * distribution with the second axis silently absent.
+ *
+ * ⚠️ **Round 3 did not create that; it created the DIVERGENCE.** Beforehand the
+ * renderer printed the literal token `"cross_tab chart"` and the export emitted
+ * the wrong table: both useless, consistently. Afterwards the canvas was right
+ * and `.md` was wrong, which is worse — nothing gave the researcher a reason to
+ * doubt the file. Markdown has no images at all, and HTML/PDF/docx fall back to
+ * these same tables whenever the PNG capture does not run.
+ */
+describe('fetchChartTables — cross-tab embeds (#832)', () => {
+  const CROSS_TAB = {
+    row_values: ['Low', 'High'],
+    col_values: ['North', 'South'],
+    matrix: [
+      [{ count: 4, row_pct: 40, col_pct: 25, total_pct: 10 },
+        { count: 6, row_pct: 60, col_pct: 30, total_pct: 15 }],
+      [{ count: 12, row_pct: 40, col_pct: 75, total_pct: 30 },
+        { count: 18, row_pct: 60, col_pct: 70, total_pct: 45 }],
+    ],
+    row_totals: [10, 30],
+    col_totals: [16, 24],
+    n_shared: 40,
+    row_column_label: 'Fidelity band',
+    col_column_label: 'Region',
+    chi_square: null,
+  }
+
+  function crossTabConfig(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return { chart_type: 'cross_tab', column_ids: [7], cross_tab_column_id: 12, ...over }
+  }
+
+  beforeEach(() => {
+    // Reset CALL HISTORY, not just the return value — three assertions below
+    // are `not.toHaveBeenCalled`, and without this they read calls made by the
+    // previous test and fail for a reason that is the harness's, not the code's.
+    vi.mocked(metricsApi.crossTabulation).mockReset()
+    vi.mocked(metricsApi.quickCompute).mockReset()
+    vi.mocked(metricsApi.crossTabulation).mockResolvedValue(CROSS_TAB as never)
+  })
+
+  it('fetches the cross-tab endpoint instead of computing a metric', async () => {
+    const tables = await fetchChartTables(themeWithChart(crossTabConfig()), 3)
+
+    expect(metricsApi.crossTabulation).toHaveBeenCalledWith(3, {
+      row_column_id: 7, col_column_id: 12, include_chi_square: true,
+    })
+    // The whole point: the wrong-data path must not run.
+    expect(metricsApi.quickCompute).not.toHaveBeenCalled()
+    expect(tables.get(1)).toBeDefined()
+  })
+
+  it('exports BOTH axes, with totals — the table the canvas draws', async () => {
+    const md = (await fetchChartTables(themeWithChart(crossTabConfig()), 3)).get(1)!.md
+    const lines = md.split('\n')
+
+    // Positive assertions, not "does not contain" — a negative here is the
+    // #770/#823(g) trap: `queryByText` never matched because the render was two
+    // text nodes, and the guard could not fail.
+    expect(lines[0]).toBe('| Fidelity band | North | South | Total |')
+    expect(lines).toContain('| Low | 4 | 6 | 10 |')
+    expect(lines).toContain('| High | 12 | 18 | 30 |')
+    expect(lines).toContain('| Total | 16 | 24 | 40 |')
+  })
+
+  it('mirrors the saved display mode rather than always emitting counts', async () => {
+    const md = (await fetchChartTables(
+      themeWithChart(crossTabConfig({ cross_tab_display: 'row_pct' })), 3,
+    )).get(1)!.md
+
+    expect(md.split('\n')).toContain('| Low | 40.0% | 60.0% | 10 |')
+    // Totals stay counts even when the cells are percentages, as on screen.
+    expect(md.split('\n')).toContain('| Total | 16 | 24 | 40 |')
+  })
+
+  it('mirrors a reversed scale order on BOTH axes', async () => {
+    const md = (await fetchChartTables(
+      themeWithChart(crossTabConfig({ scaleOrder: 'reversed' })), 3,
+    )).get(1)!.md
+    const lines = md.split('\n')
+
+    expect(lines[0]).toBe('| Fidelity band | South | North | Total |')
+    // High first, and its cells follow the reversed columns.
+    expect(lines[2]).toBe('| High | 18 | 12 | 30 |')
+    expect(lines[3]).toBe('| Low | 6 | 4 | 10 |')
+  })
+
+  it('emits nothing for a half-configured cross-tab, and does not ask', async () => {
+    // No `cross_tab_column_id`: the renderer says so on screen; an export has
+    // nowhere to say it, so it emits nothing rather than a table of whatever
+    // quickCompute would have returned.
+    const tables = await fetchChartTables(
+      themeWithChart(crossTabConfig({ cross_tab_column_id: undefined })), 3,
+    )
+
+    expect(tables.get(1)).toBeUndefined()
+    expect(metricsApi.crossTabulation).not.toHaveBeenCalled()
+    expect(metricsApi.quickCompute).not.toHaveBeenCalled()
+  })
+
+  it('has no row axis when the selection is not exactly one variable', async () => {
+    // A cross-tab is defined over ONE row variable; `columnIds[0]` would
+    // silently pick one of two.
+    const tables = await fetchChartTables(
+      themeWithChart(crossTabConfig({ column_ids: [7, 8] })), 3,
+    )
+
+    expect(tables.get(1)).toBeUndefined()
+    expect(metricsApi.crossTabulation).not.toHaveBeenCalled()
+    // ⚠️ This second assertion is what makes the test DISCRIMINATE. Without it
+    // the case passed with the cross-tab branch deleted — the fall-through also
+    // produced no table, for the opposite reason (quickCompute returned
+    // nothing). Mutation-found: 5 of 6 cases here failed on the mutant and this
+    // one did not.
+    expect(metricsApi.quickCompute).not.toHaveBeenCalled()
+  })
+})
+
 describe('captureCanvasChartPngs — what counts as "rendered" (#682)', () => {
   function mountEmbed(inner: string) {
     document.body.innerHTML = `
@@ -332,5 +458,99 @@ describe('captureCanvasChartPngs — what counts as "rendered" (#682)', () => {
 
     expect(await captureCanvasChartPngs()).toEqual(new Map())
     expect(toPng).not.toHaveBeenCalled()
+  })
+})
+
+// ── #817: the export must not lag the renderer either ────────────────────────
+
+describe('#817 — a comparison exports the comparison', () => {
+  const comparisonConfig = {
+    column_ids: [], domain_ids: [1], metric_type: 'frequency_distribution',
+    compare_by: 60, rc_view: 'comparisons', test_type: 'auto',
+  }
+
+  beforeEach(() => {
+    vi.mocked(metricsApi.quickCompute).mockReset()
+    vi.mocked(comparisonsApi.groupComparison).mockReset()
+    vi.mocked(comparisonsApi.groupComparison).mockResolvedValue({
+      groups: ['Under 45', '45 and over'],
+      group_column_label: 'degree',
+      rows: [{
+        label: 'Trust A', full_label: 'Trust scale A', source_id: 1, source_type: 'domain',
+        group_stats: [
+          { group: 'Under 45', n: 120, mean: 2.31 },
+          { group: '45 and over', n: 98, mean: 1.88 },
+        ],
+        test: { test_type: 'one_way_anova', statistic: 690.88, df: 1, p: 0.0001,
+                effect_size: 0.06, effect_size_type: 'eta_squared' },
+        test_omitted_reason: null,
+      }],
+      bonferroni_warning: false, bonferroni_threshold: null, unavailable_reason: null,
+    } as never)
+  })
+
+  it('reads the comparison endpoint, not quickCompute', async () => {
+    // 🔴 The Markdown export has NO images — this table is the only thing a
+    // `.md` reader sees. Fixing the renderer alone would have left Markdown
+    // carrying the wrong figure while HTML/PDF/docx (which capture the rendered
+    // PNG) carried the right one: one material, two answers.
+    await fetchChartTables(themeWithChart(comparisonConfig), 4)
+    expect(comparisonsApi.groupComparison).toHaveBeenCalled()
+    expect(metricsApi.quickCompute).not.toHaveBeenCalled()
+  })
+
+  it('emits the groups and the test, not a distribution', async () => {
+    const tables = await fetchChartTables(themeWithChart(comparisonConfig), 4)
+    const md = tables.get(1)?.md ?? ''
+    expect(md).toContain('Under 45 n')
+    expect(md).toContain('690.880')
+    expect(md).toContain('Trust scale A')
+  })
+
+  it('prints the REASON when a row has no test, never a blank cell', async () => {
+    // #566 — a blank is indistinguishable from a broken export.
+    vi.mocked(comparisonsApi.groupComparison).mockResolvedValue({
+      groups: ['A'], group_column_label: 'g',
+      rows: [{
+        label: 'x', full_label: 'x', source_id: 1, source_type: 'column',
+        group_stats: [{ group: 'A', n: 1, mean: 1 }],
+        test: null, test_omitted_reason: 'insufficient_n',
+      }],
+      bonferroni_warning: false, bonferroni_threshold: null, unavailable_reason: null,
+    } as never)
+    const tables = await fetchChartTables(themeWithChart(comparisonConfig), 4)
+    expect(tables.get(1)?.md ?? '').toMatch(/Too few values/)
+  })
+})
+
+describe('#831 — a correlation material exports nothing rather than a wrong table', () => {
+  /**
+   * The #832 rule applied before it could bite again: the renderer REFUSES to
+   * draw a correlation matrix, so an export that quietly ran `quickCompute` on
+   * the correlation's own columns would emit a frequency table under the
+   * correlation's title — canvas honest, `.md` wrong, and nothing to tell the
+   * reader which to believe.
+   */
+  it('does not call quickCompute for a marked correlation material', async () => {
+    const tables = await fetchChartTables(
+      themeWithChart({ rc_view: 'correlations', column_ids: [1, 2] }), 3,
+    )
+    // The load-bearing assertion: an empty-table check alone would pass just as
+    // happily if the request HAD been made and returned nothing.
+    expect(metricsApi.quickCompute).not.toHaveBeenCalled()
+    expect(tables.get(1)?.md ?? '').toBe('')
+  })
+
+  it('does not call quickCompute for a LEGACY scatter matrix either', async () => {
+    await fetchChartTables(themeWithChart({ column_ids: [1, 2], show_scatter: true }), 3)
+    expect(metricsApi.quickCompute).not.toHaveBeenCalled()
+  })
+
+  it('still routes an ordinary descriptives material to quickCompute', async () => {
+    // Positive control — a refusal that swallowed everything would pass both
+    // assertions above while breaking the export.
+    vi.mocked(metricsApi.quickCompute).mockResolvedValue({ metrics: [] } as never)
+    await fetchChartTables(themeWithChart({ column_ids: [1], metric_type: 'mean' }), 3)
+    expect(metricsApi.quickCompute).toHaveBeenCalled()
   })
 })

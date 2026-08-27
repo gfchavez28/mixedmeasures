@@ -15,7 +15,11 @@ from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue,
 from app.models.recode import RecodeDefinition, RecodeType, OutputType
 from app.models.user import User
 from app.services.recode import apply_definition_to_column
-from app.services.value_labels import apply_value_labels, ValueLabelsBlockedError
+from app.services.value_labels import (
+    apply_value_labels,
+    code_identity_violation,
+    ValueLabelsBlockedError,
+)
 
 
 # Multi-digit + a gap so a positional-vs-code confusion would surface
@@ -331,6 +335,171 @@ class TestReversePrimaryGuard:
         assert [v.value_text for v in _vals(db, c)] == ["Low", "Mid"]
 
 
+class TestCodeIdentityGuard:
+    """#793: the guard is on the PROPERTY — "the primary's output equals the code".
+
+    #585 scoped its guard to `RecodeType.REVERSE` on the premise that a
+    `scale_map` leaves `value_numeric` == the code. True only of an IDENTITY code
+    map: a FLIPPING or COLLAPSING map walks straight through it and relabels
+    every response as a *different* response, self-consistently.
+
+    ⚠️ **Every fixture below is chosen on the axis the fix generalises** — the
+    DEFINITION-shaped test and the DATA-shaped test must give different answers
+    on it, or the fixture certifies nothing (the degenerate-fixture rule). The
+    two that matter most carry explicit DISCRIMINATION assertions: the
+    label-keyed flip proves the filed shape-predicate is vacuous, and the
+    nominal reverse proves the data check alone is not sufficient either.
+    """
+
+    def _seed_pairs(self, db, c, pairs):
+        """Seed (value_text, value_numeric) directly — the shapes a recode leaves."""
+        for text, num in pairs:
+            r = DatasetRow(dataset_id=c.dataset_id); db.add(r); db.flush()
+            db.add(DatasetValue(row_id=r.id, column_id=c.id,
+                                value_text=text, value_numeric=num))
+        db.flush()
+
+    def _primary(self, db, c, name, mapping, rtype=RecodeType.SCALE_MAP):
+        d = RecodeDefinition(
+            column_id=c.id, name=name, recode_type=rtype,
+            output_type=OutputType.NUMERIC, mapping=json.dumps(mapping),
+            is_primary=True, is_auto_detected=False, sequence_order=0,
+        )
+        db.add(d); db.flush()
+        return d
+
+    def _declare_scale(self, db, c, pairs):
+        c.scale_labels = json.dumps([label for _, label in pairs])
+        c.scale_values = json.dumps([code for code, _ in pairs])
+        db.flush()
+
+    def test_a_flipping_primary_is_refused_and_writes_nothing(self, col):
+        # The dev-corpus shape (`Math Anxiety (inverted)`): value_text is the
+        # response's own code, value_numeric is the flip's output.
+        db, c = col
+        self._seed_pairs(db, c, [("2", 10.0), ("4", 6.0)])
+        self._primary(db, c, "Anxiety (inverted)", {"2": 10, "4": 6, "6": 4, "10": 2})
+
+        with pytest.raises(ValueLabelsBlockedError, match=r"Anxiety \(inverted\)"):
+            apply_value_labels(db, c, SCALE, ColumnType.ORDINAL)
+
+        # Fail CLOSED on every owner: cells, scale metadata, and the definition
+        # list (no auto primary minted, nothing demoted).
+        assert [(v.value_text, v.value_numeric) for v in _vals(db, c)] == [
+            ("2", 10.0), ("4", 6.0)]
+        assert c.scale_labels is None
+        assert db.query(RecodeDefinition).filter_by(column_id=c.id).count() == 1
+        assert db.query(RecodeDefinition).filter_by(column_id=c.id).one().is_primary
+
+    def test_the_refusal_names_the_recode_and_both_codes(self, col):
+        # The message is the whole remedy for a researcher — it has to say which
+        # recode is in the way and what the disagreement actually is.
+        db, c = col
+        self._seed_pairs(db, c, [("2", 10.0)])
+        self._primary(db, c, "Anxiety (inverted)", {"2": 10, "4": 6, "6": 4, "10": 2})
+        with pytest.raises(ValueLabelsBlockedError) as exc:
+            apply_value_labels(db, c, SCALE, ColumnType.ORDINAL)
+        message = str(exc.value)
+        assert "Anxiety (inverted)" in message
+        assert "'2' is stored as 10, not 2" in message     # integer-formatted, not 10.0
+        assert "Recode Workbench" in message
+
+    def test_a_collapsing_primary_is_refused(self, col):
+        # A banding map is not invertible, so this is the case whose damage
+        # would NOT be recoverable. The first cell AGREES — one disagreement is
+        # enough, and a fixture where every cell disagreed could not show that.
+        db, c = col
+        self._seed_pairs(db, c, [("2", 2.0), ("4", 2.0), ("6", 6.0)])
+        self._primary(db, c, "Banded", {"2": 2, "4": 2, "6": 6, "10": 6})
+        with pytest.raises(ValueLabelsBlockedError, match="Banded"):
+            apply_value_labels(db, c, SCALE, ColumnType.ORDINAL)
+
+    def test_a_hand_flip_keyed_on_labels_is_refused(self, col):
+        # The case #793's FILED predicate misses. Column already labelled, so a
+        # hand-built primary is keyed on LABELS; metadata still holds the forward
+        # dictionary, and value_numeric holds the flip.
+        db, c = col
+        self._declare_scale(db, c, SCALE)
+        flip = {"Low": 10, "Mid": 6, "High": 4, "Top": 2}
+        self._seed_pairs(db, c, [("Low", 10.0), ("Mid", 6.0)])
+        self._primary(db, c, "Reversed by hand", flip)
+
+        # DISCRIMINATION: "unsafe iff any NUMERIC key maps to a value other than
+        # itself" is VACUOUS here — there is not one numeric key to judge. This
+        # fixture is the entire reason the guard reads the data instead.
+        def _numeric(key):
+            try:
+                float(key)
+                return True
+            except ValueError:
+                return False
+        assert not any(_numeric(k) for k in flip)
+
+        with pytest.raises(ValueLabelsBlockedError, match="Reversed by hand"):
+            apply_value_labels(db, c, SCALE, ColumnType.ORDINAL)
+
+    def test_the_reverse_guard_covers_what_the_data_check_cannot(self, col):
+        # Why BOTH guards stay. `write_back_scale_metadata` runs for ORDINAL
+        # columns only, so a reverse primary on a NOMINAL column leaves labelled
+        # cells with no forward metadata to compare against — the data check has
+        # nothing to resolve and passes it.
+        db, c = col
+        c.column_type = ColumnType.NOMINAL
+        db.flush()
+        self._seed_pairs(db, c, [("Low", 10.0), ("Mid", 6.0)])
+        self._primary(db, c, "Reverse scored",
+                      {"Low": 2, "Mid": 4, "High": 6, "Top": 10},
+                      rtype=RecodeType.REVERSE)
+
+        # DISCRIMINATION: the data-shaped guard, asked directly, finds nothing.
+        assert code_identity_violation(c, [("Low", 10.0), ("Mid", 6.0)], None) is None
+
+        # And the operation is refused anyway, by the definition-shaped guard.
+        with pytest.raises(ValueLabelsBlockedError, match="Reverse scored"):
+            apply_value_labels(db, c, SCALE, ColumnType.NOMINAL)
+
+    def test_the_labelled_re_edit_path_is_untouched(self, col):
+        # The path the internal design notes warns must keep working: keys are labels,
+        # value_numeric IS the code, and editing one label must still apply.
+        db, c = col
+        self._declare_scale(db, c, SCALE)
+        self._seed_pairs(db, c, [("Low", 2.0), ("Mid", 4.0)])
+        self._primary(db, c, "Scale", {"Low": 2, "Mid": 4, "High": 6, "Top": 10})
+        res = apply_value_labels(
+            db, c, [(2, "Lowest"), (4, "Mid"), (6, "High"), (10, "Top")],
+            ColumnType.ORDINAL,
+        )
+        assert res["updated"] == 2
+        assert [v.value_text for v in _vals(db, c)] == ["Lowest", "Mid"]
+
+    def test_a_zero_coded_label_is_resolved_not_skipped(self, col):
+        # The falsy-zero trap, on a real `.sav` shape: D2 preserves SPSS's own
+        # 0-based codes and #536 synthesizes an unlabelled point's label FROM its
+        # code string — so `label_to_code["1"]` is 0.0. A
+        # `label_to_code.get(text) or parse(text)` implementation resolves that
+        # cell to 1.0, disagrees with the stored 0.0, and REFUSES a healthy
+        # column. Membership must be tested with `in`.
+        db, c = col
+        zero_based = [(0, "1"), (1, "2"), (2, "3")]
+        self._declare_scale(db, c, zero_based)
+        self._seed_pairs(db, c, [("1", 0.0), ("2", 1.0)])
+        res = apply_value_labels(db, c, zero_based, ColumnType.ORDINAL)
+        assert res["updated"] == 2
+
+    def test_a_declared_missing_cell_is_not_evidence(self, col):
+        # `apply_value_labels` skips missing cells outright (#592 §I.3), so a
+        # sentinel whose stored number disagrees is neither at risk nor grounds
+        # to refuse. Without the skip, "99" vs 5.0 reads as a violation and the
+        # whole column is blocked over a cell nothing would have touched.
+        db, c = col
+        c.missing_values = json.dumps([{"value": "99"}])
+        db.flush()
+        self._seed_pairs(db, c, [("2", 2.0), ("4", 4.0), ("99", 5.0)])
+        res = apply_value_labels(db, c, SCALE, ColumnType.ORDINAL)
+        assert res["updated"] == 2
+        assert [v.value_text for v in _vals(db, c)] == ["Low", "Mid", "99"]
+
+
 class TestEndpointGuards:
     def _user(self, db):
         return db.get(User, 1)
@@ -349,7 +518,7 @@ class TestEndpointGuards:
         db.flush()
         req = ApplyValueLabelsRequest(labels=[ValueLabelPair(value=2, label="Low")])
         with pytest.raises(HTTPException) as exc:
-            _run(apply_value_labels_endpoint(1, 1, c.id, req, user=self._user(db), db=db))
+            apply_value_labels_endpoint(1, 1, c.id, req, user=self._user(db), db=db)
         assert exc.value.status_code == 400
         # The refusal must name the recode AND the way out, not just say "no".
         assert "Reverse scored" in exc.value.detail
@@ -363,7 +532,7 @@ class TestEndpointGuards:
         c.source = "computed"; db.flush()
         req = ApplyValueLabelsRequest(labels=[ValueLabelPair(value=1, label="A")])
         with pytest.raises(HTTPException) as exc:
-            _run(apply_value_labels_endpoint(1, 1, c.id, req, user=self._user(db), db=db))
+            apply_value_labels_endpoint(1, 1, c.id, req, user=self._user(db), db=db)
         assert exc.value.status_code == 403
 
     def test_rejects_open_text(self, col):
@@ -374,7 +543,7 @@ class TestEndpointGuards:
         c.column_type = ColumnType.OPEN_TEXT; db.flush()
         req = ApplyValueLabelsRequest(labels=[ValueLabelPair(value=1, label="A")])
         with pytest.raises(HTTPException) as exc:
-            _run(apply_value_labels_endpoint(1, 1, c.id, req, user=self._user(db), db=db))
+            apply_value_labels_endpoint(1, 1, c.id, req, user=self._user(db), db=db)
         assert exc.value.status_code == 400
 
     def test_schema_rejects_duplicate_codes(self):
@@ -399,7 +568,7 @@ class TestEndpointGuards:
             labels=[ValueLabelPair(value=2, label="Low"), ValueLabelPair(value=4, label="Mid")],
             column_type="ordinal",
         )
-        res = _run(apply_value_labels_endpoint(1, 1, c.id, req, user=self._user(db), db=db))
+        res = apply_value_labels_endpoint(1, 1, c.id, req, user=self._user(db), db=db)
         assert res.column_id == c.id
         assert res.updated == 2
         assert res.unlabeled_codes == [6.0]
@@ -457,8 +626,152 @@ class TestDefaultsMissingFilterOnUndeclaredColumns:
         d = db.query(RecodeDefinition).filter_by(column_id=c.id).one()
         pre_mapping = d.mapping
         res = apply_value_labels(db, c, [(9, "Not applicable")], None)
+        # #584: the bail path reports an EMPTY staled set — it touched no
+        # cells, so it can have re-keyed nothing. Asserted as whole-dict
+        # equality, deliberately: that is what caught the new key arriving.
         assert res == {"updated": 0, "unlabeled_codes": [],
-                       "missing_skipped": [9.0]}
+                       "missing_skipped": [9.0], "staled_definitions": []}
         assert c.scale_labels == pre_labels, "metadata must survive the bail"
         assert db.query(RecodeDefinition).filter_by(
             column_id=c.id).one().mapping == pre_mapping
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #589 — the eligible-type rule lives on the OPERATION, not only at the router
+# #588 — the dictionary has ONE ceiling, at all four write paths
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestIneligibleColumnTypes:
+    """A declared dictionary must never reach an open-text or identifier column.
+
+    The retro endpoint has always answered 400 for these. The IMPORT path calls
+    `apply_value_labels` directly via `cells_are_codes` and passes no router at
+    all — so before #589 a config of `{"column_type": "open_text",
+    "cells_are_codes": true}` substituted labels into free-form responses, wrote
+    scale metadata and minted a primary scale_map. Reproduced by execution
+    before the fix; the guard now sits next to the assumption it protects, the
+    same placement `blocking_reverse_primary` uses (#585).
+    """
+
+    def _col(self, db, ctype):
+        p = db.query(Project).filter_by(id=1).first()
+        if p is None:
+            db.add(Project(id=1, name="P", user_id=1)); db.flush()
+            db.add(Dataset(id=1, project_id=1, name="D")); db.flush()
+        c = DatasetColumn(dataset_id=1, column_code="X", column_text="X",
+                          column_type=ctype, sequence_order=9, display_order=9)
+        db.add(c); db.flush()
+        return c
+
+    @pytest.mark.parametrize("ctype", [ColumnType.OPEN_TEXT, ColumnType.IDENTIFIER])
+    def test_service_refuses_an_ineligible_current_type(self, db_session, ctype):
+        c = self._col(db_session, ctype)
+        with pytest.raises(ValueLabelsBlockedError, match="cannot be applied"):
+            apply_value_labels(db_session, c, [(1, "Yes")], None)
+
+    @pytest.mark.parametrize("current, target", [
+        (ColumnType.OPEN_TEXT, ColumnType.ORDINAL),   # arrive ineligible, ask to convert
+        (ColumnType.ORDINAL, ColumnType.OPEN_TEXT),   # arrive fine, ask to become ineligible
+    ])
+    def test_neither_the_current_nor_the_target_type_may_be_ineligible(
+        self, db_session, current, target
+    ):
+        """Checking only one of the two leaves a sidestep: the caller supplies
+        the type it wants, so a one-sided guard is bypassed by naming the other."""
+        c = self._col(db_session, current)
+        with pytest.raises(ValueLabelsBlockedError):
+            apply_value_labels(db_session, c, [(1, "Yes")], target)
+
+    def test_an_eligible_column_is_unaffected(self, db_session):
+        c = self._col(db_session, ColumnType.NOMINAL)
+        _seed(db_session, c, [1])
+        res = apply_value_labels(db_session, c, [(1, "Yes")], ColumnType.NOMINAL)
+        assert res["updated"] == 1
+
+    def test_the_import_path_is_refused_end_to_end(self, db_session):
+        """The door the schema cannot close: `import_dataset_csv` takes raw
+        dicts, so only the service guard stands between this config and a
+        relabelled free-text column."""
+        from app.services.dataset_import import import_dataset_csv
+        db_session.add(Project(id=77, name="P77", user_id=1)); db_session.flush()
+        cfgs = [{"column_index": 0, "skip": False, "column_type": "open_text",
+                 "column_text": "note", "cells_are_codes": True,
+                 "scale_labels": ["Yes", "No"], "scale_values": [1, 2]}]
+        with pytest.raises(ValueLabelsBlockedError):
+            import_dataset_csv(db_session, project_id=77, name="DS",
+                               column_configs=cfgs, file_contents="note\n1\n2\n")
+
+    def test_the_import_config_schema_refuses_it_earlier(self):
+        """The edge arm: a clean 422 before any work, for the wizard."""
+        from pydantic import ValidationError
+        from app.schemas.dataset import DatasetColumnConfig
+        for t in ("open_text", "identifier"):
+            with pytest.raises(ValidationError, match="cells_are_codes"):
+                DatasetColumnConfig(column_index=1, column_type=t, column_text="c",
+                                    cells_are_codes=True, scale_labels=["Yes"],
+                                    scale_values=[1])
+
+    def test_a_skipped_column_is_not_judged(self):
+        """A skipped column is discarded before any post-pass runs, so refusing
+        it would reject a harmless (if pointless) config."""
+        from app.schemas.dataset import DatasetColumnConfig
+        cfg = DatasetColumnConfig(column_index=1, column_type="skip", column_text="c",
+                                  skip=True, cells_are_codes=True)
+        assert cfg.skip is True
+
+
+class TestValueLabelCeiling:
+    """#588 — one ceiling, shared by every schema that can write `scale_labels`.
+
+    The filed entry named two write paths; there are four. A cap on one leaves
+    the others open, which is why the bound is a shared validator rather than a
+    `max_length=` on a single field.
+    """
+
+    def _labels(self, n):
+        return [f"L{i}" for i in range(n)]
+
+    def test_every_write_path_refuses_one_past_the_cap(self):
+        from pydantic import ValidationError
+        from app.schemas.dataset import (
+            DatasetColumnConfig, ManualColumnCreate, ManualColumnUpdate,
+        )
+        from app.schemas.recode import ApplyValueLabelsRequest
+        from app.services.value_labels import MAX_VALUE_LABELS
+
+        over = MAX_VALUE_LABELS + 1
+        builders = {
+            "value-labels endpoint": lambda: ApplyValueLabelsRequest(
+                labels=[{"value": float(i), "label": f"L{i}"} for i in range(over)]),
+            "import config": lambda: DatasetColumnConfig(
+                column_index=1, column_type="nominal", column_text="c",
+                scale_labels=self._labels(over)),
+            "manual column create": lambda: ManualColumnCreate(
+                column_text="c", column_type="nominal", scale_labels=self._labels(over)),
+            "manual column update": lambda: ManualColumnUpdate(
+                scale_labels=self._labels(over)),
+        }
+        for name, build in builders.items():
+            try:
+                build()
+            except ValidationError:
+                continue
+            pytest.fail(f"{name} accepted {over} labels — its door is still open")
+
+    def test_a_real_codebook_at_the_cap_still_imports(self):
+        """The other side of the bound, and the reason it is 500 rather than the
+        preview-seed heuristic's 30: an SPSS nominal for occupation (~430 ISCO
+        unit groups) or country (~250) legitimately carries hundreds, and `.sav`
+        import feeds this same schema. Tightening the cap to the seed number
+        would reject ordinary survey data — this assertion is what stops that."""
+        from app.schemas.dataset import DatasetColumnConfig
+        from app.services.value_labels import MAX_VALUE_LABELS
+        cfg = DatasetColumnConfig(
+            column_index=1, column_type="nominal", column_text="c",
+            scale_labels=self._labels(MAX_VALUE_LABELS),
+            scale_values=[float(i) for i in range(MAX_VALUE_LABELS)])
+        assert len(cfg.scale_labels) == MAX_VALUE_LABELS
+        assert MAX_VALUE_LABELS >= 250, (
+            "the cap must admit a country/occupation codebook — see #588"
+        )

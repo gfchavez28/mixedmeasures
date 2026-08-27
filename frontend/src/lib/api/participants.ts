@@ -79,10 +79,77 @@ export const participantsApi = {
     api.patch<Participant>(`/projects/${projectId}/participants/${participantId}`, data).then(res => res.data),
   delete: (projectId: number, participantId: number) =>
     api.delete(`/projects/${projectId}/participants/${participantId}`).then(res => res.data),
+  /** #702(2): what would have to be removed to honour this person's withdrawal.
+   *  Read-only — it changes nothing, and it is what makes the orphaning default
+   *  actionable rather than merely documented. */
+  withdrawalReport: (projectId: number, participantId: number) =>
+    api.get<WithdrawalReport>(
+      `/projects/${projectId}/participants/${participantId}/withdrawal-report`
+    ).then(res => res.data),
+  /** #702(3) — honour a withdrawal: remove the person, keep everyone else's data.
+   *  Takes a full backup first and returns its filename. */
+  withdraw: (projectId: number, participantId: number) =>
+    api.post<WithdrawalOutcome>(
+      `/projects/${projectId}/participants/${participantId}/withdraw`
+    ).then(res => res.data),
+
   linkDatasetRow: (projectId: number, participantId: number, datasetId: number, rowId: number) =>
     api.post<ParticipantDetail>(`/projects/${projectId}/participants/${participantId}/link-dataset-row`,
       { dataset_id: datasetId, row_id: rowId }).then(res => res.data),
   unlinkDatasetRow: (projectId: number, participantId: number, rowId: number) =>
     api.post<ParticipantDetail>(`/projects/${projectId}/participants/${participantId}/unlink-dataset-row`,
       { row_id: rowId }).then(res => res.data),
+}
+
+
+/**
+ * What a participant's data touches — #702(2).
+ *
+ * Counts and locations only, never the text: a report reproducing transcript
+ * lines or response values would be one more copy of the data a researcher is
+ * trying to remove. `speaker_names` IS included, deliberately — it is
+ * identifying, and it is the field that SURVIVES the participant delete.
+ */
+export interface WithdrawalOutcome {
+  participant_id: number
+  identifier: string
+  speaker_label: string | null
+  segments_blanked: number
+  excerpts_deleted: number
+  dataset_rows_deleted: number
+  responses_deleted: number
+  row_scores_deleted: number
+  code_applications_kept: number
+  notes_for_review: number
+  memos_for_review: number
+  backup_filename: string
+}
+
+export interface WithdrawalReport {
+  participant_id: number
+  identifier: string
+  display_name: string | null
+  role: string | null
+  has_demographics: boolean
+  speaker_names: string[]
+  conversations: {
+    conversation_id: number
+    name: string
+    segments: number
+    code_applications: number
+    excerpts: number
+    notes: number
+  }[]
+  datasets: {
+    dataset_id: number
+    name: string
+    rows: number
+    responses: number
+    code_applications: number
+    excerpts: number
+    notes: number
+    memos: number
+    row_scores: number
+  }[]
+  total_items: number
 }

@@ -38,7 +38,7 @@ from tests import r_support
 
 
 async def _export_r_text(project_id, user, db) -> str:
-    resp = await export_r_data(project_id=project_id, user=user, db=db)
+    resp = export_r_data(project_id=project_id, user=user, db=db)
     chunks = [chunk async for chunk in resp.body_iterator]
     raw = b"".join(chunks if isinstance(chunks[0], bytes) else [c.encode() for c in chunks])
     with zipfile.ZipFile(io.BytesIO(raw)) as zf:

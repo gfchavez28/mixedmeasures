@@ -21,6 +21,15 @@ from sqlalchemy.orm import Session
 from ..models.dataset import Dataset, DatasetColumn, DatasetValue
 from .missing_values import is_missing, parse_missing_rules
 
+#: What a bucket of rows with no grouping value is CALLED, everywhere.
+#:
+#: The Excel export has labelled its ``None`` bucket this since #506, as a lone
+#: string literal. #823(l) needed the same word in a second place — the residual
+#: cell of a CROSSED comparison — and a second literal is how two surfaces start
+#: disagreeing about one fact. Any surface that renders a missing-value bucket
+#: as a row, a group or an axis value uses this.
+MISSING_GROUP_LABEL = "(Missing)"
+
 
 def value_label_sort_key(label: str) -> tuple[int, float, str]:
     """Sort key behind ``order_value_labels`` — public for callers that need to

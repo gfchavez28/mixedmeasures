@@ -2,6 +2,7 @@
 
 import json
 import logging
+from dataclasses import dataclass
 
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
@@ -142,6 +143,37 @@ def effective_reverse_offset(
     return reverse_offset(nums) if nums else None
 
 
+def definition_reflection_offset(
+    definition: RecodeDefinition, missing_values_json,
+) -> float | None:
+    """The reflection offset THIS definition's mapping implies on its column.
+
+    The wire-facing wrapper around ``effective_reverse_offset``: parse the def's
+    own ``exclude_values``, parse the column's declaration, ask the one function
+    that owns the rule. Shared by BOTH payloads that carry a `reverse_offset`
+    (`/data`'s `RecodeDefinitionSummary` and the definition endpoints'
+    `RecodeDefinitionResponse`) so the same field name cannot acquire two
+    population rules.
+
+    ⚠️ **Populated for EVERY definition type, not only `reverse` (#602).** The
+    Recode Workbench's reverse editor previews a DRAFT whose mapping is a
+    verbatim copy of its `scale_map` source, and the number that draft must show
+    is the one the save will produce — which is this offset computed over the
+    SOURCE's mapping. Restricting the field to reverse defs leaves the draft with
+    nothing authoritative to display, which is how the preview came to say
+    "Never → 99" while saving produced 5. Non-numeric mappings (a
+    `category_group`) yield ``None`` naturally.
+
+    ``None`` is meaningful and is NOT "unknown": it says the mapping has no real
+    scale points, so the apply path performs no reflection at all.
+    """
+    return effective_reverse_offset(
+        _parse_mapping(definition),
+        {v.lower() for v in _parse_exclude_values(definition)},
+        parse_missing_rules(missing_values_json),
+    )
+
+
 def compute_value(
     value_text: str,
     definition: RecodeDefinition,
@@ -191,19 +223,43 @@ def compute_value(
     return result
 
 
-def apply_definition_to_column(
+#: How ONE distinct source ``value_text`` is treated by a definition.
+#: ``kind`` is ``'mapped'`` | ``'null_set'`` | ``'unmapped'``; ``output`` is the
+#: computed value for a mapped entry (already reflected for a REVERSE) and
+#: ``None`` otherwise.
+@dataclass(frozen=True)
+class RecodeCellDisposition:
+    value_text: str
+    lower_key: str
+    kind: str
+    output: float | str | None
+    missing_overridden: bool = False
+
+
+def plan_definition_over_column(
     db: Session,
     definition: RecodeDefinition,
-    row_ids: list[int] | None = None,
-) -> dict:
-    """
-    For a primary scale_map definition: bulk UPDATE value_numeric on DatasetValue
-    using CASE WHEN with case-insensitive matching.
+) -> list[RecodeCellDisposition]:
+    """Classify every DISTINCT ``value_text`` on a definition's column.
 
-    Returns {"updated": N, "unmapped": [...], "excluded": N,
-    "missing_overridden": [...]} — the last being mapped values the column's
-    missing rule NULLed anyway (J-D1: the declaration wins over the mapping;
-    surfaced so callers can tell the researcher).
+    **THE match rule, extracted so it has exactly one implementation.** Two
+    operations need it — applying a definition IN PLACE
+    (``apply_definition_to_column``) and deriving a NEW column from it
+    (``services/derive_column.py``) — and #542b is the standing record of what a
+    second copy costs: the per-value and bulk paths once disagreed about a
+    stray non-numeric mapping value, so one cell got two different numbers
+    depending on which path computed it. A derived column whose values disagreed
+    with the in-place recode's would be the same defect wearing a new hat.
+
+    Order is the DISTINCT query's order and is preserved, so a caller building a
+    ``CASE`` from this produces the clauses the pre-extraction code produced.
+    (Order does not affect the result — the conditions are mutually exclusive
+    equality tests on one expression — but keeping it makes the two readable
+    against each other.)
+
+    ⚠️ Read-only. It runs one DISTINCT query and one scalar; it writes nothing,
+    which is what lets the derive path show a researcher the plan BEFORE
+    committing to it.
     """
     mapping = _parse_mapping(definition)
     exclude_values = _parse_exclude_values(definition)
@@ -240,37 +296,103 @@ def apply_definition_to_column(
         .all()
     )
 
-    unmapped = []
-    excluded_lower_vals = []
-    missing_overridden = []
-
-    # Build CASE WHEN expression for bulk update
-    whens = []
+    plan: list[RecodeCellDisposition] = []
     for (val,) in distinct_values:
         lower_val = val.strip().lower()
         if _effective_null_set_hit(val, lower_excludes, missing_rules):
             # Missing/excluded values get NULL — checked BEFORE the mapping,
             # so a mapped missing value NULLs anyway (J-D1; Bug B/#594).
-            whens.append((func.lower(func.trim(DatasetValue.value_text)) == lower_val, None))
-            excluded_lower_vals.append(lower_val)
-            if lower_val in lower_map:
-                missing_overridden.append(val)
+            plan.append(RecodeCellDisposition(
+                value_text=val, lower_key=lower_val, kind="null_set", output=None,
+                missing_overridden=lower_val in lower_map,
+            ))
         elif lower_val in lower_map:
+            raw = lower_map[lower_val]
+            if definition.recode_type == RecodeType.CATEGORY_GROUP:
+                # Categorical output is a STRING group name; it is never
+                # floated and never reflected.
+                plan.append(RecodeCellDisposition(
+                    value_text=val, lower_key=lower_val, kind="mapped", output=raw,
+                ))
+                continue
             try:
-                numeric_val = float(lower_map[lower_val])
+                numeric_val = float(raw)
                 # `is not None`: 0.0 is a real offset (a symmetric -5..+5 scale
                 # reflects about it) — see effective_reverse_offset. None means
                 # there are no real scale points to reflect about at all.
                 if is_reverse and rev_offset is not None:
                     numeric_val = rev_offset - numeric_val
-                whens.append((func.lower(func.trim(DatasetValue.value_text)) == lower_val, numeric_val))
+                plan.append(RecodeCellDisposition(
+                    value_text=val, lower_key=lower_val, kind="mapped", output=numeric_val,
+                ))
             except (ValueError, TypeError):
-                logger.warning("Non-numeric recode mapping value for '%s': %s", lower_val, lower_map[lower_val])
-                unmapped.append(val)
+                logger.warning("Non-numeric recode mapping value for '%s': %s", lower_val, raw)
+                plan.append(RecodeCellDisposition(
+                    value_text=val, lower_key=lower_val, kind="unmapped", output=None,
+                ))
         else:
-            unmapped.append(val)
+            plan.append(RecodeCellDisposition(
+                value_text=val, lower_key=lower_val, kind="unmapped", output=None,
+            ))
+    return plan
 
-    if not whens and not unmapped:
+
+def apply_definition_to_column(
+    db: Session,
+    definition: RecodeDefinition,
+    row_ids: list[int] | None = None,
+) -> dict:
+    """
+    For a primary scale_map definition: bulk UPDATE value_numeric on DatasetValue
+    using CASE WHEN with case-insensitive matching.
+
+    Returns {"updated": N, "unmapped": [...], "excluded": N,
+    "missing_overridden": [...]} — the last being mapped values the column's
+    missing rule NULLed anyway (J-D1: the declaration wins over the mapping;
+    surfaced so callers can tell the researcher).
+    """
+    plan = plan_definition_over_column(db, definition)
+
+    # ⚠️ ONE ordered pass, deliberately — not three comprehensions. A
+    # CATEGORY_GROUP's output is a STRING, which this path has never been able to
+    # write to `value_numeric` (`recompute_primary_value_numeric` routes that type
+    # to `clear_value_numeric` instead), so before the extraction it reached
+    # `float("Positive")`, raised, and landed in `unmapped`. Re-adding those in a
+    # second pass would preserve the MEMBERSHIP of `unmapped` but not its ORDER,
+    # and the order is what a researcher reads in "Unmapped values: …".
+    unmapped: list[str] = []
+    excluded_lower_vals: list[str] = []
+    missing_overridden: list[str] = []
+    whens = []
+    for d in plan:
+        if d.missing_overridden:
+            missing_overridden.append(d.value_text)
+        if d.kind == "null_set":
+            excluded_lower_vals.append(d.lower_key)
+            whens.append((func.lower(func.trim(DatasetValue.value_text)) == d.lower_key, None))
+        elif d.kind == "unmapped" or isinstance(d.output, str):
+            unmapped.append(d.value_text)
+        else:
+            whens.append((func.lower(func.trim(DatasetValue.value_text)) == d.lower_key, d.output))
+
+    if not whens:
+        # 🔴 #794: NOTHING matched. The old guard was `not whens and not
+        # unmapped`, so a definition whose keys match no cell — every key stale
+        # against the column's text — fell through to `case()` with zero WHEN
+        # clauses and emitted `SET value_numeric=CASE END WHERE …`, which is not
+        # valid SQL: an unhandled 500 on a routine "make this primary" click.
+        #
+        # ⚠️ **This returns rather than RAISES, and that is load-bearing.** This
+        # function is on the startup path — `repair_reverse_recode_mappings`
+        # reaches it through `recompute_primary_value_numeric` — and the J-D2
+        # pair was DROPPED in #592 slab 4 precisely because an apply-side raise
+        # fires during boot on existing data. The refusal belongs at the
+        # user-initiated door (`routers/recode.py::set_primary`), which can see
+        # `updated == 0` in this result and answer 4xx before committing.
+        #
+        # Returning a no-op is also the honest arithmetic: nothing matched, so
+        # nothing should be written. The pre-#794 behaviour NULLed nothing here
+        # only because it crashed first.
         return {"updated": 0, "unmapped": unmapped, "excluded": 0,
                 "missing_overridden": missing_overridden}
 
@@ -454,7 +576,7 @@ def write_back_scale_metadata(
 
 def recompute_primary_value_numeric(
     db: Session, definition: RecodeDefinition, column_id: int,
-) -> None:
+) -> dict | None:
     """Recompute (or clear) ``value_numeric`` for a column from its primary recode.
 
     SCALE_MAP and REVERSE both produce numeric output and must be *applied* to the
@@ -478,10 +600,16 @@ def recompute_primary_value_numeric(
     if hasattr(rtype, "value"):
         rtype = rtype.value
     if rtype in ("scale_map", "reverse"):
-        apply_definition_to_column(db, definition)
+        result = apply_definition_to_column(db, definition)
         write_back_scale_metadata(db, definition, column_id)
-    else:  # category_group → no numeric output
-        clear_value_numeric(db, column_id)
+        # Handed back (#794) so a CALLER can judge the outcome — `set_primary`
+        # refuses a promotion that matched nothing, and discloses the values a
+        # partial match left unmapped. Every existing caller ignores it, which
+        # is why this is a return value and not a raise.
+        return result
+    # category_group → no numeric output
+    clear_value_numeric(db, column_id)
+    return None
 
 
 # ── #578 one-time reverse-mapping repair ─────────────────────────────────────
@@ -499,6 +627,11 @@ def _ultimate_scale_map_mapping(
     (deleted / source-less reverses from ``CopyRecodeDialog``) and for chains
     that don't terminate at a scale map: those can't be repaired safely because
     a forward and a flipped mapping are indistinguishable without the reference.
+
+    ⚠️ This is the CHAIN walker only. An orphan may still have a reference — a
+    ``scale_map`` sibling on its own column — which ``_sibling_scale_map_mapping``
+    finds; ``_forward_reference_mapping`` is the one that tries both. Keep this
+    function pure over the chain so the two references stay distinguishable.
     """
     seen: set[int] = set()
     cur = definition
@@ -513,6 +646,141 @@ def _ultimate_scale_map_mapping(
             return None
         cur = src
     return None
+
+
+def _maybe_float(v) -> float | None:
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return None
+
+
+def _comparable_keys(
+    definition: RecodeDefinition, forward: dict,
+) -> tuple[list[str], dict, dict]:
+    """The keys a flip test can actually compare, lower-cased on both sides.
+
+    A key qualifies when it is not in the def's own ``exclude_values`` (the
+    frontend flip preserved excluded values un-flipped, so they are not evidence)
+    and carries a numeric value on BOTH sides. Returns ``(shared, current,
+    forward)`` with both maps already lower-cased and numeric-parsed.
+
+    Single-sourced because ``_forward_reference_mapping`` has to ask the same
+    question the repair loop asks: an empty result means the two mappings have
+    nothing in common, so the "reference" is not one.
+    """
+    excludes = {e.lower() for e in _parse_exclude_values(definition)}
+    cur_lower = {str(k).lower(): _maybe_float(v)
+                 for k, v in _parse_mapping(definition).items()}
+    fwd_lower = {str(k).lower(): _maybe_float(v) for k, v in forward.items()}
+    shared = [
+        k for k in cur_lower
+        if k not in excludes
+        and cur_lower[k] is not None
+        and fwd_lower.get(k) is not None
+    ]
+    return shared, cur_lower, fwd_lower
+
+
+def _sibling_scale_map_mapping(
+    db: Session, definition: RecodeDefinition,
+) -> tuple[dict, RecodeDefinition] | None:
+    """The forward reference an ORPHANED reverse def still has: a ``scale_map``
+    on its OWN column (#587).
+
+    ``CopyRecodeDialog`` / ``CopyToEquivalentsDialog`` (the crosswalk copy paths)
+    call ``recodeApi.create`` without ``source_definition_id``, so the #578
+    repair's chain walk returns None and skips them forever — leaving them
+    stored FLIPPED, i.e. silently un-reversed, while their repaired originals are
+    correct. One battery, inconsistently coded, with no visual cue (display and
+    storage agree; both wrong).
+
+    ``_ultimate_scale_map_mapping``'s docstring calls those "indistinguishable
+    without the reference", and that is OVERSTATED: the target column carries its
+    own ``scale_map`` with the forward mapping, in the TARGET's label spelling.
+    That spelling is what makes this the arm that matters — a positional copy is
+    ``remapMapping``'d to the target's labels, so walking to the SOURCE def (even
+    once provenance is recorded) yields labels this def does not share, and the
+    flip test finds nothing to compare. Provenance fixes the same-labels case;
+    this fixes the remapped one.
+
+    Two preconditions, because a sibling is weaker evidence than an explicit link:
+
+    * **exactly one** ``scale_map`` on the column. Two that disagree cannot both
+      be the reference, and picking one by a heuristic is how a repair corrupts
+      data it was meant to fix. Ambiguity → skip (logged).
+    * the sibling must cover **every** non-excluded numeric key of this def.
+      The chain path is content with one shared key; here, partial overlap is
+      indistinguishable from "these are different scales that happen to share a
+      label".
+
+    The flip test itself is unchanged and is the real safety: it demands
+    ``offset - current[k] == forward[k]`` for every shared key, and the
+    already-forward case short-circuits before it.
+    """
+    scale_maps = (
+        db.query(RecodeDefinition)
+        .filter(
+            RecodeDefinition.column_id == definition.column_id,
+            RecodeDefinition.recode_type == RecodeType.SCALE_MAP,
+        )
+        .all()
+    )
+    if len(scale_maps) != 1:
+        if scale_maps:
+            logger.info(
+                "Reverse def %s has %d scale_map siblings — ambiguous reference, "
+                "not repaired (#587)", definition.id, len(scale_maps),
+            )
+        return None
+
+    sibling = scale_maps[0]
+    forward = _parse_mapping(sibling)
+    if not forward:
+        return None
+
+    excludes = {e.lower() for e in _parse_exclude_values(definition)}
+    fwd_lower = {str(k).lower() for k in forward}
+    for key, value in _parse_mapping(definition).items():
+        if str(key).lower() in excludes:
+            continue
+        try:
+            float(value)
+        except (ValueError, TypeError):
+            continue
+        if str(key).lower() not in fwd_lower:
+            return None  # partial overlap — not a reference for THIS def
+    return forward, sibling
+
+
+def _forward_reference_mapping(
+    db: Session, definition: RecodeDefinition, resolve,
+) -> tuple[dict, RecodeDefinition | None] | None:
+    """THE forward ``{label: code}`` a reverse def should carry, or None.
+
+    Tries the explicit provenance chain first (``source_definition_id``), then
+    the same-column ``scale_map`` sibling. One function so "what is this def's
+    forward reference?" has a single answer, and so a caller cannot accidentally
+    consult only the weaker one.
+
+    Returns ``(mapping, adopted_source)`` — ``adopted_source`` is the sibling
+    when the fallback supplied the answer, so the repair can record the link it
+    should have had.
+
+    ⚠️ **A chain that RESOLVES is not automatically a usable reference, and this
+    distinction is the whole fix.** The crosswalk's `positional` copy is
+    remapped to the TARGET column's labels, so once provenance is recorded the
+    chain returns the SOURCE column's mapping in the SOURCE's spelling — a
+    perfectly valid mapping that shares NOT ONE KEY with this def. Returning it
+    would shadow the sibling and leave exactly the rows #587 is about
+    unrepaired, which is what an early version of this function did until
+    `test_a_LABEL_REMAPPED_copy_is_reachable_ONLY_through_the_sibling` failed.
+    So the chain must be comparable, not merely present.
+    """
+    chained = _ultimate_scale_map_mapping(definition, resolve)
+    if chained and _comparable_keys(definition, chained)[0]:
+        return chained, None
+    return _sibling_scale_map_mapping(db, definition)
 
 
 def repair_reverse_recode_mappings(db: Session) -> int:
@@ -550,27 +818,16 @@ def repair_reverse_recode_mappings(db: Session) -> int:
             _cache[def_id] = db.get(RecodeDefinition, def_id)
         return _cache[def_id]
 
-    def _num(v):
-        try:
-            return float(v)
-        except (ValueError, TypeError):
-            return None
-
     repaired = 0
     for defn in reverse_defs:
-        forward = _ultimate_scale_map_mapping(defn, resolve)
-        if not forward:
+        reference = _forward_reference_mapping(db, defn, resolve)
+        if not reference:
             continue
+        forward, adopted_source = reference
         current = _parse_mapping(defn)
-        excludes = {e.lower() for e in _parse_exclude_values(defn)}
-        fwd_lower = {k.lower(): _num(v) for k, v in forward.items()}
-        cur_lower = {k.lower(): _num(v) for k, v in current.items()}
-        shared = [
-            k for k in cur_lower
-            if k not in excludes
-            and cur_lower[k] is not None
-            and fwd_lower.get(k) is not None
-        ]
+        # Same helper `_forward_reference_mapping` used to judge the reference,
+        # so "is this comparable?" cannot be answered two ways.
+        shared, cur_lower, fwd_lower = _comparable_keys(defn, forward)
         if not shared:
             continue
         # Already forward → nothing to do (idempotent).
@@ -586,6 +843,14 @@ def repair_reverse_recode_mappings(db: Session) -> int:
         defn.mapping = json.dumps(
             {label: fwd_raw.get(label.lower(), current[label]) for label in current}
         )
+        if adopted_source is not None and defn.source_definition_id is None:
+            # Record the link the copy path never set (#587). Not fabricated
+            # provenance: "reversed from a scale_map on this column" is exactly
+            # what `source_definition_id` means when the Recode Workbench sets
+            # it, and adopting it makes the NEXT repair reach this def through
+            # the chain — plus the workbench's ReverseEditor stops rendering
+            # "Source definition not found or deleted." over a live def.
+            defn.source_definition_id = adopted_source.id
         if defn.is_primary:
             recompute_primary_value_numeric(db, defn, defn.column_id)
         repaired += 1

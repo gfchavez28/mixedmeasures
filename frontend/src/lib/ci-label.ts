@@ -42,15 +42,80 @@ export function isItemLevelCi(method?: string | null): boolean {
 }
 
 /**
- * The label for an interval, e.g. `"95% CI"` or `"95% CI across items"`.
+ * Every `ci_method` the backend can send. Mirrors the `CI_METHOD_*` constants in
+ * `services/metrics.py`.
+ *
+ * ⚠️ **This union is the point.** The previous shape was a ternary on
+ * `isItemLevelCi`, so any method it did not know fell silently through to a bare
+ * `"95% CI"` — and "silently renders as the ordinary case" is precisely the
+ * failure the module exists to prevent. Adding a value here without a row in
+ * `CI_DESCRIPTORS` is a TypeScript error, which is the enumeration-debt remedy
+ * this codebase already applies elsewhere: make the next variant a compile
+ * error rather than trusting a future reader to notice a fall-through.
+ */
+export type CiMethod =
+  | 't_interval'
+  | 'wilson'
+  | 'item_level_t'
+  | 'wilson_per_category'
+
+interface CiDescriptor {
+  /** Qualifier appended after the level, e.g. "across items". Empty for the
+   *  ordinary respondent-level case. */
+  qualifier: string
+  /** One-sentence explanation for a tooltip; `undefined` when none is needed. */
+  caveat?: string
+}
+
+const CI_DESCRIPTORS = {
+  t_interval: { qualifier: '' },
+  wilson: { qualifier: '' },
+  item_level_t: {
+    qualifier: 'across items',
+    caveat:
+      'Computed across the items in this scale, not across respondents — it reflects how much the items disagree, so it responds to the number of items rather than the sample size.',
+  },
+  wilson_per_category: {
+    qualifier: 'per category',
+    caveat:
+      'Each interval covers ONE response category against all the others. They are separate binomial intervals, not a simultaneous set — so they do not jointly cover at this level, and a category whose interval excludes another’s is not thereby significantly different from it.',
+  },
+} satisfies Record<CiMethod, CiDescriptor>
+
+/**
+ * The confidence level a payload states, as a percentage string.
+ *
+ * The level has been hard-wired at 95% in six places (four backend computation
+ * sites and two client strings, this one included), while `ci_level` has ridden
+ * every payload saying `0.95` the whole time. Reading it here costs nothing now
+ * and is one of the two ends that must move together when the level becomes
+ * configurable — the R export being the other. Absent or malformed falls back to
+ * 95, which is what every stored row actually holds.
+ */
+function levelPercent(level?: number | null): string {
+  if (typeof level !== 'number' || !Number.isFinite(level) || level <= 0 || level >= 1) {
+    return '95'
+  }
+  return String(Number((level * 100).toFixed(2)))
+}
+
+function descriptorFor(method?: string | null): CiDescriptor | undefined {
+  if (!method) return undefined
+  return (CI_DESCRIPTORS as Record<string, CiDescriptor>)[method]
+}
+
+/**
+ * The label for an interval, e.g. `"95% CI"`, `"95% CI across items"`.
  *
  * An unknown or absent method gets the plain label: older `ComputedResult` rows
  * predate `ci_method`, and a missing value must not silently claim the interval is
  * item-level. Under-qualifying an ordinary interval is harmless; over-qualifying a
  * respondent-level one would be a new false statement.
  */
-export function ciLabel(method?: string | null): string {
-  return isItemLevelCi(method) ? '95% CI across items' : '95% CI'
+export function ciLabel(method?: string | null, level?: number | null): string {
+  const base = `${levelPercent(level)}% CI`
+  const qualifier = descriptorFor(method)?.qualifier
+  return qualifier ? `${base} ${qualifier}` : base
 }
 
 /**
@@ -58,7 +123,19 @@ export function ciLabel(method?: string | null): string {
  * the interval is the ordinary respondent-level kind and needs no caveat.
  */
 export function ciCaveat(method?: string | null): string | undefined {
-  return isItemLevelCi(method)
-    ? 'Computed across the items in this scale, not across respondents — it reflects how much the items disagree, so it responds to the number of items rather than the sample size.'
-    : undefined
+  return descriptorFor(method)?.caveat
+}
+
+/**
+ * Just the qualifier, with a leading space, for tooltips that print a bare range
+ * (`[2.1, 4.8] across items`) rather than a labelled one. Empty string when the
+ * interval is the ordinary kind.
+ *
+ * Exists so those tooltips stop hand-rolling `isItemLevelCi(m) && ' across items'`
+ * — two of them did, which is a third copy of the qualifier vocabulary and one
+ * that silently renders any newer method as the ordinary case.
+ */
+export function ciQualifier(method?: string | null): string {
+  const qualifier = descriptorFor(method)?.qualifier
+  return qualifier ? ` ${qualifier}` : ''
 }

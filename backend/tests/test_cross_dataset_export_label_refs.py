@@ -58,8 +58,10 @@ def test_r_export_single_dataset_domain_states_the_equal_weighting():
         "# Unweighted mean of item means: each item counts equally,",
         "# regardless of how many respondents answered it.",
         # #363: ordinal members are ordered factors; .mm_num() coerces them to
-        # numeric so colMeans doesn't error on factor columns.
-        "domain_means <- colMeans(.mm_num(data[, domains$wellness]), na.rm = TRUE)",
+        # numeric so colMeans doesn't error on factor columns. `drop = FALSE`
+        # (#821b) keeps a ONE-member domain a data.frame — `data[, c("a")]`
+        # returns a vector, and colMeans then fails on it.
+        "domain_means <- colMeans(.mm_num(data[, domains$wellness, drop = FALSE]), na.rm = TRUE)",
         "mean(domain_means)",
     ]
     # Still no per-dataset breakdown — that half is genuinely cross-dataset-only.
@@ -79,7 +81,7 @@ def test_r_export_cross_dataset_domain_emits_comment_and_per_dataset_breakdown()
 
     text = "\n".join(lines)
     # All-up form preserved (matches compute_domain_aggregate semantics)
-    assert "domain_means <- colMeans(.mm_num(data[, domains$wellness]), na.rm = TRUE)" in text
+    assert "domain_means <- colMeans(.mm_num(data[, domains$wellness, drop = FALSE]), na.rm = TRUE)" in text
     assert "mean(domain_means)" in text
     # Clarifying comment block surfaces the cross-dataset interpretation
     assert "Cross-dataset domain" in text
@@ -101,7 +103,7 @@ def test_r_export_empty_or_missing_breakdown_falls_back_to_original():
     behavior matches the original code path."""
     lines_none = _emit_domain_aggregate_r_lines(None, "domains$x")
     assert "Cross-dataset" not in "\n".join(lines_none)
-    assert "domain_means <- colMeans(.mm_num(data[, domains$x]), na.rm = TRUE)" in lines_none
+    assert "domain_means <- colMeans(.mm_num(data[, domains$x, drop = FALSE]), na.rm = TRUE)" in lines_none
 
 
 # ── #292 — domain-scores subset label ────────────────────────────────────────

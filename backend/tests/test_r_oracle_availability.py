@@ -120,3 +120,106 @@ def test_ci_workflows_require_r_on_the_pytest_step():
             "loaded. Without that line an unresolvable package name fails two "
             "steps later, or not at all — the 2026-08-02 regression."
         )
+
+
+def test_the_R_install_step_cannot_eat_the_whole_job_budget():
+    """#781 — the R install must fail on its OWN clock, in both workflows.
+
+    Twice (2026-08-14, 2026-08-19) `apt-get` consumed the job's entire
+    `timeout-minutes`. A JOB-level timeout cancels the running step and SKIPS
+    every step after it, so the run reads **`cancelled`** — indistinguishable
+    from a human stopping it — while `Tests` and the HARD production-dependency
+    gate never executed. Green by appearance, two gates dark.
+
+    A STEP-level timeout makes the step FAIL instead: the run reads `failure`
+    and names the cause. The suite still does not run, but that fact is loud,
+    which is the whole requirement.
+
+    ⚠️ Parsed as YAML, not grepped. The step carries a long comment that says
+    "timeout" several times, so a text scan would pass on the rationale alone —
+    the #772 phantom-parser lesson, and the sibling scan above already records
+    being burned by exactly that.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    workflows = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+    checked = 0
+    for name in ("ci.yml", "release.yml"):
+        spec = yaml.safe_load((workflows / name).read_text(encoding="utf-8"))
+        for job_name, job in spec["jobs"].items():
+            for step in job.get("steps") or []:
+                if "Install R" not in (step.get("name") or ""):
+                    continue
+                checked += 1
+                assert step.get("timeout-minutes"), (
+                    f"{name}:{job_name} — the R install step has no "
+                    "`timeout-minutes`, so a slow mirror consumes the job's "
+                    "budget and the suite is SKIPPED under a `cancelled` run "
+                    "(#781, twice observed)."
+                )
+                assert step["timeout-minutes"] < job["timeout-minutes"], (
+                    f"{name}:{job_name} — the step timeout must be STRICTLY "
+                    "less than the job's, or the job still dies first and the "
+                    "step timeout buys nothing."
+                )
+    # Population self-check (#730): a scan whose expected result is empty passes
+    # by finding nothing, including when the step is renamed out from under it.
+    assert checked == 2, f"expected the R install step in both workflows, found {checked}"
+
+
+def test_EVERY_ci_hard_dependency_gate_runs_even_when_an_earlier_step_failed():
+    """#781's other half, asserted over the POPULATION rather than one job.
+
+    The gates are placed LAST so a failing audit cannot cost the test signal. The
+    cost of `last` is that every earlier failure skipped them too, so a push
+    could land on `main` with its production dependencies never audited —
+    failing OPEN. `!cancelled()` keeps the placement and removes the reverse
+    coupling.
+
+    ⚠️ **Written as a population assertion for a reason: the first version of
+    this fix was PARTIAL.** It conditioned the backend gate and left the
+    frontend and electron ones alone, which is the shape that has shipped
+    partially three times in this codebase already. A test naming one job would
+    have certified that. *Every* hard gate in ci.yml must carry the condition,
+    and a job added later is covered without anyone remembering.
+
+    ⛔ **The ADVISORY audit is deliberately excluded** — it is
+    `continue-on-error` and non-blocking, so its skipping costs nothing. The rule
+    is "hard gates always run, advisory ones are best-effort".
+
+    ⛔ **release.yml is deliberately excluded too.** There a failed step means no
+    artifacts and no release, which is already the outcome the gate exists to
+    force: it fails CLOSED. The condition would only add a red line to a release
+    that is dead regardless. Do not "harmonise" the two (#749).
+    """
+    from pathlib import Path
+
+    import yaml
+
+    spec = yaml.safe_load(
+        (Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml")
+        .read_text(encoding="utf-8")
+    )
+    unconditional = []
+    found = 0
+    for job_name, job in spec["jobs"].items():
+        for step in job.get("steps") or []:
+            name = step.get("name") or ""
+            if "HARD gate" not in name:
+                continue
+            found += 1
+            if "cancelled()" not in str(step.get("if") or ""):
+                unconditional.append(f"{job_name}: {name}")
+
+    # Population self-check (#730): an empty scan passes by finding nothing,
+    # including when the steps are renamed out from under this matcher.
+    assert found == 3, (
+        f"expected three HARD production-dependency gates in ci.yml, found {found} "
+        "— a job was added, removed, or its gate renamed."
+    )
+    assert not unconditional, (
+        "these ci.yml hard dependency gates are unconditional, so any earlier "
+        f"failure skips them and the push lands unaudited (#781): {unconditional}"
+    )

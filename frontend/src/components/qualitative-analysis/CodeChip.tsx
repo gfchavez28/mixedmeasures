@@ -14,9 +14,18 @@ interface CodeChipProps {
   // on hover via the title). For narrow fixed-width columns like the reconciliation grid,
   // where an un-truncated chip would bleed into the neighbouring column.
   truncate?: boolean
+  /**
+   * #771 — remove this chip from the TAB ORDER without removing it from the
+   * page. A `role="option"` row that carries interactive descendants costs the
+   * keyboard user one stop per control per row; gating the stop on selection
+   * keeps the control clickable and reachable while making a tour of the list
+   * cost one stop per row. Only meaningful when `onClick` is supplied (that is
+   * what makes this a `<button>` at all).
+   */
+  tabbable?: boolean
 }
 
-export default function CodeChip({ code, size = 'sm', onClick, coder, truncate }: CodeChipProps) {
+export default function CodeChip({ code, size = 'sm', onClick, coder, truncate, tabbable = true }: CodeChipProps) {
   const bgColor = getCodeColor(code)
   const textColor = getContrastColor(bgColor)
 
@@ -36,6 +45,7 @@ export default function CodeChip({ code, size = 'sm', onClick, coder, truncate }
       style={{ backgroundColor: bgColor, color: textColor }}
       title={code.category_name ? `${code.name} (${code.category_name})` : code.name}
       onClick={onClick ? (e) => { e.stopPropagation(); onClick(code.id) } : undefined}
+      tabIndex={onClick && !tabbable ? -1 : undefined}
     >
       {truncate ? <span className="truncate min-w-0">{code.name}</span> : code.name}
       {coder && (

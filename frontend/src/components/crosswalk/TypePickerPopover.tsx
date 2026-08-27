@@ -34,6 +34,7 @@ import { TypeBadge } from '@/components/TypeBadge'
 import { COLUMN_TYPES } from '@/lib/dataset-constants'
 import { Check, AlertCircle, ExternalLink } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { variableViewPath } from '@/lib/dataset-routes'
 
 interface TypePickerPopoverProps {
   /** The current column type. */
@@ -83,7 +84,7 @@ export function TypePickerPopover({
 
   const goToRecodeWorkbench = () => {
     navigate(
-      `/projects/${projectId}/datasets/${datasetId}/recode?column=${columnId}`,
+      variableViewPath(projectId, datasetId, columnId),
     )
     setOpen(false)
   }
@@ -127,7 +128,7 @@ export function TypePickerPopover({
                   {recodeDefCount === 1
                     ? 'This column has 1 recode definition.'
                     : `This column has ${recodeDefCount} recode definitions.`}{' '}
-                  Clear them in the Recode Workbench before changing the type.
+                  Clear them in the Variables view before changing the type.
                 </p>
               </div>
             </div>
@@ -136,7 +137,7 @@ export function TypePickerPopover({
               onClick={goToRecodeWorkbench}
               className="self-end inline-flex items-center gap-1 text-xs text-mm-blue hover:underline focus-visible:ring-2 focus-visible:ring-ring focus:outline-none rounded"
             >
-              Open Recode Workbench
+              Open the Variables view
               <ExternalLink className="w-3 h-3" aria-hidden />
             </button>
           </div>

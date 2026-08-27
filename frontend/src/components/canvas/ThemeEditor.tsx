@@ -19,7 +19,7 @@ import { useCanvasEditor } from './useCanvasEditor'
 import { ExcerptEmbed, ChartEmbed, MemoEmbed, CalloutStat, ImageEmbed, SlashCommand } from './extensions'
 import SlashCommandList from './SlashCommandList'
 import type { SlashCommandListRef } from './SlashCommandList'
-import { COMMANDS, type SlashCommand as SlashCommandItem } from './extensions/slash-commands'
+import { COMMANDS, DEFERRED_SLASH_TYPES, type SlashCommand as SlashCommandItem } from './extensions/slash-commands'
 import { describeRewrites } from './canvas-utils'
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -93,6 +93,13 @@ const ThemeEditor = forwardRef<InsertNodeHandle, ThemeEditorProps>(function Them
   } | null>(null)
   const slashListRef = useRef<SlashCommandListRef>(null)
 
+  /**
+   * The `/chart` the researcher typed, held until the command that consumed it
+   * actually produces something (#823j). Null whenever nothing is pending —
+   * which is every insert that did not come from a slash command.
+   */
+  const pendingSlashRange = useRef<{ from: number; to: number } | null>(null)
+
   // Build material + slash extensions (stable via useMemo)
   const additionalExtensions = useMemo<AnyExtension[]>(() => [
     ExcerptEmbed,
@@ -108,9 +115,25 @@ const ThemeEditor = forwardRef<InsertNodeHandle, ThemeEditorProps>(function Them
         items: ({ query }: { query: string }) =>
           COMMANDS.filter(c => c.label.toLowerCase().includes(query.toLowerCase())),
         command: ({ editor: ed, range, props: cmd }) => {
-          // Delete the "/" trigger text
-          ed.chain().focus().deleteRange(range).run()
           const c = cmd as SlashCommandItem
+          // 🔴 THE TYPED TEXT IS CONSUMED ONLY BY A COMMAND THAT COMPLETES
+          // (#823j). This used to `deleteRange(range)` unconditionally, right
+          // here — so choosing Chart, Excerpt, Memo or Image ate the `/chart`
+          // the researcher typed and then opened a drawer or a file picker they
+          // could still cancel, leaving them with nothing and no way to know
+          // what had happened.
+          //
+          // ⚠️ FOUR commands defer, not the one the issue named: every command
+          // whose real work happens after a surface the user can dismiss. The
+          // deletion moves to the four `insert*` handles below — the one place
+          // all four of them land — via `pendingSlashRange`.
+          if (DEFERRED_SLASH_TYPES.has(c.type)) {
+            pendingSlashRange.current = { from: range.from, to: range.to }
+            onSlashCommandRef.current(c)
+            return
+          }
+          // Everything else completes now, so the trigger text goes now.
+          ed.chain().focus().deleteRange(range).run()
           // Inline commands: handle directly
           if (c.type === 'text') return
           if (c.type === 'divider') { ed.chain().focus().setHorizontalRule().run(); return }
@@ -246,29 +269,51 @@ const ThemeEditor = forwardRef<InsertNodeHandle, ThemeEditorProps>(function Them
 
   // ── Imperative handles ─────────────────────────────────────────────────
 
-  const insertExcerpt = useCallback(
-    (attrs: Record<string, unknown>) => {
-      editor?.chain().focus().insertContent({ type: 'excerpt-embed', attrs }).run()
+  /**
+   * Insert a node, first consuming the slash trigger that asked for it (#823j).
+   *
+   * ⚠️ The pending range is consumed ONCE and only if the text is still there.
+   * These handles serve three other entry points — the Materials drawer, a
+   * pending-item click, and a drag onto the theme — none of which typed
+   * anything, so a stale range must never delete a researcher's prose. The
+   * `startsWith('/')` check is what makes that safe: if the document moved on,
+   * the trigger is simply left alone.
+   *
+   * ⚠️ Scoped per EDITOR instance, which is what makes it correct across
+   * themes: type `/chart` in theme A, click into B, then pick a chart, and B's
+   * pending range is empty — so B inserts cleanly and A keeps its text, which
+   * is the honest outcome for a researcher who moved away.
+   */
+  const insertWithPendingSlash = useCallback(
+    (type: string, attrs: Record<string, unknown>) => {
+      if (!editor) return
+      const pending = pendingSlashRange.current
+      pendingSlashRange.current = null
+      let chain = editor.chain().focus()
+      if (pending && pending.to <= editor.state.doc.content.size) {
+        const text = editor.state.doc.textBetween(pending.from, pending.to, '\n', '\0')
+        if (text.startsWith('/')) chain = chain.deleteRange(pending)
+      }
+      chain.insertContent({ type, attrs }).run()
     },
     [editor],
+  )
+
+  const insertExcerpt = useCallback(
+    (attrs: Record<string, unknown>) => insertWithPendingSlash('excerpt-embed', attrs),
+    [insertWithPendingSlash],
   )
   const insertChart = useCallback(
-    (attrs: Record<string, unknown>) => {
-      editor?.chain().focus().insertContent({ type: 'chart-embed', attrs }).run()
-    },
-    [editor],
+    (attrs: Record<string, unknown>) => insertWithPendingSlash('chart-embed', attrs),
+    [insertWithPendingSlash],
   )
   const insertMemo = useCallback(
-    (attrs: Record<string, unknown>) => {
-      editor?.chain().focus().insertContent({ type: 'memo-embed', attrs }).run()
-    },
-    [editor],
+    (attrs: Record<string, unknown>) => insertWithPendingSlash('memo-embed', attrs),
+    [insertWithPendingSlash],
   )
   const insertImage = useCallback(
-    (attrs: Record<string, unknown>) => {
-      editor?.chain().focus().insertContent({ type: 'image-embed', attrs }).run()
-    },
-    [editor],
+    (attrs: Record<string, unknown>) => insertWithPendingSlash('image-embed', attrs),
+    [insertWithPendingSlash],
   )
 
   // Expose via both ref patterns (forwardRef and MutableRefObject)

@@ -20,6 +20,14 @@ export interface MaterialAutoNameInput {
   showScatter?: boolean
   compareByLabel?: string | null
   compareBy2Label?: string | null
+  /**
+   * Descriptives CHART type — because one Descriptives metric type can draw
+   * more than one figure, and a cross-tab is the case where the name derived
+   * from the metric type alone is wrong (#823m). Only read when NOT on 'rc'.
+   */
+  descriptiveChartType?: string | null
+  /** The cross-tab's second axis, when there is one. */
+  crossTabColumnLabel?: string | null
 }
 
 const DESCRIPTIVE_TYPE_LABELS: Record<string, string> = {
@@ -33,6 +41,8 @@ const RC_CHART_LABELS: Record<string, string> = {
   comparison_table: 'Comparison',
   comparison_grouped_bar: 'Comparison',
   comparison_dumbbell: 'Comparison',
+  comparison_box: 'Comparison',
+  comparison_qq: 'Comparison',
 }
 
 function joinLabels(labels: string[]): string {
@@ -51,6 +61,15 @@ export function generateMaterialAutoName(input: MaterialAutoNameInput): string {
     name = `${typeLabel} · ${joinLabels(input.metricLabels)}${by}`
   } else if (input.activeTab === 'rc') {
     name = `${input.showScatter ? 'Scatter Matrix' : 'Correlations'} · ${joinLabels(input.metricLabels)}`
+  } else if (input.descriptiveChartType === 'cross_tab') {
+    // #823(m): a cross-tab saved as "Freq Dist · trust" describes half of
+    // itself — the whole point of the figure is the SECOND axis, and the
+    // metric type behind it is `frequency_distribution` either way, so a name
+    // derived from the metric type alone can never mention it. Named for what
+    // it draws, and only when the second axis is actually chosen (the chart
+    // type can be `cross_tab` with no column picked yet).
+    const by = input.crossTabColumnLabel ? ` × ${input.crossTabColumnLabel}` : ''
+    name = `Cross-tab · ${joinLabels(input.metricLabels)}${by}`
   } else {
     const typeLabel = DESCRIPTIVE_TYPE_LABELS[input.metricType] || input.metricType
     name = `${typeLabel} · ${joinLabels(input.metricLabels)}`

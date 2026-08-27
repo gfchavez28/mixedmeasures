@@ -81,7 +81,7 @@ def _sheets(db):
     from app.routers.export_excel import export_study_excel
     from tests.test_export_formula_injection import _stream_to_bytes
     user = db.get(User, 1)
-    response = _run(export_study_excel(project_id=PID, user=user, db=db))
+    response = export_study_excel(project_id=PID, user=user, db=db)
     return load_workbook(io.BytesIO(_stream_to_bytes(response)))
 
 

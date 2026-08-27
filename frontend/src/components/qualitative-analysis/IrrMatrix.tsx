@@ -1,8 +1,24 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { CircleCheck, CircleAlert, CircleX, Loader2 } from 'lucide-react'
 import { codeAnalysisApi, type Code, type IrrCodeResult } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { describeUndefined, undefinedTooltip } from '@/lib/stat-format'
+import {
+  Select, SelectContent, SelectGroup, SelectItem, SelectLabel,
+  SelectTrigger, SelectValue,
+} from '@/components/ui/select'
+
+/** Sentinel for "no source filter" — a Radix SelectItem may not have an empty value. */
+const POOLED = '__pooled__'
+
+/** Group heading per source kind, in the order the picker lists them. */
+const KIND_LABEL: Record<string, string> = {
+  conv: 'Conversations',
+  doc: 'Documents',
+  obs: 'Observations (agreed clips)',
+  col: 'Text columns',
+}
 
 interface IrrMatrixProps {
   projectId: number
@@ -35,24 +51,39 @@ const fmtThresh = (v: number) => (Number.isInteger(v * 100) ? v.toFixed(2) : v.t
 const ALPHA_FALLBACK = { tentative: 0.667, reliable: 0.8 }
 
 /** "κ=0.72 substantial" / "κ not computable" — null-safe phrase for the aria-label. */
-function metricPhrase(label: string, value: number | null, band: string | null): string {
-  if (value == null) return `${label} not computable`
+function metricPhrase(label: string, value: number | null, band: string | null, reason?: string | null): string {
+  // A browse-mode reader never hovers, so the reason must ride the name.
+  if (value == null) return `${label} ${describeUndefined(reason) ?? 'not computable'}`
   const w = bandWord(band)
   return `${label}=${value.toFixed(2)}${w ? ` ${w}` : ''}`
 }
 
 function rowAriaLabel(c: IrrCodeResult, showKappa: boolean): string {
   const parts = [`${c.code_name}:`]
-  if (showKappa) parts.push(`${metricPhrase('κ', c.cohens_kappa, c.kappa_interpretation)};`)
-  parts.push(`${metricPhrase('α', c.krippendorff_alpha, c.alpha_interpretation)};`)
+  if (showKappa) parts.push(`${metricPhrase('κ', c.cohens_kappa, c.kappa_interpretation, c.undefined_reason)};`)
+  parts.push(`${metricPhrase('α', c.krippendorff_alpha, c.alpha_interpretation, c.undefined_reason)};`)
   parts.push(`${fmtPct(c.percent_agreement)} agreement;`)
   parts.push(`prevalence ${fmt(c.prevalence)}`)
   return parts.join(' ')
 }
 
-/** A value + its band word, band-colored (dual-encoded). */
-function BandValue({ value, band }: { value: number | null; band: string | null }) {
-  if (value == null) return <span className="text-mm-text-faint">—</span>
+/** A value + its band word, band-colored (dual-encoded).
+ *
+ * #829 — an undefined statistic SAYS WHY. A code nobody applied in scope has no
+ * variance to agree about, and the arithmetic returns κ = 1.0 ("almost
+ * perfect") if you let it. The dash alone would trade a confident wrong number
+ * for a silent one; the reason comes from `lib/stat-format.ts`, the same reader
+ * every other undefined statistic uses, so the vocabulary stays single-sourced
+ * (an unknown reason renders the neutral fallback rather than an invention).
+ */
+function BandValue({ value, band, reason }: { value: number | null; band: string | null; reason?: string | null }) {
+  if (value == null) {
+    return (
+      <span className="text-mm-text-faint" title={undefinedTooltip(reason)}>
+        —<span className="sr-only"> {undefinedTooltip(reason)}</span>
+      </span>
+    )
+  }
   return (
     <span className={cn('font-medium', band ? BAND_CLASS[band] : undefined)}>
       {value.toFixed(2)}
@@ -66,9 +97,17 @@ function BandValue({ value, band }: { value: number | null; band: string | null 
 export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
   // IRR is ALWAYS all-roster — never pass coder_ids (the CoderFilterPopover is a
   // visibility filter, not a "compare these raters" selector). See the build scope.
+  // #829 — WHICH source this table is about. `null` = pooled, the old behaviour
+  // and still the default: "is our codebook working overall" is a real question,
+  // it was only ever wrong as the ONLY question.
+  //
+  // ⚠️ It is in the QUERY KEY. A scope that rides the request but not the key
+  // serves the previous source's numbers from cache (#454's class).
+  const [source, setSource] = useState<string | null>(null)
+
   const { data, isLoading } = useQuery({
-    queryKey: ['irr', projectId, null],
-    queryFn: () => codeAnalysisApi.irr(projectId),
+    queryKey: ['irr', projectId, null, source],
+    queryFn: () => codeAnalysisApi.irr(projectId, source ? { source } : undefined),
     enabled: !!projectId,
     staleTime: 5 * 60_000, // IRR is O(units×codes), uncached server-side, rarely changes
     refetchOnWindowFocus: false,
@@ -105,8 +144,51 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
   const aTentative = data.interpretation_thresholds?.alpha?.tentative ?? ALPHA_FALLBACK.tentative
   const aReliable = data.interpretation_thresholds?.alpha?.reliable ?? ALPHA_FALLBACK.reliable
 
+  const sources = data.sources ?? []
+  const scoped = sources.find(x => x.key === data.source) ?? null
+  // Grouped by kind so a picker over four different entity types reads as one
+  // list rather than a flat jumble of names.
+  const byKind = sources.reduce<Record<string, typeof sources>>((acc, x) => {
+    (acc[x.kind] ??= []).push(x)
+    return acc
+  }, {})
+
   return (
     <div className="flex flex-col gap-3">
+      {/* #829 — the source picker. Gated on >1 option: with a single shared
+          source there is nothing to scope, and an inert control beside the
+          tab's own scope selector is just two things to read. */}
+      {sources.length > 1 && (
+        <div className="flex items-center gap-2">
+          <Select
+            value={source ?? POOLED}
+            onValueChange={(v) => setSource(v === POOLED ? null : v)}
+          >
+            <SelectTrigger className="w-[280px] h-8 text-xs" aria-label="Reliability source">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={POOLED}>All sources — pooled</SelectItem>
+              {Object.entries(KIND_LABEL).map(([kind, heading]) =>
+                byKind[kind]?.length ? (
+                  <SelectGroup key={kind}>
+                    <SelectLabel>{heading}</SelectLabel>
+                    {byKind[kind].map(x => (
+                      <SelectItem key={x.key} value={x.key}>{x.label}</SelectItem>
+                    ))}
+                  </SelectGroup>
+                ) : null,
+              )}
+            </SelectContent>
+          </Select>
+          <span className="text-xs text-mm-text-muted">
+            {scoped
+              ? `Agreement on ${scoped.label} alone`
+              : `Pooled across ${sources.length} sources`}
+          </span>
+        </div>
+      )}
+
       {/* Header strip: overall α summary + what's being measured + the roster. */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
         <div className="inline-flex items-center gap-1.5 text-sm font-medium">
@@ -166,9 +248,9 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
                   <td className="px-3 py-2 text-right tabular-nums">{fmtPct(c.percent_agreement)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-mm-text-muted">{fmt(c.prevalence)}</td>
                   {showKappa && (
-                    <td className="px-3 py-2 text-right tabular-nums"><BandValue value={c.cohens_kappa} band={c.kappa_interpretation} /></td>
+                    <td className="px-3 py-2 text-right tabular-nums"><BandValue value={c.cohens_kappa} band={c.kappa_interpretation} reason={c.undefined_reason} /></td>
                   )}
-                  <td className="px-3 py-2 text-right tabular-nums"><BandValue value={c.krippendorff_alpha} band={c.alpha_interpretation} /></td>
+                  <td className="px-3 py-2 text-right tabular-nums"><BandValue value={c.krippendorff_alpha} band={c.alpha_interpretation} reason={c.undefined_reason} /></td>
                 </tr>
               )
             })}

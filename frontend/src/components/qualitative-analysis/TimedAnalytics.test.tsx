@@ -91,9 +91,10 @@ describe('TimedAnalytics', () => {
 
   it('splits into dual-encoded per-coder rows in by-coder mode', async () => {
     listSegments.mockResolvedValue(CLIPS)
-    renderTimed()
-    await waitFor(() => expect(screen.getByRole('row', { name: /Off-task/ })).toBeInTheDocument())
-    fireEvent.click(screen.getByRole('tab', { name: 'By code × coder' }))
+    // #685: the mode is a controlled prop now, so this drives it directly.
+    // Clicking the toggle is a separate concern and has its own test below —
+    // this one is about what the by-coder TABLE contains.
+    renderTimed({ tableMode: 'coder' })
     await waitFor(() => expect(screen.getByText('Ada')).toBeInTheDocument())
     expect(screen.getByText('Blake')).toBeInTheDocument()
     expect(screen.getByText('AD')).toBeInTheDocument() // initials badge, not color-only
@@ -159,5 +160,45 @@ describe('chart formatting reaches the codeline (#686)', () => {
     await screen.findByRole('table')
     expect(screen.getAllByText('Off-task')[0]).toHaveStyle({ fontSize: '11px' })
     expect(screen.getAllByText('0:00.0')[0].parentElement).toHaveStyle({ fontSize: '10px' })
+  })
+})
+
+/**
+ * #685 — the table breakdown is a per-CHART property, and it is DERIVED against
+ * `multiCoder` rather than trusted from the config.
+ *
+ * The derivation is the safety half, not a tidiness one. `TimedTable` renders
+ * by-coder rows on `mode` alone, and the toggle that would change it is gated on
+ * `multiCoder` — so a saved `'coder'` reaching a single-coder project, or a
+ * BLIND canvas (where `resolveTimelineCoderLens` sets `multiCoder: false`),
+ * would draw a by-coder table with no control to change it. Kill `effectiveMode`
+ * and the second test here fails.
+ */
+describe('#685 — the table mode is controlled, and multiCoder-derived', () => {
+  it('renders the by-coder breakdown when the saved mode says so', async () => {
+    listSegments.mockResolvedValue(CLIPS)
+    renderTimed({ tableMode: 'coder' })
+    await waitFor(() => expect(screen.getByRole('row', { name: /Ada/ })).toBeInTheDocument())
+  })
+
+  it('a saved coder mode is IGNORED without more than one coder to break down by', async () => {
+    listSegments.mockResolvedValue(CLIPS)
+    renderTimed({ tableMode: 'coder', multiCoder: false })
+    await waitFor(() => expect(screen.getByRole('row', { name: /Off-task/ })).toBeInTheDocument())
+    // The by-code table, not the by-coder one — and no toggle to escape with.
+    expect(screen.queryByRole('row', { name: /Ada/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'By code × coder' })).not.toBeInTheDocument()
+  })
+
+  it('the toggle reports upward instead of holding its own state', async () => {
+    listSegments.mockResolvedValue(CLIPS)
+    const onTableModeChange = vi.fn()
+    renderTimed({ tableMode: 'code', onTableModeChange })
+    await waitFor(() => expect(screen.getByRole('row', { name: /Off-task/ })).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('tab', { name: 'By code × coder' }))
+    expect(onTableModeChange).toHaveBeenCalledWith('coder')
+    // Controlled: it did NOT flip itself.
+    expect(screen.queryByRole('row', { name: /Ada/ })).not.toBeInTheDocument()
   })
 })

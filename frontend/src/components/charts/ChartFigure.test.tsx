@@ -4,6 +4,7 @@ import { render, screen } from '@testing-library/react'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { ChartFigure } from './ChartFigure'
+import { stripComments } from '@/lib/strip-comments'
 
 /**
  * #698 — the charts were wrapped in `role="img"`, which makes children
@@ -139,10 +140,7 @@ describe('fail-closed: no chart may reintroduce role="img"', () => {
    * documentation: strip the prose, never weaken the assertion.
    */
   function code(raw: string): string[] {
-    return raw
-      .replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' '))
-      .replace(/\/\/[^\n]*/g, m => ' '.repeat(m.length))
-      .split('\n')
+    return stripComments(raw).split('\n')
   }
 
   function walk(dir: string, out: string[] = []): string[] {
@@ -175,7 +173,11 @@ describe('fail-closed: no chart may reintroduce role="img"', () => {
     return files
   }
 
-  it('scans the WHOLE tree, not just components/charts', () => {
+  // ⚠️ Explicit timeout (#841): `code()` strips every file this walks, and
+  // since #838 that is a TypeScript parse per file — ~1.8 s cold, 4.0 s under
+  // full-suite contention (the slowest of the four consumer scans), past
+  // vitest's 5 s default. Same budget and reason as `strip-comments.test.ts`.
+  it('scans the WHOLE tree, not just components/charts', { timeout: 60_000 }, () => {
     const offenders: string[] = []
     for (const file of scannedFiles()) {
       const rel = file.replace(SRC + '/', '')

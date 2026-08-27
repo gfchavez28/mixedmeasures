@@ -60,3 +60,52 @@ export function buildShortcutCategories<T extends ShortcutCodeInput>(codes: T[])
     codes: groups.get(categoryId)!.slice(0, MAX_CODES_PER_CATEGORY),
   }))
 }
+
+/**
+ * `categoryId → chord PREFIX digit`, for the `[2]` markers a code panel prints
+ * beside a category header (#824).
+ *
+ * The panels used to derive this themselves, and BOTH derivations were a
+ * different question from the one the resolver answers. `TextCodingView` sorted
+ * **every** category by `display_order` and took index+2 — so an EMPTY category
+ * sorted first shifted every populated category's advertised digit by one, and
+ * the panel printed `6.1` for a chord that fires `3.1`. (Measured on real data:
+ * one of five prefixes agreed, by coincidence.) `CodePanel` re-derived it from
+ * its own category list, which happens to agree today. Both now read this.
+ *
+ * Only categories that HAVE codes occupy the chord space, in first-appearance
+ * order — because that is what `buildShortcutCategories` hands the resolver.
+ */
+export function categoryShortcutPrefixes<T extends ShortcutCodeInput>(
+  codes: T[],
+): Map<number, number> {
+  const prefixes = new Map<number, number>()
+  buildShortcutCategories(codes).forEach((cat, i) => {
+    prefixes.set(cat.categoryId, i + 2)
+  })
+  return prefixes
+}
+
+/**
+ * The status-bar hint naming the keys that apply a code (#830c).
+ *
+ * ⚠️ **It is STATE-DEPENDENT, and the filed remedy was wrong about that.** All
+ * three workbenches printed a flat `0-9: code`, which misdescribes a project
+ * WITH categories — there, `2`–`9` arm a two-key chord and a single digit does
+ * nothing. But the flat form is exactly right for a project with NO categories,
+ * where `useCodeChordShortcuts` resolves every digit by `numeric_id` in one
+ * press. A fixed replacement string would have traded one wrong hint for
+ * another, so the hint is derived from the same helper the resolver uses.
+ *
+ * The universal half is named only when a code can actually answer it — the
+ * #664 rule ("a code with no key has no label") applied to copy.
+ */
+export function codeKeyHint(codes: ShortcutCodeInput[]): string {
+  if (buildShortcutCategories(codes).length === 0) return '0-9: code'
+  const hasUniversal = codes.some(
+    c => c.numeric_id != null && c.numeric_id >= 0 && c.numeric_id <= 1,
+  )
+  return hasUniversal
+    ? '0-1: universal · 2-9 then 1-9: code'
+    : '2-9 then 1-9: code'
+}

@@ -10,6 +10,7 @@ import {
   Check,
   X,
   Trash2,
+  UserMinus,
   CircleAlert,
   ExternalLink,
   ChevronRight,
@@ -30,6 +31,10 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { getSpeakerInitials, getInitialsBadgeColors, isOrphanedParticipant, isUnnamedLabel, UNNAMED_LABEL } from '@/lib/conversation-import-utils'
 import { getContrastColor } from '@/lib/utils'
+import {
+  withdrawalLocations, describeDeleteConsequence, withdrawalHeadline,
+} from '@/lib/withdrawal-copy'
+import WithdrawParticipantDialog from '@/components/WithdrawParticipantDialog'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 
@@ -118,6 +123,69 @@ export default function ParticipantsPage() {
       setSelectedIds(new Set())
       setSelectedParticipantId(null)
     },
+  })
+
+  /*
+   * #702(2) — the delete confirm said "Speaker links will be removed."
+   *
+   * True, and it reads as tidy-up. What actually happens is that the transcript
+   * survives verbatim, the speaker NAME survives independently of this record,
+   * and the responses survive unlinked — so a researcher honouring a withdrawal
+   * request had every reason to believe they were done. Worse, deleting the
+   * record first DESTROYS the link used to find any of it.
+   *
+   * The confirm now names the surviving data. Fetched only while the dialog is
+   * pending, and the copy has a safe count-free form for the moment before it
+   * resolves — silence there would be the old behaviour by accident.
+   */
+  /**
+   * #702(3) — the withdrawal, distinct from "delete the record".
+   *
+   * A separate action on purpose: deleting the record removes one row and leaves
+   * everything else, which is the right behaviour for tidying up an orphan and
+   * the WRONG behaviour for a withdrawal request. Conflating them is how a
+   * researcher ends up believing a request was honoured.
+   */
+  const [withdrawParticipant, setWithdrawParticipant] = useState<
+    { id: number; identifier: string } | null
+  >(null)
+
+  const { data: withdrawReport } = useQuery({
+    queryKey: ['withdrawal-report', projectId, withdrawParticipant?.id],
+    queryFn: () => participantsApi.withdrawalReport(projectId, withdrawParticipant!.id),
+    enabled: withdrawParticipant !== null,
+  })
+
+  const withdrawMutation = useMutation({
+    mutationFn: (participantId: number) =>
+      participantsApi.withdraw(projectId, participantId),
+    onSuccess: (res) => {
+      void queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
+      // Their turns and responses changed, so anything reading conversations or
+      // datasets is now stale.
+      void queryClient.invalidateQueries({ queryKey: ['conversations', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['dataset'] })
+      toast.success(
+        `${res.identifier} removed. Backup saved as ${res.backup_filename}.`,
+        {
+          description:
+            'Now search your transcripts and free-text answers for their name — '
+            + 'that part cannot be automated.',
+          duration: 12000,
+        },
+      )
+      setWithdrawParticipant(null)
+    },
+    onError: (err: unknown) => {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      toast.error(detail || 'Could not remove this participant. Nothing was changed.')
+    },
+  })
+
+  const { data: pendingReport } = useQuery({
+    queryKey: ['withdrawal-report', projectId, deleteParticipant?.id],
+    queryFn: () => participantsApi.withdrawalReport(projectId, deleteParticipant!.id),
+    enabled: deleteParticipant !== null,
   })
 
   const orphanCount = participants.filter(isOrphanedParticipant).length
@@ -374,6 +442,7 @@ export default function ParticipantsPage() {
                         selectedParticipantId === participant.id ? null : participant.id
                       )}
                       onUpdate={(data) => updateParticipantMutation.mutate({ participantId: participant.id, data })}
+                      onWithdraw={() => setWithdrawParticipant({ id: participant.id, identifier: participant.identifier })}
                       onDelete={() => setDeleteParticipant({ id: participant.id, identifier: participant.identifier })}
                     />
                   ))}
@@ -400,8 +469,8 @@ export default function ParticipantsPage() {
         open={deleteParticipant !== null}
         onOpenChange={(open) => { if (!open) setDeleteParticipant(null) }}
         title="Delete Participant"
-        description={`Delete participant "${deleteParticipant?.identifier}"? Speaker links will be removed.`}
-        confirmLabel="Delete"
+        description={describeDeleteConsequence(pendingReport ?? null)}
+        confirmLabel="Delete record"
         onConfirm={() => {
           if (deleteParticipant !== null) {
             deleteParticipantMutation.mutate(deleteParticipant.id)
@@ -409,6 +478,31 @@ export default function ParticipantsPage() {
           setDeleteParticipant(null)
         }}
         destructive
+      >
+        {pendingReport && withdrawalLocations(pendingReport).length > 0 && (
+          <div className="text-xs text-mm-text-secondary">
+            <p className="text-mm-text-faint mb-1">
+              Data that stays in the project:
+            </p>
+            <ul className="space-y-0.5">
+              {withdrawalLocations(pendingReport).map(line => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </ConfirmDialog>
+
+      {/* #702(3) — honour a withdrawal request. */}
+      <WithdrawParticipantDialog
+        open={withdrawParticipant !== null}
+        identifier={withdrawParticipant?.identifier ?? ''}
+        report={withdrawReport ?? null}
+        isPending={withdrawMutation.isPending}
+        onCancel={() => setWithdrawParticipant(null)}
+        onConfirm={() => {
+          if (withdrawParticipant) withdrawMutation.mutate(withdrawParticipant.id)
+        }}
       />
 
       {/* Bulk delete confirm */}
@@ -434,6 +528,7 @@ function ParticipantRow({
   participant,
   onUpdate,
   onDelete,
+  onWithdraw,
   isSelected,
   onSelect,
   isOrphan = false,
@@ -443,6 +538,7 @@ function ParticipantRow({
   participant: Participant
   onUpdate: (data: { identifier?: string; display_name?: string; role?: string }) => void
   onDelete: () => void
+  onWithdraw: () => void
   isSelected?: boolean
   onSelect?: () => void
   isOrphan?: boolean
@@ -590,7 +686,15 @@ function ParticipantRow({
               <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-secondary hover:text-mm-text" onClick={() => setIsEditing(true)} title="Edit participant">
                 <Pencil className="w-4 h-4" />
               </Button>
-              <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-faint hover:text-destructive" onClick={onDelete} title="Delete participant">
+              {/*
+                #702(3) — distinct from Delete on purpose. Delete removes the
+                record and leaves everything else (right for tidying an orphan,
+                wrong for a withdrawal request); this removes their data.
+              */}
+              <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-faint hover:text-destructive" onClick={onWithdraw} title="Remove this participant's data (withdrawal request)">
+                <UserMinus className="w-4 h-4" />
+              </Button>
+              <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-faint hover:text-destructive" onClick={onDelete} title="Delete participant record only">
                 <Trash2 className="w-4 h-4" />
               </Button>
             </>
@@ -970,6 +1074,62 @@ function ParticipantDetailPanel({
         </div>
         )
       })()}
+
+      {/*
+        * #702(2) — what a withdrawal would actually involve.
+        *
+        * Deleting a participant removes ONE row: both links are SET NULL, so
+        * the transcript, the speaker name and the responses all survive. That
+        * is the identity spine working as designed — but it means the app had
+        * no answer to "what would I have to remove?", and deleting the record
+        * first DESTROYS the link that answers it.
+        *
+        * It lives in the detail panel rather than as a per-row control so it
+        * costs no extra tab stop per participant (#771), and so it is reachable
+        * without going anywhere near the delete button.
+        */}
+      <WithdrawalSection projectId={projectId} participantId={participantId} />
+    </div>
+  )
+}
+
+/** #702(2) — read-only: it changes nothing and can destroy nothing. */
+function WithdrawalSection({
+  projectId, participantId,
+}: { projectId: number; participantId: number }) {
+  const { data: report } = useQuery({
+    queryKey: ['withdrawal-report', projectId, participantId],
+    queryFn: () => participantsApi.withdrawalReport(projectId, participantId),
+  })
+  if (!report) return null
+
+  const locations = withdrawalLocations(report)
+  return (
+    <div className="p-4 border-t border-mm-border-subtle">
+      <h4 className="text-xs font-medium text-mm-text-secondary mb-1">
+        If this person withdraws
+      </h4>
+      <p className="text-xs text-mm-text-faint leading-snug">
+        {withdrawalHeadline(report)}
+      </p>
+      {locations.length > 0 && (
+        <ul className="mt-2 space-y-0.5">
+          {locations.map(line => (
+            <li key={line} className="text-xs text-mm-text-secondary">{line}</li>
+          ))}
+        </ul>
+      )}
+      {report.speaker_names.length > 0 && (
+        <p className="mt-2 text-xs text-mm-text-faint leading-snug">
+          The transcript carries their name as{' '}
+          {report.speaker_names.map(n => `"${n}"`).join(' / ')}, which survives
+          independently of this record.
+        </p>
+      )}
+      <p className="mt-2 text-[11px] text-mm-text-faint leading-snug">
+        Mixed Measures has no erase function — removing this data is manual.
+        This is a description of the software, not compliance advice.
+      </p>
     </div>
   )
 }

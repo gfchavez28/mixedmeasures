@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Union
 
-from ..models.dataset import VALUE_NUMERIC_TYPES
+from ..models.dataset import VALUE_NUMERIC_TYPES, NUMERIC_COERCIBLE_TYPES
 from .missing_values import is_missing, parse_missing_rules
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,13 @@ class Token:
 class ColumnRef:
     name: str
     column_id: int | None = None
+    #: #823d — may the evaluator parse this cell's TEXT when it has no
+    #: ``value_numeric``? Decided ONCE, at validate time, from the column's type
+    #: (``NUMERIC_COERCIBLE_TYPES``), because that is the only place the type is
+    #: known: ``evaluate`` receives a bare ``{column_id: (text, numeric)}`` row
+    #: and threading a type map through every caller would be a second source
+    #: for one question. Default False keeps every existing node unchanged.
+    coerce_numeric: bool = False
 
 
 @dataclass(frozen=True)
@@ -369,6 +376,10 @@ def parse(expression: str) -> Expr:
 # source of truth in models/dataset.py (#399). ColumnInfo.column_type is a string,
 # but ColumnType is a (str, Enum) so string membership in this frozenset works.
 _NUMERIC_TYPES = VALUE_NUMERIC_TYPES
+# Types whose cells may hold a number the formula should read, even though the
+# import never computed a `value_numeric` for them (#823d). See the set's own
+# comment in models/dataset.py for why they are NOT in `_NUMERIC_TYPES`.
+_COERCIBLE_TYPES = NUMERIC_COERCIBLE_TYPES
 
 
 @dataclass
@@ -434,7 +445,11 @@ def validate(
             col = matches[0]
             if col.id not in dependency_ids:
                 dependency_ids.append(col.id)
-            return replace(node, column_id=col.id)
+            return replace(
+                node,
+                column_id=col.id,
+                coerce_numeric=col.column_type in NUMERIC_COERCIBLE_TYPES,
+            )
 
         if isinstance(node, Literal):
             return node
@@ -442,6 +457,27 @@ def validate(
         if isinstance(node, BinaryOp):
             left = _resolve(node.left)
             right = _resolve(node.right)
+            # #823d — an ORDERED comparison requires numbers and RAISES
+            # without them, but nothing warned: `IF([sex] < 45, …)` reported
+            # "Valid" with no warnings, previewed null for every row, and 400'd
+            # on save. Arithmetic had this warning; `<` `>` `<=` `>=` did not,
+            # and they are what a banding formula is built from.
+            if node.op in ("<", ">", "<=", ">="):
+                for side in (left, right):
+                    if isinstance(side, ColumnRef):
+                        col_info = next(
+                            (c for c in columns if c.id == side.column_id), None
+                        )
+                        if (
+                            col_info
+                            and col_info.column_type not in _NUMERIC_TYPES
+                            and col_info.column_type not in _COERCIBLE_TYPES
+                        ):
+                            warnings.append(
+                                f"Comparison '{node.op}' needs numbers, and column "
+                                f"'{col_info.text}' (type: {col_info.column_type}) "
+                                f"holds text; this expression will produce no value."
+                            )
             # Warn on arithmetic with non-numeric columns
             if node.op in ("+", "-", "*", "/"):
                 for side in (left, right):
@@ -556,6 +592,28 @@ def _eval(
         if vn is not None:
             return (_NUM, float(vn))
         if vt is not None:
+            # #823d — a DEMOGRAPHIC column never gets a `value_numeric`
+            # (`_compute_value_numeric` returns None for the type), and the
+            # importer assigns it to `age`, `income`, `sex`, `race`. Without
+            # this, `[age] < 45` met a `_TXT` operand and RAISED, so the formula
+            # a researcher would reach for to band a continuous variable was
+            # un-runnable on exactly the columns real survey data arrives in.
+            #
+            # ⚠️ Per CELL, never per column: a cell that parses is a number, one
+            # that does not stays text. So `sex` ("Male") behaves exactly as
+            # before, and the `_TXT` fallback that `==` comparisons depend on is
+            # untouched for every other type.
+            if node.coerce_numeric:
+                # THE cell-to-number rule, shared with the importer rather than
+                # re-implemented: a demographic "42" and a numeric "42" must
+                # parse identically (currency/percent stripping, and the
+                # non-finite rejection #689 depends on). Imported inside the
+                # branch because `dataset_import` is a heavy module and this is
+                # the only site that needs it.
+                from .dataset_import import _strip_numeric
+                coerced = _strip_numeric(vt)
+                if coerced is not None:
+                    return (_NUM, coerced)
             return (_TXT, vt)
         return (_NULL, None)
 

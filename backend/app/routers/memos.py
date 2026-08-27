@@ -8,8 +8,10 @@ from ..models.conversation import Conversation
 from ..models.observation import Observation
 from ..models.code import Code
 from ..models.code_category import CodeCategory
+from ..models.document import Document
+from ..models.canvas import Canvas
 from ..models.materials import MaterialCollection, Material
-from ..models.memo import Memo
+from ..models.memo import MEMO_ENTITY_TYPES, Memo
 from ..models.dataset import Dataset, DatasetColumn, DatasetRow
 from ..schemas.memo import (
     MemoCreate,
@@ -22,6 +24,102 @@ from ..services.audit import log_action
 from .helpers import _get_project_or_404
 
 router = APIRouter(tags=["memos"])
+
+
+# ── Memo target validation (#780) ────────────────────────────────────────────
+#
+# 🔴 This replaced TWO divergent branch chains, and both had live holes. The one
+# here covered ten of the eleven declared types — `document` matched no arm and
+# there was no `else`, so a document memo's `entity_id` was **never checked
+# against the project at all**. `routers/scratchpad.py` carried a private copy
+# covering eight, and its `analysis` arm queried `Material.id == entity_id` with
+# no collection join, so converting a scratchpad entry could attach a memo to
+# ANOTHER project's material. The #733 rule: a copy does not merely drift from
+# its original, it propagates a defect verbatim and adds its own.
+#
+# ⚠️ `test_ownership_gate_sweep.py` cannot see this class. Both endpoints call
+# `_get_project_or_404`, so the project gate is satisfied; the hole is in the
+# per-entity check that runs after it. A sweep asking "does this endpoint reach
+# a gate token" is structurally blind to a branch chain missing an arm.
+#
+# ⚠️ `Memo.entity_id` has NO ForeignKey, so nothing downstream would have
+# caught it either — no IntegrityError, no warning, just a memo pointing at a
+# stranger's row.
+
+def _in_project(db: Session, col, *filters) -> bool:
+    return db.query(col).filter(*filters).first() is not None
+
+
+#: Per-type ownership rule, keyed by `MEMO_ENTITY_TYPES`. `project` is absent on
+#: purpose — its rule is an identity check, not a lookup — and is handled first
+#: in `_validate_memo_entity`.
+_MEMO_ENTITY_CHECKS = {
+    "conversation": lambda db, pid, eid: _in_project(
+        db, Conversation.id, Conversation.id == eid, Conversation.project_id == pid),
+    "observation": lambda db, pid, eid: _in_project(
+        db, Observation.id, Observation.id == eid, Observation.project_id == pid),
+    "document": lambda db, pid, eid: _in_project(
+        db, Document.id, Document.id == eid, Document.project_id == pid),
+    "code": lambda db, pid, eid: _in_project(
+        db, Code.id, Code.id == eid, Code.project_id == pid),
+    "code_category": lambda db, pid, eid: _in_project(
+        db, CodeCategory.id, CodeCategory.id == eid, CodeCategory.project_id == pid),
+    "dataset": lambda db, pid, eid: _in_project(
+        db, Dataset.id, Dataset.id == eid, Dataset.project_id == pid),
+    "canvas": lambda db, pid, eid: _in_project(
+        db, Canvas.id, Canvas.id == eid, Canvas.project_id == pid),
+    # Joined: these hang off the project through a parent.
+    "dataset_row": lambda db, pid, eid: db.query(DatasetRow.id).join(Dataset).filter(
+        DatasetRow.id == eid, Dataset.project_id == pid).first() is not None,
+    "dataset_column": lambda db, pid, eid: db.query(DatasetColumn.id).join(Dataset).filter(
+        DatasetColumn.id == eid, Dataset.project_id == pid).first() is not None,
+    "analysis": lambda db, pid, eid: db.query(Material.id).join(MaterialCollection).filter(
+        Material.id == eid, MaterialCollection.project_id == pid).first() is not None,
+}
+
+# FAIL CLOSED AT IMPORT. Adding a memo-able entity to `MEMO_ENTITY_TYPES` without
+# an ownership rule here stops the app booting — which is the correct trade,
+# because the alternative is exactly the silent hole this section documents. It
+# can only ever fire on a code change, so it is caught by the first test that
+# imports this module, never by a user.
+_MISSING_RULES = set(MEMO_ENTITY_TYPES) - set(_MEMO_ENTITY_CHECKS) - {"project"}
+if _MISSING_RULES:
+    raise RuntimeError(
+        f"memo entity types with no ownership rule: {sorted(_MISSING_RULES)} — "
+        "add one to _MEMO_ENTITY_CHECKS in routers/memos.py, or a memo of that "
+        "type will be created without its entity_id ever being checked."
+    )
+
+
+def _validate_memo_entity(
+    db: Session, project_id: int, entity_type: str, entity_id: int
+) -> None:
+    """Refuse a memo whose target is not in this project.
+
+    THE one implementation — `routers/scratchpad.py` imports this rather than
+    keeping its own. Raises `HTTPException(400)`; returns None on success.
+    """
+    if entity_type == "project":
+        if entity_id != project_id:
+            raise HTTPException(
+                status_code=400,
+                detail="entity_id must match project_id for project memos",
+            )
+        return
+
+    check = _MEMO_ENTITY_CHECKS.get(entity_type)
+    if check is None:
+        # Unreachable while the schema validates against the same vocabulary and
+        # the import guard above holds — kept because "no rule" must never mean
+        # "no check", which is precisely how `document` slipped through.
+        raise HTTPException(
+            status_code=400, detail=f"unsupported memo entity type: {entity_type}"
+        )
+    if not check(db, project_id, entity_id):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{entity_type} {entity_id} not found in this project",
+        )
 
 
 def memo_to_response(memo: Memo) -> MemoResponse:
@@ -81,54 +179,7 @@ async def create_memo(
     """Create a new memo."""
     _get_project_or_404(db, project_id, user.id)
 
-    # Validate that entity_id references a real entity in this project
-    entity_models = {
-        "project": (Project, Project.id == data.entity_id),
-        "conversation": (Conversation, Conversation.id == data.entity_id, Conversation.project_id == project_id),
-        "observation": (Observation, Observation.id == data.entity_id, Observation.project_id == project_id),
-        "code": (Code, Code.id == data.entity_id, Code.project_id == project_id),
-        "code_category": (CodeCategory, CodeCategory.id == data.entity_id, CodeCategory.project_id == project_id),
-    }
-    if data.entity_type == "project":
-        if data.entity_id != project_id:
-            raise HTTPException(status_code=400, detail="entity_id must match project_id for project memos")
-    elif data.entity_type == "analysis":
-        elem = db.query(Material).join(MaterialCollection).filter(
-            Material.id == data.entity_id,
-            MaterialCollection.project_id == project_id,
-        ).first()
-        if not elem:
-            raise HTTPException(status_code=400, detail=f"analysis element {data.entity_id} not found in this project")
-    elif data.entity_type == "dataset":
-        ds = db.query(Dataset).filter(Dataset.id == data.entity_id, Dataset.project_id == project_id).first()
-        if not ds:
-            raise HTTPException(status_code=400, detail=f"dataset {data.entity_id} not found in this project")
-    elif data.entity_type == "dataset_row":
-        row = db.query(DatasetRow).join(Dataset).filter(
-            DatasetRow.id == data.entity_id,
-            Dataset.project_id == project_id,
-        ).first()
-        if not row:
-            raise HTTPException(status_code=400, detail=f"dataset_row {data.entity_id} not found in this project")
-    elif data.entity_type == "dataset_column":
-        col = db.query(DatasetColumn).join(Dataset).filter(
-            DatasetColumn.id == data.entity_id,
-            Dataset.project_id == project_id,
-        ).first()
-        if not col:
-            raise HTTPException(status_code=400, detail=f"dataset_column {data.entity_id} not found in this project")
-    elif data.entity_type == "canvas":
-        from ..models.canvas import Canvas
-        cv = db.query(Canvas).filter(Canvas.id == data.entity_id, Canvas.project_id == project_id).first()
-        if not cv:
-            raise HTTPException(status_code=400, detail=f"canvas {data.entity_id} not found in this project")
-    elif data.entity_type in entity_models:
-        model_info = entity_models[data.entity_type]
-        model_cls = model_info[0]
-        filters = model_info[1:]
-        exists = db.query(model_cls.id).filter(*filters).first()
-        if not exists:
-            raise HTTPException(status_code=400, detail=f"{data.entity_type} with id {data.entity_id} not found in this project")
+    _validate_memo_entity(db, project_id, data.entity_type, data.entity_id)
 
     # Get next numeric_id for this project
     from sqlalchemy import func

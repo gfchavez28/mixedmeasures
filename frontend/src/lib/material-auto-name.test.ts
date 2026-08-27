@@ -94,3 +94,47 @@ describe('generateMaterialAutoName (#419)', () => {
     expect(name.endsWith('…')).toBe(true)
   })
 })
+
+describe('#823(m) — a cross-tab is named for what it draws', () => {
+  const base = {
+    activeTab: 'descriptives',
+    metricType: 'frequency_distribution',
+    metricLabels: ['GSS: trust'],
+  }
+
+  it('names both axes', () => {
+    // Filed case: the material was saved as "Freq Dist · GSS: trust", which
+    // describes half the figure — the second axis IS the cross-tab.
+    expect(generateMaterialAutoName({
+      ...base, descriptiveChartType: 'cross_tab', crossTabColumnLabel: 'degree',
+    })).toBe('Cross-tab · GSS: trust × degree')
+  })
+
+  it('does not promise an axis that has not been chosen', () => {
+    // The chart type can be `cross_tab` before a column is picked.
+    expect(generateMaterialAutoName({
+      ...base, descriptiveChartType: 'cross_tab', crossTabColumnLabel: null,
+    })).toBe('Cross-tab · GSS: trust')
+  })
+
+  it('leaves every other descriptives chart alone', () => {
+    for (const t of ['horizontal_bar', 'table', 'heatmap', 'line', null, undefined]) {
+      expect(generateMaterialAutoName({ ...base, descriptiveChartType: t }))
+        .toBe('Freq Dist · GSS: trust')
+    }
+  })
+
+  it('does not hijack an R&C save that happens to carry a chart type', () => {
+    // The rc branch runs first and must keep doing so — a stale descriptives
+    // chart type in state is exactly what #419 was about.
+    expect(generateMaterialAutoName({
+      ...base,
+      activeTab: 'rc',
+      rcView: 'comparisons',
+      rcChartType: 'comparison_table',
+      descriptiveChartType: 'cross_tab',
+      crossTabColumnLabel: 'degree',
+      compareByLabel: 'degree',
+    })).toBe('Comparison · GSS: trust by degree')
+  })
+})

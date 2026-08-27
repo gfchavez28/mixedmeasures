@@ -5,7 +5,13 @@ author. This statement aims to be accurate rather than reassuring: it records wh
 been built and measured, what is known to be broken, and — most importantly — what has
 **not** been tested.
 
-**Last reviewed:** 13 August 2026 · **Applies to:** version 1.3.1
+**Last reviewed:** 27 August 2026 · **Applies to:** version 1.4.0
+
+**Scope of the most recent review.** The 1.4.0 round covered the new Variables view, the
+Data view, the Canvas (including snapshot comparison) and the quantitative analysis
+surfaces. It did **not** revisit the four coding workbenches, the crosswalk, the import
+wizards, the codebook, settings, or the project-merge flow — those were last examined for
+1.3.1 and the notes below still stand for them.
 
 ## What this document is, and is not
 
@@ -93,6 +99,35 @@ at runtime for contrast rather than assumed.
 **Minimum window size.** The desktop window will not resize below 1280×720, below which
 the data tables overlap rather than reflow.
 
+## A deliberate exception: the size of code chips
+
+WCAG 2.5.8 (Target Size, Minimum) asks that a pointer target be at least 24 by 24
+CSS pixels. The small code chips attached to a segment, a clip or a row do not
+meet it: they are about 16.5 pixels tall. **This is a decision, not an oversight,
+and it is recorded here so it can be argued with.**
+
+The criterion carries an explicit exception for targets whose size is constrained
+by the line-height of the surrounding text, which is what a wrapped row of chips
+is. Against that, the cost of compliance was measured rather than assumed: the
+chips sit in a wrapped row whose line pitch is 20.5 pixels, so 24-pixel hit boxes
+would **overlap**, and chips would steal each other's clicks. That is a
+functional regression traded for a marginal one, across twelve places in nine
+components including two dense grids.
+
+The remove control on a chip is smaller still, at 14 by 14 pixels, and it is the
+part of this we are least comfortable with. Enlarging it is not a matter of
+padding: it is positioned at the chip's top-right corner, so a compliant hit box
+centred there would cover part of the chip itself and break "click the chip to
+focus its code" near its end, while extending it outward would reach the
+neighbouring chip instead. The honest fix is to make the chips themselves taller,
+which changes row density across the application and wants a deliberate look at
+the two dense grids rather than a quick edit.
+
+Every one of these controls is fully reachable and operable by keyboard, and each
+carries an accessible name. **If you use a pointer and find these targets hard to
+hit, please tell us** — that report is what would move this from a documented
+trade-off to a scheduled fix.
+
 ## Known gaps
 
 These are real and currently unfixed. Each links to a public issue you can follow,
@@ -107,9 +142,16 @@ costs one tab stop with arrow-key movement inside it, rather than one per cell.
 Still open: in the Observations workbench the active-item reference can point outside the
 virtualised window when the active clip scrolls out of view — there are three possible
 fixes and the failure differs by screen reader, so it is being chosen with a reader in
-hand rather than guessed. And the **category picker** used when creating a code or
-category is a tree that never branches — it announces a level but has no keyboard model
-of its own and spends one tab stop per category, which is felt on a large codebook.
+hand rather than guessed.
+
+The **category picker** used when creating a code or category is no longer part of this
+gap: it costs one tab stop with arrow keys inside it, and rows blocked by the depth limit
+stay reachable and say why. (Two earlier versions of this note were wrong about it. The
+first said the picker "never branches" — it does nest, and announces each item's level and
+position; the seeded test project simply had no nested categories, so a flat *rendering*
+was mistaken for a flat *capability*. The second left "spends one tab stop per category"
+standing here for three days after that was fixed. Both were corrected by listening to it,
+and the second by a close-out sweep rather than by anyone noticing.)
 
 **Dense type scale ([#11](https://github.com/gfchavez28/mixedmeasures/issues/11)).** The dominant body sizes are 12px and 13px, with roughly 495
 instances at 11px or smaller. The Text size control above is the mitigation; the scale
@@ -125,11 +167,23 @@ interactive controls inside a role whose children are technically presentational
 a known conflict, kept because the alternative removed a needed affordance; every action
 available from a row menu is also reachable another way.
 
-**Its price is now measured rather than assumed.** Because a button inside an option is
-not a valid child, NVDA re-orients to the list before *each* control — "Clips list" is
-spoken four times on a coded row, roughly forty times to cross a list of thirteen. That
-is the cost of the trade-off, stated so you can judge it. If it causes you trouble in
-practice, please tell us — that would change the calculation.
+**Its price is measured rather than assumed, and it is much smaller than it was.**
+Because a button inside an option is not a valid child, a screen reader re-orients to the
+list before *each* control — so the cost is the number of controls the list puts in the
+keyboard's path. Until recently every row put at least one there, and it was the Delete
+button: crossing thirteen clips meant meeting thirteen destructive controls and nothing
+else. A row's controls now join the keyboard's path only when that row is *selected*, so
+the same list presents eleven stops — all of them on the three rows that actually carry
+codes or notes — and the Delete for the clip you are on. Clicking any row's controls with
+a mouse is unchanged. If the remaining cost causes you trouble in practice, please tell
+us — that would change the calculation.
+
+**One accepted limitation, stated plainly.** The clip list renders only the rows near your
+scroll position, and the reader is pointed at the current clip by reference. If you scroll
+the list away from that clip with a mouse wheel, the reference briefly names a row that is
+no longer present. Tested with NVDA: it recovers on the next arrow key, announcing the
+correct clip and position, so we have left it rather than rebuild the focus model around
+it. We have not tested how other screen readers behave in that moment.
 
 ## Screen-reader testing
 
@@ -163,9 +217,39 @@ described above. The passes are recorded too, so they are not re-tested: the ski
 announces and moves focus correctly, the reveal dialog is clean, and a full check of
 `/analysis/qualitative` found no unnamed elements.
 
-**Still unheard, and named rather than implied:** whether the Observations *timeline* — a
-visual track — conveys anything by ear at all; the table captions under cell navigation;
-and the category picker described above.
+**A second pass ran on 2026-08-17**, on the three surfaces the first left unheard. It
+found four more problems, all fixed here: every clip in the Observations list was
+announced *twice*, because the row's name briefly changed after you arrived on it; an
+observation with no recording attached described its selected clip as playing; the dataset
+grid named the column of each cell but never the record, so moving across a row told you
+values without telling you whose; and the codebook tree's left/right arrows expanded and
+collapsed branches but could not move into or out of one.
+
+It also settled two questions rather than finding faults. The Observations **timeline** is
+not conveyed by ear at all: its lanes and bars are hidden from readers by design, and the
+clip list beside it carries the same clips — but the timeline's grouping of clips by code
+category has no spoken equivalent, and the explanation behind its "About the timeline"
+button describes what the lanes *mean* rather than what they currently *contain*. And the
+category picker announces its position correctly, so its remaining cost is one keyboard
+stop per category rather than one for the list.
+
+**A third pass ran on 2026-08-18.** It confirmed the two fixes above by ear, and closed the
+last surface this document had listed as unheard: **the table captions do announce** under
+cell navigation. Nothing was wrong with the markup — reaching a table by clicking into it
+leaves the reader outside any cell, which is what the earlier attempts had measured. Read
+by browse-mode navigation, the caption speaks and the cells then navigate normally.
+
+It found three further problems, all fixed here, and two of them are the same kind of fault
+as the "announced twice" one above: **a name that says something untrue**. A clip claimed
+to be playing whenever the playhead merely rested inside it, so any clip starting at 0:00
+said so the moment it was selected, on a recording that had never been played. Every
+dataset column header announced itself as "sortable" — a word inherited from the
+drag-and-drop library, in a grid that has no sort. And the previous pass's tab-order fix
+turned out to have moved one control of four, so tabbing still walked into the code chips
+of clips you had not selected.
+
+**Still unheard:** nothing on the list this document has been keeping. New surfaces will
+need new passes.
 
 **Never tested with:** JAWS, VoiceOver, or Orca; voice control; switch access;
 magnification software; or high-contrast / forced-colours modes.
@@ -188,6 +272,86 @@ please contact us rather than inferring it from the sections above.
   real browser and in the packaged desktop application.
 
 ## Recent changes
+
+**1.4.0**
+
+From the pre-release review of the new Variables view:
+
+- The list of variables costs one tab stop instead of one per variable, and moves with the
+  arrow keys, Home and End. On a dataset with 48 variables it previously cost 48 stops to
+  pass.
+- A saved rule's card header is a button that reports whether it is expanded, and all five
+  of a rule's actions are reachable from the keyboard.
+- Three dropdowns in the rule editor announced themselves only as "combobox". A dropdown's
+  visible text is the value chosen, which names the choice and never the control, so each
+  now carries its own name.
+- Text in the Variables view meets contrast in both themes, and its tables associate every
+  cell with a header.
+- The top rail no longer scrolls sideways at 200% zoom: the coder label collapses to make
+  room, rather than pushing the row past the window.
+
+From a second and third screen-reader pass, on the surfaces the first one could not reach.
+
+- Each clip in the Observations list is announced once. It was announced twice, because
+  the row's name briefly gained "now playing" as you arrived on it and lost it again a
+  moment later — and a name that changes while you are on it gets re-read.
+- An observation with no recording attached no longer describes its selected clip as
+  playing.
+- Moving through the clip list with Tab reaches the controls of the clip you are on,
+  rather than a Delete button on every row. Clicking any row's controls is unchanged.
+- On a frozen observation, a clip's Delete now says that the clip set is frozen instead of
+  disappearing from the keyboard — completing a change that reached the toolbar in 1.3.1
+  but not the rows.
+- Cells in the dataset grid name their record as well as their column, so moving across a
+  row tells you whose values you are reading.
+- The codebook tree's left and right arrows move into and out of a branch, not only open
+  and close it.
+
+From a fourth pass:
+
+- Space works on buttons again throughout the Observations and conversation workbenches.
+  Pressing it on a toolbar button did nothing — and on an observation it started the video
+  instead, because the workbench claimed the key whenever its clip list was the active
+  panel, whether or not your focus was actually there.
+- Arrow keys act on the list only when you are in it. Moving through the toolbar and
+  pressing an arrow used to change which clip was selected behind you, silently; on an
+  observation the left and right arrows went further and moved a clip's boundary — an edit
+  to your data from a key aimed at a button.
+- Keys pressed inside an open menu no longer also act on the page behind it. One press of
+  Down moved both the menu and the clip selection underneath it.
+- A transcript row costs no tab stops until you select it. Every segment carried a quote
+  button, and every note on it another, all named the same way with nothing to say which
+  segment they belonged to. The document workbench had the same problem. They now name
+  their segment, and the quote button reports whether pressing it will add or remove a
+  quote — it previously said a segment was quoted when only a phrase inside it was, so
+  pressing it added a quote rather than removing one.
+- The chart no longer announces a change of chart type when nothing is selected and no
+  chart is on screen. When adding a second variable replaces a histogram, the reason is
+  now stated where the chart is, rather than only on the chart-type picker.
+- Value labels on a dumbbell chart are hidden when they would overlap, and only the ones
+  that overlap — a label with room to itself keeps its number. Three values used to render
+  on top of each other as one unreadable run.
+- The colour picker costs one tab stop instead of sixteen, and each swatch says its colour
+  by name. Every swatch previously announced its hex code, which cannot be told from the
+  next one by ear. This is the same picker used for codes, categories, canvas themes,
+  participants, datasets and settings.
+
+From the third pass:
+
+- Tabbing the clip list no longer walks into the code chips of clips you have not
+  selected. The first version of this change moved only the Delete button; a coded row
+  still spent a stop on every chip, every remove button, its Add-code control and every
+  note badge. The same rule now applies in the conversation and document workbenches,
+  which had never had it — a long transcript could cost several hundred tab stops.
+- The remove button on a code chip is visible when you tab to it. It was reachable while
+  fully transparent, so the focus ring landed on something that could not be seen.
+- A clip says "now playing" only while something is playing, and "paused here" when the
+  playhead is simply parked in it. Any clip starting at 0:00 previously claimed to be
+  playing the moment it was selected, on a recording that had never been played.
+- Dataset column headers no longer announce as "sortable". The word came from the
+  drag-and-drop library, where it means drag-to-reorder, and this grid has no sort — so it
+  named a capability that does not exist, once per column. The drag handle now says which
+  column it moves.
 
 **1.3.1**
 

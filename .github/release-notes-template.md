@@ -2,13 +2,22 @@ Mixed Measures **__VERSION__** — a local-first desktop workspace for mixed-met
 
 **What's new in this release**
 
-A security and packaging patch. There is no new capability here and nothing in your
-projects changes.
+A corrective release, and a large one. Most of it is work that makes existing features
+hold up on real research data — a survey with tens of thousands of records, a fully
+coded transcript, a project with hundreds of variables.
 
-- 🔴 **Linux: please update.** Every Mixed Measures AppImage up to 1.3.1 was built with a packaging tool that put the *folder you launch the app from* on the system library search path — so anyone able to write a file into that folder could have had their code loaded into the app (CVE-2026-54672). This was a defect in the build tool rather than in Mixed Measures itself, and installing 1.3.2 fixes it. There is no sign it was exploited. **Windows and macOS builds were not affected.**
-- **The "could not start" message now reads correctly in every language.** If the app failed to launch, the recovery message names the folder it could not open — and accented, non-Latin or unusually-spaced folder names were being garbled, so it could point at a path that does not exist.
-- **Merging a colleague's copy no longer accepts edited transcripts.** If two people held the same project and one corrected the wording of a segment, a merge could attach the other person's highlights to words nobody had quoted. It now stops, names the segments, and asks which text is correct.
-- Full details, and the upgrade notes, in the [changelog](https://github.com/__REPO__/blob/main/CHANGELOG.md).
+- **A dataset now has two views: Data and Variables.** *Data* is the grid of records. *Variables* is where a variable is described — name and label, type, value labels, which values count as missing, and its recode rules — with the rules on screen while you edit the dictionary. The old recoding link redirects automatically.
+- **A recode rule can produce a new variable, leaving the original untouched**, and it records which variable and which rule produced it.
+- **Applying a rule to the variable it sits on is now something you ask for.** Three paths used to apply a rule without asking, including saving your first rule. A rule in effect rewrites every stored number in that variable and there is no undo, so it is now a deliberate choice.
+- **Large surveys work end to end.** A 75,699-record survey could not previously be previewed, imported, opened, or deleted. All four are fixed, and a long export no longer freezes the rest of the app.
+- **Histograms, box plots and Q–Q plots**, a margin of error on frequency distributions, per-item reliability diagnostics, and guidance on when you need the non-parametric test.
+- **Declare one missing-value vocabulary across many variables at once**, instead of one column at a time.
+- **A withdrawal report** — for a given participant, what data traces back to them and where it lives, and a way to honour a withdrawal by redacting rather than deleting.
+- **Several numbers are now correct**, including qualitative coverage on fully coded text (which read 90%), the cells counted by R and Excel exports, and a relabel that could rewrite responses to their opposite.
+
+**Known limit — very large datasets and project files.** Projects containing more than **500,000 dataset values** cannot yet be exported as a `.mmproject` file, and Mixed Measures will say so rather than failing part-way. Datasets themselves can still be imported and analysed well past that point. **Your backups are not affected** — `.mmbackup` works at full size, so your data stays protected. What this limit reaches is *sharing* a project with a colleague, *duplicating* one, and *merging*. Raising it needs both halves of the round trip rebuilt together, and that work is scheduled for the next release.
+
+- Your database is upgraded on first launch and a backup is taken first; project files are unchanged and still open in both directions with 1.3.2. Full details, and the upgrade notes, in the [changelog](https://github.com/__REPO__/blob/main/CHANGELOG.md).
 
 ## Which file should I download?
 

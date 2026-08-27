@@ -59,6 +59,7 @@ async def group_comparison(
             include_effect_size_ci=body.include_effect_size_ci,
             exclude_groups=body.exclude_groups,
             nonparametric=body.nonparametric,
+            include_qq=body.include_qq,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

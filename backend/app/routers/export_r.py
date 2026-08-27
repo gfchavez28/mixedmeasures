@@ -36,7 +36,11 @@ from ..services.coding_layers import (
 from ..services.metrics import resolve_input_source_labels
 from ..services.grouping import load_grouping_values, order_value_labels
 from ..services.missing_values import column_missing_rules, is_missing
-from ..services.recode import mapping_numeric_values
+from ..services.recode import (
+    _parse_exclude_values,
+    effective_reverse_offset,
+    mapping_numeric_values,
+)
 from ..services.computed_columns import (
     parse as parse_expression,
     validate as validate_expression,
@@ -84,11 +88,59 @@ def _make_r_identifier(name: str) -> str:
     return s
 
 
+# ── Which SPACE a column's CSV cell is written in (#765) ─────────────────────
+# THE fact the row writer and the factor emitter must agree on. `factor()`
+# matches its `levels` against the cell VERBATIM and silently returns NA for
+# anything unmatched — so a level list in the wrong space empties the column
+# with no error. #494 fixed the CSV half (nominal columns have no
+# `value_numeric`, so they must emit `value_text`) and left the level half
+# deciding independently from the column's metadata; the two disagreed for
+# every labelled nominal column in the app. Keep them reading ONE predicate.
+_TEXT_CELL_TYPES = frozenset({ColumnType.NOMINAL, ColumnType.DEMOGRAPHIC})
+
+
+def _emits_text_cell(col: DatasetColumn) -> bool:
+    """True when this column's CSV cell carries `value_text`, not `value_numeric`."""
+    return col.column_type in _TEXT_CELL_TYPES
+
+
+def _fmt_level_number(v):
+    """Render a numeric level the way the CSV does — `2`, not `2.0`.
+
+    Cosmetic for R (it compares `as.character()` on both sides, and "2.0"
+    parsed by readr is the double 2 whose character form is "2"), but the
+    script is read by humans and a scale of `c(1.0, 2.0, 3.0)` reads as a
+    different instrument than `c(1, 2, 3)`.
+    """
+    try:
+        return int(v) if float(v) == int(float(v)) else float(v)
+    except (TypeError, ValueError):
+        return v
+
+
 def _get_factor_mapping(
-    col: DatasetColumn, primary_recode: RecodeDefinition | None
+    db: Session,
+    col: DatasetColumn,
+    primary_recode: RecodeDefinition | None,
 ) -> dict | None:
-    """Extract factor levels/labels from a column's metadata.
-    Returns {values: [...], labels: [...]} or None if no metadata available.
+    """Factor levels + labels + numeric codes for a column, or None.
+
+    Returns ``{"levels": [...], "labels": [...], "codes": [...]}``, all the same
+    length and in level order:
+
+    * ``levels`` — what the CSV CELL actually contains, so ``factor()`` matches
+      (#765). Text for a `_emits_text_cell` column, the numeric code otherwise —
+      and for a REVERSE primary the REFLECTED code, because that is what
+      ``apply_definition_to_column`` stored in ``value_numeric`` (#583).
+    * ``labels`` — the display label for each level.
+    * ``codes`` — the numeric code per level, for the ``.mm_scale_codes``
+      registry so ``.mm_num`` recovers real values rather than 1..K positions
+      (#537). ``None`` for an observed level that carries no code.
+
+    ⚠️ Callers must emit ``levels`` (quoting strings) and register ``codes``.
+    Emitting ``codes`` as levels is exactly the defect this signature exists to
+    make hard: on a labelled nominal it empties the column, and on a gapped
+    reverse scale it drops every value whose reflection left the forward set.
     """
     # Priority 1: Primary recode mapping — but ONLY for numeric-output recodes
     # (#581). A category_group primary maps {label: group_name_string}; reading it
@@ -107,6 +159,9 @@ def _get_factor_mapping(
     # level would be structurally empty AND semantically wrong).
     factor_missing_rules = column_missing_rules(col)
 
+    mapping: dict | None = None
+    pairs: list[tuple] = []  # (code, label), in declared code order
+
     if primary_recode and primary_recode.mapping and _rtype in ("scale_map", "reverse"):
         try:
             mapping = (
@@ -119,20 +174,16 @@ def _get_factor_mapping(
                 # Sort by numeric value for ordinal
                 pairs = sorted(
                     (
-                        (k, v) for k, v in mapping.items()
+                        (v, k) for k, v in mapping.items()
                         if not is_missing(str(k), factor_missing_rules)
                     ),
-                    key=lambda x: (float(x[1]) if isinstance(x[1], (int, float)) else 0),
+                    key=lambda x: (float(x[0]) if isinstance(x[0], (int, float)) else 0),
                 )
-                if pairs:
-                    labels = [p[0] for p in pairs]
-                    values = [p[1] for p in pairs]
-                    return {"values": values, "labels": labels}
         except (json.JSONDecodeError, TypeError):
-            pass
+            mapping = None
 
     # Priority 2: scale_labels / scale_values
-    if col.scale_labels:
+    if not pairs and col.scale_labels:
         try:
             labels = (
                 json.loads(col.scale_labels)
@@ -151,19 +202,85 @@ def _get_factor_mapping(
                     values = list(range(1, len(labels) + 1))
                 # Positional codes are assigned BEFORE the missing filter so a
                 # skipped pair never shifts its neighbours' codes.
-                kept = [
+                pairs = [
                     (v, l) for v, l in zip(values, labels)
                     if not is_missing(str(l), factor_missing_rules)
                 ]
-                if kept:
-                    return {
-                        "values": [v for v, _ in kept],
-                        "labels": [l for _, l in kept],
-                    }
         except (json.JSONDecodeError, TypeError):
-            pass
+            pairs = []
 
-    return None
+    if not pairs:
+        return None
+
+    codes = [p[0] for p in pairs]
+    labels = [p[1] for p in pairs]
+
+    # ── Put the LEVELS in the cell's own space (#765/#583) ───────────────────
+    if _emits_text_cell(col):
+        # The cell is `value_text` — for a labelled column that IS the label
+        # (`value_labels.substitute_code` / the .sav adapter both write it), so
+        # the label is the level. Codes still ride the registry, which is how
+        # `.mm_num` keeps a text-level factor numerically usable (#537).
+        levels = [str(l) for l in labels]
+        # Observed values the declaration never named (`unlabeled_codes`) are
+        # real categories everywhere else in the app — frequency, cross-tab —
+        # so dropping them here would replace one silent NA class with another.
+        # `_get_observed_values` is already missing-filtered and canonically
+        # ordered (#495b/#495c).
+        # Dedup against the LABELS, not `levels` — "a value no declared label
+        # already covers" is what this means, and it stays true however levels
+        # are rendered. (Measured while mutation-testing: comparing against a
+        # non-string `levels` silently matches nothing, appends every observed
+        # value again, and hands R a level list with DUPLICATE labels — which R
+        # quietly merges, hiding the defect.)
+        known = {str(l) for l in labels}
+        for extra in _get_observed_values(db, col):
+            if extra in known:
+                continue
+            known.add(extra)
+            levels.append(extra)
+            labels.append(extra)
+            try:
+                codes.append(_fmt_level_number(float(extra)))
+            except (TypeError, ValueError):
+                codes.append(None)  # -> NA in the registry; .mm_num yields NA
+        # Same int-when-integral rendering the numeric branch uses, so the
+        # registry reads `c(1, 2)` on both paths rather than `c(1.0, 2.0)`.
+        codes = [c if c is None else _fmt_level_number(c) for c in codes]
+    else:
+        # The cell is `value_numeric`. For a REVERSE primary that is the
+        # REFLECTED score, not the mapping's forward code (#583) — the offset
+        # must come from `effective_reverse_offset`, which excludes the null
+        # set, because a re-derived `min + max` reflects about a value the
+        # apply path never used (#600). `is None` (never a falsy check): 0.0 is
+        # a real offset for a symmetric scale, and `None` means the apply path
+        # found no scale points to reflect about and stored the raw code.
+        offset = None
+        if _rtype == "reverse" and mapping:
+            offset = effective_reverse_offset(
+                mapping,
+                {v.lower() for v in _parse_exclude_values(primary_recode)},
+                factor_missing_rules,
+            )
+        if offset is None:
+            levels = [_fmt_level_number(c) for c in codes]
+        else:
+            reflected = [
+                (offset - float(c) if isinstance(c, (int, float)) else c) for c in codes
+            ]
+            # Re-sort ascending by the STORED score so `ordered = TRUE` encodes
+            # the direction the data actually carries: for a reverse-keyed item
+            # the highest score is the lowest raw response.
+            order = sorted(range(len(reflected)),
+                           key=lambda i: (float(reflected[i])
+                                          if isinstance(reflected[i], (int, float)) else 0))
+            reflected = [reflected[i] for i in order]
+            labels = [labels[i] for i in order]
+            levels = [_fmt_level_number(v) for v in reflected]
+            codes = list(levels)  # what `value_numeric` holds — what .mm_num owes
+        codes = [_fmt_level_number(c) for c in codes]
+
+    return {"levels": levels, "labels": labels, "codes": codes}
 
 
 def _get_observed_values(db: Session, column: DatasetColumn) -> list[str]:
@@ -198,6 +315,91 @@ _R_EXPORT_TYPES = {
 }
 
 
+def _effective_group_values(
+    db: Session,
+    project_id: int,
+    grouping_column_id: int,
+    exclude_groups: list[str],
+) -> list[str]:
+    """The groups a comparison actually runs over, in the app's own order.
+
+    Single-sourced against `services/comparisons.py::compute_group_comparison`,
+    which builds `order_value_labels(set(g for g in group_map.values() if g))`
+    and then drops `exclude_groups`. Three details are all load-bearing:
+
+    * `load_grouping_values` applies the column's missing rules (#384/#592), so
+      an "N/A"-class label is not a group.
+    * **falsy values are dropped** — the previous inline version kept `""`,
+      which could inflate the count past the 2-group boundary and flip the
+      emitted test.
+    * `order_value_labels` (#406) is what makes "the first two groups" mean the
+      same thing here as in `_run_t_test`.
+    """
+    grp_col = db.get(DatasetColumn, grouping_column_id)
+    if grp_col is None:
+        return []
+    grp_row_ids = [
+        rid for (rid,) in db.query(DatasetRow.id)
+        .filter(DatasetRow.dataset_id == grp_col.dataset_id).all()
+    ]
+    grp_vals = load_grouping_values(
+        db, grouping_column_id, grp_row_ids, project_id=project_id
+    )
+    excluded = set(exclude_groups)
+    return [
+        g for g in order_value_labels({g for g in grp_vals.values() if g})
+        if g not in excluded
+    ]
+
+
+def _is_domain_ref(r_name: str) -> bool:
+    """`domains$X` names a LIST ENTRY holding column names, not a data column.
+
+    🔴 **`data$domains$X` is not a thing, and it is silent (#821b).** `domains`
+    is a top-level `list()` the script declares ~20 lines above the metric
+    section, so `data$domains` is NULL, `NULL$X` is NULL, and R answers with an
+    *"Unknown or uninitialised column"* WARNING plus `NA` — the script runs
+    green and the number is simply absent. Reproduced on a real export.
+
+    Every emission that interpolates a metric input as `data$<name>` has to ask
+    this question; the two helpers below answer it once each.
+    """
+    return r_name.startswith("domains$")
+
+
+def _numeric_vector_r(r_name: str) -> str:
+    """The R expression yielding this metric input's values as NUMBERS.
+
+    For a domain the app POOLS every member column's values into one flat list
+    and computes over that (`metrics.py::compute_metric`, the non-aggregate
+    domain branch) — so this is `unlist`, **not** `colMeans`. A mean-of-means
+    would be the `domain_aggregate` metric, which is a different statistic and
+    has its own emitter.
+
+    ⚠️ `drop = FALSE` is load-bearing: `data[, c("one_column")]` returns a
+    VECTOR, and the matrix-shaped helpers then fail on it.
+    """
+    if _is_domain_ref(r_name):
+        return f"unlist(.mm_num(data[, {r_name}, drop = FALSE]), use.names = FALSE)"
+    return f'.mm_num(data${r_name}, "{r_name}")'
+
+
+def _text_vector_r(r_name: str) -> str:
+    """The R expression yielding this metric input's values as TEXT (levels).
+
+    The frequency/proportion emissions count LABELS, so they must not go
+    through `.mm_num`. ⚠️ `unlist` on a data.frame of factors returns the
+    integer level positions — factors lose their class — so the columns are
+    coerced with `as.character` first.
+    """
+    if _is_domain_ref(r_name):
+        return (
+            f"unlist(lapply(data[, {r_name}, drop = FALSE], as.character),"
+            " use.names = FALSE)"
+        )
+    return f"data${r_name}"
+
+
 def _emit_domain_aggregate_r_lines(
     members_by_dataset: dict[str, list[str]] | None,
     r_name_for_full_set: str,
@@ -228,7 +430,7 @@ def _emit_domain_aggregate_r_lines(
         # screen. The two must not disagree about what they computed.
         lines.append("# Unweighted mean of item means: each item counts equally,")
         lines.append("# regardless of how many respondents answered it.")
-        lines.append(f"domain_means <- colMeans(.mm_num(data[, {r_name_for_full_set}]), na.rm = TRUE)")
+        lines.append(f"domain_means <- colMeans(.mm_num(data[, {r_name_for_full_set}, drop = FALSE]), na.rm = TRUE)")
         lines.append("mean(domain_means)")
         return lines
 
@@ -240,7 +442,7 @@ def _emit_domain_aggregate_r_lines(
     lines.append("# respondent populations (e.g. BQ1 from Board, SQ1 from Staff), so")
     lines.append("# the final mean equally weights each item across datasets.")
     lines.append("# Per-dataset breakdowns follow for transparency.")
-    lines.append(f"domain_means <- colMeans(.mm_num(data[, {r_name_for_full_set}]), na.rm = TRUE)")
+    lines.append(f"domain_means <- colMeans(.mm_num(data[, {r_name_for_full_set}, drop = FALSE]), na.rm = TRUE)")
     lines.append("mean(domain_means)")
     lines.append("")
     # Sort dataset names for deterministic output.
@@ -384,6 +586,32 @@ def _build_r_script(
     r_lines.append("  v[rowSums(!is.na(m)) == 0] <- NA")
     r_lines.append("  v")
     r_lines.append("}")
+    # Frequency distribution WITH the per-category margin of error the app shows
+    # (queue #42). Without this the script would report bare percentages while
+    # the tool reports intervals — the tool and its own reproducibility script
+    # disagreeing, each half individually correct (the #732 / "two halves of one
+    # fact" class).
+    #
+    # `prop.test(..., correct = FALSE)` is the UNCORRECTED Wilson score
+    # interval, which is exactly what `services/metrics.py::_ci_wilson`
+    # computes — verified against it case by case in
+    # `tests/test_wilson_ci_oracle.py`. `correct = TRUE` (R's default) applies a
+    # continuity correction the app does not, and would disagree by more than
+    # rounding.
+    r_lines.append("# Frequency distribution with per-category 95% CI (Wilson score).")
+    r_lines.append("# Each interval is binomial for ONE category against the rest —")
+    r_lines.append("# they are not simultaneous across categories.")
+    r_lines.append(".mm_freq <- function(x) {")
+    r_lines.append("  tab <- table(x)")
+    r_lines.append("  n <- sum(tab)")
+    r_lines.append("  if (n < 2) return(data.frame(level = names(tab), count = as.integer(tab)))")
+    r_lines.append("  ci <- t(sapply(as.integer(tab), function(k)")
+    r_lines.append("    prop.test(k, n, correct = FALSE)$conf.int * 100))")
+    r_lines.append("  data.frame(level = names(tab), count = as.integer(tab),")
+    r_lines.append("             pct = as.numeric(tab) / n * 100,")
+    r_lines.append("             ci_lower = ci[, 1], ci_upper = ci[, 2],")
+    r_lines.append("             row.names = NULL)")
+    r_lines.append("}")
     r_lines.append("")
 
     # Build factor calls, labels, reverse notes, excluded values
@@ -399,10 +627,31 @@ def _build_r_script(
     scale_code_entries: list[tuple[str, list]] = []
 
     def _register_scale_codes(r_name: str, values: list) -> None:
-        if values and all(
+        # `None` is admitted (rendered `NA`) for an observed level that carries
+        # no code — a labelled nominal's undeclared value (#765). At least one
+        # real code must remain, or the registry entry says nothing and
+        # `.mm_num` is better off with its positional fallback.
+        if any(
             isinstance(v, (int, float)) and not isinstance(v, bool) for v in values
+        ) and all(
+            v is None or (isinstance(v, (int, float)) and not isinstance(v, bool))
+            for v in values
         ):
             scale_code_entries.append((r_name, values))
+
+    def _levels_literal(levels: list) -> str:
+        """Render a `levels = c(...)` list: numbers bare, everything else quoted.
+
+        A text level emitted bare is not a subtler version of the same bug — R
+        parses it as a symbol and the script dies with `object 'Male' not found`
+        (the #581 shape). The quoting therefore follows the VALUE's type, never
+        the column's.
+        """
+        return ", ".join(
+            str(v) if isinstance(v, (int, float)) and not isinstance(v, bool)
+            else f'"{_escape_r_string(str(v))}"'
+            for v in levels
+        )
 
     for cid, meta in col_meta.items():
         col = meta["col"]
@@ -482,9 +731,9 @@ def _build_r_script(
 
         # Factor calls by type
         if col_type == ColumnType.ORDINAL:
-            mapping = _get_factor_mapping(col, primary_recode)
+            mapping = _get_factor_mapping(db, col, primary_recode)
             if mapping:
-                levels_str = ", ".join(str(v) for v in mapping["values"])
+                levels_str = _levels_literal(mapping["levels"])
                 labels_str = ", ".join(
                     f'"{_escape_r_string(str(l))}"' for l in mapping["labels"]
                 )
@@ -493,7 +742,7 @@ def _build_r_script(
                 ordinal_lines.append(f"  labels = c({labels_str}),")
                 ordinal_lines.append("  ordered = TRUE)")
                 ordinal_lines.append("")
-                _register_scale_codes(r_name, mapping["values"])
+                _register_scale_codes(r_name, mapping["codes"])
             else:
                 script_notes.append(
                     f"# {r_name}: ordinal type but no scale labels defined"
@@ -501,9 +750,9 @@ def _build_r_script(
                 )
 
         elif col_type == ColumnType.BINARY:
-            mapping = _get_factor_mapping(col, primary_recode)
+            mapping = _get_factor_mapping(db, col, primary_recode)
             if mapping:
-                levels_str = ", ".join(str(v) for v in mapping["values"])
+                levels_str = _levels_literal(mapping["levels"])
                 labels_str = ", ".join(
                     f'"{_escape_r_string(str(l))}"' for l in mapping["labels"]
                 )
@@ -511,7 +760,7 @@ def _build_r_script(
                 nominal_lines.append(f"  levels = c({levels_str}),")
                 nominal_lines.append(f"  labels = c({labels_str}))")
                 nominal_lines.append("")
-                _register_scale_codes(r_name, mapping["values"])
+                _register_scale_codes(r_name, mapping["codes"])
             else:
                 script_notes.append(
                     f"# {r_name}: binary type but no labels defined"
@@ -519,9 +768,9 @@ def _build_r_script(
                 )
 
         elif col_type == ColumnType.NOMINAL:
-            mapping = _get_factor_mapping(col, primary_recode)
+            mapping = _get_factor_mapping(db, col, primary_recode)
             if mapping:
-                levels_str = ", ".join(str(v) for v in mapping["values"])
+                levels_str = _levels_literal(mapping["levels"])
                 labels_str = ", ".join(
                     f'"{_escape_r_string(str(l))}"' for l in mapping["labels"]
                 )
@@ -529,7 +778,7 @@ def _build_r_script(
                 nominal_lines.append(f"  levels = c({levels_str}),")
                 nominal_lines.append(f"  labels = c({labels_str}))")
                 nominal_lines.append("")
-                _register_scale_codes(r_name, mapping["values"])
+                _register_scale_codes(r_name, mapping["codes"])
             else:
                 # Try distinct observed values
                 observed = _get_observed_values(db, col)
@@ -575,7 +824,7 @@ def _build_r_script(
         r_lines.append(".mm_scale_codes <- list(")
         for idx, (entry_name, entry_values) in enumerate(scale_code_entries):
             comma = "," if idx < len(scale_code_entries) - 1 else ""
-            vals_str = ", ".join(str(v) for v in entry_values)
+            vals_str = ", ".join("NA" if v is None else str(v) for v in entry_values)
             r_lines.append(f"  `{entry_name}` = c({vals_str}){comma}")
         r_lines.append(")")
         r_lines.append("")
@@ -857,8 +1106,15 @@ def _build_r_script(
                                 f"data %>% group_by({grp_r}) %>% count({r_name})"
                             )
                     else:
-                        metric_lines.append(f"table(data${r_name})")
-                        metric_lines.append(f"prop.table(table(data${r_name}))")
+                        # queue #42: `.mm_freq` carries count, pct AND the
+                        # per-category Wilson interval, so the script reproduces
+                        # what the app displays. `table`/`prop.table` stayed as
+                        # the raw view — dropping them would remove the shape R
+                        # users expect for a quick eyeball.
+                        freq_src = _text_vector_r(r_name)
+                        metric_lines.append(f"table({freq_src})")
+                        metric_lines.append(f"prop.table(table({freq_src}))")
+                        metric_lines.append(f".mm_freq({freq_src})")
 
                 elif mt == "mean":
                     if has_grouping and not is_domain_ref:
@@ -881,37 +1137,56 @@ def _build_r_script(
                         )
                         metric_lines.append(f"  )")
                     else:
-                        metric_lines.append(
-                            f'mean(.mm_num(data${r_name}, "{r_name}"), na.rm = TRUE)'
-                        )
-                        metric_lines.append(
-                            f'sd(.mm_num(data${r_name}, "{r_name}"), na.rm = TRUE)'
-                        )
+                        if has_grouping and is_domain_ref:
+                            # The grouped shape below is column-only; say so
+                            # rather than letting an ungrouped number pass for
+                            # the grouped one the researcher saw.
+                            metric_lines.append(
+                                "# NOTE: this metric is grouped in Mixed Measures;"
+                                " the pooled (ungrouped) mean is emitted here."
+                            )
+                        mean_src = _numeric_vector_r(r_name)
+                        metric_lines.append(f"mean({mean_src}, na.rm = TRUE)")
+                        metric_lines.append(f"sd({mean_src}, na.rm = TRUE)")
 
                 elif mt == "proportion":
                     prop_cfg = pe_cfg.get("proportion_config", {})
                     p_mode = prop_cfg.get("mode", "numeric")
+                    # #821b: a domain input pools its member columns; either way
+                    # this is the vector the threshold is applied to. The
+                    # `{r_name}_valid` object name is derived from the r_name, so
+                    # a domain ref would otherwise emit `domains$X_valid <- …`,
+                    # which assigns into the list rather than a fresh variable.
+                    prop_src = (
+                        _numeric_vector_r(r_name) if p_mode == "numeric"
+                        else _text_vector_r(r_name)
+                    )
+                    valid_obj = (
+                        f"{_make_r_identifier(r_name.split('$', 1)[1])}_valid"
+                        if _is_domain_ref(r_name) else f"{r_name}_valid"
+                    )
                     if p_mode == "numeric":
                         op = prop_cfg.get("operator", ">=")
                         thresh = prop_cfg.get("threshold_numeric", 0)
-                        cond = f"data${r_name} {op} {thresh}"
                     else:
                         vals = prop_cfg.get("threshold_values", [])
                         vals_str = ", ".join(f'"{_escape_r_string(v)}"' for v in vals)
-                        cond = f"data${r_name} %in% c({vals_str})"
                     metric_lines.append(
-                        f"{r_name}_valid <- data${r_name}[!is.na(data${r_name})]"
+                        f"{valid_obj} <- {prop_src}"
+                    )
+                    metric_lines.append(
+                        f"{valid_obj} <- {valid_obj}[!is.na({valid_obj})]"
                     )
                     if p_mode == "numeric":
                         metric_lines.append(
-                            f"count_meeting <- sum({r_name}_valid {op} {thresh})"
+                            f"count_meeting <- sum({valid_obj} {op} {thresh})"
                         )
                     else:
                         metric_lines.append(
-                            f"count_meeting <- sum({r_name}_valid %in% c({vals_str}))"
+                            f"count_meeting <- sum({valid_obj} %in% c({vals_str}))"
                         )
                     metric_lines.append(
-                        f"prop.test(count_meeting, length({r_name}_valid), correct = FALSE)"
+                        f"prop.test(count_meeting, length({valid_obj}), correct = FALSE)"
                     )
 
                 elif mt == "domain_aggregate" and is_domain_ref:
@@ -968,10 +1243,13 @@ def _build_r_script(
         )
         metric_lines.append(f"# Metric: {_escape_r_string(hm_label)}")
         if hm.metric_type == "mean":
-            metric_lines.append(f'mean(.mm_num(data${hm_r}, "{hm_r}"), na.rm = TRUE)')
-            metric_lines.append(f'sd(.mm_num(data${hm_r}, "{hm_r}"), na.rm = TRUE)')
+            # #821b: `hm_r` is `domains$X` for a dataset_domain input, so these
+            # two lines used to read `data$domains$X` — NULL, warned about, NA.
+            hm_src = _numeric_vector_r(hm_r)
+            metric_lines.append(f"mean({hm_src}, na.rm = TRUE)")
+            metric_lines.append(f"sd({hm_src}, na.rm = TRUE)")
         elif hm.metric_type == "frequency_distribution":
-            metric_lines.append(f"table(data${hm_r})")
+            metric_lines.append(f"table({_text_vector_r(hm_r)})")
         elif (
             hm.metric_type == "domain_aggregate"
             and hm.input_source_type == "dataset_domain"
@@ -1291,33 +1569,43 @@ def _build_r_script(
                 )
                 data_ref = "comp_data"
 
-            # Determine the effective group count the way the tool does, so the
-            # non-parametric path emits the test the user actually ran: a 2-group
-            # comparison is Mann-Whitney (R `wilcox.test` defaults reproduce the
-            # app's scipy.stats.mannwhitneyu exactly), 3+ is Kruskal-Wallis. Count
-            # uses load_grouping_values (recognized N/A excluded, #384) minus the
-            # explicitly excluded groups — a raw distinct-value count would
-            # miscount N/A-class labels as a group and emit the wrong test.
-            nonparam_two_group = False
-            if nonparam:
-                grp_col = db.get(DatasetColumn, compare_by)
-                if grp_col is not None:
-                    grp_row_ids = [
-                        rid for (rid,) in db.query(DatasetRow.id)
-                        .filter(DatasetRow.dataset_id == grp_col.dataset_id).all()
-                    ]
-                    grp_vals = load_grouping_values(
-                        db, compare_by, grp_row_ids, project_id=project.id
-                    )
-                    effective_groups = set(grp_vals.values()) - set(exclude_grps)
-                    nonparam_two_group = len(effective_groups) == 2
+            # The effective groups, exactly as `comparisons.py` computes them —
+            # `load_grouping_values` (recognized N/A excluded, #384), falsy
+            # values dropped, ordered by `order_value_labels` (#406), minus the
+            # explicitly excluded ones.
+            #
+            # 🔴 **This used to run only on the NON-parametric path, and that is
+            # #821(a).** The parametric arm emitted `t.test` for `test_type` in
+            # `("t_test", "auto")` without looking at the data at all, so a
+            # five-level grouping variable — where the tool itself auto-picked
+            # one-way ANOVA and displayed F = 690.88 — exported as
+            # `t.test(y ~ g)`, which R refuses:
+            #     Error in t.test.formula(...): grouping factor must have exactly
+            #     2 levels. Execution halted.
+            # The correct call sat in a COMMENT on the next line, and everything
+            # after the failing line — the other comparisons, the stratified
+            # comparison, the whole cross-tabulation section — never ran.
+            group_values = _effective_group_values(
+                db, project.id, compare_by, exclude_grps
+            )
+            n_groups = len(group_values)
+
+            if n_groups < 2:
+                # The app returns no rows at all below two groups; emitting a
+                # test here would be a second way to halt the script.
+                rc_lines.append(
+                    f"# Skipped comparison: {grp_r} has fewer than 2 groups"
+                    " after exclusions."
+                )
+                rc_lines.append("")
+                continue
 
             for vr in var_r_names:
                 if nonparam:
                     rc_lines.append(
                         f"# Non-parametric test: {vr} by {grp_r}"
                     )
-                    if nonparam_two_group:
+                    if n_groups == 2:
                         rc_lines.append(
                             "# Mann-Whitney U (wilcox.test defaults match the app's"
                             " scipy.stats.mannwhitneyu)"
@@ -1330,22 +1618,45 @@ def _build_r_script(
                             f'kruskal.test(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r})'
                         )
                 else:
-                    if test_type in ("t_test", "auto"):
+                    # Mirrors `comparisons.py::_resolve_test_type`: `auto` picks
+                    # by group count; an explicit choice is honoured.
+                    wants_t = test_type == "t_test" or (test_type == "auto" and n_groups == 2)
+                    rc_lines.append(f"# Parametric test: {vr} by {grp_r}")
+                    if wants_t:
+                        t_ref = data_ref
+                        if n_groups > 2:
+                            # An explicitly-chosen t-test on 3+ groups: the app
+                            # runs Welch on the FIRST TWO groups in display order
+                            # (`_run_t_test` takes `group_names[0]`/`[1]`), so the
+                            # export reproduces that rather than emitting a call
+                            # that cannot run. `droplevels` is what makes it
+                            # legal — `t.test.formula` counts the factor's
+                            # LEVELS, not its observed values.
+                            pair = ", ".join(
+                                f'"{_escape_r_string(g)}"' for g in group_values[:2]
+                            )
+                            t_ref = f"tt_data_{vr}"
+                            rc_lines.append(
+                                f"# t-test explicitly selected over {n_groups} groups —"
+                                " the app compares the first two."
+                            )
+                            rc_lines.append(
+                                f"{t_ref} <- droplevels({data_ref}[{data_ref}${grp_r}"
+                                f" %in% c({pair}), ])"
+                            )
                         rc_lines.append(
-                            f"# Parametric test: {vr} by {grp_r}"
-                        )
-                        rc_lines.append(
-                            f't.test(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r}, var.equal = FALSE)'
-                        )
-                        rc_lines.append(
-                            f'# (If 3+ groups, use: aov(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r}) %>% summary())'
+                            f't.test(.mm_num({t_ref}${vr}, "{vr}") ~ {t_ref}${grp_r}, var.equal = FALSE)'
                         )
                     else:
+                        # One object per model. A shared `aov_result` is fine
+                        # read top-to-bottom but silently overwrites the previous
+                        # model, so a reader cannot go back to an earlier one.
+                        aov_obj = f"aov_{vr}_by_{grp_r}"
                         rc_lines.append(
-                            f'aov_result <- aov(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r})'
+                            f'{aov_obj} <- aov(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r})'
                         )
-                        rc_lines.append("summary(aov_result)")
-                        rc_lines.append("TukeyHSD(aov_result)")
+                        rc_lines.append(f"summary({aov_obj})")
+                        rc_lines.append(f"TukeyHSD({aov_obj})")
             rc_lines.append("")
 
     if rc_lines:
@@ -1787,7 +2098,7 @@ def _build_r_script(
                         )
                         chart_lines.append(
                             f"dom_means <- colMeans(.mm_num(data[,"
-                            f" c({members_str})]), na.rm = TRUE)"
+                            f" c({members_str}), drop = FALSE]), na.rm = TRUE)"
                         )
                         chart_lines.append(
                             "dom_df <- data.frame(item = names(dom_means),"
@@ -2193,7 +2504,7 @@ def _build_r_script(
 
 
 @router.get("/r-data")
-async def export_r_data(
+def export_r_data(
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -2546,7 +2857,11 @@ async def export_r_data(
     # coder_ids filter); the exported R re-derives κ/α/% from these. Gated below
     # on the same condition as compute_irr.available.
     from ..services.irr import build_irr_matrices
-    irr_coder_ids, irr_code_names, irr_per_code = build_irr_matrices(db, project_id)
+    # ⚠️ #829 added two trailing values (the selectable source set and the scope's
+    # engaged coders). The export is deliberately POOLED — it emits what it has
+    # always emitted (#402, test_export_r_irr.py) — so it takes no `source` and
+    # discards both.
+    irr_coder_ids, irr_code_names, irr_per_code, _, _ = build_irr_matrices(db, project_id)
 
     # ── Step 8: Assemble CSV ─────────────────────────────────────────────
     csv_output = io.StringIO()
@@ -2621,11 +2936,15 @@ async def export_r_data(
 
         for m in item_cols:
             vals = row_values.get(m["col"].id)
-            if m["col"].column_type == ColumnType.NOMINAL:
+            if _emits_text_cell(m["col"]):
                 # #494: nominal columns are TEXT-valued (value_numeric is None)
                 # — the numeric-only emission wrote an all-empty column while
                 # the script defined its text factor levels, so every R
                 # analysis on the column errored or silently lost it.
+                # #765: the SAME predicate now decides the factor's levels, so
+                # the cell and the level list cannot drift into two spaces
+                # again. Behaviour here is unchanged (demographic columns are
+                # split into their own list upstream and never reach this loop).
                 csv_row.append(_text_cell(vals, m["col"].id))
             elif vals and vals[1] is not None:
                 csv_row.append(vals[1])

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { stripComments } from './strip-comments'
 import { join } from 'node:path'
 
 /**
@@ -71,18 +72,39 @@ function openingTag(src: string, from: number): string {
   return src.slice(from, from + 400)
 }
 
+/**
+ * Blank out comments, preserving offsets so reported line numbers stay true.
+ *
+ * ⚠️ **#772's rule, reached here a second time.** These scans read raw source,
+ * so any `<table>` or `<PopoverContent>` written in PROSE is matched as markup.
+ * That is not hypothetical: `VariablePropertiesGrid.tsx` documents where
+ * `role="grid"` belongs by naming `<table>` in its docstring, and this guard
+ * reported that DOCSTRING as an unnamed table while the real element three
+ * screens below carried `aria-label` all along. A phantom points at a real file
+ * and a real line and looks exactly like the defect.
+ *
+ * Replacing with spaces rather than deleting keeps `src.slice(0, index)`
+ * line-counting honest.
+ */
 function named(tag: string, body: string): boolean {
   return /aria-label[=\s]/.test(tag) || /aria-labelledby[=\s]/.test(tag) || /<caption/.test(body)
 }
 
 describe('accessible names (#8)', () => {
-  it('every PopoverContent has a name', () => {
+  // ⚠️ Explicit timeout (#841): this strips the whole source tree, and since
+  // #838 that means parsing all ~655 files with the TypeScript compiler —
+  // ~1.8 s cold, 3.4 s under full-suite contention, past vitest's 5 s default.
+  // The budget matches `strip-comments.test.ts`, which pays the same cost.
+  // The SECOND scan below is ~20 ms: `stripComments` caches on source text, and
+  // that cache is per-FILE (vitest runs each test file in its own process), so
+  // the first test in each file pays and the rest are free.
+  it('every PopoverContent has a name', { timeout: 60_000 }, () => {
     // Radix renders PopoverContent as role="dialog" (verified in the installed
     // package). A dialog with no accessible name announces as an unnamed dialog:
     // the user is told they entered something, but not what.
     const offenders: string[] = []
     for (const file of scannedFiles()) {
-      const src = readFileSync(file, 'utf8')
+      const src = stripComments(readFileSync(file, 'utf8'), file)
       for (const m of src.matchAll(/<PopoverContent\b/g)) {
         const tag = openingTag(src, m.index!)
         if (!named(tag, '')) {
@@ -107,7 +129,7 @@ describe('accessible names (#8)', () => {
     // full-width over a page heading.
     const offenders: string[] = []
     for (const file of scannedFiles()) {
-      const src = readFileSync(file, 'utf8')
+      const src = stripComments(readFileSync(file, 'utf8'), file)
       for (const m of src.matchAll(/<table\b/g)) {
         const tag = openingTag(src, m.index!)
         const close = src.indexOf('</table>', m.index!)
@@ -136,5 +158,16 @@ describe('accessible names (#8)', () => {
 
     const tricky = '<table\n  aria-activedescendant={a.length > 0 ? "x" : undefined}\n  aria-label="T"\n/>'
     expect(openingTag(tricky, 0)).toContain('aria-label="T"')
+
+    // #772: prose is not markup. A docstring naming `<table>` must not be
+    // scanned, and stripping must PRESERVE offsets so the line numbers this
+    // guard reports stay true.
+    const prose = '/** where `<table>` belongs */\nconst x = 1\n// see <PopoverContent>\n'
+    expect(stripComments(prose)).not.toContain('<table>')
+    expect(stripComments(prose)).not.toContain('<PopoverContent>')
+    expect(stripComments(prose)).toHaveLength(prose.length)
+    expect(stripComments(prose).split('\n')).toHaveLength(prose.split('\n').length)
+    // ...and real markup still survives.
+    expect(stripComments('<table aria-label="T">')).toContain('<table aria-label="T">')
   })
 })

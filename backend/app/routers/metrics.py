@@ -799,6 +799,9 @@ async def get_analysis_columns(
             scale_labels=scale_labels,
             equivalence_group_id=col.equivalence_group_id,
             domain_ids=col_domain_map.get(col.id, []),
+            # `stale` is nullable on the model (only computed columns carry it),
+            # so coerce — the schema's default cannot fire for an explicit None.
+            stale=bool(col.stale),
         )
 
         if ds_id not in datasets_map:
@@ -907,7 +910,7 @@ async def cross_tabulation(
 
 
 @router.get("/row-matrix", response_model=RowMatrixResponse)
-async def get_row_matrix(
+def get_row_matrix(
     project_id: int,
     metric_ids: str | None = None,
     user: User = Depends(get_current_user),
@@ -1025,19 +1028,25 @@ async def get_row_matrix(
 
 
 @router.get("/row-matrix/csv")
-async def get_row_matrix_csv(
+def get_row_matrix_csv(
     project_id: int,
     metric_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Export record × variable matrix as CSV download."""
+    """Export record × variable matrix as CSV download.
+
+    ⚠️ **This endpoint and `get_row_matrix` convert TOGETHER or not at all**
+    (#837). Its body is a plain call to that endpoint, so the two must agree
+    about being coroutines — an `await` on a sync function raises, and calling a
+    coroutine without awaiting silently returns a coroutine object.
+    """
     from fastapi.responses import StreamingResponse
     import csv
     import io
 
     # Reuse JSON endpoint logic
-    matrix = await get_row_matrix(project_id, metric_ids, user, db)
+    matrix = get_row_matrix(project_id, metric_ids, user, db)
 
     output = io.StringIO()
     writer = csv.writer(output)

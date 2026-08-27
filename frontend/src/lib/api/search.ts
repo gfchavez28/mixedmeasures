@@ -84,6 +84,17 @@ export interface TextSearchResult {
   row_identifier: string | null
   is_quoted: boolean
   applied_code_count: number
+  /**
+   * #834: the RECORD this text belongs to, and its dataset.
+   *
+   * `id` is the dataset_value_id and `row_identifier` is a human label, so
+   * before these the client knew which text matched and had no way to address
+   * the row — the hit could only navigate to the column. `dataset_name`
+   * disambiguates identically-named open-text columns across datasets.
+   */
+  dataset_id: number
+  dataset_name: string
+  row_id: number
 }
 
 export interface SearchResults<T> {

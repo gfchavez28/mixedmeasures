@@ -1,6 +1,10 @@
-import { DISPLAY_PRECISION, mergeFormatting } from '@/lib/chart-data'
+import { mergeFormatting } from '@/lib/chart-data'
+import { formatDescriptive } from '@/lib/stat-format'
 import { ciLabel, ciCaveat } from '@/lib/ci-label'
-import { aggregateBasisCaveat, aggregateBasisLabel, aggregateNLabel, aggregateNCaveat } from '@/lib/aggregate-basis'
+import {
+  aggregateBasisCaveat, aggregateBasisLabel, aggregateNLabel, aggregateNCaveat,
+  pooledNLabel, pooledNCaveat,
+} from '@/lib/aggregate-basis'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import { useChartColors } from '@/lib/theme-context'
 import type { SummaryStatsRow, ChartFormatting } from '@/lib/chart-data'
@@ -13,10 +17,13 @@ interface SummaryStatsTableProps {
   proportionLabel?: string
 }
 
-function fmtNum(v: number | null): string {
-  if (v == null) return '—'
-  return v.toFixed(DISPLAY_PRECISION)
-}
+/**
+ * #823(e): descriptives, not data labels. `DISPLAY_PRECISION` (1 dp) is right
+ * for the percentages and chart labels it exists for and wrong here — it
+ * rendered every SE in a 43,000-respondent survey as `0.0`, and three SDs that
+ * differ as `1.0`. See `formatDescriptive` for the measurements.
+ */
+const fmtNum = formatDescriptive
 
 /** The #693 fields, under the names `lib/aggregate-basis.ts` reads. */
 function toBasisFields(row: SummaryStatsRow) {
@@ -168,13 +175,20 @@ export default function SummaryStatsTable({
               <td
                 className="text-center px-2 py-2 tabular-nums"
                 style={{ fontSize: fmt.labelFontSize, color: colors.text }}
-                title={aggregateNCaveat(toBasisFields(row), row.n) ?? undefined}
+                title={
+                  aggregateNCaveat(toBasisFields(row), row.n)
+                  ?? (row.pooledAcrossDomain ? pooledNCaveat(row.n, row.memberCount) : undefined)
+                }
               >
                 {/* #693: a scale score's `n` is the SUM of its items'
                     respondent counts, and a sum reads as a respondent count
                     beside a mean. State the unit and the spread instead; the
-                    pooled figure stays in the tooltip. */}
-                {aggregateNLabel(toBasisFields(row)) ?? row.n}
+                    pooled figure stays in the tooltip.
+                    #823(e): a MEAN over a variable group pools values the same
+                    way, and there is no better figure to show — so that one
+                    states its UNIT rather than replacing the number. */}
+                {aggregateNLabel(toBasisFields(row))
+                  ?? (row.pooledAcrossDomain ? pooledNLabel(row.n) : row.n)}
               </td>
               <td
                 className="text-center px-2 py-2 tabular-nums font-semibold"
@@ -228,7 +242,7 @@ export default function SummaryStatsTable({
                   style={{ fontSize: fmt.labelFontSize, color: colors.textMuted }}
                 >
                   {row.ciLower != null && row.ciUpper != null
-                    ? `[${row.ciLower.toFixed(DISPLAY_PRECISION)}, ${row.ciUpper.toFixed(DISPLAY_PRECISION)}]`
+                    ? `[${fmtNum(row.ciLower)}, ${fmtNum(row.ciUpper)}]`
                     : '—'}
                 </td>
               )}

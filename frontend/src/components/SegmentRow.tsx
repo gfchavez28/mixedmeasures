@@ -4,6 +4,7 @@ import { SELECTED_TINT } from '@/lib/selection'
 import { optionPositionAria } from '@/lib/listbox-aria'
 import { Quote, Paperclip, Check } from 'lucide-react'
 import { type Segment, type SegmentExcerptInfo, type Code, type Coder, type Speaker, segmentsApi, speakersApi } from '@/lib/api'
+import { isWholeExcerpt } from '@/lib/excerpt-shape'
 import InlineCodeActions from '@/components/qualitative-analysis/InlineCodeActions'
 import { highlightText } from '@/components/qualitative-analysis/highlight-text'
 import { getSpeakerInitials, getInitialsBadgeColors } from '@/lib/conversation-import-utils'
@@ -449,6 +450,30 @@ function SegmentRow({
             )}
             <div className="flex items-start gap-3">
               {/* Quote/Excerpt gutter */}
+              {/* #785 — three things, all of them the same control's business.
+                *
+                * (a) `tabIndex` follows selection. This leaked ONE stop on EVERY
+                *     row, and with the note badges beside it a segment cost 1+N.
+                *     Ungated it is the row's only tab stop, so a keyboard tour of
+                *     a transcript was a tour of quote buttons.
+                * (b) The name says the ACTION and WHICH ROW. Twenty identical
+                *     "No excerpts" announcements name nothing (#559); `tabIndex`
+                *     does not remove it from the accessibility tree, so a
+                *     browse-mode reader still meets all of them.
+                * (c) The pressed STATE is `aria-pressed`, not words in the name.
+                *     A toggle's state belongs there — it announces the change
+                *     without re-reading the whole name, which is the mechanism
+                *     #770 is about.
+                *
+                * ⚠️ The two excerpt reads below are DIFFERENT FACTS and must not
+                * be re-merged (#790). The amber fill is shape-AGNOSTIC — "does
+                * this segment carry any quote", the display question. The pressed
+                * state is shape-EXACT via `isWholeExcerpt`, because that is what
+                * this button's toggle creates and deletes. They were one
+                * expression, so a segment with only a char-range quote announced
+                * "Has excerpts" while pressing it ADDED a whole-segment one — and
+                * the context menu one screen down, firing the SAME handler, had
+                * the shape-exact test all along. */}
               <button
                 className={cn(
                   'w-5 flex-shrink-0 pt-0.5 focus:outline-none transition-colors',
@@ -461,8 +486,10 @@ function SegmentRow({
                   onToggleQuote?.(segment.id)
                 }}
                 onMouseDown={(e) => e.stopPropagation()}
-                title={segment.excerpts.length > 0 ? 'Has excerpts' : 'No excerpts'}
-                aria-label={segment.excerpts.length > 0 ? 'Has excerpts' : 'No excerpts'}
+                tabIndex={isSelected ? undefined : -1}
+                title={segment.excerpts.some(isWholeExcerpt) ? 'Unquote segment' : 'Quote segment'}
+                aria-label={`Quote segment ${positionInSet}`}
+                aria-pressed={segment.excerpts.some(isWholeExcerpt)}
               >
                 <Quote className={cn('w-4 h-4', segment.excerpts.length > 0 && 'fill-amber-400')} />
               </button>
@@ -619,6 +646,7 @@ function SegmentRow({
               {showCodes && <div data-col="codes" className="w-[160px] flex-shrink-0 flex items-center">
                 {onCodeChange && allCodes && codeMap && projectId ? (
                   <InlineCodeActions
+                    tabbable={isSelected}
                     projectId={projectId}
                     itemType="segment"
                     itemId={segment.id}
@@ -663,7 +691,15 @@ function SegmentRow({
                           e.stopPropagation()
                           onNoteClick?.(note.id)
                         }}
-                        aria-label={`Note ${note.sequence_number}`}
+                        /* #785: a note badge is a row control like any other — a
+                         * segment with three notes was three more stops on a row
+                         * the researcher had not selected, and the name said which
+                         * NOTE but never which segment. The Observations clip row
+                         * has carried both of these since #771/#747; this is the
+                         * surface that never got them, which is also the one where
+                         * the row count is largest. */
+                        tabIndex={isSelected ? undefined : -1}
+                        aria-label={`Note ${note.sequence_number} on segment ${positionInSet}`}
                       >
                         {note.sequence_number}
                       </button>

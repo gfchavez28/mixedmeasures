@@ -8,7 +8,7 @@
  * an authored/scale order and must NOT be re-sorted.
  */
 import { describe, it, expect } from 'vitest'
-import { getLabels } from './RecodeWorkbench'
+import { getLabels, getSeedBasis } from './RecodeWorkbench'
 import type { DatasetColumn, RecodeDefinition, ValueFrequency } from '@/lib/api'
 
 const freq = (value_text: string, is_na = false): ValueFrequency =>
@@ -46,5 +46,59 @@ describe('getLabels — #579 priority-3 numeric-aware ordering', () => {
       { mapping: { Never: 1, Sometimes: 2, Always: 3 } },
     ] as unknown as RecodeDefinition[]
     expect(getLabels(existing, undefined, undefined)).toEqual(['Never', 'Sometimes', 'Always'])
+  })
+})
+
+describe('getSeedBasis — #823(h), how the codes got their order', () => {
+  it('names the alphabet when the observed values are text', () => {
+    // The filed case, GSS `fair`: the seed read *Depends = 1, Would take
+    // advantage of you = 2, Would try to be fair = 3* — the negative pole above
+    // the midpoint, on a 3-point attitude item, with nothing saying why.
+    const fd = freqData([
+      freq('Would try to be fair'), freq('Depends'), freq('Would take advantage of you'),
+    ])
+    expect(getSeedBasis([], undefined, fd)).toBe('observed_alphabetical')
+    expect(getLabels([], undefined, fd)).toEqual([
+      'Depends', 'Would take advantage of you', 'Would try to be fair',
+    ])
+  })
+
+  it('does NOT warn when every observed value is a number', () => {
+    // `compareValueLabels` orders these by VALUE, so 1..5 is the scale's own
+    // order and a warning here would be noise on the common case.
+    const fd = freqData([freq('3'), freq('5'), freq('1')])
+    expect(getSeedBasis([], undefined, fd)).toBe('observed_numeric')
+  })
+
+  it('does NOT warn when somebody authored the order', () => {
+    const def = { mapping: { Never: 1, Sometimes: 2, Always: 3 } } as unknown as RecodeDefinition
+    expect(getSeedBasis([def], undefined, undefined)).toBe('authored_rule')
+
+    const col = { scale_labels: ['Low', 'Mid', 'High'] } as unknown as DatasetColumn
+    expect(getSeedBasis([], col, undefined)).toBe('declared_scale')
+  })
+
+  it('a single text value still counts as alphabetical', () => {
+    // One value cannot be mis-ordered, but the BASIS is still the alphabet —
+    // and the next import can add a second. The basis describes the ladder
+    // rung, not how bad today's outcome happens to be.
+    expect(getSeedBasis([], undefined, freqData([freq('Depends')]))).toBe('observed_alphabetical')
+  })
+
+  it('reports none when there is nothing to seed from', () => {
+    expect(getSeedBasis([], undefined, undefined)).toBe('none')
+    expect(getSeedBasis([], undefined, freqData([]))).toBe('none')
+    // N/A values are filtered before the basis is decided, so a column whose
+    // only values are missing seeds nothing rather than seeding the sentinels.
+    expect(getSeedBasis([], undefined, freqData([freq('N/A', true)]))).toBe('none')
+  })
+
+  it('is the SAME ladder as getLabels, not a second one', () => {
+    // Both read one implementation; if they ever disagree about which rung
+    // fired, the warning would appear over an order it does not describe.
+    const col = { scale_labels: ['Low', 'High'] } as unknown as DatasetColumn
+    const fd = freqData([freq('Depends'), freq('Always')])
+    expect(getSeedBasis([], col, fd)).toBe('declared_scale')
+    expect(getLabels([], col, fd)).toEqual(['Low', 'High'])
   })
 })

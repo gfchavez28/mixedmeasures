@@ -9,7 +9,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, cleanup, fireEvent, screen } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { useRef } from 'react'
-import { useTreeKeyboardNav, useTreeAriaPositions } from './useTreeKeyboardNav'
+import { useTreeKeyboardNav, useTreeAriaPositions, firstChildIndex, parentIndex } from './useTreeKeyboardNav'
 
 afterEach(cleanup)
 
@@ -202,5 +202,72 @@ describe('keyboard navigation', () => {
     screen.getByText('outside').focus()
     fireEvent.keyDown(item('one'), { key: 'ArrowDown' })
     expect(document.activeElement).toBe(screen.getByText('outside'))
+  })
+})
+
+/**
+ * #773 — the horizontal half of the tree pattern, as pure arithmetic.
+ *
+ * `CodebookTreeView` only ever implemented open/close, and since every category
+ * there renders EXPANDED that half was unobservable — an NVDA pass reported
+ * "right didn't do anything", which read as an inert handler when in fact the
+ * TRAVERSAL half was missing. These two functions are that half, shared by the
+ * DOM trees and the SVG node graph so the two cannot disagree about what a
+ * parent is (the `siblingPositions` argument, one function over).
+ *
+ * Levels below are `aria-level` values in document order, e.g.
+ *   1  Category A
+ *   2    Code a1
+ *   2    Code a2
+ *   1  Category B
+ */
+describe('#773 — horizontal traversal from levels alone', () => {
+  const TREE = [1, 2, 2, 1, 2]   // A, a1, a2, B, b1
+
+  describe('firstChildIndex', () => {
+    it('steps into the first child — the next entry, when it is deeper', () => {
+      expect(firstChildIndex(TREE, 0)).toBe(1)
+      expect(firstChildIndex(TREE, 3)).toBe(4)
+    })
+
+    it('a leaf has nowhere to go, with no separate leaf test needed', () => {
+      // a1's next entry (a2) is a SIBLING, not a child.
+      expect(firstChildIndex(TREE, 1)).toBeNull()
+    })
+
+    it('an expanded node with NO children stays put — the DOM hook\'s old bug', () => {
+      // The hook used a bare `focus(idx + 1)` whenever aria-expanded was true,
+      // so an empty expanded category stepped sideways onto its next sibling.
+      const EMPTY_THEN_SIBLING = [1, 1]
+      expect(firstChildIndex(EMPTY_THEN_SIBLING, 0)).toBeNull()
+    })
+
+    it('the last entry has no next', () => {
+      expect(firstChildIndex(TREE, TREE.length - 1)).toBeNull()
+    })
+  })
+
+  describe('parentIndex', () => {
+    it('finds the nearest PRECEDING shallower entry', () => {
+      expect(parentIndex(TREE, 1)).toBe(0)
+      expect(parentIndex(TREE, 2)).toBe(0)   // skips the sibling between
+      expect(parentIndex(TREE, 4)).toBe(3)
+    })
+
+    it('a root stays put', () => {
+      expect(parentIndex(TREE, 0)).toBeNull()
+      expect(parentIndex(TREE, 3)).toBeNull()
+    })
+
+    it('handles a skipped level — a tree may jump 1 to 3', () => {
+      // `siblingPositions` documents that levels need not step by one, so the
+      // parent hop must not assume `level - 1` exists.
+      expect(parentIndex([1, 3, 3], 1)).toBe(0)
+    })
+
+    it('never walks past a DEEPER intervening entry', () => {
+      //  1 A / 2 a1 / 3 a1x / 2 a2  — a2's parent is A, not a1x.
+      expect(parentIndex([1, 2, 3, 2], 3)).toBe(0)
+    })
   })
 })

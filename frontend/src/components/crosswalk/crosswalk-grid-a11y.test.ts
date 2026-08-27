@@ -27,6 +27,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { stripComments } from '@/lib/strip-comments'
 import { join } from 'node:path'
 
 const DIR = join(__dirname)
@@ -39,19 +40,18 @@ const DIR = join(__dirname)
  * quote the very strings being scanned for (`role="row"`, `role="gridcell"`,
  * `role="grid"`). A source scan that reads commentary is measuring the wrong
  * artifact — it can report a violation that does not exist, and equally miss one
- * that does, the moment someone writes about it nearby. (the internal design notes notes the
- * verification layer already had four different answers to comment-stripping;
- * this is a fifth only until the substrate lands.)
+ * that does, the moment someone writes about it nearby. (The substrate has since
+ * landed: `@/lib/strip-comments`, which is now the codebase's one answer to
+ * comment-stripping — this file used to carry a sixth.)
+ *
+ * ⚠️ That module BLANKS comments rather than deleting their lines, so offsets
+ * survive; the `indexOf` ordering assertions below are unaffected, and the
+ * fixed-width window at the end of this file was re-measured against it.
  */
-function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')            // block + JSDoc + {/* jsx */}
-    .split('\n')
-    .filter(line => !/^\s*(\/\/|\*)/.test(line))    // line comments, JSDoc bodies
-    .join('\n')
+const read = (f: string) => {
+  const abs = join(DIR, f)
+  return stripComments(readFileSync(abs, 'utf8'), abs)
 }
-
-const read = (f: string) => stripComments(readFileSync(join(DIR, f), 'utf8'))
 
 const BRACKET = read('Bracket.tsx')
 const CELL = read('Cell.tsx')
@@ -81,7 +81,15 @@ describe('#701(b) — the grid owns rows, and only rows', () => {
     // defect — sailed past it, and was caught incidentally by two other
     // assertions. A guard that checks one member of a pair is the #515 → #676
     // shape in miniature.
-    const openings = [...BRACKET.matchAll(/<section[\s\S]{0,400}?>/g)].map(m => m[0])
+    // ⚠️ To the tag's real `>`, not a fixed 400-char window. The window was a
+    // proxy for "the opening tag", and it worked only while the stripper
+    // DELETED comment lines: once comments are blanked in place (2026-08-26,
+    // `@/lib/strip-comments`), the JSDoc inside these tags stays as whitespace
+    // and both openings run past 400 chars — so the scan silently matched
+    // NOTHING. The bound is gone rather than raised; a proxy that has already
+    // failed once should not be re-tuned.
+    const openings = [...BRACKET.matchAll(/<section/g)]
+      .map(m => BRACKET.slice(m.index, BRACKET.indexOf('>', m.index) + 1))
     expect(openings.length, 'expected the collapsed and expanded branches').toBe(2)
     for (const tag of openings) {
       expect(tag).not.toMatch(/role="grid"/)

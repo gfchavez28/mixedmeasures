@@ -1,0 +1,60 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<CodeBook xmlns="urn:QDA-XML:codebook:1.0" xsi:schemaLocation="urn:QDA-XML:codebook:1.0 Codebook.xsd" origin="QualCoder" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<Codes>
+<Code guid="8162617f-e691-400b-aa13-c586dfaf7b89" name="Unsubstantive/Artifact" isCodable="true" color="#D8D8D8">
+<Description>Non-substantive content or transcript artifacts</Description>
+</Code>
+<Code guid="0b8d2bce-4fb0-4eec-a1ed-b8dba3c0f486" name="Unclear" isCodable="true" color="#81BEF7">
+<Description>Content that is unclear or needs review</Description>
+</Code>
+<Code guid="da298f4e-3d71-4df2-880d-4bd3ed264ee0" name="Ünïcøde &amp; &lt;angle&gt; &quot;quoted&quot; — 教师" isCodable="true" color="#81BEF7" />
+<Code guid="a07ea1c2-3f9d-4c62-ad0c-74f0880cf42f" name="Implementation Quality" isCodable="false">
+<Code guid="4d1ebd54-13f8-4da1-9a17-026e2aefc288" name="Curriculum fidelity" isCodable="true" color="#A3BEA5">
+<Description>Teacher follows the published sequence.
+Second line, after a hard break.</Description>
+</Code>
+<Code guid="f9bd9244-1f01-4c53-9757-c5cb72a413b0" name="Pacing adherence" isCodable="true" color="#B07CE1" />
+<Code guid="29bd4479-953b-406c-89ba-afe15b14da56" name="Materials use (manipulatives)" isCodable="true" color="#F7BE81">
+<Description>Uses &quot;manipulatives&quot; &amp; other &lt;hands-on&gt; materials — quotes, ampersand, angle brackets.</Description>
+</Code>
+<Code guid="287650d1-951c-4a8d-814d-02e8793f9a1d" name="Inquiry protocol followed" isCodable="true" color="#6D91C6" />
+<Code guid="48c6d841-0a07-4e66-8d27-9e9d241c2f64" name="Reversion to old methods" isCodable="true" color="#C54949" />
+</Code>
+<Code guid="e40ea3f0-e7bb-4ed8-b349-89e493aa2312" name="Training &amp; Professional Development" isCodable="false">
+<Code guid="052ca641-1b93-45f9-bb65-730699f5fb5f" name="Training adequacy" isCodable="true" color="#5882FA" />
+<Code guid="00c852be-e503-4663-b9f5-e0b57966f019" name="Training format (workshop vs. session)" isCodable="true" color="#7EA793" />
+<Code guid="4a335fa4-f592-4be4-b138-f4c03023b58c" name="Ongoing coaching" isCodable="true" color="#D8866D">
+<Description>Résumé of coaching; 教师反馈 included.</Description>
+</Code>
+<Code guid="aa6c51e9-c735-4c13-b5ba-1281f9080ad2" name="Peer collaboration" isCodable="true" color="#D37676" />
+<Code guid="c61c11ff-3210-49d5-90fe-65155c707c84" name="Self-directed learning" isCodable="true" color="#81BEF7" />
+</Code>
+<Code guid="f4e3048b-4822-4d21-a1ce-01d53cd13a72" name="Leadership &amp; Support" isCodable="false">
+<Code guid="f9980187-9ed7-44c4-80d1-da6f0eaef52d" name="Principal engagement" isCodable="true" color="#A3BEA5" />
+<Code guid="5b1cd703-91e7-40e1-b1c9-77b8cdc353de" name="Classroom walkthroughs" isCodable="true" color="#B07CE1" />
+<Code guid="9fc85044-4e1c-4bc5-a544-5a26351f2dbf" name="Protected planning time" isCodable="true" color="#F7BE81" />
+<Code guid="103f6555-08db-40f9-b4a4-5a0b159ae123" name="District support" isCodable="true" color="#6D91C6" />
+<Code guid="ef2a652c-97e5-4677-a698-0a2fb57e6211" name="Communication clarity" isCodable="true" color="#C54949" />
+</Code>
+<Code guid="64efd5b1-6b05-4c4a-bd84-ae2d781dc575" name="Barriers to Implementation" isCodable="false">
+<Code guid="67d3af39-acba-4073-a816-e5dca86407df" name="Insufficient time" isCodable="true" color="#5882FA" />
+<Code guid="2b401e93-d41b-4901-a687-acbdd5951c1b" name="Competing priorities" isCodable="true" color="#7EA793" />
+<Code guid="4dd511ae-dd0e-4965-ba1d-a8200615d4a2" name="Teacher resistance" isCodable="true" color="#D8866D" />
+<Code guid="0632f9fa-5308-4a0a-b26d-5147964c5e47" name="Material delivery delays" isCodable="true" color="#D37676" />
+<Code guid="96b6d3c3-42c5-4dfc-9724-129936059e36" name="Scheduling conflicts" isCodable="true" color="#81BEF7" />
+<Code guid="104632d0-59bd-4ecd-bc2a-41b29c4c7a12" name="Staff turnover" isCodable="true" color="#A3BEA5" />
+</Code>
+<Code guid="756bbd0b-ef35-4bcc-9b24-d8faf5ffbf23" name="Teacher Attitudes" isCodable="false">
+<Code guid="f43440a1-9f6f-4353-bf54-134725faa542" name="Enthusiasm / buy-in" isCodable="true" color="#B07CE1" />
+<Code guid="21e54663-d043-410c-824f-7505aa62d983" name="Skepticism" isCodable="true" color="#F7BE81" />
+<Code guid="033c4651-fa28-48e5-a044-938193c691fd" name="Feeling unsupported" isCodable="true" color="#6D91C6" />
+<Code guid="be5c7ef8-dd3a-4cd6-8a10-c01f5f03a157" name="Confidence with new materials" isCodable="true" color="#C54949" />
+</Code>
+<Code guid="169448d4-bb24-46d7-8a4d-5ff8af8cfb62" name="Student Engagement" isCodable="false">
+<Code guid="5415d81f-2ab9-47f1-813e-5894a3fa1152" name="Positive student response" isCodable="true" color="#5882FA" />
+<Code guid="5124d75c-570c-49ec-a988-10a731bd03bb" name="Student confusion / frustration" isCodable="true" color="#7EA793" />
+<Code guid="31d082f6-b00f-44a4-9a2e-c7f1f3aa8937" name="Differentiation challenges" isCodable="true" color="#D8866D" />
+<Code guid="66462669-92f5-4dbe-a6dc-c1d75a3394a0" name="Parent feedback" isCodable="true" color="#D37676" />
+</Code>
+</Codes>
+</CodeBook>

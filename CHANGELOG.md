@@ -5,6 +5,136 @@ All notable changes to Mixed Measures are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-27
+
+A corrective release, and a large one. Most of it is work that makes existing
+features hold up on real research data — a 75,699-record survey, a fully coded
+transcript, a project with hundreds of variables. The dataset workspace is
+reorganised into two views, recoding can now produce a new variable instead of
+overwriting the old one, and several numbers the app reported are now correct.
+
+### Upgrade notes
+
+- **Your database is upgraded on first launch, and a backup is taken first.**
+  This release adds two fields recording where a derived variable came from. The
+  upgrade is quick even on very large projects, and it does not change any of
+  your data. As always, the automatic pre-upgrade backup is kept only for the
+  five most recent launches — if you want a copy you control, take one before
+  updating (Settings → Backup & Data).
+- **Project files are unchanged.** `.mmproject` and `.mmbackup` files work in both
+  directions with 1.3.2. A colleague still on 1.3.2 can open a project you export
+  from 1.4.0; they will simply not see the new "derived from" note on variables.
+- **The recoding page moved.** It is now *Variables*, alongside *Data*, on every
+  dataset. Old links and bookmarks redirect automatically.
+- **Applying a recode rule is now something you ask for.** Previously, saving your
+  first rule for a variable applied it immediately, and deleting the rule in
+  effect could rewrite the variable's numbers again. Neither happens now — see
+  *Changed*.
+
+### Known limit
+
+- **Very large datasets and project files.** Projects containing more than
+  **500,000 dataset values** cannot yet be exported as a `.mmproject` file, and
+  Mixed Measures will say so rather than failing part-way. Datasets themselves can
+  still be imported and analysed well past that point. **Your backups are not
+  affected** — `.mmbackup` works at full size, so your data stays protected. What
+  this limit reaches is *sharing* a project with a colleague, *duplicating* one,
+  and *merging*. Raising it needs both halves of the round trip rebuilt together,
+  and that work is scheduled for the next release.
+
+### Added
+
+- **A dataset now has two views: Data and Variables.** *Data* is the grid of
+  records. *Variables* is where a variable is described — its name and label, its
+  type, its value labels, which values count as missing, and its recode rules —
+  with the rules visible on screen while you edit the dictionary.
+- **A recode rule can produce a new variable, leaving the original untouched.**
+  Choose *Recoded variable…* from the *Add* menu on the Data view, or derive from
+  a rule in the Variables view. The new variable records which variable and which
+  rule produced it.
+- **Histograms, box plots, and Q–Q plots.** A continuous variable draws a
+  histogram rather than one bar per distinct value; group comparisons draw a box
+  plot; and the Q–Q plot states the plotting convention it used.
+- **A frequency distribution states its margin of error.**
+- **Reliability reports per-item diagnostics** — alpha if each item were dropped,
+  and item-total correlations — and no longer reports an undefined coefficient as
+  zero.
+- **The comparisons panel says whether you need the non-parametric test**, rather
+  than leaving the assumption checks for you to interpret.
+- **Declare one missing-value vocabulary across many variables at once.** Survey
+  exports typically use the same handful of codes for "Refused", "Don't know" and
+  "Inapplicable" in every column; declaring them one variable at a time was the
+  only option before.
+- **A withdrawal report.** For a given participant, the app can now say what data
+  traces back to them and where it lives — counts and locations, never the text —
+  and honour a withdrawal by redacting rather than deleting the links that make
+  the request answerable in the first place.
+- **Jump to a record, and land on it from search.** A record number takes you
+  straight to its page in a large dataset, and a search hit opens the record it
+  found rather than the first page.
+- **Re-derive a variable whose source has drifted**, and re-key a rule that a
+  relabel invalidated, instead of rebuilding either by hand.
+
+### Changed
+
+- **Applying a recode rule to the variable it sits on is now a deliberate act.**
+  Three paths used to apply a rule without asking: saving the first rule for a
+  variable, deleting the rule in effect, and promoting another. A rule in effect
+  rewrites every stored number in its variable and there is no undo, so it is now
+  something you choose — *Apply to this variable…* — and the rest leave your
+  numbers exactly as they are. Value labels are unaffected; they work as before.
+- **Every saved rule says whether it is in effect** — "In effect" or "Not
+  applied" — where before there was an unlabelled star.
+- **Imports are limited by cells, not file size.** The limit is 4,000,000 cells
+  (records × variables), which is the thing that actually costs time and memory;
+  a file's size in megabytes varies four-fold between formats for identical data.
+- **Declared-missing values are now blank in R and Excel exports**, and the data
+  dictionary carries a Missing Values column so the distinction between "Don't
+  know", "Refused" and "Inapplicable" is not lost. The two exports previously
+  disagreed about which cells counted.
+- **Exports are given up to 15 minutes.** A large Excel export could take longer
+  than the app was willing to wait, and a successful export was being discarded
+  after the fact.
+
+### Fixed
+
+- **Large surveys work end to end.** A real 75,699-record, 41-variable survey
+  could not be previewed, imported, opened, or deleted. All four are fixed:
+  previewing no longer times out, importing writes in batches instead of one
+  round trip per record, opening a dataset loads a page at a time, and deleting
+  is handed to the database rather than loading every row to delete it.
+- **A long export no longer freezes the whole app.** Running a large export made
+  every other part of Mixed Measures unresponsive for the duration — over three
+  minutes in the worst measured case, now under eight seconds.
+- **Text Coding no longer fails on a dataset with several open-text variables.**
+- **The qualitative coverage figure was wrong on fully coded text.** A column
+  where every substantive response had been coded reported 90%, because cells the
+  workbench hides by default were counted in the total but could never be coded.
+- **Canvas: comparing a snapshot showed one theme's text under another theme's
+  heading**, and comparing against a snapshot that had rotated out drew a
+  difference it had not actually established.
+- **The Variables view's detail pane had no surface of its own**, so it showed
+  through to the page behind it — grey in light mode, and the darkest region on
+  screen in dark mode.
+- **Relabelling a variable is refused when the stored number is not the code the
+  label implies**, which would otherwise have rewritten responses to their
+  opposite.
+- **A declared answer option nobody chose is now a row of the cross-tabulation,
+  but not a row of the test** — chi-square and Cramér's V run on what was
+  actually observed.
+- **Chi-square says when its approximation is unreliable** rather than reporting
+  a p-value that should not be read.
+- **A codebook exported by QualCoder was rejected** because of an invisible
+  marker at the start of the file.
+- **R exports: a factor's levels are written in the same form as the data**, so a
+  variable no longer silently arrives empty in R.
+- **A saved figure records the filters it was saved under**, so reopening it does
+  not silently show a different population.
+- **Accessibility:** the variable list, saved rule cards, and every rule action
+  are reachable from the keyboard; several controls that were announced only by a
+  tooltip now have real names; and the toolbar no longer scrolls out of reach at
+  200% zoom.
+
 ## [1.3.2] - 2026-08-15
 
 A security and packaging patch. There is no new capability here and nothing in
@@ -566,7 +696,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.2...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.2.0...v1.3.0

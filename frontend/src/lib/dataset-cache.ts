@@ -60,3 +60,31 @@ export function invalidateColumnDictionary(
     qc.invalidateQueries({ queryKey: key })
   }
 }
+
+/**
+ * #812 — a column's EXISTENCE changing, which is strictly more than its
+ * dictionary changing.
+ *
+ * 🔴 Deleting a column cascades further than any edit to it. `delete_manual_column`
+ * and `_cascade_delete_column_refs` also delete the `AnalysisDomainMember` rows
+ * that referenced it, delete the `MetricDefinition` + `StatisticalTest` rows that
+ * read it, and **auto-dissolve any equivalence group or analysis domain left
+ * empty** (mutation catalog §E3). The mutation this helper was extracted from
+ * invalidated `dataset-data` and `dataset-columns` only — so after deleting the
+ * last column of a variable group, the crosswalk went on rendering a bracket
+ * whose group the server had already dissolved.
+ *
+ * ⚠️ **Found while EXTRACTING that mutation for a second surface, and that is the
+ * general point: a copy does not only DRIFT, it propagates the original's defect
+ * verbatim (#733).** The moment a call site stops being the only one is the
+ * moment to check what it was quietly getting away with.
+ */
+export function invalidateColumnRemoved(
+  qc: QueryClient,
+  projectId: number | string,
+  datasetId: number | string,
+): void {
+  invalidateColumnDictionary(qc, projectId, datasetId)
+  qc.invalidateQueries({ queryKey: ['analysis-domains', projectId] })
+  qc.invalidateQueries({ queryKey: ['equivalence-groups', projectId] })
+}

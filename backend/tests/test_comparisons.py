@@ -228,3 +228,67 @@ def test_every_anova_result_labels_both_effect_sizes(mtcars_session):
     test = result["rows"][0]["test"]
     assert test["omega_squared"] is not None
     assert test["omega_squared_label"] is not None
+
+
+# ── #823(l) — the residual cell of a CROSSED comparison ──────────────────────
+
+
+def test_crossed_residual_is_named_not_left_bare(mtcars_session):
+    """A row with a primary group and NO secondary value is not the marginal.
+
+    Measured on GSS: with a Secondary Grouping set, `Associate/junior college`
+    (n = 26 — the rows whose secondary value is missing) sat beside
+    `Associate/junior college · Under 45` and `… · 45 and over` and read as
+    their marginal total of 2,444. The rows are real and must not be dropped;
+    what was wrong is that nothing said which cell they were.
+    """
+    from app.models.dataset import DatasetRow, DatasetValue
+    from app.services.comparisons import _load_grouping_map
+    from app.services.grouping import MISSING_GROUP_LABEL
+
+    db = mtcars_session
+    # Remove the SECONDARY value from a few rows so they fall to the residual.
+    orphaned = db.query(DatasetValue).filter(DatasetValue.column_id == AM_ID).limit(4).all()
+    orphan_ids = [v.row_id for v in orphaned]
+    for v in orphaned:
+        db.delete(v)
+    db.flush()
+
+    row_ids = [r.id for r in db.query(DatasetRow).all()]
+    mapping = _load_grouping_map(db, CYL_ID, AM_ID, row_ids, project_id=1)
+
+    # POPULATION self-check: without residual rows every assertion below is vacuous.
+    residuals = {rid: lbl for rid, lbl in mapping.items() if rid in orphan_ids}
+    assert len(residuals) == len(orphan_ids), (
+        "the fixture produced no residual rows, so this test proves nothing"
+    )
+    crossed = {rid: lbl for rid, lbl in mapping.items() if rid not in orphan_ids}
+    assert crossed, "no fully-crossed rows either — the fixture is degenerate"
+
+    for label in residuals.values():
+        assert label.endswith(f" · {MISSING_GROUP_LABEL}"), (
+            f"residual cell {label!r} is the bare primary name, which in a crossed "
+            "table reads as that group's marginal total"
+        )
+
+    # The positive control: an ordinary crossed row is UNCHANGED, and in
+    # particular does not acquire the missing label.
+    for label in crossed.values():
+        assert " · " in label
+        assert MISSING_GROUP_LABEL not in label
+
+
+def test_uncrossed_grouping_is_untouched_by_the_residual_rule(mtcars_session):
+    """With no secondary column there is no residual, and no label may change."""
+    from app.models.dataset import DatasetRow
+    from app.services.comparisons import _load_grouping_map
+    from app.services.grouping import MISSING_GROUP_LABEL
+
+    db = mtcars_session
+    row_ids = [r.id for r in db.query(DatasetRow).all()]
+    mapping = _load_grouping_map(db, CYL_ID, None, row_ids, project_id=1)
+
+    assert mapping, "no grouping values loaded — the assertion below is vacuous"
+    for label in mapping.values():
+        assert MISSING_GROUP_LABEL not in label
+        assert " · " not in label

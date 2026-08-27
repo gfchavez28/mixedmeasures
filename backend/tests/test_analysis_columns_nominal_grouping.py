@@ -62,3 +62,37 @@ def test_nominal_column_still_selectable_as_metric_input(db_session):
     assert 9002 in all_column_ids   # Salary still selectable
     # Demographic columns are intentionally NOT in the per-dataset column list.
     assert 9003 not in all_column_ids
+
+
+def test_a_stale_computed_column_says_so(db_session):
+    """#795 — the payload carries `stale`, and it is the ONLY project-wide
+    column payload that does.
+
+    The canvas chart embed computes ad-hoc through `quickCompute`, so unlike a
+    saved chart it has no `MetricDefinition.stale` to read; it holds column ids
+    and nothing else. Before this field, neither this payload nor
+    `ProjectColumnInfo` carried a staleness flag, which is why the embed's
+    indicator sat unwired for the life of the feature.
+    """
+    user = _seed(db_session)
+    db_session.add_all([
+        DatasetColumn(id=9004, dataset_id=900, column_code="Gain", column_name="Score Gain",
+                      column_text="Score Gain", column_type="numeric", source="computed",
+                      expression="[Post] - [Pre]", stale=True,
+                      sequence_order=3, display_order=3),
+        DatasetColumn(id=9005, dataset_id=900, column_code="Fresh", column_name="Fresh Gain",
+                      column_text="Fresh Gain", column_type="numeric", source="computed",
+                      expression="[Post] - [Pre]", stale=False,
+                      sequence_order=4, display_order=4),
+    ])
+    db_session.flush()
+
+    resp = _run(get_analysis_columns(project_id=900, user=user, db=db_session))
+    by_id = {c.id: c for ds in resp.datasets for c in ds.columns}
+
+    assert by_id[9004].stale is True
+    assert by_id[9005].stale is False
+    # An imported column carries NULL in the DB and can never be stale — it must
+    # arrive as False, not None, or the client's `=== true` test is the only
+    # thing standing between a null and a warning about healthy data.
+    assert by_id[9002].stale is False

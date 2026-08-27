@@ -97,7 +97,21 @@ jobs:
       # The verify line is the point of the whole step: an apt name that does not
       # resolve, or a CRAN install that half-fails, must fail HERE rather than as
       # a confusing MM_REQUIRE_R error two steps later.
+      # ⚠️ STEP-LEVEL TIMEOUT, and it is the point of #781 rather than a tidy-up.
+      # Twice now (2026-08-14, 2026-08-19) this step consumed the JOB's entire
+      # budget fetching apt packages. A job-level timeout CANCELS the running
+      # step and SKIPS every step after it, so the run reads `cancelled` — which
+      # looks like a human stopped it — while `Tests` and the HARD dependency
+      # gate below never executed. Green by appearance, two gates dark.
+      #
+      # A step-level timeout makes the STEP fail instead, so the run reads
+      # `failure` and names this step. The suite still does not run, but "the
+      # tests did not run" is now LOUD, which is the requirement #781 is about.
+      #
+      # 10 minutes is generous against the ~5 the job budget was widened by for
+      # this install (#642); raise it if a legitimately slow mirror trips it.
       - name: Install R + the correctness-oracle packages
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -129,7 +143,18 @@ jobs:
       # Placement is load-bearing: LAST in the job, after Tests. A failing step halts
       # the ones after it, so an audit placed earlier would cost the test signal on
       # exactly the runs you most want it.
+      #
+      # ⚠️ `!cancelled()` removes the REVERSE coupling, and it is #781's other half.
+      # Being last means every earlier failure — a slow R install, a red test —
+      # used to skip this gate too, so a push could land on `main` with its
+      # production dependencies never audited. The condition keeps the placement
+      # (a failing audit still cannot cost the test signal) while letting the gate
+      # run anyway. `!cancelled()` rather than `always()` on purpose: a run someone
+      # deliberately cancels should stop, not spend a minute querying PyPI.
+      #
+      # ⚠️ This is DELIBERATELY NOT mirrored in release.yml — see the note there.
       - name: Dependency audit (HARD gate, production deps)
+        if: ${{ !cancelled() }}
         run: pip-audit -r requirements.txt
 
   # ── Frontend: lint + vitest + production build + dep audit ──────────────────
@@ -175,7 +200,20 @@ jobs:
       #     release.yml gate. Without it `ci.yml` had no production-dep check at all
       #     on the frontend: a CVE in a SHIPPING dep passed every push and surfaced
       #     only when someone tried to cut. --omit=dev is load-bearing (see #632).
+      #
+      # ⚠️ `!cancelled()` for the same reason as the backend gate (#781): a lint,
+      # test or build failure would otherwise skip this, leaving the push's
+      # dependency posture simply unanswered. MEASURED rather than assumed:
+      # `npm audit --omit=dev` reads `package-lock.json` and needs no
+      # `node_modules` — run in a directory holding only the two manifests it
+      # returns "found 0 vulnerabilities", exit 0 — so it does not cascade-fail
+      # even when `npm ci` is what broke.
+      #
+      # ⛔ Deliberately NOT applied to the ADVISORY audit above: it is
+      # `continue-on-error` and non-blocking, so its skipping costs nothing. The
+      # rule is "hard gates always run, advisory ones are best-effort".
       - name: Dependency audit (HARD gate, production deps)
+        if: ${{ !cancelled() }}
         run: npm audit --omit=dev --audit-level=high
 
   # ── Electron shell: headless unit tests ─────────────────────────────────────
@@ -223,5 +261,39 @@ jobs:
       # `--force` — so a full-tree gate here would fail literally every run and be
       # switched off within a week. electron ships exactly ONE runtime dep
       # (electron-updater, #29 S2), which is what this gate exists to watch.
+      #
+      # ⚠️ `!cancelled()` for the same reason as the other two hard gates (#781) —
+      # a unit-test failure must not leave the shipping dep unaudited. The command
+      # reads the lockfile, so it does not depend on `npm ci` having succeeded.
       - name: Dependency audit (HARD gate, production deps)
+        if: ${{ !cancelled() }}
         run: npm audit --omit=dev --audit-level=high
+
+  # Added 2026-08-22 (#792 follow-up 1). The rules manuals are delivered by the
+  # `paths:` frontmatter in the internal design notes, so a pattern that stops matching —
+  # a renamed or moved file — silently makes that rule undeliverable, with no error
+  # and no tell. That is not hypothetical: the 2026-08-22 sweep found 19 real
+  # delivery gaps across four manuals, including services/code_analysis.py, the
+  # highest-risk seam in the project.
+  #
+  # Its own job rather than a step on `backend`, deliberately: gate placement is
+  # load-bearing here (a failing step halts the ones after it), and a documentation
+  # check must never be able to cost the test signal. It needs no dependencies
+  # beyond a checkout and stdlib Python, so it is close to free.
+  #
+  # ⚠️ Only the GATED half runs — dead patterns, stale references, stale exemptions
+  # and the script's own population self-check. `--uncovered` is a REVIEW LIST whose
+  # result is expected non-empty and which requires a judgement no scan can make;
+  # gating on it would produce a noisy gate, and a noisy gate gets switched off.
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+
+      - name: Rules delivery gate (.claude/rules paths must resolve)
+        run: python scripts/rules-coverage.py

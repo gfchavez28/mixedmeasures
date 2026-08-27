@@ -128,6 +128,85 @@ class MergeDivergenceError(ValueError):
         self.payload = payload
 
 
+# ── Export size bound (#842) ────────────────────────────────────────────
+
+MAX_PROJECT_EXPORT_VALUES = 500_000
+"""The largest project `.mmproject` will export, in dataset values.
+
+**Chosen on TIME, with margin, 2026-08-27.** The binding constraint is the IMPORT
+half, not the export: `import_project` flushes once per entity, measured linear at
+0.376-0.433 s per 1,000 values across a 15x range (#847), against `importProject`'s
+hard-coded 300,000 ms client timeout. 500,000 values imports in roughly 190 s — 37%
+headroom.
+
+⚠️ **Do NOT raise this to the ~800,000 where the timeout actually bites.** That is the
+FAILURE POINT, not a bound: at 720,000 the margin is already 9.8% on an unloaded
+6-core machine, and a slower one would abandon a valid import.
+
+⚠️ **This is deliberately NOT `MAX_DATASET_CELLS` (4,000,000) and the 8x gap is
+KNOWN** — the tool imports far more than it can share. The bound makes that honest;
+it does not close it. The real fix is BOTH halves together (streaming export +
+batched import) in v1.5.0 — `docs/release-1.4.0-checklist.md` §4d, tracked by #842
+and #847, which both stay open.
+
+⚠️ Dependency note (the internal design notes's blue block): this value was derived from TIME, so it
+does not key on the parked cloud/VPS question.
+"""
+
+
+class ProjectTooLargeError(ValueError):
+    """Refused: over `MAX_PROJECT_EXPORT_VALUES` (#842).
+
+    ⚠️ A DISTINCT type, not a bare `ValueError`, for the same reason
+    `DatasetTooLargeError` is (#797/#803): `export_project_endpoint` catches
+    `ValueError` and re-raises it as **HTTPException(404)**, so a bare ValueError
+    would tell the researcher their project was NOT FOUND. Every caller catches this
+    one FIRST and shows its message verbatim.
+    """
+
+
+def project_export_size_error(n_values: int) -> str | None:
+    """The refusal message for an over-bound project, or None if it fits.
+
+    ONE function so the export endpoint, Duplicate Project and the overwrite
+    safety-backup refuse at the same size with the same words — those three call
+    `export_project` and all three were breaking with a raw `OperationalError`.
+
+    ⚠️ The message must not offer `include_media=False` as a workaround: media is not
+    counted here, so excluding it changes nothing about this limit. Advice that does
+    not work is worse than none.
+    """
+    if n_values <= MAX_PROJECT_EXPORT_VALUES:
+        return None
+    return (
+        f"This project holds {n_values:,} dataset values, over the "
+        f"{MAX_PROJECT_EXPORT_VALUES:,} limit for a .mmproject file. "
+        "Your data is not at risk and backups are unaffected — Settings → "
+        "Backup & Data still covers this project in full, including its datasets. "
+        "What this limit blocks is sharing a copy, duplicating the project, and "
+        "merging a colleague's coding. A project comes under the limit if its "
+        "datasets hold fewer records or fewer variables. A larger limit is planned."
+    )
+
+
+def assert_project_exportable(db: Session, project_id: int) -> None:
+    """Refuse an over-bound project BEFORE the gather begins.
+
+    ⚠️ Enforced in the SERVICE, not at a router: `export_project` has three callers
+    (the export endpoint, `duplicate_project_endpoint`, and
+    `_safety_export_before_overwrite`) and a router guard is not a guard on the
+    operation (#589). One COUNT — it must not spend the memory it is refusing.
+    """
+    n_values = db.query(func.count(DatasetValue.id)).join(
+        DatasetRow, DatasetValue.row_id == DatasetRow.id
+    ).join(
+        Dataset, DatasetRow.dataset_id == Dataset.id
+    ).filter(Dataset.project_id == project_id).scalar() or 0
+    message = project_export_size_error(n_values)
+    if message:
+        raise ProjectTooLargeError(message)
+
+
 # ── Serialization helpers ───────────────────────────────────────────────
 
 def _get_columns(model) -> list[str]:
@@ -173,6 +252,9 @@ def export_project(
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise ValueError(f"Project {project_id} not found")
+
+    # #842 — refuse an over-bound project here, before a single entity is loaded.
+    assert_project_exportable(db, project_id)
 
     # Pre-compute column lists once
     cols = {
@@ -268,12 +350,25 @@ def export_project(
     dataset_rows = db.query(DatasetRow).filter(
         DatasetRow.dataset_id.in_(dataset_ids)
     ).all() if dataset_ids else []
-    row_ids = [r.id for r in dataset_rows]
 
-    dataset_values = db.query(DatasetValue).filter(
-        DatasetValue.row_id.in_(row_ids)
-    ).all() if row_ids else []
-    value_ids = [v.id for v in dataset_values]
+    # #842 — JOIN BACK to the dataset; never materialise a project-wide id list.
+    #
+    # This used to build `row_ids` and hand it to `.in_()`. SQLAlchemy renders ONE
+    # BIND PARAMETER PER ELEMENT and SQLite's SQLITE_MAX_VARIABLE_NUMBER is exactly
+    # 250,000 (measured by bisection), so a real survey raised a raw OperationalError
+    # that reached the researcher as an unexplained failure — on export, on Duplicate
+    # Project, and on the safety backup an overwrite-import takes first.
+    #
+    # `dataset_ids` is bounded by the project's dataset COUNT, so passing it by value
+    # is safe; the row and value sets are not, so they are joined instead. Measured
+    # 2026-08-27 on a 3,633,552-value corpus: identical result sets, 0.45 s, no memory
+    # growth. `order_by` keeps the archive reproducible so two exports of an unchanged
+    # project can be compared — the shape the v1.5.0 round-trip guard needs.
+    dataset_values = db.query(DatasetValue).join(
+        DatasetRow, DatasetValue.row_id == DatasetRow.id
+    ).filter(
+        DatasetRow.dataset_id.in_(dataset_ids)
+    ).order_by(DatasetValue.id).all() if dataset_ids else []
 
     # Exclude the derived consensus layer from export — it is regenerated on
     # import via materialize_consensus_for_project (§8 decision 4 / C2). This also
@@ -287,12 +382,19 @@ def export_project(
                 CodeApplication.origin != CONSENSUS_ORIGIN,
             ).all()
         )
-    if value_ids:
+    if dataset_ids:
+        # #842 join-back — see the note on `dataset_values` above. The filter is the
+        # same predicate the id list expressed ("this project's dataset values"),
+        # reached through the FK chain instead of through 3.6 million bind parameters.
         code_applications.extend(
-            db.query(CodeApplication).filter(
-                CodeApplication.dataset_value_id.in_(value_ids),
+            db.query(CodeApplication).join(
+                DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id
+            ).join(
+                DatasetRow, DatasetValue.row_id == DatasetRow.id
+            ).filter(
+                DatasetRow.dataset_id.in_(dataset_ids),
                 CodeApplication.origin != CONSENSUS_ORIGIN,
-            ).all()
+            ).order_by(CodeApplication.id).all()
         )
 
     # Coders referenced by this project's code applications (Track J · J1).
@@ -306,9 +408,16 @@ def export_project(
         notes.extend(
             db.query(Note).filter(Note.conversation_id.in_(conv_ids)).all()
         )
-    if value_ids:
+    if dataset_ids:
+        # #842 join-back — see the note on `dataset_values` above.
         notes.extend(
-            db.query(Note).filter(Note.dataset_value_id.in_(value_ids)).all()
+            db.query(Note).join(
+                DatasetValue, Note.dataset_value_id == DatasetValue.id
+            ).join(
+                DatasetRow, DatasetValue.row_id == DatasetRow.id
+            ).filter(
+                DatasetRow.dataset_id.in_(dataset_ids)
+            ).order_by(Note.id).all()
         )
     if doc_ids:
         notes.extend(
@@ -911,6 +1020,15 @@ def _safety_export_before_overwrite(
         path = backup_dir / f"pre-overwrite_{target.id}_{ts}.mmproject"
         path.write_bytes(buf.getvalue())
         return path
+    except ProjectTooLargeError as e:
+        # #842 — the abort is CORRECT (never destroy data we could not back up), but
+        # the REASON has to survive. Without this arm the generic wrapper below
+        # reports "Could not create a safety backup … (too many SQL variables)",
+        # which describes neither the cause nor anything the researcher can act on.
+        raise ProjectTooLargeError(
+            "Overwriting was stopped because the project being replaced is too large "
+            f"to snapshot first, and it is not overwritten without a snapshot. {e}"
+        )
     except Exception as e:
         raise ValueError(
             "Could not create a safety backup before overwrite; aborting to protect "
@@ -2014,7 +2132,50 @@ def import_project(
                 "depends_on_column_ids": _remap_json_id_array(
                     item.get("depends_on_column_ids"), remap, "dataset_columns"
                 ),
+                # 🔴 SELF-REFERENCING FK (Decision B) — nulled here, resolved in the
+                # post-pass below. It cannot be remapped in this loop: it points at
+                # another row of the table currently being inserted, which may not
+                # exist yet. Leaving it OUT of the overrides is not neutral either —
+                # `_build_entity` copies any column the import does not explicitly
+                # remap, so the SOURCE instance's raw id would be written into this
+                # database, which is the exact hazard `backend-invariants.md` §6
+                # names for un-remapped parent FKs.
+                "derived_from_column_id": None,
             }, "dataset_columns")
+
+        # ── l-bis. Derived-column provenance (Decision B) ──────────
+        # The self-reference resolved once every column of this import exists.
+        #
+        # 🔴 Scoped to `inserted_ids`, NEVER `remap` (#714). On a MERGE, `remap`
+        # maps a uuid-matched file column onto a row that ALREADY EXISTED locally,
+        # and a merge deliberately keeps the target's field values — so writing
+        # through `remap` would overwrite the target's own correct provenance with
+        # the colleague's. This is the trap `_repair_pre_v5_excerpt_offsets`
+        # documents, and it is silent.
+        #
+        # ⚠️ An all-matched merge leaves the inserted set EMPTY. Do not add an
+        # early return on it: that is what let a mutant survive during #714's fix.
+        _inserted_cols = inserted_ids.get("dataset_columns", set())
+        for item in data.get("dataset_columns", []):
+            src = item.get("derived_from_column_id")
+            if src is None:
+                continue
+            new_id = remap["dataset_columns"].get(item["_original_id"])
+            if new_id is None or new_id not in _inserted_cols:
+                continue
+            resolved = _remap_id(remap, "dataset_columns", src)
+            if resolved is not None:
+                db.query(DatasetColumn).filter(DatasetColumn.id == new_id).update(
+                    {"derived_from_column_id": resolved}, synchronize_session=False,
+                )
+        # ⚠️ NO `CURRENT_FORMAT_VERSION` bump, and this is a decision rather than
+        # an omission. The gate REFUSES a file whose version exceeds the reader's,
+        # so bumping would stop a colleague on v1.3.2 importing this build's
+        # projects at all. `derived_from_column_id` and `derived_via` are purely
+        # descriptive — an older build drops both and keeps the column, its cells,
+        # its value labels and its missing declaration intact. That is the opposite
+        # of v4's case (`missing_values`), which was bumped because losing it
+        # changed every statistic on the column, silently.
 
         # ── m. DatasetRows ─────────────────────────────────────────
         for item in data.get("dataset_rows", []):

@@ -214,6 +214,8 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
             coderMap={coderMap}
             consensusScope={qa.layerScope === 'consensus'}
             labelFontSize={qa.formatting.labelFontSize}
+            tableMode={qa.timelineTableMode}
+            onTableModeChange={qa.setTimelineTableMode}
           />
         ) : qa.chartType === 'saturation' ? (
           saturationLoading ? (

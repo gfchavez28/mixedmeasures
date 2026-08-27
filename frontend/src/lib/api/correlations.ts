@@ -1,5 +1,5 @@
 import api from './client'
-import { namedBlob } from './download'
+import { namedBlob, EXPORT_TIMEOUT_MS } from './download'
 
 // Correlation types
 export interface CorrelationCell {
@@ -94,6 +94,11 @@ export const correlationsApi = {
         bonferroni: params.bonferroni,
       },
       responseType: 'blob',
+      // #833 — the project-scale export budget, not the 30 s client default.
+      // This is `EXPORT_TIMEOUT_MS`, already decided and measured for #820; it
+      // is applied here rather than re-derived. Cost scales with rows x columns
+      // and the client cannot know either before asking.
+      timeout: EXPORT_TIMEOUT_MS,
     }).then(res => namedBlob(res, `correlation_matrix_${params.correlation_type}.csv`)),
   scatterDataCsv: (projectId: number, params: {
     column_ids: number[]
@@ -109,5 +114,10 @@ export const correlationsApi = {
         group_column_id: params.group_column_id ?? undefined,
       },
       responseType: 'blob',
+      // #833 — the project-scale export budget, not the 30 s client default.
+      // This is `EXPORT_TIMEOUT_MS`, already decided and measured for #820; it
+      // is applied here rather than re-derived. Cost scales with rows x columns
+      // and the client cannot know either before asking.
+      timeout: EXPORT_TIMEOUT_MS,
     }).then(res => namedBlob(res, 'scatter_data.csv')),
 }

@@ -16,6 +16,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { stripComments } from './strip-comments'
 
 import {
   DATASET_ACCEPT,
@@ -183,12 +184,7 @@ function tsxFilesUnder(dir: string, base = dir): string[] {
  * a re-inlined gate; without this the guard flags the very comment that records
  * the bug it prevents.
  */
-function code(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')   // block comments (incl. JSX {/* … */})
-    .replace(/^\s*\/\/.*$/gm, '')       // whole-line // comments
-    .replace(/([^:])\/\/.*$/gm, '$1')   // trailing // comments (spare `https://`)
-}
+const code = stripComments
 
 describe('no page or component re-inlines an upload-format list (fail-closed)', () => {
   const files = [...tsxFilesUnder(PAGES_DIR), ...tsxFilesUnder(COMPONENTS_DIR)]

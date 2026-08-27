@@ -9,6 +9,8 @@ import { ColorDotButton } from '@/components/ColorDotButton'
 
 import { type Code, type CodeCategory, codesApi } from '@/lib/api'
 import { getCodeColor } from '@/lib/utils'
+import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
+import { categoryShortcutPrefixes } from '@/lib/codeShortcuts'
 
 interface TextCodePanelProps {
   codes: Code[]
@@ -21,7 +23,6 @@ interface TextCodePanelProps {
   isFocused: boolean
   onFocusChange: (focused: boolean) => void
   disabled?: boolean
-  chordNumberMap: Map<number, number>
 }
 
 export default function TextCodePanel({
@@ -35,7 +36,6 @@ export default function TextCodePanel({
   isFocused,
   onFocusChange,
   disabled = false,
-  chordNumberMap,
 }: TextCodePanelProps) {
   const queryClient = useQueryClient()
   const [searchQuery, setSearchQuery] = useState('')
@@ -166,35 +166,26 @@ export default function TextCodePanel({
     return () => window.removeEventListener('keydown', handleNKey)
   }, [])
 
-  // Build position-within-category map for shortcut labels (1-indexed, matching CodePanel)
-  const codePositionMap = useMemo(() => {
-    const map = new Map<number, number>()
-    for (const [, catCodes] of groupedCodes.categorized) {
-      catCodes.forEach((code, idx) => {
-        if (idx < 9) map.set(code.id, idx + 1)
-      })
-    }
-    return map
-  }, [groupedCodes.categorized])
-
-  const getShortcutLabel = (code: Code): string => {
-    if (code.is_universal) {
-      return code.numeric_id !== null ? String(code.numeric_id) : ''
-    }
-    if (code.category_id) {
-      const chordNum = chordNumberMap.get(code.category_id)
-      const position = codePositionMap.get(code.id)
-      if (chordNum !== undefined && position !== undefined) {
-        return `${chordNum}.${position}`
-      }
-    }
-    return code.numeric_id !== null ? String(code.numeric_id) : ''
-  }
+  // #824: the labels and the category prefixes come from the SAME source the
+  // chord resolver reads. This panel used to derive both itself — a category
+  // number handed down from `TextCodingView` (built from EVERY category by
+  // `display_order`) and a position built from its own filtered grouping — so a
+  // project with an empty category ordered first printed keys that fired a
+  // DIFFERENT code, silently, on the surface where coding happens.
+  //
+  // ⚠️ Both take the UNFILTERED `codes` prop, never `activeCodes`: a search
+  // narrows what is LISTED, not which keys exist, and dropping an inactive code
+  // would renumber every position after it (the trap `CodePanel:127` names).
+  const shortcutLabels = useCodeShortcutLabels(codes)
+  const categoryPrefixes = useMemo(() => categoryShortcutPrefixes(codes), [codes])
 
   const renderCodeItem = (code: Code, index: number) => {
     const isApplied = appliedCodeIds.includes(code.id)
     const isFocusedItem = isFocused && focusedIndex === index
-    const shortcut = getShortcutLabel(code)
+    // No entry = no reachable key. Printing `numeric_id` as a fallback is the
+    // #664 anti-pattern: a two-digit id can never be typed, and once any
+    // category exists digits 2-9 are the chord prefix space.
+    const shortcut = shortcutLabels.get(code.id)
 
     return (
       <button
@@ -313,8 +304,8 @@ export default function TextCodePanel({
                   <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: cat.color }} />
                 )}
                 {cat?.name || 'Category'}
-                {chordNumberMap.has(catId) && (
-                  <span className="font-mono text-mm-text-faint">[{chordNumberMap.get(catId)}]</span>
+                {categoryPrefixes.has(catId) && (
+                  <span className="font-mono text-mm-text-faint">[{categoryPrefixes.get(catId)}]</span>
                 )}
               </div>
               {catCodes.map(code =>

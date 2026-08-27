@@ -1,8 +1,24 @@
 import { useState, useMemo, useCallback, useRef, useEffect, memo } from 'react'
-import { useParams, Link } from 'react-router'
+import { useParams, Link, useNavigate, useSearchParams } from 'react-router'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuGroup,
+  DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Settings2, Plus, FileInput, GripVertical, Layers, Undo2, Redo2, MessageSquareText, FunctionSquare } from 'lucide-react'
+import { Plus, FileInput, GripVertical, Undo2, Redo2, MessageSquareText, FunctionSquare, ChevronDown, CornerDownRight } from 'lucide-react'
+import { columnDisplayLabel, truncatedColumnLabel } from '@/lib/dataset-column-label'
+import PickRuleToDeriveDialog from '@/components/PickRuleToDeriveDialog'
+import DeriveVariableDialog from '@/components/DeriveVariableDialog'
+import { useDeriveVariable } from '@/hooks/useDeriveVariable'
+import { variableViewPath } from '@/lib/dataset-routes'
+import './dataset-view.css'
+import { revealRecordCell, offsetForRecordNumber } from '@/lib/dataset-record-focus'
 import {
   DndContext,
   DragOverlay,
@@ -27,9 +43,8 @@ import {
   type DatasetDataResponse,
   type RecodeDefinitionSummary,
   type ManualColumnCreate,
-  type ManualColumnUpdate,
   type ComputedColumnCreate,
-  type ComputedColumnUpdate,
+  DATASET_PAGE_SIZE,
 } from '@/lib/api'
 import { toast } from 'sonner'
 import {
@@ -38,35 +53,36 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { ColumnFormDialog } from '@/components/ColumnFormDialog'
-import { ValueLabelsDialog } from '@/components/ValueLabelsDialog'
+import { DeleteVariableDialog } from '@/components/DeleteVariableDialog'
+import { useDeleteVariable } from '@/hooks/useDeleteVariable'
+import { modeDisabledProps, MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
 import { SortableColumnHeader, DataRow } from '@/components/DatasetGridComponents'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
 import { useHistory } from '@/hooks/useHistory'
+import DatasetTabs from '@/components/DatasetTabs'
 
 const EMPTY_DOMAIN_SCORES: import('@/lib/api').DomainScoreColumn[] = []
 
 // ── Memoized grid body (avoids re-rendering rows when dialog state changes) ──
 
 const DataGridBody = memo(function DataGridBody({
-  rows, columns, resolvedActiveDefinitions, handleOpenText, pid,
+  rows, rowOffset, columns, resolvedActiveDefinitions, handleOpenText, pid,
   linkedParticipantMap, handleLink, selectedCell, handleCellSelect,
   editingCell, handleStartEdit, handleCellSave, handleCellCancel,
   handleTabNav, handleEnterNav, handleDeleteRow, domainScoreCols,
 }: {
   rows: import('@/lib/api').DatasetDataRow[]
+  /**
+   * The FETCHED page's offset — the record label's fallback is dataset-scoped,
+   * never page-scoped (#834 review). `R${i + 1}` over a page restarts at "R1"
+   * on every page, so two different records would carry the same label the
+   * moment a dataset has no identifier column. Uses the fetched offset, not the
+   * requested one, for the same reason the pager label does.
+   */
+  rowOffset: number
   columns: DatasetColumn[]
   resolvedActiveDefinitions: Record<number, number | null>
   handleOpenText: (title: string, text: string) => void
@@ -90,7 +106,7 @@ const DataGridBody = memo(function DataGridBody({
         <DataRow
           key={row.id}
           row={row}
-          rowIndex={i}
+          rowIndex={rowOffset + i}
           columns={columns}
           activeDefinitions={resolvedActiveDefinitions}
           onOpenText={handleOpenText}
@@ -120,15 +136,13 @@ type EditorField = 'name' | 'label' | null
 const DataGridHead = memo(function DataGridHead({
   columns, columnDerivedData, sortableIds, activeColumnId, activeField,
   handleSelectDefStable, pid, iid,
-  handleEditColumn, handleDeleteColumn, handleTypeChange, handleSubtypeChange,
+  handleDeleteColumn, handleTypeChange,
   handleColumnNameEdit, handleColumnTextEdit,
   handleColumnResizeStart, handleColumnResize, handleColumnResizeEnd, handleColumnResetWidth,
-  handleEditComputed, handleDeleteComputed, handleRecompute,
+  handleRecompute,
   handleRemoveFromGroup,
   handleToggleParticipantVisibility,
   handleLinkByColumn,
-  handleEditValueLabels,
-  handleSwapNameLabel,
   handlePopoverOpenChange, setActiveField, goNextColumn, goPrevColumn,
 }: {
   columns: DatasetColumn[]
@@ -139,24 +153,18 @@ const DataGridHead = memo(function DataGridHead({
   handleSelectDefStable: (columnId: number, defId: number | null) => void
   pid: number
   iid: number
-  handleEditColumn: (column: DatasetColumn) => void
   handleDeleteColumn: (column: DatasetColumn) => void
   handleTypeChange: (columnId: number, newType: string) => void
-  handleSubtypeChange: (columnId: number, subtype: string | null) => void
   handleColumnNameEdit: (columnId: number, newName: string) => void
   handleColumnTextEdit: (columnId: number, newText: string) => void
   handleColumnResizeStart: (columnId: number) => void
   handleColumnResize: (columnId: number, delta: number) => void
   handleColumnResizeEnd: (columnId: number) => void
   handleColumnResetWidth: (columnId: number) => void
-  handleEditComputed: (column: DatasetColumn) => void
-  handleDeleteComputed: (column: DatasetColumn) => void
   handleRecompute: (column: DatasetColumn) => void
   handleRemoveFromGroup: (columnId: number, domainId: number) => void
   handleToggleParticipantVisibility: (column: DatasetColumn) => void
   handleLinkByColumn: (column: DatasetColumn) => void
-  handleEditValueLabels: (column: DatasetColumn) => void
-  handleSwapNameLabel: (column: DatasetColumn) => void
   handlePopoverOpenChange: (columnId: number, open: boolean) => void
   setActiveField: (field: EditorField) => void
   goNextColumn: (field: EditorField) => void
@@ -174,10 +182,8 @@ const DataGridHead = memo(function DataGridHead({
             onSelectDef={handleSelectDefStable}
             projectId={pid}
             datasetId={iid}
-            onEditColumn={handleEditColumn}
             onDeleteColumn={handleDeleteColumn}
             onTypeChange={handleTypeChange}
-            onSubtypeChange={handleSubtypeChange}
             onColumnNameEdit={handleColumnNameEdit}
             onColumnTextEdit={handleColumnTextEdit}
             onColumnResizeStart={handleColumnResizeStart}
@@ -187,12 +193,8 @@ const DataGridHead = memo(function DataGridHead({
             domainPills={derived?.domainPills}
             onRemoveFromGroup={handleRemoveFromGroup}
             onToggleParticipantVisibility={handleToggleParticipantVisibility}
-            onEditComputed={handleEditComputed}
-            onDeleteComputed={handleDeleteComputed}
             onRecompute={handleRecompute}
             onLinkByColumn={handleLinkByColumn}
-            onEditValueLabels={handleEditValueLabels}
-            onSwapNameLabel={handleSwapNameLabel}
             isPopoverOpen={activeColumnId === q.id}
             onPopoverOpenChange={handlePopoverOpenChange}
             activeField={activeColumnId === q.id ? activeField : null}
@@ -214,14 +216,87 @@ export default function DatasetView() {
   const { projectId, datasetId } = useParams<{ projectId: string; datasetId: string }>()
   const pid = parseInt(projectId || '0')
   const iid = parseInt(datasetId || '0')
+  // The Append item navigates from `onSelect` rather than wrapping a `<Link>`:
+  // a menu item IS the interactive element, and nesting an anchor inside one
+  // gives the row two roles and two tab targets.
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { setBreadcrumbLabel } = useProjectLayout()
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ['dataset-data', pid, iid],
-    queryFn: () => datasetsApi.getData(pid, iid),
+  /**
+   * #800: the grid reads ONE PAGE. The endpoint used to return every row —
+   * 90.1s / 226 MB / ~5.9 GB RSS on a 75,699-row dataset — so a researcher's
+   * real dataset imported fine and then could not be opened at all.
+   *
+   * The offset is part of the query KEY, so each page caches separately and
+   * the optimistic patches below (which map over `old.rows`) act on the page
+   * actually on screen — which is the page the user just edited.
+   */
+  const [pageOffset, setPageOffset] = useState(0)
+  /**
+   * ⚠️ **`setQueryData` / `getQueryData` are EXACT-match; `invalidateQueries` /
+   * `cancelQueries` are PREFIX-match.** Adding the offset to the query key means
+   * the invalidations below keep working untouched (they match every page), but
+   * every optimistic patch and its rollback would silently write to a key
+   * nothing reads — the edit would appear to save and then snap back on the next
+   * fetch. All of them take this key.
+   */
+  const dataPageKey = useMemo(
+    () => ['dataset-data', pid, iid, pageOffset] as const,
+    [pid, iid, pageOffset],
+  )
+
+  const { data, isLoading, error, isFetching } = useQuery({
+    queryKey: ['dataset-data', pid, iid, pageOffset],
+    queryFn: () => datasetsApi.getData(pid, iid, { offset: pageOffset }),
+    placeholderData: (prev: DatasetDataResponse | undefined) => prev,
     enabled: !!pid && !!iid,
   })
+
+  /**
+   * #834 — deep link to one RECORD: `?row=<rowId>&column=<columnId>`.
+   *
+   * A universal-search text hit knows a row's primary key; this grid is
+   * addressed by page offset. The bridge is `datasetsApi.rowPosition`, and it
+   * is a SEPARATE request on purpose (see the endpoint's docstring): letting
+   * `/data` resolve the row would make the offset a property of the response,
+   * and this component's query key carries the offset (#800) with ten
+   * optimistic-patch sites keyed on it.
+   *
+   * ⚠️ The params are consumed ONCE and then stripped from the URL. Left in
+   * place they would re-fire the jump on every later render — so paging away
+   * from a deep-linked record would snap straight back to it, and the browser
+   * Back button would land on a URL that re-jumps rather than on the page the
+   * user was reading.
+   */
+  const [searchParams, setSearchParams] = useSearchParams()
+  const focusRowId = searchParams.get('row')
+  const focusColumnId = searchParams.get('column')
+  /**
+   * ⚠️ A REF, not state, and deliberately so: the reveal below is a DOM effect
+   * (scroll + a transient class) with no render output, so holding the pending
+   * target in state would make the effect call `setState` for a value nothing
+   * renders — the cascading-render shape `react-hooks` warns about. The
+   * SELECTION it also sets is real state, so that is set at resolve time, in
+   * the promise, where it belongs.
+   */
+  const pendingRevealRef = useRef<{ rowId: number; columnId: number | null } | null>(null)
+  /** Which `?row=` has already been claimed — see the run-once guard below. */
+  const handledFocusRef = useRef<string | null>(null)
+  /** False only after unmount, so a resolve is never cancelled by a re-render. */
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    // ⚠️ Re-arm on MOUNT, not just clear on unmount. `useRef(true)` initialises
+    // once for the component's whole life, so under StrictMode's development
+    // double-invoke (mount → cleanup → mount) the cleanup left this false
+    // permanently and every deep-link resolve was discarded on arrival. Found
+    // by driving: the request fired, returned, and did nothing.
+    aliveRef.current = true
+    return () => { aliveRef.current = false }
+  }, [])
+  const [jumpValue, setJumpValue] = useState('')
+
+
 
   // Set breadcrumb label to dataset name
   useEffect(() => {
@@ -282,21 +357,17 @@ export default function DatasetView() {
   const [addColumnOpen, setAddColumnOpen] = useState(false)
   const [addColumnError, setAddColumnError] = useState<string | null>(null)
 
-  // Edit Column dialog
-  const [editColumnTarget, setEditColumnTarget] = useState<DatasetColumn | null>(null)
-  const [editColumnError, setEditColumnError] = useState<string | null>(null)
-
-  // Value-labels editor (#576/#577)
-  const [valueLabelsTarget, setValueLabelsTarget] = useState<DatasetColumn | null>(null)
-
   // Delete Column confirmation
-  const [deleteColumnTarget, setDeleteColumnTarget] = useState<DatasetColumn | null>(null)
 
-  // Computed Column dialogs
+  // Add Computed Column dialog. The EDIT half lives in the Variables view now
+  // (design note E — the popover thinning).
   const [computedColumnOpen, setComputedColumnOpen] = useState(false)
+  const [pickRuleOpen, setPickRuleOpen] = useState(false)
+  // Decision B Stage 3 — the same flow the Variables view uses, from one hook.
+  // ⚠️ No `onCreated`: the new column appears in the grid already on screen, so
+  // navigating would move the researcher away from what they just made.
+  const derive = useDeriveVariable(pid, iid)
   const [computedColumnError, setComputedColumnError] = useState<string | null>(null)
-  const [editComputedColumn, setEditComputedColumn] = useState<DatasetColumn | null>(null)
-  const [editComputedError, setEditComputedError] = useState<string | null>(null)
 
   // Delete Response confirmation
   const [deleteResponse, setDeleteResponse] = useState<{ id: number; label: string } | null>(null)
@@ -369,7 +440,7 @@ export default function DatasetView() {
     if (!col) return
     const oldName = col.column_name || ''
     // Optimistic update
-    queryClient.setQueryData<DatasetDataResponse>(['dataset-data', pid, iid], old => {
+    queryClient.setQueryData<DatasetDataResponse>(dataPageKey, old => {
       if (!old) return old
       return { ...old, columns: old.columns.map(c => c.id === columnId ? { ...c, column_name: newName || null } : c) }
     })
@@ -379,7 +450,7 @@ export default function DatasetView() {
       redo: async () => { await updateHeaderMutation.mutateAsync({ columnId, data: { column_name: newName || null } }) },
       undo: async () => { await updateHeaderMutation.mutateAsync({ columnId, data: { column_name: oldName || null } }) },
     })
-  }, [data, pid, iid, queryClient, executeHistory, updateHeaderMutation])
+  }, [data, queryClient, executeHistory, updateHeaderMutation, dataPageKey])
 
   const handleColumnTextEdit = useCallback((columnId: number, newText: string) => {
     if (!data) return
@@ -387,7 +458,7 @@ export default function DatasetView() {
     if (!col) return
     const oldText = col.column_text
     // Optimistic update
-    queryClient.setQueryData<DatasetDataResponse>(['dataset-data', pid, iid], old => {
+    queryClient.setQueryData<DatasetDataResponse>(dataPageKey, old => {
       if (!old) return old
       return { ...old, columns: old.columns.map(c => c.id === columnId ? { ...c, column_text: newText } : c) }
     })
@@ -397,34 +468,11 @@ export default function DatasetView() {
       redo: async () => { await updateHeaderMutation.mutateAsync({ columnId, data: { column_text: newText } }) },
       undo: async () => { await updateHeaderMutation.mutateAsync({ columnId, data: { column_text: oldText } }) },
     })
-  }, [data, pid, iid, queryClient, executeHistory, updateHeaderMutation])
+  }, [data, queryClient, executeHistory, updateHeaderMutation, dataPageKey])
 
-  // #575: swap column_name ↔ column_text. column_text is NOT NULL, so when there's
-  // no short name we PROMOTE the label into the name (leaving the label) rather
-  // than blanking it. Renaming column_text is a data change (it's the machine
-  // identifier append/computed/suggest match on) — the header PATCH marks metrics
-  // stale and this rides undo/redo like any other header edit.
-  const handleSwapNameLabel = useCallback((column: DatasetColumn) => {
-    const name = (column.column_name || '').trim()
-    const text = (column.column_text || '').trim()
-    if (!text) return
-    const columnId = column.id
-    const oldName = column.column_name ?? null
-    const oldText = column.column_text
-    const newName = text
-    const newText = name || text  // promote when no short name (never empty column_text)
-    if (newName === oldName && newText === oldText) return
-    queryClient.setQueryData<DatasetDataResponse>(['dataset-data', pid, iid], old => {
-      if (!old) return old
-      return { ...old, columns: old.columns.map(c => c.id === columnId ? { ...c, column_name: newName, column_text: newText } : c) }
-    })
-    executeHistory({
-      type: 'column_swap_name_label',
-      description: `Swap name and label for "${text}"`,
-      redo: async () => { await updateHeaderMutation.mutateAsync({ columnId, data: { column_name: newName, column_text: newText } }) },
-      undo: async () => { await updateHeaderMutation.mutateAsync({ columnId, data: { column_name: oldName, column_text: oldText } }) },
-    })
-  }, [pid, iid, queryClient, executeHistory, updateHeaderMutation])
+  // #575's "Swap name ↔ label" moved to the Variables view with the other
+  // property forms (design note E — the popover thinning), and the swap
+  // arithmetic moved with it, to `components/VariableActions.tsx`.
 
   // ── Column editor popover state ───────────────────────────────────────
   const [activeColumnId, setActiveColumnId] = useState<number | null>(null)
@@ -508,6 +556,69 @@ export default function DatasetView() {
   const resizeColumnIdRef = useRef<number>(0)
   const tableRef = useRef<HTMLTableElement>(null)
 
+  /**
+   * The second half of the deep link: the requested page has now rendered, so
+   * select the cell, scroll it into view and mark it briefly.
+   *
+   * Runs off `data` rather than off the resolve, because the rows have to EXIST
+   * in the DOM before anything can be scrolled to — the same ordering trap
+   * #825 records for "Jump to uncoded", where an activedescendant was moved to
+   * a row react-virtuoso had never rendered.
+   */
+  useEffect(() => {
+    if (focusRowId == null) return
+    const key = `${focusRowId}:${focusColumnId ?? ''}`
+    // 🔴 RUN-ONCE GUARD, and it is load-bearing — found by driving, not by any
+    // test. Stripping the params below CHANGES `focusRowId`, which re-runs this
+    // effect. The first draft cancelled the in-flight resolve from the effect's
+    // own cleanup (`return () => { cancelled = true }`), so the effect cancelled
+    // ITSELF ~30ms before its own response arrived and the jump was silently
+    // dropped on every deep link. It looked correct on a 48-row dataset purely
+    // because a single-page grid already had the row on screen.
+    if (handledFocusRef.current === key) return
+    handledFocusRef.current = key
+
+    const rowId = Number(focusRowId)
+    const columnId = focusColumnId == null ? null : Number(focusColumnId)
+    // Strip once claimed, so a failed resolve cannot leave a param that retries
+    // forever and the Back button lands on a page rather than on a re-jump.
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      next.delete('row')
+      next.delete('column')
+      return next
+    }, { replace: true })
+    if (!Number.isFinite(rowId)) return
+
+    datasetsApi.rowPosition(pid, iid, rowId, DATASET_PAGE_SIZE)
+      .then(pos => {
+        // ⚠️ Guarded on UNMOUNT only (`aliveRef`), never on an effect re-run —
+        // that distinction is the whole bug above.
+        if (!aliveRef.current) return
+        const col = Number.isFinite(columnId as number) ? columnId : null
+        setPageOffset(pos.offset)
+        if (col != null) setSelectedCell({ rowId, columnId: col })
+        pendingRevealRef.current = { rowId, columnId: col }
+      })
+      .catch(() => {
+        if (!aliveRef.current) return
+        // A row that is not in THIS dataset 404s. Say so rather than leaving the
+        // grid silently parked on page 1 as though nothing had been asked.
+        toast.error('That record is no longer in this dataset.')
+      })
+  }, [focusRowId, focusColumnId, pid, iid, setSearchParams])
+
+  useEffect(() => {
+    const pending = pendingRevealRef.current
+    if (!pending || !data || !tableRef.current) return
+    const cleanup = revealRecordCell(tableRef.current, pending.rowId, pending.columnId)
+    // Not found means the requested page has not rendered yet — keep the ref
+    // armed so the next `data` change retries, rather than dropping the jump.
+    if (!cleanup) return
+    pendingRevealRef.current = null
+    return cleanup
+  }, [data])
+
   const handleColumnResizeStart = useCallback((columnId: number) => {
     const startWidth = columnWidthsRef.current[columnId] || DEFAULT_COL_WIDTH
     resizeStartWidthRef.current = startWidth
@@ -569,12 +680,7 @@ export default function DatasetView() {
     }).catch((err: unknown) => toast.error(extractApiError(err, 'Failed to change column type')))
   }, [pid, iid, queryClient])
 
-  const handleSubtypeChange = useCallback((columnId: number, subtype: string | null) => {
-    datasetsApi.updateColumnSubtype(pid, iid, columnId, subtype).then(() => {
-      queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })
-      queryClient.invalidateQueries({ queryKey: ['dataset-columns', pid, iid] })
-    }).catch((err: unknown) => toast.error(extractApiError(err, 'Failed to change subtype')))
-  }, [pid, iid, queryClient])
+  // The demographic-subtype edit moved to the Variables view (design note E).
 
   const handleDragStart = useCallback((event: DragStartEvent) => {
     setDragActiveId(event.active.id as number)
@@ -594,13 +700,13 @@ export default function DatasetView() {
     const orderedIds = newOrder.map(q => q.id)
 
     // Optimistic update: reorder columns in cache
-    queryClient.setQueryData<DatasetDataResponse>(['dataset-data', pid, iid], old => {
+    queryClient.setQueryData<DatasetDataResponse>(dataPageKey, old => {
       if (!old) return old
       return { ...old, columns: newOrder }
     })
 
     reorderMutation.mutate(orderedIds)
-  }, [data, pid, iid, queryClient, reorderMutation])
+  }, [data, queryClient, reorderMutation, dataPageKey])
 
   const dragActiveColumn = useMemo(() => {
     if (!dragActiveId || !data) return null
@@ -639,14 +745,21 @@ export default function DatasetView() {
   }, [data])
 
   // Map of participant_id → row_identifier for already-linked responses
+  /**
+   * #800: DATASET-scoped, from the server — NOT derived from the loaded page.
+   *
+   * This map is what stops the picker offering a participant who is already
+   * linked to another record (`DatasetGridComponents.tsx` greys them out and
+   * names the record). Built from `data.rows` it only ever saw the current
+   * page, so on a paginated dataset it would offer a participant linked on
+   * page 7 — refused by `uq_dataset_rows_dataset_participant`, so a 409 rather
+   * than corruption, but an offer the UI should never make. The payload is
+   * bounded by the number of LINKED participants, not by row count.
+   */
   const linkedParticipantMap = useMemo(() => {
-    if (!data) return new Map<number, string>()
     const map = new Map<number, string>()
-    for (let i = 0; i < data.rows.length; i++) {
-      const r = data.rows[i]
-      if (r.participant_id != null) {
-        map.set(r.participant_id, r.row_identifier || `R${i + 1}`)
-      }
+    for (const [pidStr, identifier] of Object.entries(data?.linked_participants ?? {})) {
+      map.set(Number(pidStr), identifier)
     }
     return map
   }, [data])
@@ -657,8 +770,8 @@ export default function DatasetView() {
       datasetsApi.linkParticipant(pid, iid, rowId, participantId),
     onMutate: async ({ rowId, participantId, participantName }) => {
       await queryClient.cancelQueries({ queryKey: ['dataset-data', pid, iid] })
-      const previous = queryClient.getQueryData<DatasetDataResponse>(['dataset-data', pid, iid])
-      queryClient.setQueryData<DatasetDataResponse>(['dataset-data', pid, iid], (old) => {
+      const previous = queryClient.getQueryData<DatasetDataResponse>(dataPageKey)
+      queryClient.setQueryData<DatasetDataResponse>(dataPageKey, (old) => {
         if (!old) return old
         return {
           ...old,
@@ -676,7 +789,7 @@ export default function DatasetView() {
     // load → 409) rolled the cell back in silence — after the #532 flow had
     // already told the user "linked". Mirrors linkByColumnMutation's onError.
     onError: (err: unknown, vars, context) => {
-      if (context?.previous) queryClient.setQueryData(['dataset-data', pid, iid], context.previous)
+      if (context?.previous) queryClient.setQueryData(dataPageKey, context.previous)
       toast.error(extractApiError(
         err,
         vars.participantId == null
@@ -700,8 +813,8 @@ export default function DatasetView() {
       datasetsApi.updateValue(pid, iid, answerId, { value_text: valueText }),
     onMutate: async ({ answerId, valueText }) => {
       await queryClient.cancelQueries({ queryKey: ['dataset-data', pid, iid] })
-      const previous = queryClient.getQueryData<DatasetDataResponse>(['dataset-data', pid, iid])
-      queryClient.setQueryData<DatasetDataResponse>(['dataset-data', pid, iid], (old) => {
+      const previous = queryClient.getQueryData<DatasetDataResponse>(dataPageKey)
+      queryClient.setQueryData<DatasetDataResponse>(dataPageKey, (old) => {
         if (!old) return old
         return {
           ...old,
@@ -720,7 +833,7 @@ export default function DatasetView() {
       return { previous }
     },
     onError: (_err, _vars, context) => {
-      if (context?.previous) queryClient.setQueryData(['dataset-data', pid, iid], context.previous)
+      if (context?.previous) queryClient.setQueryData(dataPageKey, context.previous)
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })
@@ -801,38 +914,11 @@ export default function DatasetView() {
     },
   })
 
-  // Update column mutation
-  const updateColumnMutation = useMutation({
-    mutationFn: ({ columnId, data }: { columnId: number; data: ManualColumnUpdate }) =>
-      datasetsApi.updateManualColumn(pid, iid, columnId, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })
-      queryClient.invalidateQueries({ queryKey: ['dataset-columns', pid, iid] })
-      setEditColumnTarget(null)
-      setEditColumnError(null)
-      toast.success('Column updated')
-    },
-    onError: (err: Error) => {
-      setEditColumnError(extractApiError(err, 'Failed to update column'))
-    },
-  })
-
-  // Delete column mutation
-  const deleteColumnMutation = useMutation({
-    mutationFn: ({ columnId, source }: { columnId: number; source: string }) => {
-      if (source === 'computed') return datasetsApi.deleteComputedColumn(pid, iid, columnId)
-      return datasetsApi.deleteManualColumn(pid, iid, columnId)
-    },
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] }),
-        queryClient.invalidateQueries({ queryKey: ['dataset-columns', pid, iid] }),
-      ])
-      setDeleteColumnTarget(null)
-      toast.success('Column deleted')
-    },
-    onError: (err: Error) => toast.error(extractApiError(err, 'Failed to delete column')),
-  })
+  // Deleting a variable: the confirm, the endpoint choice and the invalidation
+  // set all live in `useDeleteVariable` (#812), shared with the Variables view.
+  // The Data view passes no `onDeleted` — the column simply leaves the grid the
+  // researcher is already looking at.
+  const deleteVariable = useDeleteVariable(pid, iid)
 
   const createComputedMut = useMutation({
     mutationFn: (d: ComputedColumnCreate) => datasetsApi.createComputedColumn(pid, iid, d),
@@ -844,19 +930,6 @@ export default function DatasetView() {
       toast.success('Computed column added')
     },
     onError: (err: Error) => setComputedColumnError(extractApiError(err, 'Failed to create computed column')),
-  })
-
-  const updateComputedMut = useMutation({
-    mutationFn: ({ columnId, d }: { columnId: number; d: ComputedColumnUpdate }) =>
-      datasetsApi.updateComputedColumn(pid, iid, columnId, d),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })
-      queryClient.invalidateQueries({ queryKey: ['dataset-columns', pid, iid] })
-      setEditComputedColumn(null)
-      setEditComputedError(null)
-      toast.success('Computed column updated')
-    },
-    onError: (err: Error) => setEditComputedError(extractApiError(err, 'Failed to update computed column')),
   })
 
   const recomputeMut = useMutation({
@@ -920,6 +993,24 @@ export default function DatasetView() {
   // every render while data is undefined.
   const columns = useMemo(() => data?.columns ?? [], [data])
   const rows = data?.rows ?? []
+  // #800: `rows` is ONE PAGE. Anything user-facing that counts records reads
+  // this instead — they were the same number until the endpoint was paginated.
+  const totalRows = data?.total_rows ?? 0
+  const pageSize = data?.limit ?? DATASET_PAGE_SIZE
+  /**
+   * #835(b): the label describes the page that is ON SCREEN, so it reads the
+   * FETCHED offset — never `pageOffset`, the local state.
+   *
+   * `placeholderData` keeps the previous page's rows rendered while the next
+   * one loads, so a label derived from local state flipped to the new range
+   * ~0.2s (prod) / ~1.3s (dev) before those records existed on screen — and
+   * this element is `role="status" aria-live="polite"`, so a screen reader was
+   * TOLD the new range while the old rows were still displayed.
+   */
+  const shownOffset = data?.offset ?? pageOffset
+  const pageStart = totalRows === 0 ? 0 : shownOffset + 1
+  const pageEnd = Math.min(shownOffset + rows.length, totalRows)
+  const hasPaging = totalRows > pageSize
 
   // ── Pre-compute per-column derived data for stable references ──────────
   const columnDerivedData = useMemo(() => {
@@ -941,37 +1032,28 @@ export default function DatasetView() {
   // Stable sortable IDs for SortableContext (avoids new array each render)
   const sortableIds = useMemo(() => columns.map(q => q.id), [columns])
 
-  // Pre-compute open-text column IDs for toolbar "Code Text" link
+  // Pre-compute open-text column IDs for toolbar "Code Text" link.
+  // ⚠️ `columns` is the FULL column list even though `rows` is a page (#800),
+  // so this is never a partial answer — the link cannot silently omit a text
+  // variable that happened to fall outside the visible rows.
   const openTextColumnIds = useMemo(() =>
     columns.filter(c => c.column_type === 'open_text').map(c => c.id),
     [columns]
   )
+  const hasOpenText = openTextColumnIds.length > 0
 
   // ── Stable callbacks that take column as argument ──────────────────────
   const handleSelectDefStable = useCallback((columnId: number, defId: number | null) => {
     setActiveDefinitions(prev => ({ ...prev, [columnId]: defId }))
   }, [])
 
-  const handleEditColumn = useCallback((q: DatasetColumn) => {
-    closeColumnEditor()
-    setEditColumnTarget(q)
-    setEditColumnError(null)
-  }, [closeColumnEditor])
-
+  // One handler for both kinds — the endpoint choice lives in
+  // `useDeleteVariable` (#812). `handleDeleteComputed` was an identical twin
+  // that differed only by not closing the popover, which it never needed to.
   const handleDeleteColumn = useCallback((q: DatasetColumn) => {
     closeColumnEditor()
-    setDeleteColumnTarget(q)
-  }, [closeColumnEditor])
-
-  const handleEditComputed = useCallback((q: DatasetColumn) => {
-    closeColumnEditor()
-    setEditComputedColumn(q)
-    setEditComputedError(null)
-  }, [closeColumnEditor])
-
-  const handleDeleteComputed = useCallback((q: DatasetColumn) => {
-    setDeleteColumnTarget(q)
-  }, [])
+    deleteVariable.request(q)
+  }, [closeColumnEditor, deleteVariable])
 
   const handleRecompute = useCallback((q: DatasetColumn) => {
     recomputeMut.mutate(q.id)
@@ -992,9 +1074,41 @@ export default function DatasetView() {
   }
 
   if (error || !data || !dataset) {
+    /**
+     * #800: "Failed to load dataset data" told the researcher nothing, and for
+     * the case that produced it — a dataset too large for this endpoint — it
+     * read as data loss when the data was intact and imported.
+     *
+     * 🔴 **CORRECTED 2026-08-23: this copy was stale the day after it shipped.**
+     * It said "the spreadsheet view still loads every row at once", which #800
+     * fixed in the same session that wrote it — the endpoint is paginated now
+     * (MEASURED: 90.1s / 226 MB / ~5.9 GB before, 0.24s / 0.60 MB / 96 MB
+     * after). So the sentence asserted a cause that no longer exists, which is
+     * #797's defect — a diagnosis the code has not established — reintroduced
+     * by the fix that obsoleted it.
+     *
+     * A timeout here is now an ORDINARY failure (a slow disk, a backend
+     * restart), so say only what is known: the request did not finish, and the
+     * data is not implicated. ⚠️ Do not re-add a size explanation without
+     * re-measuring; the page size is bounded and no longer scales with the
+     * dataset.
+     */
+    const aborted =
+      error != null &&
+      (((error as { name?: string }).name === 'TimeoutError') ||
+       ((error as { name?: string }).name === 'AbortError'))
     return (
-      <div className="p-8 text-center">
-        <p className="text-red-600 mb-3">Failed to load dataset data</p>
+      <div className="p-8 text-center max-w-xl mx-auto">
+        <p className="text-red-600 mb-3">
+          {aborted ? 'This dataset took too long to load' : 'Failed to load dataset data'}
+        </p>
+        {aborted && (
+          <p className="text-sm text-mm-text-muted mb-3">
+            Nothing is wrong with your data — the import finished and the dataset is
+            stored. The request timed out before this page could show it. Try again,
+            or open the Variables view, which reads the dataset a variable at a time.
+          </p>
+        )}
         <Link to={`/projects/${pid}/datasets`} className="text-sm text-mm-text-muted hover:text-mm-text underline">
           Back to Datasets
         </Link>
@@ -1006,11 +1120,14 @@ export default function DatasetView() {
     <div className="h-full flex flex-col overflow-hidden">
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-4 py-2 border-b bg-mm-surface flex-shrink-0">
+        <DatasetTabs projectId={pid} datasetId={iid} variableCount={columns.length} />
+        <div className="w-px h-4 bg-mm-border" aria-hidden="true" />
         <div className="flex items-center gap-2 text-sm text-mm-text-secondary mr-auto">
           {dataset.source && <span>Source: {dataset.source}</span>}
-          <span><strong className="font-mono tabular-nums">{columns.length}</strong> columns</span>
-          <span className="text-mm-text-faint">·</span>
-          <span><strong className="font-mono tabular-nums">{rows.length}</strong> records</span>
+          {/* The variable count rides the Variables tab now — repeating it here
+              was the same number twice in one band. `total_rows` is the DATASET
+              (#800): `rows` is only the page. */}
+          <span><strong className="font-mono tabular-nums">{totalRows.toLocaleString()}</strong> records</span>
         </div>
         {(canUndo || canRedo) && (
           <>
@@ -1034,49 +1151,147 @@ export default function DatasetView() {
             </Button>
           </>
         )}
-        <Button
-          variant="outline"
-          size="sm"
-          className="text-sm bg-mm-orange/8 text-mm-orange-text border-mm-orange/20 hover:bg-mm-orange/15"
-          onClick={() => setAddColumnOpen(true)}
-        >
-          <Plus className="w-4 h-4 mr-1" />
-          Add Column
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="text-sm bg-violet-500/8 text-violet-700 dark:text-violet-300 border-violet-500/20 hover:bg-violet-500/15"
-          onClick={() => setComputedColumnOpen(true)}
-        >
-          <FunctionSquare className="w-4 h-4 mr-1" />
-          Add Computed
-        </Button>
-        <Link to={`/projects/${pid}/datasets/${iid}/append`}>
-          <Button variant="outline" size="sm" className="text-sm">
-            <FileInput className="w-4 h-4 mr-1" />
-            Append Data
-          </Button>
-        </Link>
-        <Link to={`/projects/${pid}/datasets/variable-groups`}>
-          <Button variant="outline" size="sm" className="text-sm">
-            <Layers className="w-4 h-4 mr-1" />
-            Variable Groups
-          </Button>
-        </Link>
-        <Link to={`/projects/${pid}/datasets/${iid}/recode`}>
-          <Button variant="outline" size="sm" className="text-sm">
-            <Settings2 className="w-4 h-4 mr-1" />
-            Recode
-          </Button>
-        </Link>
-        {openTextColumnIds.length > 0 && (
-          <Link to={`/projects/${pid}/datasets/text-coding?columns=${openTextColumnIds.join(',')}`}>
+        {/* ── Decision F: the two axes of a table, in one control ──────────
+            This row was six buttons across FOUR unrelated axes with no
+            separators: two created a variable, one added records, one went to
+            a project-scoped page that is not about this dataset at all, one
+            opened the Variables view, and one jumped to a different workspace.
+
+            `Add ▾` groups by AXIS, which is jamovi's own shape and the thing
+            two differently-tinted sibling buttons cannot say: creating a
+            variable and appending records are two kinds of one act, and they
+            are not the same kind as each other.
+
+            ⚠️ The group headings carry that meaning, so they are ASSOCIATED,
+            not merely rendered — Radix's `Group` gives `role="group"` but does
+            NOT wire a sibling `Label` to it. Without `aria-labelledby` a
+            screen reader meets "Variables" and "Records" as loose text and
+            hears four items in one flat list, which is exactly the reading
+            this control exists to replace.
+
+            ⚠️ The orange tint on "Add Column" is GONE (§10.4): `mm-orange`
+            appears nowhere else in this grid, so it was decoration that made
+            two same-kind actions read as different kinds. Violet STAYS on the
+            computed item — it matches the violet `FunctionSquare` marking a
+            computed column in the grid, so it is the one tint here carrying
+            information. */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
             <Button variant="outline" size="sm" className="text-sm">
-              <MessageSquareText className="w-4 h-4 mr-1" />
-              Code Text
+              <Plus className="w-4 h-4 mr-1" aria-hidden="true" />
+              Add
+              <ChevronDown className="w-3.5 h-3.5 ml-1" aria-hidden="true" />
             </Button>
-          </Link>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuGroup aria-labelledby="add-menu-variables">
+              <DropdownMenuLabel id="add-menu-variables" className="text-xs font-medium">
+                Variables
+              </DropdownMenuLabel>
+              <DropdownMenuItem onSelect={() => setAddColumnOpen(true)}>
+                <Plus className="w-4 h-4 mr-2" aria-hidden="true" />
+                Variable
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setComputedColumnOpen(true)}>
+                <FunctionSquare
+                  className="w-4 h-4 mr-2 text-violet-600 dark:text-violet-400"
+                  aria-hidden="true"
+                />
+                Computed variable
+              </DropdownMenuItem>
+              {/* The THIRD kind (Decision B Stage 3, design note §11). jamovi's
+                  `Add` offers Data / Computed / Transformed in one menu; MM had
+                  built the third kind and listed only two, so a researcher
+                  looking where jamovi taught them to look found nothing.
+
+                  ⚠️ Inside the EXISTING Variables group on purpose — Decision F
+                  established that a Radix `Group` needs an explicit
+                  `aria-labelledby`, and a new group would need its own. A third
+                  ITEM also does not widen the toolbar ROW, which is what F's
+                  640×360 finding was about. */}
+              <DropdownMenuItem onSelect={() => setPickRuleOpen(true)}>
+                <CornerDownRight className="w-4 h-4 mr-2" aria-hidden="true" />
+                Recoded variable...
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuGroup aria-labelledby="add-menu-records">
+              <DropdownMenuLabel id="add-menu-records" className="text-xs font-medium">
+                Records
+              </DropdownMenuLabel>
+              {/* "Append Data" said nothing — "Data" is the whole table. The
+                  operation adds ROWS, and it does it from a file (§10.5). */}
+              <DropdownMenuItem onSelect={() => navigate(`/projects/${pid}/datasets/${iid}/append`)}>
+                <FileInput className="w-4 h-4 mr-2" aria-hidden="true" />
+                Append from file...
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {/* "Variable Groups" LEFT this toolbar: its route carries no
+            `:datasetId` (it is project-scoped, and equivalence groups span
+            datasets), so it never belonged to this dataset's action row. It is
+            reachable from seven other places, TopRail's Datasets menu included
+            — checked before removing, because a removal with no other entry
+            point is a deletion.
+
+            The old "Recode" button also lived here and went in slab 1: the tab
+            strip at the head of this same band now goes to the Variables view.
+
+            What is left is one control for this dataset's own two axes, and —
+            after a separator, because it is a jump to a DIFFERENT workspace
+            rather than an action on this table — Code Text. */}
+        {/* 🔴 PRESENT-BUT-DISABLED, not absent (2026-08-24).
+            This whole block used to render only when the dataset had an
+            open-text variable — so on a survey of coded questions the capability
+            simply was not there, and nothing said it existed or what would bring
+            it back. That is the finding Stage 3 already made about the third
+            variable kind: **a feature that is not enumerated where its siblings
+            are is, for discovery purposes, absent.**
+
+            It takes the persistent-MODE arm of `mode-disabled.ts` (#754): the
+            state is one the researcher can CHANGE, and the remedy — set a
+            variable's type to open text — is named in the disabled control's own
+            accessible name, because the place to do it is the Variables view and
+            nothing else on this screen would say so.
+
+            ⚠️ The click guard is the load-bearing half: `aria-disabled` changes
+            what a control ANNOUNCES and nothing about what it DOES.
+
+            ⚠️ `Button asChild` and NOT `<Link><Button>`, which is what this was:
+            an anchor wrapping a button is nested interactive content and two tab
+            stops for one control. The enabled arm now renders ONE anchor styled
+            as a button; the disabled arm renders a real `<button>`, because
+            there is nowhere for it to link to. */}
+        <div className="w-px h-4 bg-mm-border" aria-hidden="true" />
+        {hasOpenText ? (
+          <Button asChild variant="outline" size="sm" className="text-sm">
+            <Link
+              to={`/projects/${pid}/datasets/text-coding?columns=${openTextColumnIds.join(',')}`}
+              aria-label="Code text"
+            >
+              <MessageSquareText className="w-4 h-4 mr-1" aria-hidden="true" />
+              Code Text
+            </Link>
+          </Button>
+        ) : (
+          <Button
+            variant="outline"
+            size="sm"
+            className={`text-sm ${MODE_DISABLED_CLASS}`}
+            title="No open-text variables in this dataset. Set a variable's type to open text in the Variables view to code its responses."
+            {...modeDisabledProps<HTMLButtonElement>({
+              label: 'Code text',
+              blockedReason:
+                'unavailable because no variable in this dataset has the open text type; '
+                + 'set one in the Variables view',
+              onActivate: () => {},
+            })}
+          >
+            <MessageSquareText className="w-4 h-4 mr-1" aria-hidden="true" />
+            Code Text
+          </Button>
         )}
       </div>
 
@@ -1095,6 +1310,11 @@ export default function DatasetView() {
               className="border-collapse"
               style={{ tableLayout: 'fixed', width: totalTableWidth }}
             >
+              {/* HTML requires `<caption>` to be the table's FIRST child — it
+                  sat after `<colgroup>`, the only one of the app's caption
+                  sites that did. Browsers recover, and a screen reader read it
+                  fine, but the spec order is what other consumers rely on. */}
+              <caption className="sr-only">{dataset.name} — {columns.length} columns{domainScoreCols.length > 0 ? `, ${domainScoreCols.length} domain scores` : ''}, {totalRows} records</caption>
               <colgroup>
                 <col style={{ width: 96 }} />
                 <col style={{ width: 160 }} />
@@ -1105,16 +1325,21 @@ export default function DatasetView() {
                   <col key={`ds-${ds.domain_id}`} style={{ width: 100 }} />
                 ))}
               </colgroup>
-              <caption className="sr-only">{dataset.name} — {columns.length} columns{domainScoreCols.length > 0 ? `, ${domainScoreCols.length} domain scores` : ''}, {rows.length} records</caption>
               <thead>
                 <tr className="bg-mm-bg border-b">
+                  {/* #772 — `scope="col"` on all four header sites: these two,
+                    * the per-column header in `DatasetGridComponents.tsx`, and
+                    * the domain-score headers below. Four sites, two files —
+                    * add one to a new header or it silently heads nothing. */}
                   <th
+                    scope="col"
                     className="px-3 py-2 text-left text-xs font-semibold text-mm-text-secondary sticky left-0 top-0 z-30 bg-mm-bg"
                     title="Record ID"
                   >
                     Record
                   </th>
                   <th
+                    scope="col"
                     className="px-3 py-2 text-left text-xs font-semibold text-mm-text-secondary sticky left-[96px] top-0 z-30 bg-mm-bg border-r"
                     title="Linked participant"
                   >
@@ -1129,24 +1354,18 @@ export default function DatasetView() {
                     handleSelectDefStable={handleSelectDefStable}
                     pid={pid}
                     iid={iid}
-                    handleEditColumn={handleEditColumn}
                     handleDeleteColumn={handleDeleteColumn}
                     handleTypeChange={handleTypeChange}
-                    handleSubtypeChange={handleSubtypeChange}
                     handleColumnNameEdit={handleColumnNameEdit}
                     handleColumnTextEdit={handleColumnTextEdit}
                     handleColumnResizeStart={handleColumnResizeStart}
                     handleColumnResize={handleColumnResize}
                     handleColumnResizeEnd={handleColumnResizeEnd}
                     handleColumnResetWidth={handleColumnResetWidth}
-                    handleEditComputed={handleEditComputed}
-                    handleDeleteComputed={handleDeleteComputed}
                     handleRecompute={handleRecompute}
                     handleRemoveFromGroup={handleRemoveFromGroup}
                     handleToggleParticipantVisibility={handleToggleParticipantVisibility}
                     handleLinkByColumn={handleLinkByColumn}
-                    handleEditValueLabels={setValueLabelsTarget}
-                    handleSwapNameLabel={handleSwapNameLabel}
                     handlePopoverOpenChange={handlePopoverOpenChange}
                     setActiveField={setActiveField}
                     goNextColumn={goNextColumn}
@@ -1155,6 +1374,7 @@ export default function DatasetView() {
                   {domainScoreCols.map(ds => (
                     <th
                       key={`ds-${ds.domain_id}`}
+                      scope="col"
                       className="px-2 py-2 text-center text-xs font-medium text-mm-text border-l sticky top-0 z-20 bg-mm-bg"
                       style={{ borderLeftColor: ds.domain_color || undefined, borderLeftWidth: ds.domain_color ? 3 : 1 }}
                       title={
@@ -1182,6 +1402,7 @@ export default function DatasetView() {
                 </tr>
               </thead>
               <DataGridBody
+                rowOffset={shownOffset}
                 rows={rows}
                 columns={columns}
                 resolvedActiveDefinitions={resolvedActiveDefinitions}
@@ -1202,12 +1423,88 @@ export default function DatasetView() {
               />
             </table>
           </div>
+          {/* #800: the pager. Shown only when there is more than one page, so a
+              120-row dataset looks exactly as it did before this change. */}
+          {hasPaging && (
+            <nav
+              className="flex items-center justify-between gap-3 mt-2 flex-shrink-0"
+              aria-label="Record pages"
+            >
+              <p className="text-xs text-mm-text-muted" role="status" aria-live="polite">
+                Records <strong className="font-mono tabular-nums">{pageStart.toLocaleString()}</strong>
+                {'\u2013'}
+                <strong className="font-mono tabular-nums">{pageEnd.toLocaleString()}</strong>
+                {' of '}
+                <strong className="font-mono tabular-nums">{totalRows.toLocaleString()}</strong>
+              </p>
+              <div className="flex items-center gap-2">
+                {/* #835: reaching record 10,000 was 50 clicks of Next.
+                  *
+                  * A `<form>` so Enter submits natively \u2014 the control is
+                  * useless if it needs a mouse to reach a button. The label is
+                  * `sr-only` rather than `hidden`, because `hidden` removes it
+                  * from the accessibility tree and leaves the input nameless
+                  * (#717/#718); the placeholder is NOT a name.
+                  *
+                  * \u26a0\ufe0f No server round trip: a record NUMBER is an ordinal and
+                  * its page is division (`offsetForRecordNumber`). Only the
+                  * search deep link needs the resolver, because it knows a
+                  * primary key instead. */}
+                <form
+                  className="flex items-center gap-1.5"
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    const target = offsetForRecordNumber(Number(jumpValue), pageSize, totalRows)
+                    if (target == null) {
+                      toast.error(`Enter a record number between 1 and ${totalRows.toLocaleString()}.`)
+                      return
+                    }
+                    setPageOffset(target)
+                    setJumpValue('')
+                  }}
+                >
+                  <label htmlFor="dataset-jump-record" className="sr-only">
+                    Go to record number
+                  </label>
+                  <input
+                    id="dataset-jump-record"
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={jumpValue}
+                    onChange={(e) => setJumpValue(e.target.value.replace(/[^0-9]/g, ''))}
+                    placeholder="Go to #"
+                    className="w-[88px] h-8 text-xs px-2 rounded-md border border-mm-border bg-mm-surface focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <Button type="submit" variant="outline" size="sm" disabled={jumpValue === '' || isFetching}>
+                    Go
+                  </Button>
+                </form>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPageOffset(o => Math.max(0, o - pageSize))}
+                  disabled={pageOffset === 0 || isFetching}
+                >
+                  Previous
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPageOffset(o => (o + pageSize < totalRows ? o + pageSize : o))}
+                  disabled={pageEnd >= totalRows || isFetching}
+                >
+                  Next
+                </Button>
+              </div>
+            </nav>
+          )}
           {/* Drag overlay for column reorder */}
           <DragOverlay>
             {dragActiveColumn && (
               <div className="bg-mm-surface border rounded-lg shadow-lg px-3 py-2 text-xs font-medium text-mm-text flex items-center gap-2">
                 <GripVertical className="w-3 h-3 text-mm-text-faint" />
-                <span>{dragActiveColumn.column_name || dragActiveColumn.column_code || (dragActiveColumn.column_text.length > 25 ? dragActiveColumn.column_text.slice(0, 25) + '...' : dragActiveColumn.column_text)}</span>
+                <span>{truncatedColumnLabel(dragActiveColumn, 25)}</span>
                 <span className={`px-1.5 py-0.5 rounded text-[11px] font-medium ${TYPE_BADGE_CLASSES[dragActiveColumn.column_type] || 'bg-mm-bg text-mm-text-muted'}`}>
                   {dragActiveColumn.column_type}
                 </span>
@@ -1227,7 +1524,7 @@ export default function DatasetView() {
           const col = columns.find(c => c.id === activeColumnId)
           return col ? (
             <>
-              <span className="font-medium text-mm-text-secondary">{col.column_name || col.column_code || col.column_text.slice(0, 30)}</span>
+              <span className="font-medium text-mm-text-secondary">{truncatedColumnLabel(col, 30)}</span>
               <span className={`px-1 py-0.5 rounded text-[10px] font-medium ${TYPE_BADGE_CLASSES[col.column_type] || 'bg-mm-bg text-mm-text-muted'}`}>
                 {col.column_type}
               </span>
@@ -1238,7 +1535,7 @@ export default function DatasetView() {
           const col = columns.find(c => c.id === selectedCell.columnId)
           return col ? (
             <>
-              <span className="font-medium text-mm-text-secondary">{col.column_name || col.column_code || col.column_text.slice(0, 30)}</span>
+              <span className="font-medium text-mm-text-secondary">{truncatedColumnLabel(col, 30)}</span>
               <span className={`px-1 py-0.5 rounded text-[10px] font-medium ${TYPE_BADGE_CLASSES[col.column_type] || 'bg-mm-bg text-mm-text-muted'}`}>
                 {col.column_type}
               </span>
@@ -1261,6 +1558,26 @@ export default function DatasetView() {
         </DialogContent>
       </Dialog>
 
+      {/* Decision B Stage 3 — the third kind of new variable. Two dialogs in
+          sequence: pick the variable + rule, then the shared derive confirm.
+          ⚠️ `onCreated` is deliberately NOT wired here: the new column appears
+          in the grid the researcher is already looking at, whereas the Variables
+          view navigates because it would otherwise leave them on the source. */}
+      <PickRuleToDeriveDialog
+        open={pickRuleOpen}
+        columns={columns}
+        variablesHref={variableViewPath(pid, iid)}
+        onOpenChange={setPickRuleOpen}
+        onPick={(columnId, definition) => { void derive.open({ columnId, definition }) }}
+      />
+      <DeriveVariableDialog
+        {...derive.dialogProps}
+        sourceLabel={(() => {
+          const src = columns.find(c => c.id === derive.sourceColumnId)
+          return src ? columnDisplayLabel(src) : 'the source variable'
+        })()}
+      />
+
       {/* Add Column dialog */}
       <ColumnFormDialog
         open={addColumnOpen}
@@ -1271,20 +1588,10 @@ export default function DatasetView() {
         title="Add Column"
       />
 
-      {/* Edit Column dialog */}
-      <ColumnFormDialog
-        open={!!editColumnTarget}
-        onOpenChange={(o) => { if (!o) { setEditColumnTarget(null); setEditColumnError(null) } }}
-        onSubmit={(data) => {
-          if (editColumnTarget) {
-            updateColumnMutation.mutate({ columnId: editColumnTarget.id, data: data as ManualColumnUpdate })
-          }
-        }}
-        isSubmitting={updateColumnMutation.isPending}
-        submitError={editColumnError}
-        initial={editColumnTarget}
-        title="Column Details"
-      />
+      {/* The Edit Column and Edit Computed Column dialogs moved to the
+          Variables view with their entry points (design note E). The ADD
+          dialogs below stay: creating a variable is a dataset-level act, and
+          Decision F reorganises those two into one `Add ▾`. */}
 
       {/* Add Computed Column dialog */}
       <ColumnFormDialog
@@ -1300,70 +1607,9 @@ export default function DatasetView() {
         availableColumns={columns}
       />
 
-      {/* Edit Computed Column dialog */}
-      <ColumnFormDialog
-        open={!!editComputedColumn}
-        onOpenChange={(o) => { if (!o) { setEditComputedColumn(null); setEditComputedError(null) } }}
-        onSubmit={(data) => {
-          if (editComputedColumn) {
-            const oldExpr = editComputedColumn.expression || ''
-            const newData = data as ComputedColumnUpdate
-            const colId = editComputedColumn.id
-            executeHistory({
-              type: 'computed_column_update',
-              description: `Update formula for ${editComputedColumn.column_text}`,
-              redo: async () => { updateComputedMut.mutate({ columnId: colId, d: newData }) },
-              undo: async () => { updateComputedMut.mutate({ columnId: colId, d: { expression: oldExpr } }) },
-            })
-          }
-        }}
-        isSubmitting={updateComputedMut.isPending}
-        submitError={editComputedError}
-        initial={editComputedColumn}
-        title="Computed Column Details"
-        availableColumns={columns}
-        mode="computed"
-        projectId={pid}
-        datasetId={iid}
-      />
-
-      {/* Value-labels editor (#576/#577) */}
-      {valueLabelsTarget && (
-        <ValueLabelsDialog
-          column={valueLabelsTarget}
-          open={!!valueLabelsTarget}
-          projectId={pid}
-          datasetId={iid}
-          onClose={() => setValueLabelsTarget(null)}
-        />
-      )}
-
-      {/* Delete Column confirmation */}
-      <AlertDialog open={!!deleteColumnTarget} onOpenChange={(o) => { if (!o) setDeleteColumnTarget(null) }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete column?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will permanently delete the column "{deleteColumnTarget?.column_text}" and all
-              its cell values across all responses. Any recode definitions on this column will also
-              be deleted. This cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-red-600 hover:bg-red-700"
-              onClick={() => {
-                if (deleteColumnTarget) {
-                  deleteColumnMutation.mutate({ columnId: deleteColumnTarget.id, source: deleteColumnTarget.source })
-                }
-              }}
-            >
-              {deleteColumnMutation.isPending ? 'Deleting...' : 'Delete Column'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {/* Delete variable confirmation — the SAME dialog the Variables view
+          renders, from the same hook (#812). */}
+      <DeleteVariableDialog {...deleteVariable.dialogProps} />
 
       {/* Delete Response confirmation */}
       <ConfirmDialog

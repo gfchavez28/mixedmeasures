@@ -154,7 +154,10 @@ function sanitizeFilename(name: string): string {
 
 interface ChartGroup {
   metrics: MetricDefinitionResponse[]
-  chartType: 'horizontal_bar' | 'heatmap' | 'dumbbell' | 'stacked_bar' | 'table' | 'vertical_bar' | 'line' | 'frequency_table' | 'cross_tab'
+  // #522: kept in sync by hand with `ChartType` — a second copy of the union,
+  // which is why the histogram had to be added here too. Worth collapsing to
+  // `ChartType` next time this file is open.
+  chartType: 'horizontal_bar' | 'heatmap' | 'dumbbell' | 'stacked_bar' | 'table' | 'vertical_bar' | 'line' | 'frequency_table' | 'cross_tab' | 'histogram'
   title: string
   filenameBase: string
   isFrequencyBar: boolean
@@ -327,8 +330,14 @@ export async function exportAllChartsAsZip(
         const heatmapData = shapeHeatmapRows(group.metrics)
         chartElement = <HeatmapTable data={heatmapData} />
       } else if (group.chartType === 'table') {
-        const statsData = shapeSummaryStats(group.metrics)
-        chartElement = <SummaryStatsTable data={statsData} />
+        // ⚠️ The metric type is REQUIRED, not decorative (#823e rider). Without
+        // it `shapeSummaryStats` computes no SE at all — so the exported image
+        // silently lost a whole column the screen shows — and the value header
+        // falls back to "Mean" for what is a Score or a % Responding. The
+        // exported figure must be the figure on screen.
+        const exportMetricType = group.metrics[0]?.metric_type
+        const statsData = shapeSummaryStats(group.metrics, undefined, exportMetricType)
+        chartElement = <SummaryStatsTable data={statsData} metricType={exportMetricType} />
       } else {
         const dumbbellData = shapeDumbbellRows(group.metrics)
         chartElement = <DumbbellChart data={dumbbellData} />

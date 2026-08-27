@@ -300,6 +300,25 @@ class TestExtractTextFromTxt:
         doc = extract_text_from_txt(text.encode("utf-8"))
         assert len(doc.paragraphs) == 2
 
+    def test_utf8_bom_is_stripped(self):
+        """Windows Notepad's "UTF-8 with BOM" must not smuggle U+FEFF into the text.
+
+        A plain utf-8 decode leaves the BOM as a real character, and str.strip()
+        does NOT remove it (U+FEFF is not whitespace) — so it survives into the
+        FIRST paragraph as an invisible leading character, shifting every char
+        offset derived from that segment and riding into coding, search and
+        exports. Same root cause as the .qdc import defect (#760).
+        """
+        text = "First paragraph.\n\nSecond paragraph."
+        doc = extract_text_from_txt(text.encode("utf-8-sig"))
+
+        assert doc.paragraphs[0].text == "First paragraph."
+        assert "﻿" not in doc.paragraphs[0].text
+        # And a BOM must change nothing else about the parse.
+        assert [p.text for p in doc.paragraphs] == [
+            p.text for p in extract_text_from_txt(text.encode("utf-8")).paragraphs
+        ]
+
 
 # ---------------------------------------------------------------------------
 # _split_sentences

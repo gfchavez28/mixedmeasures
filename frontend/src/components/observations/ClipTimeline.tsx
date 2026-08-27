@@ -51,6 +51,13 @@ import {
 import { NOW_PLAYING_BAR, SELECTED_BAR } from '@/lib/selection'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuCheckboxItem,
+  DropdownMenuLabel,
+} from '@/components/ui/dropdown-menu'
 import { cn, formatTimecode, getContrastColor } from '@/lib/utils'
 
 const TRACK_HEIGHT = 22
@@ -122,7 +129,7 @@ interface ClipTimelineProps {
   currentTime: number | null
   selectedIds: number[]
   /** Clips containing the playhead right now (D27) — the green not-selection ring. */
-  nowPlayingIds?: Set<number>
+  atPlayheadIds?: Set<number>
   /** D22: while frozen the clip SET is read-only — no drag-create, no boundary
    * handles (label edits and selection stay live; the workbench toolbar carries
    * the unfreeze flow). Seeks keep working: frozen gates EDITING, not viewing. */
@@ -220,7 +227,7 @@ export default function ClipTimeline({
   recordingEndSeconds,
   currentTime,
   selectedIds,
-  nowPlayingIds,
+  atPlayheadIds,
   armedInTime,
   isPlaying,
   boundaryPreview,
@@ -243,7 +250,7 @@ export default function ClipTimeline({
   const extent = Math.max(extentSeconds, 1)
   const clipById = useMemo(() => new Map(clips.map(c => [c.id, c])), [clips])
   // A Set, not `selectedIds.includes`: the bar map runs it once per rendered
-  // clip, and `nowPlayingIds` next to it is already a Set.
+  // clip, and `atPlayheadIds` next to it is already a Set.
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds])
 
   const fit = useCallback(() => {
@@ -412,6 +419,65 @@ export default function ClipTimeline({
         <Button variant="outline" size="sm" className="h-5 px-2 text-xs" onClick={fit}>
           Fit
         </Button>
+        {/*
+          * #646 — lane collapse, reachable without a mouse.
+          *
+          * The lane LABEL below collapses its lane on click and carries no
+          * role, tabIndex or `aria-expanded`, so the operation was mouse-only.
+          * ⚠️ **It cannot be fixed in place**: that label lives inside the
+          * `aria-hidden` visual layer, and focusable ARIA inside an
+          * `aria-hidden` subtree is the `aria-hidden-focus` violation — a
+          * control that takes focus and announces nothing, which is strictly
+          * WORSE than mouse-only. `aria-hidden="false"` on a descendant does
+          * not undo an ancestor's, so there is no in-place escape.
+          *
+          * So the control moves OUT, here, beside the zoom buttons — the
+          * component's own documented precedent ("The zoom controls are real
+          * buttons OUTSIDE the hidden layer").
+          *
+          * A MENU rather than one toolbar button per lane: lanes are code
+          * CATEGORIES, so the count is open-ended, and N toolbar toggles would
+          * cost N tab stops (the #758/#771 class). A single disclosure costs
+          * ONE, and Radix gives arrow-key navigation and `menuitemcheckbox`
+          * state for free — tab order and arrow keys are one feature.
+          *
+          * ⚠️ Hidden when `showHeaders` is false: a lone Uncoded lane renders
+          * headerless and `collapsed` is forced false, so a menu there would
+          * offer an operation that cannot happen.
+          */}
+        {showHeaders && lanes.length > 0 && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className="h-5 px-2 text-xs">
+                Lanes
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="text-xs">
+              {/* "Collapse" is not "hide": a collapsed lane keeps its label row
+                * and loses only its bars, so the heading says what unchecking
+                * actually does. */}
+              <DropdownMenuLabel className="text-xs font-medium">
+                Show lane contents
+              </DropdownMenuLabel>
+              {lanes.map(lane => (
+                <DropdownMenuCheckboxItem
+                  key={lane.key}
+                  checked={!collapsedLanes.has(lane.key)}
+                  // Keep the menu open: collapsing several lanes is the normal
+                  // gesture, and a menu that closes on each toggle makes the
+                  // keyboard user re-open it per lane.
+                  onSelect={e => e.preventDefault()}
+                  onCheckedChange={() => toggleLane(lane.key)}
+                  className="text-xs"
+                >
+                  {/* Same vocabulary the label row's own tooltip uses, so the
+                    * two describe the lane identically. */}
+                  {lane.label} ({lane.clips.length})
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         {/* #658: the code has always distinguished LANES (one per code
           * category) from TRACKS (the stacked rows inside a lane, packed by
           * overlap), and the UI named neither — so a researcher had no words
@@ -658,7 +724,7 @@ export default function ClipTimeline({
                         const start = previewedEdge(clip, 'start')
                         const end = previewedEdge(clip, 'end')
                         const selected = selectedSet.has(clip.id)
-                        const nowPlaying = nowPlayingIds?.has(clip.id) ?? false
+                        const atPlayhead = atPlayheadIds?.has(clip.id) ?? false
                         // #656: the code's own colour, or null for uncoded —
                         // which keeps the neutral teal, so the timeline reads
                         // "coloured = coded, teal = still to do" at a glance.
@@ -680,7 +746,7 @@ export default function ClipTimeline({
                                 'absolute w-2.5 h-2.5 rotate-45 cursor-pointer',
                                 !fill && 'bg-mm-teal-text',
                                 selected && SELECTED_BAR,
-                                !selected && nowPlaying && NOW_PLAYING_BAR,
+                                !selected && atPlayhead && NOW_PLAYING_BAR,
                               )}
                               style={{
                                 left: px(start) - 5,
@@ -706,7 +772,7 @@ export default function ClipTimeline({
                               selected && SELECTED_BAR,
                               // Selection wins when both apply (D27) — the ring
                               // only marks UNSELECTED playhead containment.
-                              !selected && nowPlaying && NOW_PLAYING_BAR,
+                              !selected && atPlayhead && NOW_PLAYING_BAR,
                             )}
                             style={{
                               left: px(start),

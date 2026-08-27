@@ -7,7 +7,7 @@
  * missing values (the seeded scale labels used to lock Apply), and seeding is
  * once-per-open (a frequencies refetch must never wipe in-progress edits).
  */
-import { describeRecoveredUnmapped, describeMissingValueChanges } from '@/lib/missing-values-copy'
+import { describeRecoveredUnmapped, describeMissingValueChanges, describeStaledDefinitions } from '@/lib/missing-values-copy'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
@@ -31,10 +31,9 @@ vi.mock('@/lib/api', async () => {
   }
 })
 
-import {
-  ValueLabelsDialog,
+import ColumnDictionaryEditor, {
   buildValueLabelPayload,
-} from './ValueLabelsDialog'
+} from './ColumnDictionaryEditor'
 import { labelRowsTouched } from './ValueLabelRows'
 
 const row = (code: string, label: string) => ({ code, label })
@@ -143,24 +142,21 @@ const FREQ = (values: string[]) => ({
 
 function renderDialog(column: DatasetColumn) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  const onClose = vi.fn()
   render(
     <MemoryRouter>
       <QueryClientProvider client={qc}>
-        <ValueLabelsDialog
+        <ColumnDictionaryEditor
           column={column}
-          open
           projectId={1}
           datasetId={2}
-          onClose={onClose}
         />
       </QueryClientProvider>
     </MemoryRouter>,
   )
-  return { qc, onClose }
+  return { qc }
 }
 
-describe('ValueLabelsDialog (component)', () => {
+describe('ColumnDictionaryEditor (component)', () => {
   it('#604: a reverse-blocked column with scale metadata can still declare missing values', async () => {
     getFrequencies.mockResolvedValue(FREQ(['Never', 'Always']))
     setMissingValues.mockResolvedValue({
@@ -168,7 +164,7 @@ describe('ValueLabelsDialog (component)', () => {
       labelled_rows: 0, stripped_scale_points: 0, recovered_rows: 0,
       recovered_values: [], recovered_unmapped: [],
     })
-    const { onClose } = renderDialog({
+    renderDialog({
       ...BASE_COLUMN,
       // The #604 blind spot: reverse primary AND scale metadata (every typical
       // reverse-scored ordinal — write_back_scale_metadata runs for all types).
@@ -196,9 +192,163 @@ describe('ValueLabelsDialog (component)', () => {
     expect(apply).toBeEnabled()
     fireEvent.click(apply)
 
-    await waitFor(() => expect(onClose).toHaveBeenCalled())
-    expect(setMissingValues).toHaveBeenCalledWith(1, 2, 31, [{ value: '99' }])
+    // Inline there is nothing to close: the contract is that the save lands
+    // and the editor stays, re-seeded from what was stored (which is also how
+    // the researcher sees the rules beside it change).
+    await waitFor(() =>
+      expect(setMissingValues).toHaveBeenCalledWith(1, 2, 31, [{ value: '99' }]))
+    expect(screen.getByTestId('column-dictionary-editor')).toBeInTheDocument()
     expect(applyValueLabels).not.toHaveBeenCalled()
+  })
+
+  it('#793: a FLIP-primary column is blocked in the labels arm, in its own words, and can still declare missing values', async () => {
+    // The #793 hole: a flipping scale_map is not a `reverse`, so the #585 guard
+    // returned null for it and the dialog offered the labels editor. The
+    // narrowing (#592 §I.4) must survive the widening — missing rules key on the
+    // cell's TEXT, so blocking them here would leave exactly the affected
+    // columns unable to ever declare a sentinel.
+    getFrequencies.mockResolvedValue(FREQ(['1', '2']))
+    setMissingValues.mockResolvedValue({
+      column_id: 31, missing_values: [{ value: '99' }], nulled_rows: 1,
+      labelled_rows: 0, stripped_scale_points: 0, recovered_rows: 0,
+      recovered_values: [], recovered_unmapped: [],
+    })
+    renderDialog({
+      ...BASE_COLUMN,
+      recode_definitions: [{
+        id: 9, name: 'Anxiety (inverted)', recode_type: 'scale_map',
+        output_type: 'numeric', mapping: { '1': 5, '2': 4, '3': 3, '4': 2, '5': 1 },
+        exclude_values: null, is_primary: true, is_auto_detected: false,
+        source_definition_id: null,
+      }],
+    })
+
+    const block = await screen.findByTestId('value-labels-reverse-block')
+    expect(block).toHaveTextContent('Anxiety (inverted)')
+    // The copy must describe THIS defect, not borrow the reverse one — a flip is
+    // not a reflection and "opposite label" would be a false explanation.
+    expect(block).toHaveTextContent(/re-maps this column/i)
+    expect(block).not.toHaveTextContent(/reverse-scores/i)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'These values' }))
+    fireEvent.change(screen.getByLabelText('Missing value code for row 1'), {
+      target: { value: '99' },
+    })
+    const apply = screen.getByRole('button', { name: 'Apply' })
+    expect(apply).toBeEnabled()
+    fireEvent.click(apply)
+
+    // Inline there is nothing to close: the contract is that the save lands
+    // and the editor stays, re-seeded from what was stored (which is also how
+    // the researcher sees the rules beside it change).
+    await waitFor(() =>
+      expect(setMissingValues).toHaveBeenCalledWith(1, 2, 31, [{ value: '99' }]))
+    expect(screen.getByTestId('column-dictionary-editor')).toBeInTheDocument()
+    expect(applyValueLabels).not.toHaveBeenCalled()
+  })
+
+  it('#613 inline: a NEW `column` object with the SAME id does not re-seed', async () => {
+    // 🔴 The trap the modal→inline move creates. "Once per open" had to become
+    // "once per variable", and `column` is a fresh object on every listColumns
+    // refetch — which an Apply on this very editor triggers. Resetting the seed
+    // on the OBJECT rather than its ID re-seeds after every save and every
+    // background refetch, wiping typed edits: #613, reintroduced by a move that
+    // was supposed to be behaviour-neutral.
+    getFrequencies.mockResolvedValue(FREQ(['1', '2']))
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const { rerender } = render(
+      <MemoryRouter>
+        <QueryClientProvider client={qc}>
+          <ColumnDictionaryEditor column={BASE_COLUMN} projectId={1} datasetId={2} />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    )
+    const input = await screen.findByLabelText('Label for code 1')
+    fireEvent.change(input, { target: { value: 'Never' } })
+    expect((screen.getByLabelText('Label for code 1') as HTMLInputElement).value).toBe('Never')
+
+    // ⚠️ The refetch must CHANGE an effect dependency, or neither implementation
+    // does anything and the test is blind on the axis it exists to test. A bare
+    // `{...BASE_COLUMN}` re-render changes no dep — `existing` memoises to null
+    // either way — so it passed under the object-keyed mutant. The real
+    // post-Apply refetch brings back scale metadata, which is what moves
+    // `existing` and re-runs the effect.
+    rerender(
+      <MemoryRouter>
+        <QueryClientProvider client={qc}>
+          <ColumnDictionaryEditor
+            column={{ ...BASE_COLUMN, scale_labels: ['Rarely', 'Often'], scale_values: [1, 2] }}
+            projectId={1} datasetId={2}
+          />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() =>
+      expect((screen.getByLabelText('Label for code 1') as HTMLInputElement).value).toBe('Never'))
+  })
+
+  it('re-seeds AFTER a save, so the editor shows what was stored and not what was typed', async () => {
+    // The server can modify the outcome — a pair filtered as missing (#605), a
+    // type coerced — and showing the typed state afterwards would be a lie.
+    getFrequencies.mockResolvedValue(FREQ(['1', '2']))
+    applyValueLabels.mockResolvedValue({
+      updated: 2, unlabeled_codes: [], missing_skipped: [], staled_definitions: [],
+    })
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = (column: DatasetColumn) => (
+      <MemoryRouter>
+        <QueryClientProvider client={qc}>
+          <ColumnDictionaryEditor column={column} projectId={1} datasetId={2} />
+        </QueryClientProvider>
+      </MemoryRouter>
+    )
+    const { rerender } = render(view(BASE_COLUMN))
+    // BOTH seeded codes need a label — "every code needs a label" is what
+    // gates Apply, so a one-label fixture never reaches the save at all.
+    fireEvent.change(await screen.findByLabelText('Label for code 1'), {
+      target: { value: 'Never' },
+    })
+    fireEvent.change(screen.getByLabelText('Label for code 2'), {
+      target: { value: 'Often' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+    await waitFor(() => expect(applyValueLabels).toHaveBeenCalled())
+
+    // The invalidated query comes back with what the server actually stored.
+    rerender(view({ ...BASE_COLUMN, scale_labels: ['Refused', 'Often'], scale_values: [1, 2] }))
+    await waitFor(() =>
+      expect((screen.getByLabelText('Label for code 1') as HTMLInputElement).value)
+        .toBe('Refused'))
+  })
+
+  it('re-seeds when a DIFFERENT variable is selected', async () => {
+    // The other half: keyed too tightly, the editor would keep showing the
+    // previous variable's rows. One test alone passes under either mistake.
+    getFrequencies.mockResolvedValue(FREQ(['1', '2']))
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const { rerender } = render(
+      <MemoryRouter>
+        <QueryClientProvider client={qc}>
+          <ColumnDictionaryEditor column={BASE_COLUMN} projectId={1} datasetId={2} />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    )
+    fireEvent.change(await screen.findByLabelText('Label for code 1'), {
+      target: { value: 'Never' },
+    })
+
+    rerender(
+      <MemoryRouter>
+        <QueryClientProvider client={qc}>
+          <ColumnDictionaryEditor
+            column={{ ...BASE_COLUMN, id: 99, column_name: 'other' }}
+            projectId={1} datasetId={2}
+          />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() =>
+      expect((screen.getByLabelText('Label for code 1') as HTMLInputElement).value).toBe(''))
   })
 
   it('#613: a frequencies refetch mid-edit does not wipe typed rows', async () => {
@@ -239,20 +389,20 @@ describe('ValueLabelsDialog (component)', () => {
       stripped_scale_points: 0, recovered_rows: 2, recovered_values: ['N/A'],
       recovered_unmapped: [],
     })
-    const { onClose } = renderDialog(BASE_COLUMN)
+    renderDialog(BASE_COLUMN)
 
     await screen.findByLabelText('Label for code 1')
     fireEvent.click(screen.getByRole('tab', { name: 'Nothing missing' }))
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
 
-    await waitFor(() => expect(onClose).toHaveBeenCalled())
-    expect(setMissingValues).toHaveBeenCalledWith(1, 2, 31, [])
+    await waitFor(() => expect(setMissingValues).toHaveBeenCalledWith(1, 2, 31, []))
+    expect(screen.getByTestId('column-dictionary-editor')).toBeInTheDocument()
   })
 
   it('#608: readers are invalidated even when the mutation fails (finally, not success-only)', async () => {
     getFrequencies.mockResolvedValue(FREQ(['1', '2']))
     setMissingValues.mockRejectedValue(new Error('boom'))
-    const { qc, onClose } = renderDialog(BASE_COLUMN)
+    const { qc } = renderDialog(BASE_COLUMN)
     const invalidate = vi.spyOn(qc, 'invalidateQueries')
 
     await screen.findByLabelText('Label for code 1')
@@ -267,7 +417,6 @@ describe('ValueLabelsDialog (component)', () => {
     )
     expect(roots).toContain('dataset-data')
     expect(roots).toContain('dq-summary')
-    expect(onClose).not.toHaveBeenCalled()
   })
 })
 
@@ -356,5 +505,44 @@ describe('describeMissingValueChanges (#680)', () => {
       .toBe('1 cell no longer counted in analysis; 2 scale points removed.')
     expect(describeMissingValueChanges({ ...base, recovered_rows: 1 }))
       .toBe('1 cell counted again.')
+  })
+})
+
+describe('describeStaledDefinitions (#584)', () => {
+  const d = (name: string) => ({ name })
+
+  it('is silent when nothing was staled — the overwhelmingly common case', () => {
+    expect(describeStaledDefinitions([])).toBeNull()
+  })
+
+  it('names the CONSEQUENCE, not just the state', () => {
+    // "no longer match" alone reads as cosmetic. While a staled definition
+    // stays non-primary it is dormant; making it primary NULLs value_numeric
+    // column-wide (#580 class). The sentence has to earn the interruption.
+    const msg = describeStaledDefinitions([d('Reversed Q1')])!
+    expect(msg).toContain('"Reversed Q1"')
+    expect(msg).toMatch(/no longer match/)
+    expect(msg).toMatch(/re-map it in the Variables view/)
+  })
+
+  it('agrees with itself about number', () => {
+    expect(describeStaledDefinitions([d('A')])).toMatch(/^Recode "A" was written/)
+    const two = describeStaledDefinitions([d('A'), d('B')])!
+    expect(two).toMatch(/^Recodes "A", "B" were written/)
+    expect(two).toMatch(/re-map them/)
+  })
+
+  it('caps the list rather than naming twenty recodes in a toast', () => {
+    const many = ['A', 'B', 'C', 'D', 'E', 'F', 'G'].map(d)
+    const msg = describeStaledDefinitions(many)!
+    expect(msg).toContain('+2 more')
+    expect(msg).not.toContain('"G"')
+  })
+
+  it('never offers to re-derive', () => {
+    // ⛔ Re-deriving changes stored numbers a researcher may already have
+    // reported (#710) — it is a deliberate, visible act, never a toast action.
+    const msg = describeStaledDefinitions([d('A'), d('B')])!
+    expect(msg).not.toMatch(/automatic|re-derive|we (have )?updated|fixed for you/i)
   })
 })

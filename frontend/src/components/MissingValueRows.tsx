@@ -20,8 +20,26 @@
  *
  * The rules this produces are the wire shape verbatim (`MissingValueRule`), so
  * nothing translates between here and the backend predicate.
+ *
+ * ⚠️ **COLUMN WIDTHS ARE LOAD-BEARING AND THE TWO ROW KINDS SHARE THEM (#851).**
+ * The value column was `w-24` (measured 88px of input) while the OPTIONAL label
+ * beside it took 448px — 5.1× the room, given to the field that is empty by
+ * definition. Every `.sav` import lands here: #596 injects the user-missing
+ * declaration server-side, so a GSS column arrives with six rules of which
+ * `.d: Do not Know/Cannot Choose` rendered as `.d: Do not`. It is `w-1/3` now.
+ *
+ * ⚠️ **Do NOT "reverse the ratio" by giving the value column a big FIXED
+ * width.** Column 2 holds a long sentinel on a `value` row and a short bound
+ * (`-99`) on a `range` row; column 3 holds an optional label on one and the
+ * `to` + high-bound pair on the other. A proportional third serves both; a
+ * fixed 448px would make the range row absurd in the other direction.
+ *
+ * ⚠️ **The row-kind cell is a `<th scope="row">`, not a `<td>`.** It is what
+ * labels the row, and it is why the table satisfies `td-has-header`. A column
+ * header ROW would be wrong here — the columns are polymorphic (see above), so
+ * a single header per column cannot be true of both row kinds.
  */
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Plus, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -171,18 +189,48 @@ export function missingRulesEqual(
   return a.length === b.length && a.every((r, i) => ruleEqual(r, b[i]))
 }
 
+/** How many observed values the picker renders at once (#823a).
+ *
+ * ⚠️ Bounded by CARDINALITY, the call #809 made for the frequency panel: a real
+ * open-ended column can carry thousands of distinct values (measured: 4,510 on
+ * one GSS column), and rendering that tail as buttons is a wall of noise.
+ *
+ * 🔴 **BUT THE BOUND ALONE HIDES THE VALUES THIS CONTROL EXISTS FOR, and that
+ * was found by driving it, not by reasoning.** Frequencies arrive count
+ * DESCENDING, and a sentinel is RARE: on GSS `wrkstat` the six `.x:` sentinels
+ * total 47 cells against 36,727 for "Working full time", so every one of them
+ * fell outside the first twelve. The picker offered exactly the responses
+ * nobody would ever declare missing. **Hence the filter** — the bound governs
+ * how many are DRAWN, never which ones are reachable.
+ */
+export const OBSERVED_PICK_LIMIT = 12
+
+/** Collapse runs of whitespace so the FILTER is forgiving where the RULE is not.
+ *
+ * The researcher can only type what the screen showed them — one space — so a
+ * filter matching raw text would fail on exactly the values this control
+ * exists to surface. Searching is forgiving; the value still lands verbatim
+ * from the chip, which is the half that must be exact. */
+function searchable(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
 export function MissingValueRows({
   rows,
   onRowsChange,
   validation,
+  observedValues = [],
   idPrefix = 'mv',
 }: {
   rows: MissingRow[]
   onRowsChange: (rows: MissingRow[]) => void
   validation: MissingRulesValidation
+  /** Distinct observed values, count-descending, for the picker. */
+  observedValues?: { value_text: string; count: number }[]
   idPrefix?: string
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const [pickFilter, setPickFilter] = useState('')
   // #610: removing a row unmounts the focused Remove button and focus falls to
   // <body> (inside a Radix dialog the next Tab restarts from the trap edge).
   // Hand focus to the row that takes the removed one's place, else Add value.
@@ -197,6 +245,33 @@ export function MissingValueRows({
   const addRange = useCallback(
     () => onRowsChange([...rows, { kind: 'range', lo: '', hi: '', label: '' }]),
     [rows, onRowsChange])
+
+  // Values already spoken for by a row drop out of the picker — offering a
+  // second chip for a value already declared invites the duplicate `code` that
+  // `buildMissingRules` refuses ("X is listed twice").
+  const claimed = new Set(
+    rows.filter(r => r.kind === 'value').map(r => (r as { code: string }).code.trim()),
+  )
+  const unclaimed = observedValues.filter(v => !claimed.has(v.value_text.trim()))
+  const needle = searchable(pickFilter)
+  const matching = needle
+    ? unclaimed.filter(v => searchable(v.value_text).includes(needle))
+    : unclaimed
+  const pickable = matching.slice(0, OBSERVED_PICK_LIMIT)
+  const hidden = matching.length - pickable.length
+
+  const pickValue = useCallback((text: string) => {
+    // Fill the first EMPTY value row rather than always appending: entering
+    // "These values" seeds one blank row, so appending would leave the
+    // researcher looking at a blank row above their pick.
+    const target = rows.findIndex(r => r.kind === 'value' && r.code.trim() === '')
+    if (target >= 0) {
+      onRowsChange(rows.map((r, i) =>
+        i === target ? { ...(r as MissingRow & { kind: 'value' }), code: text } : r))
+      return
+    }
+    onRowsChange([...rows, { kind: 'value', code: text, label: '' }])
+  }, [rows, onRowsChange])
   const removeRow = useCallback(
     (i: number) => {
       pendingFocus.current = i
@@ -233,12 +308,16 @@ export function MissingValueRows({
               <tr key={i}>
                 {r.kind === 'value' ? (
                   <>
-                    <td className="py-1 pr-2 w-20 text-xs text-mm-text-muted">Value</td>
-                    <td className="py-1 pr-2 w-24">
+                    <th scope="row" className="py-1 pr-2 w-16 text-left font-normal text-xs text-mm-text-muted">Value</th>
+                    <td className="py-1 pr-2 w-1/3">
                       <Input
                         aria-label={`Missing value code for row ${i + 1}`}
                         {...rowAria(i)}
                         value={r.code}
+                        // The declared value is the CONTENT of this row, so it
+                        // gets the room (#851). A `title` covers the tail that
+                        // still overflows on the longest sentinels.
+                        title={r.code || undefined}
                         placeholder="99"
                         onChange={e => setRow(i, { code: e.target.value })}
                         className="h-8 text-sm"
@@ -257,8 +336,8 @@ export function MissingValueRows({
                   </>
                 ) : (
                   <>
-                    <td className="py-1 pr-2 w-20 text-xs text-mm-text-muted">Range</td>
-                    <td className="py-1 pr-2 w-24">
+                    <th scope="row" className="py-1 pr-2 w-16 text-left font-normal text-xs text-mm-text-muted">Range</th>
+                    <td className="py-1 pr-2 w-1/3">
                       <Input
                         type="number"
                         aria-label={`Range low bound for row ${i + 1}`}
@@ -313,6 +392,61 @@ export function MissingValueRows({
         </Button>
       </div>
 
+      {pickable.length > 0 && (
+        <div className="mt-2">
+          {/* 🔴 THE POINT OF THIS CONTROL IS THAT TYPING CANNOT BE MADE SAFE
+            * (#823a). GSS stores ".i:  Inapplicable" with two interior spaces;
+            * HTML collapses interior whitespace, so the researcher reads one,
+            * types one, and declares a rule that matches zero of 28,041 cells.
+            * Copy-paste does not help — the clipboard gets the collapsed form
+            * too. Picking hands over the stored text verbatim, which is the
+            * only input path that cannot lose the difference. */}
+          <p id={`${idPrefix}-pick-label`} className="text-xs text-mm-text-secondary mb-1">
+            Or pick an observed value:
+          </p>
+          {unclaimed.length > OBSERVED_PICK_LIMIT && (
+            <Input
+              value={pickFilter}
+              onChange={e => setPickFilter(e.target.value)}
+              placeholder="Filter values…"
+              aria-label="Filter observed values"
+              className="h-7 text-xs mb-1 max-w-[16rem]"
+              data-testid={`${idPrefix}-pick-filter`}
+            />
+          )}
+          <div className="flex flex-wrap gap-1" role="group"
+               aria-labelledby={`${idPrefix}-pick-label`}>
+            {pickable.map(v => (
+              <button
+                key={v.value_text}
+                type="button"
+                onClick={() => pickValue(v.value_text)}
+                data-testid={`${idPrefix}-pick`}
+                className="min-h-[24px] px-2 py-0.5 rounded border border-mm-border
+                           bg-mm-surface hover:bg-mm-surface-hover text-xs
+                           text-mm-text max-w-[16rem] truncate"
+                title={v.value_text}
+              >
+                {/* The visible chip truncates; the accessible name never does,
+                  * and it carries the count so a reader can tell a sentinel
+                  * from a real response without leaving the control. */}
+                <span aria-hidden="true">{v.value_text}</span>
+                <span className="sr-only">
+                  {`Declare ${v.value_text} as missing — ${v.count} ${v.count === 1 ? 'record' : 'records'}`}
+                </span>
+              </button>
+            ))}
+          </div>
+          {hidden > 0 && (
+            // Never silently truncate: the researcher must be able to tell
+            // "this value is not in my data" from "this value is on page two".
+            <p aria-live="polite" className="text-xs text-mm-text-faint mt-1">
+              {`${hidden} more — type to narrow the list.`}
+            </p>
+          )}
+        </div>
+      )}
+
       {validation.msg !== '' && (
         <p id={errId} role="alert" className="text-xs text-amber-600 dark:text-amber-400">
           {validation.msg}
@@ -333,6 +467,7 @@ export function MissingValuesSection({
   rows,
   onRowsChange,
   validation,
+  observedValues = [],
   idPrefix = 'mv',
 }: {
   mode: MissingMode
@@ -340,6 +475,8 @@ export function MissingValuesSection({
   rows: MissingRow[]
   onRowsChange: (rows: MissingRow[]) => void
   validation: MissingRulesValidation
+  /** Distinct observed values, count-descending (#823a) — see the picker. */
+  observedValues?: { value_text: string; count: number }[]
   idPrefix?: string
 }) {
   const handleMode = (m: MissingMode) => {
@@ -382,6 +519,7 @@ export function MissingValuesSection({
             rows={rows}
             onRowsChange={onRowsChange}
             validation={validation}
+            observedValues={observedValues}
             idPrefix={idPrefix}
           />
           <p className="text-xs text-mm-text-faint mt-1">

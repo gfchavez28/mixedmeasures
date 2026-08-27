@@ -179,7 +179,13 @@ export function usePlayback<S extends TimelineUnit>({
    * element's own truth even before the server's metadata agrees.
    */
   const seekMedia = useCallback((media: HTMLMediaElement, target: number) => {
-    media.currentTime = clampMediaSeek(target, media.duration)
+    // Returns where the element ACTUALLY landed, which is not always `target`:
+    // the clamp both floors at 0 and holds back from `duration` (#563). A
+    // caller that also maintains the clock must write THIS, never its own
+    // request, or the two disagree (#770).
+    const landed = clampMediaSeek(target, media.duration)
+    media.currentTime = landed
+    return landed
   }, [])
 
   const offset = source?.media_offset_seconds ?? 0
@@ -487,18 +493,43 @@ export function usePlayback<S extends TimelineUnit>({
 
     const selectedSeg = segments.find(s => s.id === selId)
     if (selectedSeg?.start_time !== undefined && selectedSeg?.start_time !== null) {
-      currentPlaybackTimeRef.current = selectedSeg.start_time
-      setCurrentPlaybackTime(selectedSeg.start_time)
-
       // Seek media with lead-in buffer
       const media = mediaRef?.current
       if (media && hasPlayableMedia) {
         const targetTime = selectedSeg.start_time + offset
         const seekTime = Math.max(0, targetTime - SEEK_LEAD_IN_SECONDS)
-        seekMedia(media, seekTime)
+        const landed = seekMedia(media, seekTime)
         // Clicking a turn that begins past the end of the recording detaches the
         // clock, exactly like scrubbing there (#564).
-        setTranscriptOnly(timelineOutrunsRecording(media, selectedSeg.start_time))
+        const beyond = timelineOutrunsRecording(media, selectedSeg.start_time)
+        setTranscriptOnly(beyond)
+
+        // #770: the clock names WHERE THE MEDIA IS, never where the selection
+        // is. This used to write `selectedSeg.start_time` — three lines above
+        // the seek that deliberately lands `− SEEK_LEAD_IN_SECONDS` earlier —
+        // so for one commit the clock claimed a position the element never
+        // occupies, and `timeupdate` then corrected it ~100ms later.
+        //
+        // No human can see that frame. A SCREEN READER can: the Observations
+        // clip row folds "— now playing" (derived from this clock) into its
+        // accessible NAME, and a name that changes while the row is the active
+        // descendant is re-read. Every clip was announced twice — measured on
+        // three consecutive ArrowDown presses, and reported from a real NVDA
+        // pass before it was understood here.
+        //
+        // BEYOND the recording the element is parked and the transcript rolls
+        // on its own clock (#564), so there the SEGMENT is the truth and the
+        // clamped element position would drag the playhead back to the end of
+        // the recording — the exact snap-back #564 exists to prevent.
+        const clock = beyond ? selectedSeg.start_time : landed - offset
+        currentPlaybackTimeRef.current = clock
+        setCurrentPlaybackTime(clock)
+      } else {
+        // No playable media: nothing else will ever drive the clock, so the
+        // segment start IS the playhead. This is the branch the old
+        // unconditional write was right for, which is why it survived.
+        currentPlaybackTimeRef.current = selectedSeg.start_time
+        setCurrentPlaybackTime(selectedSeg.start_time)
       }
     }
   }, [selectedSegments, segments, mediaRef, hasPlayableMedia, offset, seekMedia, setTranscriptOnly, timelineOutrunsRecording])

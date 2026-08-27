@@ -18,6 +18,7 @@ import {
   mergeFormatting,
   wrapLabel,
   resolveChartColors,
+  resolveColorPalette,
   resolveGroupColors,
   computeLogDomain,
 } from '@/lib/chart-data'
@@ -35,6 +36,20 @@ import type { RechartsTooltipProps, RechartsPayloadEntry, ChartDataRow } from '@
 import { ChartFigure } from './ChartFigure'
 
 interface VerticalBarChartProps {
+  /**
+   * #522 — render as a HISTOGRAM: bars flush against each other, one colour for
+   * the whole distribution, and a hairline separator so adjacent bins stay
+   * readable.
+   *
+   * A histogram is one variable's distribution, so every bar is the SAME series.
+   * The categorical path this component was written for encodes two conventions
+   * that are wrong here, and both shipped visible before anyone looked: a FIXED
+   * `barSize` (24px in a ~195px band — measured at 12% fill, 171px gaps) and a
+   * per-LABEL colour (six palette hues across six bins, which reads as six
+   * categories). Gaps and hue both mean "these are different things"; in a
+   * histogram they are not.
+   */
+  histogram?: boolean
   frequencyData?: BarDatum[]
   groupedFrequencyData?: GroupedFrequencySection
   groupedScalarData?: GroupedScalarSection[]
@@ -196,6 +211,7 @@ export default function VerticalBarChart({
   responseLabels = [],
   groupValues = [],
   axisTransform = 'linear',
+  histogram = false,
 }: VerticalBarChartProps) {
   const fmt = mergeFormatting(fmtProp)
   const colors = useChartColors()
@@ -232,13 +248,19 @@ export default function VerticalBarChart({
       fmt.colorPalette,
       fmt.customColors,
     )
+    // Declared BEFORE chartData, which reads it — a `const` referenced from an
+    // earlier line is a temporal-dead-zone throw at runtime, and neither tsc
+    // nor the unit suite caught it. The live re-check did.
+    const histogramFill = resolveColorPalette(fmt.colorPalette)[0] ?? '#3b82f6'
     const chartData = frequencyData.map(d => ({
       label: d.label,
       _fullLabel: d.label,
       value: display === 'count' ? (d.count ?? 0) : d.value,
       n: d.n,
       _suffix: display === 'count' ? '' : '%',
-      fill: barColors[d.label] || '#3b82f6',
+      // #522: one series, one colour — the palette's first hue, so the palette
+      // picker still chooses WHICH colour without reintroducing six of them.
+      fill: histogram ? histogramFill : (barColors[d.label] || '#3b82f6'),
       _ciError: showCI && d.ciLower != null && d.ciUpper != null
         ? [d.value - d.ciLower, d.ciUpper - d.value]
         : undefined,
@@ -249,7 +271,17 @@ export default function VerticalBarChart({
     return (
       <ChartFigure label="Vertical bar chart">
         <ResponsiveContainer width="100%" height={360}>
-          <BarChart data={chartData} margin={{ top: topMargin, right: 20, bottom: 80, left: 20 }}>
+          {/* #522: `barCategoryGap={0}` AND no `barSize` — BOTH are needed, and
+              measurement is what settled the order. A code read blamed recharts'
+              default 10% category gap; the live rects were 24px in a ~195px
+              band, so the fixed `barSize` was ~88% of the whitespace and the
+              category gap the rounding error. Dropping `barSize` alone would
+              still leave a visible 10% gutter. */}
+          <BarChart
+            data={chartData}
+            margin={{ top: topMargin, right: 20, bottom: 80, left: 20 }}
+            barCategoryGap={histogram ? 0 : undefined}
+          >
             <CartesianGrid stroke={colors.grid} vertical={false} />
             <XAxis
               dataKey="label"
@@ -267,9 +299,23 @@ export default function VerticalBarChart({
             {fmt.referenceLine != null && (
               <ReferenceLine y={fmt.referenceLine} stroke={colors.textMuted} strokeDasharray="3 3" />
             )}
-            <Bar dataKey="value" barSize={fmt.barSize} isAnimationActive={false} label={dataLabel}>
+            <Bar
+              dataKey="value"
+              barSize={histogram ? undefined : fmt.barSize}
+              isAnimationActive={false}
+              label={dataLabel}
+            >
               {chartData.map((entry, index) => (
-                <Cell key={index} fill={entry.fill} />
+                <Cell
+                  key={index}
+                  fill={entry.fill}
+                  // Flush bars need a hairline or adjacent bins merge into one
+                  // block. `grid` rather than a background colour: it is the same
+                  // token the gridlines use, so the divider reads as chart
+                  // furniture and is theme-aware in both modes.
+                  stroke={histogram ? colors.grid : undefined}
+                  strokeWidth={histogram ? 1 : undefined}
+                />
               ))}
               {showCI && (
                 <ErrorBar dataKey="_ciError" width={4} strokeWidth={1.5} stroke={colors.textDark} />

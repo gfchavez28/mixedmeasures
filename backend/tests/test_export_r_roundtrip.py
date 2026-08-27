@@ -263,6 +263,18 @@ def _seed(db):
                             origin="human", stale=False))
     db.flush()
 
+    # #821(b): a MEAN over a domain input. `metrics.py` POOLS every member
+    # column's values into one flat list for this metric type (it is not the
+    # mean-of-means that `domain_aggregate` computes), and the export used to
+    # emit `mean(.mm_num(data$domains$Scale_dup, ...))` — `domains` is a
+    # top-level list(), so `data$domains` is NULL, R warns "Unknown or
+    # uninitialised column" and the mean comes back NA. Silent, green script.
+    db.add(MetricDefinition(id=9110, project_id=PID, name="Scale pooled mean",
+                            metric_type="mean",
+                            input_source_type="dataset_domain", input_source_id=9301,
+                            config="{}", origin="human", stale=False))
+    db.flush()
+
     # result_data must be non-null: the export only emits tests the user has
     # actually run (computed), via `StatisticalTest.result_data != None`.
     db.add(StatisticalTest(id=9201, project_id=PID, test_type="independent_t_test",
@@ -311,6 +323,28 @@ def _seed(db):
                                        "nonparametric": True}),
                     auto_name="mpg by am (MW)", source_tab="comparisons",
                     display_order=4))
+    # #821(a) PARAMETRIC comparison, 3 groups (mpg by cyl) — drives `aov`.
+    #
+    # 🔴 **The fixture blindness this closes.** Before it, EVERY comparison
+    # material here was non-parametric, so the parametric arm of the export was
+    # emitted by no test at all — and that arm wrote `t.test` for any group
+    # count, which R refuses above two levels ("grouping factor must have
+    # exactly 2 levels. Execution halted"). Because `_RUNNER` sources the
+    # exported script, a halt fails the whole round-trip: this material is the
+    # fixture on which old and new behaviour DISAGREE.
+    db.add(Material(id=9408, collection_id=9400, material_type="comparison",
+                    config=json.dumps({"column_ids": [MPG], "compare_by": CYL}),
+                    auto_name="mpg by cyl (ANOVA)", source_tab="comparisons",
+                    display_order=7))
+    # #821(a), the other arm: an EXPLICITLY chosen t-test over those same 3
+    # groups. The app runs Welch on the first two groups in display order
+    # (`_run_t_test` takes group_names[0]/[1]); the export must reproduce that
+    # rather than emit a call that cannot run.
+    db.add(Material(id=9409, collection_id=9400, material_type="comparison",
+                    config=json.dumps({"column_ids": [MPG], "compare_by": CYL,
+                                       "test_type": "t_test"}),
+                    auto_name="mpg by cyl (forced t)", source_tab="comparisons",
+                    display_order=8))
     # Descriptives material for the domain — drives `domain_means <- colMeans(...)`
     # (the domain-aggregate emission lives in the materials loop, not human_metrics).
     db.add(Material(id=9404, collection_id=9400, material_type="domain_aggregate",
@@ -338,7 +372,7 @@ def _seed(db):
 
 
 async def _export_zip_bytes(pid, user, db) -> bytes:
-    resp = await export_r_data(project_id=pid, user=user, db=db)
+    resp = export_r_data(project_id=pid, user=user, db=db)
     chunks = [c async for c in resp.body_iterator]
     return b"".join(chunks if isinstance(chunks[0], bytes)
                     else [c.encode() for c in chunks])
@@ -393,6 +427,24 @@ def _tool_expected(db) -> dict:
     mwt = mw["rows"][0]["test"]
     assert mwt["test_type"] == "mann_whitney_u"
     exp["mw_stat"], exp["mw_p"] = mwt["statistic"], mwt["p"]
+    # #821(a): the parametric comparison MATERIAL path (distinct from the saved
+    # StatisticalTest path above — different emission code).
+    cmp_anova = compute_group_comparison(db, project_id=PID, column_ids=[MPG], domain_ids=[],
+                                         grouping_column_id=CYL, grouping_column_id_2=None,
+                                         test_type="auto", include_effect_size_ci=False)
+    ct = cmp_anova["rows"][0]["test"]
+    assert ct["test_type"] == "one_way_anova", "fixture must have 3+ groups"
+    exp["cmp_anova_F"] = ct["statistic"]
+    # The forced-t arm: the app compares the FIRST TWO groups only.
+    cmp_forced_t = compute_group_comparison(db, project_id=PID, column_ids=[MPG], domain_ids=[],
+                                            grouping_column_id=CYL, grouping_column_id_2=None,
+                                            test_type="t_test", include_effect_size_ci=False)
+    ftt = cmp_forced_t["rows"][0]["test"]
+    assert ftt["test_type"] == "independent_t_test"
+    exp["cmp_forced_t"] = ftt["statistic"]
+    # #821(b): the pooled domain mean (one flat list across the member columns).
+    pm = json.loads(compute_metric(db, db.get(MetricDefinition, 9110))[0].result_data)
+    exp["domain_pooled_mean"] = pm["mean"]
     # Pearson + Spearman correlation (mpg/hp/wt/disp); order mpg(0) hp(1) wt(2) disp(3)
     cp = compute_correlation_matrix(db, project_id=PID, column_ids=[MPG, HP, WT, DISP],
                                     domain_ids=[], correlation_type="pearson",
@@ -424,6 +476,13 @@ def _tool_expected(db) -> dict:
     # frequency (cyl)
     fr = json.loads(compute_metric(db, db.get(MetricDefinition, 9104))[0].result_data)
     exp["freq"] = {str(k): int(v) for k, v in fr["counts"].items()}
+    # queue #42: the per-category interval the app shows. Taken from the SAME
+    # result_data the screen reads, so the assertion is literally "does the
+    # exported R reproduce what the researcher saw?"
+    exp["freq_ci"] = {
+        str(k): (fr["ci_lower_by_label"][k], fr["ci_upper_by_label"][k])
+        for k in fr["counts"]
+    }
     # domain-aggregate scale score (mean of per-column means)
     dr = json.loads(compute_metric(db, db.get(MetricDefinition, 9105))[0].result_data)
     exp["domain_agg"] = dr["aggregate_value"]
@@ -467,6 +526,17 @@ emit("kw_H", unname(kw$statistic)); emit("kw_df", unname(kw$parameter))
 mw <- suppressWarnings(wilcox.test(mpg ~ am, data = data))
 emit("mw_stat", unname(mw$statistic)); emit("mw_p", mw$p.value)
 
+# #821(a): the comparison MATERIAL's ANOVA, from the object the script named.
+# A shared `aov_result` would have collided with the StatisticalTest one above.
+casum <- summary(aov_mpg_by_cyl)[[1]]
+emit("cmp_anova_F", casum[["F value"]][1])
+
+# #821(a): the forced t-test over 3 groups. The script subsets to the first two
+# and drops the unused level; re-run the identical call on its own object.
+ftt <- t.test(.mm_num(tt_data_mpg$mpg, "mpg") ~ tt_data_mpg$cyl, var.equal = FALSE)
+emit("cmp_forced_t", unname(ftt$statistic))
+emit("cmp_forced_t_levels", nlevels(factor(tt_data_mpg$cyl)))
+
 # Pearson + Spearman: reuse the `cor_vars` the exported script created.
 cmp <- cor(.mm_num(data[, cor_vars]), use = "pairwise.complete.obs", method = "pearson")
 emit("cor_mpg_hp", cmp[1, 2]); emit("cor_mpg_wt", cmp[1, 3])
@@ -507,6 +577,21 @@ emit("gap_t_stat", unname(tg$statistic))
 tb <- table(data$cyl)
 for (nm in names(tb)) emit(paste0("freq_", nm), tb[[nm]])
 
+# queue #42: the per-category margin of error the app displays. Runs the
+# script's OWN `.mm_freq` helper rather than reimplementing it here — the point
+# is that the exported script reproduces the tool's numbers, so a private
+# reimplementation in the harness would prove nothing about the export.
+fq <- .mm_freq(data$cyl)
+for (i in seq_len(nrow(fq))) {
+  emit(paste0("freqci_lo_", fq$level[i]), fq$ci_lower[i])
+  emit(paste0("freqci_hi_", fq$level[i]), fq$ci_upper[i])
+}
+
+# #821(b): the pooled domain mean, run through the export's OWN emitted
+# expression (lifted from the script), so a private reimplementation here could
+# not paper over a broken emission.
+emit("domain_pooled_mean", __DOMAIN_MEAN__)
+
 # domain-aggregate scale score: reuse the `domain_means` object the script created.
 emit("domain_agg", mean(domain_means))
 
@@ -536,9 +621,20 @@ def _run_r(setup_path: Path, workdir: Path) -> dict:
     assert mobj, "exported script did not emit a psych::alpha (Cronbach) call"
     scale_frame = mobj.group(1)
 
+    # #821(b): the pooled-domain-mean line, verbatim. Lifting it means the
+    # runner executes what the export emitted rather than an equivalent of it.
+    dm = re.search(
+        r"mean\(unlist\(\.mm_num\(data\[, domains\$\w+, drop = FALSE\]\),"
+        r" use\.names = FALSE\), na\.rm = TRUE\)",
+        script_text,
+    )
+    assert dm, "exported script did not emit a pooled domain mean"
+
     runner = workdir / "runner.R"
     runner.write_text(
-        _RUNNER.replace("__SETUP__", setup_path.name).replace("__SCALE_FRAME__", scale_frame),
+        _RUNNER.replace("__SETUP__", setup_path.name)
+               .replace("__SCALE_FRAME__", scale_frame)
+               .replace("__DOMAIN_MEAN__", dm.group(0)),
         encoding="utf-8",
     )
     proc = subprocess.run(
@@ -580,6 +676,15 @@ def test_exported_script_reproduces_tool_results(db_session):
         ), "3-group non-parametric comparison must emit kruskal.test"
         assert 'kruskal.test(.mm_num(data$mpg, "mpg") ~ data$am' not in script_text, \
             "2-group comparison must NOT emit kruskal.test"
+        # #821(a): the PARAMETRIC arm branches on group count too. The comment
+        # that used to carry the correct call ("If 3+ groups, use: aov(...)")
+        # must be gone — a comment is not a reproduction.
+        assert re.search(
+            r'aov_mpg_by_cyl <- aov\(\.mm_num\(data\$mpg, "mpg"\) ~ data\$cyl\)',
+            script_text,
+        ), "3-group parametric comparison must emit aov, not t.test"
+        assert "If 3+ groups, use" not in script_text, \
+            "the correct call must be emitted, not left in a comment"
         # #537: the level-value registry must carry the real codes.
         assert re.search(r"`zb` = c\(0, 1, 2, 3\)", script_text), \
             ".mm_scale_codes must register the 0-based scale's codes"
@@ -593,7 +698,9 @@ def test_exported_script_reproduces_tool_results(db_session):
                    "scor_mpg_wt", "chisq", "chisq_df", "cramers_v", "cronbach",
                    "sh_r", "sh_sb", "wt_mean", "wt_sd", "domain_agg",
                    "sb_total_count", "line_grand_mean", "zb_mean", "gap_mean",
-                   "gap_t_stat", "id_is_character", "id_leading_zero_count")
+                   "gap_t_stat", "id_is_character", "id_leading_zero_count",
+                   "cmp_anova_F", "cmp_forced_t", "cmp_forced_t_levels",
+                   "domain_pooled_mean")
     for key in scalar_keys:
         assert key in actual, f"R did not emit {key}; got {sorted(actual)}"
 
@@ -632,6 +739,23 @@ def test_exported_script_reproduces_tool_results(db_session):
     assert actual["zb_mean"] == pytest.approx(expected["zb_mean"], abs=0.001)
     assert actual["gap_mean"] == pytest.approx(expected["gap_mean"], abs=0.001)
     assert actual["gap_t_stat"] == pytest.approx(expected["gap_t_stat"], abs=0.01)
+    # #821(a): the comparison MATERIAL's parametric emission.
+    #
+    # Pre-fix the "auto" arm wrote `t.test` for these three groups, which halts
+    # the script — so this assertion is unreachable under the defect and the
+    # whole round-trip fails at `source()` with R's own message.
+    assert actual["cmp_anova_F"] == pytest.approx(expected["cmp_anova_F"], abs=0.01)
+    # The forced-t arm reproduces the app's first-two-groups comparison, and the
+    # subset really has exactly two levels (which is what makes it legal R).
+    assert actual["cmp_forced_t_levels"] == pytest.approx(2.0, abs=1e-9)
+    assert actual["cmp_forced_t"] == pytest.approx(expected["cmp_forced_t"], abs=0.01)
+    # ...and the two are different numbers, so neither assertion could pass by
+    # reading the other's model.
+    assert abs(expected["cmp_anova_F"] - expected["cmp_forced_t"]) > 1.0
+    # #821(b): the pooled domain mean reproduces, and it is a DIFFERENT number
+    # from the domain aggregate — so this assertion cannot be satisfied by the
+    # mean-of-means emission sitting a few lines away in the same script.
+    assert actual["domain_pooled_mean"] == pytest.approx(expected["domain_pooled_mean"], abs=0.001)
     # #533: the identifier column arrived in R as character, leading zeros intact
     # (a numeric guess would read "007" as 7 → count 0, is_character 0).
     assert actual["id_is_character"] == pytest.approx(1.0, abs=1e-9)
@@ -645,6 +769,11 @@ def test_exported_script_reproduces_tool_results(db_session):
     # Correlation heatmap: emitted only for correlation_matrix materials.
     assert "ggplot(cor_long" in script_text, \
         "correlation_matrix material must emit a ggplot2 correlation heatmap"
+
+    # #821(b): `data$domains$X` never appears. It is not an error in R — it is
+    # NULL plus a warning — so the script stays green and the number vanishes.
+    assert "data$domains$" not in script_text, \
+        "a domain reference must not be interpolated as a data column (#821b)"
 
     # --- #432: a domain_aggregate metric not saved as a Material now emits
     # colMeans computation, not a bare comment. Material 9105 (via the materials
@@ -666,6 +795,19 @@ def test_exported_script_reproduces_tool_results(db_session):
         fkey = f"freq_{label}"
         assert fkey in actual, f"R missing frequency category {label}: {sorted(actual)}"
         assert actual[fkey] == pytest.approx(count, abs=0.5)
+
+    # --- queue #42: and every category's interval matches ---
+    #
+    # Tolerance is 0.01 on a PERCENTAGE scale, i.e. tighter than the second
+    # decimal the app displays. That is deliberate: the two implementations
+    # agree exactly on the quantile (#768), so anything looser would let a
+    # continuity correction (R's `prop.test` default, which the app does not
+    # apply) slip through unnoticed.
+    for label, (lo, hi) in expected["freq_ci"].items():
+        lo_key, hi_key = f"freqci_lo_{label}", f"freqci_hi_{label}"
+        assert lo_key in actual, f"R missing CI for category {label}: {sorted(actual)}"
+        assert actual[lo_key] == pytest.approx(lo, abs=0.01)
+        assert actual[hi_key] == pytest.approx(hi, abs=0.01)
 
 
 def test_identifier_column_rides_export_as_character_join_key(db_session):

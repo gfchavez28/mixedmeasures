@@ -382,14 +382,14 @@ class TestC4WriteSide:
         from app.routers.export_r import _get_factor_mapping
         col = _seed(db_session, missing_values=DECLARE_99)
         d = _def(db_session, col, {"1": 1, "2": 2, "99": 99})
-        fm = _get_factor_mapping(col, d)
-        assert fm == {"values": [1, 2], "labels": ["1", "2"]}
+        fm = _get_factor_mapping(db_session, col, d)
+        assert fm == {"levels": [1, 2], "labels": ["1", "2"], "codes": [1, 2]}
 
         # Priority 2 (no recode): scale metadata with a missing label.
         col.scale_labels = json.dumps(["1", "99", "2"])
         col.scale_values = None
-        fm2 = _get_factor_mapping(col, None)
-        assert fm2 == {"values": [1, 3], "labels": ["1", "2"]}, (
+        fm2 = _get_factor_mapping(db_session, col, None)
+        assert fm2 == {"levels": [1, 3], "labels": ["1", "2"], "codes": [1, 3]}, (
             "positional codes must not shift when the missing pair drops"
         )
 
@@ -1297,3 +1297,124 @@ class TestMissingRuleCollisionGuard:
             ))
         assert exc.value.status_code == 400
         assert "Agree" in exc.value.detail
+
+
+class TestBulkMissingDeclaration:
+    """#798: one vocabulary, many columns — without loosening a single guard."""
+
+    def _dataset(self, db, pid=987):
+        from app.models.project import Project
+        from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, ColumnType
+        db.add(Project(id=pid, name="Bulk", user_id=1)); db.flush()
+        ds = Dataset(project_id=pid, name="Survey"); db.add(ds); db.flush()
+        cols = {}
+        for i, (name, ctype) in enumerate([
+            ("q1", ColumnType.NUMERIC), ("q2", ColumnType.NUMERIC),
+            ("q3", ColumnType.NUMERIC), ("notes", ColumnType.OPEN_TEXT),
+        ]):
+            c = DatasetColumn(dataset_id=ds.id, column_text=name, column_type=ctype,
+                              sequence_order=i, display_order=i)
+            db.add(c); cols[name] = c
+        db.flush()
+        # GSS's own sentinel beside real answers, on every numeric column.
+        for r_i, cell in enumerate(["1", "2", ".i:  Inapplicable", "3"]):
+            row = DatasetRow(dataset_id=ds.id, row_identifier=f"R{r_i}"); db.add(row); db.flush()
+            for name in ("q1", "q2", "q3"):
+                db.add(DatasetValue(row_id=row.id, column_id=cols[name].id,
+                                    value_text=cell,
+                                    value_numeric=None if cell.startswith(".") else float(cell)))
+            db.add(DatasetValue(row_id=row.id, column_id=cols["notes"].id, value_text="free text"))
+        db.flush()
+        return ds, cols
+
+    def test_one_vocabulary_reaches_every_eligible_column(self, db_session):
+        from app.routers.recode import bulk_set_missing_values
+        from app.schemas.recode import BulkMissingValuesUpdate
+        from app.models.user import User
+        from app.models.dataset import DatasetValue
+        from app.services.missing_values import parse_missing_rules
+
+        db = db_session
+        ds, cols = self._dataset(db)
+        user = db.get(User, 1)
+
+        # MM's defaults do NOT recognise GSS's marker — that is the premise.
+        from app.services.missing_values import is_missing
+        assert is_missing(".i:  Inapplicable", None) is False
+
+        resp = bulk_set_missing_values(
+            project_id=987, dataset_id=ds.id,
+            data=BulkMissingValuesUpdate(
+                column_ids=[c.id for c in cols.values()],
+                rules=[{"kind": "discrete", "value": ".i:  Inapplicable"}],
+            ),
+            user=user, db=db,
+        )
+
+        applied_ids = {r.column_id for r in resp.applied}
+        assert applied_ids == {cols["q1"].id, cols["q2"].id, cols["q3"].id}
+        # The open_text column is SKIPPED, not a 400 for the whole request.
+        assert [s.column_id for s in resp.skipped] == [cols["notes"].id]
+        assert "open_text" in resp.skipped[0].reason
+
+        # Every eligible column really carries the declaration...
+        for name in ("q1", "q2", "q3"):
+            db.refresh(cols[name])
+            # The normalizer's own stored shape — asserted as it actually is,
+            # not as the request spelled it.
+            assert parse_missing_rules(cols[name].missing_values) == [
+                {"value": ".i:  Inapplicable"}
+            ]
+        # ...and the sentinel's cells were re-aligned, not just recorded.
+        assert resp.nulled_rows_total == 3
+        still_numeric = db.query(DatasetValue).filter(
+            DatasetValue.column_id.in_([cols[n].id for n in ("q1", "q2", "q3")]),
+            DatasetValue.value_text == ".i:  Inapplicable",
+            DatasetValue.value_numeric.isnot(None),
+        ).count()
+        assert still_numeric == 0
+
+    def test_one_column_refusing_does_not_discard_the_others(self, db_session):
+        """#606 is a judgement about ONE column's data — it must not abort the rest."""
+        from app.routers.recode import bulk_set_missing_values
+        from app.schemas.recode import BulkMissingValuesUpdate
+        from app.models.user import User
+        from app.models.dataset import DatasetValue, DatasetRow
+
+        db = db_session
+        ds, cols = self._dataset(db, pid=988)
+        user = db.get(User, 1)
+        # Make "Refused" a REAL response on q2 only, so a rule labelled
+        # "Refused" collides there and nowhere else.
+        row = db.query(DatasetRow).filter(DatasetRow.dataset_id == ds.id).first()
+        db.add(DatasetValue(row_id=row.id, column_id=cols["q2"].id, value_text="Refused"))
+        db.query(DatasetValue).filter(
+            DatasetValue.column_id == cols["q2"].id,
+            DatasetValue.value_text == "1",
+        ).delete(synchronize_session="fetch")
+        db.flush()
+
+        resp = bulk_set_missing_values(
+            project_id=988, dataset_id=ds.id,
+            data=BulkMissingValuesUpdate(
+                column_ids=[cols[n].id for n in ("q1", "q2", "q3")],
+                rules=[{"kind": "discrete", "value": "99", "label": "Refused"}],
+            ),
+            user=user, db=db,
+        )
+
+        assert {r.column_id for r in resp.applied} == {cols["q1"].id, cols["q3"].id}
+        assert [s.column_id for s in resp.skipped] == [cols["q2"].id]
+        assert resp.skipped[0].reason, "a refusal must say why"
+
+    def test_bulk_payload_validates_through_the_same_validator(self):
+        """#612/#614: a bulk path that validates loosely is how those got in."""
+        import pytest as _pytest
+        from app.schemas.recode import BulkMissingValuesUpdate, MissingValuesUpdate
+
+        bad = [{"kind": "discrete", "value": "1", "label": "A"},
+               {"kind": "discrete", "value": "1", "label": "B"}]  # same value twice
+        with _pytest.raises(ValueError):
+            MissingValuesUpdate(rules=bad)
+        with _pytest.raises(ValueError):
+            BulkMissingValuesUpdate(column_ids=[1], rules=bad)

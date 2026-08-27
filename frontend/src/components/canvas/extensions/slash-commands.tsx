@@ -21,6 +21,29 @@ export type SlashCommand = {
   icon: ReactNode
 }
 
+/**
+ * Commands whose real work happens AFTER a surface the researcher can dismiss
+ * — a drawer, or the OS file picker (#823j).
+ *
+ * The editor deletes the typed `/chart` when a command completes, not when one
+ * is chosen: for these four, choosing is not completing. Cancel the drawer and
+ * the text is still there.
+ *
+ * ⚠️ Classify every NEW command here. The question is not "does this open a
+ * dialog" but **"can the researcher walk away with nothing inserted?"** —
+ * `heading` and `section` open nothing and create a theme immediately, so they
+ * consume the text at once and belong on the other side.
+ * `slash-commands.test.ts` fails if a command type is on neither side.
+ */
+export const DEFERRED_SLASH_TYPES: ReadonlySet<SlashCommand['type']> = new Set([
+  'excerpt', 'chart', 'memo', 'image',
+])
+
+/** Commands that finish during the keystroke that fires them. */
+export const IMMEDIATE_SLASH_TYPES: ReadonlySet<SlashCommand['type']> = new Set([
+  'text', 'heading', 'section', 'divider', 'callout',
+])
+
 export const COMMANDS: SlashCommand[] = [
   { type: 'text',    label: 'Text',        description: 'Plain paragraph',       icon: <Type className="w-4 h-4" /> },
   { type: 'heading', label: 'New theme',   description: 'Theme with materials',   icon: <Hash className="w-4 h-4" /> },

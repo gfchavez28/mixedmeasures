@@ -37,7 +37,7 @@ describe('#701(a) — the Codebook tree can be entered from the keyboard', () =>
   })
 
   it('it exposes an active descendant rather than moving focus into the SVG', () => {
-    expect(SRC).toMatch(/aria-activedescendant=\{[\s\S]{0,200}?nodeDomId\(nodeOrder\[focusedIdx\]\)/)
+    expect(SRC).toMatch(/aria-activedescendant=\{cursorNodeId \? nodeDomId\(cursorNodeId\)/)
   })
 
   it('entering the tree seeds a resting position', () => {
@@ -48,7 +48,7 @@ describe('#701(a) — the Codebook tree can be entered from the keyboard', () =>
     expect(
       SRC,
       'entering the tree must put the cursor on the first node when there is none',
-    ).toContain('if (focusedIdx < 0 && nodeOrder.length > 0) setFocusedIdx(0)')
+    ).toContain('if (focusedIdx < 0 && nodeOrder.length > 0) setFocusedId(nodeOrder[0])')
   })
 
   it('every treeitem states its depth', () => {
@@ -73,8 +73,39 @@ describe('#701(a) — the Codebook tree can be entered from the keyboard', () =>
     expect(SRC, "a category's codes sit one level deeper").toContain('level: depth + 2')
     expect(SRC, 'universal codes and the synthetic Uncategorized label are roots')
       .toMatch(/level: 1,\s+\/\/ #701\(a\): top band/)
-    expect(SRC, 'uncategorized codes hang off that synthetic root')
-      .toMatch(/level: 2,\s+\/\/ #701\(a\): child of the synthetic/)
+    // ⚠️ CHANGED by #774: this used to assert `level: 2` — "child of the
+    // synthetic 'Uncategorized' root". That marker has `depth: -1`, and the
+    // category renderer returns `null` for it, so it is not a treeitem and no
+    // key can reach it. The level was promising a parent that does not exist,
+    // and ArrowLeft from an uncategorized code walked back to the LAST CATEGORY.
+    expect(SRC, 'uncategorized codes are ROOTS — their visual grouping has no navigable node')
+      .toMatch(/A ROOT, because the 'Uncategorized' marker below is not navigable[\s\S]{0,1200}?level: 1,/)
+  })
+
+  /**
+   * #774 — the cursor indexes the NAVIGABLE order, never `layout.nodes`.
+   *
+   * `layout.nodes` is the SVG paint order: `layoutCategory` emits a category
+   * AFTER the children whose extent decides its `y`, so the array is post-order
+   * while the traversal rules it feeds (`firstChildIndex` / `parentIndex`) are
+   * specified on a pre-order. Measured before the fix: ArrowLeft from `code-8`
+   * landed on `cat-1` though `code-8` belongs to `cat-2` — wrong for every code
+   * — and ArrowDown threw the cursor back up the screen once per category.
+   * Reverting any of these three lines to `layout.nodes` restores all of it.
+   */
+  it('the keyboard order is derived, not the raw layout array', () => {
+    expect(SRC, 'the order comes from the shared pre-order derivation')
+      .toContain('navigableNodeIds(treeData, id => byId.has(id))')
+    // ⚠️ A WINDOW, not a line: `nodeAria` spans several lines, and the
+    // line-based form of this check passed on two of the three while being
+    // structurally unable to read the third.
+    for (const derived of ['const nodeOrder', 'const nodeLevels', 'const nodeAria']) {
+      const at = SRC.indexOf(derived)
+      expect(at, `${derived} must exist`).toBeGreaterThan(-1)
+      const body = SRC.slice(at, SRC.indexOf('\n\n', at))
+      expect(body, `${derived} must read navNodes, not layout.nodes`).toContain('navNodes')
+      expect(body, `${derived} must not index the paint order`).not.toContain('layout.nodes')
+    }
   })
 
   it('every treeitem carries the id the active descendant points at', () => {

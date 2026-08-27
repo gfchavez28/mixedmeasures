@@ -8,7 +8,10 @@
  * offset is used and never silently re-derived (the #578 drift class).
  */
 import { describe, it, expect } from 'vitest'
-import { mappingNumericValues, reverseOffset, reflectReverseValue } from './recode-utils'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { mappingNumericValues, reverseOffset, reflectReverseValue, recodeMappingPayload } from './recode-utils'
+import { stripComments } from './strip-comments'
 
 // The #600 repro: a real 1..5 scale plus a recognized-N/A label carrying the
 // SPSS-convention sentinel. Raw min+max = 100; over the real scale points, 6.
@@ -74,5 +77,76 @@ describe('reflectReverseValue', () => {
 
   it('returns the code unchanged when the mapping has no numeric values', () => {
     expect(reflectReverseValue(2, { a: 'Low', b: 'High' })).toBe(2)
+  })
+})
+
+describe('#818 — an excluded response never keeps its old code', () => {
+  it('drops the excluded label from the mapping', () => {
+    // The measured defect, verbatim: `Exclude` was ticked on "Depends" and the
+    // mapping kept the 2 it had before the tick — the same code as the positive
+    // pole — so 2,114 respondents were scored as trusting.
+    const { mapping, exclude_values } = recodeMappingPayload(
+      { "Can't be too careful": 1, 'Depends': 2, 'Most people can be trusted': 2 },
+      ['Depends'],
+    )
+    expect(mapping).toEqual({ "Can't be too careful": 1, 'Most people can be trusted': 2 })
+    expect(exclude_values).toEqual(['Depends'])
+  })
+
+  it('leaves an unexcluded mapping untouched', () => {
+    const m = { Low: 1, High: 2 }
+    expect(recodeMappingPayload(m, []).mapping).toEqual(m)
+  })
+
+  it('returns BOTH halves, because a caller diffing one alone re-opens the bug', () => {
+    // Ticking the checkbox changes only `excludeValues`. A save path that diffs
+    // an unstripped mapping sees no change, sends `exclude_values` alone, and
+    // leaves the stale code on the server.
+    const before = { Depends: 2 }
+    const after = recodeMappingPayload(before, ['Depends'])
+    expect(JSON.stringify(after.mapping)).not.toBe(JSON.stringify(before))
+  })
+
+  it('is not confused by a label that is excluded but never mapped', () => {
+    const { mapping, exclude_values } = recodeMappingPayload({ Low: 1 }, ['Never asked'])
+    expect(mapping).toEqual({ Low: 1 })
+    expect(exclude_values).toEqual(['Never asked'])
+  })
+
+  it('every recode payload site routes through the helper', () => {
+    // A POPULATION assertion, not a list of the sites that were wrong: the
+    // defect existed in BOTH editors (ScaleMap and CategoryGroup) through two
+    // separate payload sites, and fixing the reported one would have left the
+    // other. #824's lesson, one file over.
+    const workbench = join(__dirname, '..', 'pages', 'RecodeWorkbench.tsx')
+    const src = stripComments(readFileSync(workbench, 'utf8'), workbench)
+
+    // Self-check per narrowing: the file was read and the comment stripper did
+    // not blank it (#772's phantom).
+    expect(src).toMatch(/recodeMappingPayload/)
+
+    // A payload site is `mapping:` in a VALUE position, or an assignment to
+    // `.mapping`. Type annotations (`mapping: Record<string, number | string>`)
+    // sit in the same syntactic shape and are not payloads — the scan's first
+    // run flagged four of them, which is the narrowing this filter records.
+    const isTypeAnnotation = (rhs: string) =>
+      /^(Record<|string|number|boolean|\w+\[\]|\{)/.test(rhs.trim())
+
+    const literalSites = [...src.matchAll(/^\s*mapping:\s*(.+?),?\s*$/gm)]
+      .map(m => m[1])
+      .filter(rhs => !isTypeAnnotation(rhs))
+    // NOT line-anchored: the edit path's assignment sits after an `if (…)`
+    // guard on the same line. The self-check below is what caught that.
+    const assignSites = [...src.matchAll(/\w+\.mapping\s*=\s*([^\n;]+)/g)].map(m => m[1])
+    const sites = [...literalSites, ...assignSites]
+
+    // Self-check per narrowing: the filter must not have removed everything.
+    expect(literalSites.length).toBeGreaterThanOrEqual(1)
+    expect(assignSites.length).toBeGreaterThanOrEqual(1)
+
+    for (const site of sites) {
+      expect(site, `a recode payload builds its mapping without the helper: ${site}`)
+        .toMatch(/recodeMappingPayload|payload\.mapping/)
+    }
   })
 })

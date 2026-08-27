@@ -37,6 +37,7 @@ import TranscriptPanel, { type PlaybackHandle } from '@/components/TranscriptPan
 import { useCollapsibleColumn } from '@/hooks/useCollapsibleColumn'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
+import { codeKeyHint } from '@/lib/codeShortcuts'
 import { useCoders } from '@/hooks/useCoders'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { isSegmentCodedVisible, computeCoverage, isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
@@ -1310,9 +1311,13 @@ export default function CodingWorkbench() {
     },
     extraKeys: {
       // Self-gate on transcript focus, return true to claim the key (#388 P3.1 boolean extraKeys).
+      // ⚠️ The media check is load-bearing, not defensive (#784): claiming Space on a
+      // conversation with no recording swallowed the key and did nothing — the sibling
+      // Observations handler has always had it, and these two must keep the same shape.
       ' ': () => {
-        if (focusedPanel !== 'transcript') return false
-        playbackRef.current?.togglePlayback()
+        const p = playbackRef.current
+        if (focusedPanel !== 'transcript' || !p?.hasPlayableMedia) return false
+        p.togglePlayback()
         return true
       },
       g: () => {
@@ -1960,7 +1965,7 @@ export default function CodingWorkbench() {
         <span>Conversation</span>
         {selectedSegments.length > 0 && <span>{selectedSegments.length} selected</span>}
         <div className="flex-1" />
-        <span className="opacity-60">0-9: code · s: quote · c: create code · n: note · j: next uncoded · g: group · Ctrl+Z/Y: undo/redo</span>
+        <span className="opacity-60">{codeKeyHint(codes)} · s: quote · c: create code · n: note · j: next uncoded · g: group · Ctrl+Z/Y: undo/redo</span>
       </div>
 
       {/* Floating create code dialog */}

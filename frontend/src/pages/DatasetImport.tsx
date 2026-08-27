@@ -14,7 +14,10 @@ import { ValueLabelRows, buildValueLabelPayload, type ValueLabelRow } from '@/co
 import { cn } from '@/lib/utils'
 import { consumePendingImportFiles } from '@/lib/pending-import-files'
 import { COLUMN_TYPES, TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
-import { DATASET_ACCEPT, DATASET_FORMAT_LABEL, isSupportedDatasetFile } from '@/lib/dataset-import-formats'
+import {
+  DATASET_ACCEPT, DATASET_FORMAT_LABEL, isSupportedDatasetFile,
+  describeDatasetUploadError, estimatedProcessingSeconds, SLOW_UPLOAD_THRESHOLD_BYTES,
+} from '@/lib/dataset-import-formats'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
 
 /** Human-readable labels for auto-detected column types. */
@@ -217,6 +220,64 @@ function ParticipantLinkNote({
 const MAX_FILES = 50
 const PREVIEW_CONCURRENCY = 5
 
+/**
+ * Elapsed seconds while `active`, for the progress fill (#796b).
+ *
+ * The developer's report: *"I wonder if a time estimate is enough. I'm more
+ * familiar with a progress bar that fills as a signal that some processing is
+ * happening."* They are right — a static "~100 seconds" plus a frozen button is
+ * indistinguishable from a hang, which is exactly how the timeout presented.
+ *
+ * ⚠️ **What this deliberately does NOT do is claim a percentage it cannot
+ * know.** The server reports no progress (one request, one response), so any
+ * "62%" here would be elapsed-over-estimate wearing a measurement's clothes —
+ * and the estimate had *just* been wrong by 4x when this was written. So the
+ * fill is paced by the estimate but **capped below full** and never claims
+ * completion; the text beside it says *elapsed*, which is a fact, and admits it
+ * when the estimate is exceeded rather than sitting silently at 99%.
+ */
+function useElapsedSeconds(active: boolean): number {
+  // Stores the last TICK timestamp, not a counter. Timestamp-based, never
+  // accumulated: background tabs throttle intervals to ~1/s and an accumulating
+  // counter drifts (the #564 clock rule).
+  const [tickAt, setTickAt] = useState(0)
+  const startedAtRef = useRef(0)
+  useEffect(() => {
+    if (!active) return
+    // A ref write, deliberately — resetting STATE here would be a synchronous
+    // setState inside an effect (the react-hooks/immutability warning), and the
+    // stale-tick guard below makes the reset unnecessary anyway.
+    startedAtRef.current = Date.now()
+    const id = setInterval(() => setTickAt(Date.now()), 500)
+    return () => clearInterval(id)
+  }, [active])
+  if (!active || startedAtRef.current === 0) return 0
+  // A tick left over from a PREVIOUS run is older than this run's start, so it
+  // reads as 0 rather than flashing the last run's elapsed time.
+  return Math.max(0, tickAt - startedAtRef.current) / 1000
+}
+
+/** The fill fraction: approaches but never reaches full while work is running. */
+/**
+ * The line beside the fill. Says ELAPSED (a fact) and the estimate (labelled as
+ * one), and admits when the estimate has been passed rather than going quiet —
+ * silence at 92% full is exactly the state that reads as a hang.
+ */
+function elapsedNote(elapsed: number, estimate: number, over: boolean): string {
+  const s = Math.round(elapsed)
+  if (over) return `${s}s elapsed — longer than the usual ~${estimate}s for this size. Still working.`
+  return `${s}s elapsed — usually about ${estimate}s for a file this size.`
+}
+
+const PROGRESS_CEILING = 0.92
+function fillFraction(elapsedSeconds: number, estimateSeconds: number): number {
+  if (estimateSeconds <= 0) return 0
+  // Asymptotic rather than linear: passing the estimate slows the fill instead
+  // of pinning it, so a longer-than-expected run still visibly moves.
+  const ratio = elapsedSeconds / estimateSeconds
+  return PROGRESS_CEILING * (1 - Math.exp(-1.6 * ratio))
+}
+
 /** #575: per-column value-labels authoring in the import wizard — the cells are
  * numeric codes, so declare a code→label dictionary to substitute at import (the
  * wizard analog of a .sav import). Rendered as a sibling BELOW the column row, not
@@ -319,6 +380,16 @@ export default function DatasetImport() {
   const [fileConfigs, setFileConfigs] = useState<FileConfig[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
+  /**
+   * #796 (a11y half): a large import is 30s+ of server work behind a button
+   * whose label changes to 'Analyzing...'. A changed label announces only if
+   * focus happens to be on that button, and NOTHING announces completion — so
+   * a screen-reader user got silence for half a minute and no end signal.
+   * This drives a polite live region instead, which is focus-independent.
+   * ⚠️ Kept OUT of any control's accessible name on purpose (#770: a name that
+   * changes while its element is the active descendant is re-read).
+   */
+  const [statusMessage, setStatusMessage] = useState('')
 
   // Accordion state for configure step (multi-file)
   const [expandedFileIndex, setExpandedFileIndex] = useState<number>(0)
@@ -442,9 +513,63 @@ export default function DatasetImport() {
 
   // --- Preview all files (triggered by "Next" on upload step) ---
 
+  /**
+   * Roughly how long the server will spend on the current selection, in seconds
+   * — used ONLY to decide whether to warn. `estimatedProcessingSeconds` is
+   * per-file and the wizard previews in batches of PREVIEW_CONCURRENCY, so the
+   * honest wall-clock is the sum: the batch is bounded by its total work, not by
+   * its slowest member.
+   */
+  const estimatedSeconds = useMemo(
+    () => files.reduce((s, f) => s + estimatedProcessingSeconds(f.size, 'preview'), 0),
+    [files],
+  )
+  /**
+   * #796b: the IMPORT estimate is ~3x the preview one, because import also
+   * writes ~3.1M rows. Quoting the preview number on the import button is what
+   * made the wait feel unbounded.
+   */
+  const estimatedImportSeconds = useMemo(
+    () => files.reduce((s, f) => s + estimatedProcessingSeconds(f.size, 'import'), 0),
+    [files],
+  )
+  const hasSlowFile = useMemo(
+    () => files.some(f => f.size > SLOW_UPLOAD_THRESHOLD_BYTES),
+    [files],
+  )
+
+  const elapsed = useElapsedSeconds(isLoading)
+  const activeEstimate = step === 'upload' ? estimatedSeconds : estimatedImportSeconds
+  const progress = fillFraction(elapsed, activeEstimate)
+  const overEstimate = elapsed > activeEstimate * 1.15
+
+  /**
+   * Announce at 30s intervals only. A live region that fires every tick would
+   * make the page unusable with a screen reader; the fill is the continuous
+   * signal for sighted users and this is the periodic one for everyone else.
+   */
+  const lastAnnouncedRef = useRef(0)
+  useEffect(() => {
+    if (!isLoading) { lastAnnouncedRef.current = 0; return }
+    const bucket = Math.floor(elapsed / 30)
+    if (bucket > 0 && bucket !== lastAnnouncedRef.current) {
+      lastAnnouncedRef.current = bucket
+      setStatusMessage(
+        `Still working — ${Math.round(elapsed)} seconds elapsed${
+          overEstimate ? '. This is taking longer than usual for this file.' : '.'
+        }`,
+      )
+    }
+  }, [isLoading, elapsed, overEstimate])
+
   const handlePreviewAll = useCallback(async () => {
     setIsLoading(true)
     setError('')
+    setStatusMessage(
+      hasSlowFile
+        ? `Reading ${files.length === 1 ? 'the file' : `${files.length} files`}. This is a large upload and may take around ${estimatedSeconds} seconds.`
+        : `Reading ${files.length === 1 ? 'the file' : `${files.length} files`}…`,
+    )
 
     const newConfigs = [...fileConfigs]
     const errors: string[] = []
@@ -483,7 +608,10 @@ export default function DatasetImport() {
             previewError: null,
           }
         } else {
-          const errMsg = result.reason instanceof Error ? result.reason.message : 'Failed to parse CSV'
+          // #797: report the reason we HAVE. The old line reduced every failure
+          // to a raw Error.message (a bare "signal timed out" for #796's abort)
+          // and the all-failed branch below then replaced even that with a guess.
+          const errMsg = describeDatasetUploadError(result.reason)
           newConfigs[fileIdx] = {
             ...newConfigs[fileIdx],
             preview: null,
@@ -501,16 +629,37 @@ export default function DatasetImport() {
     // Check if all files failed
     const allFailed = newConfigs.every(c => c.previewError !== null)
     if (allFailed) {
-      setError('All files failed to preview. Please check your CSV files.')
+      // #797: two defects lived in the string this replaces — "Please check your
+      // CSV files" asserted a diagnosis it had not established (in #796 the file
+      // was valid and the CLIENT had aborted), and it named one of the three
+      // formats this wizard accepts. Say what actually happened, per file.
+      setError(
+        files.length === 1
+          ? (newConfigs[0].previewError as string)
+          : `None of the ${files.length} files could be read. ${errors.join(' · ')}`,
+      )
+      setStatusMessage('Import failed. See the message above.')
       return
     }
 
     if (errors.length > 0) {
       setError(`${errors.length} file(s) had preview errors. You can remove them and continue.`)
+      setStatusMessage(
+        `${newConfigs.length - errors.length} of ${newConfigs.length} files read. ${errors.length} had errors.`,
+      )
+    } else {
+      const cols = newConfigs.reduce((n, c) => n + (c.previewColumns?.length ?? 0), 0)
+      setStatusMessage(
+        `Ready to configure. ${cols} column${cols === 1 ? '' : 's'} found. Review the column types, then import.`,
+      )
     }
 
     setStep('configure')
-  }, [files, fileConfigs, id])
+    // `hasSlowFile`/`estimatedSeconds` are derived from `files` and are read when
+    // the announcement is composed — omitting them would close over a previous
+    // selection's estimate and announce a stale duration after the user adds or
+    // removes a file.
+  }, [files, fileConfigs, id, hasSlowFile, estimatedSeconds])
 
   // --- Worksheet change (#523, .xlsx only): re-preview ONE file on its new sheet ---
 
@@ -718,6 +867,11 @@ export default function DatasetImport() {
     if (files.length === 1) {
       // Single file: import directly, navigate to ProjectView
       setIsLoading(true)
+      setStatusMessage(
+        hasSlowFile
+          ? `Importing. This is a large file and may take around ${estimatedSeconds} seconds.`
+          : 'Importing…',
+      )
       try {
         const config = fileConfigs[0]
         const result = await datasetsApi.import(id, files[0], {
@@ -753,7 +907,11 @@ export default function DatasetImport() {
         })
         setStep('results')
       } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : 'Import failed')
+        // #796/#797: the import re-runs the same parse the preview did, so it
+        // can time out the same way — and 'Import failed' told the researcher
+        // nothing about which of those it was.
+        setError(describeDatasetUploadError(err))
+        setStatusMessage('Import failed. See the message above.')
       } finally {
         setIsLoading(false)
       }
@@ -762,7 +920,12 @@ export default function DatasetImport() {
       setStep('importing')
       handleBatchImport()
     }
-  }, [files, fileConfigs, id, buildColumnConfigs, queryClient]) // eslint-disable-line react-hooks/exhaustive-deps -- handleBatchImport defined below; adding would cause TDZ error
+    // `hasSlowFile`/`estimatedSeconds` added by hand: the disable below silences
+    // exhaustive-deps for the WHOLE line, so a new capture here gets no warning.
+    // Both derive from `files` via useMemo and `files` is already a dep, so the
+    // closure cannot currently go stale — they are listed so it still cannot if
+    // either memo's own deps widen later.
+  }, [files, fileConfigs, id, buildColumnConfigs, queryClient, hasSlowFile, estimatedSeconds]) // eslint-disable-line react-hooks/exhaustive-deps -- handleBatchImport defined below; adding would cause TDZ error
 
   const handleBatchImport = useCallback(async () => {
     cancelledRef.current = false
@@ -824,7 +987,7 @@ export default function DatasetImport() {
           fileName: files[i].name,
           datasetName: config.datasetName,
           status: 'error',
-          error: err instanceof Error ? err.message : 'Unknown error',
+          error: describeDatasetUploadError(err),
         })
       }
 
@@ -1174,6 +1337,11 @@ export default function DatasetImport() {
   return (
     <div className="h-full overflow-auto">
       <div className="max-w-5xl mx-auto px-4 py-6">
+        {/* #796: the only non-visual signal for a 30s+ import. Polite, so it
+            never interrupts; sr-only, because the same information is on screen
+            for sighted users (the button label and the hint below it). */}
+        <div role="status" aria-live="polite" className="sr-only">{statusMessage}</div>
+
         {/* Progress Steps */}
         <nav aria-label="Import progress" className="flex items-center justify-between mb-8">
           {steps.map((s, i) => (
@@ -1312,10 +1480,32 @@ export default function DatasetImport() {
                     <Button
                       onClick={handlePreviewAll}
                       disabled={files.length === 0 || isLoading}
+                      className="relative overflow-hidden"
                     >
-                      {isLoading ? 'Analyzing...' : 'Next'}
+                      {isLoading && (
+                        <span
+                          aria-hidden
+                          className="absolute inset-y-0 left-0 bg-white/30 transition-[width] duration-500 ease-out motion-reduce:transition-none"
+                          style={{ width: `${(progress * 100).toFixed(1)}%` }}
+                        />
+                      )}
+                      <span className="relative">{isLoading ? 'Reading…' : 'Next'}</span>
                     </Button>
                   </div>
+                  {/* #796 (usability half): a big workbook is ~30s+ of silent
+                      server work. Saying so beforehand is what stops it reading
+                      as a hang — the abort it replaces looked like a bad file. */}
+                  {hasSlowFile && !isLoading && (
+                    <p className="text-xs text-mm-text-muted text-right mt-2">
+                      Large {files.length === 1 ? 'file' : 'files'} — reading{' '}
+                      {files.length === 1 ? 'this' : 'these'} may take around {estimatedSeconds} seconds.
+                    </p>
+                  )}
+                  {isLoading && (
+                    <p className="text-xs text-mm-text-muted text-right mt-2">
+                      {elapsedNote(elapsed, activeEstimate, overEstimate)}
+                    </p>
+                  )}
                 </div>
               )}
             </CardContent>
@@ -1329,7 +1519,13 @@ export default function DatasetImport() {
             {!isMultiFile && fileConfigs[0] && (
               <>
                 {renderConfigurePanel(fileConfigs[0], 0)}
-                <div className="flex items-center justify-between pt-2">
+                {/* #796b: `justify-between` distributes ALL its children, so the
+                    elapsed note below must NOT be a third child of this row —
+                    adding one made the Back/Import pair jump from the right edge
+                    to the centre the instant the import started. The row keeps
+                    exactly two children; the note is a sibling of the ROW. */}
+                <div className="pt-2">
+                  <div className="flex items-center justify-between">
                   <div /> {/* spacer */}
                   <div className="flex gap-2">
                     <Button variant="outline" onClick={() => setStep('upload')}>
@@ -1338,11 +1534,26 @@ export default function DatasetImport() {
                     <Button
                       onClick={handleImport}
                       disabled={!configureStepValid || isLoading}
-                      className="bg-[hsl(var(--mm-orange))] hover:opacity-90 text-white"
+                      className="bg-[hsl(var(--mm-orange))] hover:opacity-90 text-white relative overflow-hidden"
                     >
-                      {isLoading ? 'Importing...' : 'Import Dataset'}
+                      {isLoading && (
+                        <span
+                          aria-hidden
+                          className="absolute inset-y-0 left-0 bg-white/30 transition-[width] duration-500 ease-out motion-reduce:transition-none"
+                          style={{ width: `${(progress * 100).toFixed(1)}%` }}
+                        />
+                      )}
+                      <span className="relative">{isLoading ? 'Importing…' : 'Import Dataset'}</span>
                     </Button>
                   </div>
+                  </div>
+                  {/* #796b: the import is the SLOW phase (it writes every cell),
+                      so it needs the elapsed note more than the preview did. */}
+                  {isLoading && (
+                    <p className="text-xs text-mm-text-muted text-right mt-2">
+                      {elapsedNote(elapsed, activeEstimate, overEstimate)}
+                    </p>
+                  )}
                 </div>
               </>
             )}
@@ -1409,7 +1620,13 @@ export default function DatasetImport() {
                   })}
                 </div>
 
-                <div className="flex items-center justify-between pt-2">
+                {/* #796b: `justify-between` distributes ALL its children, so the
+                    elapsed note below must NOT be a third child of this row —
+                    adding one made the Back/Import pair jump from the right edge
+                    to the centre the instant the import started. The row keeps
+                    exactly two children; the note is a sibling of the ROW. */}
+                <div className="pt-2">
+                  <div className="flex items-center justify-between">
                   <div /> {/* spacer */}
                   <div className="flex gap-2">
                     <Button variant="outline" onClick={() => setStep('upload')}>
@@ -1418,11 +1635,26 @@ export default function DatasetImport() {
                     <Button
                       onClick={handleImport}
                       disabled={!configureStepValid || isLoading}
-                      className="bg-[hsl(var(--mm-orange))] hover:opacity-90 text-white"
+                      className="bg-[hsl(var(--mm-orange))] hover:opacity-90 text-white relative overflow-hidden"
                     >
-                      {isLoading ? 'Importing...' : `Import ${files.length} Datasets`}
+                      {isLoading && (
+                        <span
+                          aria-hidden
+                          className="absolute inset-y-0 left-0 bg-white/30 transition-[width] duration-500 ease-out motion-reduce:transition-none"
+                          style={{ width: `${(progress * 100).toFixed(1)}%` }}
+                        />
+                      )}
+                      <span className="relative">{isLoading ? 'Importing…' : `Import ${files.length} Datasets`}</span>
                     </Button>
                   </div>
+                  </div>
+                  {/* #796b: the import is the SLOW phase (it writes every cell),
+                      so it needs the elapsed note more than the preview did. */}
+                  {isLoading && (
+                    <p className="text-xs text-mm-text-muted text-right mt-2">
+                      {elapsedNote(elapsed, activeEstimate, overEstimate)}
+                    </p>
+                  )}
                 </div>
               </>
             )}

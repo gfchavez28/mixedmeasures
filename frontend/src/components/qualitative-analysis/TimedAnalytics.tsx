@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
+import type { QualTimelineTableMode } from '@/lib/qual-analysis-types'
 import { useQueries } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
 import { observationsApi, type ObservationSegment } from '@/lib/api'
@@ -102,6 +103,21 @@ interface Props {
    * must survive on the canvas.
    */
   showTableModeToggle?: boolean
+  /**
+   * #685 — the table breakdown, now a per-CHART property so it survives a save.
+   *
+   * ⚠️ It is DERIVED against `multiCoder` in the component (see `effectiveMode`),
+   * not guarded at the call sites. That placement is deliberate and falsifiable:
+   * `TimedTable` renders by-coder rows on `mode` alone, and the toggle is already
+   * gated on `multiCoder`, so a saved `'coder'` reaching a single-coder project —
+   * or a BLIND canvas, where the lens sets `multiCoder: false` — would draw a
+   * by-coder table with no control to change it. Kill the derivation and that
+   * renders; a call-site guard would duplicate a rule this component can enforce
+   * once. (`qual-timeline-params.ts` records a belt-and-braces guard REMOVED for
+   * being unkillable — this is the same test applied in the other direction.)
+   */
+  tableMode?: QualTimelineTableMode
+  onTableModeChange?: (mode: QualTimelineTableMode) => void
 }
 
 const TRACK_HEIGHT = 10
@@ -121,6 +137,7 @@ const secs = formatTimedSeconds
 export default function TimedAnalytics({
   projectId, observations, codes, categories, include, multiCoder, coderMap,
   consensusScope = false, labelFontSize, showTableModeToggle = true,
+  tableMode = 'code', onTableModeChange,
 }: Props) {
   const clipQueries = useQueries({
     queries: observations.map(o => ({
@@ -161,6 +178,8 @@ export default function TimedAnalytics({
           coderMap={coderMap}
           labelFontSize={labelFontSize}
           showTableModeToggle={showTableModeToggle}
+          tableMode={tableMode}
+          onTableModeChange={onTableModeChange}
         />
       ))}
     </div>
@@ -169,6 +188,7 @@ export default function TimedAnalytics({
 
 function ObservationTimedBlock({
   obs, clips, loading, codes, categories, include, multiCoder, coderMap, labelFontSize,
+  tableMode, onTableModeChange,
   showTableModeToggle,
 }: {
   obs: TimedObservationLite
@@ -181,8 +201,14 @@ function ObservationTimedBlock({
   coderMap: ReadonlyMap<number, TimedCoderLite>
   labelFontSize?: number
   showTableModeToggle?: boolean
+  tableMode: QualTimelineTableMode
+  onTableModeChange?: (mode: QualTimelineTableMode) => void
 }) {
-  const [tableMode, setTableMode] = useState<'code' | 'coder'>('code')
+  // #685: by-coder is meaningless without more than one coder to break down by,
+  // and `TimedTable` keys on `mode` alone — so the mode is derived here rather
+  // than trusted from the config. Blind mode reaches this the same way, via the
+  // canvas lens setting `multiCoder: false`.
+  const effectiveMode: QualTimelineTableMode = multiCoder ? tableMode : 'code'
 
   const codeIds = useMemo(() => codes.map(c => c.id), [codes])
   const codeById = useMemo(() => new Map(codes.map(c => [c.id, c])), [codes])
@@ -198,8 +224,8 @@ function ObservationTimedBlock({
     [clips, codeIds, include, extent],
   )
   const coderRows = useMemo(
-    () => (tableMode === 'coder' ? computeTimedRowsByCoder(clips ?? [], codeIds, include, extent) : []),
-    [tableMode, clips, codeIds, include, extent],
+    () => (effectiveMode === 'coder' ? computeTimedRowsByCoder(clips ?? [], codeIds, include, extent) : []),
+    [effectiveMode, clips, codeIds, include, extent],
   )
   const groups = useMemo(
     () => buildCodelineLanes(clips ?? [], codeIds, include, categories, codeToCategoryId),
@@ -255,8 +281,8 @@ function ObservationTimedBlock({
                 { value: 'code', label: 'By code' },
                 { value: 'coder', label: 'By code × coder' },
               ]}
-              value={tableMode}
-              onChange={(v) => setTableMode(v as 'code' | 'coder')}
+              value={effectiveMode}
+              onChange={(v) => onTableModeChange?.(v as QualTimelineTableMode)}
               ariaLabel="Table breakdown"
               idPrefix={`timed-mode-${obs.id}`}
             />
@@ -283,7 +309,7 @@ function ObservationTimedBlock({
 
           <TimedTable
             obsName={obs.name}
-            mode={tableMode}
+            mode={effectiveMode}
             rows={rows}
             coderRows={coderRows}
             codeById={codeById}

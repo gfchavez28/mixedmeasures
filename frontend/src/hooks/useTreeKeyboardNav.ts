@@ -78,26 +78,25 @@ export function useTreeKeyboardNav({ treeRef, onSetExpanded }: TreeKeyboardNavOp
       case 'Home':      e.preventDefault(); focus(0); break
       case 'End':       e.preventDefault(); focus(items.length - 1); break
 
-      case 'ArrowRight':
+      case 'ArrowRight': {
         e.preventDefault()
-        // Collapsed → open it. Already open → step into the first child, which
-        // in document order is simply the next item.
-        if (expanded === 'false') onSetExpanded?.(focused, true)
-        else if (expanded === 'true') focus(idx + 1)
+        // Collapsed → open it. Already open → step into the first child.
+        if (expanded === 'false') { onSetExpanded?.(focused, true); break }
+        // ⚠️ Was a bare `focus(idx + 1)`, which stepped onto the next SIBLING
+        // when an expanded node had no children (#773). `firstChildIndex`
+        // requires the next entry to be DEEPER, so that case now stays put.
+        const child = firstChildIndex(items.map(levelOf), idx)
+        if (child !== null) items[child].focus()
         break
+      }
 
       case 'ArrowLeft': {
         e.preventDefault()
         if (expanded === 'true') { onSetExpanded?.(focused, false); break }
-        // Otherwise move to the parent: the nearest PRECEDING item at a shallower
-        // level. Derived from `aria-level` rather than DOM nesting on purpose —
-        // these trees render each group as a SIBLING of its treeitem (owned via
-        // `aria-owns`), so `closest('[role="treeitem"]')` would walk past the
-        // parent entirely and land on whatever wraps the section.
-        const level = levelOf(focused)
-        for (let i = idx - 1; i >= 0; i--) {
-          if (levelOf(items[i]) < level) { items[i].focus(); break }
-        }
+        // Otherwise move to the parent — see `parentIndex`, which is shared with
+        // the SVG tree so the two cannot disagree about what a parent is.
+        const parent = parentIndex(items.map(levelOf), idx)
+        if (parent !== null) items[parent].focus()
         break
       }
 
@@ -139,6 +138,49 @@ export function useTreeKeyboardNav({ treeRef, onSetExpanded }: TreeKeyboardNavOp
  * decreases (leaving a group), which is what makes two sibling categories each
  * announce "1 of 3" for their own children rather than a running total.
  */
+/**
+ * Horizontal traversal for a tree, from its levels alone — #773.
+ *
+ * The tree pattern's arrows are two jobs each: ArrowRight opens a CLOSED node
+ * and steps INTO an open one; ArrowLeft closes an OPEN node and steps OUT of a
+ * closed one. Only the open/close half was ever implemented in
+ * `CodebookTreeView`, where it did nothing observable because every category
+ * renders expanded — reported from an NVDA pass as "right didn't do anything".
+ *
+ * Pure, levels-only, and exported for the same reason as `siblingPositions`
+ * below: the DOM trees and the SVG node graph share no DOM, and two copies of
+ * "which entry is my parent" is exactly the drift #701 was about. Levels come
+ * from `aria-level`, never DOM nesting — these trees render each group as a
+ * SIBLING of its treeitem, so nesting would walk past the parent entirely.
+ */
+
+/**
+ * The entry a step-INTO lands on, or `null` when there is nowhere to go.
+ *
+ * In a flattened preorder a node's first child is simply the next entry — but
+ * only if it is DEEPER. ⚠️ That test is the part worth keeping: the DOM hook
+ * used a bare `focus(idx + 1)` on any node marked `aria-expanded="true"`, so an
+ * expanded category with no children stepped sideways onto its next SIBLING.
+ * A leaf needs no separate case; its next entry is never deeper.
+ */
+export function firstChildIndex(levels: number[], idx: number): number | null {
+  const next = idx + 1
+  if (idx < 0 || next >= levels.length) return null
+  return levels[next] > levels[idx] ? next : null
+}
+
+/**
+ * The entry a step-OUT lands on — the nearest PRECEDING shallower entry — or
+ * `null` at a root, which correctly stays put.
+ */
+export function parentIndex(levels: number[], idx: number): number | null {
+  if (idx <= 0 || idx >= levels.length) return null
+  for (let i = idx - 1; i >= 0; i--) {
+    if (levels[i] < levels[idx]) return i
+  }
+  return null
+}
+
 /**
  * Sibling positions for a tree, from its levels alone — #701(a).
  *

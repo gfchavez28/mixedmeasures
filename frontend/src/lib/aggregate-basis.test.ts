@@ -28,6 +28,12 @@ describe('the basis rides the wire', () => {
    * field, and a second aggregation (POMP — #693(ii)) will take its own value:
    * describing an unidentified computation is the failure this module exists to
    * prevent, so silence is the correct output.
+   *
+   * ⚠️ This covers the RUNTIME unknown only. The COMPILE-TIME one — a basis added
+   * to `AggregationBasis` with no phrase written for it — is caught by
+   * `satisfies Record<AggregationBasis, string>` on the two maps, and no runtime
+   * assertion can see it. The two must not be collapsed: silence is right for a
+   * payload we cannot identify and wrong for a value we simply forgot to describe.
    */
   it('says nothing about a basis it cannot identify', () => {
     expect(aggregateBasisLabel(undefined)).toBeUndefined()

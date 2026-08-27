@@ -38,7 +38,19 @@ import type { ExcerptCreatePayload } from '@/lib/api/excerpts'
 export interface ExcerptShapeFields {
   start_offset: number | null
   end_offset?: number | null
-  start_time: number | null
+  /**
+   * Optional so a payload with NO time columns satisfies this structurally
+   * (#785). `SegmentExcerptInfo` — the conversation/document row's excerpt
+   * shape — carries `start_offset`/`end_offset` and nothing else, because the
+   * router refuses the time shape on a non-observation parent, so a text
+   * segment's excerpt can only ever be whole or char-range.
+   *
+   * ⚠️ Making it required forced those call sites to re-inline a bare
+   * `start_offset === null`, which is exactly what this module exists to stop.
+   * The loose `== null` below already treats a MISSING field as null, so the
+   * runtime answer was correct all along — only the type disagreed.
+   */
+  start_time?: number | null
   end_time?: number | null
 }
 

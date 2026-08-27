@@ -112,6 +112,40 @@ export default function AnalysisCrossTabTable({
     return `χ²(${df}) = ${formatStat(statistic)}, ${formatPValue(p_value)}, ${v}`
   }, [data.chi_square])
 
+  // #591: a declared level nobody chose belongs on the AXIS (that is what a
+  // declared scale is for, and the frequency chart already shows it as a 0 bar)
+  // but cannot enter the TEST — scipy refuses an all-zero row outright. So the
+  // table and the statistic differ in dimension on purpose, and saying so is
+  // the difference between an honest number and one the reader has to
+  // reverse-engineer from df. Kept OUT of the APA string above, which stays
+  // quotable.
+  const omitted = data.chi_square?.omitted_levels ?? 0
+
+  // #709: chi-square is a large-sample approximation and the table said nothing
+  // about it. The expected-frequency table was already being computed and
+  // discarded, so the disclosure costs one destructured value.
+  //
+  // Kept OUT of the APA string for the same reason `omitted` is: that string is
+  // quotable, and a caveat pasted into a paper as if it were part of the
+  // statistic helps nobody. The numbers are shown rather than just the verdict —
+  // "3 of 4 cells" is what lets a reader judge it.
+  const sparse = useMemo(() => {
+    const cs = data.chi_square
+    if (!cs?.low_expected_warning) return null
+    const cells = cs.cell_count ?? 0
+    const below = cs.cells_below_5 ?? 0
+    return {
+      // Older payloads carry the flag without the figures; say the honest short
+      // version rather than rendering "0 of 0".
+      counts: cells > 0 ? `${below} of ${cells} cells` : null,
+      minExpected: cs.min_expected ?? null,
+    }
+  }, [data.chi_square])
+
+  // Offered whenever the shape allows it, not only when the warning fires, so
+  // the two p-values can be compared instead of one replacing the other.
+  const fisherP = data.chi_square?.fisher_exact_p ?? null
+
   const grandTotal = data.n_shared
 
   return (
@@ -207,6 +241,29 @@ export default function AnalysisCrossTabTable({
       {chiSquareText && (
         <div className="text-xs text-mm-text-muted mt-2 italic">
           {chiSquareText}
+          {omitted > 0 && (
+            <span className="not-italic">
+              {' '}— computed on responded levels only
+              {` (${omitted} empty ${omitted === 1 ? 'level' : 'levels'} excluded)`}
+            </span>
+          )}
+          {fisherP != null && (
+            <span className="not-italic">
+              {`; Fisher's exact ${formatPValue(fisherP)}`}
+            </span>
+          )}
+        </div>
+      )}
+
+      {sparse && (
+        <div className="text-xs text-amber-700 dark:text-amber-300 mt-1">
+          Small expected counts
+          {sparse.counts ? ` (${sparse.counts} below 5` : ' (below 5'}
+          {sparse.minExpected != null ? `, smallest ${sparse.minExpected}` : ''}
+          {') — the chi-square approximation is unreliable here'}
+          {fisherP != null
+            ? ". Fisher's exact, shown above, makes no such assumption."
+            : '.'}
         </div>
       )}
     </div>

@@ -63,7 +63,19 @@ def test_alpha(bfi_session, subscale):
 
 
 def test_alpha_constant(db_session):
-    """All identical values: total_variance=0 → alpha should be 0."""
+    """All identical values: total_variance = 0 → alpha is UNDEFINED (#767).
+
+    ⚠️ This test asserted `alpha == 0.0` for years, which is what the code did
+    and what pinned the defect in place. Zero is a MEASURED-looking claim — "this
+    scale has no internal consistency" — for a scale whose alpha is not
+    computable at all: the formula divides by the total variance, and the limit
+    as it approaches zero is negative infinity, not zero. Same family as #689's
+    `0.00` correlation cell.
+
+    The saved-test path raises rather than returning `None`, because it
+    `json.dumps` its result into `result_data` and the t-test beside it already
+    refuses the analogous all-constant case that way.
+    """
     db = db_session
     from app.models.project import Project
 
@@ -113,8 +125,62 @@ def test_alpha_constant(db_session):
     db.add(test)
     db.flush()
 
-    result = compute_statistical_test(db, test)
-    assert result["alpha"] == pytest.approx(0.0, abs=0.001)
+    with pytest.raises(ValueError, match="undefined"):
+        compute_statistical_test(db, test)
+
+
+def test_alpha_undefined_when_items_cancel_out(db_session):
+    """The case that shows zero is the WRONG answer, not merely an imprecise one.
+
+    Every value identical (the test above) is easy to dismiss as degenerate. Here
+    each item has real variance — 2.5 — and respondents simply trade off
+    perfectly, so every total score is 6. A reader shown "alpha = 0.00" would
+    conclude the items are unrelated; in fact they are perfectly NEGATIVELY
+    related, which is a different finding with a different remedy, and the
+    message says so.
+    """
+    db = db_session
+    from app.models.project import Project
+
+    db.add(Project(id=2, name="Cancel", user_id=1))
+    db.add(Dataset(id=2, project_id=2, name="Cancel"))
+    cols = []
+    for i in range(2):
+        col = DatasetColumn(
+            id=20 + i, dataset_id=2, column_code=f"c{i}", column_text=f"c{i}",
+            column_type="ordinal", sequence_order=i, display_order=i,
+        )
+        db.add(col)
+        cols.append(col)
+    db.add(AnalysisDomain(id=2, project_id=2, name="Cancelling"))
+    for i, col in enumerate(cols):
+        db.add(AnalysisDomainMember(
+            domain_id=2, member_type="column", member_id=col.id, sequence_order=i,
+        ))
+    db.flush()
+
+    val_id = 1000
+    for row_idx, (a, b) in enumerate([(1, 5), (5, 1), (2, 4), (4, 2), (3, 3)]):
+        dr = DatasetRow(id=100 + row_idx, dataset_id=2)
+        db.add(dr)
+        db.flush()
+        for col, v in zip(cols, (a, b)):
+            val_id += 1
+            db.add(DatasetValue(
+                id=val_id, row_id=dr.id, column_id=col.id,
+                value_text=str(v), value_numeric=float(v),
+            ))
+    db.flush()
+
+    test = StatisticalTest(
+        project_id=2, test_type="cronbachs_alpha",
+        target_type="analysis_domain", target_id=2, config="{}",
+    )
+    db.add(test)
+    db.flush()
+
+    with pytest.raises(ValueError, match="reverse-coding"):
+        compute_statistical_test(db, test)
 
 
 def test_alpha_single_item(db_session):
@@ -568,3 +634,238 @@ def test_split_half_perfect_positive(db_session):
     assert result["spearman_brown"] == pytest.approx(1.0, abs=0.001)
     assert result["negative_half_correlation"] is False
     assert result["interpretation"] == "excellent"
+
+
+class TestSplitHalfFollowsTheDomainItemOrder:
+    """#710 — the odd/even split follows the researcher's item order.
+
+    It used to be `sorted(domain_data.keys())`, i.e. `DatasetColumn.id`: the
+    order the columns were inserted into the database across the whole project.
+    For a cross-dataset domain that blocks all of one dataset then all of the
+    other, and it is an order the researcher sees NOWHERE — Dataset View shows
+    `display_order`, and the domain has `sequence_order` with a reorder endpoint
+    behind it.
+
+    ⚠️ That mattered for exactly one consumer and mattered a lot: split-half
+    splits odd/even, so the item ORDER decides which items land in which half
+    and therefore decides the coefficient. The reorder control could not reach
+    the number it was ordering.
+    """
+
+    def _seed(self, db, sequence_orders, *, pid=710):
+        from app.models.project import Project
+
+        db.add(Project(id=pid, name=f"P{pid}", user_id=1))
+        db.add(Dataset(id=pid, project_id=pid, name="D"))
+        db.flush()
+
+        # Two items correlate strongly with each other, two with each other —
+        # so WHICH pair the split separates changes the coefficient a lot.
+        data = {
+            "a": [1, 2, 3, 4, 5, 4, 3, 2],
+            "b": [1, 2, 3, 4, 5, 4, 3, 2],
+            "c": [5, 1, 4, 2, 3, 5, 1, 4],
+            "d": [5, 1, 4, 2, 3, 5, 1, 4],
+        }
+        cols = []
+        for i, code in enumerate(data):
+            col = DatasetColumn(
+                id=pid * 10 + i, dataset_id=pid, column_code=code,
+                column_name=code.upper(), column_text=code,
+                column_type="ordinal", sequence_order=i, display_order=i,
+            )
+            db.add(col)
+            cols.append(col)
+        db.add(AnalysisDomain(id=pid, project_id=pid, name="Scale"))
+        db.flush()
+        for col, seq in zip(cols, sequence_orders):
+            db.add(AnalysisDomainMember(
+                domain_id=pid, member_type="column",
+                member_id=col.id, sequence_order=seq,
+            ))
+        db.flush()
+
+        vid = pid * 1000
+        for r in range(8):
+            dr = DatasetRow(id=pid * 100 + r, dataset_id=pid)
+            db.add(dr)
+            db.flush()
+            for col, code in zip(cols, data):
+                vid += 1
+                v = data[code][r]
+                db.add(DatasetValue(
+                    id=vid, row_id=dr.id, column_id=col.id,
+                    value_text=str(v), value_numeric=float(v),
+                ))
+        db.flush()
+
+        test = StatisticalTest(
+            project_id=pid, test_type="split_half",
+            target_type="analysis_domain", target_id=pid, config="{}",
+        )
+        db.add(test)
+        db.flush()
+        return test
+
+    def test_the_researchers_order_decides_the_split(self, db_session):
+        """A, B, C, D → halves (A, C) and (B, D)."""
+        test = self._seed(db_session, [0, 1, 2, 3])
+        result = compute_statistical_test(db_session, test)
+        assert result["half1_items"] == ["A", "C"]
+        assert result["half2_items"] == ["B", "D"]
+
+    def test_reordering_the_domain_reorders_the_split(self, db_session):
+        """The control the researcher already had now reaches the number.
+
+        A, C, B, D → halves (A, B) and (C, D), which separates the two
+        correlated pairs differently and therefore yields a different
+        coefficient. Asserting only the item lists would leave the point
+        unproven — the split must actually move the statistic.
+        """
+        first = compute_statistical_test(db_session, self._seed(db_session, [0, 1, 2, 3]))
+        second = compute_statistical_test(
+            db_session, self._seed(db_session, [0, 2, 1, 3], pid=711),
+        )
+        assert second["half1_items"] == ["A", "B"]
+        assert second["half2_items"] == ["C", "D"]
+        assert first["split_half_r"] != second["split_half_r"], (
+            "if the coefficient is unchanged this fixture cannot show that the "
+            "order decides the split — pick items whose correlations differ"
+        )
+
+    def test_the_result_states_its_basis(self, db_session):
+        """The client displays what the server did; it never infers the split."""
+        result = compute_statistical_test(db_session, self._seed(db_session, [0, 1, 2, 3]))
+        assert result["split_basis"] == "odd_even_domain_order"
+
+    def test_a_null_sequence_order_still_sorts_deterministically(self, db_session):
+        """`sequence_order` is nullable. Nulls last, then by id — total order."""
+        result = compute_statistical_test(
+            db_session, self._seed(db_session, [None, None, None, None], pid=712),
+        )
+        assert result["half1_items"] == ["A", "C"]
+        assert result["half2_items"] == ["B", "D"]
+
+    def test_alpha_is_unaffected_by_the_order(self, db_session):
+        """Alpha is order-INVARIANT, so this change moves no alpha anywhere.
+
+        The sum of item variances and the variance of the row totals do not
+        depend on item order. Pinned because the ordering helper is SHARED with
+        alpha, so a future change there must not quietly move a coefficient
+        researchers have already reported.
+        """
+        t1 = self._seed(db_session, [0, 1, 2, 3], pid=713)
+        t2 = self._seed(db_session, [3, 2, 1, 0], pid=714)
+        for t in (t1, t2):
+            t.test_type = "cronbachs_alpha"
+        db_session.flush()
+        a1 = compute_statistical_test(db_session, t1)
+        a2 = compute_statistical_test(db_session, t2)
+        assert a1["alpha"] == a2["alpha"]
+
+
+class TestSplitBasisCrossLanguageContract:
+    """`split_basis` is hand-mirrored in TypeScript with no codegen (#710).
+
+    Same shape as `test_ci_method_contract.py` and `test_aggregate_basis.py`:
+    the server states the basis, `lib/split-basis.ts` DISPLAYS it, and nothing
+    but this connects the two halves.
+
+    ⚠️ The client falls back to `null` — showing no label — for a basis it does
+    not recognise. That is the right default (a pre-#710 result must not be
+    labelled with a split that did not produce it) and it is exactly why a
+    server-side addition would be silent: the note would simply stop appearing.
+    """
+
+    def _ts_source(self):
+        from pathlib import Path
+
+        path = (
+            Path(__file__).resolve().parents[2]
+            / "frontend" / "src" / "lib" / "split-basis.ts"
+        )
+        assert path.exists(), (
+            f"{path} not found — the client half of the split_basis contract "
+            "moved. Update this path rather than deleting the test."
+        )
+        return path.read_text(encoding="utf-8")
+
+    def test_every_server_basis_has_a_client_descriptor(self):
+        from app.services import statistical_tests as st
+
+        bases = {
+            name: getattr(st, name)
+            for name in dir(st) if name.startswith("SPLIT_BASIS_")
+        }
+        assert bases, "no SPLIT_BASIS_* constants found — the scan is looking in the wrong place"
+
+        source = self._ts_source()
+        for name, value in bases.items():
+            assert value in source, (
+                f"`split-basis.ts` does not know {name} ({value!r}). Without a "
+                "descriptor the client renders NO basis line at all, silently — "
+                "there is no error to notice."
+            )
+
+
+def test_a_failed_recompute_clears_the_stale_result(db_session):
+    """#767 — an old wrong number must not outlive the fix that refuses it.
+
+    The dispatcher used to write `result_data` only on success, so a test that
+    had once computed kept displaying its previous value behind a stale marker
+    indefinitely. That is worst in exactly this case: an alpha saved as `0.00`
+    under the old code recomputes into a refusal, and leaving `0.00` on screen
+    would preserve the very claim the fix exists to remove.
+    """
+    from app.models.project import Project
+
+    db = db_session
+    db.add(Project(id=767, name="P767", user_id=1))
+    db.add(Dataset(id=767, project_id=767, name="D"))
+    db.flush()
+    cols = []
+    for i in range(2):
+        col = DatasetColumn(
+            id=7670 + i, dataset_id=767, column_code=f"q{i}", column_text=f"q{i}",
+            column_type="ordinal", sequence_order=i, display_order=i,
+        )
+        db.add(col)
+        cols.append(col)
+    db.add(AnalysisDomain(id=767, project_id=767, name="Cancelling"))
+    for i, col in enumerate(cols):
+        db.add(AnalysisDomainMember(
+            domain_id=767, member_type="column", member_id=col.id, sequence_order=i,
+        ))
+    db.flush()
+
+    vid = 767000
+    for r, (a, b) in enumerate([(1, 5), (5, 1), (2, 4), (4, 2), (3, 3)]):
+        dr = DatasetRow(id=76700 + r, dataset_id=767)
+        db.add(dr)
+        db.flush()
+        for col, v in zip(cols, (a, b)):
+            vid += 1
+            db.add(DatasetValue(
+                id=vid, row_id=dr.id, column_id=col.id,
+                value_text=str(v), value_numeric=float(v),
+            ))
+    db.flush()
+
+    # A result stored by the OLD code: the undefined coefficient as a measured 0.
+    test = StatisticalTest(
+        project_id=767, test_type="cronbachs_alpha",
+        target_type="analysis_domain", target_id=767, config="{}",
+        result_data='{"alpha": 0.0, "k": 2, "n": 5}', valid_n=5, stale=True,
+    )
+    db.add(test)
+    db.flush()
+
+    with pytest.raises(ValueError):
+        compute_statistical_test(db, test)
+
+    assert test.result_data is None, (
+        "the refused recompute left the old 0.00 in place — it would keep "
+        "rendering, which is the claim #767 removes"
+    )
+    assert test.valid_n is None
+    assert test.stale is True

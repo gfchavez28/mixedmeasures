@@ -1,5 +1,6 @@
 import type { ComparisonRow } from '@/lib/api'
 import { formatPValue, getSignificanceStars } from '@/lib/chart-data'
+import AssumptionNote from './AssumptionNote'
 
 interface ComparisonTestStripProps {
   rows: ComparisonRow[]
@@ -70,8 +71,8 @@ export default function ComparisonTestStrip({ rows, sigLevels, nonparametric }: 
         }
 
         return (
+          <div key={`${row.source_id}-${row.source_type}`}>
           <div
-            key={`${row.source_id}-${row.source_type}`}
             className="flex items-center gap-3 px-2 py-1 text-[11px] text-mm-text-muted font-mono tabular-nums"
           >
             {/* The name is clipped at 180px and this strip has no tooltip, so
@@ -89,6 +90,10 @@ export default function ComparisonTestStrip({ rows, sigLevels, nonparametric }: 
             </span>
             <span>{esLabel} = {esValue}{ciStr}{labelStr}</span>
             {postHocNote && <span className="text-mm-text-faint">{postHocNote}</span>}
+          </div>
+          {/* #525 — the panel offers "use the non-parametric test"; this is the
+              answer to "do I need to?", beside the test it qualifies. */}
+          <AssumptionNote row={row} />
           </div>
         )
       })}

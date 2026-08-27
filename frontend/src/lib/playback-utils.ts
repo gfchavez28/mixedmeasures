@@ -259,3 +259,24 @@ export function findNearestSegment<T extends TimelineUnit>(segments: T[], time: 
   }
   return closest
 }
+
+/**
+ * #775 — what a row under the playhead should ANNOUNCE.
+ *
+ * Two distinct facts, which #770 collapsed into one and therefore got wrong:
+ * `atPlayhead` says the playhead is inside this unit (containment — what the
+ * green highlight means), and `isPlaying` says the transport is actually
+ * rolling. "Now playing" is a claim about the TRANSPORT, so it needs both; a
+ * parked playhead is a true and useful thing to say, but it is not playing.
+ *
+ * Both non-empty branches exist so the announced state MATCHES the visible one:
+ * the highlight is drawn on containment alone, and suppressing the parked case
+ * would leave a sighted user with a signal a screen-reader user does not get.
+ *
+ * ⚠️ Named for the TIMELINE, not the transcript (this module's convention) —
+ * the video-only coding track reuses it on a source with no transcript.
+ */
+export function playheadRowSuffix(atPlayhead: boolean, isPlaying: boolean): string {
+  if (!atPlayhead) return ''
+  return isPlaying ? ' — now playing' : ' — paused here'
+}

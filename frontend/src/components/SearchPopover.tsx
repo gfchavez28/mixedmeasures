@@ -11,6 +11,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog'
+import { dataViewPath } from '@/lib/dataset-routes'
 import {
   searchApi,
   type SearchEntityType,
@@ -446,8 +447,30 @@ export default function SearchPopover({
     closeAndNavigate(`/projects/${projectId}/observations/${obs.id}`)
   }
 
+  /**
+   * #834: land on the RECORD, in the Data view.
+   *
+   * This used to navigate to `…/datasets/text-coding?columns=N` — the column,
+   * never the row. Measured live: the Text Coding list is deliberately shuffled
+   * (it renders a seed), so the matched record was not merely unselected, it
+   * was not on screen and its position was randomised. Search answered "which
+   * record said this" and the click discarded the answer.
+   *
+   * The Data view is the destination because it is the only one that shows the
+   * REST of that record — which is what someone searching for a remembered
+   * quote is after. The grid resolves `row` to a page itself.
+   *
+   * ⚠️ The coding workflow is NOT lost, and deliberately does not cost a second
+   * control here: the Data view's own `Code Text` button reaches Text Coding
+   * for this dataset one click from where we land. A secondary button inside a
+   * `role="option"` row would be nested interactive content and a tab stop per
+   * hit (#771/#785) — real accessibility cost to duplicate an adjacent path.
+   */
   const handleTextClick = (comment: TextSearchResult) => {
-    closeAndNavigate(`/projects/${projectId}/datasets/text-coding?columns=${comment.column_id}`)
+    closeAndNavigate(dataViewPath(projectId, comment.dataset_id, {
+      rowId: comment.row_id,
+      columnId: comment.column_id,
+    }))
   }
 
   const handleCanvasClick = (result: CanvasSearchResult) => {
@@ -820,7 +843,8 @@ export default function SearchPopover({
       <div className="flex-1 min-w-0">
         <p className="text-sm">{highlightMatch(getSnippet(comment.value_text, debouncedQuery), debouncedQuery)}</p>
         <p className="text-xs text-muted-foreground mt-0.5">
-          {comment.column_name}
+          {comment.dataset_name}
+          {` \u00b7 ${comment.column_name}`}
           {comment.row_identifier && ` \u00b7 ${comment.row_identifier}`}
           {comment.applied_code_count > 0 && ` \u00b7 ${comment.applied_code_count} codes`}
         </p>
@@ -858,7 +882,7 @@ export default function SearchPopover({
         aria-label="Search qualitative data"
       >
         <DialogTitle className="sr-only">Search qualitative data</DialogTitle>
-        <DialogDescription className="sr-only">Search across conversations, documents, codes, and more</DialogDescription>
+        <DialogDescription className="sr-only">Search across conversations, documents, observations, open-text responses in your datasets, canvases, codes, notes and memos</DialogDescription>
 
         {/* Search input */}
         <div className="p-3 border-b bg-[hsl(var(--mm-green)/0.08)]">
@@ -872,7 +896,7 @@ export default function SearchPopover({
             <Input
               ref={inputRef}
               type="text"
-              placeholder="Search qualitative data..."
+              placeholder="Search transcripts, documents, responses, codes..."
               value={query}
               onChange={(e) => {
                 setQuery(e.target.value)

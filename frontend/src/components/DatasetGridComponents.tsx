@@ -3,8 +3,9 @@ import { useListKeyboardNav } from '@/hooks/useListKeyboardNav'
 import { useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Link2, X, Pencil, Trash2, Settings2, GripVertical, FunctionSquare, RefreshCw, Check, UserPlus, LoaderCircle } from 'lucide-react'
+import { Link2, X, Pencil, Trash2, Settings2, GripVertical, FunctionSquare, RefreshCw, Check, UserPlus, LoaderCircle, CornerDownRight } from 'lucide-react'
 import { useSortable } from '@dnd-kit/sortable'
+import { columnDisplayLabel } from '@/lib/dataset-column-label'
 import {
   participantsApi,
   type DatasetColumn,
@@ -27,9 +28,10 @@ import {
 } from '@/components/ui/popover'
 import { Input } from '@/components/ui/input'
 import EditableCell from '@/components/EditableCell'
-import { TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
+import { TYPE_BADGE_CLASSES, variableDeleteEndpoint } from '@/lib/dataset-constants'
 import { ColumnEditorPopover, type EditorField } from '@/components/ColumnEditorPopover'
 import { formatFocusRow } from '@/components/crosswalk/navigation'
+import { variableViewPath } from '@/lib/dataset-routes'
 
 // ── Resize handle ────────────────────────────────────────────────────────────
 
@@ -154,13 +156,43 @@ export function ColumnHeaderContent({
           {column.column_type === 'demographic' && column.demographic_subtype
             ? column.demographic_subtype.charAt(0).toUpperCase() + column.demographic_subtype.slice(1)
             : column.column_type}
+          {/* An unset subtype is worth flagging, but a bare "?" announces as
+              the character — a screen reader read "demographic ?" and nothing
+              else. The words ARE the accessible name here, so `role="img"`
+              would suppress them (#698); `sr-only` text beside the glyph is
+              what names it without changing the visual. Setting it now lives
+              in the Variables view (design note E). */}
           {column.column_type === 'demographic' && !column.demographic_subtype && (
-            <span className="ml-0.5 text-amber-500">?</span>
+            <>
+              <span className="ml-0.5 text-amber-500" aria-hidden="true">?</span>
+              <span className="sr-only"> — no subtype set</span>
+            </>
           )}
         </span>
-        {isManual && (
-          <span title="Manual column"><Pencil className="w-3 h-3 text-mm-text-faint" /></span>
-        )}
+        {/* 🔴 A derived variable is `source="manual"` (Decision B — it must be,
+            because a COMPUTED column is refused value labels, missing rules and
+            recode definitions, #806). But "Manual column" then reads as
+            "somebody typed this by hand", which is the OPPOSITE of what it is.
+            Found by driving the real corpus, and it is #795's rule restated:
+            ask of any status label whether the sentence it implies is true of
+            THIS thing.
+
+            ⚠️ The `sr-only` text is not decoration. `lucide-react` sets
+            `aria-hidden` on its icons by default and a `title` on a `<span>` is
+            not a reliable name, so before this the marker was announced as
+            nothing at all — the same shape as the demographic-subtype marker
+            just above, which is why it takes the same remedy. */}
+        {isManual && (column.derived_via ? (
+          <span title={`Derived using ${column.derived_via}`} className="flex items-center gap-0.5">
+            <CornerDownRight className="w-3 h-3 text-mm-text-faint" />
+            <span className="sr-only"> — derived using {column.derived_via}</span>
+          </span>
+        ) : (
+          <span title="Manual column">
+            <Pencil className="w-3 h-3 text-mm-text-faint" />
+            <span className="sr-only"> — manual column</span>
+          </span>
+        ))}
         {isComputed && (
           <span title={column.expression || 'Computed column'} className="flex items-center gap-0.5">
             <FunctionSquare className="w-3 h-3 text-violet-500" />
@@ -274,10 +306,8 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
   onSelectDef,
   projectId,
   datasetId,
-  onEditColumn,
   onDeleteColumn,
   onTypeChange,
-  onSubtypeChange,
   onColumnNameEdit,
   onColumnTextEdit,
   onColumnResizeStart,
@@ -287,12 +317,8 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
   domainPills,
   onRemoveFromGroup,
   onToggleParticipantVisibility,
-  onEditComputed,
-  onDeleteComputed,
   onRecompute,
   onLinkByColumn,
-  onEditValueLabels,
-  onSwapNameLabel,
   isPopoverOpen,
   onPopoverOpenChange,
   activeField,
@@ -307,10 +333,8 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
   onSelectDef: (columnId: number, defId: number | null) => void
   projectId: number
   datasetId: number
-  onEditColumn: (column: DatasetColumn) => void
   onDeleteColumn: (column: DatasetColumn) => void
   onTypeChange: (columnId: number, newType: string) => void
-  onSubtypeChange: (columnId: number, subtype: string | null) => void
   onColumnNameEdit: (columnId: number, newName: string) => void
   onColumnTextEdit: (columnId: number, newText: string) => void
   onColumnResizeStart: (columnId: number) => void
@@ -326,15 +350,11 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
    * profile panels. DatasetView owns the mutation + query invalidation;
    * this menu item just dispatches. */
   onToggleParticipantVisibility?: (column: DatasetColumn) => void
-  onEditComputed?: (column: DatasetColumn) => void
-  onDeleteComputed?: (column: DatasetColumn) => void
+  /** A stale computed column is recomputed from here; the FORMULA is edited in
+   * the Variables view (design note E — the popover thinning). */
   onRecompute?: (column: DatasetColumn) => void
   /** #414 (DEC-8): retro bulk-link by an identifier column. */
   onLinkByColumn?: (column: DatasetColumn) => void
-  /** #576/#577: open the value-labels editor. */
-  onEditValueLabels?: (column: DatasetColumn) => void
-  /** #575: swap column_name ↔ column_text. */
-  onSwapNameLabel?: (column: DatasetColumn) => void
   isPopoverOpen: boolean
   onPopoverOpenChange: (columnId: number, open: boolean) => void
   activeField: EditorField
@@ -349,7 +369,16 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
     listeners,
     setNodeRef,
     isDragging,
-  } = useSortable({ id: column.id })
+  } = useSortable({
+    id: column.id,
+    // #776: dnd-kit's default `roleDescription` is the literal string
+    // "sortable", which it means as *drag-reorderable*. On a TABLE COLUMN
+    // HEADER that word already has a specific, different meaning — sort by
+    // value — and this grid has no sort at all (no aria sort, no handler).
+    // So every header announced a capability that does not exist, once per
+    // column across a row, to the only users who hear it. Say what it is.
+    attributes: { roleDescription: 'draggable column header' },
+  })
   const navigate = useNavigate()
 
   const handleResizeStart = useCallback(() => {
@@ -373,10 +402,13 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
     onPopoverOpenChange(column.id, open)
   }, [column.id, onPopoverOpenChange])
 
+  // ONE handler, because the endpoint choice moved into `useDeleteVariable`
+  // (#812). The `onDeleteComputed` twin it replaces was vestigial: both props
+  // resolved to the same `setDeleteColumnTarget`, so the branch decided nothing
+  // and existed only to be got wrong on a fourth surface.
   const handleDelete = useCallback((q: DatasetColumn) => {
-    if (q.source === 'computed' && onDeleteComputed) onDeleteComputed(q)
-    else onDeleteColumn(q)
-  }, [onDeleteColumn, onDeleteComputed])
+    onDeleteColumn(q)
+  }, [onDeleteColumn])
 
   const handleResetWidth = useCallback(() => {
     onColumnResetWidth(column.id)
@@ -387,6 +419,32 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
       <ContextMenuTrigger asChild>
         <th
           ref={setNodeRef}
+          // #772: `<th>` alone does not tell a screen reader which way it
+          // heads. Without `scope`, cell navigation across a 120×11 grid
+          // announces values with nothing to attach them to.
+          scope="col"
+          /**
+           * Double-click opens this variable in the Variables view — jamovi's
+           * gesture for the same surface (design note §11), and it was free:
+           * `ResizeHandle` stops propagation on its own double-click, so the
+           * width-reset keeps working (verified, not assumed).
+           *
+           * ⚠️ Single-click already opens the editor popover, so a double-click
+           * necessarily toggles it open-then-shut first. Closing it explicitly
+           * is what stops that landing us on the next page with a stale open
+           * state. Form controls are excluded because the popover's own inline
+           * editors would otherwise navigate away mid-edit — Radix PORTALS the
+           * popover content, so this only guards the trigger's own children.
+           *
+           * ⚠️ This is a mouse-only affordance by nature. The keyboard path is
+           * the popover's "Edit in the Variables view" link, which is why that
+           * item stays even though this gesture exists.
+           */
+          onDoubleClick={(e) => {
+            if ((e.target as HTMLElement).closest('input, textarea, select')) return
+            onPopoverOpenChange(column.id, false)
+            navigate(variableViewPath(projectId, datasetId, column.id))
+          }}
           className="px-3 py-2 text-center text-xs font-medium text-mm-text border-l sticky top-0 z-20 bg-mm-bg group/col"
           style={{ opacity: isDragging ? 0.4 : 1 }}
         >
@@ -399,18 +457,13 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
             onColumnNameEdit={onColumnNameEdit}
             onColumnTextEdit={onColumnTextEdit}
             onTypeChange={onTypeChange}
-            onSubtypeChange={onSubtypeChange}
             onSelectDef={handleSelectDef}
             activeDef={activeDef}
             onNextColumn={onNextColumn}
             onPrevColumn={onPrevColumn}
-            onOpenDetails={onEditColumn}
             onDeleteColumn={handleDelete}
-            onEditComputed={onEditComputed}
             onRecompute={onRecompute}
             onLinkByColumn={onLinkByColumn}
-            onEditValueLabels={onEditValueLabels}
-            onSwapNameLabel={onSwapNameLabel}
             projectId={projectId}
             datasetId={datasetId}
             columnIndex={columnIndex}
@@ -418,14 +471,20 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
           >
             <div className="cursor-pointer">
               {/* Drag handle — visible on hover */}
+              {/* #776/#559: the handle is a real (keyboard-draggable) control,
+                  so it needs a name that says WHAT it moves — "Drag to reorder"
+                  eleven times over says nothing about which column you are on.
+                  `focus-visible:opacity-100` because it is reachable by Tab and
+                  was revealed on hover only. */}
               <div
                 {...attributes}
                 {...listeners}
                 onClick={(e) => e.stopPropagation()}
-                className="absolute left-0 top-0 bottom-0 w-4 flex items-center justify-center opacity-0 group-hover/col:opacity-100 cursor-grab active:cursor-grabbing z-10"
+                className="absolute left-0 top-0 bottom-0 w-4 flex items-center justify-center opacity-0 group-hover/col:opacity-100 focus-visible:opacity-100 cursor-grab active:cursor-grabbing z-10"
+                aria-label={`Reorder column ${columnDisplayLabel(column)}`}
                 title="Drag to reorder"
               >
-                <GripVertical className="w-3 h-3 text-mm-text-faint" />
+                <GripVertical aria-hidden className="w-3 h-3 text-mm-text-faint" />
               </div>
               <ColumnHeaderContent
                 column={column}
@@ -445,18 +504,14 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
         </th>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        {(column.source === 'manual' || column.source === 'imported') && (
-          <ContextMenuItem onClick={() => onEditColumn(column)}>
-            <Settings2 className="w-4 h-4 mr-2" />
-            Column details...
-          </ContextMenuItem>
-        )}
-        {column.source === 'computed' && onEditComputed && (
-          <ContextMenuItem onClick={() => onEditComputed(column)}>
-            <FunctionSquare className="w-4 h-4 mr-2" />
-            Edit formula...
-          </ContextMenuItem>
-        )}
+        {/* 🔴 "Column details…" and "Edit formula…" are GONE from here (design
+            note E — the popover thinning), and the details item was also a
+            LIVE DEFECT: it was offered for `manual || imported` while its save
+            goes through the manual-only PATCH, which 403s on an imported
+            column. The popover beside it carried the correct `isManual` gate
+            since #575; this sibling was never swept. Both forms now have one
+            home, reachable by "Edit in the Variables view" below, where the
+            gate lives once. `Recompute` stays — see the popover's note. */}
         {column.source === 'computed' && column.stale && onRecompute && (
           <ContextMenuItem onClick={() => onRecompute(column)}>
             <RefreshCw className="w-4 h-4 mr-2" />
@@ -464,9 +519,9 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
           </ContextMenuItem>
         )}
         <ContextMenuSeparator />
-        <ContextMenuItem onClick={() => navigate(`/projects/${projectId}/datasets/${datasetId}/recode?column=${column.id}`)}>
+        <ContextMenuItem onClick={() => navigate(variableViewPath(projectId, datasetId, column.id))}>
           <Settings2 className="w-4 h-4 mr-2" />
-          Edit in Recode Workbench
+          Edit in the Variables view
         </ContextMenuItem>
         {/* #353: toggle this column in linked-participant profile panels.
           * Default true; clicking flips. SKIP and OPEN_TEXT are excluded
@@ -490,17 +545,25 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
             )}
           </ContextMenuItem>
         )}
-        <ContextMenuSeparator />
-        <ContextMenuItem
-          onClick={() => {
-            if (column.source === 'computed' && onDeleteComputed) onDeleteComputed(column)
-            else onDeleteColumn(column)
-          }}
-          className="text-red-600"
-        >
-          <Trash2 className="w-4 h-4 mr-2" />
-          Delete column
-        </ContextMenuItem>
+        {/* 🔴 This item had NO source gate (#812). `delete_manual_column` 403s
+            anything that is not `source="manual"`, so on an imported corpus —
+            every column of a real survey — right-clicking a header opened a
+            confirm promising to permanently delete the column and all its data,
+            and the server then refused. The popover's two copies WERE gated, by
+            living inside its manual/computed branches; this one was the third
+            surface with the wrong gate, which is #807 exactly. */}
+        {variableDeleteEndpoint(column) !== null && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              onClick={() => onDeleteColumn(column)}
+              className="text-red-600"
+            >
+              <Trash2 className="w-4 h-4 mr-2" />
+              Delete variable…
+            </ContextMenuItem>
+          </>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   )
@@ -775,6 +838,12 @@ export const DataRow = memo(function DataRow({
   onDeleteRow: (rowId: number, recordLabel: string) => void
   domainScoreCols?: DomainScoreColumn[]
 }) {
+  // ⚠️ `rowIndex` is DATASET-scoped, not page-scoped — the caller adds the
+  // page offset. Page-scoped it restarted at "R1" on every page, so on a
+  // dataset with no identifier column two different records carried the same
+  // label 200 rows apart. Latent rather than live (measured 2026-08-25: 0 of
+  // 75,699 GSS rows and 0 of 48 Ferncrest rows lack an identifier), but record
+  // identity is exactly what the #834 deep link makes load-bearing.
   const recordLabel = row.row_identifier || `R${rowIndex + 1}`
 
   // #532: the row's identity for create-from-row — the identifier column's
@@ -789,13 +858,33 @@ export const DataRow = memo(function DataRow({
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <tr className="group border-b">
-          <td
-            className="px-3 py-2 text-sm font-medium font-mono whitespace-nowrap sticky left-0 z-10 bg-mm-surface group-hover:bg-mm-surface-hover w-[96px] min-w-[96px]"
+        {/* `data-row-id` is the deep-link's only DOM contract (#834). A search
+            hit scrolls to `tr[data-row-id="N"]` and then indexes into
+            `tr.cells` using the position of the matching `<col data-col-id>` in
+            the table's colgroup — which is why the marker lives HERE and not on
+            each cell: `EditableCell` returns ten different `<td>` branches by
+            type and edit state, so a per-cell attribute would be ten places to
+            keep in step. Renaming this attribute breaks `useRecordFocus`. */}
+        <tr className="group border-b" data-row-id={row.id}>
+          {/* #772 — the record id is this row's HEADER, not a value.
+            *
+            * It was a `<td>`, so every body cell in a 120×11 grid had a column
+            * to name it and nothing to say WHICH RECORD it belonged to: cell
+            * navigation announced "Post_Score, 14" with no way to learn whose
+            * 14 that was. `scope="row"` is what makes the identifier travel
+            * with each cell.
+            *
+            * ⚠️ `text-left` is load-bearing, not tidying — a `<th>` centres by
+            * UA default where a `<td>` does not, so dropping it silently
+            * re-aligns the sticky identity column. `font-medium` already
+            * overrides the bold. */}
+          <th
+            scope="row"
+            className="px-3 py-2 text-left text-sm font-medium font-mono whitespace-nowrap sticky left-0 z-10 bg-mm-surface group-hover:bg-mm-surface-hover w-[96px] min-w-[96px]"
             title={recordLabel}
           >
             {recordLabel}
-          </td>
+          </th>
           <ParticipantCell
             row={row}
             projectId={projectId}

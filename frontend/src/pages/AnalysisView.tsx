@@ -21,11 +21,7 @@ import type {
   MaterialResponse,
   MaterialCollectionDetailResponse,
   StatisticalTestResponse,
-  AnalysisColumnItem,
-  DatasetColumn,
-  ManualColumnUpdate,
 } from '@/lib/api'
-import { extractApiError } from '@/lib/api/error-utils'
 import { toast } from 'sonner'
 import {
   DEFAULT_FORMATTING,
@@ -45,11 +41,12 @@ import { compareScales, type ScaleAgreement } from '@/lib/scale-comparison'
 import CorrelationsComparisonsContent from '@/components/analysis/CorrelationsComparisonsContent'
 import { DataQualityContent } from '@/components/analysis/DataQualityTab'
 import AnalysisSidebar from '@/components/analysis/AnalysisSidebar'
-import { ColumnFormDialog } from '@/components/ColumnFormDialog'
+import AlphaItemDiagnostics, { type AlphaItem } from '@/components/analysis/AlphaItemDiagnostics'
+import { splitBasisLabel, splitBasisDetail, describeHalves } from '@/lib/split-basis'
 import { useAnalysisUrlState } from '@/hooks/useAnalysisUrlState'
 import { useAnalysisDerived } from '@/hooks/useAnalysisDerived'
 import { useQuickCompute } from '@/hooks/useQuickCompute'
-import { useChartAnnouncements } from '@/hooks/useChartAnnouncements'
+import { useChartAnnouncements, describeChartTypeChange } from '@/hooks/useChartAnnouncements'
 import { useEnsureMaterialCollection } from '@/hooks/useEnsureMaterialCollection'
 import { Button } from '@/components/ui/button'
 import {
@@ -87,6 +84,39 @@ const TEST_TYPE_LABELS: Record<string, string> = {
   independent_t_test: 'Independent T-Test',
   one_way_anova: 'One-Way ANOVA',
   split_half: 'Split-Half Reliability',
+}
+
+/**
+ * The per-item diagnostics on a Cronbach's alpha result, or `null`.
+ *
+ * `null` for results computed before #707a — an older row has no `items` key,
+ * and recomputing is what fills it. Deliberately does NOT synthesise rows from
+ * the legacy `item_variances` list: that list is positional with no labels, so
+ * the rows would be numbered rather than named, which is the state this feature
+ * exists to leave behind.
+ */
+function alphaItems(test: StatisticalTestResponse): AlphaItem[] | null {
+  const rd = test.result_data as Record<string, unknown> | null
+  const items = rd?.items
+  return Array.isArray(items) && items.length > 0 ? (items as AlphaItem[]) : null
+}
+
+/**
+ * The split-half basis line: how the items were split, and into what.
+ *
+ * `null` on a result computed before #710 — it was split over an internal
+ * column order, and labelling it with the current basis would assert a split
+ * that did not happen.
+ */
+function splitNote(test: StatisticalTestResponse): string | null {
+  const rd = test.result_data as Record<string, unknown> | null
+  const label = splitBasisLabel(rd?.split_basis as string | undefined)
+  if (!label) return null
+  const halves = describeHalves(
+    rd?.half1_items as string[] | undefined,
+    rd?.half2_items as string[] | undefined,
+  )
+  return halves ? `Split ${label} — ${halves}` : `Split ${label}`
 }
 
 function formatTestResult(test: StatisticalTestResponse): string {
@@ -198,42 +228,12 @@ export default function AnalysisView() {
   const [proportionThreshold, setProportionThreshold] = useState(4)
   const [proportionValues, setProportionValues] = useState<string[]>([])
 
-  // Column details dialog (opened from ColumnPicker context menu)
-  const [editColumnTarget, setEditColumnTarget] = useState<{ variable: AnalysisColumnItem; column: DatasetColumn } | null>(null)
-  const [editColumnError, setEditColumnError] = useState<string | null>(null)
-
-  const handleEditAnalysisColumn = useCallback(async (variable: AnalysisColumnItem) => {
-    try {
-      const data = await queryClient.fetchQuery({
-        queryKey: ['dataset-data', pid, variable.dataset_id],
-        queryFn: () => datasetsApi.getData(pid, variable.dataset_id),
-        staleTime: 60_000,
-      })
-      const column = data.columns.find((c: DatasetColumn) => c.id === variable.id)
-      if (column) {
-        setEditColumnTarget({ variable, column })
-        setEditColumnError(null)
-      } else {
-        toast.error('Column not found')
-      }
-    } catch {
-      toast.error('Failed to load column data')
-    }
-  }, [pid, queryClient])
-
-  const editColumnMutation = useMutation({
-    mutationFn: ({ datasetId, columnId, data }: { datasetId: number; columnId: number; data: ManualColumnUpdate }) =>
-      datasetsApi.updateManualColumn(pid, datasetId, columnId, data),
-    onSuccess: () => {
-      if (editColumnTarget) {
-        queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, editColumnTarget.variable.dataset_id] })
-      }
-      queryClient.invalidateQueries({ queryKey: ['analysis-columns', pid] })
-      setEditColumnTarget(null)
-      toast.success('Column updated')
-    },
-    onError: (err: Error) => setEditColumnError(extractApiError(err, 'Failed to update column')),
-  })
+  // The "Column Details…" item this dialog served is GONE from the variable
+  // picker's context menu (design note E — the popover thinning). It saved
+  // through the manual-only PATCH with NO source gate, so it 403'd on every
+  // imported and computed column — nearly all of them in a real corpus. The
+  // picker's "Edit in the Variables view" item is the working path, and the
+  // Variables view is where the gate lives.
 
   // Resizable panel layout persistence
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
@@ -313,8 +313,15 @@ export default function AnalysisView() {
   const hasComparisonSelection = activeTab === 'rc' && rcView === 'comparisons'
     && (rcColumnIds.length >= 1 || rcDomainIds.length >= 1) && compareBy !== null
 
+  // #525b — the QQ points are O(n) and only one panel draws them, so they are
+  // requested rather than always sent. ⚠️ `includeQq` MUST be in the queryKey:
+  // a query that sends a parameter and does not key on it serves the cached
+  // response from before the parameter changed (the #454 family), which here
+  // means switching to the QQ panel would render an empty chart from cache.
+  const includeQq = rcChartType === 'comparison_qq'
+
   const { data: comparisonData, isFetching: isComparisonFetching } = useQuery({
-    queryKey: ['group-comparison', pid, rcColumnIds, rcDomainIds, compareBy, compareBy2, testType, excludeGroups, nonparametric],
+    queryKey: ['group-comparison', pid, rcColumnIds, rcDomainIds, compareBy, compareBy2, testType, excludeGroups, nonparametric, includeQq],
     queryFn: () => comparisonsApi.groupComparison(pid, {
       column_ids: rcColumnIds,
       domain_ids: rcDomainIds,
@@ -324,6 +331,7 @@ export default function AnalysisView() {
       include_effect_size_ci: true,
       exclude_groups: excludeGroups.length > 0 ? excludeGroups : undefined,
       nonparametric,
+      include_qq: includeQq || undefined,
     }),
     enabled: hasComparisonSelection,
     staleTime: 30_000,
@@ -637,13 +645,50 @@ export default function AnalysisView() {
   const chartAnnouncement = useChartAnnouncements({
     isComputing,
     metricCount: selectedMetrics.length,
+    // #786 — the SYNC selection, never `selectedMetrics.length`. The metric list
+    // is the quick-compute result and lags the checkbox by a commit, which is the
+    // window in which the derived chart type flips to a value nobody sees.
+    hasChart: hasAnySelection,
     chartType: activeChartType,
+    chartTypeDisabledReasons: chartTypeInfo.disabledReasons,
     groupingColumnId,
     groupingColumnId2,
     demographics: analysisColumnsData?.demographics ?? [],
     divergingMode,
     axisTransform,
   })
+
+  /**
+   * #786 — the sighted half of an AUTOMATIC chart-type change.
+   *
+   * Selecting a second continuous variable silently replaced the histogram with a
+   * horizontal bar, and the only banner on screen talked about heatmap and stacked
+   * bar. The reason was already authored — `disabledReasons.histogram` says
+   * "Select a single variable to see its distribution" — it simply never reached
+   * anyone: it lives on the chart-type picker, which is not where you are looking
+   * when the chart changes under you.
+   *
+   * ⚠️ Rendered WITHOUT `role="status"`. The same sentence goes out through the
+   * chart-announcements live region, and two channels carrying one fact is how a
+   * screen reader ends up saying it twice (#525b).
+   */
+  const [autoChartNotice, setAutoChartNotice] = useState<string | null>(null)
+  const prevActiveChartType = useRef<ChartType | null>(null)
+  const disabledReasonsRef = useRef(chartTypeInfo.disabledReasons)
+  disabledReasonsRef.current = chartTypeInfo.disabledReasons
+  useEffect(() => {
+    const prev = prevActiveChartType.current
+    prevActiveChartType.current = activeChartType
+    // Only an automatic change earns a banner: a deliberate switch is the user's
+    // own click, and `disabledReasons` has nothing to say about the type they left.
+    const reason = prev && activeChartType && prev !== activeChartType
+      ? disabledReasonsRef.current?.[prev]
+      : undefined
+    if (!reason || !hasAnySelection) return
+    setAutoChartNotice(describeChartTypeChange(prev, activeChartType, disabledReasonsRef.current))
+    const timer = setTimeout(() => setAutoChartNotice(null), 6000)
+    return () => clearTimeout(timer)
+  }, [activeChartType, hasAnySelection])
 
   // Comparison test type announcement (screen reader)
   const [compAnnouncement, setCompAnnouncement] = useState('')
@@ -706,7 +751,24 @@ export default function AnalysisView() {
     cross_tab_column_id: crossTabColumnId || undefined,
     cross_tab_display: crossTabDisplay !== 'count' ? crossTabDisplay : undefined,
     // R&C tab params
-    rc_view: rcView !== 'correlations' ? rcView : undefined,
+    /**
+     * #831 — written UNCONDITIONALLY, unlike every other default-omitted key
+     * here, and that is the fix.
+     *
+     * Omitting it for the default `'correlations'` made a Pearson correlation
+     * material's config **indistinguishable from a descriptives config**, so a
+     * correlation embedded on a canvas fell through to the quantitative metric
+     * branch and drew a plausible, silent, wrong figure (#817's mechanism, on
+     * the half its fix could not reach). The saver KNEW — three lines below it
+     * writes `source_tab: 'correlations'` and `material_type:
+     * 'correlation_matrix'` — but the config, which is what the canvas reads,
+     * threw the answer away.
+     *
+     * ⚠️ Safe precisely because `buildCurrentChartConfig` has exactly ONE
+     * caller (`handleAddToMaterials`), so the default-omissions here are
+     * stored-JSON brevity and nothing reads them as URL state.
+     */
+    rc_view: rcView,
     corr_type: corrType !== 'pearson' ? corrType : undefined,
     sig_levels: sigLevels,
     bonferroni: bonferroniOn || undefined,
@@ -1095,8 +1157,10 @@ export default function AnalysisView() {
       showScatter,
       compareByLabel: columnLabel(compareBy),
       compareBy2Label: columnLabel(compareBy2),
+      descriptiveChartType: chartType,
+      crossTabColumnLabel: columnLabel(crossTabColumnId),
     })
-  }, [activeTab, metricType, selectedMetrics, rcView, rcChartType, showScatter, compareBy, compareBy2, columnsData])
+  }, [activeTab, metricType, selectedMetrics, rcView, rcChartType, showScatter, compareBy, compareBy2, columnsData, chartType, crossTabColumnId])
 
   const handleAddToMaterials = useCallback(async () => {
     if (!hasAnySelection) return
@@ -1271,7 +1335,6 @@ export default function AnalysisView() {
             onReorderMaterials={(ids) => reorderMaterialsMutation.mutate(ids)}
             selectedColumnIds={selectedColumnIds}
             selectedDomainIds={selectedDomainIds}
-            onEditColumn={handleEditAnalysisColumn}
             domainsFull={domainsData?.domains}
             metricsList={allMetrics}
             onCreateScoreMetric={(domainId) => createScoreMetricMutation.mutate(domainId)}
@@ -1390,7 +1453,11 @@ export default function AnalysisView() {
         </Panel>
 
         {/* Resize handle */}
-        <PanelResizeHandle className="w-1.5 bg-mm-bg hover:bg-mm-blue/20 active:bg-mm-blue/30 transition-colors cursor-col-resize flex items-center justify-center">
+        {/* A focusable separator with no name announces as bare "separator"
+            (#559) — the library supplies the role and the tab stop, not a label. */}
+        <PanelResizeHandle
+          aria-label="Resize the sidebar"
+          className="w-1.5 bg-mm-bg hover:bg-mm-blue/20 active:bg-mm-blue/30 transition-colors cursor-col-resize flex items-center justify-center">
           <div className="w-0.5 h-8 rounded-full bg-mm-border-medium" />
         </PanelResizeHandle>
 
@@ -1490,11 +1557,28 @@ export default function AnalysisView() {
               </div>
             )}
 
-            {/* Screen reader announcements */}
+            {/*
+              Screen reader announcements — TWO regions, deliberately (#791).
+
+              These are unrelated facts on independent clocks: the chart's own
+              state, and which statistical test the comparison picked. Sharing one
+              region meant neither could clear the other, so a stale sentence about
+              one kept sitting beside a live sentence about the other.
+            */}
             <div role="status" aria-live="polite" className="sr-only" id="chart-announcements">
               {chartAnnouncement}
+            </div>
+            <div role="status" aria-live="polite" className="sr-only" id="comparison-announcements">
               {compAnnouncement}
             </div>
+
+            {/* #786 — chart type changed itself; say why, where the chart is. */}
+            {autoChartNotice && (
+              <div className="flex items-center gap-2 px-3 py-2 mb-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded text-xs text-amber-700 dark:text-amber-300">
+                <TriangleAlert className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                <span>{autoChartNotice}</span>
+              </div>
+            )}
 
             {/* Group By auto-clear notice */}
             {groupByClearedNotice && (
@@ -1608,6 +1692,39 @@ export default function AnalysisView() {
                           <div className="text-mm-text-secondary mt-0.5 font-mono text-xs">
                             {formatTestResult(test)}
                           </div>
+                          {/* #707a: the per-item diagnostics a reviewer asks for.
+                              The result line above is a single string and cannot
+                              carry a table, which is why `item_variances` was
+                              computed and returned for years without ever being
+                              displayed. */}
+                          {test.test_type === 'cronbachs_alpha' && alphaItems(test) && (
+                            <AlphaItemDiagnostics
+                              items={alphaItems(test)!}
+                              alpha={
+                                ((test.result_data as Record<string, unknown> | null)
+                                  ?.alpha as number) ?? 0
+                              }
+                            />
+                          )}
+                          {/* #710: the split basis, stated rather than assumed.
+                              Split-half is split-DEPENDENT, so the coefficient
+                              cannot be judged without knowing which items landed
+                              in which half — and the researcher can now change
+                              it, because the split follows the domain's own item
+                              order. Absent on results computed before #710. */}
+                          {test.test_type === 'split_half' && splitNote(test) && (
+                            <div
+                              className="text-xs text-mm-text-faint mt-0.5"
+                              title={
+                                splitBasisDetail(
+                                  (test.result_data as Record<string, unknown> | null)
+                                    ?.split_basis as string | undefined,
+                                ) ?? undefined
+                              }
+                            >
+                              {splitNote(test)}
+                            </div>
+                          )}
                         </div>
                         <div className="flex items-center gap-1 flex-shrink-0">
                           <Button
@@ -1822,24 +1939,6 @@ export default function AnalysisView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      {/* Column details dialog (from ColumnPicker context menu) */}
-      {editColumnTarget && (
-        <ColumnFormDialog
-          open
-          onOpenChange={(open) => { if (!open) setEditColumnTarget(null) }}
-          onSubmit={(data) => {
-            editColumnMutation.mutate({
-              datasetId: editColumnTarget.variable.dataset_id,
-              columnId: editColumnTarget.variable.id,
-              data: data as ManualColumnUpdate,
-            })
-          }}
-          isSubmitting={editColumnMutation.isPending}
-          submitError={editColumnError}
-          initial={editColumnTarget.column}
-          title="Column Details"
-        />
-      )}
     </div>
   )
 }

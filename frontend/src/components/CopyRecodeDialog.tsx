@@ -242,6 +242,18 @@ export function CopyRecodeDialog({
           output_type: sourceDef.output_type,
           mapping,
           exclude_values: excludeValues?.length ? excludeValues : null,
+          // #587: record where this copy came from, exactly as the backend
+          // `copy_to` endpoint does. Without it the #578 startup repair's chain
+          // walk finds no reference and skips these defs FOREVER — so a reverse
+          // recode copied here stayed flipped (i.e. silently un-reversed) while
+          // its repaired original was correct: one battery, inconsistently
+          // coded, with no visual cue.
+          // ⚠️ Do NOT "simplify" this by routing the dialog through `copy_to`
+          // instead: that endpoint copies the mapping VERBATIM, and a
+          // `positional` copy here is remapped to the TARGET's labels. The
+          // source's label keys would match none of the target's cells and
+          // `value_numeric` would go NULL column-wide (the #580 class).
+          source_definition_id: sourceDef.id,
         })
 
         // If source def is primary, set the new one as primary too

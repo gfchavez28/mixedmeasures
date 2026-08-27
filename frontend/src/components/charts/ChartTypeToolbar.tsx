@@ -10,6 +10,7 @@ import {
   Table,
   TrendingUp,
   ListChecks,
+  BarChartBig,
 } from 'lucide-react'
 import type { ChartType, MetricType } from '@/lib/chart-data'
 import {
@@ -41,6 +42,7 @@ const CHART_TYPE_META: {
   { type: 'line', label: 'Line Chart', icon: TrendingUp },
   { type: 'frequency_table', label: 'Frequency Table', icon: ListChecks },
   { type: 'cross_tab', label: 'Cross-Tab', icon: Grid2X2 },
+  { type: 'histogram', label: 'Histogram', icon: BarChartBig },
 ]
 
 export default function ChartTypeToolbar({

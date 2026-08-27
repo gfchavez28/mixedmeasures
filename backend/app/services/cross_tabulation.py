@@ -59,6 +59,30 @@ def _get_ordered_values(db: Session, column: DatasetColumn) -> list[str] | None:
     return None
 
 
+def _axis_values(
+    ordered: list[str] | None, observed: set[str], rules,
+) -> list[str]:
+    """One axis's display values: the DECLARED scale, then the undeclared tail.
+
+    #591: a declared level nobody chose is a STRUCTURAL ZERO and belongs on the
+    axis — that is what a declared scale exists to express, and the frequency
+    computer already zero-fills it (#577). Filtering the declared order down to
+    what was observed made the same declaration answer two different ways on two
+    surfaces: a 0 bar in a frequency chart, and silently absent from a cross-tab.
+
+    ⚠️ **The declared order is filtered through the column's missing rules first.**
+    `_get_ordered_values` reads a primary `scale_map`'s mapping keys, and a
+    hand-authored mapping may name a value the column treats as missing (`{"N/A":
+    99}`). `apply_value_labels` and `write_back_scale_metadata` strip such pairs
+    on the write side (C4), but this path reads the mapping directly — so without
+    the filter, zero-filling would resurrect a missing level as a visible
+    category and undo #384/#592 on exactly this surface.
+    """
+    declared = [v for v in (ordered or []) if not is_missing(v, rules)]
+    seen = set(declared)
+    return declared + [v for v in order_value_labels(observed) if v not in seen]
+
+
 def compute_cross_tabulation(
     db: Session,
     project_id: int,
@@ -153,21 +177,13 @@ def compute_cross_tabulation(
             continue
         joint_counts[(row_val, col_val)] += 1
 
-    # Determine value sets (#406: numeric-aware ordering; explicit
-    # recode/scale_labels orders below still override)
-    all_row_vals = order_value_labels({rv for rv, _ in joint_counts.keys()})
-    all_col_vals = order_value_labels({cv for _, cv in joint_counts.keys()})
-
-    # Apply ordered values if available (only keep values that actually appear)
-    if row_ordered:
-        ordered_set = set(row_ordered)
-        remaining = [v for v in all_row_vals if v not in ordered_set]
-        all_row_vals = [v for v in row_ordered if v in {rv for rv, _ in joint_counts.keys()}] + remaining
-
-    if col_ordered:
-        ordered_set = set(col_ordered)
-        remaining = [v for v in all_col_vals if v not in ordered_set]
-        all_col_vals = [v for v in col_ordered if v in {cv for _, cv in joint_counts.keys()}] + remaining
+    # Axis values: the DECLARED scale first (including levels nobody chose —
+    # #591), then any observed value the declaration never named. #406:
+    # numeric-aware ordering for the undeclared tail.
+    observed_rows = {rv for rv, _ in joint_counts.keys()}
+    observed_cols = {cv for _, cv in joint_counts.keys()}
+    all_row_vals = _axis_values(row_ordered, observed_rows, row_rules)
+    all_col_vals = _axis_values(col_ordered, observed_cols, col_rules)
 
     n_shared = sum(joint_counts.values())
     row_totals = [sum(joint_counts.get((rv, cv), 0) for cv in all_col_vals) for rv in all_row_vals]
@@ -187,18 +203,50 @@ def compute_cross_tabulation(
             })
         matrix.append(row_cells)
 
-    # Chi-square test
+    # Chi-square test — on the OBSERVED submatrix only (#591).
+    #
+    # A declared-but-unchosen level is a legitimate ROW of the table and an
+    # illegitimate row of the TEST: scipy raises outright on it —
+    #   ValueError: The internally computed table of expected frequencies has a
+    #   zero element at (2, 0)
+    # — so displaying structural zeros without splitting the two would make the
+    # chi-square block silently vanish (it is inside a `try`) on every cross-tab
+    # that has one, or 500 if that `try` were ever narrowed. Measured, not
+    # reasoned. Same shape as #506: a phantom group is fine to show and must not
+    # enter the statistic.
+    chi_rows = [i for i, t in enumerate(row_totals) if t > 0]
+    chi_cols = [j for j, t in enumerate(col_totals) if t > 0]
+    omitted_levels = (len(all_row_vals) - len(chi_rows)) + (len(all_col_vals) - len(chi_cols))
+
     chi_result = None
-    if include_chi_square and len(all_row_vals) >= 2 and len(all_col_vals) >= 2:
+    if include_chi_square and len(chi_rows) >= 2 and len(chi_cols) >= 2:
         try:
             import numpy as np
             from scipy.stats import chi2_contingency
             observed = np.array([
-                [joint_counts.get((rv, cv), 0) for cv in all_col_vals]
-                for rv in all_row_vals
+                [joint_counts.get((all_row_vals[i], all_col_vals[j]), 0) for j in chi_cols]
+                for i in chi_rows
             ])
-            chi2, p, df, _ = chi2_contingency(observed)
-            min_dim = min(len(all_row_vals), len(all_col_vals)) - 1
+            chi2, p, df, expected = chi2_contingency(observed)
+            # #709: the expected table was computed and thrown away. Chi-square
+            # is a large-sample approximation and it degrades when expected
+            # counts are small — the conventional rule is >20% of cells below 5,
+            # or any cell below 1. Both figures ride the payload rather than a
+            # bare boolean, because "3 of 12 cells" is what a reader needs to
+            # judge it, and a threshold with no number behind it is the kind of
+            # warning people learn to dismiss.
+            #
+            # ⚠️ Computed on the SUBMATRIX, like the statistic itself (#591). A
+            # structurally-empty level is not a sparse cell — it is a level
+            # nobody was offered the chance to fill — so counting it here would
+            # fire the warning on tables that are perfectly well-powered.
+            n_cells = int(expected.size)
+            cells_lt_5 = int((expected < 5).sum())
+            min_expected = float(expected.min())
+            low_expected_warning = (cells_lt_5 / n_cells > 0.2) or min_expected < 1
+            # V's denominator must come from the SUBMATRIX too, or an empty
+            # level inflates the table's dimensions and shrinks the effect size.
+            min_dim = min(len(chi_rows), len(chi_cols)) - 1
             # #689: a degenerate table (a single effective row or column) gives
             # `min_dim == 0`, and V was reported as a measured 0 — "no
             # association" for a table that cannot express association at all.
@@ -206,12 +254,38 @@ def compute_cross_tabulation(
                 finite_or_none(np.sqrt(chi2 / (n_shared * min_dim)), 3)
                 if n_shared > 0 and min_dim > 0 else None
             )
+            # Fisher's exact, 2x2 only — offered whenever the shape allows it,
+            # not only when the warning fires, so the researcher can compare the
+            # two p-values rather than being handed a replacement.
+            fisher_p = None
+            if len(chi_rows) == 2 and len(chi_cols) == 2:
+                from scipy.stats import fisher_exact
+                fisher_p = finite_or_none(fisher_exact(observed)[1], 4)
             chi_result = {
                 "statistic": finite_or_none(chi2, 3),
                 "p_value": finite_or_none(p, 4),
                 "df": int(df),
                 "cramers_v": cramers_v,
                 "undefined_reason": None if cramers_v is not None else DEGENERATE,
+                # #591: how many displayed levels the test could NOT use. The
+                # table and the statistic now legitimately disagree about their
+                # dimensions, so the payload says so rather than leaving the
+                # researcher to infer it from df.
+                "omitted_levels": omitted_levels,
+                # #709: the sparsity disclosure. `cells_below_5` / `cell_count`
+                # are the figures; `low_expected_warning` is the conventional
+                # rule applied to them, sent so the client does not re-implement
+                # a threshold the server already knows.
+                "low_expected_warning": low_expected_warning,
+                "cells_below_5": cells_lt_5,
+                "cell_count": n_cells,
+                "min_expected": round(min_expected, 2),
+                # #709: Fisher's exact needs no large-sample assumption, so on
+                # the table where it is defined it is not a caveat but an
+                # answer. scipy implements it for 2x2 ONLY — an r x c version
+                # would be a different (and much more expensive) computation, so
+                # this is deliberately absent rather than approximated.
+                "fisher_exact_p": fisher_p,
             }
         except (ZeroDivisionError, ValueError, TypeError) as exc:
             logger.warning("Chi-square computation failed: %s", exc)

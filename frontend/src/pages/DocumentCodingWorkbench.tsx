@@ -12,6 +12,7 @@ import { useTextSplitSelection } from '@/hooks/useTextSplitSelection'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
+import { codeKeyHint } from '@/lib/codeShortcuts'
 import SplitToolbar from '@/components/SplitToolbar'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import {
@@ -1666,7 +1667,7 @@ export default function DocumentCodingWorkbench() {
         <span>Document</span>
         {selectedSegments.length > 0 && <span>{selectedSegments.length} selected</span>}
         <div className="flex-1" />
-        <span className="opacity-60">0-9: code · s: quote · c: create code · n: note · j: next uncoded · Ctrl+Z/Y: undo/redo</span>
+        <span className="opacity-60">{codeKeyHint(codes)} · s: quote · c: create code · n: note · j: next uncoded · Ctrl+Z/Y: undo/redo</span>
       </div>
 
       {/* Floating create code dialog */}
@@ -1750,7 +1751,10 @@ export default function DocumentCodingWorkbench() {
 
 // ── Document Segment Row ──
 
-function DocumentSegmentRow({
+/* Exported for `DocumentSegmentRow.a11y.test.tsx` only — the row's tab-stop
+ * population needs a real render, and #785's whole lesson is that a guard naming
+ * the controls somebody thought of misses the next one. No other importer. */
+export function DocumentSegmentRow({
   segment,
   isSelected,
   isEditing,
@@ -1867,7 +1871,21 @@ function DocumentSegmentRow({
     ? `Heading level ${segment.heading_level}, segment ${segment.sequence_order + 1}`
     : `Segment ${segment.sequence_order + 1}`
 
-  const hasExcerpt = segment.excerpt_info?.has_whole_segment || (segment.excerpt_info?.sub_segment_count ?? 0) > 0
+  /* #790 — TWO FACTS, and they were one variable.
+   *
+   * `hasAnyQuote` is shape-AGNOSTIC: "does this segment carry a quote of any
+   * kind", which is the right question for the amber fill and the filter.
+   * `isWholeQuoted` is shape-EXACT: it is what the gutter button's toggle
+   * actually creates and deletes (`handleToggleQuote` reads `has_whole_segment`).
+   *
+   * Merged, the button announced "Unquote" on a segment carrying only a
+   * SUB-SEGMENT quote — where pressing it CREATES a whole-segment one. A verb
+   * naming the opposite of what the press does is the worst version of this,
+   * and `excerpt-shape.ts::isWholeExcerpt`'s own docstring already says which
+   * predicate drives a toggle. */
+  const hasAnyQuote = segment.excerpt_info?.has_whole_segment || (segment.excerpt_info?.sub_segment_count ?? 0) > 0
+  const isWholeQuoted = segment.excerpt_info?.has_whole_segment ?? false
+  const hasExcerpt = hasAnyQuote
   return (
     <>
     <ContextMenu>
@@ -1903,10 +1921,18 @@ function DocumentSegmentRow({
           onDoubleClick={onDoubleClick}
         >
           {/* Quote gutter */}
+          {/* #785/#790 — parity with SegmentRow, which this row had drifted from
+            * in three ways: the tab stop was ungated (20 rendered rows = 20 stops,
+            * every one named the same word), the name said neither which segment
+            * nor, via `aria-pressed`, what state it was in, and the state it DID
+            * announce came from the shape-agnostic flag. */}
           <button
             className={`w-5 flex-shrink-0 pt-0.5 ${hasExcerpt ? '' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'} transition-opacity`}
             onClick={e => { e.stopPropagation(); onToggleQuote(segment.id) }}
-            aria-label={hasExcerpt ? 'Unquote' : 'Quote'}
+            tabIndex={isSelected ? undefined : -1}
+            title={isWholeQuoted ? 'Unquote segment' : 'Quote segment'}
+            aria-label={`Quote segment ${positionInSet}`}
+            aria-pressed={isWholeQuoted}
           >
             <Quote className={`w-3.5 h-3.5 ${hasExcerpt ? 'fill-amber-400 text-amber-400' : 'text-mm-text-faint hover:text-amber-400'}`} />
           </button>
@@ -1979,6 +2005,7 @@ function DocumentSegmentRow({
             <div data-col="codes" className="w-[160px] flex-shrink-0 flex items-center">
               {segment.codes.length > 0 && !isEditing && (
                 <InlineCodeActions
+                  tabbable={isSelected}
                   projectId={projectId}
                   itemType="segment"
                   itemId={segment.id}

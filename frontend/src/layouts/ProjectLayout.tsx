@@ -101,7 +101,10 @@ function deriveBreadcrumbs(pathname: string, projectName: string | undefined, pr
       if (segments.length >= 3) {
         crumbs.push({ label: '', to: `${base}/${workspace}/${sub}` })
         const action = segments[2]
-        if (action === 'recode') crumbs.push({ label: 'Recode' })
+        // `recode` is retired (2026-08-23) — the route redirects — but an
+        // in-flight render can still see it, and a stale crumb is worse than a
+        // duplicated arm.
+        if (action === 'variables' || action === 'recode') crumbs.push({ label: 'Variables' })
         else if (action === 'append') crumbs.push({ label: 'Append' })
       } else {
         crumbs.push({ label: '' })
@@ -126,8 +129,14 @@ function resolveEntityName(
     return list?.conversations.find(c => c.id === entityId)?.name || ''
   }
   if (workspace === 'datasets') {
-    const dsData = queryClient.getQueryData<DatasetDataResponse>(['dataset-data', projectId, entityId])
-    if (dsData?.dataset?.name) return dsData.dataset.name
+    // #800: the grid's cache key now carries a page offset, so an EXACT-match
+    // getQueryData can never hit it again. Prefix-match instead — otherwise
+    // this lookup silently becomes dead code that still looks live.
+    const dsPages = queryClient.getQueriesData<DatasetDataResponse>({
+      queryKey: ['dataset-data', projectId, entityId],
+    })
+    const dsName = dsPages.find(([, v]) => v?.dataset?.name)?.[1]?.dataset?.name
+    if (dsName) return dsName
     const ds = queryClient.getQueryData<Dataset>(['dataset', projectId, entityId])
     if (ds?.name) return ds.name
     const list = queryClient.getQueryData<DatasetList>(['datasets', projectId])

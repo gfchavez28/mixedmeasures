@@ -134,6 +134,14 @@ class PendingItemResponse(BaseModel):
     item_type: str
     source_id: int
     created_at: UTCTimestamp
+    # #823(j): what this item IS. The inbox rendered `"Chart #5"` — a type word
+    # and a raw primary key — because the payload carried nothing else, while
+    # the Materials drawer beside it showed the real name. The client cannot
+    # derive this: the three item types are three different entities, so a
+    # client-side lookup would need three queries all loaded and would still
+    # show the id until they landed. Same reason `#749`'s participant_count
+    # rides its payload. `None` when the source row is gone.
+    source_label: str | None = None
 
 
 # ── Snapshots ─────────────────────────────────────────────────────────────

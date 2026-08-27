@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import type { DumbbellData, ChartFormatting, VariableNMode } from '@/lib/chart-data'
 import { DISPLAY_PRECISION, mergeFormatting, resolveGroupColors, resolveGroupTextColors, computeLogDomain, computeDumbbellAxis } from '@/lib/chart-data'
 import { ciLabel } from '@/lib/ci-label'
+import { placeDotLabels, visibleLabels } from '@/lib/dumbbell-labels'
 import { useChartColors } from '@/lib/theme-context'
 import { ChartFigure } from './ChartFigure'
 
@@ -79,7 +80,6 @@ function computeJitterOffsets(
   return offsets
 }
 
-const MAX_LABELED_JITTER_DOTS = 5
 
 export default function DumbbellChart({
   data,
@@ -354,7 +354,22 @@ export default function DumbbellChart({
           const pixelXs = row.dots.map(d => xScale(d.value))
           const jitterStep = DOT_RADIUS + 4
           const jitterOffsets = computeJitterOffsets(pixelXs, DOT_RADIUS * 2, jitterStep)
+          // Still used for the per-question `n`, which is a DOT-density question —
+          // unlike label legibility, which #787 moved onto the labels' own geometry.
           const isJittered = jitterOffsets.some(o => o !== 0)
+
+          // #787 — place the value labels ONCE, then ask whether they actually fit.
+          // The renderer below reads these same placements, so the geometry it is
+          // judged on and the geometry it draws cannot drift apart.
+          const labelPlacements = placeDotLabels({
+            texts: row.dots.map(d => `${d.value.toFixed(DISPLAY_PRECISION)}${suffix}`),
+            pixelXs,
+            jitterOffsets,
+            baseY: y,
+            dotRadius: DOT_RADIUS,
+            fontSize: fmt.dataLabelFontSize,
+          })
+          const labelVisible = visibleLabels(labelPlacements)
 
           return (
             <g key={row.metricId}>
@@ -398,33 +413,10 @@ export default function DumbbellChart({
                   ? `${dot.groupValue}: ${dot.value.toFixed(DISPLAY_PRECISION)}${suffix}${logSuffix}, ${ciLabel(dot.ciMethod)}: [${dot.ciLower!.toFixed(DISPLAY_PRECISION)}${suffix}, ${dot.ciUpper!.toFixed(DISPLAY_PRECISION)}${suffix}], n = ${dot.n}`
                   : `${dot.groupValue}: ${dot.value.toFixed(DISPLAY_PRECISION)}${suffix}${logSuffix}, n = ${dot.n}`
 
-                // Label positioning: when jittered, spread labels to avoid collisions
-                // Top dot → label above, bottom dot → label below, middle → right side
-                let labelX = cx
-                let labelY = dy - DOT_RADIUS - 6
-                let labelAnchor: 'middle' | 'start' = 'middle'
-                if (isJittered && row.dots.length > 1) {
-                  if (jitterOffsets[di] === Math.min(...jitterOffsets)) {
-                    // Topmost dot: label above
-                    labelY = dy - DOT_RADIUS - 6
-                  } else if (jitterOffsets[di] === Math.max(...jitterOffsets)) {
-                    // Bottommost dot: label below
-                    labelY = dy + DOT_RADIUS + fmt.dataLabelFontSize
-                  } else {
-                    // Middle dot: label to the right
-                    labelX = cx + DOT_RADIUS + 4
-                    labelY = dy + fmt.dataLabelFontSize / 3
-                    labelAnchor = 'start'
-                  }
-                }
-
-                // #428c: with many clustered groups the jittered value labels
-                // pile up illegibly (and overflow the row). The axis fit (#431)
-                // spreads most cases out so they don't jitter at all; for the
-                // genuinely-clustered residual, drop the inline labels — dots,
-                // the connecting line, and tooltips still carry the values, and
-                // the comparison table is the precise read.
-                const showValueLabel = !(isJittered && row.dots.length > MAX_LABELED_JITTER_DOTS)
+                // #787: placement comes from `placeDotLabels` above — one source for
+                // where a label sits and for whether it fits.
+                const { x: labelX, y: labelY, anchor: labelAnchor } = labelPlacements[di]
+                const showValueLabel = labelVisible[di]
 
                 return (
                   <g key={dot.groupValue}>

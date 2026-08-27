@@ -1,6 +1,6 @@
 """Single-sourced R-availability detection for the correctness-oracle tests.
 
-Five test files run **real R** as an EXTERNAL ORACLE — the only check that the
+Several test files run **real R** as an EXTERNAL ORACLE — the only check that the
 tool's statistics agree with an independent implementation:
 
     test_export_r_roundtrip.py   the #402 round-trip (does the exported .R
@@ -9,6 +9,28 @@ tool's statistics agree with an independent implementation:
     test_irr.py                  Krippendorff alpha / Cohen kappa vs `irr::`
     test_open_cut_reliability.py time-binned kappa vs `irr::kappa2`
     test_export_r_runnable.py    parse-only (the .R is syntactically valid)
+    test_wilson_ci_oracle.py     the Wilson proportion interval vs base R's
+                                 `prop.test(correct = FALSE)` (#768)
+    test_alpha_diagnostics_oracle.py  Cronbach item diagnostics vs `psych::alpha`
+                                 (#707a)
+    test_export_r_factor_levels.py    the emitted factor levels EXECUTED in R —
+                                 0 NA, `nlevels`, `.mm_num` (#765/#583)
+    test_qq_plot.py              the Q–Q diagnostic vs base R's `ppoints`,
+                                 `qnorm`, `cor` and `qqline` quartiles (#525b)
+
+⚠️ That list is a map, not a count — it has been wrong before by counting
+`skipif` decorators rather than tests (#642 said "7 tests"; it was 21). Gate on
+`HAS_R` / `HAS_IRR`, never on the length of this list.
+
+🔴 **And the map itself was incomplete until 2026-08-21** — it omitted
+`test_alpha_diagnostics_oracle.py` and `test_export_r_factor_levels.py`, both
+added weeks earlier, while the internal design notes still said *"21 tests across five files"*.
+**Measured that day: 41 R-gated tests across NINE oracle files** — the
+population had roughly doubled with nobody updating either statement. *A
+docstring that warns its own list rots is not exempt from rotting.* To
+re-measure, run the suite twice and diff the skips (`PATH` without `Rscript`
+vs. normal): the delta IS the oracle population, because that is exactly what
+the gate does.
 
 Before #642 each file made this decision for itself, in three different shapes
 (`_r_has_irr()` copy-pasted three times, a bare `shutil.which("Rscript")` in

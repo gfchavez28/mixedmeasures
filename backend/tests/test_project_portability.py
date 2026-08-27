@@ -2001,6 +2001,30 @@ class TestCodebookExport:
         assert el.get("color") is None
         assert "rebecca" not in export_codebook_qdc(db_session, pid)
 
+    def test_qdc_export_expands_shorthand_colour_to_six_digits(self, db_session, populated_project):
+        """`#RGB` is schema-legal but not portable — emit the `#RRGGBB` equivalent.
+
+        QualCoder 3.8.2's color_matcher() opens `if len(hex_color) != 7: return
+        "#D8D8D8"`, so a conformant `#0a0` reaches a researcher's screen as light
+        grey instead of green (#760's round-trip, measured 2026-08-16). Being
+        right about RGBType does not make the colour survive the trip.
+        """
+        pid = populated_project["project"].id
+        leadership = db_session.query(Code).filter(
+            Code.project_id == pid, Code.name == "Leadership"
+        ).first()
+        leadership.color = "#0a0"
+        db_session.flush()
+
+        xml = export_codebook_qdc(db_session, pid)
+        el = next(
+            e for e in ET.fromstring(xml).iter(f"{{{QDC_NAMESPACE}}}Code")
+            if e.get("name") == "Leadership"
+        )
+        assert el.get("color") == "#00aa00"
+        # The shorthand must not survive anywhere in the emission.
+        assert '"#0a0"' not in xml
+
     def test_qdc_export_satisfies_every_schema_constraint(self, db_session, populated_project):
         """Assert the XSD's actual rules, not just the namespace string.
 

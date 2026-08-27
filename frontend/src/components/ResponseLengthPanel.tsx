@@ -1,4 +1,5 @@
 import type { ResponseLengthResponse } from '@/lib/api'
+import { WORD_COUNT_NOTE } from '@/lib/word-count-basis'
 
 interface ResponseLengthPanelProps {
   data: ResponseLengthResponse | null
@@ -34,7 +35,7 @@ export default function ResponseLengthPanel({ data, loading }: ResponseLengthPan
               <span className={`text-xs w-28 truncate flex-shrink-0 ${c.isUncoded ? 'text-mm-text-faint italic' : 'text-mm-text'}`} title={c.code_name}>
                 {c.code_name}
               </span>
-              <div className="flex-1 bg-mm-bg rounded-full h-3 overflow-hidden" role="meter" aria-valuenow={c.avg_words} aria-valuemin={0} aria-valuemax={maxWords} aria-label={`${c.code_name}: ${c.avg_words.toFixed(0)} avg words`}>
+              <div className="flex-1 bg-mm-bg rounded-full h-3 overflow-hidden" role="meter" aria-valuenow={c.avg_words} aria-valuemin={0} aria-valuemax={maxWords} aria-label={`${c.code_name}: ${c.avg_words.toFixed(0)} average whitespace-delimited words`}>
                 <div
                   className={`h-full rounded-full transition-all ${c.isUncoded ? 'bg-mm-border-medium' : 'bg-teal-400'}`}
                   style={{ width: `${(c.avg_words / maxWords) * 100}%` }}
@@ -60,6 +61,10 @@ export default function ResponseLengthPanel({ data, loading }: ResponseLengthPan
           })()}
         </p>
       )}
+
+      {/* #703 — this panel's whole subject is word counts, so the unit is stated
+          here unconditionally rather than left to a hover. */}
+      <p className="text-xs text-mm-text-faint mt-2">{WORD_COUNT_NOTE}</p>
     </div>
   )
 }

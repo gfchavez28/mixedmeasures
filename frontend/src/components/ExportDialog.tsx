@@ -17,6 +17,7 @@ import type { ExportOptions } from '@/lib/api'
 import { defaultIncludeMedia } from '@/lib/api/project-portability'
 import { formatBytes } from '@/lib/format'
 import { toast } from 'sonner'
+import { toastProjectExportError } from '@/lib/project-export-error'
 
 interface ExportDialogProps {
   open: boolean
@@ -122,6 +123,13 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
 
   const handleExport = useCallback(async () => {
     setExporting(true)
+    // #820: the downloads run in parallel (each is an independent request), but
+    // the dialog now WAITS for them. It used to fire and forget, so "Exporting…"
+    // cleared and the dialog closed while a 3-minute Excel export was still in
+    // flight — and if that request then failed the researcher met a toast about
+    // a dialog they had left. `downloadFromApi` never rejects, so collecting the
+    // promises cannot turn one export's failure into another's.
+    const pending: Promise<unknown>[] = []
     try {
       // Conversations - Full Export
       if (state.fullExport) {
@@ -136,13 +144,13 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
           summaries: state.summaries,
           audit: state.audit,
         }
-        exportApi.excelWithOptions(projectId, options)
+        pending.push(exportApi.excelWithOptions(projectId, options))
         await delay(200)
       }
 
       // Conversations - CSV
       if (state.csv) {
-        exportApi.csv(projectId)
+        pending.push(exportApi.csv(projectId))
         await delay(200)
       }
 
@@ -167,52 +175,44 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
 
       // Datasets Excel
       if (state.datasetsExcel) {
-        exportApi.datasetsExcel(projectId)
+        pending.push(exportApi.datasetsExcel(projectId))
         await delay(200)
       }
 
       // Qualitative - Code Frequencies
       if (state.codeFrequencies) {
-        exportApi.codeFrequencies(projectId)
+        pending.push(exportApi.codeFrequencies(projectId))
         await delay(200)
       }
 
       // Qualitative - Coded Segments
       if (state.codedSegments) {
-        exportApi.codedSegments(projectId)
+        pending.push(exportApi.codedSegments(projectId))
         await delay(200)
       }
 
       // Qualitative - Code Co-occurrence
       if (state.codeCooccurrence) {
-        exportApi.codeCooccurrence(projectId)
+        pending.push(exportApi.codeCooccurrence(projectId))
         await delay(200)
       }
 
       // Quantitative - Record Matrix
       if (state.rowMatrix) {
-        metricsApi.rowMatrix(projectId, undefined, 'csv')
+        pending.push(Promise.resolve(metricsApi.rowMatrix(projectId, undefined, 'csv')))
       }
 
       // Statistical Software - R Data Export
       if (state.rDataExport) {
-        try {
-          const blob = await exportApi.rData(projectId)
-          const url = URL.createObjectURL(blob)
-          const a = document.createElement('a')
-          a.href = url
-          a.download = `r_data_export.zip`
-          document.body.appendChild(a)
-          a.click()
-          document.body.removeChild(a)
-          URL.revokeObjectURL(url)
-        } catch (err: unknown) {
-          const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
-          alert(typeof detail === 'string' ? detail : 'R Data Export failed')
-        }
+        // #820: no hand-rolled anchor, no `alert()`. `exportApi.rData` routes
+        // through `downloadFromApi` like every other export, so it carries the
+        // export timeout, the server's Content-Disposition filename, and the
+        // app's own toast for a failure.
+        pending.push(exportApi.rData(projectId))
         await delay(200)
       }
 
+      await Promise.all(pending)
       onOpenChange(false)
     } finally {
       setExporting(false)
@@ -255,8 +255,10 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
                     try {
                       await projectPortabilityApi.exportProject(projectId, includeMedia)
                       toast.success('Project exported')
-                    } catch {
-                      toast.error('Project export failed')
+                    } catch (err) {
+                      // #842: the server names the size limit and what it does NOT
+                      // affect; a bare catch threw that away.
+                      toastProjectExportError(err, 'Project export failed')
                     } finally {
                       setExporting(false)
                     }
@@ -580,13 +582,41 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
           </section>
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="sm:justify-between">
+          {/* #820: the wait is now real, so say how long it can be. Measured on
+            * a 75,699-record survey: 86 s for the R export, 213 s for datasets
+            * Excel. Silence at that length reads as a hang. */}
+          <p aria-live="polite" className="text-xs text-mm-text-secondary sm:mr-auto">
+            {exporting
+              ? 'Working — a large project can take a few minutes. You can close this; '
+                + 'the download still arrives.'
+              : ''}
+          </p>
+          {/* #837: not disabled while exporting, and renamed because its
+            * meaning changes. Measured on a 75,699-record survey, datasets-Excel
+            * is 181 s of server work, and this button was disabled for all of it.
+            *
+            * ⚠️ The premise that motivated this was REFUTED and the correction is
+            * why the fix is what it is: the researcher was NOT trapped.
+            * `DialogContent` always renders a corner ✕ (`ui/dialog.tsx:46`) which
+            * is never disabled, so there was always a way out. The real defect is
+            * that two controls performing the identical action disagreed about
+            * whether it was allowed — and the disabled one is the one that looks
+            * like the answer.
+            *
+            * So it matches the ✕ in both respects, name included. Two controls,
+            * one action, one name is consistent; "Cancel" is the word that would
+            * be wrong, because closing does not stop the export. Safe to leave:
+            * each export is an independent fetch that triggers its own download
+            * and reports its own failure through `downloadFromApi`'s toast, and
+            * this dialog is a persistent ProjectLayout overlay, so the `finally`
+            * above still runs against a mounted component. */}
           <Button
+            data-testid="export-dismiss"
             variant="outline"
             onClick={() => onOpenChange(false)}
-            disabled={exporting}
           >
-            Cancel
+            {exporting ? 'Close' : 'Cancel'}
           </Button>
           <Button
             onClick={handleExport}

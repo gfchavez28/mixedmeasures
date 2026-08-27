@@ -19,7 +19,7 @@ import {
   resolveGroupTextColors,
   computeLogDomain,
 } from '@/lib/chart-data'
-import { ciCaveat, isItemLevelCi } from '@/lib/ci-label'
+import { ciCaveat, ciQualifier } from '@/lib/ci-label'
 import { useChartColors } from '@/lib/theme-context'
 import type { LabelProps } from 'recharts'
 import type { GroupedScalarSection, ChartFormatting, VariableNMode, SortOrder } from '@/lib/chart-data'
@@ -65,9 +65,12 @@ function GroupedTooltip({ active, payload, label }: RechartsTooltipProps) {
               title={ciCaveat(entry.payload[`_ciMethod_${entry.name}`] as string | undefined)}
             >
               [{(entry.payload[`_ciLower_${entry.name}`] as number).toFixed(DISPLAY_PRECISION)}, {(entry.payload[`_ciUpper_${entry.name}`] as number).toFixed(DISPLAY_PRECISION)}]
-              {/* #715: this tooltip shows a bare range, so an item-level interval needs
-                  the qualifier spelled out — an ordinary one stays uncluttered. */}
-              {isItemLevelCi(entry.payload[`_ciMethod_${entry.name}`] as string | undefined) && ' across items'}
+              {/* #715: this tooltip shows a bare range, so a qualified interval needs
+                  the qualifier spelled out — an ordinary one stays uncluttered.
+                  Read from `ciQualifier`, never re-tested here: this site
+                  hand-rolled `isItemLevelCi(...) && ' across items'`, which meant
+                  a method added later rendered as the ordinary case (queue #42). */}
+              {ciQualifier(entry.payload[`_ciMethod_${entry.name}`] as string | undefined)}
             </span>
           )}
         </div>

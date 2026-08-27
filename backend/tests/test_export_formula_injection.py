@@ -393,9 +393,9 @@ def test_export_study_excel_metric_name_is_string_typed(polluted_session):
     """
     from app.routers.export_excel import export_study_excel
     user = polluted_session.get(User, 1)
-    response = _run(export_study_excel(
+    response = export_study_excel(
         project_id=1, user=user, db=polluted_session,
-    ))
+    )
     body = _stream_to_bytes(response)
     wb = load_workbook(io.BytesIO(body))
 
@@ -421,9 +421,9 @@ def test_export_datasets_excel_defangs_metric_and_column_names(polluted_session)
     """
     from app.routers.export_excel import export_datasets_excel
     user = polluted_session.get(User, 1)
-    response = _run(export_datasets_excel(
+    response = export_datasets_excel(
         project_id=1, user=user, db=polluted_session,
-    ))
+    )
     body = _stream_to_bytes(response)
     wb = load_workbook(io.BytesIO(body))
 
@@ -457,7 +457,7 @@ def test_export_r_data_csv_defangs_dataset_and_demographic_strings(polluted_sess
     remain numeric (no leading apostrophe on numbers)."""
     from app.routers.export_r import export_r_data
     user = polluted_session.get(User, 1)
-    response = _run(export_r_data(project_id=1, user=user, db=polluted_session))
+    response = export_r_data(project_id=1, user=user, db=polluted_session)
     body = _stream_to_bytes(response)
 
     with zipfile.ZipFile(io.BytesIO(body)) as zf:
@@ -492,9 +492,9 @@ def test_export_row_matrix_csv_defangs_metric_label(polluted_session):
     Verify defang."""
     from app.routers.metrics import get_row_matrix_csv
     user = polluted_session.get(User, 1)
-    response = _run(get_row_matrix_csv(
+    response = get_row_matrix_csv(
         project_id=1, metric_ids=None, user=user, db=polluted_session,
-    ))
+    )
     text = _stream_to_text(response)
     _assert_no_raw_formula_prefix(text, label="row_matrix_csv")
 

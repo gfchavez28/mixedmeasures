@@ -80,6 +80,7 @@ from ..models.recode import RecodeDefinition, RecodeType
 from .missing_values import (
     _as_float,
     _fmt_code,
+    describe_missing_rules,
     is_missing,
     matched_missing_label,
     parse_missing_rules,
@@ -436,4 +437,49 @@ def apply_missing_declaration(
         "recovered_rows": recovered_rows,
         "recovered_values": recovered_values,
         "recovered_unmapped": recovered_unmapped,
+        "unmatched_rules": _unmatched_rule_descriptions(new_rules, distinct),
     }
+
+
+def _unmatched_rule_descriptions(
+    new_rules: list[dict] | None,
+    distinct: list[str],
+) -> list[str]:
+    """Which of these rules matched NO value in the column? (#823a)
+
+    A declaration is validated for SHAPE and never for whether it hits
+    anything, so a rule that can never match is accepted with the same
+    "Column updated." as one that reclassified 30,000 cells.
+
+    🔴 **The motivating case is invisible on screen, which is why the answer has
+    to come from the server.** GSS stores ``".i:  Inapplicable"`` with TWO
+    interior spaces; HTML collapses interior whitespace, so the researcher reads
+    one and types one. ``_discrete_rule_match`` compares ``text ==
+    rule["value"]`` after stripping the ENDS only — correctly — so the typed rule
+    matches zero of 28,041 cells. Copy-paste is not a workaround either: the
+    clipboard gets the collapsed form. **Two strings differing only in interior
+    whitespace are indistinguishable to the eye, so no amount of care at the
+    keyboard prevents this.**
+
+    ⚠️ **Not derivable client-side, and "nothing changed" is NOT a sound proxy.**
+    A correct declaration also nulls zero cells when those values were already
+    caught by the ``_is_na`` defaults — so a client-side "nothing happened"
+    warning would fire on healthy declarations, which is the failure mode #707b
+    describes (a marker that cries wolf gets dismissed).
+
+    ⚠️ Costs NO extra query: ``distinct`` is already materialised above for the
+    #606 collision guard, and this reuses ``is_declared_missing`` rather than
+    re-deriving the match, so the report and the behaviour cannot disagree.
+    """
+    if not new_rules:
+        return []
+    unmatched = []
+    for rule in new_rules:
+        # `is_missing` with a non-None list IS `is_declared_missing`, and it is
+        # the decision function every read surface already routes through.
+        if any(is_missing(text, [rule]) for text in distinct):
+            continue
+        # One rule in, one phrase out — the AUTHORING vocabulary (#609/#822),
+        # never a fourth wording invented here.
+        unmatched.append(describe_missing_rules([rule]))
+    return unmatched

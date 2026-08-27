@@ -23,6 +23,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import { getDatasetAccent } from '@/components/crosswalk/dataset-color'
+import { variableViewPath } from '@/lib/dataset-routes'
 
 export default function DatasetsListPage() {
   const { projectId } = useProjectLayout()
@@ -300,13 +301,13 @@ export default function DatasetsListPage() {
                         <div className="flex items-center justify-end gap-1.5">
                           <button
                             className="px-2 py-0.5 rounded text-[11px] font-medium bg-[hsl(var(--mm-orange)/0.08)] border border-[hsl(var(--mm-orange)/0.18)] text-mm-orange-text hover:opacity-80 transition-opacity"
-                            aria-label={`Recode variables in ${ds.name}`}
+                            aria-label={`Open the Variables view for ${ds.name}`}
                             onClick={e => {
                               e.stopPropagation()
-                              navigate(`/projects/${projectId}/datasets/${ds.id}/recode`)
+                              navigate(variableViewPath(projectId, ds.id))
                             }}
                           >
-                            Recode
+                            Variables
                           </button>
                           <ChevronRight className="w-4 h-4 text-mm-text-faint" />
                         </div>
@@ -323,10 +324,10 @@ export default function DatasetsListPage() {
                       Change color…
                     </ContextMenuItem>
                     <ContextMenuItem
-                      onClick={() => navigate(`/projects/${projectId}/datasets/${ds.id}/recode`)}
+                      onClick={() => navigate(variableViewPath(projectId, ds.id))}
                     >
                       <SlidersHorizontal className="w-4 h-4 mr-2" />
-                      Recode Variables
+                      Variables
                     </ContextMenuItem>
                     <ContextMenuItem
                       onClick={() => setDeleteDataset({ id: ds.id, name: ds.name })}

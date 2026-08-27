@@ -14,6 +14,9 @@
  * different arguments.
  */
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { stripComments } from '@/lib/strip-comments'
 import {
   extractQualComputeParams,
   buildQualSaturationParams,
@@ -22,6 +25,13 @@ import {
   isQualChartRenderable,
   qualChartKind,
   qualChartHasEnoughToFetch,
+  staleComputedInputs,
+  isComparisonMaterialConfig,
+  isCorrelationMaterialConfig,
+  isRelationshipsMaterialConfig,
+  extractComparisonParams,
+  extractCrossTabParams,
+  isCrossTabMaterialConfig,
 } from './inline-chart-params'
 import type { QualChartType } from '@/lib/qual-analysis-types'
 
@@ -375,5 +385,320 @@ describe('the co-occurrence embed reproduces the view’s filter scope', () => {
     // Empty lists must be omitted, not sent as empty strings.
     expect(filter.document_ids).toBeUndefined()
     expect(filter.participant_ids).toBeUndefined()
+  })
+})
+
+
+/**
+ * #684 — the save button runs THIS predicate on the config it is about to
+ * persist, rather than a view-side reconstruction of "is there enough to draw".
+ *
+ * Two halves, because either alone is a false positive:
+ *   · the predicate must answer correctly for configs shaped as
+ *     `buildCurrentConfig` writes them (below), and
+ *   · the button must actually be wired to it — a behaviour test of the
+ *     predicate proves the view was TOLD, never that it listened, and
+ *     `QualitativeAnalysisView` has no test file to mount.
+ */
+describe('#684 — a config that cannot be drawn cannot be saved', () => {
+  const base = {
+    tab: 'descriptives',
+    chart_type: 'bar',
+    code_ids: [] as number[],
+    conversation_ids: [] as number[],
+    text_column_ids: [] as number[],
+    document_ids: [] as number[],
+    observation_ids: [] as number[],
+  }
+
+  it('refuses a source-frequency chart with no codes and no sources', () => {
+    expect(qualChartHasEnoughToFetch(extractQualComputeParams(base))).toBe(false)
+  })
+
+  it('refuses it with codes but no source, and with a source but no codes', () => {
+    expect(qualChartHasEnoughToFetch(extractQualComputeParams({ ...base, code_ids: [1] }))).toBe(false)
+    expect(qualChartHasEnoughToFetch(extractQualComputeParams({ ...base, conversation_ids: [1] }))).toBe(false)
+  })
+
+  it('allows it once both are present', () => {
+    expect(qualChartHasEnoughToFetch(extractQualComputeParams(
+      { ...base, code_ids: [1], conversation_ids: [1] },
+    ))).toBe(true)
+  })
+
+  /**
+   * ⚠️ The trap the #684 entry named: a blanket "is anything selected" gate
+   * would block these two, which legitimately need nothing from the config.
+   */
+  it('still allows saturation and co-occurrence with an empty selection', () => {
+    expect(qualChartHasEnoughToFetch(extractQualComputeParams(
+      { ...base, chart_type: 'saturation' },
+    ))).toBe(true)
+    expect(qualChartHasEnoughToFetch(extractQualComputeParams(
+      { ...base, tab: 'relationships', rel_view: 'cooccurrence' },
+    ))).toBe(true)
+  })
+
+  it('refuses a comparison with no grouping variable, and allows it with one', () => {
+    const comp = { ...base, tab: 'relationships', rel_view: 'comparison' }
+    expect(qualChartHasEnoughToFetch(extractQualComputeParams(comp))).toBe(false)
+    expect(qualChartHasEnoughToFetch(extractQualComputeParams(
+      { ...comp, group_by: 'role' },
+    ))).toBe(true)
+  })
+
+  it('the Add to Materials button is wired to the gate', () => {
+    // The other half. Comments off first — the prose beside the fix names the
+    // symbol too, and a scan that reads its own documentation measures the
+    // wrong file (the #728 lesson, met again in this batch's grid scan).
+    const qualView = join(__dirname, '..', '..', 'pages', 'QualitativeAnalysisView.tsx')
+    const src = stripComments(readFileSync(qualView, 'utf8'), qualView)
+
+    expect(src).toMatch(/canAddToMaterials\s*=\s*useMemo/)
+    expect(src).toMatch(/qualChartHasEnoughToFetch\(extractQualComputeParams\(/)
+    // The button's own disabled expression, not merely the constant existing.
+    expect(src).toMatch(/disabled=\{[^}]*!canAddToMaterials[^}]*\}/)
+  })
+})
+
+// ── #795: which of an embed's variables need recomputing ────────────────────
+
+describe('staleComputedInputs', () => {
+  const col = (o: Partial<{ id: number; stale: boolean; domain_ids: number[] }> & { id: number }) => ({
+    stale: false,
+    domain_ids: [] as number[],
+    ...o,
+  })
+
+  it('finds a directly-selected column that is stale', () => {
+    const found = staleComputedInputs(
+      { columnIds: [1, 2], domainIds: [] },
+      [col({ id: 1, stale: true }), col({ id: 2 })],
+    )
+    expect(found.map(c => c.id)).toEqual([1])
+  })
+
+  it('finds a stale MEMBER of a selected domain', () => {
+    // A variable group's scale score aggregates its members, so a stale member
+    // makes the group's number stale. The membership rides `domain_ids` on the
+    // column, so one project-wide payload answers both without a second call.
+    const found = staleComputedInputs(
+      { columnIds: [], domainIds: [7] },
+      [col({ id: 3, stale: true, domain_ids: [7] }), col({ id: 4, stale: true, domain_ids: [9] })],
+    )
+    expect(found.map(c => c.id)).toEqual([3])
+  })
+
+  it('ignores stale columns this chart does not read', () => {
+    // The point of the predicate: a project can hold stale computed columns
+    // that have nothing to do with this embed, and warning about those would
+    // make every chart on the canvas cry wolf.
+    const found = staleComputedInputs(
+      { columnIds: [1], domainIds: [] },
+      [col({ id: 1 }), col({ id: 99, stale: true })],
+    )
+    expect(found).toEqual([])
+  })
+
+  it('returns nothing when the embed selects nothing', () => {
+    // A qualitative embed and a half-configured one both land here; neither
+    // reads a dataset column, so neither can be stale.
+    expect(staleComputedInputs({ columnIds: [], domainIds: [] }, [col({ id: 1, stale: true })]))
+      .toEqual([])
+  })
+
+  it('treats a missing `stale` as not stale, never as unknown', () => {
+    // An older server omits the field. `=== true` and not truthiness, so an
+    // absent flag cannot become a warning about data that is fine.
+    const found = staleComputedInputs({ columnIds: [1] , domainIds: [] }, [{ id: 1 }])
+    expect(found).toEqual([])
+  })
+})
+
+// ── #817: which materials the comparison branch claims ───────────────────────
+
+describe('isComparisonMaterialConfig (#817)', () => {
+  it('claims a saved group comparison', () => {
+    expect(isComparisonMaterialConfig({ rc_view: 'comparisons', compare_by: 60 })).toBe(true)
+  })
+
+  it('needs BOTH markers', () => {
+    // A descriptives config can carry a stale `compare_by` from an earlier
+    // session; on its own it must not reroute the whole embed.
+    expect(isComparisonMaterialConfig({ compare_by: 60 })).toBe(false)
+    expect(isComparisonMaterialConfig({ rc_view: 'comparisons' })).toBe(false)
+  })
+
+  it('does not claim a descriptives material', () => {
+    expect(isComparisonMaterialConfig({ column_ids: [1], metric_type: 'mean' })).toBe(false)
+  })
+
+  /**
+   * 🔴 **A RECORDED NEGATIVE, not an endorsement.**
+   *
+   * `correlation_matrix` and `scatter_matrix` materials have the SAME
+   * fall-through #817 describes — they are not qualitative, so they land in the
+   * metric branch and render a frequency/mean chart of their own columns. They
+   * are NOT fixed here, and this test exists so the next reader meets that fact
+   * where they would otherwise assume the class was closed.
+   *
+   * ✅ **CLOSED by #831 (2026-08-25), in two halves — and the residual below is
+   * deliberate, not an oversight.** The saver now writes `rc_view`
+   * unconditionally, so every R&C material created from then on identifies
+   * itself; `isCorrelationMaterialConfig` also recovers the two legacy shapes
+   * that left a trace (`corr_type` on a non-Pearson, `show_scatter` on a
+   * scatter matrix).
+   *
+   * ⚠️ **A LEGACY default-Pearson correlation is still indistinguishable from a
+   * descriptives material, and that was decided rather than missed.** Reading
+   * the material row's `material_type` would catch it, and
+   * `lib/material-kind.ts` refuses row data as an input to this seam for two
+   * reasons that still hold (it can disappear; it arrives late). Put to the
+   * developer and declined: one discriminator, with a shrinking legacy set left
+   * no worse than it already was.
+   */
+  it('still does NOT claim a legacy default-Pearson correlation — the accepted residual', () => {
+    // No marker of any kind: rc_view omitted (was the default), corr_type
+    // omitted (was the default), show_scatter omitted (false).
+    const legacyPearson = { column_ids: [1, 2], metric_type: 'frequency_distribution' }
+    expect(isComparisonMaterialConfig(legacyPearson)).toBe(false)
+    expect(isCorrelationMaterialConfig(legacyPearson)).toBe(false)
+  })
+})
+
+describe('isCorrelationMaterialConfig (#831)', () => {
+  it('claims anything the saver marked — the primary tell, present since #831', () => {
+    expect(isCorrelationMaterialConfig({ rc_view: 'correlations', column_ids: [1, 2] })).toBe(true)
+  })
+
+  it('recovers a LEGACY scatter matrix, which left a trace even unmarked', () => {
+    // `show_scatter: showScatter || undefined` — the key is absent when false,
+    // so its PRESENCE is the signal.
+    expect(isCorrelationMaterialConfig({ column_ids: [1, 2], show_scatter: true })).toBe(true)
+  })
+
+  it('recovers a LEGACY non-Pearson correlation for the same reason', () => {
+    expect(isCorrelationMaterialConfig({ column_ids: [1, 2], corr_type: 'spearman' })).toBe(true)
+  })
+
+  it('does not claim a descriptives material', () => {
+    // The four keys the saver writes UNCONDITIONALLY ride every quantitative
+    // material, descriptives included — verified against the real corpus's ten
+    // materials — so none of them may be used as a tell.
+    expect(isCorrelationMaterialConfig({
+      column_ids: [1], metric_type: 'mean', chart_type: 'table',
+      sig_levels: { show_05: true }, nonparametric: false,
+      post_hoc_expanded: true, show_reg_line: true,
+    })).toBe(false)
+  })
+
+  it('does not claim a comparison, which has its own branch and renderer', () => {
+    expect(isCorrelationMaterialConfig({ rc_view: 'comparisons', compare_by: 60 })).toBe(false)
+  })
+
+  it('tolerates a null or non-object config', () => {
+    expect(isCorrelationMaterialConfig(null)).toBe(false)
+    expect(isCorrelationMaterialConfig(undefined)).toBe(false)
+  })
+})
+
+describe('isRelationshipsMaterialConfig (#831)', () => {
+  it('is the union, so a third R&C kind is added in ONE place', () => {
+    expect(isRelationshipsMaterialConfig({ rc_view: 'comparisons', compare_by: 60 })).toBe(true)
+    expect(isRelationshipsMaterialConfig({ rc_view: 'correlations' })).toBe(true)
+    expect(isRelationshipsMaterialConfig({ column_ids: [1], metric_type: 'mean' })).toBe(false)
+  })
+})
+
+describe('extractComparisonParams (#817)', () => {
+  it('defaults the chart type to the table, which is what an absent value means', () => {
+    // `rc_chart_type` is stored only in its NON-default state, like the
+    // qualitative flags — a bare cast would render every saved table as
+    // `undefined` and fall through the router.
+    expect(extractComparisonParams({ rc_view: 'comparisons', compare_by: 60, domain_ids: [1] }).chartType)
+      .toBe('comparison_table')
+  })
+
+  it('refuses to build a request with nothing selected', () => {
+    expect(extractComparisonParams({ rc_view: 'comparisons', compare_by: 60 }).request).toBeNull()
+  })
+
+  it('defaults the significance levels rather than sending undefined', () => {
+    const p = extractComparisonParams({ rc_view: 'comparisons', compare_by: 60, column_ids: [1] })
+    expect(p.sigLevels).toEqual({ show_05: true, show_01: true, show_001: true })
+  })
+})
+
+/**
+ * #832 — the cross-tab axis derivation has ONE home.
+ *
+ * It lived inline in `InlineChartRenderer` and the export never learned it, so
+ * `.md` carried the row variable's marginal distribution while the canvas drew
+ * the cross-tab. Both consumers read these helpers now — which is the #824
+ * shape (two panels, two derivations of one chord space, agreeing only by
+ * coincidence) caught one surface earlier.
+ */
+describe('#832 — cross-tab material params', () => {
+  it('reads both axes when the config names them', () => {
+    const p = extractCrossTabParams({
+      chart_type: 'cross_tab', column_ids: [7], cross_tab_column_id: 12,
+    })
+    expect(p.request).toEqual({ row_column_id: 7, col_column_id: 12, include_chi_square: true })
+  })
+
+  it('has no request without a column axis', () => {
+    const p = extractCrossTabParams({ chart_type: 'cross_tab', column_ids: [7] })
+    expect(p.request).toBeNull()
+  })
+
+  it('has no ROW axis unless exactly one variable is selected', () => {
+    // A cross-tab is defined over one row variable. `columnIds[0]` would
+    // silently pick one of two and draw a table the researcher never chose.
+    expect(extractCrossTabParams({
+      chart_type: 'cross_tab', column_ids: [7, 8], cross_tab_column_id: 12,
+    }).request).toBeNull()
+    expect(extractCrossTabParams({
+      chart_type: 'cross_tab', column_ids: [], cross_tab_column_id: 12,
+    }).request).toBeNull()
+  })
+
+  it('defaults the display mode to count, matching what the WRITER omits', () => {
+    // `AnalysisView` writes `cross_tab_display` only when it is NOT 'count'
+    // (the same non-default-only convention the qualitative flags use), so
+    // absent must mean 'count' — reading it with a bare cast yields undefined.
+    expect(extractCrossTabParams({ chart_type: 'cross_tab' }).display).toBe('count')
+    expect(extractCrossTabParams({
+      chart_type: 'cross_tab', cross_tab_display: 'row_pct',
+    }).display).toBe('row_pct')
+  })
+
+  it('defaults the scale order to natural', () => {
+    expect(extractCrossTabParams({ chart_type: 'cross_tab' }).scaleOrder).toBe('natural')
+  })
+
+  it('identifies a cross-tab config, and nothing else', () => {
+    expect(isCrossTabMaterialConfig({ chart_type: 'cross_tab' })).toBe(true)
+    expect(isCrossTabMaterialConfig({ chart_type: 'heatmap' })).toBe(false)
+    expect(isCrossTabMaterialConfig({})).toBe(false)
+    expect(isCrossTabMaterialConfig(null)).toBe(false)
+  })
+
+  it('is the ONLY place the two consumers read those config keys', () => {
+    // The #824 guard shape: a second derivation is the defect, so assert the
+    // population rather than the one site that was wrong.
+    const strip = stripComments
+
+    const consumers = {
+      'InlineChartRenderer.tsx': join(__dirname, 'InlineChartRenderer.tsx'),
+      'canvas-export.ts': join(__dirname, '..', '..', 'lib', 'canvas-export.ts'),
+    }
+    for (const [name, path] of Object.entries(consumers)) {
+      const src = strip(readFileSync(path, 'utf8'))
+      expect(src, `${name} re-derives the cross-tab axis`).not.toMatch(/cross_tab_column_id/)
+      expect(src, `${name} re-derives the cross-tab display mode`).not.toMatch(/cross_tab_display/)
+      // Self-check per narrowing: prove the file was read and the comment
+      // stripper did not blank it (the #772 phantom, twice over).
+      expect(src).toMatch(/extractCrossTabParams/)
+    }
   })
 })

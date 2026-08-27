@@ -50,6 +50,82 @@ from .coding_layers import (
     non_consensus_filter,
     resolve_effective_code,
 )
+from .undefined_stats import NO_VARIANCE
+
+
+# ── The source axis (#829) ────────────────────────────────────────────────────
+#
+# A source key is ``(kind, id)`` with kind ∈ conv | doc | obs | col — the same
+# tuples `_segment_source_key` produces and `engaged` is keyed on. On the wire it
+# travels as ``"kind:id"`` so it can ride a query string and a React Query key.
+
+_SOURCE_KINDS = ("conv", "doc", "obs", "col")
+
+
+def _source_token(source: tuple[str, int] | None) -> str | None:
+    """The wire form of a source key, or None for the pooled view."""
+    return f"{source[0]}:{source[1]}" if source else None
+
+
+def parse_source_token(token: str | None) -> tuple[str, int] | None:
+    """Wire form → source key. Returns None for absent/malformed input.
+
+    ⚠️ **Malformed is None (= pooled), never an error.** A stale bookmark naming
+    a deleted source must not 400 the whole panel; the scope simply falls back to
+    the pooled view, and `build_irr_matrices` intersects against the selectable
+    set anyway so an unknown-but-well-formed key yields an honest empty result.
+    """
+    if not token:
+        return None
+    kind, _, raw = token.partition(":")
+    if kind not in _SOURCE_KINDS or not raw.isdigit():
+        return None
+    return (kind, int(raw))
+
+
+def _describe_sources(db: Session, sources: set[tuple]) -> list[dict]:
+    """Name every selectable source, so the picker can render one (#829).
+
+    ⚠️ **Four kinds resolve from four different tables**, which is why this exists
+    rather than the client joining names itself: the client would need four more
+    queries and would have to re-derive which sources are even selectable.
+
+    ⚠️ A source whose row has vanished is DROPPED rather than labelled with its
+    id — an unnamed row in a picker is not a choice a researcher can make.
+    """
+    if not sources:
+        return []
+    from ..models.observation import Observation
+
+    by_kind: dict[str, list[int]] = defaultdict(list)
+    for kind, sid in sources:
+        by_kind[kind].append(sid)
+
+    names: dict[tuple, str] = {}
+    # ⚠️ All three segment parents name themselves `name`, NOT `title` — the
+    # first draft used `title` and every IRR test failed on the attribute, which
+    # is the cheapest possible way to learn it.
+    for kind, model in (("conv", Conversation), ("doc", Document), ("obs", Observation)):
+        ids = by_kind.get(kind)
+        if not ids:
+            continue
+        for sid, label in db.query(model.id, model.name).filter(model.id.in_(ids)).all():
+            names[(kind, sid)] = label
+
+    if by_kind.get("col"):
+        # A text column's display name follows the #575 precedence rule.
+        for sid, cname, ctext in (
+            db.query(DatasetColumn.id, DatasetColumn.column_name, DatasetColumn.column_text)
+            .filter(DatasetColumn.id.in_(by_kind["col"])).all()
+        ):
+            names[("col", sid)] = cname or ctext
+
+    out = [
+        {"key": _source_token(k), "kind": k[0], "label": names[k]}
+        for k in sources if names.get(k)
+    ]
+    out.sort(key=lambda r: (r["kind"], (r["label"] or "").lower()))
+    return out
 
 # Segment parent FK -> source-key tag. A MAP, never a ternary: the two-arm form
 # (`("conv", cid) if cid is not None else ("doc", did)`) silently produced
@@ -191,9 +267,33 @@ def _krippendorff_alpha(
     return 1.0 - (n - 1) * do_num / de_num
 
 
+def _project_to_pair(
+    units: list[list[int | None]], idx_a: int, idx_b: int,
+) -> list[list[int | None]]:
+    """Narrow roster-wide rows to two coders' columns (#828).
+
+    🔴 **This is what #828 actually needed, and the filed remedy did not say so.**
+    `_cohens_kappa` drops any row where ``len(r) != 2``, and these rows are
+    ``len(coder_id_list)`` wide — so on a roster of 8 EVERY row was discarded and
+    κ came back ``None`` no matter what the gate said. Changing the gate alone
+    would have produced exactly the same empty column.
+
+    ⚠️ **Lossless by construction, not by luck.** Option-B engagement is recorded
+    at the SOURCE, so a coder who never engaged this source has ``None`` in every
+    one of its units. Dropping their column therefore discards only missing
+    cells — which is why this may be done for a source with exactly two engaged
+    coders and must NOT be done to pick an arbitrary pair out of three.
+    """
+    return [[row[idx_a], row[idx_b]] for row in units]
+
+
 def _cohens_kappa(units: list[list[int | None]]) -> float | None:
     """Cohen's unweighted κ for exactly 2 coders, over units both judged.
-    Reproduces ``irr::kappa2``."""
+    Reproduces ``irr::kappa2``.
+
+    ⚠️ Rows MUST already be 2 wide — see ``_project_to_pair``. The ``len(r) == 2``
+    filter below is why: it silently yields ``None`` for wider input.
+    """
     pairs = [(r[0], r[1]) for r in units if len(r) == 2 and r[0] is not None and r[1] is not None]
     n = len(pairs)
     if n == 0:
@@ -395,7 +495,8 @@ def gather_coder_applications(
 
 def build_irr_matrices(
     db: Session, project_id: int, coder_ids: list[int] | None = None,
-) -> tuple[list[int], dict[int, str], dict[int, list[list[int | None]]]]:
+    source: tuple[str, int] | None = None,
+) -> tuple[list[int], dict[int, str], dict[int, list[list[int | None]]], set[tuple], set[int]]:
     """Return ``(coder_ids_ordered, {code_id: name}, {effective_code_id: units})``.
 
     ``units`` is the per-code matrix (one row per in-play unit; each row a list of
@@ -408,11 +509,28 @@ def build_irr_matrices(
         db, project_id, coder_ids
     )
     if len(coder_id_list) < 2 or not multi_sources:
-        return coder_id_list, {}, {}
+        return coder_id_list, {}, {}, set(), set()
+
+    # #829 — the SOURCE axis. `multi_sources` is the selectable set (every source
+    # ≥2 coders engaged); narrowing it to one is the whole scoping mechanism,
+    # because `units` below is already filtered by it.
+    #
+    # ⚠️ **Scoping by SOURCE is not scoping by CODER.** `coder_ids` stays exactly
+    # as passed — the matrix is ALWAYS all-roster (J2-5), because a visibility
+    # filter must never change a reliability statistic. Only the unit set moves.
+    selectable = set(multi_sources)
+    if source is not None:
+        multi_sources = {source} & multi_sources
+        if not multi_sources:
+            return coder_id_list, {}, {}, selectable, set()
+
     n = len(coder_id_list)
     coder_idx = {cid: i for i, cid in enumerate(coder_id_list)}
 
     units = [u for u, src in unit_source.items() if src in multi_sources]
+    # The coders actually engaged in the SCOPE being reported — the fact #828's
+    # gate needs, and which the roster size cannot answer.
+    scope_coders = {c for src in multi_sources for c in engaged[src]} & set(coder_id_list)
     all_codes = sorted({c for ud in applied.values() for cs in ud.values() for c in cs})
     code_names = dict(
         db.query(Code.id, Code.name).filter(Code.id.in_(all_codes)).all()
@@ -430,13 +548,29 @@ def build_irr_matrices(
                 row[coder_idx[cid]] = 1 if code_id in applied_here.get(cid, empty) else 0
             rows.append(row)
         per_code[code_id] = rows
-    return coder_id_list, code_names, per_code
+    return coder_id_list, code_names, per_code, selectable, scope_coders
 
 
-def compute_irr(db: Session, project_id: int, coder_ids: list[int] | None = None) -> dict:
-    """Compute per-code + overall IRR for a project. Returns a result dict; when
-    fewer than 2 roster coders (or no shared coding) exist, ``available`` is False."""
-    coder_id_list, code_names, per_code = build_irr_matrices(db, project_id, coder_ids)
+def compute_irr(
+    db: Session, project_id: int, coder_ids: list[int] | None = None,
+    source: tuple[str, int] | None = None,
+) -> dict:
+    """Compute per-code + overall IRR for a project, optionally scoped to ONE source.
+
+    ``source`` is a ``(kind, id)`` key — ``("conv"|"doc"|"obs"|"col", id)``.
+    ⚠️ **It defaults to None = POOLED, and that default is load-bearing**: the
+    `.mmproject` R export calls this and must keep emitting the pooled figures
+    it has always emitted (#402, `test_export_r_irr.py`).
+
+    #829: the pooled table averaged every multi-coder source in the project into
+    one headline — measured, a deliberate two-coder study of one column pooled
+    with seven other people's transcript work, *Curriculum fidelity* reading
+    α 0.06 pooled against 0.0023 on the notes alone, under *"Overall α 0.62 ·
+    unreliable"* as the largest text on screen.
+    """
+    coder_id_list, code_names, per_code, selectable, scope_coders = build_irr_matrices(
+        db, project_id, coder_ids, source
+    )
     n = len(coder_id_list)
     coders = (
         [{"id": cid, "name": name}
@@ -449,6 +583,8 @@ def compute_irr(db: Session, project_id: int, coder_ids: list[int] | None = None
     if n < 2 or not per_code:
         return {
             "available": False,
+            "sources": _describe_sources(db, selectable),
+            "source": _source_token(source),
             "reason": "Inter-rater reliability needs at least 2 coders with coding on a shared source.",
             "n_coders": n,
             "coders": coders,
@@ -458,24 +594,68 @@ def compute_irr(db: Session, project_id: int, coder_ids: list[int] | None = None
             "interpretation_thresholds": thresholds,
         }
 
+    # #828 — κ belongs to a SOURCE, not to the install. The engaged pair is the
+    # honest basis, and the panel's own explainer already promised it: *"Cohen's
+    # κ only when exactly two coders coded a shared source."*
+    pair_idx: tuple[int, int] | None = None
+    if len(scope_coders) == 2:
+        a, b = sorted(scope_coders, key=coder_id_list.index)
+        pair_idx = (coder_id_list.index(a), coder_id_list.index(b))
+
     per_code_results = []
     global_rows: list[list[int | None]] = []
     for code_id, rows in per_code.items():
         n_units = _n_comparable_units(rows)
         if n_units == 0:
             continue
+        prevalence = _prevalence(rows)
+
+        # 🔴 THE ZERO-PREVALENCE RIDER (#829). A code NOBODY applied in scope has
+        # no variance to agree about, and the arithmetic says so loudly in the
+        # wrong direction: every present cell is 0, so po = 1.0, the expected
+        # agreement pe is also 1.0, and the `pe >= 1.0` branch returns κ = 1.0 —
+        # rendered "almost perfect". Measured on real data: three codes reporting
+        # n=40, prevalence 0.00, agreement 100%, κ = 1, and LIFTING the headline
+        # (α 0.7962 with them, 0.7911 without).
+        #
+        # This is #689's rule, not a new one: an undefined statistic is None WITH
+        # a reason, never a number. The reason is the existing `no_variance`
+        # member of `undefined_stats.UNDEFINED_REASONS`. Reporting it as
+        # undefined also answers the pooling question for free — an undefined
+        # statistic contributes no rows to the headline.
+        #
+        # ⚠️ Per-source scoping makes this MORE visible, not less: a source where
+        # a code was never used becomes its own κ = 1 row. The two ship together
+        # or the fix makes the panel noisier than it found it.
+        no_variance = prevalence == 0.0 or prevalence == 1.0
+        if no_variance:
+            per_code_results.append({
+                "code_id": code_id,
+                "code_name": code_names.get(code_id, str(code_id)),
+                "n_units": n_units,
+                "percent_agreement": _percent_agreement(rows),
+                "prevalence": prevalence,
+                "cohens_kappa": None,
+                "kappa_interpretation": None,
+                "krippendorff_alpha": None,
+                "alpha_interpretation": None,
+                "undefined_reason": NO_VARIANCE,
+            })
+            continue
+
         alpha = _krippendorff_alpha(rows)
-        kappa = _cohens_kappa(rows) if n == 2 else None
+        kappa = _cohens_kappa(_project_to_pair(rows, *pair_idx)) if pair_idx else None
         per_code_results.append({
             "code_id": code_id,
             "code_name": code_names.get(code_id, str(code_id)),
             "n_units": n_units,
             "percent_agreement": _percent_agreement(rows),
-            "prevalence": _prevalence(rows),
+            "prevalence": prevalence,
             "cohens_kappa": kappa,
             "kappa_interpretation": _interpret_kappa(kappa),
             "krippendorff_alpha": alpha,
             "alpha_interpretation": _interpret_alpha(alpha),
+            "undefined_reason": None,
         })
         global_rows.extend(rows)
 
@@ -484,9 +664,13 @@ def compute_irr(db: Session, project_id: int, coder_ids: list[int] | None = None
 
     return {
         "available": True,
+        "sources": _describe_sources(db, selectable),
+        "source": _source_token(source),
         "n_coders": n,
         "coders": coders,
-        "metric_label": "kappa+alpha" if n == 2 else "alpha",
+        # ⚠️ Reads the SCOPE's engaged pair, not the roster — a per-source κ under
+        # a roster-derived label would say "alpha" beside a populated κ column.
+        "metric_label": "kappa+alpha" if pair_idx else "alpha",
         "per_code": per_code_results,
         "overall_alpha": overall_alpha,
         "overall_alpha_interpretation": _interpret_alpha(overall_alpha),

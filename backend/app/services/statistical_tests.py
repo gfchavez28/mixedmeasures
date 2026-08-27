@@ -15,8 +15,9 @@ from sqlalchemy.orm import Session
 
 from ..models.metric import MetricDefinition
 from ..models.statistical_test import StatisticalTest
-from ..models.analysis_domain import AnalysisDomain
+from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
 from ..models.dataset import DatasetColumn, DatasetRow, Dataset
+from ..models.equivalence_group import EquivalenceGroup
 from .grouping import order_value_labels
 from .undefined_stats import finite_or_none
 from .metrics import (
@@ -34,6 +35,16 @@ logger = logging.getLogger(__name__)
 COHENS_D_THRESHOLDS = {"small": 0.2, "medium": 0.5, "large": 0.8}
 ETA_SQUARED_THRESHOLDS = {"small": 0.01, "medium": 0.06, "large": 0.14}
 ALPHA_THRESHOLDS = {"poor": 0.5, "questionable": 0.6, "acceptable": 0.7, "good": 0.8, "excellent": 0.9}
+
+# ── How a split-half coefficient was split (#710) ────────────────────────────
+# Rides the wire so the client STATES the basis rather than assuming one, the
+# same seam as `ci_method` (#690/#715) and `aggregation_basis` (#693).
+#
+# ⚠️ A different split rule (random splits averaged, a theoretical two-half
+# structure) MUST take a new value here rather than reusing this one. The whole
+# point is that split-half is split-DEPENDENT, so a basis that lies about which
+# split produced the number is worse than no basis at all.
+SPLIT_BASIS_ODD_EVEN_DOMAIN_ORDER = "odd_even_domain_order"
 
 
 def _classify_effect_cohens_d(d: float) -> str:
@@ -121,6 +132,49 @@ class RecordItemRow:
     excluded: bool
 
 
+def _order_columns_by_domain_sequence(
+    db: Session, domain_id: int, column_ids,
+) -> list[int]:
+    """Order a domain's columns by the researcher's own item order (#710).
+
+    This used to be `sorted(domain_data.keys())` — i.e. by `DatasetColumn.id`,
+    which is the order the columns were INSERTED into the database across the
+    whole project. For a cross-dataset domain that blocks all of dataset A and
+    then all of dataset B, and it is not an order the researcher sees anywhere
+    in the UI: Dataset View shows `display_order`, and the domain has its own
+    `sequence_order` with a reorder endpoint behind it.
+
+    That mattered for exactly one consumer, but it mattered a lot.
+    **Split-half reliability splits the items odd/even**, so the item order
+    DECIDES which items land in which half and therefore decides the
+    coefficient. The researcher had a reorder control that could not reach it.
+    Ordering here makes that control mean something, and makes the label
+    ("odd/even by the domain's item order") a statement they can act on.
+
+    Cronbach's alpha is order-INVARIANT — the sum of item variances and the
+    variance of the row totals do not depend on item order — so this changes no
+    alpha, anywhere. It does put alpha's per-item diagnostics (#707a) in the
+    researcher's order rather than an internal one, which is a free improvement.
+
+    `sequence_order` is nullable; those sort last, then by id, so the order is
+    total and deterministic either way.
+    """
+    ids = set(column_ids)
+    if not ids:
+        return []
+
+    rows = (
+        db.query(AnalysisDomainMember.member_id, AnalysisDomainMember.sequence_order)
+        .filter(
+            AnalysisDomainMember.domain_id == domain_id,
+            AnalysisDomainMember.member_type == "column",
+        )
+        .all()
+    )
+    seq = {mid: order for mid, order in rows}
+    return sorted(ids, key=lambda cid: (seq.get(cid) is None, seq.get(cid, 0), cid))
+
+
 def build_row_item_matrix(
     db: Session,
     domain_id: int,
@@ -149,7 +203,7 @@ def build_row_item_matrix(
     if not domain_data:
         return {}, {}, [], {}
 
-    column_ids = sorted(domain_data.keys())
+    column_ids = _order_columns_by_domain_sequence(db, domain_id, domain_data.keys())
 
     # Build col_id → equivalence_group_id map
     col_to_equiv: dict[int, int] = {}
@@ -187,6 +241,158 @@ def build_row_item_matrix(
     return matrix, grouping_map, column_ids, col_to_equiv
 
 
+def collapse_domain_items(
+    matrix: dict[int, dict[int, RecordItemRow]],
+    column_ids: list[int],
+    col_to_equiv: dict[int, int],
+) -> tuple[list[tuple[str, int]], dict[int, dict[tuple[str, int], float | None]]]:
+    """Collapse equivalent columns into logical items, per record.
+
+    Columns in the same equivalence group become ONE item — a record answers
+    whichever of them their dataset used, and a valid value takes precedence
+    over a missing one. Well-defined only under the 1:1-column-per-dataset
+    invariant (#289), which guarantees at most one value per (group, dataset).
+
+    Returns `(item_keys, collapsed)` where a key is `("equiv", group_id)` or
+    `("col", column_id)`.
+
+    Extracted from `compute_cronbachs_alpha` and `compute_split_half`, which
+    held byte-identical copies of this block. Not cosmetic: the item ORDER is
+    load-bearing for split-half (it decides the odd/even split) and the item
+    IDENTITY is load-bearing for alpha's per-item diagnostics, so two copies
+    could disagree about what "item 1" is while each stayed internally
+    consistent — the #733 shape.
+    """
+    item_keys: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    col_to_item_key: dict[int, tuple[str, int]] = {}
+
+    for col_id in column_ids:
+        eg_id = col_to_equiv.get(col_id)
+        key = ("equiv", eg_id) if eg_id is not None else ("col", col_id)
+        col_to_item_key[col_id] = key
+        if key not in seen:
+            seen.add(key)
+            item_keys.append(key)
+
+    collapsed: dict[int, dict[tuple[str, int], float | None]] = {}
+    for row_id, items in matrix.items():
+        row_vals: dict[tuple[str, int], float | None] = {}
+        for col_id, item in items.items():
+            item_key = col_to_item_key.get(col_id)
+            if item_key is None:
+                continue
+            if item.excluded or item.numeric is None:
+                # Only set None if no valid value is already present: a record
+                # answering one column of an equivalence group has answered the
+                # ITEM, whatever the sibling columns hold.
+                if item_key not in row_vals:
+                    row_vals[item_key] = None
+            else:
+                row_vals[item_key] = item.numeric
+        collapsed[row_id] = row_vals
+
+    return item_keys, collapsed
+
+
+def resolve_item_labels(
+    db: Session, item_keys: list[tuple[str, int]],
+) -> dict[tuple[str, int], str]:
+    """Human labels for logical items, in TWO batched queries.
+
+    Per-item diagnostics are unreadable without them — `item_variances` has
+    always been a positional list with no way to say WHICH item, which is why
+    nothing ever displayed it. A value and the thing naming it have to be
+    produced together or they drift apart (the #745/#746 class).
+
+    Batched deliberately: a lookup per item is an N+1 on a screen that renders
+    one row per item.
+    """
+    col_ids = [i for kind, i in item_keys if kind == "col"]
+    eg_ids = [i for kind, i in item_keys if kind == "equiv"]
+    labels: dict[tuple[str, int], str] = {}
+
+    if col_ids:
+        for cid, name, text, code in (
+            db.query(
+                DatasetColumn.id, DatasetColumn.column_name,
+                DatasetColumn.column_text, DatasetColumn.column_code,
+            ).filter(DatasetColumn.id.in_(col_ids)).all()
+        ):
+            labels[("col", cid)] = name or text or code or f"Column {cid}"
+
+    if eg_ids:
+        for gid, label in (
+            db.query(EquivalenceGroup.id, EquivalenceGroup.label)
+            .filter(EquivalenceGroup.id.in_(eg_ids)).all()
+        ):
+            labels[("equiv", gid)] = label or f"Group {gid}"
+
+    # A key with no row (a column deleted between compute and label) still gets
+    # a name — an unnamed diagnostic row is worse than a generic one.
+    for kind, ident in item_keys:
+        labels.setdefault((kind, ident), f"{'Group' if kind == 'equiv' else 'Column'} {ident}")
+    return labels
+
+
+def _item_diagnostics(
+    complete_rows: list[list[float]],
+    item_variances: list[float],
+    k: int,
+) -> list[dict]:
+    """Corrected item-total correlation and alpha-if-item-deleted, per item.
+
+    These are the standard diagnostics — the first thing a reviewer asks for,
+    and what reveals a mis-keyed item. Both fall out of the `complete_rows`
+    matrix alpha already builds.
+
+    ⚠️ Every value passes `finite_or_none`. A constant item makes the
+    item-total correlation `nan` (zero variance in one leg of the covariance),
+    and dropping an item can make the REMAINING items' total variance zero,
+    which makes alpha-if-deleted undefined rather than zero. A `0.0` in either
+    column reads as a measured result — "this item is unrelated to the rest" —
+    when the truth is "not computable" (#689).
+    """
+    import numpy as np
+
+    data = np.array(complete_rows, dtype=float)
+    totals = data.sum(axis=1)
+    diagnostics: list[dict] = []
+
+    for i in range(k):
+        item = data[:, i]
+        # CORRECTED item-total: the item against the sum of the OTHERS. An
+        # uncorrected one correlates the item with a total containing itself,
+        # which is inflated by construction and worst for short scales.
+        rest = totals - item
+        if item.std() == 0 or rest.std() == 0:
+            item_total_r = None
+        else:
+            item_total_r = finite_or_none(float(np.corrcoef(item, rest)[0, 1]), STATS_PRECISION)
+
+        alpha_if_deleted = None
+        if k >= 3:
+            # k - 1 items must still be >= 2 for alpha to be defined at all.
+            rest_variances = [v for j, v in enumerate(item_variances) if j != i]
+            rest_total_var = float(rest.var(ddof=1)) if len(rest) > 1 else 0.0
+            if rest_total_var > 0:
+                a = ((k - 1) / (k - 2)) * (1 - sum(rest_variances) / rest_total_var)
+                alpha_if_deleted = finite_or_none(a, STATS_PRECISION)
+
+        diagnostics.append({
+            "variance": round(item_variances[i], STATS_PRECISION),
+            "item_total_r": item_total_r,
+            "alpha_if_deleted": alpha_if_deleted,
+            # A NEGATIVE corrected item-total correlation is the signature of an
+            # item scored in the opposite direction to the rest — the single
+            # most common and most fixable scale-construction error, and the app
+            # already has the remedy (a reverse recode, #578/#600).
+            "possible_reverse_coding": item_total_r is not None and item_total_r < 0,
+        })
+
+    return diagnostics
+
+
 # ── Compute functions ─────────────────────────────────────────────────────────
 
 
@@ -211,53 +417,12 @@ def compute_cronbachs_alpha(db: Session, test: StatisticalTest) -> dict:
         db, test.target_id, exclude_values=exclude_values,
     )
 
-    # Collapse equivalent columns into logical items.
-    # item_keys: ordered list of unique item identifiers
-    #   - For columns in an equivalence group: ("equiv", group_id)
-    #   - For standalone columns: ("col", col_id)
-    item_keys: list[tuple[str, int]] = []
-    item_key_set: set[tuple[str, int]] = set()
-    for col_id in column_ids:
-        eg_id = col_to_equiv.get(col_id)
-        if eg_id is not None:
-            key = ("equiv", eg_id)
-        else:
-            key = ("col", col_id)
-        if key not in item_key_set:
-            item_key_set.add(key)
-            item_keys.append(key)
-
-    # Map each col_id to its item_key
-    col_to_item_key: dict[int, tuple[str, int]] = {}
-    for col_id in column_ids:
-        eg_id = col_to_equiv.get(col_id)
-        if eg_id is not None:
-            col_to_item_key[col_id] = ("equiv", eg_id)
-        else:
-            col_to_item_key[col_id] = ("col", col_id)
+    # Collapse equivalent columns into logical items (shared with split-half).
+    item_keys, collapsed = collapse_domain_items(matrix, column_ids, col_to_equiv)
 
     k = len(item_keys)
     if k < 2:
         raise ValueError(f"Cronbach's alpha requires at least 2 items, domain has {k}")
-
-    # Build collapsed record matrix: {row_id: {item_key: numeric_value}}
-    # For equivalence groups, a record's value comes from whichever
-    # equivalent column they answered.
-    collapsed: dict[int, dict[tuple[str, int], float | None]] = {}
-    for row_id, items in matrix.items():
-        row_vals: dict[tuple[str, int], float | None] = {}
-        for col_id, item in items.items():
-            item_key = col_to_item_key.get(col_id)
-            if item_key is None:
-                continue
-            if item.excluded or item.numeric is None:
-                # Only set None if no valid value already present for this item
-                if item_key not in row_vals:
-                    row_vals[item_key] = None
-            else:
-                # Valid value takes precedence
-                row_vals[item_key] = item.numeric
-        collapsed[row_id] = row_vals
 
     # Listwise deletion: keep records with all k items valid
     complete_rows: list[list[float]] = []
@@ -292,19 +457,51 @@ def compute_cronbachs_alpha(db: Session, test: StatisticalTest) -> dict:
     total_variance = statistics.variance(row_totals)
 
     # Alpha formula
+    #
+    # #767: `total_variance == 0` used to return `alpha = 0.0`. That is a
+    # MEASURED-looking claim of zero reliability for a scale whose alpha is not
+    # computable at all — the formula divides by that variance, and the limit is
+    # negative infinity, not zero. It is reachable with an entirely ordinary
+    # fixture: a two-item scale where respondents trade off perfectly (1,5),
+    # (5,1), (2,4)… gives item variances of 2.5 each and a total variance of 0.
+    #
+    # Raise rather than return `None`, per the #689 split: this path SAVES its
+    # result (`json.dumps` into `result_data`), and the t-test above refuses the
+    # analogous all-constant case the same way. The message names the condition
+    # in the researcher's terms, not the formula's.
     if total_variance == 0:
-        alpha = 0.0
-    else:
-        alpha = (k / (k - 1)) * (1 - sum(item_variances) / total_variance)
+        raise ValueError(
+            "Every record has the same total score across these items, so there "
+            "is no variance for Cronbach's alpha to explain and the coefficient "
+            "is undefined. This usually means the items are scored in opposing "
+            "directions and cancel out — check whether one needs reverse-coding."
+        )
 
+    alpha = (k / (k - 1)) * (1 - sum(item_variances) / total_variance)
     alpha = round(alpha, STATS_PRECISION)
+
+    # #707(a): the diagnostics a reviewer asks for, and what reveals a mis-keyed
+    # item. Both fall out of the `complete_rows` matrix already in hand.
+    diagnostics = _item_diagnostics(complete_rows, item_variances, k)
+    labels = resolve_item_labels(db, item_keys)
+    items = [
+        {
+            "key": f"{kind}:{ident}",
+            "label": labels[(kind, ident)],
+            **diagnostics[i],
+        }
+        for i, (kind, ident) in enumerate(item_keys)
+    ]
 
     return {
         "alpha": alpha,
         "k": k,
         "n": n,
         "n_excluded_listwise": n_excluded_listwise,
+        # Kept for payload compatibility; `items[].variance` is the same numbers
+        # with the labels that make them readable.
         "item_variances": [round(v, STATS_PRECISION) for v in item_variances],
+        "items": items,
         "total_variance": round(total_variance, STATS_PRECISION),
         "interpretation": _interpret_alpha(alpha),
         "interpretation_thresholds": ALPHA_THRESHOLDS,
@@ -588,20 +785,12 @@ def compute_split_half(db: Session, test: StatisticalTest) -> dict:
         db, test.target_id, exclude_values=exclude_values,
     )
 
-    # Collapse equivalent columns into logical items (same as Cronbach's alpha)
-    item_keys: list[tuple[str, int]] = []
-    item_key_set: set[tuple[str, int]] = set()
-    for col_id in column_ids:
-        eg_id = col_to_equiv.get(col_id)
-        key = ("equiv", eg_id) if eg_id is not None else ("col", col_id)
-        if key not in item_key_set:
-            item_key_set.add(key)
-            item_keys.append(key)
-
-    col_to_item_key: dict[int, tuple[str, int]] = {}
-    for col_id in column_ids:
-        eg_id = col_to_equiv.get(col_id)
-        col_to_item_key[col_id] = ("equiv", eg_id) if eg_id is not None else ("col", col_id)
+    # Collapse equivalent columns into logical items — the SAME helper alpha
+    # uses. These were byte-identical copies; the item ORDER decides the
+    # odd/even split here and the item IDENTITY labels alpha's diagnostics, so
+    # two copies could disagree about what "item 1" is while each stayed
+    # internally consistent.
+    item_keys, collapsed = collapse_domain_items(matrix, column_ids, col_to_equiv)
 
     k = len(item_keys)
     if k < 4:
@@ -609,21 +798,6 @@ def compute_split_half(db: Session, test: StatisticalTest) -> dict:
             f"Split-half reliability requires at least 4 items for balanced "
             f"halves, domain has {k}"
         )
-
-    # Build collapsed record matrix
-    collapsed: dict[int, dict[tuple[str, int], float | None]] = {}
-    for row_id, items in matrix.items():
-        row_vals: dict[tuple[str, int], float | None] = {}
-        for col_id, item in items.items():
-            item_key = col_to_item_key.get(col_id)
-            if item_key is None:
-                continue
-            if item.excluded or item.numeric is None:
-                if item_key not in row_vals:
-                    row_vals[item_key] = None
-            else:
-                row_vals[item_key] = item.numeric
-        collapsed[row_id] = row_vals
 
     # Split items: odd-indexed vs even-indexed
     half1_keys = [item_keys[i] for i in range(0, k, 2)]
@@ -672,6 +846,13 @@ def compute_split_half(db: Session, test: StatisticalTest) -> dict:
     negative_half_correlation = r < 0
     spearman_brown = max(raw_sb, 0.0)
 
+    # #710: split-half is split-DEPENDENT by construction, so reporting one
+    # split as *the* coefficient overstates its stability — and until now the
+    # split was over `DatasetColumn.id`, an order the researcher never sees.
+    # It now follows the domain's own item order, which they can change, so the
+    # basis rides the wire and the client DISPLAYS it (the `ci_method` /
+    # `aggregation_basis` pattern) rather than assuming a split it cannot see.
+    labels = resolve_item_labels(db, item_keys)
     return {
         "split_half_r": round(r, STATS_PRECISION),
         "spearman_brown": round(spearman_brown, STATS_PRECISION),
@@ -682,6 +863,13 @@ def compute_split_half(db: Session, test: StatisticalTest) -> dict:
         "k_half2": len(half2_keys),
         "n": n,
         "n_excluded_listwise": n_excluded_listwise,
+        "split_basis": SPLIT_BASIS_ODD_EVEN_DOMAIN_ORDER,
+        # Which items actually landed in each half. The coefficient cannot be
+        # judged without them, and a researcher who dislikes the split now has
+        # both the information and the control (domain member reorder) to
+        # change it.
+        "half1_items": [labels[k_] for k_ in half1_keys],
+        "half2_items": [labels[k_] for k_ in half2_keys],
     }
 
 
@@ -692,7 +880,31 @@ def compute_statistical_test(db: Session, test: StatisticalTest) -> dict:
     """Compute a single statistical test and update the model in place.
 
     Returns the result_data dict.
+
+    ⚠️ **A failed recompute CLEARS the stored result (#767).** Every runner here
+    refuses an undefined statistic by raising, and the previous behaviour was to
+    write only on success — so a test that had once computed kept displaying its
+    OLD number behind a stale marker, forever. That is at its worst in exactly
+    the case #767 is about: an alpha saved as `0.00` under the old code
+    recomputes into a refusal, and leaving `0.00` on screen would preserve the
+    wrong claim the fix exists to remove.
+
+    Clearing is the honest state — "this cannot currently be computed" — and it
+    is what the empty-result rendering already handles ("Not yet computed").
+    The exception still propagates: the single-test endpoint turns it into a 400
+    carrying the reason, and the batch path collects it per test.
     """
+    try:
+        return _compute_statistical_test(db, test)
+    except Exception:
+        test.result_data = None
+        test.valid_n = None
+        test.stale = True
+        db.flush()
+        raise
+
+
+def _compute_statistical_test(db: Session, test: StatisticalTest) -> dict:
     if test.test_type == "cronbachs_alpha":
         result = compute_cronbachs_alpha(db, test)
         valid_n = result.get("n")

@@ -48,6 +48,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { toastProjectExportError } from '@/lib/project-export-error'
 
 /**
  * #459 — Dashboard coder switcher. The TopRail only lives inside a project, so the
@@ -292,7 +293,9 @@ export default function Dashboard() {
       setDuplicateProjectId(null)
       toast.success(`Duplicated as "${result.project_name}"`)
     },
-    onError: () => { toast.error('Could not duplicate project') },
+    // #842: Duplicate runs through the SAME export machinery, so it hits the
+    // same size refusal — and it must say so rather than shrug.
+    onError: (err) => { toastProjectExportError(err, 'Could not duplicate project') },
   })
 
   const handleCreateProject = (e: React.FormEvent) => {
@@ -710,8 +713,8 @@ function ProjectCard({
           try {
             await projectPortabilityApi.exportProject(project.id)
             toast.success('Project exported')
-          } catch {
-            toast.error('Export failed')
+          } catch (err) {
+            toastProjectExportError(err, 'Export failed')  // #842
           }
         }}>
           <Package className="w-4 h-4 mr-2" />

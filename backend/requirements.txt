@@ -1,5 +1,12 @@
 fastapi==0.136.1
-starlette>=0.49.1  # security floor: GHSA-7f5h-v6xp-fcq8 (Range-header parsing DoS in FileResponse), transitive via fastapi. Range streaming is load-bearing for media seek (audio + video V1).
+starlette==1.6.0  # security floor: GHSA-7f5h-v6xp-fcq8 (Range-header parsing DoS in FileResponse), transitive via fastapi — 1.6.0 is far above it. Range streaming is load-bearing for media seek (audio + video V1).
+                  # EXACT since 2026-08-27 (#843), and the reason is reproducibility, same as the numbers stack below. This was the LAST unbounded specifier in this file, so a
+                  # fresh resolve took whatever PyPI offered that day while the dev venv sat on 0.52.1 (2026-01-18): v1.3.0, v1.3.1 and v1.3.2 were every one of them frozen
+                  # against a starlette MAJOR that had never executed on the developer's machine, and two builds from one source tag could ship different majors. 1.6.0 is what
+                  # CI has been running green and what those three releases actually shipped, so this pin adopts the shipped version rather than reverting to the stale local one.
+                  # Soaked locally at 1.6.0 before pinning: 2837 passed, 0 skipped, MM_REQUIRE_R=1 — identical to the pre-bump baseline.
+                  # Bump DELIBERATELY and re-run the suite locally FIRST: app/main.py imports BaseHTTPMiddleware directly (the base of BOTH SecurityHeadersMiddleware and
+                  # LoopbackTokenMiddleware) and JSONResponse, whose allow_nan=False rendering is a load-bearing invariant (#689/#566) — assert it still RAISES on nan.
 uvicorn[standard]==0.42.0
 pydantic==2.13.3
 pydantic-settings==2.14.2  # security floor: GHSA-4xgf-cpjx-pc3j (NestedSecretsSettingsSource symlink traversal; MM doesn't use secrets_dir). Bumped from 2.14.0.

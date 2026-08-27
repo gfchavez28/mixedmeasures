@@ -11,6 +11,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useCodeChordShortcuts, CHORD_TIMEOUT_MS, type UseCodeChordShortcutsOptions } from './useCodeChordShortcuts'
 import type { ShortcutCodeInput } from '@/lib/codeShortcuts'
+import { ACTIVATION_KEYS } from '@/lib/keyboard-scope'
 
 type Code = ShortcutCodeInput
 
@@ -375,5 +376,212 @@ describe('slab-3d contract additions', () => {
     press(',', { shiftKey: true })
     expect(seen).toEqual([false, true])
     view.unmount()
+  })
+})
+
+/**
+ * #784 — the two stand-down rules.
+ *
+ * Both were found by a screen-reader pass and then MEASURED in Chrome, and neither is
+ * visible to a test that only dispatches keys at a bare window: the first needs a real
+ * focused control, the second needs a real event that something else already handled.
+ */
+describe('#784 stand-down rules', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  /** A real focused control, because `document.activeElement` is what the guard reads. */
+  function focusButton(): HTMLButtonElement {
+    const b = document.createElement('button')
+    b.textContent = 'Fit'
+    document.body.appendChild(b)
+    b.focus()
+    return b
+  }
+
+  /** Dispatch and hand back the event, so the harm (`preventDefault`) is assertable. */
+  function pressReturning(key: string, from: EventTarget = window): KeyboardEvent {
+    const e = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+    act(() => { from.dispatchEvent(e) })
+    return e
+  }
+
+  describe('stand-down 1 — the focused control owns activation keys', () => {
+    // Population over the activation set, so a workbench that adds `Enter` to its
+    // extraKeys tomorrow is covered without anyone widening this test.
+    for (const key of ACTIVATION_KEYS) {
+      it(`does not claim ${JSON.stringify(key)} while a button has focus`, () => {
+        const handler = vi.fn(() => true)
+        const { view } = setup({ extraKeys: { [key]: handler } })
+        focusButton()
+
+        const e = pressReturning(key)
+
+        expect(handler).not.toHaveBeenCalled()
+        // The real harm: a prevented default cancels the button's native activation.
+        expect(e.defaultPrevented).toBe(false)
+        view.unmount()
+      })
+    }
+
+    it('STILL claims Space when the list container has focus — the primary interaction', () => {
+      const handler = vi.fn(() => true)
+      const { view } = setup({ extraKeys: { ' ': handler } })
+      const list = document.createElement('div')
+      list.setAttribute('role', 'listbox')
+      list.tabIndex = 0
+      document.body.appendChild(list)
+      list.focus()
+
+      pressReturning(' ')
+
+      expect(handler).toHaveBeenCalledTimes(1)
+      view.unmount()
+    })
+
+    it('leaves the chord layer global — `c` still fires with a button focused', () => {
+      const { view, onCreateCode } = setup()
+      focusButton()
+
+      pressReturning('c')
+
+      expect(onCreateCode).toHaveBeenCalledTimes(1)
+      view.unmount()
+    })
+  })
+
+  describe('stand-down 2 — another widget already handled the key', () => {
+    /**
+     * Mirrors the real flow: a Radix menu item handles the key and calls
+     * `preventDefault` on the way up, so the window-bubble listener sees it marked.
+     * MEASURED against an open DropdownMenu — ArrowDown and Escape both arrive with
+     * `defaultPrevented` set.
+     */
+    function pressThroughHandledWidget(key: string): void {
+      const widget = document.createElement('div')
+      widget.setAttribute('role', 'menu')
+      document.body.appendChild(widget)
+      widget.addEventListener('keydown', ev => ev.preventDefault())
+      pressReturning(key, widget)
+    }
+
+    it('does not move the list selection for an ArrowDown the menu consumed', () => {
+      const { view, onArrowNav } = setup()
+      pressThroughHandledWidget('ArrowDown')
+      expect(onArrowNav).not.toHaveBeenCalled()
+      view.unmount()
+    })
+
+    it('does not run the Escape ladder for an Escape the menu consumed', () => {
+      const { view, clearSelection } = setup({ selectionCount: 2 })
+      pressThroughHandledWidget('Escape')
+      expect(clearSelection).not.toHaveBeenCalled()
+      view.unmount()
+    })
+
+    // Positive control: without the consuming widget both keys still work, so the two
+    // assertions above are pinning the guard rather than a broken harness.
+    it('still acts on the same keys when nothing consumed them', () => {
+      const { view, onArrowNav, clearSelection } = setup({ selectionCount: 2 })
+      pressReturning('ArrowDown')
+      pressReturning('Escape')
+      expect(onArrowNav).toHaveBeenCalledTimes(1)
+      expect(clearSelection).toHaveBeenCalledTimes(1)
+      view.unmount()
+    })
+  })
+})
+
+/**
+ * #789 — arrows ask where focus IS, not which panel is "active".
+ *
+ * ⚠️ Half of these assert that navigation KEEPS working. That is not padding: the failure
+ * mode of this guard is the keyboard quietly going dead, which looks like nothing at all
+ * and is exactly how the defect it fixes survived.
+ */
+describe('#789 arrow keys follow real focus', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+    // jsdom leaves the removed node focused; put focus back on body explicitly.
+    document.body.focus()
+  })
+
+  function focusEl(html: string): HTMLElement {
+    const host = document.createElement('div')
+    host.innerHTML = html
+    const el = host.firstElementChild as HTMLElement
+    document.body.appendChild(el)
+    el.focus()
+    return el
+  }
+
+  describe('vertical — the list selection', () => {
+    it('does NOT move the selection while a toolbar button has focus', () => {
+      const { view, onArrowNav } = setup({ arrowNavEnabled: true })
+      focusEl('<button>Fit</button>')
+      press('ArrowDown')
+      expect(onArrowNav).not.toHaveBeenCalled()
+      view.unmount()
+    })
+
+    // MEASURED: on a fresh page load `document.activeElement` is BODY and ArrowDown
+    // selects the first clip. This is how the surface is picked up — arrive, press Down.
+    it('STILL moves the selection when nothing is focused (the entry path)', () => {
+      const { view, onArrowNav } = setup({ arrowNavEnabled: true })
+      expect(document.activeElement).toBe(document.body)
+      press('ArrowDown')
+      expect(onArrowNav).toHaveBeenCalledTimes(1)
+      view.unmount()
+    })
+
+    it('STILL moves the selection when the list container has focus', () => {
+      const { view, onArrowNav } = setup({ arrowNavEnabled: true })
+      focusEl('<div role="listbox" tabindex="0"></div>')
+      press('ArrowDown')
+      expect(onArrowNav).toHaveBeenCalledTimes(1)
+      view.unmount()
+    })
+  })
+
+  describe('horizontal — panel switching and boundary nudges', () => {
+    /**
+     * The one that mutates. On Observations this reaches `nudgeBoundary`, which EDITS a
+     * clip's boundary and commits 600 ms later. Proven reachable on the frozen
+     * observation, where the same path raised the frozen refusal with focus on `Fit`.
+     */
+    it('does NOT reach the handler while a toolbar button has focus', () => {
+      const { view, onArrowHorizontal } = setup()
+      focusEl('<button>Fit</button>')
+      press('ArrowRight')
+      expect(onArrowHorizontal).not.toHaveBeenCalled()
+      view.unmount()
+    })
+
+    /**
+     * ⚠️ Panel-return depends on this. MEASURED: ArrowRight from the transcript lands
+     * focus on CodePanel's container — `DIV`, `role: null`, `tabIndex: 0` — and ArrowLeft
+     * must still reach the hook from there. A containment-based guard would strand the
+     * user in the panel with no way back.
+     */
+    it('STILL reaches the handler from a plain container div (panel focus)', () => {
+      const { view, onArrowHorizontal } = setup()
+      focusEl('<div tabindex="0" class="h-full flex flex-col"></div>')
+      press('ArrowLeft')
+      expect(onArrowHorizontal).toHaveBeenCalledTimes(1)
+      view.unmount()
+    })
+
+    /**
+     * ⚠️ Horizontal is deliberately NOT gated on `arrowNavEnabled` — panel switching has
+     * to work FROM a rail panel, which is precisely when that flag is false. Pinning it
+     * so the "make the two branches symmetrical" edit fails loudly.
+     */
+    it('is NOT gated on arrowNavEnabled — panel switching works with it false', () => {
+      const { view, onArrowHorizontal } = setup({ arrowNavEnabled: false })
+      press('ArrowLeft')
+      expect(onArrowHorizontal).toHaveBeenCalledTimes(1)
+      view.unmount()
+    })
   })
 })

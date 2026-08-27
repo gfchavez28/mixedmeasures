@@ -10,7 +10,7 @@ import { useSearchParams, useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { EditorContent } from '@tiptap/react'
 import type { AnyExtension } from '@tiptap/core'
-import { ArrowLeft } from 'lucide-react'
+import { ArrowLeft, FileQuestion, Loader2 } from 'lucide-react'
 import { canvasApi, type SnapshotRelationship } from '@/lib/api'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useCanvasEditor } from '@/components/canvas/useCanvasEditor'
@@ -49,6 +49,10 @@ function ReadOnlyTheme({ name, color, content, diffClass, materialDiff }: {
     content: parsedContent,
     editable: false,
     additionalExtensions: readOnlyExtensions,
+    // #848: this renderer's content prop is the source of truth, so the editor
+    // must follow it. Without this, an instance React reuses across a data
+    // change keeps the prose it was created with. See the hook's docstring.
+    recreateOnContentChange: true,
   })
 
   return (
@@ -96,6 +100,17 @@ function computeMaterialDiff(leftRefs: SourceRef[], rightRefs: SourceRef[]): str
 }
 
 interface ThemeForCompare {
+  /**
+   * #848 — the stable identity every rendered card is keyed on.
+   *
+   * These lists are rebuilt as queries resolve, and their MEMBERSHIP changes:
+   * before the snapshot arrives every current theme is "right only"; after it,
+   * only the genuinely-added ones are. An index-derived key therefore means a
+   * different theme on either side of that transition, and React reuses the
+   * instance. MEASURED: `ro-0` was "Assessment Outcomes" at t=1233ms and
+   * "New theme" at t=1352ms — the heading updated, the prose did not.
+   */
+  id: number
   name: string
   color: string | null
   content: Record<string, unknown> | null
@@ -170,33 +185,55 @@ export default function CanvasCompareView() {
   const isSnapshotMode = snapshotId > 0
   const isSideBySide = canvas2Id > 0
 
+  // ⚠️ #849 — the whole query result is kept, not just `data`. All three used to
+  // destructure `data` alone, so `isPending`/`isError` were unreachable and a
+  // missing snapshot rendered a CONFIDENT FALSE DIFF: "Snapshot: ... ()" in the
+  // header, "No themes" on the left, the full current canvas on the right —
+  // i.e. "the snapshot was empty; you added everything since". No error, no
+  // toast, no empty state. `PageErrorBoundary` cannot catch it either: a failed
+  // `useQuery` RETURNS, it does not throw.
+  const canvasEnabled = canvasId > 0
+  const snapshotEnabled = isSnapshotMode && canvasId > 0
+  const canvas2Enabled = isSideBySide && canvas2Id > 0
+
   // Fetch current canvas (right panel, or left for side-by-side)
-  const { data: canvas } = useQuery({
+  const canvasQuery = useQuery({
     queryKey: ['canvas', projectId, canvasId],
     queryFn: () => canvasApi.get(projectId, canvasId),
-    enabled: canvasId > 0,
+    enabled: canvasEnabled,
   })
+  const canvas = canvasQuery.data
 
   // Fetch snapshot detail (left panel in snapshot mode)
-  const { data: snapshot } = useQuery({
+  const snapshotQuery = useQuery({
     queryKey: ['snapshot-detail', projectId, canvasId, snapshotId],
     queryFn: () => canvasApi.getSnapshot(projectId, canvasId, snapshotId),
-    enabled: isSnapshotMode && canvasId > 0,
+    enabled: snapshotEnabled,
+    // Snapshots are a 10-rotation, so a gone id is the EXPECTED failure here,
+    // not a flake. Retrying it only lengthens the window the wrong render is up.
+    retry: false,
   })
+  const snapshot = snapshotQuery.data
 
   // Fetch second canvas (right panel in side-by-side mode)
-  const { data: canvas2 } = useQuery({
+  const canvas2Query = useQuery({
     queryKey: ['canvas', projectId, canvas2Id],
     queryFn: () => canvasApi.get(projectId, canvas2Id),
-    enabled: isSideBySide && canvas2Id > 0,
+    enabled: canvas2Enabled,
+    retry: false,
   })
+  const canvas2 = canvas2Query.data
 
   // Build theme arrays for comparison
   const leftThemes: ThemeForCompare[] = useMemo(() => {
     if (isSnapshotMode && snapshot?.snapshot_data) {
-      return snapshot.snapshot_data.themes
+      // ⚠️ `[...]` first — `.sort()` is IN PLACE. Without the copy this reorders
+      // React Query's own cached array on every recompute. `rightThemes` below
+      // always copied; only this arm did not.
+      return [...snapshot.snapshot_data.themes]
         .sort((a, b) => a.doc_order - b.doc_order)
         .map(t => ({
+          id: t.id,
           name: t.name,
           color: t.color,
           content: t.content as unknown as Record<string, unknown> | null,
@@ -205,6 +242,7 @@ export default function CanvasCompareView() {
     }
     if (isSideBySide && canvas) {
       return [...canvas.themes].sort((a, b) => a.doc_order - b.doc_order).map(t => ({
+        id: t.id,
         name: t.name,
         color: t.color,
         content: t.content,
@@ -218,6 +256,7 @@ export default function CanvasCompareView() {
     const source = isSideBySide ? canvas2 : canvas
     if (!source) return []
     return [...source.themes].sort((a, b) => a.doc_order - b.doc_order).map(t => ({
+      id: t.id,
       name: t.name,
       color: t.color,
       content: t.content,
@@ -262,6 +301,96 @@ export default function CanvasCompareView() {
     navigate(`/projects/${projectId}/analysis/canvas?canvas=${canvasId}`)
   }
 
+  // ── #849: resolve before comparing ────────────────────────────────────────
+  //
+  // 🔴 This gate is what makes the comparison HONEST, and it is the same gate
+  // #848 needs. A diff computed while one side is still fetching is not a
+  // partial answer, it is a WRONG one: `matchThemes([], right)` is a perfectly
+  // valid result meaning "every theme is new", so the page states that with the
+  // same confidence it states a real diff. It also renders a header reading
+  // literally `Snapshot: ... ()`.
+  //
+  // ⚠️ `isPending` is true for a DISABLED query too, so each arm is paired with
+  // its own `enabled` condition — otherwise side-by-side mode would wait forever
+  // on the snapshot query it never runs.
+  const waiting =
+    (canvasEnabled && canvasQuery.isPending) ||
+    (snapshotEnabled && snapshotQuery.isPending) ||
+    (canvas2Enabled && canvas2Query.isPending)
+
+  const missingSnapshot = snapshotEnabled && snapshotQuery.isError
+  const missingCanvas =
+    (canvasEnabled && canvasQuery.isError) || (canvas2Enabled && canvas2Query.isError)
+  const nothingToCompare = !canvasEnabled
+
+  const backButton = (
+    <button
+      onClick={handleBack}
+      className="p-1 rounded text-mm-text-muted hover:text-mm-text hover:bg-mm-bg transition-colors"
+      aria-label="Back to canvas"
+    >
+      <ArrowLeft className="w-4 h-4" />
+    </button>
+  )
+
+  if (nothingToCompare || missingSnapshot || missingCanvas) {
+    // ⚠️ Worded per CAUSE, because the remedies differ: a rotated-out snapshot is
+    // normal housekeeping and the canvas is still there; a missing canvas is not.
+    const { heading, detail } = nothingToCompare
+      ? {
+          heading: 'Nothing to compare',
+          detail: 'This link is missing the canvas it should open. Go back and choose a snapshot from the canvas you want to compare.',
+        }
+      : missingSnapshot
+        ? {
+            heading: 'This snapshot is no longer available',
+            detail: 'Canvases keep the ten most recent snapshots, so older ones are removed automatically. A saved link or a bookmark can outlive the snapshot it points to. Your canvas itself is unaffected.',
+          }
+        : {
+            heading: 'This canvas is no longer available',
+            detail: 'It may have been deleted or archived since this link was made.',
+          }
+    return (
+      <div className="h-full flex flex-col overflow-hidden">
+        <div className="shrink-0 flex items-center gap-3 px-4 py-2.5 border-b border-mm-border-subtle bg-mm-surface">
+          {backButton}
+          <span className="text-sm font-medium text-mm-text">Compare</span>
+        </div>
+        <div className="flex-1 flex items-center justify-center p-6">
+          <div className="max-w-[420px] text-center">
+            {/* Not colour-only: an icon, a heading and prose all carry the state. */}
+            <FileQuestion className="w-8 h-8 mx-auto mb-3 text-mm-text-faint" aria-hidden="true" />
+            <h2 className="text-base font-semibold text-mm-text mb-2">{heading}</h2>
+            <p className="text-sm text-mm-text-muted mb-4">{detail}</p>
+            <button
+              onClick={handleBack}
+              className="text-sm px-3 py-1.5 rounded border border-mm-border-subtle text-mm-text hover:bg-mm-bg transition-colors"
+            >
+              Back to canvas
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (waiting) {
+    return (
+      <div className="h-full flex flex-col overflow-hidden">
+        <div className="shrink-0 flex items-center gap-3 px-4 py-2.5 border-b border-mm-border-subtle bg-mm-surface">
+          {backButton}
+          <span className="text-sm font-medium text-mm-text">Compare</span>
+        </div>
+        <div className="flex-1 flex items-center justify-center" role="status" aria-live="polite">
+          <span className="flex items-center gap-2 text-sm text-mm-text-muted">
+            <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+            Loading comparison…
+          </span>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Header */}
@@ -287,9 +416,9 @@ export default function CanvasCompareView() {
           <div className="max-w-[600px] mx-auto px-6 py-6">
             {diff ? (
               <>
-                {diff.matched.map((m, i) => (
+                {diff.matched.map(m => (
                   <ReadOnlyTheme
-                    key={`m-l-${i}`}
+                    key={`m-l-${m.left.id}`}
                     name={m.left.name}
                     color={m.left.color}
                     content={m.left.content}
@@ -299,13 +428,13 @@ export default function CanvasCompareView() {
                     ) ? `Snapshot: ${computeMaterialDiff(parseRefs(m.left.referenced_source_ids), parseRefs(m.right.referenced_source_ids))}` : undefined}
                   />
                 ))}
-                {diff.leftOnly.map((t, i) => (
-                  <ReadOnlyTheme key={`lo-${i}`} name={t.name} color={t.color} content={t.content} diffClass="border-l-indigo-500" />
+                {diff.leftOnly.map(t => (
+                  <ReadOnlyTheme key={`lo-${t.id}`} name={t.name} color={t.color} content={t.content} diffClass="border-l-indigo-500" />
                 ))}
               </>
             ) : (
-              leftThemes.map((t, i) => (
-                <ReadOnlyTheme key={`l-${i}`} name={t.name} color={t.color} content={t.content} />
+              leftThemes.map(t => (
+                <ReadOnlyTheme key={`l-${t.id}`} name={t.name} color={t.color} content={t.content} />
               ))
             )}
             {leftThemes.length === 0 && (
@@ -319,14 +448,14 @@ export default function CanvasCompareView() {
           <div className="max-w-[600px] mx-auto px-6 py-6">
             {diff ? (
               <>
-                {diff.matched.map((m, i) => {
+                {diff.matched.map(m => {
                   const md = computeMaterialDiff(
                     parseRefs(m.left.referenced_source_ids),
                     parseRefs(m.right.referenced_source_ids),
                   )
                   return (
                     <ReadOnlyTheme
-                      key={`m-r-${i}`}
+                      key={`m-r-${m.right.id}`}
                       name={m.right.name}
                       color={m.right.color}
                       content={m.right.content}
@@ -334,13 +463,13 @@ export default function CanvasCompareView() {
                     />
                   )
                 })}
-                {diff.rightOnly.map((t, i) => (
-                  <ReadOnlyTheme key={`ro-${i}`} name={t.name} color={t.color} content={t.content} diffClass="border-l-rose-500" />
+                {diff.rightOnly.map(t => (
+                  <ReadOnlyTheme key={`ro-${t.id}`} name={t.name} color={t.color} content={t.content} diffClass="border-l-rose-500" />
                 ))}
               </>
             ) : (
-              rightThemes.map((t, i) => (
-                <ReadOnlyTheme key={`r-${i}`} name={t.name} color={t.color} content={t.content} />
+              rightThemes.map(t => (
+                <ReadOnlyTheme key={`r-${t.id}`} name={t.name} color={t.color} content={t.content} />
               ))
             )}
             {rightThemes.length === 0 && (

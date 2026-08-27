@@ -644,3 +644,70 @@ describe('usePlayback — D27 Follow: findUnitsAtTime writes the FULL containmen
     expect(onSelectionChange).toHaveBeenCalledWith([2])
   })
 })
+
+/**
+ * #770 — the clock names WHERE THE MEDIA IS, not where the selection is.
+ *
+ * The manual-selection effect used to write `selectedSeg.start_time` three
+ * lines above the seek that deliberately lands `− SEEK_LEAD_IN_SECONDS`
+ * earlier. The two disagreed by exactly the lead-in for one commit, until
+ * `timeupdate` corrected it ~100ms later.
+ *
+ * That frame is invisible to a human and LOUD to a screen reader: the
+ * Observations clip row folds "— now playing" (derived from this clock) into
+ * its accessible NAME, and a name that changes while the row is the active
+ * descendant is re-read — so every clip was announced twice. Found by ear in an
+ * NVDA pass, then reproduced by measuring the label at +60ms and +460ms.
+ */
+describe('usePlayback — #770: the clock agrees with the element', () => {
+  it('a manual selection writes the LANDED position, not the segment start', () => {
+    const { result, rerender } = setup([])
+    act(() => { rerender({ sel: [4] }) }) // segment 4 starts at 100
+
+    // The element really goes to start − lead-in …
+    expect(audio.currentTime).toBeCloseTo(98.5, 3)
+    // … and the clock must AGREE. `100` here is the defect.
+    expect(result.current.currentPlaybackTime).toBeCloseTo(98.5, 3)
+  })
+
+  it('unwinds the offset — the clock is TRANSCRIPT time, the seek is MEDIA time', () => {
+    const conv = { ...CONVERSATION, media_offset_seconds: 10 } as unknown as Conversation
+    const { result, rerender } = setup([], { source: conv })
+    act(() => { rerender({ sel: [4] }) })
+
+    expect(audio.currentTime).toBeCloseTo(108.5, 3) // (100 + 10) − 1.5, media time
+    expect(result.current.currentPlaybackTime).toBeCloseTo(98.5, 3) // transcript time
+  })
+
+  it('honours the clamp: a seek floored at 0 still leaves the clock truthful', () => {
+    const { result, rerender } = setup([])
+    act(() => { rerender({ sel: [1] }) }) // starts at 0, so 0 − 1.5 floors to 0
+
+    expect(audio.currentTime).toBe(0)
+    // NOT −1.5: the clock reports the landing, not the request.
+    expect(result.current.currentPlaybackTime).toBe(0)
+  })
+
+  it('with no playable media the segment start IS the clock', () => {
+    // Nothing else will ever drive it — no element, so no timeupdate. This is
+    // the branch the old unconditional write was right for.
+    const noMedia = { ...CONVERSATION, media_filename: null } as unknown as Conversation
+    const { result, rerender } = setup([], { source: noMedia })
+    act(() => { rerender({ sel: [4] }) })
+
+    expect(result.current.currentPlaybackTime).toBe(100)
+  })
+
+  it('BEYOND the recording the SEGMENT stays the truth (the #564 handover)', () => {
+    audio = makeFakeAudio({ duration: 113.2 })
+    const FAR = [seg(1, 0, 8), seg(2, 1060, 1120)]
+    const { result, rerender } = setup([], { segments: FAR })
+    act(() => { rerender({ sel: [2] }) })
+
+    // The element is parked inside its own length …
+    expect(audio.currentTime).toBeLessThan(113.2)
+    // … and must NOT drag the transcript clock back there, which is the exact
+    // snap-back #564 exists to prevent.
+    expect(result.current.currentPlaybackTime).toBe(1060)
+  })
+})

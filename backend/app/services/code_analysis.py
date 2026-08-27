@@ -25,9 +25,22 @@ from ..models.excerpt import Excerpt, segment_has_any_quote_filter
 from .coding_layers import LAYER_CONSENSUS, layer_origin_filter, non_consensus_filter
 from .grouping import order_value_labels
 from .missing_values import column_missing_rules, is_missing
+from .text_analysis import substantive_text_clause, treat_as_empty_for_project
 
 # ── Rounding precision constants ─────────────────────────────────────────────
 DISPLAY_PERCENTAGE_PRECISION = 1  # round(x, 1) for display percentages (e.g. 42.9%)
+
+# ── What a saturation curve's x-axis is ordered BY (#708) ────────────────────
+# Rides the wire so the chart states its ordering instead of the client assuming
+# one — the `ci_method` (#690/#715) / `aggregation_basis` (#693) /
+# `split_basis` (#710) seam.
+#
+# ⚠️ A user-chosen ordering (a fieldwork date, a manual sequence) MUST take a
+# new value here. It is also a bigger change than it looks: only `Conversation`
+# has a date field (`conversation_date`, nullable); `Document` and `Observation`
+# have none, so ordering by fieldwork needs two new columns and a migration
+# before it can be offered at all.
+SATURATION_ORDERING_IMPORT_DATE = "import_date"
 
 # The category fold used by `get_source_frequencies` when `aggregation="category"`.
 # An uncategorised code becomes its own pseudo-category keyed on the NEGATIVE of
@@ -2079,6 +2092,11 @@ def _compute_source_groups(
             b["coded_segments"] += 1
 
     # ── text-column totals per (column, group) ──
+    # #840: which texts count is the CODING GAUGE's rule, not "not blank" — a
+    # cell reading "N/A" is hidden from the workbench by default and so can never
+    # be coded. Counting it puts rows in the denominator the numerator cannot
+    # reach, and the column can never read 100%.
+    tae = treat_as_empty_for_project(db, project_id)
     col_q = (
         db.query(
             DatasetValue.column_id,
@@ -2092,8 +2110,7 @@ def _compute_source_groups(
         .filter(
             Dataset.project_id == project_id,
             DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
-            DatasetValue.value_text != None,
-            DatasetValue.value_text != "",
+            substantive_text_clause(tae),
             DatasetRow.participant_id.in_(pids),
         )
     )
@@ -2128,6 +2145,9 @@ def _compute_source_groups(
         .filter(
             Dataset.project_id == project_id,
             DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
+            # Paired with `col_q` above: the coded count must stay a SUBSET of
+            # the total, or a coded-but-non-substantive cell reads as >100%.
+            substantive_text_clause(tae),
             DatasetRow.participant_id.in_(pids),
         )
     )
@@ -2203,6 +2223,11 @@ def get_source_frequencies(
     This side is the one that can express a scoped selection exactly, which is
     why the summary table now sources BOTH its count and its percentage here.
     """
+
+    # #840 — the project's "which texts count" rule, shared by every open-text
+    # total and coded count below so this response cannot disagree with the
+    # coding-progress gauge (#519). Read once: it is one small query.
+    text_tae = treat_as_empty_for_project(db, project_id)
 
     # Load code metadata
     code_query = (
@@ -2572,6 +2597,8 @@ def get_source_frequencies(
             CodeApplication.dataset_value_id.isnot(None),
             Dataset.project_id == project_id,
             DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
+            # Paired with `total_rec_q` below — see the subset note there.
+            substantive_text_clause(text_tae),
         )
     )
     if text_column_ids is not None:
@@ -2638,8 +2665,10 @@ def get_source_frequencies(
         .filter(
             Dataset.project_id == project_id,
             DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
-            DatasetValue.value_text != None,
-            DatasetValue.value_text != "",
+            # #840 — a record whose only open-text answer is "N/A" has not
+            # responded, and can never be coded. `rec_by_code_q` above carries
+            # the same clause so the per-code numerator stays a subset of this.
+            substantive_text_clause(text_tae),
         )
     )
     if text_column_ids is not None:
@@ -2932,8 +2961,9 @@ def get_source_frequencies(
         .filter(
             Dataset.project_id == project_id,
             DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
-            DatasetValue.value_text != None,
-            DatasetValue.value_text != "",
+            # #840 — this total is displayed as a text source's denominator
+            # beside `col_coded_q`'s coded count. Both use the gauge's rule.
+            substantive_text_clause(text_tae),
         )
     )
     if text_column_ids is not None:
@@ -2957,6 +2987,8 @@ def get_source_frequencies(
         .filter(
             Dataset.project_id == project_id,
             DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
+            # Paired with `col_totals_q` — see the subset note there.
+            substantive_text_clause(text_tae),
         )
     )
     if universal_ids:
@@ -3728,6 +3760,20 @@ def get_saturation_data(
         "total_unique_codes": len(seen),
         "total_sources": len(all_sources),
         "category_level": category_level,
+        # #708(i): the curve's x-axis is an ORDERING, and a saturation curve is
+        # entirely order-dependent — a plateau after the twelfth source may be
+        # a property of the sequence, not of the data. The docstring disclosed
+        # this honestly and the CHART did not, and the chart is what goes in the
+        # report.
+        #
+        # The server names the ordering rather than the client assuming it (the
+        # `ci_method` / `aggregation_basis` / `split_basis` pattern). `created_at`
+        # is when each source was IMPORTED into the project, which is not when
+        # fieldwork happened — only `Conversation` records a fieldwork date at
+        # all, and documents and observations have no equivalent, so an
+        # ordering CHOICE is a schema change rather than a display option and
+        # deliberately not attempted here.
+        "ordering": SATURATION_ORDERING_IMPORT_DATE,
     }
 
 

@@ -12,20 +12,29 @@ import statistics
 import numpy as np
 from sqlalchemy.orm import Session
 
-from ..models.dataset import Dataset, DatasetColumn
+from ..models.dataset import Dataset, DatasetColumn, VALUE_NUMERIC_TYPES
+from ..models.metric import MetricDefinition
 from .correlations import _load_column_vectors, _load_domain_vectors
-from .grouping import load_grouping_values, order_value_labels
-from .metrics import _t_critical
+from .grouping import MISSING_GROUP_LABEL, load_grouping_values, order_value_labels
+from .metrics import _Z_975, _t_critical
 from .statistical_tests import (
     _classify_effect_cohens_d,
     _classify_effect_eta_squared,
     pooled_cohens_d,
 )
+from .assumption_checks import normality_check, variance_homogeneity_check
+from .qq_plot import qq_summary
 from .undefined_stats import (
     DEGENERATE,
+    DOMAIN_SCORES_MISSING,
+    DOMAIN_SCORES_NOT_COMPUTED,
     EMPTY_GROUP,
+    INSUFFICIENT_GROUPS,
     INSUFFICIENT_N,
+    NO_GROUP_VALUES,
+    NO_VARIABLES,
     NO_VARIANCE,
+    NOT_NUMERIC,
     finite_or_none,
 )
 
@@ -33,9 +42,98 @@ logger = logging.getLogger(__name__)
 
 # ── Effect size thresholds ──────────────────────────────────────────────────
 
-_Z_CRIT_975 = 1.96  # z-approximation for 95% CI on Cohen's d SE (Hedges & Olkin)
+# The 95% normal quantile for Cohen's d SE (Hedges & Olkin). Imported, never
+# re-declared: this file used to hold its own `1.96` while `metrics.py` held
+# another, so two CI computations in one app could drift apart on the same
+# constant (#768, the #733 copies class). `_t_critical` already comes from the
+# same module, so there is no new import edge.
+_Z_CRIT_975 = _Z_975
 
 RANK_BISERIAL_THRESHOLDS = {"small": 0.1, "medium": 0.3, "large": 0.5}
+
+
+# ── Box-plot five-number summary (#522b) ───────────────────────────────────────
+
+#: The quartile definition, STATED because several exist and they disagree on
+#: small samples. Type 7 is R's `quantile()` default, and numpy's and pandas'.
+#: VERIFIED against R's reference values rather than assumed:
+#: `quantile(1:10, type=7)` gives 3.25 / 5.5 / 7.75, which is exactly what
+#: `statistics.quantiles(method="inclusive")` returns.
+QUARTILE_METHOD_TYPE7 = "type7_linear"
+
+#: Whisker rule: Tukey's — each whisker reaches the most extreme observation
+#: still within 1.5 x IQR of its hinge, and anything beyond is drawn as a point.
+WHISKER_RULE_TUKEY = "tukey_1_5_iqr"
+
+#: A pathological group (thousands of outliers) must not put thousands of points
+#: on the wire or on the canvas. Past this the count is reported instead.
+MAX_OUTLIERS_PER_GROUP = 50
+
+
+def box_summary(values: list[float]) -> dict | None:
+    """Five-number summary + Tukey whiskers + outliers for one group.
+
+    ⚠️ The quartile METHOD and the whisker RULE ride the payload rather than
+    being assumed by the client (the stated-basis family): a box plot is only
+    interpretable if you know which convention drew it, and readers of a figure
+    in a paper need to be told.
+
+    ⚠️ **The trap to remember if this surface ever gains an R export**: R's
+    `boxplot()` does NOT use `quantile(type=7)` — it uses `fivenum()`, i.e.
+    Tukey HINGES, which differ on some sample sizes. Emitting a bare
+    `boxplot(...)` alongside these numbers would put the tool and its own script
+    in disagreement while each half looked right. Build the box from
+    `quantile(x, type = 7)` instead. Today the comparisons panel is screen-only
+    (no CSV, no Excel, and `export_r` emits saved StatisticalTest rows, not this
+    panel), so nothing round-trips yet.
+    """
+    n = len(values)
+    if n == 0:
+        return None
+    ordered = sorted(values)
+    if n == 1:
+        v = finite_or_none(ordered[0], 4)
+        if v is None:
+            return None
+        return {
+            "min": v, "q1": v, "median": v, "q3": v, "max": v,
+            "whisker_low": v, "whisker_high": v, "outliers": [],
+            "outliers_omitted": 0,
+            "quartile_method": QUARTILE_METHOD_TYPE7,
+            "whisker_rule": WHISKER_RULE_TUKEY,
+        }
+
+    q1_raw, med_raw, q3_raw = statistics.quantiles(ordered, n=4, method="inclusive")
+    q1 = finite_or_none(q1_raw, 4)
+    med = finite_or_none(med_raw, 4)
+    q3 = finite_or_none(q3_raw, 4)
+    if q1 is None or med is None or q3 is None:
+        return None
+
+    iqr = q3 - q1
+    fence_lo = q1 - 1.5 * iqr
+    fence_hi = q3 + 1.5 * iqr
+    inside = [v for v in ordered if fence_lo <= v <= fence_hi]
+    # `inside` is non-empty whenever iqr >= 0, because q1 and q3 are themselves
+    # within the fences — but guard rather than reason, since a NaN input would
+    # make every comparison False.
+    whisker_low = finite_or_none(inside[0] if inside else ordered[0], 4)
+    whisker_high = finite_or_none(inside[-1] if inside else ordered[-1], 4)
+
+    out = [v for v in ordered if v < fence_lo or v > fence_hi]
+    shown = [finite_or_none(v, 4) for v in out[:MAX_OUTLIERS_PER_GROUP]]
+    shown = [v for v in shown if v is not None]
+    return {
+        "min": finite_or_none(ordered[0], 4),
+        "q1": q1, "median": med, "q3": q3,
+        "max": finite_or_none(ordered[-1], 4),
+        "whisker_low": whisker_low,
+        "whisker_high": whisker_high,
+        "outliers": shown,
+        "outliers_omitted": max(0, len(out) - len(shown)),
+        "quartile_method": QUARTILE_METHOD_TYPE7,
+        "whisker_rule": WHISKER_RULE_TUKEY,
+    }
 
 
 def _classify_effect_rank_biserial(r: float) -> str:
@@ -57,7 +155,8 @@ def _classify_effect_epsilon_squared(eps2: float) -> str:
 def _cohens_d_ci(d: float, n1: int, n2: int) -> tuple[float, float]:
     """Compute 95% CI for Cohen's d using Hedges & Olkin formula.
 
-    Uses z = 1.96 approximation, which is standard for effect size CIs.
+    Uses the normal quantile, which is standard for effect size CIs (the
+    textbook writes it 1.96; `_Z_975` carries the exact value — #768).
     """
     se = math.sqrt((n1 + n2) / (n1 * n2) + d ** 2 / (2 * (n1 + n2 - 2)))
     return (round(d - _Z_CRIT_975 * se, 4), round(d + _Z_CRIT_975 * se, 4))
@@ -78,6 +177,62 @@ def _mean_ci(values: list[float]) -> tuple[float, float]:
 # ── Main computation ────────────────────────────────────────────────────────
 
 
+def _no_comparison(
+    reason: str,
+    group_column_label: str = "",
+    groups: list[str] | None = None,
+) -> dict:
+    """An empty comparison that says why (#823c · #827 · #830b family).
+
+    Every early return from `compute_group_comparison` used to be the same
+    shapeless `rows: []`, so the client had nothing to render but a guess — and
+    the guess it made ("The selected demographic may have fewer than 2 groups")
+    is right for exactly ONE of the ways this happens. The reason is computable
+    at each of them, and it is the only thing the researcher needs.
+    """
+    return {
+        "groups": groups or [],
+        "group_column_label": group_column_label,
+        "rows": [],
+        "bonferroni_warning": False,
+        "bonferroni_threshold": None,
+        "unavailable_reason": reason,
+    }
+
+
+def _diagnose_no_rows(db: Session, project_id: int, domain_ids: list[int]) -> str:
+    """Why a variable GROUP produced no per-row scores (#823c).
+
+    Two states with different remedies: no scale-score metric exists at all
+    (create one), or one exists and has never been computed (compute it). The
+    researcher's undiscoverable fix for the second was to open Variable Groups
+    and click a chip — nothing on the comparison screen said so.
+
+    ⚠️ **Runs only on the failure path**, so the happy path pays nothing for it.
+    ⚠️ **It must NOT compute the scores itself.** A GET that writes is the
+    recompute-on-read hazard this codebase already decided against (DEC-C:
+    SQLite lock races against the write-side sweep); the honest move is to name
+    the action, and the client offers a button that calls the existing
+    idempotent create-or-recompute endpoint.
+    """
+    if not domain_ids:
+        return NO_VARIABLES
+    metric_ids = [
+        m.id for m in db.query(MetricDefinition.id)
+        .filter(
+            MetricDefinition.project_id == project_id,
+            MetricDefinition.metric_type == "domain_aggregate",
+            MetricDefinition.input_source_type == "dataset_domain",
+            MetricDefinition.input_source_id.in_(domain_ids),
+            MetricDefinition.grouping_column_id.is_(None),
+        )
+        .all()
+    ]
+    if not metric_ids:
+        return DOMAIN_SCORES_MISSING
+    return DOMAIN_SCORES_NOT_COMPUTED
+
+
 def compute_group_comparison(
     db: Session,
     project_id: int,
@@ -89,11 +244,19 @@ def compute_group_comparison(
     include_effect_size_ci: bool,
     exclude_groups: list[str] | None = None,
     nonparametric: bool = False,
+    include_qq: bool = False,
 ) -> dict:
     """Compute group comparisons for all selected variables.
 
     Loads all data in batch, groups by demographic column in-memory,
     then runs t-test/ANOVA per variable.
+
+    ⚠️ ``include_qq`` is OPT-IN, unlike every other diagnostic here, and the
+    asymmetry is deliberate: `box_summary` and `normality_check` are O(1) in the
+    group's size — about ten numbers each — while a QQ plot is O(n) points. On a
+    2800-row dataset across five variables the unconditional version would build
+    and serialize tens of thousands of pairs for the four chart types that never
+    draw them. It is requested by the one panel that shows it.
     """
     # Determine source type
     if column_ids:
@@ -103,16 +266,10 @@ def compute_group_comparison(
         values, var_info = _load_domain_vectors(db, domain_ids, project_id)
         source_type = "domain"
     else:
-        return {
-            "groups": [], "group_column_label": "", "rows": [],
-            "bonferroni_warning": False, "bonferroni_threshold": None,
-        }
+        return _no_comparison(NO_VARIABLES)
 
     if not var_info:
-        return {
-            "groups": [], "group_column_label": "", "rows": [],
-            "bonferroni_warning": False, "bonferroni_threshold": None,
-        }
+        return _no_comparison(NO_VARIABLES)
 
     # Get grouping column label. #390: join Dataset.project_id so a foreign
     # column id can't resolve a label (defense-in-depth; matches correlations).
@@ -124,16 +281,43 @@ def compute_group_comparison(
     )
     group_column_label = (group_col.column_name or group_col.column_text) if group_col else ""
 
+    # #830(b): which of these variables can hold a number at all.
+    #
+    # A nominal column is a legitimate metric input (#371 — a frequency chart on
+    # `School` is exactly right) and is offered in the same picker, so it reaches
+    # this comparison from an ordinary selection. `_load_column_vectors` reads
+    # `value_numeric`, which a nominal column has none of, so every group came
+    # back n=0 — reported as `empty_group`, i.e. *"No values in this group, after
+    # missing data was excluded"*, blaming the grouping and the missing data for
+    # a type mismatch, once per group. The type is the reason and the type is
+    # known here. ⚠️ Read `VALUE_NUMERIC_TYPES` (#399), never a hand-rolled list.
+    non_numeric_ids: set[int] = set()
+    if source_type == "column":
+        non_numeric_ids = {
+            cid for (cid, ctype) in db.query(DatasetColumn.id, DatasetColumn.column_type)
+            .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+            .filter(DatasetColumn.id.in_([v[0] for v in var_info]),
+                    Dataset.project_id == project_id)
+            .all()
+            if ctype not in VALUE_NUMERIC_TYPES
+        }
+
     # Collect all row IDs across all variables
     all_row_ids: set[int] = set()
     for vid, _, _ in var_info:
         all_row_ids.update(values.get(vid, {}).keys())
 
     if not all_row_ids:
-        return {
-            "groups": [], "group_column_label": group_column_label, "rows": [],
-            "bonferroni_warning": False, "bonferroni_threshold": None,
-        }
+        # 🔴 #823(c). The grouping column has not been looked at yet, so any
+        # sentence about its group count is a guess — and the one the client
+        # used to print ("fewer than 2 groups") was exactly that. The variables
+        # produced no rows; for a variable GROUP the reason is recoverable and
+        # actionable, so recover it.
+        return _no_comparison(
+            _diagnose_no_rows(db, project_id, domain_ids) if source_type == "domain"
+            else NO_VARIABLES,
+            group_column_label,
+        )
 
     # Load grouping values for all rows
     group_map = _load_grouping_map(
@@ -149,13 +333,16 @@ def compute_group_comparison(
         unique_groups = [g for g in unique_groups if g not in excluded]
 
     if len(unique_groups) < 2:
-        return {
-            "groups": unique_groups,
-            "group_column_label": group_column_label,
-            "rows": [],
-            "bonferroni_warning": False,
-            "bonferroni_threshold": None,
-        }
+        # 🔴 #827. "Fewer than 2 groups" is true here only when the grouping
+        # column HAS values on these rows. When it has none, the cause is that
+        # the analysis and the grouping column do not share rows at all — the
+        # cross-dataset case — and telling a researcher their 3-group variable
+        # has fewer than 2 groups sends them to inspect data that is fine.
+        return _no_comparison(
+            INSUFFICIENT_GROUPS if group_map else NO_GROUP_VALUES,
+            group_column_label,
+            unique_groups,
+        )
 
     # Determine effective test type
     num_groups = len(unique_groups)
@@ -187,7 +374,7 @@ def compute_group_comparison(
                 group_stats.append({
                     "group": g, "n": 0, "mean": None, "sd": None,
                     "median": None, "ci_lower": None, "ci_upper": None,
-                    "undefined_reason": EMPTY_GROUP,
+                    "undefined_reason": NOT_NUMERIC if var_id in non_numeric_ids else EMPTY_GROUP,
                 })
                 continue
             m = statistics.mean(gvals)
@@ -202,6 +389,14 @@ def compute_group_comparison(
                 "mean": round(m, 4), "sd": round(sd, 4),
                 "median": round(mdn, 4),
                 "ci_lower": ci_lower, "ci_upper": ci_upper,
+                # #522b — the box plot's five-number summary. Computed here
+                # because the client never receives the raw values: it gets this
+                # summary, so quartiles cannot be derived downstream.
+                "box": box_summary(gvals),
+                # #525 — the panel offers "use the non-parametric test" and never
+                # said whether the data needs one. Computed regardless of the
+                # toggle: that is the whole point of showing it.
+                "normality": normality_check(gvals),
             })
 
         # Run statistical test. #566: when it does not run, the row carries WHY
@@ -212,6 +407,10 @@ def compute_group_comparison(
             grouped, unique_groups, effective_test, include_effect_size_ci,
             nonparametric=nonparametric,
         )
+        # The row's own refusal follows the same rule: `_run_test` can only see
+        # empty lists and reports EMPTY_GROUP, which is a claim about the data.
+        if test_result is None and var_id in non_numeric_ids:
+            test_omitted_reason = NOT_NUMERIC
 
         rows.append({
             "label": label,
@@ -221,6 +420,15 @@ def compute_group_comparison(
             "group_stats": group_stats,
             "test": test_result,
             "test_omitted_reason": test_omitted_reason,
+            # #525 — equal variances is a property of the COMPARISON, not of any
+            # one group, so it rides the row rather than the group stats.
+            "variance_homogeneity": variance_homogeneity_check(
+                [grouped[g] for g in unique_groups], names=unique_groups
+            ),
+            # #525b — the QQ diagnostic is per-ROW for the same reason Levene is:
+            # normality is a property of the model's residuals, not of any one
+            # group. Opt-in because it is the only O(n) field in this payload.
+            "qq": qq_summary({g: grouped[g] for g in unique_groups}) if include_qq else None,
         })
 
     # Bonferroni warning
@@ -234,6 +442,10 @@ def compute_group_comparison(
         "rows": rows,
         "bonferroni_warning": bonferroni_warning,
         "bonferroni_threshold": bonferroni_threshold,
+        # Present on EVERY response, `None` when rows were produced — the client
+        # branches on rows, and a field that only sometimes exists invites a
+        # consumer to infer its absence means something.
+        "unavailable_reason": None,
     }
 
 
@@ -270,7 +482,19 @@ def _load_grouping_map(
         if p and s:
             composite[rid] = f"{p} \u00b7 {s}"
         elif p:
-            composite[rid] = p
+            # The RESIDUAL: a row with a primary group and no secondary value.
+            # It used to be labelled with the bare primary name (#823l), which
+            # in a crossed table sits directly beside `X · Under 45` and
+            # `X · 45 and over` and reads as their MARGINAL TOTAL --
+            # measured on GSS, `Associate/junior college` (n = 26) beside a true
+            # marginal of 2,444. The rows are real and must not be dropped; what
+            # was wrong is that nothing said which cell this was.
+            #
+            # The word comes from MISSING_GROUP_LABEL, never a literal: the
+            # Excel export has labelled its own missing bucket since #506, and
+            # two spellings of one concept is how an exported table and a
+            # rendered one start disagreeing.
+            composite[rid] = f"{p} · {MISSING_GROUP_LABEL}"
         # If only secondary, skip — primary grouping is required
 
     return composite

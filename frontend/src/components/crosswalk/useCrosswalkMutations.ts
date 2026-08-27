@@ -107,7 +107,7 @@ export function toastEquivalenceError(err: unknown, fallback: string) {
   }
   if (detail.error === 'recode_definitions_exist') {
     toast.error(detail.message || 'Recode definitions exist on this column', {
-      description: 'Clear the recode in the Recode Workbench before changing the column type.',
+      description: 'Clear the recode in the Variables view before changing the column type.',
     })
     return
   }

@@ -45,9 +45,13 @@ export function reverseOffset(values: number[]): number {
  * missing declaration — so deriving it here would show a different number than
  * `value_numeric` holds, which is exactly the #578 drift.
  *
- * The local `mapping` fallback is for definitions fetched from an endpoint that
- * does not send the offset. It is the RAW min+max and is knowingly wrong for a
- * mapping containing a missing key — prefer passing `serverOffset` everywhere.
+ * The local `mapping` fallback is the RAW min+max and is knowingly wrong for a
+ * mapping containing a missing key. ⚠️ **As of #602 every endpoint that returns
+ * a definition sends the offset** — `/data`'s summary and the recode endpoints'
+ * `RecodeDefinitionResponse` both, computed by the one server-side
+ * `definition_reflection_offset`. So the fallback now covers only a payload from
+ * an older build, and a NEW call site reaching it is a bug in that call site, not
+ * a supported mode: pass `serverOffset`.
  */
 export function reflectReverseValue(
   forwardCode: number,
@@ -120,4 +124,48 @@ export function remapExcludeValues(
     }
     return val
   })
+}
+
+/**
+ * The mapping + exclusion pair a recode definition should be SAVED with (#818).
+ *
+ * 🔴 **Ticking `Exclude` left the response's previous code in the mapping.**
+ * The editor disabled and blanked the value box, so the row read as having no
+ * value — while `mapping` still carried the number it had before the tick.
+ * Measured: `{"Can't be too careful": 1, "Depends": 2, "Most people can be
+ * trusted": 2}` saved alongside `exclude_values: ["Depends"]`, so "Depends"
+ * scored **the same as the positive pole** and 2,114 respondents were counted
+ * as trusting.
+ *
+ * ⚠️ **Why the stale entry is the whole defect, and why the fix belongs here.**
+ * On an UNDECLARED column `exclude_values` reaches the null set and the cell
+ * NULLs anyway, so the stale code is latent. On a column with a declared
+ * `missing_values`, `services/recode.py::_effective_null_set_hit` gives the
+ * declaration sole authority and **ignores the per-definition exclude channel
+ * entirely** (#592 REPLACE semantics, which are correct and are not being
+ * changed) — so the mapping is all that is left, and the stale code decides.
+ * After one bulk declaration or any `.sav` import, EVERY column is in that
+ * state. Removing the entry makes the value *unmapped*, which the apply path
+ * NULLs and REPORTS (`unmapped_values`, #794) — the honest outcome, reached
+ * through the channel a declaration cannot switch off.
+ *
+ * ⚠️ **The two halves must be computed TOGETHER, which is why this returns
+ * both.** A caller that diffs an unstripped `mapping` against the saved one
+ * sees no change when only the checkbox moved, sends `exclude_values` alone,
+ * and leaves the stale code on the server — the defect surviving its own fix.
+ *
+ * ⚠️ **The editor's local state deliberately KEEPS the value while excluded**,
+ * so unticking restores it and the row never moves. Nothing stale is ever
+ * persisted, which is the property that matters.
+ */
+export function recodeMappingPayload(
+  mapping: Record<string, number | string>,
+  excludeValues: string[],
+): { mapping: Record<string, number | string>; exclude_values: string[] } {
+  const excluded = new Set(excludeValues)
+  const kept: Record<string, number | string> = {}
+  for (const [label, value] of Object.entries(mapping)) {
+    if (!excluded.has(label)) kept[label] = value
+  }
+  return { mapping: kept, exclude_values: excludeValues }
 }

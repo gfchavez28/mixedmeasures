@@ -72,6 +72,12 @@ class McarTestResult(BaseModel):
     n_variables: int
     apa_string: str
     interpretation: str
+    #: Which estimates of mu/Sigma produced the statistic — the stated basis
+    #: (#707(b)). ⚠️ This field is what makes the divergence from Little's
+    #: EM-based definition visible; the endpoint declares `response_model`, so a
+    #: value the service returns without a field HERE is silently dropped at the
+    #: wire. Optional so an older stored/mocked payload still validates.
+    mcar_estimator: str | None = None
 
 
 class McarTestResponse(BaseModel):

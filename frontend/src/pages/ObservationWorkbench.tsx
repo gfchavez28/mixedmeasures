@@ -58,7 +58,7 @@ import {
   gapsInExtent, laneCodeIds, MAX_CLIP_FILL_BANDS, nextGapStart, pointMark, unionIntervals,
   type ArmedMark, type Interval,
 } from '@/lib/clip-timeline'
-import { findClipsAtTime, recordingEndsAtTimelineTime } from '@/lib/playback-utils'
+import { playheadRowSuffix, findClipsAtTime, recordingEndsAtTimelineTime } from '@/lib/playback-utils'
 import ClipTimeline, { type BoundaryPreview } from '@/components/observations/ClipTimeline'
 import { useHistory } from '@/hooks/useHistory'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
@@ -85,6 +85,7 @@ import { NOW_PLAYING_ROW, SELECTED_ROW } from '@/lib/selection'
 import { useScrollbarGutter } from '@/hooks/useScrollbarGutter'
 import { clipContainsRange, isQuoteExcerpt, isWholeExcerpt } from '@/lib/excerpt-shape'
 import { cn, formatTimecode, formatTimestamp, getCodeColor, parseTimecode } from '@/lib/utils'
+import { codePointLength, sliceByCodePoints } from '@/lib/text-offsets'
 import { MODE_DISABLED_CLASS, modeDisabledProps } from '@/lib/mode-disabled'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -166,6 +167,28 @@ function clipTimeLabel(clip: ObservationSegment): { range: string; duration: str
     range: `${formatTimecode(clip.start_time)}–${formatTimecode(clip.end_time)}`,
     duration: formatTimecode(clip.end_time - clip.start_time),
   }
+}
+
+/**
+ * #771 — how a clip identifies itself inside a ROW CONTROL's accessible name.
+ *
+ * The clip's label is what distinguishes one Delete from the next, so it has to
+ * be there — but not all of it. An observation clip's `text` is free-form and
+ * routinely a full paragraph (the live fixture's longest runs 178 characters),
+ * and a destructive control that reads for fifteen seconds before you learn it
+ * is Delete is worse than one that reads for two.
+ *
+ * ⚠️ `sliceByCodePoints`, never `String.slice` (#687): a raw slice can cut a
+ * surrogate pair in half and emit a lone surrogate. Nothing here reads a STORED
+ * offset, so this is not the #687 defect — but the hazard is the same one, and
+ * the helper costs nothing.
+ */
+const CONTROL_LABEL_MAX_CHARS = 48
+function clipControlSuffix(clip: ObservationSegment): string {
+  const text = clip.text?.trim()
+  if (!text) return ''
+  if (codePointLength(text) <= CONTROL_LABEL_MAX_CHARS) return ` — ${text}`
+  return ` — ${sliceByCodePoints(text, 0, CONTROL_LABEL_MAX_CHARS)}…`
 }
 
 /**
@@ -1561,13 +1584,30 @@ export default function ObservationWorkbench() {
     prevIsPlayingRef.current = isPlaying
   }, [isPlaying])
 
-  // D27: the clips containing the playhead — the green "now playing" state on
-  // list rows and timeline bars (NOT selection; lib/selection.ts's rule).
-  const nowPlayingIds = useMemo(
-    () => currentPlaybackTime === null
+  // D27: the clips CONTAINING the playhead — the green state on list rows and
+  // timeline bars (NOT selection; lib/selection.ts's rule).
+  //
+  // #775: a PAUSED player still satisfies containment, so selecting a clip that
+  // starts at 0:00 announced "now playing" with nothing playing — the selection
+  // seek's lead-in CLAMPS to 0 and therefore lands INSIDE the clip. Heard on a
+  // real observation that had never been played.
+  // CONTAINMENT is the right gate for the VISUAL, and `hasPlayableMedia` is the
+  // right gate for containment: without a recording the clock is seeded from the
+  // SELECTION and nothing ever advances it, so every selected clip would sit
+  // permanently under a playhead that does not exist. (Measured while writing
+  // the test: clock-driven playback is unreachable on a recording-less
+  // observation anyway — Space, K, L and the toolbar Play all gate on
+  // `hasPlayableMedia` — so `isPlaying` cannot be true without media. A
+  // `hasPlayableMedia || isPlaying` predicate was written here first and is
+  // dead code; do not re-add it.)
+  //
+  // What #770 got wrong is the SUFFIX, not the set: it read containment as
+  // "playing". See the label below.
+  const atPlayheadIds = useMemo(
+    () => currentPlaybackTime === null || !hasPlayableMedia
       ? new Set<number>()
       : new Set(findClipsAtTime(clips, currentPlaybackTime).map(c => c.id)),
-    [clips, currentPlaybackTime],
+    [clips, currentPlaybackTime, hasPlayableMedia],
   )
 
   // D28: category lanes through the BLIND lens — membership uses the same
@@ -1986,7 +2026,7 @@ export default function ObservationWorkbench() {
           recordingEndSeconds={recordingEnd}
           currentTime={currentPlaybackTime}
           selectedIds={selectedClips}
-          nowPlayingIds={nowPlayingIds}
+          atPlayheadIds={atPlayheadIds}
           armedInTime={armedInTime}
           isPlaying={isPlaying}
           boundaryPreview={boundaryPreview}
@@ -2138,7 +2178,7 @@ export default function ObservationWorkbench() {
                 const clipIndex = clips.findIndex(c => c.id === clip.id)
                 // D27: the timeline is aria-hidden — the LIST row carries the
                 // accessible now-playing/coded state. Selection wins visually.
-                const nowPlaying = nowPlayingIds.has(clip.id)
+                const atPlayhead = atPlayheadIds.has(clip.id)
                 return (
                   /* #654 — the clip-row context menu. Radix's Root renders NO
                    * DOM node and Trigger `asChild` clones its child, so the
@@ -2169,11 +2209,15 @@ export default function ObservationWorkbench() {
                     aria-label={
                       `${range}${clip.text ? ` — ${clip.text}` : ''}` +
                       `${hasVisibleChips ? ' — coded' : ''}${quoted ? ' — quoted' : ''}` +
-                      `${nowPlaying ? ' — now playing' : ''}`
+                      // #775: the rule lives in playback-utils (with the rest of
+                      // the timeline primitives) so the three states can be
+                      // asserted directly — the workbench's own harness mocks
+                      // VideoPane away, so `isPlaying` can never become true here.
+                      playheadRowSuffix(atPlayhead, isPlaying)
                     }
                     className={cn(
                       'flex items-start gap-3 px-3.5 py-2 border-b border-mm-border-subtle bg-mm-surface text-sm cursor-default',
-                      selected ? SELECTED_ROW : nowPlaying ? NOW_PLAYING_ROW : undefined,
+                      selected ? SELECTED_ROW : atPlayhead ? NOW_PLAYING_ROW : undefined,
                     )}
                     onClick={(e) => {
                       setFollowOn(false) // a manual click breaks Follow (D14)
@@ -2230,6 +2274,11 @@ export default function ObservationWorkbench() {
                           appliedCodeDetails={clip.applied_code_details}
                           coderMap={chipCoderMap}
                           hiddenCoderIds={chipHidden}
+                          tabbable={selected}
+                          /* #771: the chips and their remove buttons belong to
+                             the SELECTED clip, exactly like the Delete button
+                             below. Gating only Delete left 2N+1 stops per coded
+                             row still in the tour. */
                         />
                       )}
                     </span>
@@ -2266,6 +2315,10 @@ export default function ObservationWorkbench() {
                           type="button"
                           aria-label={`Note ${note.sequence_number} on clip ${range}`}
                           title={`Note ${note.sequence_number} — click to view`}
+                          /* #771: a note badge is a row control like any other.
+                             A clip with four notes was four more stops on a row
+                             the researcher had not selected. */
+                          tabIndex={selected ? undefined : -1}
                           className="w-5 h-5 rounded-full bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 text-[10px] font-bold flex items-center justify-center hover:bg-amber-200 dark:hover:bg-amber-800/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           onClick={(e) => { e.stopPropagation(); handleNoteClick(note.id) }}
                         >
@@ -2275,12 +2328,40 @@ export default function ObservationWorkbench() {
                     </span>
                     {/* Row actions — deliberately unlabelled in the header. */}
                     <span className="w-8 flex-none flex items-center justify-end pt-0.5">
+                      {/* #771 — a row control belongs to the SELECTED row.
+                       *
+                       * This button renders on every row while the productive
+                       * control beside it (`InlineCodeActions`) renders only on
+                       * a selected-or-coded one, so on an ordinary uncoded clip
+                       * Delete was the row's ONLY tab stop. Touring 13 clips
+                       * meant hearing "Delete clip…, Delete clip…" thirteen
+                       * times, each reading the clip's whole text, and never
+                       * meeting a single thing you could productively do —
+                       * reported as Tab being "stuck on the trashcan".
+                       *
+                       * Presence is unchanged (a mouse user still clicks any
+                       * row's trash directly, and hiding it would break that);
+                       * only the TAB ORDER follows selection. Arrowing selects,
+                       * so the keyboard route is arrow-to-the-clip then Tab.
+                       *
+                       * ⚠️ NOT `disabled` — that is #754's transient arm, and
+                       * frozen-ness is a persistent MODE. `modeDisabledProps`
+                       * keeps the control focusable, appends the reason to its
+                       * name and guards the click (`aria-disabled` changes what
+                       * a control ANNOUNCES and nothing about what it DOES).
+                       * The per-row Delete was the arm #754 never converted,
+                       * though its own docstring counts "every Delete" among
+                       * what tabbing a frozen workbench could not reach. */}
                       <Button
                         variant="ghost" size="icon"
-                        className="h-6 w-6 text-mm-text-faint hover:text-destructive"
-                        aria-label={`Delete clip ${range}${clip.text ? ` — ${clip.text}` : ''}`}
-                        disabled={frozen}
-                        onClick={(e) => { e.stopPropagation(); void deleteClip(clip) }}
+                        className={cn('h-6 w-6 text-mm-text-faint hover:text-destructive', MODE_DISABLED_CLASS)}
+                        title={frozen ? FROZEN_OPS_REASON : undefined}
+                        tabIndex={selected ? undefined : -1}
+                        {...modeDisabledProps<HTMLButtonElement>({
+                          label: `Delete clip ${range}${clipControlSuffix(clip)}`,
+                          blockedReason: frozen ? FROZEN_OPS_REASON : null,
+                          onActivate: (e) => { e.stopPropagation(); void deleteClip(clip) },
+                        })}
                       >
                         <Trash2 aria-hidden className="h-3.5 w-3.5" />
                       </Button>

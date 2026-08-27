@@ -105,6 +105,17 @@ export interface PlaybackHandle {
   togglePlayback: () => void
   /** Exit video theater/PiP back to the docked size. True if an overlay was exited. */
   exitVideoOverlay: () => boolean
+  /**
+   * Whether there is anything to play — `lib/playback-utils::isPlayableMedia`, read
+   * from `usePlayback` and never re-derived (#784).
+   *
+   * The workbench's Space shortcut needs it to decide whether to CLAIM the key. Without
+   * it the handler returned `true` unconditionally, so on a conversation with no
+   * recording Space was swallowed and did nothing at all — not even the page scroll the
+   * browser would have given. The Observations sibling has always checked this; the two
+   * handlers now have the same shape, which is the point.
+   */
+  hasPlayableMedia: boolean
 }
 
 interface TranscriptPanelProps {
@@ -337,6 +348,7 @@ export default function TranscriptPanel({
       const handle: PlaybackHandle = {
         togglePlayback,
         exitVideoOverlay: () => videoPaneHandleRef.current?.exitOverlay() ?? false,
+        hasPlayableMedia,
       }
       // eslint-disable-next-line react-hooks/immutability -- imperative ref handle assignment in effect
       ;(playbackRef as React.MutableRefObject<PlaybackHandle | null>).current = handle
@@ -346,7 +358,7 @@ export default function TranscriptPanel({
         (playbackRef as React.MutableRefObject<PlaybackHandle | null>).current = null
       }
     }
-  }, [togglePlayback, playbackRef])
+  }, [togglePlayback, playbackRef, hasPlayableMedia])
 
   useEffect(() => {
     const updateHeight = () => {

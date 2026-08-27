@@ -1,3 +1,6 @@
+import logging
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select
@@ -27,9 +30,16 @@ from ..schemas.participant import (
     LinkedDemographicValue,
     LinkDatasetRowRequest,
     UnlinkDatasetRowRequest,
+    WithdrawalReportResponse,
 )
+from ..services.withdrawal_report import build_withdrawal_report
+from ..services.withdrawal_redaction import apply_withdrawal
+from ..services.backup import create_backup
+from ..config import get_documents_dir, get_media_dir, get_backup_dir, get_settings
 from ..auth import get_current_user
 from ..services.audit import log_action
+
+logger = logging.getLogger(__name__)
 from ..services.participant_linking import auto_fill_role_from_linked_row
 from .helpers import _get_project_or_404
 
@@ -547,6 +557,45 @@ async def unlink_dataset_row(
     return _participant_to_detail(participant, db)
 
 
+@router.get(
+    "/api/projects/{project_id}/participants/{participant_id}/withdrawal-report",
+    response_model=WithdrawalReportResponse,
+)
+async def get_withdrawal_report(
+    project_id: int,
+    participant_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """What would have to be removed to honour this participant's withdrawal — #702(2).
+
+    🔴 **Built before the cascade delete, deliberately.** The hard part of a
+    withdrawal request is FINDING the data, not deleting it — and deleting the
+    participant record first makes it harder, because that destroys the link
+    this report walks. So the first tool is the one that answers "what would I
+    have to remove?" while the answer is still knowable.
+
+    ⛔ Read-only. It changes nothing, and the orphaning default is unchanged.
+
+    ⚠️ **No `log_action` call**, deliberately: a GET stays free of side effects.
+    The audit-log spine is there for the DELETE that step (3) will add — the act
+    worth recording is the removal, not the reading.
+
+    ⚠️ This is a code-level reachability report, **not legal advice**; a
+    compliance reviewer owns the conclusion.
+    """
+    _get_project_or_404(db, project_id, user.id)
+    participant = (
+        db.query(Participant)
+        .filter(Participant.id == participant_id, Participant.project_id == project_id)
+        .first()
+    )
+    if not participant:
+        raise HTTPException(status_code=404, detail="Participant not found")
+
+    return build_withdrawal_report(db, participant).to_dict()
+
+
 @router.delete("/api/projects/{project_id}/participants/{participant_id}")
 async def delete_participant(
     project_id: int,
@@ -580,3 +629,85 @@ async def delete_participant(
     db.commit()
 
     return {"status": "ok", "deleted_id": participant_id}
+
+
+@router.post(
+    "/api/projects/{project_id}/participants/{participant_id}/withdraw",
+)
+async def withdraw_participant(
+    project_id: int,
+    participant_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Honour a withdrawal: remove the person, keep everyone else's data — #702(3).
+
+    Deletes the participant record and everything that is unambiguously theirs
+    (their dataset rows and responses), renames their speaker to a numbered
+    withdrawal token, and BLANKS their conversation turns rather than deleting
+    them — a turn removed outright damages the records of participants who did
+    not withdraw, and moves every coverage and reliability figure in the project.
+
+    ⚠️ **A full backup is taken FIRST and its filename is returned.** There is no
+    per-participant undo: `restore_from_backup` replaces the whole database, so
+    reversing this also reverses everything done after it. The backup is what
+    makes the operation recoverable at all, so a failure to take one aborts the
+    withdrawal rather than proceeding without it.
+
+    ⚠️ **This cannot find the person's name inside OTHER people's turns, or
+    inside free-text answers, notes or memos.** Those need reading by someone who
+    knows the project, and the response reports the counts to review. A researcher
+    who believes this endpoint completed a withdrawal while the name sits three
+    turns later is worse off than with no feature at all.
+
+    ⚠️ Code applications on blanked turns are KEPT — they are the researcher's
+    analysis rather than the participant's personal data, and deleting them would
+    silently change reliability figures other coders' work feeds.
+
+    ⚠️ Not legal advice; a compliance reviewer owns the conclusion.
+    """
+    _get_project_or_404(db, project_id, user.id)
+    participant = (
+        db.query(Participant)
+        .filter(Participant.id == participant_id, Participant.project_id == project_id)
+        .first()
+    )
+    if not participant:
+        raise HTTPException(status_code=404, detail="Participant not found")
+
+    # The forced backup comes first and is not optional. If it cannot be taken,
+    # the withdrawal does not happen — an irreversible removal with no recovery
+    # point is the one outcome this must never produce.
+    settings = get_settings()
+    try:
+        backup_info = create_backup(
+            Path(settings.mm_database_path),
+            get_documents_dir(),
+            get_media_dir(),
+            get_backup_dir(),
+            "pre_withdrawal",
+        )
+    except Exception as exc:  # noqa: BLE001 - reported to the caller verbatim
+        logger.error("Pre-withdrawal backup failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Could not take a backup before removing this participant, so "
+                "nothing was changed. Check disk space and try again."
+            ),
+        )
+
+    outcome = apply_withdrawal(db, participant)
+
+    log_action(
+        db,
+        action="withdrawn",
+        entity_type="participant",
+        entity_id=participant_id,
+        user_id=user.id,
+        project_id=project_id,
+        details={**outcome.to_dict(), "backup_filename": backup_info.filename},
+    )
+    db.commit()
+
+    return {**outcome.to_dict(), "backup_filename": backup_info.filename}

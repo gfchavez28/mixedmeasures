@@ -16,7 +16,7 @@ import {
   type LabelMode,
 } from '@/lib/chart-data'
 import { metricDisplayLabel } from '@/lib/metric-label'
-import { CATEGORICAL_GROUPING_TYPES } from '@/lib/dataset-constants'
+import { CATEGORICAL_GROUPING_TYPES, CONTINUOUS_TYPES } from '@/lib/dataset-constants'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -217,9 +217,43 @@ export function useAnalysisDerived(params: UseAnalysisDerivedParams) {
   // Scale compatibility: disable frequency charts when types or scales are mixed
   const scaleCompatible = !hasMixedTypes && !hasMixedScales
 
+  /**
+   * #522 — histogram eligibility. `CONTINUOUS_TYPES` rather than a hand-rolled
+   * array: the #399 rule, and it is deliberately narrower than
+   * VALUE_NUMERIC_TYPES (ordinal and binary are discrete response options where
+   * one bar per level IS the honest chart).
+   */
+  const continuousSelection = useMemo(() => {
+    if (!analysisColumnsData) return false
+    let seen = 0
+    for (const ds of analysisColumnsData.datasets) {
+      for (const q of ds.columns) {
+        if (!selectedColumnIds.has(q.id)) continue
+        if (!CONTINUOUS_TYPES.includes(q.column_type)) return false
+        seen++
+      }
+    }
+    return seen > 0
+  }, [analysisColumnsData, selectedColumnIds])
+
+  /** Distinct response values in the payload — drives the histogram default. */
+  const distinctValueCount = useMemo(() => {
+    let max = 0
+    for (const m of selectedMetrics) {
+      for (const r of m.results) {
+        const order = (r.result_data as { scale_order?: string[] })?.scale_order
+        if (Array.isArray(order)) max = Math.max(max, order.length)
+      }
+    }
+    return max
+  }, [selectedMetrics])
+
   const chartTypeInfo = useMemo(
-    () => getApplicableChartTypes(metricType, hasGrouping, selectedMetrics.length, scaleCompatible),
-    [metricType, hasGrouping, selectedMetrics.length, scaleCompatible],
+    () => getApplicableChartTypes(
+      metricType, hasGrouping, selectedMetrics.length, scaleCompatible,
+      continuousSelection, distinctValueCount,
+    ),
+    [metricType, hasGrouping, selectedMetrics.length, scaleCompatible, continuousSelection, distinctValueCount],
   )
 
   const activeChartType: ChartType | null = useMemo(() => {

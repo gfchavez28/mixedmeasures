@@ -54,4 +54,42 @@ describe('comparisonGroupChips (#510)', () => {
     expect(chips.every(c => c.n === null)).toBe(true)
     expect(nVariableLabel).toBeNull()
   })
+
+  // ── #830(b) ────────────────────────────────────────────────────────────────
+  //
+  // A nominal variable is a legitimate metric input (#371) and holds no
+  // `value_numeric`, so every one of its groups comes back n=0. Selected FIRST,
+  // it made every chip read "(n=0)" directly above a table reporting n=6 for the
+  // same groups — measured on the Ferncrest corpus with `School` selected.
+  const nominalRow = {
+    label: 'School',
+    group_stats: [
+      { group: 'East', n: 0 },
+      { group: 'North', n: 0 },
+      { group: 'South', n: 0 },
+    ],
+  }
+
+  it('does not take the n from a variable that has none', () => {
+    const { chips } = comparisonGroupChips(groups, [nominalRow, rows[0]])
+    expect(chips).toEqual([
+      { group: 'East', n: 4 },
+      { group: 'North', n: 9 },
+      { group: 'South', n: 7 },
+    ])
+  })
+
+  it('names nothing when only ONE variable could supply the n', () => {
+    // Attributing "n from Hours" would imply School offers a different number.
+    // It offers none, so there is one measurement and no ambiguity to resolve.
+    const { nVariableLabel } = comparisonGroupChips(groups, [nominalRow, rows[0]])
+    expect(nVariableLabel).toBeNull()
+  })
+
+  it('still reports zeros when NO variable measured anything', () => {
+    // The all-empty case is a real answer, not a defect: say so rather than
+    // blanking, which would read as "not computed".
+    const { chips } = comparisonGroupChips(groups, [nominalRow])
+    expect(chips.every(c => c.n === 0)).toBe(true)
+  })
 })

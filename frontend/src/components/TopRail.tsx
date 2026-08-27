@@ -1,4 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, isValidElement, cloneElement } from 'react'
+import { FOCUS_RING } from '@/lib/selection'
 import { Link, useNavigate, useLocation, matchPath } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -107,6 +108,31 @@ const RAIL_LABEL = 'sr-only xl:not-sr-only'
  */
 const TAB_LABEL = 'sr-only lg:not-sr-only'
 /**
+ * The coder name, which collapses LAST (#830a).
+ *
+ * 🔴 Measured at the 625x345 CSS viewport a 1280x720 window has at 200% zoom:
+ * `scrollWidth` 667 against `clientWidth` 610, so the page scrolled
+ * horizontally — WCAG 1.4.10 reflow.
+ *
+ * ⚠️ **#718's "designate one flexible child" was ALREADY satisfied and is not
+ * the fix.** The breadcrumb carries `truncate min-w-0` and had already
+ * collapsed to 0px; the row still overflowed because everything else is fixed
+ * (22 logo + 178 tabs + 12 chevron + 400 right group = 612 > 610 before
+ * padding). The only honest lever was to shrink fixed content, and this label —
+ * capped at 80px inside a 128px button, the single widest item in the group —
+ * is the one that costs nothing to hide.
+ *
+ * ⚠️ It breaks at `sm`, LATER than the pills (`xl`) and the tabs (`lg`),
+ * because knowing which coder you are attributing work to matters more at a
+ * narrow width than a search label does. The identity survives regardless: the
+ * colour dot stays, and the button's own `aria-label` names the coder.
+ *
+ * ⚠️ The `not-sr-only` padding rider (#721) does not bite here — the span
+ * carries `max-w`/`truncate` and no unprefixed `px-*`/`m-*` for it to zero —
+ * but keep any future padding on the SAME variant if one is added.
+ */
+const CODER_LABEL = 'sr-only sm:not-sr-only'
+/**
  * Counts are the first thing to go; they stay in the a11y tree regardless.
  *
  * ⚠️ **The padding belongs to this constant and carries the SAME `xl:` prefix as
@@ -122,7 +148,7 @@ const TAB_LABEL = 'sr-only lg:not-sr-only'
  */
 const TAB_COUNT_LABEL = 'sr-only xl:not-sr-only xl:px-1.5 xl:py-0.5'
 
-const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--mm-green)/0.5)] focus-visible:ring-offset-1'
+// FOCUS_RING is single-sourced in lib/selection.ts (#823f).
 
 // Tabs that have dropdown menus
 const TABS_WITH_DROPDOWNS = new Set(['conversations', 'datasets', 'documents', 'observations', 'analysis'])
@@ -1021,7 +1047,25 @@ function UserMenu() {
           style={{ backgroundColor: coderColor({ id: user.id, display_color: user.display_color }) }}
           aria-hidden="true"
         />
-        <span className="max-w-[80px] truncate">{user.username}</span>
+        {/* 🔴 The name collapses below `sm`, and it is `sr-only` — NEVER
+          * `hidden` (#717). Measured at the 625x345 CSS viewport a 1280x720
+          * window has at 200% zoom: `scrollWidth` 667 against `clientWidth`
+          * 610, so the page scrolled horizontally (WCAG 1.4.10 reflow).
+          *
+          * ⚠️ The obvious reading of #718 — "designate one flexible child" —
+          * was ALREADY SATISFIED and is not the fix. The breadcrumb beside the
+          * tabs carries `truncate min-w-0` and had already collapsed to 0px;
+          * the row still overflowed because everything ELSE is fixed
+          * (22 logo + 178 tabs + 12 chevron + 400 right group = 612 > 610
+          * before padding). The only honest lever was to make some fixed
+          * content smaller, and this label — capped at 80px inside a 128px
+          * button — was the largest single item that costs nothing to hide.
+          *
+          * ⚠️ `sr-only` keeps it in the accessibility tree. The button also
+          * carries an `aria-label`, so it would survive `hidden` too — but
+          * `hidden` is the habit that leaves the NEXT such control nameless,
+          * which is exactly what #717 was. */}
+        <span className={`max-w-[80px] truncate ${CODER_LABEL}`}>{user.username}</span>
         <ChevronDown className="w-3 h-3" />
       </button>
       {open && (

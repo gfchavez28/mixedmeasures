@@ -365,6 +365,11 @@ export interface SaturationResponse {
   total_unique_codes: number
   total_sources: number
   category_level: boolean
+  /** #708: what the x-axis is ordered BY. A saturation curve is entirely
+   *  order-dependent, so the ordering is part of the claim, not a detail of it.
+   *  Absent on older payloads — the chart then says nothing rather than
+   *  asserting an ordering it cannot verify. */
+  ordering?: string
 }
 
 // Reconciliation grid (Track J · J2-5 M-1)
@@ -530,6 +535,12 @@ export interface IrrCodeResult {
   kappa_interpretation: string | null
   krippendorff_alpha: number | null
   alpha_interpretation: string | null
+  /**
+   * #829 — why κ/α are null here. `no_variance` = nobody applied this code in
+   * scope (or everybody did), so there is nothing to agree about. Reporting
+   * κ = 1 "almost perfect" was the defect.
+   */
+  undefined_reason: string | null
 }
 
 export interface IrrThresholds {
@@ -537,9 +548,20 @@ export interface IrrThresholds {
   alpha?: Record<string, number>
 }
 
+/** One selectable reliability scope (#829). `key` is the wire form "kind:id". */
+export interface IrrSourceInfo {
+  key: string
+  kind: 'conv' | 'doc' | 'obs' | 'col'
+  label: string
+}
+
 export interface IrrResponse {
   available: boolean
   reason: string | null
+  /** Every source ≥2 coders engaged — the picker's options (#829). */
+  sources: IrrSourceInfo[]
+  /** The scope this payload was computed on; null = pooled across all sources. */
+  source: string | null
   n_coders: number
   coders: IrrCoderInfo[]
   /** "kappa+alpha" (exactly 2 coders) | "alpha" (n coders). */
@@ -553,6 +575,11 @@ export interface IrrResponse {
 export interface IrrParams {
   /** Comma-separated coder IDs; omit = all roster coders (the display always omits). */
   coder_ids?: string
+  /**
+   * Scope to ONE source — "conv:7" | "doc:3" | "obs:2" | "col:16" (#829).
+   * ⚠️ A UNIT filter, never a coder filter: the matrix stays all-roster.
+   */
+  source?: string
 }
 
 // Text columns

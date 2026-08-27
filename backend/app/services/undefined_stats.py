@@ -52,7 +52,79 @@ NO_VARIANCE = "no_variance"
 #: margin, a regression with no spread).
 DEGENERATE = "degenerate"
 
-UNDEFINED_REASONS = frozenset({INSUFFICIENT_N, EMPTY_GROUP, NO_VARIANCE, DEGENERATE})
+#: The VARIABLE holds no numbers at all — a nominal or open-text column asked to
+#: behave like a measurement (#830b). Distinct from EMPTY_GROUP, which it used to
+#: be reported as: *"No values in this group, after missing data was excluded"*
+#: blames the grouping and the missing data for something neither did, and it
+#: says it once per group, so a researcher reads a data problem into a type
+#: mismatch. Nominal columns are legitimately offered as metric inputs (#371 —
+#: a frequency chart on `School` is exactly right), so this is reachable from an
+#: ordinary selection, not a misuse.
+NOT_NUMERIC = "not_numeric"
+
+UNDEFINED_REASONS = frozenset({
+    INSUFFICIENT_N, EMPTY_GROUP, NO_VARIANCE, DEGENERATE, NOT_NUMERIC,
+})
+
+
+# ── Why a whole RESULT is empty ──────────────────────────────────────────────
+#
+# The vocabulary above answers "why has this NUMBER no value". This one answers
+# "why has this ANALYSIS no rows", and it exists for the same reason one level
+# up: **the surface was inventing the answer.**
+#
+# 🔴 Measured on real data (#823c · #827 · the 2026-08-25 review). A comparison
+# that produced nothing rendered one hardcoded sentence — *"The selected
+# demographic may have fewer than 2 groups"* — which was:
+#   * wrong for a 5-group variable whose scale scores had never been computed
+#     (the grouping column was never even consulted), and
+#   * wrong for a 3-group variable in another dataset, where no row the analysis
+#     looked at carries a value for it.
+# It is right for exactly one of the four ways this can happen, and the server
+# knows which one every time.
+#
+# ⚠️ **Do not read these as a ranking.** They are disjoint causes, diagnosed in
+# the order the pipeline reaches them, and each has a different remedy — which is
+# the whole point of separating them.
+
+#: Nothing resolvable was selected (no columns, no domains, or ids that do not
+#: belong to this project).
+NO_VARIABLES = "no_variables"
+
+#: A variable group was selected but has no ungrouped scale-score metric, so
+#: there is no per-row number to compare. The remedy is to create one.
+DOMAIN_SCORES_MISSING = "domain_scores_missing"
+
+#: The scale-score metric EXISTS but has never been computed (or its rows were
+#: cleared), so `RowScore` is empty. #823(c): the researcher's fix was to visit
+#: an unrelated page and click a chip nothing pointed them at.
+DOMAIN_SCORES_NOT_COMPUTED = "domain_scores_not_computed"
+
+#: Rows were found, but not one of them carries a value for the grouping column.
+#: 🔴 **The dominant real-world cause is a grouping column in a DIFFERENT dataset
+#: (#827), and the reason it fails is not the one that entry proposed.**
+#: `_load_grouping_map` reads the grouping column's values on the ROW IDS the
+#: analysis is built from, so a column in another dataset contributes nothing.
+#: **Participant links are irrelevant here — verified by execution: with 12 of 12
+#: rows linked one-to-one, the comparison still returns no groups.** What DOES
+#: work is a cross-dataset DOMAIN whose row scores span both datasets, grouped by
+#: a column in either of them (also verified) — which is why the offer must be
+#: gated on "does the grouping column's dataset appear among the analysed rows",
+#: never on "are these two datasets linked".
+NO_GROUP_VALUES = "no_group_values"
+
+#: Fewer than two distinct groups survive the column's missing rules and the
+#: researcher's excluded groups. **The only case the old hardcoded sentence
+#: described.**
+INSUFFICIENT_GROUPS = "insufficient_groups"
+
+UNAVAILABLE_REASONS = frozenset({
+    NO_VARIABLES,
+    DOMAIN_SCORES_MISSING,
+    DOMAIN_SCORES_NOT_COMPUTED,
+    NO_GROUP_VALUES,
+    INSUFFICIENT_GROUPS,
+})
 
 
 def finite_or_none(value: float | int | None, digits: int | None = None) -> float | None:

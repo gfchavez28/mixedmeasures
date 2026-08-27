@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildShortcutCategories, type ShortcutCodeInput } from '@/lib/codeShortcuts'
+import { focusedElementOwnsKey, focusIsOnAnotherControl } from '@/lib/keyboard-scope'
 
 /**
  * Shared chord-dispatch keyboard layer for the coding workbenches (#388 Phase 1).
@@ -180,6 +181,19 @@ export function useCodeChordShortcuts<T extends ShortcutCodeInput>(
 
       if (o.enabled === false) return
 
+      // ── Stand-down 1: another widget already handled this key (#784) ──
+      // This listener is on `window` in the BUBBLE phase, so anything with its own
+      // keyboard model — a Radix menu, a dialog — has already run and marked the event.
+      // MEASURED, not assumed: `ArrowDown` and `Escape` pressed inside an open
+      // DropdownMenu both arrive here with `defaultPrevented` set. Before this line one
+      // ArrowDown did TWO things — moved the menu's active item AND moved the clip
+      // selection underneath it — and Escape ran the workbench's unwind ladder while the
+      // user only meant to close the menu.
+      // ⚠️ Reading the platform's own "already handled" signal is deliberate: the
+      // alternative is an allow-list of overlay roles, which is exactly the
+      // hand-maintained enumeration that rots here.
+      if (e.defaultPrevented) return
+
       // Input guard: never steal keystrokes from a text field / contenteditable.
       const target = e.target as HTMLElement | null
       const tag = target?.tagName
@@ -192,6 +206,15 @@ export function useCodeChordShortcuts<T extends ShortcutCodeInput>(
       // While inline-editing, bail entirely so the editor's own handler owns the keys
       // (this is also the Escape "edit" layer — plan G-B).
       if (o.isEditing) return
+
+      // ── Stand-down 2: the focused control activates on this key ITSELF (#784) ──
+      // Sibling of the input guard above and there for the same reason, one step
+      // further out: a text field owns every key, a button owns Space and Enter. If we
+      // claim one of those, `preventDefault()` cancels the control's native activation
+      // and the button silently does nothing while the workbench does something else.
+      // ⚠️ Activation keys ONLY — the chord layer and the letter verbs stay global on
+      // purpose, so `c` and the digits still work with a toolbar button focused.
+      if (focusedElementOwnsKey(e.key, document.activeElement)) return
 
       const isPlainDigit =
         e.key.length === 1 && e.key >= '0' && e.key <= '9' && !e.ctrlKey && !e.metaKey && !e.altKey
@@ -221,10 +244,18 @@ export function useCodeChordShortcuts<T extends ShortcutCodeInput>(
       }
 
       // ── Arrow navigation ──
+      // ⚠️ BOTH arrow branches ask `focusIsOnAnotherControl` (#789) — app state alone was
+      // never enough. `arrowNavEnabled` reports which PANEL is active, which stays true
+      // while focus sits on a toolbar button, so arrows kept acting on a list the user
+      // had left. Measured: ArrowDown with `Fit` focused moved the clip selection
+      // (`clip-1113` → `clip-1114`) with no announcement, and ArrowRight reached
+      // `nudgeBoundary` — an EDIT to the clip's boundary from a key aimed at a button.
+      // ⚠️ The two branches take DIFFERENT gates and that asymmetry is deliberate: see
+      // the horizontal branch below.
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         // Only claim the key (preventDefault) when the list actually owns nav — else
         // leave it for the focused panel's own roving nav / native scroll (plan G-E).
-        if (o.arrowNavEnabled) {
+        if (o.arrowNavEnabled && !focusIsOnAnotherControl(document.activeElement)) {
           e.preventDefault()
           o.onArrowNav?.(e.key === 'ArrowDown' ? 1 : -1, {
             extend: e.shiftKey,
@@ -234,6 +265,14 @@ export function useCodeChordShortcuts<T extends ShortcutCodeInput>(
         return
       }
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        // ⚠️ NOT gated on `arrowNavEnabled`, and that is not an oversight: horizontal
+        // arrows SWITCH PANELS, so they must work FROM a rail panel — which is exactly
+        // when `arrowNavEnabled` is false. Adding it here would strand a keyboard user
+        // in the codes panel with no way back (DocumentCodingWorkbench's `dir === 'left'
+        // && focusedPanel !== 'document'` arm is the one that would break).
+        // The control guard is still right: panel focus lands on a plain container
+        // `<div>`, never a control, so returning from a panel is unaffected.
+        if (focusIsOnAnotherControl(document.activeElement)) return
         const handled = o.onArrowHorizontal?.(e.key === 'ArrowLeft' ? 'left' : 'right', {
           shift: e.shiftKey,
           alt: e.altKey,

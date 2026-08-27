@@ -28,6 +28,7 @@ from ..auth import get_current_user
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
 from ..services.coding_layers import non_consensus_filter
+from ..services.text_analysis import substantive_text_clause
 from .helpers import _get_project_or_404, parse_int_list, sanitize_csv_filename, TEXT_TYPES
 from .export_helpers import csv_safe
 from ..schemas.text_coding import (
@@ -161,67 +162,79 @@ async def list_texts(
 
     rows = query.all()
 
-    # Get code applications for all matching values
-    value_ids = [r[0] for r in rows]
+    # #842/#844 — the three follow-up queries below all scope to "the values THIS
+    # request selected". That used to be a Python id list handed to `.in_()`, which
+    # renders ONE BIND PARAMETER PER ELEMENT: SQLite's SQLITE_MAX_VARIABLE_NUMBER is
+    # exactly 250,000, so selecting four open-text questions on a 75,699-record survey
+    # (302,796 values) raised a raw OperationalError and took the whole screen down.
+    # Measured 2026-08-26: 1 column OK, 3 columns 6.76 s / 699 MB, 4 columns CRASH.
+    #
+    # `value_scope` is THE SAME query with its selected columns swapped for the id, so
+    # the predicate cannot drift from the one that produced `rows` — it is DERIVED,
+    # not restated, which matters because two of this endpoint's filters are optional
+    # (`dataset_ids`, `record_id`, `search`). It renders as a SQL subquery: zero bind
+    # parameters, no ceiling. Never rebuild this as a list comprehension over `rows`.
+    #
+    # ⚠️ This removes the CRASH, not the COST — `rows` is still materialised and the
+    # payload is still whole-population. Pagination is #844's v1.5.0 half; see
+    # `docs/release-1.4.0-checklist.md` §4d.
+    value_scope = query.with_entities(DatasetValue.id).scalar_subquery()
 
     # Batch-fetch quoted excerpts scoped to result values
-    if value_ids:
-        quoted_excerpts = dict(
-            db.query(Excerpt.dataset_value_id, Excerpt.id)
-            .filter(Excerpt.project_id == project_id, Excerpt.dataset_value_id.in_(value_ids))
-            .all()
+    quoted_excerpts = dict(
+        db.query(Excerpt.dataset_value_id, Excerpt.id)
+        .filter(
+            Excerpt.project_id == project_id,
+            Excerpt.dataset_value_id.in_(value_scope),
         )
-    else:
-        quoted_excerpts = {}
+        .all()
+    )
 
     code_apps = {}
     code_details: dict[int, list[AppliedCodeDetail]] = {}
-    if value_ids:
-        # Join Code for is_universal so the enriched detail can drive the
-        # coder-scoped isSegmentCoded predicate (Track J · J1). code_id FK is
-        # non-null so the inner join drops nothing the bare-ID list had.
-        ca_query = (
-            db.query(
-                CodeApplication.dataset_value_id,
-                CodeApplication.code_id,
-                CodeApplication.user_id,
-                CodeApplication.attribution,
-                Code.is_universal,
-            )
-            .join(Code, Code.id == CodeApplication.code_id)
-            .filter(
-                CodeApplication.dataset_value_id.in_(value_ids),
-                CodeApplication.dataset_value_id.isnot(None),
-                # J2-B / P-1: workbench shows the human/working layer only; never
-                # leak derived consensus rows into the client coded predicate.
-                non_consensus_filter(),
-            )
-            .all()
+    # Join Code for is_universal so the enriched detail can drive the
+    # coder-scoped isSegmentCoded predicate (Track J · J1). code_id FK is
+    # non-null so the inner join drops nothing the bare-ID list had.
+    ca_query = (
+        db.query(
+            CodeApplication.dataset_value_id,
+            CodeApplication.code_id,
+            CodeApplication.user_id,
+            CodeApplication.attribution,
+            Code.is_universal,
         )
-        for dv_id, code_id, ca_user_id, attribution, is_universal in ca_query:
-            code_apps.setdefault(dv_id, []).append(code_id)
-            code_details.setdefault(dv_id, []).append(
-                AppliedCodeDetail(
-                    code_id=code_id,
-                    user_id=ca_user_id,
-                    attribution=attribution,
-                    is_universal=bool(is_universal),
-                )
+        .join(Code, Code.id == CodeApplication.code_id)
+        .filter(
+            CodeApplication.dataset_value_id.in_(value_scope),  # #844 join-back
+            CodeApplication.dataset_value_id.isnot(None),
+            # J2-B / P-1: workbench shows the human/working layer only; never
+            # leak derived consensus rows into the client coded predicate.
+            non_consensus_filter(),
+        )
+        .all()
+    )
+    for dv_id, code_id, ca_user_id, attribution, is_universal in ca_query:
+        code_apps.setdefault(dv_id, []).append(code_id)
+        code_details.setdefault(dv_id, []).append(
+            AppliedCodeDetail(
+                code_id=code_id,
+                user_id=ca_user_id,
+                attribution=attribution,
+                is_universal=bool(is_universal),
             )
+        )
 
     # Get note counts
-    note_counts = {}
-    if value_ids:
-        nc_query = (
-            db.query(Note.dataset_value_id, func.count(Note.id))
-            .filter(
-                Note.dataset_value_id.in_(value_ids),
-                Note.is_archived == False,
-            )
-            .group_by(Note.dataset_value_id)
-            .all()
+    nc_query = (
+        db.query(Note.dataset_value_id, func.count(Note.id))
+        .filter(
+            Note.dataset_value_id.in_(value_scope),  # #844 join-back
+            Note.is_archived == False,
         )
-        note_counts = {dv_id: cnt for dv_id, cnt in nc_query}
+        .group_by(Note.dataset_value_id)
+        .all()
+    )
+    note_counts = {dv_id: cnt for dv_id, cnt in nc_query}
 
     # Apply in-memory filtering and build response
     texts = []
@@ -579,28 +592,44 @@ async def text_columns(
     total_counts = {}
     non_empty_counts = {}
     if col_ids:
-        # Total rows per column
-        totals = (
-            db.query(DatasetValue.column_id, func.count(DatasetValue.id))
-            .filter(DatasetValue.column_id.in_(col_ids))
-            .group_by(DatasetValue.column_id)
+        # Records per column = the RECORDS IN ITS DATASET (#830d).
+        #
+        # 🔴 This counted `DatasetValue` rows until 2026-08-26, i.e. cells that
+        # EXIST — and the import pipeline stores no row for a blank cell, so a
+        # record that skipped the question contributed nothing to the
+        # denominator. Measured on the Ferncrest corpus: `Observer_Notes` has 40
+        # value rows in a 48-record dataset, so the picker read
+        # "36/40 responded" — a 90% response rate where the true figure is
+        # 36/48 = 75%. The denominator was the wrong POPULATION: "how many
+        # people answered" is asked of the people, not of the answers.
+        #
+        # ⚠️ The NUMERATOR is untouched and stays single-sourced (#519) — it was
+        # independently confirmed correct against the coding gauge on the same
+        # screen. Only the base moved.
+        ds_ids = {c.ds_id for c in cols}
+        dataset_row_counts = dict(
+            db.query(DatasetRow.dataset_id, func.count(DatasetRow.id))
+            .filter(DatasetRow.dataset_id.in_(ds_ids))
+            .group_by(DatasetRow.dataset_id)
             .all()
         )
-        total_counts = {cid: cnt for cid, cnt in totals}
+        total_counts = {c[0]: dataset_row_counts.get(c.ds_id, 0) for c in cols}
 
         # Non-empty rows (also exclude treat_as_empty values)
         config = _get_config(db, project_id)
         treat_as_empty = _get_treat_as_empty(config)
+        # #840 — the shared SQL expression of `is_empty_text`, not a local
+        # `!= val` chain. The chain was untrimmed, so it kept " N/A " while the
+        # Python rule dropped it: two implementations of one predicate that had
+        # already drifted. Latent on every corpus measured (0 padded cells), but
+        # this is the exact seam #519 exists to close.
         non_empty_q = (
             db.query(DatasetValue.column_id, func.count(DatasetValue.id))
             .filter(
                 DatasetValue.column_id.in_(col_ids),
-                DatasetValue.value_text.isnot(None),
-                DatasetValue.value_text != "",
+                substantive_text_clause(treat_as_empty),
             )
         )
-        for val in treat_as_empty:
-            non_empty_q = non_empty_q.filter(DatasetValue.value_text != val)
         non_empty = non_empty_q.group_by(DatasetValue.column_id).all()
         non_empty_counts = {cid: cnt for cid, cnt in non_empty}
 
@@ -620,12 +649,9 @@ async def text_columns(
                 DatasetValue.column_id.in_(col_ids),
                 Code.is_universal == False,
                 non_consensus_filter(),
-                DatasetValue.value_text.isnot(None),
-                DatasetValue.value_text != "",
+                substantive_text_clause(treat_as_empty),
             )
         )
-        for val in treat_as_empty:
-            coded_q = coded_q.filter(DatasetValue.value_text != val)
         coded = coded_q.group_by(DatasetValue.column_id).all()
         coded_counts = {cid: cnt for cid, cnt in coded}
 

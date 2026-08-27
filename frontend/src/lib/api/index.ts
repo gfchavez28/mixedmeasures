@@ -62,6 +62,8 @@ export type {
   DatasetRowInfo,
   LinkedDemographicValue,
   LinkableRow,
+  WithdrawalReport,
+  WithdrawalOutcome,
 } from './participants'
 
 // Notes
@@ -95,7 +97,7 @@ export type {
 } from './excerpts'
 
 // Datasets & Recode
-export { datasetsApi, recodeApi } from './datasets'
+export { datasetsApi, recodeApi, DATASET_PAGE_SIZE } from './datasets'
 export type {
   DatasetColumnPreview,
   DatasetPreviewResponse,
@@ -106,10 +108,18 @@ export type {
   DatasetList,
   RecodeDefinition,
   RecodeDefinitionSummary,
+  RederivePlanItem,
+  RederiveResult,
+  RekeyRename,
+  RekeyPlanItem,
+  RekeyResult,
   ValueFrequency,
   ColumnFrequenciesResponse,
   CopyToResponse,
   DatasetColumn,
+  DerivePlan,
+  DeriveLabelCarryPlan,
+  DeriveColumnResult,
   DatasetValueCell,
   DatasetDataRow,
   DatasetDataResponse,
@@ -136,6 +146,8 @@ export type {
   ParticipantLinkReport,
   ProjectColumnInfo,
   ProjectColumnListResponse,
+  MissingValuesResult,
+  BulkMissingValuesResult,
 } from './datasets'
 
 // Crosswalk (Path A — atomic move-members)
@@ -228,6 +240,8 @@ export type {
   TestResult,
   ComparisonRow,
   GroupComparisonResponse,
+  QQPoint,
+  QQSummary,
 } from './comparisons'
 
 // Statistical Tests

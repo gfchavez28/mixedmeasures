@@ -92,14 +92,65 @@ def _build_detail_response(canvas, themes_list,
     )
 
 
-def _build_pending_items_list(canvas) -> list[PendingItemResponse]:
+def _pending_item_labels(db: Session, items) -> dict[tuple[str, int], str]:
+    """Resolve each pending item to the name the researcher gave it (#823j).
+
+    `source_id` is polymorphic with no FK, so this is one grouped query per
+    TYPE — never one per item, which on a busy inbox would be an N+1 on the
+    canvas's own load.
+
+    ⚠️ A material's display name is `custom_name or auto_name`, the same
+    precedence the Materials drawer uses. The drawer showed the real name while
+    the inbox two panels away showed `"Chart #5"`, which is what made the
+    inbox look broken rather than unimplemented.
+    """
+    from ..models.materials import Material
+    from ..models.memo import Memo
+    from ..models.excerpt import Excerpt
+
+    by_type: dict[str, list[int]] = {}
+    for pi in items:
+        by_type.setdefault(pi.item_type, []).append(pi.source_id)
+
+    labels: dict[tuple[str, int], str] = {}
+
+    for mid, custom, auto in db.query(Material.id, Material.custom_name, Material.auto_name).filter(
+        Material.id.in_(by_type.get("material", []))
+    ).all() if by_type.get("material") else []:
+        name = (custom or auto or "").strip()
+        if name:
+            labels[("material", mid)] = name
+
+    for memo_id, title in db.query(Memo.id, Memo.title).filter(
+        Memo.id.in_(by_type.get("memo", []))
+    ).all() if by_type.get("memo") else []:
+        if title and title.strip():
+            labels[("memo", memo_id)] = title.strip()
+
+    for exc_id, text in db.query(Excerpt.id, Excerpt.excerpt_text).filter(
+        Excerpt.id.in_(by_type.get("excerpt", []))
+    ).all() if by_type.get("excerpt") else []:
+        # An excerpt has no name — its TEXT is its identity, so a short prefix
+        # is what tells two of them apart. A clip's text is often empty (its
+        # label is the excerpt), which is why the empty case falls back to the
+        # id rather than rendering a blank row.
+        snippet = (text or "").strip()
+        if snippet:
+            labels[("excerpt", exc_id)] = snippet[:80] + ("…" if len(snippet) > 80 else "")
+
+    return labels
+
+
+def _build_pending_items_list(canvas, db: Session | None = None) -> list[PendingItemResponse]:
     """Build pending items list from eager-loaded canvas."""
     if not hasattr(canvas, "pending_items") or not canvas.pending_items:
         return []
+    labels = _pending_item_labels(db, canvas.pending_items) if db is not None else {}
     return [
         PendingItemResponse(
             id=pi.id, canvas_id=pi.canvas_id, item_type=pi.item_type,
             source_id=pi.source_id, created_at=pi.created_at,
+            source_label=labels.get((pi.item_type, pi.source_id)),
         )
         for pi in canvas.pending_items
     ]
@@ -194,7 +245,7 @@ async def get_canvas_endpoint(
     return _build_detail_response(
         canvas,
         [CanvasThemeResponse(**build_theme_response(t)) for t in canvas.themes],
-        _build_pending_items_list(canvas),
+        _build_pending_items_list(canvas, db),
     )
 
 
@@ -223,7 +274,7 @@ async def update_canvas_endpoint(
     return _build_detail_response(
         full,
         [CanvasThemeResponse(**build_theme_response(t)) for t in full.themes],
-        _build_pending_items_list(full),
+        _build_pending_items_list(full, db),
     )
 
 
@@ -280,7 +331,7 @@ async def duplicate_canvas_endpoint(
     return _build_detail_response(
         full,
         [CanvasThemeResponse(**build_theme_response(t)) for t in full.themes],
-        _build_pending_items_list(full),
+        _build_pending_items_list(full, db),
     )
 
 
@@ -677,7 +728,7 @@ async def restore_snapshot_endpoint(
     return _build_detail_response(
         full,
         [CanvasThemeResponse(**build_theme_response(t)) for t in full.themes],
-        _build_pending_items_list(full),
+        _build_pending_items_list(full, db),
     )
 
 

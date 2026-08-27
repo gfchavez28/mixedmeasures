@@ -89,6 +89,14 @@ class TextSearchResult(BaseModel):
     row_identifier: str | None = None
     is_quoted: bool = False
     applied_code_count: int = 0
+    # #834: the hit's RECORD and its dataset. Without these the click could only
+    # reach the column — `id` is the dataset_value_id and `row_identifier` is a
+    # human label, so the client knew *which text* matched and had no way to
+    # address the row it belongs to, in a project that may hold several datasets
+    # with identically-named open-text columns.
+    dataset_id: int
+    dataset_name: str
+    row_id: int
 
     model_config = ConfigDict(from_attributes=True)
 

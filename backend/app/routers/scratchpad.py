@@ -20,6 +20,7 @@ from ..schemas.scratchpad import (
 )
 from ..auth import get_current_user
 from .helpers import _get_project_or_404
+from .memos import _validate_memo_entity
 
 router = APIRouter(prefix="/api/projects", tags=["scratchpad"])
 
@@ -130,32 +131,12 @@ async def delete_entry(
     return {"status": "ok", "deleted_id": entry_id}
 
 
-def _validate_memo_entity(db: Session, project_id: int, entity_type: str, entity_id: int) -> None:
-    """Validate that an entity exists in this project (reuses logic from memos router)."""
-    if entity_type == "project":
-        if entity_id != project_id:
-            raise HTTPException(status_code=400, detail="entity_id must match project_id for project memos")
-    elif entity_type == "dataset":
-        if not db.query(Dataset.id).filter(Dataset.id == entity_id, Dataset.project_id == project_id).first():
-            raise HTTPException(status_code=400, detail=f"dataset {entity_id} not found in this project")
-    elif entity_type == "dataset_row":
-        if not db.query(DatasetRow.id).join(Dataset).filter(DatasetRow.id == entity_id, Dataset.project_id == project_id).first():
-            raise HTTPException(status_code=400, detail=f"dataset_row {entity_id} not found in this project")
-    elif entity_type == "dataset_column":
-        if not db.query(DatasetColumn.id).join(Dataset).filter(DatasetColumn.id == entity_id, Dataset.project_id == project_id).first():
-            raise HTTPException(status_code=400, detail=f"dataset_column {entity_id} not found in this project")
-    elif entity_type == "conversation":
-        if not db.query(Conversation.id).filter(Conversation.id == entity_id, Conversation.project_id == project_id).first():
-            raise HTTPException(status_code=400, detail=f"conversation {entity_id} not found in this project")
-    elif entity_type == "code":
-        if not db.query(Code.id).filter(Code.id == entity_id, Code.project_id == project_id).first():
-            raise HTTPException(status_code=400, detail=f"code {entity_id} not found in this project")
-    elif entity_type == "code_category":
-        if not db.query(CodeCategory.id).filter(CodeCategory.id == entity_id, CodeCategory.project_id == project_id).first():
-            raise HTTPException(status_code=400, detail=f"code_category {entity_id} not found in this project")
-    elif entity_type == "analysis":
-        if not db.query(Material.id).filter(Material.id == entity_id).first():
-            raise HTTPException(status_code=400, detail=f"analysis element {entity_id} not found")
+# `_validate_memo_entity` is imported from `routers/memos.py` — see #780. The
+# copy that used to live here covered EIGHT of the eleven declared memo entity
+# types (no `document`, `observation` or `canvas`), and its `analysis` arm
+# queried `Material.id == entity_id` with NO collection join, so converting a
+# scratchpad entry could attach a memo to another project's material. Its
+# docstring already claimed it "reuses logic from memos router"; now it does.
 
 
 @router.post("/{project_id}/scratchpad/{entry_id}/convert", response_model=ScratchpadEntryResponse)

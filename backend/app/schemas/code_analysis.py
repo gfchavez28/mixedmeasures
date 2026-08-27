@@ -378,11 +378,30 @@ class IrrCodeResult(BaseModel):
     kappa_interpretation: str | None = None
     krippendorff_alpha: float | None = None
     alpha_interpretation: str | None = None
+    #: #829 — why κ/α are None here. `no_variance` = nobody applied this code
+    #: in scope (or everybody did), so there is nothing to agree about; reporting
+    #: κ = 1 "almost perfect" was the defect (#689's rule, one surface over).
+    undefined_reason: str | None = None
+
+
+class IrrSourceInfo(BaseModel):
+    """One selectable source for the reliability scope (#829).
+
+    ``key`` is the wire form ``"kind:id"`` — it rides the query string AND the
+    React Query key, so the two can never describe different scopes.
+    """
+    key: str
+    kind: str
+    label: str
 
 
 class IrrResponse(BaseModel):
     available: bool
     reason: str | None = None
+    #: Every source ≥2 coders engaged — the picker's options (#829).
+    sources: list[IrrSourceInfo] = []
+    #: The scope this payload was computed on; ``None`` = pooled across all.
+    source: str | None = None
     n_coders: int
     coders: list[IrrCoderInfo] = []
     metric_label: str | None = None

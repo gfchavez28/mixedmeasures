@@ -348,3 +348,295 @@ def test_R3_cross_tab_unmapped_value_still_appears(db_session, recoded_crosstab_
     ))
     # Mapped values first (numeric order), the unmapped typo last.
     assert result.response_values == ["Standard", "Plus", "Premium", "Premum"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #591 — a declared level nobody chose belongs on the AXIS, never in the TEST
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDeclaredZeroResponseLevels:
+    """The frequency computer zero-fills a declared level (which is what makes
+    #577 work); the cross-tab used to filter its axis down to values that
+    actually appear. Same declaration, two answers on two surfaces — and a
+    structural zero is exactly what a declared scale exists to express.
+
+    ⚠️ The fix is NOT "stop filtering". `chi2_contingency` **raises** on the
+    all-zero row that a displayed-but-unchosen level produces:
+
+        ValueError: The internally computed table of expected frequencies has a
+        zero element at (2, 0)
+
+    and that call sits inside a `try`, so the naive version would make the whole
+    chi-square block silently disappear from every cross-tab that has one. The
+    table and the statistic legitimately differ in dimension; the payload says by
+    how much (`omitted_levels`) rather than leaving df to be reverse-engineered.
+    """
+
+    def _seed(self, db, *, mapping_extra=None, pairs=None):
+        db.add(Project(id=591, name="P591", user_id=1)); db.flush()
+        db.add(Dataset(id=591, project_id=591, name="D")); db.flush()
+        row = DatasetColumn(
+            id=5911, dataset_id=591, column_code="Sat", column_text="Satisfaction",
+            column_type="ordinal", sequence_order=0, display_order=0,
+            scale_labels=json.dumps(["Low", "Neutral", "High"]),
+            scale_values=json.dumps([1, 2, 3]))
+        col = DatasetColumn(
+            id=5912, dataset_id=591, column_code="Grp", column_text="Group",
+            column_type="nominal", sequence_order=1, display_order=1)
+        db.add_all([row, col]); db.flush()
+        mapping = {"Low": 1, "Neutral": 2, "High": 3}
+        mapping.update(mapping_extra or {})
+        db.add(RecodeDefinition(
+            id=5913, column_id=row.id, name="scale", recode_type="scale_map",
+            output_type="numeric", is_primary=True, sequence_order=0,
+            mapping=json.dumps(mapping)))
+        db.flush()
+        # "Neutral" is declared and never chosen.
+        for rv, cv in (pairs or [("Low", "A"), ("Low", "A"), ("Low", "B"),
+                                 ("High", "A"), ("High", "B"), ("High", "B")]):
+            r = DatasetRow(dataset_id=591); db.add(r); db.flush()
+            db.add(DatasetValue(row_id=r.id, column_id=row.id, value_text=rv))
+            db.add(DatasetValue(row_id=r.id, column_id=col.id, value_text=cv))
+        db.flush()
+        return row, col
+
+    def test_a_declared_level_nobody_chose_stays_on_the_axis(self, db_session):
+        self._seed(db_session)
+        out = compute_cross_tabulation(db_session, project_id=591,
+                                       row_column_id=5911, col_column_id=5912)
+        assert out["row_values"] == ["Low", "Neutral", "High"], (
+            "the declared scale, in declared order — a structural zero is a level"
+        )
+        assert out["row_totals"] == [3, 0, 3]
+        assert [c["count"] for c in out["matrix"][1]] == [0, 0]
+
+    def test_the_empty_level_does_not_break_the_chi_square(self, db_session):
+        """The half that makes the naive fix unshippable."""
+        self._seed(db_session)
+        out = compute_cross_tabulation(db_session, project_id=591,
+                                       row_column_id=5911, col_column_id=5912)
+        assert out["chi_square"] is not None, (
+            "scipy raises on the all-zero row; the block must run on the "
+            "observed submatrix instead of silently vanishing"
+        )
+        assert out["chi_square"]["df"] == 1, (
+            "df comes from the 2x2 the test could use, not the displayed 3x2"
+        )
+
+    def test_the_payload_says_how_many_levels_the_test_could_not_use(self, db_session):
+        self._seed(db_session)
+        out = compute_cross_tabulation(db_session, project_id=591,
+                                       row_column_id=5911, col_column_id=5912)
+        assert out["chi_square"]["omitted_levels"] == 1
+
+    def test_nothing_is_omitted_when_every_level_was_chosen(self, db_session):
+        """Two-sided: the field must be 0 on an ordinary table, or a display
+        that trusts it would caveat every cross-tab in the app."""
+        self._seed(db_session, pairs=[
+            ("Low", "A"), ("Low", "B"), ("Neutral", "A"), ("Neutral", "B"),
+            ("High", "A"), ("High", "B"), ("High", "A"),
+        ])
+        out = compute_cross_tabulation(db_session, project_id=591,
+                                       row_column_id=5911, col_column_id=5912)
+        assert out["row_values"] == ["Low", "Neutral", "High"]
+        assert out["chi_square"]["omitted_levels"] == 0
+        assert out["chi_square"]["df"] == 2
+
+    def test_a_declared_level_the_column_treats_as_MISSING_is_not_resurrected(self, db_session):
+        """`_get_ordered_values` reads a primary scale_map's mapping keys, and a
+        hand-authored mapping can name a value the column treats as missing.
+        Zero-filling it would undo #384/#592 on this surface — the write-side C4
+        strip never touched this read path."""
+        self._seed(db_session, mapping_extra={"N/A": 99})
+        out = compute_cross_tabulation(db_session, project_id=591,
+                                       row_column_id=5911, col_column_id=5912)
+        assert "N/A" not in out["row_values"], (
+            "a missing value is not a scale point, and a phantom category here "
+            "would also inflate the axis the test omits"
+        )
+        assert out["row_values"] == ["Low", "Neutral", "High"]
+
+    def test_percentages_survive_a_zero_row(self, db_session):
+        """Divide-by-zero is one line away in the row-% computation."""
+        self._seed(db_session)
+        out = compute_cross_tabulation(db_session, project_id=591,
+                                       row_column_id=5911, col_column_id=5912)
+        assert all(c["row_pct"] == 0 for c in out["matrix"][1])
+        assert out["n_shared"] == 6, "an empty level adds no records"
+
+
+class TestExpectedCountDisclosure:
+    """Chi-square is a large-sample approximation and the table never said so
+    (#709). `chi2_contingency` was already returning the expected-frequency
+    table and the code discarded it into `_`, so the disclosure cost one
+    destructured value.
+
+    ⚠️ The subtle half is WHICH table the counts come from. Post-#591 the
+    statistic runs on the observed submatrix, and the sparsity check has to run
+    on the same one: a declared level nobody chose is not a sparse cell — it is
+    a level nobody was offered — so counting it would fire the warning on tables
+    that are perfectly well powered. `test_a_declared_empty_level_does_not_make
+    _a_healthy_table_look_sparse` is the case that separates the two.
+    """
+
+    def _seed(self, db, pairs, *, pid=709):
+        db.add(Project(id=pid, name=f"P{pid}", user_id=1)); db.flush()
+        db.add(Dataset(id=pid, project_id=pid, name="D")); db.flush()
+        row = DatasetColumn(
+            id=pid * 10 + 1, dataset_id=pid, column_code="Row", column_text="Row",
+            column_type="nominal", sequence_order=0, display_order=0)
+        col = DatasetColumn(
+            id=pid * 10 + 2, dataset_id=pid, column_code="Col", column_text="Col",
+            column_type="nominal", sequence_order=1, display_order=1)
+        db.add_all([row, col]); db.flush()
+        for rv, cv in pairs:
+            r = DatasetRow(dataset_id=pid); db.add(r); db.flush()
+            db.add(DatasetValue(row_id=r.id, column_id=row.id, value_text=rv))
+            db.add(DatasetValue(row_id=r.id, column_id=col.id, value_text=cv))
+        db.flush()
+        return row, col
+
+    def _run(self, db, pid=709):
+        return compute_cross_tabulation(
+            db, project_id=pid, row_column_id=pid * 10 + 1, col_column_id=pid * 10 + 2)
+
+    def test_a_sparse_table_says_so_and_shows_its_figures(self, db_session):
+        # 16 records over 2x2, deliberately lopsided: expected counts fall well
+        # under 5 in the thin cells.
+        pairs = ([("Yes", "A")] * 10 + [("Yes", "B")] * 2
+                 + [("No", "A")] * 3 + [("No", "B")] * 1)
+        self._seed(db_session, pairs)
+        cs = self._run(db_session)["chi_square"]
+
+        assert cs["low_expected_warning"] is True
+        assert cs["cell_count"] == 4, "figures come from the 2x2 submatrix"
+        assert cs["cells_below_5"] >= 1
+        assert cs["min_expected"] is not None and cs["min_expected"] < 5
+        assert cs["statistic"] is not None, (
+            "the warning is a caveat on the number, not a refusal to compute it"
+        )
+
+    def test_a_well_powered_table_carries_no_warning(self, db_session):
+        pairs = ([("Yes", "A")] * 50 + [("Yes", "B")] * 60
+                 + [("No", "A")] * 55 + [("No", "B")] * 45)
+        self._seed(db_session, pairs)
+        cs = self._run(db_session)["chi_square"]
+
+        assert cs["low_expected_warning"] is False
+        assert cs["cells_below_5"] == 0
+        assert cs["min_expected"] > 5
+
+    def test_fisher_exact_is_offered_on_2x2_and_absent_elsewhere(self, db_session):
+        """scipy implements Fisher for 2x2 ONLY, so the field is shape-gated.
+
+        Absent must mean absent — never a silent fallback to chi-square's own p,
+        which would present one test's number under another test's name.
+        """
+        self._seed(db_session, [("Yes", "A")] * 10 + [("Yes", "B")] * 2
+                   + [("No", "A")] * 3 + [("No", "B")] * 1)
+        two_by_two = self._run(db_session)["chi_square"]
+        assert two_by_two["fisher_exact_p"] is not None
+
+        wide = ([("Yes", "A")] * 8 + [("Yes", "B")] * 6 + [("Yes", "C")] * 5
+                + [("No", "A")] * 4 + [("No", "B")] * 7 + [("No", "C")] * 9)
+        self._seed(db_session, wide, pid=710)
+        cs = self._run(db_session, pid=710)["chi_square"]
+        assert cs["fisher_exact_p"] is None
+        assert cs["p_value"] is not None
+        assert cs["fisher_exact_p"] != cs["p_value"]
+
+    def test_a_declared_empty_level_does_not_make_a_healthy_table_look_sparse(
+        self, db_session,
+    ):
+        """The #591 interaction, and the reason the check runs on the submatrix.
+
+        A declared-but-unchosen level contributes an all-zero row. Counted as
+        cells, its zeros would drag `cells_below_5` past the 20% threshold and
+        warn about a table whose observed counts are ample — a warning that
+        fires on correct data is how researchers learn to ignore warnings.
+        """
+        db_session.add(Project(id=7091, name="P7091", user_id=1)); db_session.flush()
+        db_session.add(Dataset(id=7091, project_id=7091, name="D")); db_session.flush()
+        row = DatasetColumn(
+            id=70911, dataset_id=7091, column_code="Sat", column_text="Satisfaction",
+            column_type="ordinal", sequence_order=0, display_order=0,
+            scale_labels=json.dumps(["Low", "Neutral", "High"]),
+            scale_values=json.dumps([1, 2, 3]))
+        col = DatasetColumn(
+            id=70912, dataset_id=7091, column_code="Grp", column_text="Group",
+            column_type="nominal", sequence_order=1, display_order=1)
+        db_session.add_all([row, col]); db_session.flush()
+        db_session.add(RecodeDefinition(
+            id=70913, column_id=row.id, name="scale", recode_type="scale_map",
+            output_type="numeric", is_primary=True, sequence_order=0,
+            mapping=json.dumps({"Low": 1, "Neutral": 2, "High": 3})))
+        db_session.flush()
+        pairs = ([("Low", "A")] * 30 + [("Low", "B")] * 25
+                 + [("High", "A")] * 28 + [("High", "B")] * 32)
+        for rv, cv in pairs:
+            r = DatasetRow(dataset_id=7091); db_session.add(r); db_session.flush()
+            db_session.add(DatasetValue(row_id=r.id, column_id=row.id, value_text=rv))
+            db_session.add(DatasetValue(row_id=r.id, column_id=col.id, value_text=cv))
+        db_session.flush()
+
+        out = compute_cross_tabulation(
+            db_session, project_id=7091, row_column_id=70911, col_column_id=70912)
+        cs = out["chi_square"]
+
+        assert "Neutral" in out["row_values"], "precondition: the empty level is displayed"
+        assert cs["omitted_levels"] == 1, "precondition: the test could not use it"
+        assert cs["cell_count"] == 4, (
+            "2x2 submatrix, not the 3x2 displayed table — the zero row is not a cell"
+        )
+        assert cs["low_expected_warning"] is False
+        assert cs["cells_below_5"] == 0
+
+    # ── The two arms, separated ──────────────────────────────────────────────
+    #
+    # The rule is a disjunction: >20% of cells below 5, OR any cell below 1. The
+    # obvious sparse fixture trips BOTH, so it cannot tell them apart and would
+    # keep passing if either arm were deleted. These three fixtures were solved
+    # for numerically rather than guessed — the expected table is smoothed by the
+    # marginals, so isolating the second arm needs a table with at least 5 rows
+    # (a tiny row contributes c cells, and c/(r*c) must stay under the 20% gate).
+
+    def test_the_proportion_arm_fires_on_its_own(self, db_session):
+        """All expected counts >= 1, but every one of them under 5."""
+        pairs = ([("Yes", "A")] * 3 + [("Yes", "B")] * 3
+                 + [("No", "A")] * 3 + [("No", "B")] * 3)
+        self._seed(db_session, pairs, pid=7092)
+        cs = self._run(db_session, pid=7092)["chi_square"]
+        assert cs["min_expected"] >= 1, "precondition: the below-1 arm is NOT what fires"
+        assert cs["cells_below_5"] == 4
+        assert cs["low_expected_warning"] is True
+
+    def test_the_below_one_arm_fires_on_its_own(self, db_session):
+        """Exactly 20% of cells below 5 — under the proportion gate — but one
+        expected count is 0.5."""
+        pairs = []
+        for label in ("A", "B", "C", "D"):
+            pairs += [(label, "L")] * 20 + [(label, "R")] * 20
+        pairs += [("E", "L")]
+        self._seed(db_session, pairs, pid=7093)
+        cs = self._run(db_session, pid=7093)["chi_square"]
+        assert cs["cell_count"] == 10
+        assert cs["cells_below_5"] == 2, "20%, which does NOT clear the > 0.2 gate"
+        assert cs["min_expected"] < 1
+        assert cs["low_expected_warning"] is True
+
+    def test_neither_arm_fires_at_the_exact_boundary(self, db_session):
+        """The negative control for both thresholds at once: 20% of cells below
+        5 (not *more* than 20%) and a smallest expected count of exactly 1.0.
+
+        A `>=` slip in either comparison turns this green table amber.
+        """
+        pairs = []
+        for label in ("A", "B", "C", "D"):
+            pairs += [(label, "L")] * 20 + [(label, "R")] * 20
+        pairs += [("E", "L"), ("E", "R")]
+        self._seed(db_session, pairs, pid=7094)
+        cs = self._run(db_session, pid=7094)["chi_square"]
+        assert cs["cells_below_5"] == 2 and cs["cell_count"] == 10
+        assert cs["min_expected"] == 1.0
+        assert cs["low_expected_warning"] is False

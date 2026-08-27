@@ -1332,6 +1332,32 @@ export default function ChartOptionsPanel({
               </OptionRow>
             )}
 
+            {/* #522 — histogram bin width. "Automatic" is the honest default:
+                the chart's own footnote then names the rule that produced the
+                bins (Freedman–Diaconis, or Sturges where the IQR is zero), so
+                the parameter is never silent. A manual value overrides it and
+                the footnote says so instead. */}
+            {vis.binWidth && (
+              <OptionRow icon={GripHorizontal} label="Bin width">
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  className="h-7 w-full rounded border border-mm-border-medium bg-mm-surface px-2 text-xs"
+                  placeholder="Automatic"
+                  aria-label="Histogram bin width — leave empty for automatic"
+                  value={formatting.binWidth ?? ''}
+                  onChange={e => {
+                    const raw = e.target.value.trim()
+                    const n = Number(raw)
+                    // Empty, zero and negative all mean "let the data choose" —
+                    // a zero width would divide the span by nothing.
+                    onFormattingChange({ binWidth: raw !== '' && Number.isFinite(n) && n > 0 ? n : null })
+                  }}
+                />
+              </OptionRow>
+            )}
+
             {/* Bar width */}
             {vis.barSize && (
               <OptionRow icon={GripHorizontal} label="Bar width">

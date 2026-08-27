@@ -492,3 +492,172 @@ class TestObservationClipsInIrr:
         assert code["n_units"] == 3
         assert code["percent_agreement"] == pytest.approx(1 / 3, abs=1e-9)
         assert code["cohens_kappa"] == pytest.approx(0.0, abs=1e-9)
+
+
+# ── #829 / #828 — the SOURCE axis, per-source κ, and zero prevalence ──────────
+
+
+class TestSourceScopingPureMath:
+    """The parts provable without a database, which is where the real defects were."""
+
+    def test_kappa_silently_returns_None_on_roster_wide_rows(self):
+        """🔴 Why #828 was NOT "nearly free", pinned so nobody re-derives it.
+
+        `_cohens_kappa` filters `len(r) == 2`. The matrices are
+        `len(coder_id_list)` wide, so on a roster of 3+ EVERY row is discarded
+        and κ is None **whatever the gate says** — changing `if n == 2` alone
+        would have produced exactly the same empty column.
+        """
+        from app.services.irr import _cohens_kappa
+        roster_wide = [[1, 1, None], [0, 0, None], [1, 1, None]]
+        assert _cohens_kappa(roster_wide) is None
+
+    def test_projection_recovers_it_and_is_lossless(self):
+        from app.services.irr import _cohens_kappa, _project_to_pair
+        roster_wide = [[1, 1, None], [0, 0, None], [1, 1, None]]
+        # Coders 0 and 1 are the engaged pair; coder 2 never engaged this source,
+        # so their column is None in every unit and dropping it discards nothing.
+        assert _cohens_kappa(_project_to_pair(roster_wide, 0, 1)) == 1.0
+        assert _project_to_pair(roster_wide, 0, 1) == [[1, 1], [0, 0], [1, 1]]
+
+    def test_a_code_nobody_applied_reports_kappa_1_almost_perfect(self):
+        """The rider's arithmetic, before the fix — the reason it must be undefined.
+
+        Every present cell is 0, so observed agreement is 1.0 and EXPECTED
+        agreement is also 1.0; the `pe >= 1.0` branch then returns 1.0, which
+        `_interpret_kappa` renders "almost_perfect". There is no variance to
+        agree about, so that is a confident statement about nothing.
+        """
+        from app.services.irr import _cohens_kappa, _interpret_kappa, _prevalence
+        never_applied = [[0, 0], [0, 0], [0, 0]]
+        assert _prevalence(never_applied) == 0.0
+        assert _cohens_kappa(never_applied) == 1.0
+        assert _interpret_kappa(1.0) == "almost_perfect"
+
+    def test_source_token_round_trips_and_fails_soft(self):
+        from app.services.irr import _source_token, parse_source_token
+        assert parse_source_token("col:16") == ("col", 16)
+        assert _source_token(("col", 16)) == "col:16"
+        assert parse_source_token(None) is None
+        # ⚠️ Malformed is POOLED, never an error: a stale bookmark naming a
+        # deleted source must not 400 the whole panel.
+        for bad in ("", "nope:1", "col:", "col:x", "16"):
+            assert parse_source_token(bad) is None, bad
+
+
+class TestSourceScopedIrr:
+    """#829/#828 end to end: two sources, three coders, one deliberate pair."""
+
+    def _project(self, db, pid):
+        """A column coded by Alice+Bob and a conversation coded by Alice+Carol.
+
+        The shape #829 was measured on: a deliberate two-coder study of ONE
+        source, pooled with unrelated work by other people.
+        """
+        db.add_all([
+            Project(id=pid, name="P", user_id=1),
+            Dataset(id=pid, project_id=pid, name="Survey"),
+            Conversation(id=pid, project_id=pid, name="Interview 1"),
+        ])
+        db.flush()
+        db.add(DatasetColumn(id=pid, dataset_id=pid, column_code="Q1", column_name="Notes",
+                             column_text="Open?", column_type="open_text",
+                             sequence_order=0, display_order=0))
+        for rid in (pid, pid + 1):
+            db.add(DatasetRow(id=rid, dataset_id=pid))
+        db.flush()
+        db.add(DatasetValue(id=pid, row_id=pid, column_id=pid, value_text="a"))
+        db.add(DatasetValue(id=pid + 1, row_id=pid + 1, column_id=pid, value_text="b"))
+        db.add(Segment(id=pid, conversation_id=pid, sequence_order=0, text="s1"))
+        db.add(Segment(id=pid + 1, conversation_id=pid, sequence_order=1, text="s2"))
+        _coder(db, 2, "Bob")
+        _coder(db, 3, "Carol")
+        db.add(Code(id=pid, project_id=pid, name="Fidelity", numeric_id=2,
+                    is_active=True, is_universal=False))
+        db.add(Code(id=pid + 1, project_id=pid, name="Elsewhere only", numeric_id=3,
+                    is_active=True, is_universal=False))
+        db.flush()
+        # Column: Alice + Bob, agreeing on one value and differing on the other.
+        _apply(db, pid, 1, value_id=pid)
+        _apply(db, pid, 2, value_id=pid)
+        _apply(db, pid, 1, value_id=pid + 1)
+        # Conversation: Alice + Carol.
+        _apply(db, pid, 1, segment_id=pid)
+        _apply(db, pid, 3, segment_id=pid)
+        # ⚠️ `Elsewhere only` is applied on the CONVERSATION and never on the
+        # column. That is what puts it in the codebook's in-play set while giving
+        # it prevalence 0.00 inside the column's scope — the state the rider is
+        # about, and one that SCOPING creates. A code nobody applied ANYWHERE
+        # never enters `all_codes`, so the naive fixture cannot reach it: found
+        # by writing this test and watching it come back empty.
+        _apply(db, pid + 1, 1, segment_id=pid)
+        _apply(db, pid + 1, 3, segment_id=pid)
+        db.flush()
+
+    def test_pooled_stays_the_default_and_lists_both_sources(self, db_session):
+        db = db_session
+        self._project(db, 7400)
+        res = compute_irr(db, 7400)
+
+        assert res["source"] is None, "omitting the param must keep the pooled view"
+        keys = {s["key"] for s in res["sources"]}
+        assert keys == {"col:7400", "conv:7400"}
+        assert {s["label"] for s in res["sources"]} == {"Notes", "Interview 1"}
+
+    def test_scoping_to_one_source_narrows_the_units(self, db_session):
+        db = db_session
+        self._project(db, 7410)
+        pooled = compute_irr(db, 7410)
+        scoped = compute_irr(db, 7410, source=("col", 7410))
+
+        assert scoped["source"] == "col:7410"
+        pooled_n = next(c for c in pooled["per_code"] if c["code_id"] == 7410)["n_units"]
+        scoped_n = next(c for c in scoped["per_code"] if c["code_id"] == 7410)["n_units"]
+        assert scoped_n < pooled_n, "the conversation's units must be out of scope"
+
+    def test_kappa_appears_when_exactly_two_coders_engaged_THAT_source(self, db_session):
+        """#828: the roster is 3, so the old roster gate could never yield κ."""
+        db = db_session
+        self._project(db, 7420)
+
+        pooled = compute_irr(db, 7420)
+        assert pooled["n_coders"] == 3
+        assert pooled["metric_label"] == "alpha"
+        assert all(c["cohens_kappa"] is None for c in pooled["per_code"])
+
+        scoped = compute_irr(db, 7420, source=("col", 7420))
+        assert scoped["n_coders"] == 3, "the matrix stays ALL-ROSTER — source ≠ coder"
+        assert scoped["metric_label"] == "kappa+alpha"
+        code = next(c for c in scoped["per_code"] if c["code_id"] == 7420)
+        assert code["cohens_kappa"] is not None, "the engaged PAIR is what κ needs"
+
+    def test_a_code_nobody_applied_is_undefined_not_almost_perfect(self, db_session):
+        """The rider. `Never used` is in play (its column is shared) but unapplied."""
+        db = db_session
+        self._project(db, 7430)
+        res = compute_irr(db, 7430, source=("col", 7430))
+
+        unused = next((c for c in res["per_code"] if c["code_id"] == 7431), None)
+        assert unused is not None, "it must still be SHOWN — the evidence stays visible"
+        assert unused["prevalence"] == 0.0
+        assert unused["cohens_kappa"] is None
+        assert unused["krippendorff_alpha"] is None
+        assert unused["kappa_interpretation"] is None
+        assert unused["undefined_reason"] == "no_variance"
+
+    def test_an_undefined_code_does_not_lift_the_headline(self, db_session):
+        db = db_session
+        self._project(db, 7440)
+        res = compute_irr(db, 7440, source=("col", 7440))
+        # Measured on real data: three zero-prevalence codes moved the pooled
+        # headline 0.7911 -> 0.7962 purely by agreeing about nothing.
+        used = [c for c in res["per_code"] if c["undefined_reason"] is None]
+        assert used, "the fixture must still contribute a real code"
+        assert res["overall_alpha"] is not None
+
+    def test_an_unknown_source_is_an_honest_empty_not_a_crash(self, db_session):
+        db = db_session
+        self._project(db, 7450)
+        res = compute_irr(db, 7450, source=("col", 999999))
+        assert res["available"] is False
+        assert res["sources"], "the picker's options must survive an empty scope"

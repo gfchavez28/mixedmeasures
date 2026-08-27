@@ -68,6 +68,66 @@ CROSSWALK_INELIGIBLE_TYPES = frozenset({
     ColumnType.IDENTIFIER,
 })
 
+# VALUE_LABEL_INELIGIBLE_TYPES — types a declared code→label dictionary must
+# never be applied to (#589). An EXCLUSION set for the same reason as the one
+# above: "which columns can carry value labels" is an open list, "which cannot"
+# is a short closed one.
+#   OPEN_TEXT  — free-form responses are not codes; substituting a label into
+#                `value_text` would overwrite what the participant wrote.
+#   IDENTIFIER — the value IS the identity, and participant linking (#414) runs
+#                AFTER the import's value-label post-pass, so it would match on
+#                cells already overwritten with labels.
+# ⚠️ The two consumers are NOT interchangeable and both are required. The router
+# (`recode.py::apply_value_labels_endpoint`) refuses early with a clean 400; the
+# SERVICE (`value_labels.py::apply_value_labels`) refuses the operation, because
+# the import path calls it directly via `cells_are_codes` and never passes a
+# router at all — that gap was #589, and it is the #585 lesson restated: a guard
+# at the router is not a guard on the operation.
+#
+# ⚠️ **Two sibling gates in `routers/recode.py` spell the SAME pair inline today
+# and are deliberately NOT routed through this constant** — recode-definition
+# creation (#414) and the missing-values declaration. They exclude the same two
+# types for related but distinct reasons, and nothing has decided they must move
+# together; merging them would assert an agreement no one has verified (the
+# `VALUE_NUMERIC_TYPES` / `SCALE_SCORE_ELIGIBLE_TYPES` lesson, which differ by
+# exactly one member ON PURPOSE). If a third type ever joins one of the three,
+# that is the moment to decide whether they are one set or three.
+VALUE_LABEL_INELIGIBLE_TYPES = frozenset({
+    ColumnType.OPEN_TEXT,
+    ColumnType.IDENTIFIER,
+})
+
+
+# NUMERIC_COERCIBLE_TYPES — a FOURTH set, and it answers a question the three
+# above cannot (#823d, 2026-08-25).
+#
+# 🔴 **The question is not "is this column numeric?" but "may a FORMULA read a
+# number out of its cell?"** `_compute_value_numeric` returns None for
+# DEMOGRAPHIC, so every demographic cell carries `value_numeric = NULL` — and
+# the importer assigns that type itself to `age`, `income`, `sex` and `race`.
+# `IF([age] < 45, …)` therefore validated as *"Valid"*, previewed null for every
+# row, and raised on save, on precisely the columns a researcher most wants to
+# band.
+#
+# ⚠️ **DEMOGRAPHIC MUST NOT JOIN `VALUE_NUMERIC_TYPES`, and this set exists so
+# nobody tries.** MEASURED: that set is read by `data_quality.py` (twice), the
+# MCAR loader and `comparisons.py`. Because every demographic cell's
+# `value_numeric` is NULL, adding the type there makes `_classify_value` return
+# `na_unusable` for every non-empty cell — a class in `_ALWAYS_MISSING`, which
+# the UI toggle cannot switch off — so the Data Quality tab would report ~100%
+# missing on `age`, `sex` and `race`. That is #819 pointing the other way, one
+# round after #819 shipped. It would also not FIX anything: computed columns
+# read `value_numeric`, which stays NULL either way.
+#
+# ⚠️ So the coercion is at READ time, in the formula evaluator alone, and it is
+# per CELL: a demographic cell whose text parses as a number is a number, one
+# that does not is text, exactly as before. NOMINAL is deliberately absent — its
+# `value_text` IS the label (#494) and its `_TXT` fallback is load-bearing for
+# `==` comparisons.
+NUMERIC_COERCIBLE_TYPES = frozenset({
+    ColumnType.DEMOGRAPHIC,
+})
+
 
 class Dataset(Base):
     """A dataset within a project (e.g. 'Board 360 Assessment')."""
@@ -90,8 +150,27 @@ class Dataset(Base):
 
     # Relationships
     project = relationship("Project", back_populates="datasets")
-    columns = relationship("DatasetColumn", back_populates="dataset", cascade="all, delete-orphan", order_by="DatasetColumn.display_order, DatasetColumn.sequence_order")
-    rows = relationship("DatasetRow", back_populates="dataset", cascade="all, delete-orphan")
+    # ⚠️ #802: `passive_deletes=True` on every collection here that can be
+    # UNBOUNDED. Without it SQLAlchemy's `delete-orphan` cascade LOADS every
+    # child row into the session purely to delete it — MEASURED on a 75,699-row
+    # dataset (3,103,659 values): the ORM delete was **abandoned at 664s and
+    # 2,770 MB RSS**, still running, while `DELETE FROM datasets WHERE id=?`
+    # took **22.0s** at constant memory with no orphans and a clean
+    # `PRAGMA foreign_key_check`.
+    #
+    # Safe because both halves were verified, not assumed: every inbound FK in
+    # this tree is `ON DELETE CASCADE` (12 checked; the only two exceptions are
+    # `metric_definitions.grouping_column_id{,_2}`, deliberately SET NULL), and
+    # `PRAGMA foreign_keys=ON` is set on every connection in `database.py` and
+    # confirmed live. Nothing in the codebase de-associates via
+    # `collection.remove()`, which is the one case `delete-orphan` still has to
+    # handle itself.
+    #
+    # ⚠️ This also fixes PROJECT delete, which cascades through `Project.
+    # datasets` into exactly the same relationships — a surgical fix in
+    # `delete_dataset` alone would have left that path broken.
+    columns = relationship("DatasetColumn", back_populates="dataset", cascade="all, delete-orphan", passive_deletes=True, order_by="DatasetColumn.display_order, DatasetColumn.sequence_order")
+    rows = relationship("DatasetRow", back_populates="dataset", cascade="all, delete-orphan", passive_deletes=True)
 
 
 class DatasetColumn(Base):
@@ -131,6 +210,25 @@ class DatasetColumn(Base):
     depends_on_column_ids = Column(Text, nullable=True)  # JSON array of column IDs
     stale = Column(Boolean, nullable=True, default=False, server_default="0")
 
+    # Decision B (2026-08-24) — provenance for a variable derived FROM another
+    # by a recode rule. A derived column is `source="manual"`, never
+    # `"computed"`: a computed column is refused value labels, missing rules AND
+    # recode definitions by three separate endpoints whatever its type (#806),
+    # and a derived variable you cannot label is useless.
+    #
+    # ⚠️ `derived_via` is the rule's NAME, snapshotted — NOT a FK to
+    # `recode_definitions`. The column's cells were computed once and never
+    # recompute, so a live link would keep resolving to the rule's CURRENT
+    # mapping and quietly make the provenance claim false the moment that rule
+    # is edited. See the migration for why `depends_on_column_ids` is not reused.
+    derived_from_column_id = Column(
+        Integer,
+        ForeignKey("dataset_columns.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    derived_via = Column(String(255), nullable=True)
+
     # Demographic subtype (role, race, gender, age, or custom)
     demographic_subtype = Column(String(40), nullable=True)
 
@@ -152,7 +250,8 @@ class DatasetColumn(Base):
     # Relationships
     dataset = relationship("Dataset", back_populates="columns")
     equivalence_group = relationship("EquivalenceGroup", back_populates="columns")
-    values = relationship("DatasetValue", back_populates="column", cascade="all, delete-orphan")
+    # #802 — a single column holds one value per row (75,699 on the GSS import).
+    values = relationship("DatasetValue", back_populates="column", cascade="all, delete-orphan", passive_deletes=True)
     recode_definitions = relationship(
         "RecodeDefinition",
         back_populates="column",
@@ -196,8 +295,10 @@ class DatasetRow(Base):
     # Relationships
     dataset = relationship("Dataset", back_populates="rows")
     participant = relationship("Participant", back_populates="dataset_rows")
-    values = relationship("DatasetValue", back_populates="row", cascade="all, delete-orphan")
-    row_scores = relationship("RowScore", back_populates="dataset_row", cascade="all, delete-orphan")
+    # #802 — bounded by column count per row, but unbounded in aggregate when
+    # a dataset cascade walks every row.
+    values = relationship("DatasetValue", back_populates="row", cascade="all, delete-orphan", passive_deletes=True)
+    row_scores = relationship("RowScore", back_populates="dataset_row", cascade="all, delete-orphan", passive_deletes=True)
 
     __table_args__ = (
         # At most one row per participant per dataset. Partial unique index —

@@ -34,6 +34,22 @@ interface InlineCodeActionsProps {
    * Pointer-down-outside + Escape still dismiss, so behaviour is unchanged elsewhere.
    */
   keepOpenOnFocusOutside?: boolean
+  /**
+   * #771 — keep these controls OUT of the tab order while the row that owns
+   * them is not the selected one. Presence is unchanged: a mouse user still
+   * clicks any row's chips directly, and a browse-mode reader still meets them
+   * by touring into the row.
+   *
+   * Opt-in (default `true`) because it is only correct where the row is a
+   * `role="option"` in a list with a selection cursor — the three coding
+   * workbenches. The analysis surfaces (quote cards, the code/source content
+   * lists, the reconciliation grid) are ordinary content whose controls
+   * legitimately earn a stop each, so they pass nothing and do not move.
+   *
+   * ⚠️ Gate the STOP, never the control: an `aria-disabled` or removed handler
+   * would change what the control DOES, which is not the defect (#754's rule).
+   */
+  tabbable?: boolean
 }
 
 export default function InlineCodeActions({
@@ -51,6 +67,7 @@ export default function InlineCodeActions({
   coderMap,
   hiddenCoderIds,
   keepOpenOnFocusOutside,
+  tabbable = true,
 }: InlineCodeActionsProps) {
   const queryClient = useQueryClient()
   const [addCodeOpen, setAddCodeOpen] = useState(false)
@@ -150,10 +167,19 @@ export default function InlineCodeActions({
         const coder = (coderMap && row.userId != null) ? coderMap.get(row.userId) ?? null : null
         return (
           <span key={row.key} className="group/chip relative inline-flex min-w-0 max-w-full">
-            <CodeChip code={c} size="xs" onClick={onFocusCode} coder={coder} truncate />
+            <CodeChip code={c} size="xs" onClick={onFocusCode} coder={coder} truncate tabbable={tabbable} />
+            {/* The reveal carries `focus:` AND `group-focus-within/chip:` for
+                the same reason the hover pair does: a keyboard user arriving by
+                Tab must SEE this control (WCAG 2.4.7), and focusing the chip
+                must reveal the remove button beside it just as hovering does.
+                Without them the button was focusable at `opacity-0` — an
+                invisible focus ring on an invisible control, which is what the
+                sibling Add button's `focus:opacity-100` had always avoided. */}
             <button
-              className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-mm-surface border border-mm-border-subtle flex items-center justify-center opacity-0 group-hover/chip:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity hover:bg-red-100 dark:hover:bg-red-900/30"
+              type="button"
+              className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-mm-surface border border-mm-border-subtle flex items-center justify-center opacity-0 group-hover/chip:opacity-100 group-focus-within/chip:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity hover:bg-red-100 dark:hover:bg-red-900/30"
               onClick={e => { e.stopPropagation(); removeCodeMutation.mutate(row.codeId) }}
+              tabIndex={tabbable ? undefined : -1}
               title={`Remove ${c.name}`}
               aria-label={`Remove code ${c.name}`}
             >
@@ -170,7 +196,9 @@ export default function InlineCodeActions({
               enlarged targets would overlap and steal each other's clicks (see
               the #647 entry). The icon stays 12px; only the hit area moves. */}
           <button
+            type="button"
             className="w-6 h-6 rounded-full border border-dashed border-mm-border-subtle flex items-center justify-center opacity-0 group-hover/actions:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity hover:border-mm-accent hover:text-mm-accent"
+            tabIndex={tabbable ? undefined : -1}
             title="Add code"
             aria-label="Add code"
           >

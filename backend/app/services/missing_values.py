@@ -348,3 +348,34 @@ def column_missing_rules(column) -> list[dict] | None:
 def is_missing_for_column(column, value_text: str | None) -> bool:
     """Column-aware entry point — what slab 2 wires into every read site."""
     return is_missing(value_text, column_missing_rules(column))
+
+
+def describe_missing_rules(rules: list[dict] | None) -> str:
+    """One human-readable line for a column's missing declaration (#822).
+
+    The vocabulary is the AUTHORING tri-state's (#609) — *Automatic* / *Nothing
+    missing* / the rules themselves — so a Data Dictionary cell and the editor
+    the researcher set it in say the same words. A fourth wording invented at
+    the export would be a second definition of the same fact.
+
+    Why the export needs it at all: the R and Excel exports now agree that a
+    declared-missing cell is EMPTY, which loses the DISTINCTION between "Do not
+    know", "No answer" and "Inapplicable" — exactly what a survey researcher
+    needs. The dictionary is what preserves it, which is why the blanking and
+    this column shipped together rather than one being chosen over the other.
+    """
+    if rules is None:
+        return "Automatic"
+    if not rules:
+        return "Nothing missing"
+    parts: list[str] = []
+    for rule in rules:
+        if "value" in rule:
+            label = rule.get("label")
+            parts.append(f'{rule["value"]} = {label}' if label else str(rule["value"]))
+        else:
+            lo, hi = rule.get("lo"), rule.get("hi")
+            lo_s = _fmt_code(lo) if lo is not None else "lowest"
+            hi_s = _fmt_code(hi) if hi is not None else "highest"
+            parts.append(f"{lo_s} to {hi_s}")
+    return "; ".join(parts)

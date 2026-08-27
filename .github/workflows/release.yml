@@ -113,7 +113,12 @@ jobs:
       # rc cut would have hit it at the gate). It comes from CRAN: pure R
       # (`NeedsCompilation: no`), sole dependency lpSolve, which IS an archive
       # binary. See the fuller note in ci.yml; keep the two in step.
+      # ⚠️ Step-level timeout, matching ci.yml (#781) — the fuller note is there.
+      # A job-level timeout cancels this step and skips everything after it, so
+      # the run reads `cancelled` while the suite never ran; a step-level one
+      # fails loudly and names the cause.
       - name: Install R + the correctness-oracle packages
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -129,6 +134,14 @@ jobs:
           MM_REQUIRE_R: "1"
         run: python -m pytest tests/ -q
 
+      # ⚠️ NO `!cancelled()` here, and the asymmetry with ci.yml is DELIBERATE —
+      # do not "harmonise" it (#749's rule: two consumers, two scopes).
+      #
+      # In ci.yml a skipped audit fails OPEN: the run goes green-ish and a push
+      # lands on `main` with its production dependencies unaudited. Here it fails
+      # CLOSED — a failed step means no artifacts and no release, which is
+      # already the outcome the gate exists to force. Running the audit anyway
+      # would only add a second red line to a release that is dead regardless.
       - name: Backend dependency audit (HARD gate, production deps)
         working-directory: backend
         run: pip-audit -r requirements.txt

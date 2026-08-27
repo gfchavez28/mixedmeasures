@@ -1,3 +1,4 @@
+import { EXPORT_TIMEOUT_MS } from './download'
 import api from './client'
 
 // Data Quality types
@@ -54,6 +55,8 @@ export interface McarTestResult {
   n_variables: number
   apa_string: string
   interpretation: string
+  /** Which estimates produced the statistic — read via `lib/mcar-basis.ts` (#707b). */
+  mcar_estimator?: string | null
 }
 
 export interface McarTestResponse {
@@ -90,5 +93,10 @@ export const dataQualityApi = {
         include_empty_as_missing: params.include_empty_as_missing,
       },
       responseType: 'blob',
+      // #833 — the project-scale export budget, not the 30 s client default.
+      // This is `EXPORT_TIMEOUT_MS`, already decided and measured for #820; it
+      // is applied here rather than re-derived. Cost scales with rows x columns
+      // and the client cannot know either before asking.
+      timeout: EXPORT_TIMEOUT_MS,
     }).then(r => r.data as Blob),
 }

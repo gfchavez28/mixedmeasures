@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
-import { DATASET_ACCEPT, DATASET_FORMAT_LABEL, isSupportedDatasetFile } from '@/lib/dataset-import-formats'
+import { DATASET_ACCEPT, DATASET_FORMAT_LABEL, isSupportedDatasetFile, describeDatasetUploadError } from '@/lib/dataset-import-formats'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
 
 type Step = 'upload' | 'review' | 'results'
@@ -77,8 +77,10 @@ export default function AppendImport() {
       setSheetName(sheet ?? null)
       setStep('review')
     } catch (err: unknown) {
-      const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
-      setError(typeof detail === 'string' ? detail : (err instanceof Error ? err.message : 'Failed to preview file'))
+      // #796/#797: appendPreview is one of the four calls that now carry a
+      // size-derived timeout, so it can fail by abort as well as by parse —
+      // and the two need different words. The shared describer owns that.
+      setError(describeDatasetUploadError(err))
     } finally {
       setIsLoading(false)
     }
@@ -123,8 +125,7 @@ export default function AppendImport() {
       }
     },
     onError: (err: unknown) => {
-      const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
-      setError(typeof detail === 'string' ? detail : (err instanceof Error ? err.message : 'Import failed'))
+      setError(describeDatasetUploadError(err))
     },
   })
 

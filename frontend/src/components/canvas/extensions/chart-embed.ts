@@ -15,6 +15,17 @@ export const ChartEmbed = Node.create({
       title:            { default: '' },
       materialTag:      { default: null },
       tagNote:          { default: null },
+      // #808 — the figure baseline. Three attrs, and per this directory's
+      // the internal design notes every one must appear in all THREE places below or the HTML
+      // round-trip drops it silently.
+      //
+      // `figureHash` fingerprints the numbers this embed DREW; `figureHeadline`
+      // is the one figure worth showing a before/after for; `figureStampedAt`
+      // is when the researcher last accepted them. Absent = no baseline = no
+      // claim, which is the honest state for every embed inserted before this.
+      figureHash:       { default: null },
+      figureHeadline:   { default: null },
+      figureStampedAt:  { default: null },
     }
   },
 
@@ -29,6 +40,9 @@ export const ChartEmbed = Node.create({
           title:            dom.getAttribute('data-title') ?? '',
           materialTag:      dom.getAttribute('data-material-tag') || null,
           tagNote:          dom.getAttribute('data-tag-note') || null,
+          figureHash:       dom.getAttribute('data-figure-hash') || null,
+          figureHeadline:   dom.getAttribute('data-figure-headline') || null,
+          figureStampedAt:  dom.getAttribute('data-figure-stamped-at') || null,
         }
       },
     }]
@@ -42,6 +56,9 @@ export const ChartEmbed = Node.create({
       'data-title': HTMLAttributes.title,
       'data-material-tag': HTMLAttributes.materialTag,
       'data-tag-note': HTMLAttributes.tagNote,
+      'data-figure-hash': HTMLAttributes.figureHash,
+      'data-figure-headline': HTMLAttributes.figureHeadline,
+      'data-figure-stamped-at': HTMLAttributes.figureStampedAt,
     }, ['span', HTMLAttributes.title || 'Chart']]
   },
 

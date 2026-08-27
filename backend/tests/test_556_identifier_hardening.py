@@ -266,7 +266,7 @@ def test_r_export_column_named_record_id_does_not_collide_with_the_csv_header(
     import zipfile
 
     async def _zip_bytes():
-        resp = await export_r_data(project_id=project.id, user=user, db=db_session)
+        resp = export_r_data(project_id=project.id, user=user, db=db_session)
         return b"".join([c async for c in resp.body_iterator])
 
     body = _run(_zip_bytes())

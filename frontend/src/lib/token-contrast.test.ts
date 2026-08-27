@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import { AA_LARGE, AA_NORMAL, NON_TEXT, contrast, over, readToken, type Rgb } from './contrast'
+import { stripComments } from './strip-comments'
 
 const CSS = readFileSync(join(__dirname, '..', 'index.css'), 'utf-8')
 
@@ -385,3 +386,70 @@ export function matrixReport(): Array<[string, number]> {
   }
   return rows.sort((x, y) => x[1] - y[1])
 }
+
+describe('#852 — a blue tint is painted with the TEXT token, not the fill hue', () => {
+  const SRC_DIR = join(__dirname, '..')
+
+  /**
+   * `--mm-blue` is a FILL colour. Measured as TEXT on its own tint over
+   * `--mm-surface` it reads 3.35:1 light / 4.35:1 dark — below AA — while
+   * `--mm-blue-text` on the same tint reads 5.88 / 6.93. Three components had
+   * paired the tint with the raw hue (`DatasetTabs`, and the crosswalk's
+   * `UnassignedPanel` + `CrosswalkHeader`); ~40 others already used the text
+   * token, so this scan pins the majority rule rather than inventing one.
+   *
+   * ⚠️ Scoped to the CO-OCCURRENCE, deliberately. A blanket ban on
+   * `text-mm-blue` would be a false-positive machine: it is used ~127 times,
+   * overwhelmingly on ICONS, where the bar is 3:1 non-text and the raw hue
+   * passes (3.76 light / 5.00 dark on a plain surface). Distinguishing an icon
+   * from text in JSX statically is exactly the unreliable-grep problem — so the
+   * scan asks the narrower question it CAN answer: is this element painting
+   * text on a blue tint it declares in the same class string?
+   */
+  const TINT_THEN_TEXT = /bg-mm-blue\/\d+[^'"`]*?\btext-mm-blue\b(?!-)/
+  const TEXT_THEN_TINT = /\btext-mm-blue\b(?!-)[^'"`]*?bg-mm-blue\/\d+/
+  const CORRECT = /bg-mm-blue\/\d+[^'"`]*?\btext-mm-blue-text\b|\btext-mm-blue-text\b[^'"`]*?bg-mm-blue\/\d+/
+
+  const scan = () => {
+    const offenders: string[] = []
+    let correctPairings = 0
+    let scanned = 0
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name)
+        if (entry.isDirectory()) { walk(path); continue }
+        if (!/\.tsx$/.test(entry.name) || /\.test\.tsx$/.test(entry.name)) continue
+        scanned++
+        // Strip first: the prose explaining this very fix names both classes,
+        // and a scan that matches its own comments is the #772 failure mode.
+        for (const [line, i] of stripComments(readFileSync(path, 'utf-8'), entry.name)
+          .split('\n').map((l, i) => [l, i] as const)) {
+          if (TINT_THEN_TEXT.test(line) || TEXT_THEN_TINT.test(line)) {
+            offenders.push(`${path.slice(SRC_DIR.length + 1)}:${i + 1}`)
+          } else if (CORRECT.test(line)) {
+            correctPairings++
+          }
+        }
+      }
+    }
+    walk(SRC_DIR)
+    return { offenders, correctPairings, scanned }
+  }
+
+  it('no component paints text-mm-blue on a blue tint', () => {
+    const { offenders } = scan()
+    expect(offenders, 'a blue tint must carry `text-mm-blue-text`; the raw '
+      + '`--mm-blue` fill hue is below AA as text on its own tint (#852)').toEqual([])
+  })
+
+  it('the scan reaches real class strings (it cannot pass by seeing nothing)', () => {
+    // The self-check a narrowing needs (#814): if the regex, the extension
+    // filter or the comment-stripper broke, `offenders` would be empty for the
+    // wrong reason. The CORRECT pairing is the positive control — it is the
+    // same shape, one token different, and it is everywhere.
+    const { correctPairings, scanned } = scan()
+    expect(scanned).toBeGreaterThan(100)
+    expect(correctPairings, 'the tint+text-token pairing vanished from the '
+      + 'source — the scan is looking at the wrong thing').toBeGreaterThan(25)
+  })
+})

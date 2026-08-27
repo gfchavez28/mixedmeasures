@@ -9,6 +9,7 @@ import type { RecentConversation, RecentDataset, RecentDocument, RecentObservati
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import InlineEditableText from '@/components/InlineEditableText'
 import { OBSERVATION_CARD_DESCRIPTION, SOURCE_KIND_ONE_LINER } from '@/lib/source-kind-copy'
+import { toastProjectExportError } from '@/lib/project-export-error'
 
 const ACCENT = {
   green: {
@@ -84,8 +85,8 @@ export default function OverviewPage() {
     try {
       await projectPortabilityApi.exportProject(projectId)
       toast.success('Project exported')
-    } catch {
-      toast.error('Export failed')
+    } catch (err) {
+      toastProjectExportError(err, 'Export failed')  // #842
     } finally {
       setExportingProject(false)
     }

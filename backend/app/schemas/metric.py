@@ -312,6 +312,17 @@ class AnalysisColumnItem(BaseModel):
     scale_labels: list[str] | None = None
     equivalence_group_id: int | None = None
     domain_ids: list[int] = []
+    #: #795 — a COMPUTED column whose dependency changed and has not been
+    #: recomputed, so every surface reading it is drawing its earlier values.
+    #: Always False for imported and manual columns, which cannot go stale.
+    #:
+    #: ⚠️ On THIS payload rather than derived per consumer because the canvas
+    #: chart embed is the surface that needs it and it has only column ids: it
+    #: computes ad-hoc through `quickCompute`, so unlike a saved chart it has no
+    #: `MetricDefinition.stale` to read. Neither project-wide column payload
+    #: carried a staleness flag before this (`ProjectColumnInfo` still does not),
+    #: which is why the embed's indicator sat unwired for its whole life.
+    stale: bool = False
 
 
 class AnalysisDatasetGroup(BaseModel):
@@ -368,6 +379,24 @@ class ChiSquareResult(BaseModel):
     # association at all; V was reported as a measured 0.
     cramers_v: float | None = None
     undefined_reason: str | None = None
+    # #591: displayed levels the test could not use — a declared level nobody
+    # chose is a legitimate row of the TABLE and an illegitimate row of the
+    # STATISTIC (scipy raises on the all-zero row it produces). The table and
+    # the test now differ in dimension on purpose, so the payload states it
+    # instead of leaving the researcher to reverse-engineer df.
+    omitted_levels: int = 0
+    # #709: chi-square is a large-sample approximation, and nothing said so.
+    # The figures ride alongside the verdict because a threshold with no number
+    # behind it is a warning people learn to dismiss. Computed on the same
+    # observed submatrix as the statistic (#591) — a structurally-empty level is
+    # not a sparse cell.
+    low_expected_warning: bool = False
+    cells_below_5: int = 0
+    cell_count: int = 0
+    min_expected: float | None = None
+    # 2x2 only — scipy implements Fisher's exact for that shape alone, and an
+    # r x c version is a different computation, not a wider call to the same one.
+    fisher_exact_p: float | None = None
 
 
 class CrossTabResponse(BaseModel):

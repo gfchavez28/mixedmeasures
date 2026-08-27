@@ -55,6 +55,13 @@ export function orientationToToken(orientation: QualOrientation): 'sr' | 'cr' {
 export type QualRelView = 'cooccurrence' | 'comparisons'
 export type QualCooccurrenceLevel = 'segment' | 'source'
 export type QualComparisonChartMode = 'table' | 'bar'
+/**
+ * #685 — the Timeline's table breakdown. A per-CHART property (one toggle for
+ * the whole chart), not per-observation: the old per-block `useState` was an
+ * accident of where it was declared, and making it observation-keyed would put
+ * an id map in the config that every `.mmproject` import has to remap.
+ */
+export type QualTimelineTableMode = 'code' | 'coder'
 export type QualContentMode = 'by-code' | 'by-source'
 export type QuoteGroupBy = 'none' | 'code' | 'source' | 'category'
 export type QuoteSort = 'source' | 'date' | 'quoted' | 'custom'

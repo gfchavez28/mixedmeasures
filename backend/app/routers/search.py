@@ -639,7 +639,18 @@ async def search_study(
     # Search comments (open-ended dataset values)
     if "text" in requested_types:
         text_query = (
-            db.query(DatasetValue, DatasetColumn.column_name, DatasetColumn.column_text, DatasetColumn.id.label("col_id"), DatasetRow.row_identifier)
+            db.query(
+                DatasetValue,
+                DatasetColumn.column_name,
+                DatasetColumn.column_text,
+                DatasetColumn.id.label("col_id"),
+                DatasetRow.row_identifier,
+                # #834: the row and dataset the hit belongs to. Both are already
+                # JOINed for the project filter, so this costs nothing.
+                DatasetRow.id.label("row_pk"),
+                Dataset.id.label("ds_id"),
+                Dataset.name.label("ds_name"),
+            )
             .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
             .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
             .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
@@ -692,8 +703,11 @@ async def search_study(
                     row_identifier=resp_id,
                     is_quoted=dv.id in quoted_dv_ids,
                     applied_code_count=code_count_map.get(dv.id, 0),
+                    dataset_id=ds_id,
+                    dataset_name=ds_name,
+                    row_id=row_pk,
                 )
-                for dv, col_name, col_text, col_id, resp_id in text_rows
+                for dv, col_name, col_text, col_id, resp_id, row_pk, ds_id, ds_name in text_rows
             ],
         )
 

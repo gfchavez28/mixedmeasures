@@ -11,6 +11,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildShortcutCategories,
+  categoryShortcutPrefixes,
+  codeKeyHint,
   MAX_SHORTCUT_CATEGORIES,
   MAX_CODES_PER_CATEGORY,
   type ShortcutCodeInput,
@@ -90,5 +92,57 @@ describe('buildShortcutCategories', () => {
     const cats = buildShortcutCategories(codes)
     expect(cats[0].codes).toHaveLength(MAX_CODES_PER_CATEGORY)
     expect(cats[0].codes.map(c => c.id)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8])
+  })
+})
+
+describe('categoryShortcutPrefixes (#824)', () => {
+  it('numbers only the categories that HAVE codes, in appearance order', () => {
+    // The defect's shape: category 90 exists and is empty. A derivation over
+    // "every category" gives it a digit and shifts everything after it.
+    const prefixes = categoryShortcutPrefixes([
+      { id: 1, category_id: 91 },
+      { id: 2, category_id: 92 },
+    ])
+    expect([...prefixes]).toEqual([[91, 2], [92, 3]])
+    expect(prefixes.has(90)).toBe(false)
+  })
+
+  it('agrees with buildShortcutCategories by construction', () => {
+    const codes: Code[] = [
+      { id: 1, category_id: 7 }, { id: 2, category_id: 3 }, { id: 3, category_id: 7 },
+    ]
+    const cats = buildShortcutCategories(codes)
+    const prefixes = categoryShortcutPrefixes(codes)
+    cats.forEach((cat, i) => expect(prefixes.get(cat.categoryId)).toBe(i + 2))
+  })
+
+  it('stops at the last reachable prefix digit', () => {
+    const codes: Code[] = []
+    for (let c = 0; c < 10; c++) codes.push({ id: c, category_id: 1000 + c })
+    const prefixes = categoryShortcutPrefixes(codes)
+    expect(prefixes.size).toBe(MAX_SHORTCUT_CATEGORIES)
+    expect(Math.max(...prefixes.values())).toBe(9)
+  })
+})
+
+describe('codeKeyHint (#830c)', () => {
+  it('keeps the flat form when the project has NO categories', () => {
+    // ⚠️ The filed remedy would have replaced this unconditionally. With no
+    // categories every digit resolves by numeric_id in ONE press, so `0-9: code`
+    // is exactly right — the chord copy would be the new lie.
+    expect(codeKeyHint([{ id: 1, numeric_id: 3 }])).toBe('0-9: code')
+  })
+
+  it('names the chord once a category exists', () => {
+    expect(codeKeyHint([
+      { id: 0, numeric_id: 0, is_universal: true },
+      { id: 1, numeric_id: 5, category_id: 4 },
+    ])).toBe('0-1: universal · 2-9 then 1-9: code')
+  })
+
+  it('does not advertise the universal row when nothing answers to it', () => {
+    // #664 applied to copy: a key with no code behind it is not a key.
+    expect(codeKeyHint([{ id: 1, numeric_id: 5, category_id: 4 }]))
+      .toBe('2-9 then 1-9: code')
   })
 })

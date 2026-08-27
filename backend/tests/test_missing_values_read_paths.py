@@ -496,11 +496,26 @@ class TestDataQualityPatternsAndMcar:
         )
 
 
-def test_excel_export_asymmetry_is_deliberate(db_session):
-    """#611e — the Excel datasets export is the researcher's RAW-data escape
-    hatch: the raw value column keeps a declared-missing "99" VISIBLE (the
-    deliberate asymmetry with the R export's `_text_cell`, which blanks it),
-    while the recode column beside it honors the declaration (blank)."""
+def test_excel_export_blanks_a_declared_missing_cell_like_r(db_session):
+    """🔴 **This test REVERSES what it used to assert, and the reversal is the
+    point (#822, 2026-08-25).**
+
+    It was `test_excel_export_asymmetry_is_deliberate`, pinning #611e / #592
+    §I.10: the raw value column kept a declared-missing "99" VISIBLE, as the
+    researcher's raw-data escape hatch, deliberately asymmetric with the R
+    export's `_text_cell`.
+
+    Measured on a real survey, that asymmetry cost more than it bought: R
+    blanked and Excel wrote the sentinel text (**1,099,939 cells**), so the two
+    exports of one project answered *"how many people responded?"* differently,
+    and anyone averaging a column in Excel silently included "No answer" rows.
+    The decision (developer, 2026-08-25) is that the two files must agree about
+    the sample, and that the Data Dictionary's `Missing Values` column — not the
+    cell — is where "Do not know" vs "No answer" vs "Inapplicable" is preserved.
+
+    Kept here rather than deleted so the earlier decision is not silently lost;
+    the cross-export guard lives in `test_export_sample_agreement.py`.
+    """
     import io as _io
     from openpyxl import load_workbook
     from app.models.recode import RecodeDefinition, RecodeType, OutputType
@@ -519,7 +534,7 @@ def test_excel_export_asymmetry_is_deliberate(db_session):
     # to the enum (values_callable) the way real rows arrive.
     db_session.expire_all()
     user = db_session.query(User).filter(User.id == 1).one()
-    resp = _run(export_datasets_excel(project_id=1, user=user, db=db_session))
+    resp = export_datasets_excel(project_id=1, user=user, db=db_session)
     body = b"".join(_run(_drain(resp)))
     wb = load_workbook(_io.BytesIO(body))
     ws = wb["S1"] if "S1" in wb.sheetnames else wb[wb.sheetnames[0]]
@@ -531,11 +546,16 @@ def test_excel_export_asymmetry_is_deliberate(db_session):
     rec_idx = next(i for i, h in enumerate(headers, 1) if h and "tens" in str(h))
     raw_vals = {ws.cell(row=r, column=raw_idx).value: r
                 for r in range(2, ws.max_row + 1)}
-    assert "99" in raw_vals, (
-        "the raw column must keep the declared '99' VISIBLE — this sheet is "
-        "the raw-data escape hatch, the deliberate asymmetry with R's blanking"
+    assert "99" not in raw_vals, (
+        "a declared-missing cell must be EMPTY in the raw column, exactly as in "
+        "the R export — two exports of one project must not disagree about what "
+        "the sample is (#822)"
     )
-    r99, r3 = raw_vals["99"], raw_vals["3"]
+    # The row is still THERE; only its value is gone. (Nothing else identifies
+    # it, so find it as the row whose raw cell is empty.)
+    r99 = next(r for r in range(2, ws.max_row + 1)
+               if (ws.cell(row=r, column=raw_idx).value or "") == "")
+    r3 = raw_vals["3"]
     assert ws.cell(row=r99, column=rec_idx).value in (None, ""), (
         "the recode column must honor the declaration (blank for 99)"
     )

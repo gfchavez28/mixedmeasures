@@ -165,10 +165,17 @@ export default function QualTimelineEmbed({ projectId, params, labelFontSize }: 
         coderMap={coderMap}
         consensusScope={false}
         labelFontSize={labelFontSize}
-        // A document is not an interactive analysis surface — and the mode is
-        // per-observation local state no config records (#685), so the control
-        // would silently forget itself on every remount.
+        // A document is not an interactive analysis surface, so the control
+        // stays hidden — but since #685 the mode IS recorded, so the figure now
+        // renders the breakdown the researcher arranged instead of always
+        // falling back to by-code.
+        //
+        // No blind guard here on purpose: `lens.multiCoder` is false while
+        // blind, and `TimedAnalytics` derives the effective mode against it. A
+        // second guard at this call site would be the unkillable kind this
+        // module already removed one of.
         showTableModeToggle={false}
+        tableMode={params.tableMode}
       />
     </div>
   )

@@ -4,7 +4,7 @@ Counts code applications on comment (open-ended) columns,
 optionally filtered by row IDs.
 """
 
-from sqlalchemy import func
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from ..models.dataset import Dataset, DatasetColumn, DatasetValue
@@ -54,6 +54,46 @@ def treat_as_empty_for_project(db: Session, project_id: int) -> list[str]:
         .scalar()
     )
     return parse_treat_as_empty(raw)
+
+
+# The whitespace `str.strip()` removes by default. SQLite's 2-arg TRIM(X, Y)
+# strips any character in Y from both ends, so naming the set explicitly is what
+# makes the SQL agree with Python — a bare TRIM(X) strips SPACES ONLY and would
+# leave "N/A\n" counted here while `is_empty_text` drops it.
+_STRIP_CHARS = " \t\n\r\v\f"
+
+
+def substantive_text_clause(treat_as_empty: list[str]):
+    """The SQL half of `models/text_coding_config.py::is_empty_text` (#840).
+
+    Returns a clause selecting the `DatasetValue` rows a researcher can actually
+    code — non-NULL, not blank, and not one of the project's recognized
+    non-substantive strings.
+
+    **Why this exists rather than routing through `get_non_empty_comment_values`
+    (#519's instruction).** That function materialises every matching
+    `DatasetValue` and filters in Python. An open-text column can hold 75,699
+    rows (#844 measured exactly that), and the callers here are aggregate
+    COUNT/SUM queries reached by the qualitative analysis surfaces — so loading
+    the rows to count them would reintroduce #844's own defect one release after
+    it was fixed. The single-sourcing #519 asks for is preserved by making this
+    the SQL *expression* of the same rule, pinned against `is_empty_text` by
+    `test_text_analysis_denominators.py::TestSubstantiveTextClauseAgreement`.
+
+    ⚠️ Two implementations of one predicate, in two languages. Only that
+    agreement test keeps them from drifting into the bug they exist to prevent —
+    do not add a third (there were two before this: the Python one and
+    `text_coding.py`'s untrimmed `!= val` chain, which already disagreed with it
+    on padded values).
+    """
+    trimmed = func.trim(DatasetValue.value_text, _STRIP_CHARS)
+    clause = and_(
+        DatasetValue.value_text.isnot(None),
+        trimmed != "",
+    )
+    if treat_as_empty:
+        clause = and_(clause, trimmed.notin_(treat_as_empty))
+    return clause
 
 
 def get_non_empty_comment_values(

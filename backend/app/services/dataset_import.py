@@ -11,6 +11,8 @@ import json
 import logging
 import math
 import re
+from itertools import islice
+from sqlalchemy import insert as sa_insert
 from sqlalchemy.orm import Session
 
 from ..models.dataset import (
@@ -1373,6 +1375,81 @@ def _detect_column_type(
 
 # Structural caps: a .xlsx is a ZIP, so a small upload can inflate enormously.
 # These bound the parse work independently of the 50 MB upload cap.
+# ── The real size gate: CELLS (#799/#803) ────────────────────────────────────
+# The byte and dimension caps beside this one are cheap PRE-FILTERS; neither
+# bounds what an import actually costs.
+#
+#   * BYTES vary ~4x by format — a compressed .xlsx expands into roughly four
+#     times its size in CSV — so the same 50 MB budget buys wildly different
+#     work depending on which file the researcher happens to have.
+#   * DIMENSIONS MULTIPLY. 100,000 rows and 500 columns are each defensible on
+#     their own and authorise **50,000,000 cells** together — 16x the file that
+#     already exceeded every memory target in this codebase.
+#
+# What costs time and memory is CELLS, and it is linear in them: MEASURED at
+# 23.4 / 23.6 / 24.0 s per million cells across 410K / 1.03M / 2.05M-cell
+# imports of the same real file.
+#
+# 4,000,000 is set ABOVE the largest real dataset this has been driven against
+# (GSS: 75,699 x 41 = 3,103,659) on purpose. Sizing the cap to what fits the
+# <256 MB resident target would put it near 2M cells and REFUSE an ordinary
+# research dataset, which is the tool declining real work.
+#
+# ⚠️ **The memory budget is two numbers, not one, and this is the deliberate
+# part.** `<256 MB` is a RESIDENT target — a steady-state property of a server
+# answering requests, and the paginated grid honours it (96 MB per page, down
+# from 5,877 MB). An import is a one-off TRANSIENT: measured at 297 MB (CSV) and
+# 346 MB (.xlsx) for 3.1M cells, so ~450 MB at this cap. That allowance is
+# chosen and stated here rather than discovered later.
+MAX_DATASET_CELLS = 4_000_000
+
+
+class DatasetTooLargeError(ValueError):
+    """Refused: over `MAX_DATASET_CELLS` (#803).
+
+    ⚠️ A DISTINCT type, not a bare `ValueError`, because the preview endpoint
+    catches `(ValueError, csv.Error, TypeError)` and replaces it with "Unable to
+    parse CSV file. Check the file format and try again." — a diagnosis it has
+    not established, about a file that parses perfectly well. That is the #797
+    defect exactly, and a shared exception type is how it would have recurred.
+    The router catches this one FIRST and shows its message verbatim.
+    """
+
+
+def cell_cap_exceeded_message(n_cols: int) -> str:
+    """The refusal for a STREAMING path, which bails before it has counted.
+
+    ⚠️ Deliberately does NOT quote a row total. The caller stops the moment the
+    cap is crossed, so it does not know how many rows the file has — and a
+    message naming the count at the point of the bail would state a number that
+    is simply wrong, which is the #797 lesson (report what you know, never a
+    plausible-looking guess).
+    """
+    return (
+        f"This dataset is over the {MAX_DATASET_CELLS:,}-value limit at "
+        f"{n_cols:,} columns. Importing fewer columns — the wizard can skip any "
+        "you don't need — or splitting the file by rows will bring it under."
+    )
+
+
+def cell_count_error(n_rows: int, n_cols: int) -> str | None:
+    """The refusal message for an over-cap dataset, or None if it fits.
+
+    ONE function so CSV, .xlsx and .sav refuse at the same size for the same
+    reason — the three formats had three different limits expressed in three
+    different units, and none of them was cells.
+    """
+    cells = n_rows * n_cols
+    if cells <= MAX_DATASET_CELLS:
+        return None
+    return (
+        f"This dataset is {n_rows:,} rows x {n_cols:,} columns = {cells:,} values, "
+        f"over the {MAX_DATASET_CELLS:,} limit. Importing fewer columns — the "
+        "wizard can skip any you don't need — or splitting the file by rows will "
+        "bring it under."
+    )
+
+
 MAX_XLSX_ROWS = 100_000
 MAX_XLSX_COLS = 500
 
@@ -1448,6 +1525,15 @@ def xlsx_to_csv_text(content: bytes, sheet_name: str | None = None) -> tuple[str
             raise XlsxImportError(f'Worksheet "{target}" was not found in the workbook.')
         ws = wb[target]
 
+        # #803: refuse on the sheet's DECLARED dimensions, before any cell is
+        # read — an over-cap workbook must not cost the memory it is being
+        # refused for. openpyxl's max_row/max_column can OVERCOUNT (formatting
+        # residue, trimmed later), so this only ever refuses what is genuinely
+        # over; the authoritative check runs on the trimmed dimensions below.
+        declared = cell_count_error(ws.max_row or 0, ws.max_column or 0)
+        if declared:
+            raise XlsxImportError(declared)
+
         rows: list[list[str]] = []
         for i, row in enumerate(ws.iter_rows(values_only=True)):
             if i >= MAX_XLSX_ROWS:
@@ -1476,6 +1562,12 @@ def xlsx_to_csv_text(content: bytes, sheet_name: str | None = None) -> tuple[str
     if not header:
         raise XlsxImportError(f'Worksheet "{target}" has no header row.')
     width = len(header)
+
+    # #803: the authoritative check, on the TRIMMED dimensions. The pre-read
+    # check above uses openpyxl's declared size, which can overcount.
+    trimmed = cell_count_error(len(rows) - 1, width)
+    if trimmed:
+        raise XlsxImportError(trimmed)
 
     out = _io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
@@ -1525,8 +1617,17 @@ def preview_dataset_csv(
     col_all_values: dict[str, list[str]] = {h: [] for h in headers}
     total_rows = 0
 
+    # #803: a plain .csv declares no dimensions, so the cap can only be applied
+    # while reading. Bail the MOMENT it is crossed rather than after the count —
+    # accumulating an over-cap file into `col_all_values` would spend exactly the
+    # memory the cap exists to refuse.
+    n_cols = len(headers)
+    max_rows_for_cap = MAX_DATASET_CELLS // n_cols if n_cols else None
+
     for row in reader:
         total_rows += 1
+        if max_rows_for_cap is not None and total_rows > max_rows_for_cap:
+            raise DatasetTooLargeError(cell_cap_exceeded_message(n_cols))
         for h in headers:
             col_all_values[h].append(row.get(h, "").strip())
 
@@ -1611,6 +1712,72 @@ def preview_dataset_csv(
     return {"total_rows": total_rows, "columns": columns}
 
 
+def _scan_source_rows(text: str, column_configs: list[dict]) -> tuple[int, dict, dict]:
+    """ONE streaming pass over the CSV, for everything the import needs to know
+    about the data BEFORE it writes anything (#799).
+
+    Returns ``(row_count, distinct_numeric, na_values)``.
+
+    ⚠️ **This replaces `data_rows = list(reader)`, and the reason is memory:**
+    MEASURED on a real GSS extract (75,699 x 41), that list materialised
+    3,103,700 Python `str` objects and took peak RSS from 223 MB to **511 MB** —
+    twice the <256 MB backend target, for a file well inside the 50 MB upload
+    cap.
+
+    ⚠️ **It is also FASTER, which the naive fix would not have been.** The two
+    scans it replaces lived INSIDE the per-column loop, so the row list was
+    walked once per qualifying column — 4 numeric columns meant 4 walks. Simply
+    swapping the list for a fresh `csv.reader` each time would have re-parsed a
+    43 MB string once per column. Accumulating every column's answer in a single
+    pass costs one parse total.
+
+    Both predicates come from the CONFIG, not from the database, so this can run
+    before any column exists:
+
+    * numeric/percentage columns need their DISTINCT values — `_analyze_numeric`
+      takes `list(set(...))`, so a set is what it actually wanted;
+    * ordinal columns with scale labels need the set of cells their effective
+      missing rule recognises, to seed the auto recode's exclude channel.
+    """
+    want_numeric: dict[int, list] = {}
+    want_na: dict[int, list] = {}
+    for cfg in column_configs:
+        if cfg.get("skip"):
+            continue
+        idx = cfg["column_index"]
+        qtype = cfg.get("column_type", "")
+        rules = cfg.get("missing_values")
+        if qtype in (ColumnType.NUMERIC.value, ColumnType.PERCENTAGE.value):
+            want_numeric[idx] = rules
+        if (
+            qtype == ColumnType.ORDINAL.value
+            and cfg.get("scale_labels")
+            and not cfg.get("cells_are_codes")
+        ):
+            want_na[idx] = rules
+
+    distinct_numeric: dict[int, set] = {i: set() for i in want_numeric}
+    na_values: dict[int, set] = {i: set() for i in want_na}
+
+    reader = csv.reader(io.StringIO(text))
+    next(reader, None)  # header
+    row_count = 0
+    for row in reader:
+        row_count += 1
+        n = len(row)
+        for idx, rules in want_numeric.items():
+            if idx < n:
+                cell = row[idx].strip()
+                if cell and not is_missing(cell, rules):
+                    distinct_numeric[idx].add(cell)
+        for idx, rules in want_na.items():
+            if idx < n:
+                cell = row[idx].strip()
+                if cell and is_missing(cell, rules):
+                    na_values[idx].add(cell)
+    return row_count, distinct_numeric, na_values
+
+
 def import_dataset_csv(
     db: Session,
     project_id: int,
@@ -1652,15 +1819,25 @@ def import_dataset_csv(
         (None unless linking ran).
     """
     text = _strip_bom(file_contents)
-    reader = csv.reader(io.StringIO(text))
-    headers = next(reader)
-    data_rows = list(reader)
+    headers = next(csv.reader(io.StringIO(text)))
+    # #799: ONE streaming pass instead of a retained row list — see
+    # `_scan_source_rows`. The list cost 288 MB on a real import and was walked
+    # once per qualifying column.
+    row_count, distinct_numeric_by_idx, na_values_by_idx = _scan_source_rows(
+        text, column_configs,
+    )
+    # #803: the cap is enforced on the OPERATION, not only at the wizard. The
+    # preview endpoint refuses first and more cheaply, but scripts and direct API
+    # callers never pass it — the #589 lesson, restated for size.
+    _over = cell_count_error(row_count, len(headers))
+    if _over:
+        raise DatasetTooLargeError(_over)
 
     # Build config lookup by column index
     cfg_by_idx: dict[int, dict] = {cfg["column_index"]: cfg for cfg in column_configs}
 
     # Auto-ID padding: len(str(row_count)) + 2 extra zeros
-    pad_width = len(str(len(data_rows))) + 2
+    pad_width = len(str(row_count)) + 2
 
     # -- 1. Create dataset -----------------------------------------------------
     dataset = Dataset(
@@ -1721,17 +1898,13 @@ def import_dataset_csv(
         n_min: float | None = None
         n_max: float | None = None
         if qtype in (ColumnType.NUMERIC, ColumnType.PERCENTAGE):
-            col_vals = [
-                row[col_idx].strip()
-                for row in data_rows
-                if col_idx < len(row)
-                and row[col_idx].strip()
-                and not is_missing(row[col_idx].strip(), col_missing_rules)
-            ]
+            # #799: precomputed in the single scan pass — already DISTINCT,
+            # which is what `_analyze_numeric` reduced it to anyway.
+            col_vals = distinct_numeric_by_idx.get(col_idx, set())
             # #358: pass the CSV header (not column_text override) so the
             # percentage keyword check uses the original column name.
             col_header = headers[col_idx] if col_idx < len(headers) else None
-            info = _analyze_numeric(list(set(col_vals)), header=col_header)
+            info = _analyze_numeric(list(col_vals), header=col_header)
             if info:
                 n_fmt = info["numeric_format"]
                 n_min = info["numeric_min"]
@@ -1795,12 +1968,8 @@ def import_dataset_csv(
         # Pre-scan data rows for missing values (#592: column-aware — the
         # exclude channel seeds FROM the effective rule, §J.2)
         col_missing_rules = cfg.get("missing_values")
-        na_values = set()
-        for row in data_rows:
-            if col_idx < len(row):
-                cell = row[col_idx].strip()
-                if cell and is_missing(cell, col_missing_rules):
-                    na_values.add(cell)
+        # #799: precomputed in the single scan pass.
+        na_values = na_values_by_idx.get(col_idx, set())
 
         exclude_values_json = json.dumps(sorted(na_values)) if na_values else None
 
@@ -1829,76 +1998,141 @@ def import_dataset_csv(
     recognized_missing_count = 0
     recognized_missing_labels: set[str] = set()
 
-    for row_idx, data_row in enumerate(data_rows):
-        # System-generated record identifier
-        record_id = f"R{str(row_idx + 1).zfill(pad_width)}"
+    # #796b: BATCHED. This loop used to `db.flush()` once per row and `db.add()`
+    # an ORM instance per cell. MEASURED on a real GSS extract (75,699 x 41 =
+    # 3,103,659 values): **374.8s**, six minutes for one file and past any
+    # timeout a client can reasonably offer. Batching the row flush (75,699
+    # round trips -> 38) and inserting values via a Core executemany took it to
+    # **76.4s — 4.9x** — with identical row/value counts, record identifiers and
+    # uuids.
+    #
+    # Rows still become ORM objects: there are only tens of thousands, and
+    # `DatasetRow` carries a Python-side `uuid` default (the Track J identity
+    # spine) that a Core insert would not apply. VALUES go through Core:
+    # `DatasetValue` has no defaults and no post-insert consumer in this
+    # function, so nothing needs the instances.
+    #
+    # ⚠️ **This is a SPEED fix and NOT a memory fix — do not read it as one.**
+    # Peak RSS was 521 MB before and 533 MB after, and the staged measurement
+    # says why: baseline 59 MB -> **223 MB** after openpyxl's workbook read ->
+    # **511 MB** after `data_rows = list(reader)` materialises 3.1M Python str
+    # objects. The per-cell ORM instances were never the driver. Both real
+    # drivers predate this loop and neither is addressed here (see #799); the
+    # <256 MB backend target is still exceeded on a file this size.
+    #
+    # ⚠️ The batch sizes bound what THIS loop adds on top, not the total.
+    #
+    # ⚠️ **The ORM row insert is deliberately NOT converted to Core, and this is
+    # measured rather than assumed.** SQLAlchemy emits one INSERT per row for
+    # this mapper even under `add_all` (RETURNING is available and the page size
+    # is 1000, so the reason is the mapper, not the dialect). A Core insert with
+    # RETURNING is **3.0x** faster on 75,699 rows — but that is 5.7s -> 1.9s
+    # against a 76.4s import, **5% of the total**, and it would require spelling
+    # `DatasetRow`'s Python-side `uuid` and `created_at` defaults here, where
+    # they would silently diverge the day the model changes. Not worth it. The
+    # values were the win; the rows are not.
+    ROW_BATCH = 2_000
+    VALUE_BATCH = 10_000
+    pending_values: list[dict] = []
 
-        # Create row (no participant linking at import time)
-        ds_row = DatasetRow(
-            dataset_id=dataset.id,
-            participant_id=None,
-            row_identifier=record_id,
-            submitted_at=None,
-        )
-        db.add(ds_row)
-        db.flush()
+    def _drain_values() -> None:
+        if pending_values:
+            db.execute(sa_insert(DatasetValue), pending_values)
+            pending_values.clear()
 
-        # Create values
-        for col_idx, column in columns.items():
-            if col_idx >= len(data_row):
-                continue
-            cell = data_row[col_idx].strip()
-            if not cell:
-                continue
+    # #799: stream the rows a SECOND time rather than holding them. Two parses
+    # of the CSV text total (this and `_scan_source_rows`) replace one parse plus
+    # a retained 3.1M-object list — measured at ~0.8s per parse against a ~76s
+    # import, i.e. ~1% of the time for 288 MB of memory.
+    source_rows = csv.reader(io.StringIO(text))
+    next(source_rows, None)  # header
+    batch_start = 0
+    while True:
+        batch = list(islice(source_rows, ROW_BATCH))
+        if not batch:
+            break
+        ds_rows = [
+            DatasetRow(
+                dataset_id=dataset.id,
+                participant_id=None,
+                # System-generated record identifier — numbering is unchanged
+                # from the per-row loop this replaces.
+                row_identifier=f"R{str(batch_start + i + 1).zfill(pad_width)}",
+                submitted_at=None,
+            )
+            for i in range(len(batch))
+        ]
+        db.add_all(ds_rows)
+        db.flush()  # ONE flush per batch, not per row — populates ds_row.id
 
-            cfg = cfg_by_idx.get(col_idx, {})
-            col_missing_rules = cfg.get("missing_values")
+        for ds_row, data_row in zip(ds_rows, batch):
+            for col_idx, column in columns.items():
+                if col_idx >= len(data_row):
+                    continue
+                cell = data_row[col_idx].strip()
+                if not cell:
+                    continue
 
-            # #415: recognized-missing accounting. Mirrors the per-column
-            # na_count in preview_dataset_csv and the value-keyed compute rule
-            # (missing everywhere; #592: column-aware when the config declares).
-            # value_text still stores the raw label; value_numeric lands None.
-            if is_missing(cell, col_missing_rules):
-                recognized_missing_count += 1
-                if len(recognized_missing_labels) < 25:
-                    recognized_missing_labels.add(cell)
+                cfg = cfg_by_idx.get(col_idx, {})
+                col_missing_rules = cfg.get("missing_values")
 
-            if cfg.get("cells_are_codes"):
-                # #575: the cell IS the numeric code; keep it (value_text stays the
-                # raw code). apply_value_labels substitutes the label + owns the
-                # scale metadata/recode in the post-pass below. Passing scale_labels
-                # to _compute here would route to label→code and NULL a bare code.
-                # #592: a declared-missing code stores NULL, never its number.
-                value_numeric = (
-                    None if is_missing(cell, col_missing_rules)
-                    else _strip_numeric(cell)
-                )
-            else:
-                value_numeric = _compute_value_numeric(
-                    cell, cfg.get("column_type", ""), cfg.get("scale_labels"),
-                    cfg.get("scale_values"),
-                    missing_rules=col_missing_rules,
-                )
+                # #415: recognized-missing accounting. Mirrors the per-column
+                # na_count in preview_dataset_csv and the value-keyed compute rule
+                # (missing everywhere; #592: column-aware when the config declares).
+                # value_text still stores the raw label; value_numeric lands None.
+                if is_missing(cell, col_missing_rules):
+                    recognized_missing_count += 1
+                    if len(recognized_missing_labels) < 25:
+                        recognized_missing_labels.add(cell)
 
-            col_type = cfg.get("column_type", "")
-            wc = len(cell.split()) if col_type == "open_text" and cell.strip() else None
+                if cfg.get("cells_are_codes"):
+                    # #575: the cell IS the numeric code; keep it (value_text stays the
+                    # raw code). apply_value_labels substitutes the label + owns the
+                    # scale metadata/recode in the post-pass below. Passing scale_labels
+                    # to _compute here would route to label→code and NULL a bare code.
+                    # #592: a declared-missing code stores NULL, never its number.
+                    value_numeric = (
+                        None if is_missing(cell, col_missing_rules)
+                        else _strip_numeric(cell)
+                    )
+                else:
+                    value_numeric = _compute_value_numeric(
+                        cell, cfg.get("column_type", ""), cfg.get("scale_labels"),
+                        cfg.get("scale_values"),
+                        missing_rules=col_missing_rules,
+                    )
 
-            # #607: a labelled missing rule substitutes its label into the cell,
-            # exactly as the declare endpoint, the append channel, and the .sav
-            # adapter do — otherwise the same code renders two ways in one
-            # column ("99" here, "Refused" everywhere else) and the append
-            # dedup fingerprint misses precisely the rows it exists to match.
-            # `recognized_missing_labels` above records the RAW cell (the
-            # disclosure lists what the file carried).
-            db.add(DatasetValue(
-                row_id=ds_row.id,
-                column_id=column.id,
-                value_text=matched_missing_label(cell, col_missing_rules) or cell,
-                value_numeric=value_numeric,
-                word_count=wc,
-            ))
-            values_created += 1
+                col_type = cfg.get("column_type", "")
+                wc = len(cell.split()) if col_type == "open_text" and cell.strip() else None
 
+                # #607: a labelled missing rule substitutes its label into the cell,
+                # exactly as the declare endpoint, the append channel, and the .sav
+                # adapter do — otherwise the same code renders two ways in one
+                # column ("99" here, "Refused" everywhere else) and the append
+                # dedup fingerprint misses precisely the rows it exists to match.
+                # `recognized_missing_labels` above records the RAW cell (the
+                # disclosure lists what the file carried).
+                # A plain dict, never an ORM instance: 3.1M `DatasetValue` objects
+                # in one identity map is what cost 521 MB (#796b).
+                pending_values.append({
+                    "row_id": ds_row.id,
+                    "column_id": column.id,
+                    "value_text": matched_missing_label(cell, col_missing_rules) or cell,
+                    "value_numeric": value_numeric,
+                    "word_count": wc,
+                })
+                values_created += 1
+
+            if len(pending_values) >= VALUE_BATCH:
+                _drain_values()
+
+        # ⚠️ The record-identifier counter. `range(0, n, ROW_BATCH)` used to
+        # advance this; the streaming loop must do it by hand, and a fixture
+        # with only ONE batch cannot tell the difference — every batch would
+        # restart at R0000001.
+        batch_start += len(batch)
+
+    _drain_values()
     db.flush()
 
     # -- 3b. Declared value labels (#575) --------------------------------------
@@ -1954,7 +2188,7 @@ def import_dataset_csv(
     return {
         "dataset_id": dataset.id,
         "columns_created": len(columns),
-        "rows_created": len(data_rows),
+        "rows_created": row_count,
         "values_created": values_created,
         "recognized_missing_count": recognized_missing_count,
         "recognized_missing_labels": sorted(recognized_missing_labels),

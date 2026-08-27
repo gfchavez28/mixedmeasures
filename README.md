@@ -96,6 +96,29 @@ mean anything is wrong:
   code what happens on the timeline itself. Start from an empty timeline, slice it
   into fixed intervals, or seed the first clips from a cue file.
 
+### Describe and prepare variables
+
+Every dataset has two views. **Data** is the grid of records; **Variables** is
+where a variable is described.
+
+- **A variable dictionary** — name and label, type, and the **value labels** that
+  say what each stored code means (`1` = "Strongly disagree"), so exports and
+  analysis read in words rather than numbers.
+- **Declare which values count as missing** — per variable, or one vocabulary
+  across many variables at once, which is how real survey exports are shaped
+  (`.d`, `.n`, `.i` for "Don't know", "Refused", "Inapplicable"). Declared-missing
+  values are excluded from statistics and blank in exports, and the data
+  dictionary records what each one meant.
+- **Recode rules** — collapse categories, map scale points, or reverse-score an
+  item, with the rule saved and named rather than applied and forgotten. Each
+  saved rule says whether it is currently **in effect**, and applying one to the
+  variable it sits on is a deliberate step, because it rewrites stored numbers and
+  cannot be undone.
+- **Or recode into a new variable** and leave the original untouched. The new
+  variable records which variable and which rule produced it.
+- **Computed variables** via a safe expression language (`[Post] - [Pre]`,
+  `IF(...)`, `MEAN(...)`, `COALESCE(...)`), re-derived when their sources change.
+
 ### Work with recordings (audio & video)
 
 Two ways to work with a recording, and the choice is about what you are coding:
@@ -172,17 +195,23 @@ across, leaving the original and its coding untouched.
   treemap** overview.
 
 ### Analyze quantitatively
-- Descriptives (means, SDs, frequencies, proportions).
+- Descriptives (means, SDs, frequencies, proportions), with a **margin of error**
+  on frequency distributions.
+- **Distributions**: histograms for continuous variables, box plots for group
+  comparisons, and **Q–Q plots** — each stating the convention it used, so the
+  figure can be reproduced rather than just read.
 - Comparisons: **Welch's t-test**, **one-way ANOVA** with **Tukey HSD** post-hoc,
   and non-parametric **Mann-Whitney U** / **Kruskal-Wallis H**, with effect sizes
-  (Cohen's *d*, η², ω², ε²).
+  (Cohen's *d*, η², ω², ε²). Assumption checks report **whether you need the
+  non-parametric test**, rather than leaving you to interpret them.
 - **Correlation matrices** (Pearson / Spearman) with scatter matrix and trendlines.
-- **Cross-tabulation** with chi-square and Cramér's V.
-- **Reliability**: Cronbach's alpha and split-half (Spearman-Brown corrected).
+- **Cross-tabulation** with chi-square and Cramér's V, which says when its
+  approximation is unreliable rather than printing a p-value you should not read.
+- **Reliability**: Cronbach's alpha with **per-item diagnostics** (alpha if the
+  item were dropped, item-total correlation) and split-half (Spearman-Brown
+  corrected).
 - **Missing-data diagnostics**: missingness summary, pattern view, and Little's MCAR
-  test.
-- **Computed columns** via a safe expression language (`[Post] - [Pre]`,
-  `IF(...)`, `MEAN(...)`, `COALESCE(...)`, etc.).
+  test, which states which estimates produced it.
 - **Crosswalk** — harmonize variables that were measured differently across
   datasets into equivalence groups and analysis domains, then compute scale scores
   across instruments. This is the workspace's strongest differentiator for
@@ -231,6 +260,35 @@ Being honest about scope:
   AI — local-first, off by default, and separable from the build.
   *(AI coding tools did assist in **building** Mixed Measures — an honest note about
   development, distinct from what the product does.)*
+- **Withdrawal is supported, but it cannot *read* — and deleting a participant is
+  still not a withdrawal.** Two things exist. A **withdrawal report** answers
+  "what traces back to this person?" — counts and locations across transcripts,
+  datasets, excerpts, notes and memos, never the text itself. And a **withdrawal
+  action** removes the identity, deletes what is unambiguously theirs (their
+  dataset rows and responses), renames their speaker to a numbered token, and
+  **blanks** their conversation turns rather than deleting them — a turn removed
+  outright damages the records of participants who did *not* withdraw, and moves
+  every coverage and reliability figure in the project. Quotes pointing into
+  blanked text are removed with it; the researcher's own codes, notes and memos
+  are kept and reported for review, because deciding whether a memo quotes the
+  person is reading, not matching. **That is the limit that matters: it cannot
+  find the person's name inside *other* people's turns, or inside free-text
+  answers, notes or memos.** Those need someone who knows the project. A full
+  backup is taken first and there is no per-participant undo — restoring reverses
+  everything done since. And deleting a participant record **first** still makes a
+  withdrawal harder, because it destroys the link used to find the rest. Plan
+  withdrawal handling before you collect. *(This describes what the software does;
+  a compliance reviewer should own the conclusion for your study.)*
+- **English-only interface, and word counts assume spaces.** There is no
+  translation layer, and the bundled fonts cover Latin and Latin-Extended only, so
+  other scripts fall back to system fonts and render outside the designed type
+  scale. Word counts are **whitespace-delimited**: languages written without
+  spaces between words — Chinese, Japanese, Thai — count as one word per segment,
+  which means coding density, per-source volume and the saturation denominator are
+  counting segments rather than words for those corpora. Everything else
+  (coding, retrieval, statistics, export) is script-agnostic and stores text as
+  UTF-8, so a non-Latin project works — you simply should not read the
+  word-based numbers as word counts.
 - **Not a full statistical-modeling suite.** Regression and factor analysis are not
   currently included; for analysis beyond the built-in descriptives and comparisons,
   export the R script and continue there.

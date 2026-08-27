@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { WORD_COUNT_NOTE } from '@/lib/word-count-basis'
 import type { SourceFrequenciesResponse, SourceKind } from '@/lib/api'
 import {
   shapeQualCodeSummary, shapeQualSourceSummary, presentSourceKinds, summaryKindTotals,
@@ -323,7 +324,8 @@ export default function QualSummaryTable({
                         <Info className="w-3 h-3 text-mm-text-faint" />
                       </TooltipTrigger>
                       <TooltipContent side="top" className="max-w-xs text-xs">
-                        Proportion of total words in segments coded with this code
+                        Proportion of total words in segments coded with this code.
+                        {' '}{WORD_COUNT_NOTE}
                       </TooltipContent>
                     </Tooltip>
                   </span>
@@ -411,7 +413,7 @@ export default function QualSummaryTable({
                 <Th field="uniqueCodes" label="Unique Codes" sortField={activeSortField} sortDir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right" />
                 <Th field="codedSegments" label="Coded Segments" sortField={activeSortField} sortDir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right" />
                 <Th field="codesPerSegment" label="Codes/Segment" sortField={activeSortField} sortDir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right" />
-                <Th field="avgSegmentLength" label="Avg Words" sortField={activeSortField} sortDir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right" />
+                <Th field="avgSegmentLength" label="Avg Words" hint={WORD_COUNT_NOTE} sortField={activeSortField} sortDir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right" />
               </tr>
             </thead>
             <tbody>
@@ -491,9 +493,12 @@ function Th({
   onSort,
   indicator,
   className = '',
+  hint,
 }: {
   field: string
   label: string
+  /** #703 — a unit caveat for sighted hover; the column keeps its short name. */
+  hint?: string
   sortField: string
   sortDir: SortDir
   onSort: (field: string) => void
@@ -505,6 +510,7 @@ function Th({
       scope="col"
       className={`px-3 py-2 border-b font-medium select-none ${className}`}
       aria-sort={sortField === field ? (sortDir === 'asc' ? 'ascending' : 'descending') : undefined}
+      title={hint}
     >
       <button type="button" className={SORT_BUTTON} onClick={() => onSort(field)}>
         {label}

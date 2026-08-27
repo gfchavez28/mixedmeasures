@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
+import { WORD_COUNT_NOTE } from '@/lib/word-count-basis'
 import { useQuery } from '@tanstack/react-query'
 import { SELECTED_ROW } from '@/lib/selection'
 import { Link } from 'react-router'
@@ -799,7 +800,9 @@ function CommentsSection({
                               })
                           )}
                           <span className="text-[11px] text-mm-text-faint">
-                            {comment.word_count} word{comment.word_count !== 1 ? 's' : ''}
+                            <span title={WORD_COUNT_NOTE}>
+                              {comment.word_count} word{comment.word_count !== 1 ? 's' : ''}
+                            </span>
                           </span>
                           <Link
                             to={`/projects/${projectId}/datasets/text-coding`}

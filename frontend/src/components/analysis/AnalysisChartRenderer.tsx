@@ -26,6 +26,8 @@ import {
   type ChartFormatting,
   type GroupOrganization,
   type SortOrder,
+  shapeHistogramBars,
+  describeHistogramBasis,
 } from '@/lib/chart-data'
 import { Button } from '@/components/ui/button'
 import ChartExportWrapper from '@/components/charts/ChartExportWrapper'
@@ -190,9 +192,28 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
 
   const varyingFootnote = '* Not all records have values for every variable. Per-variable sample sizes shown where they differ.'
 
-  // Check if CI data is missing on any selected metrics (need recompute)
+  // Check if CI data is missing on any selected metrics (need recompute).
+  //
+  // #769: this used to test only for the ABSENCE of `ci_lower`/`ci_upper`, which
+  // is also true of every metric type that has no interval to compute — so a
+  // frequency distribution raised "Recompute metrics to enable error bars", the
+  // researcher pressed Compute All, and the banner stayed forever because
+  // recomputing could never add the field. The toggle is hidden for those chart
+  // types but `showCI` is a URL param that nothing clears, so it outlived the
+  // control that set it.
+  //
+  // The honest test is "this result PREDATES the interval", and `ci_method` is
+  // exactly that stamp: all four metric types now write it unconditionally —
+  // `mean` and `proportion` and `domain_aggregate` since #690, and
+  // `frequency_distribution` since queue #42 — including on the arm where the
+  // bounds are null because n was too small. So an absent `ci_method` means a
+  // stale row, which recomputing genuinely does fix, and a present one with
+  // null bounds is correctly silent.
+  //
+  // ⚠️ A metric type added later MUST stamp `ci_method` even when it has no
+  // interval to offer, or this banner returns as an unclearable promise.
   const ciMissing = showCI && selectedMetrics.some(m =>
-    m.results.some(r => r.result_data.ci_lower === undefined && r.result_data.ci_upper === undefined)
+    m.results.some(r => (r.result_data as Record<string, unknown>).ci_method === undefined)
   )
 
   const ciNotice = ciMissing ? (
@@ -657,6 +678,37 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
         </ChartExportWrapper>
       )
     }
+    case 'histogram': {
+      // #522 — display-side binning over the per-value counts already on the
+      // wire. `shapeHistogramBars` emits NO interval fields, so the error bars
+      // queue #42 added to this payload are suppressed structurally rather than
+      // by a flag: once the categories are binned, a per-category interval no
+      // longer describes the bars drawn.
+      const { bars, histogram } = shapeHistogramBars(orderedMetrics[0], { binWidth: formatting.binWidth })
+      const nInfo = computeFreqBarChartN(orderedMetrics)
+      const basis = describeHistogramBasis(histogram)
+      // The bin rule is NAMED beside the chart — the stated-basis habit (#42's
+      // CI label, #708's ordering label, the IRR bin-size control).
+      const footnote = [chartFootnote, basis].filter(Boolean).join(' ')
+      return (
+        <ChartExportWrapper
+          title={chartTitle} subtitle={chartSubtitle} footnote={footnote}
+          filename={exportFilename} chartN={nInfo.chartN} showChartN={showChartN}
+          hasVaryingN={nInfo.hasVaryingN} formatting={formatting}
+        >
+          <VerticalBarChart
+            histogram
+            frequencyData={bars}
+            display={display}
+            sortOrder="none"
+            showVariableN={showVariableN}
+            chartN={nInfo.chartN}
+            formatting={formatting}
+          />
+        </ChartExportWrapper>
+      )
+    }
+
     case 'cross_tab': {
       if (!crossTabColumnId) {
         return (

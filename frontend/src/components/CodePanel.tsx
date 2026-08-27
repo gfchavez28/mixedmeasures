@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/dialog'
 import { cn, getCodeColor } from '@/lib/utils'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
+import { categoryShortcutPrefixes } from '@/lib/codeShortcuts'
 import { ColorSwatchPicker, CATEGORY_COLORS } from '@/components/ColorSwatchPicker'
 import { ColorDotButton } from '@/components/ColorDotButton'
 import { CreatableComboList } from '@/components/ui/creatable-combobox'
@@ -108,28 +109,18 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
     return map
   }, [categoriesProp])
 
-  // Build unique ordered category list from codes
-  const categoryList = useMemo(() => {
-    const seen = new Map<number, { id: number; name: string; color: string | null }>()
-    // codes are already ordered by backend (category display_order, then category_order)
-    for (const code of codes) {
-      if (code.category_id !== null && !code.is_universal && !seen.has(code.category_id)) {
-        seen.set(code.category_id, {
-          id: code.category_id,
-          name: code.category_name || 'Unknown',
-          color: code.category_color || null,
-        })
-      }
-    }
-    return Array.from(seen.values())
-  }, [codes])
-
   // #663/#664: the panel's own labels come from the SAME map the row menus and
   // the chord resolver use. Built from the UNFILTERED codes on purpose — a
   // search narrows what's listed, not which keys exist, and deriving
   // "are there categories?" from the filtered set would flip the digit rule
   // mid-search.
   const shortcutLabels = useCodeShortcutLabels(codes)
+  // #824: the category `[2]` marker comes from the same source as the labels.
+  // This panel used to re-derive it from `categoryList` — a THIRD derivation of
+  // the chord space, agreeing with the resolver only because both happen to use
+  // first-appearance order. The sibling panel's independent derivation did NOT
+  // agree, which is the whole defect.
+  const categoryPrefixes = useMemo(() => categoryShortcutPrefixes(codes), [codes])
 
   // Filter and separate codes into groups
   const { universalCodes, categorizedGroups, uncategorizedCodes, allDisplayedCodes } = useMemo(() => {
@@ -146,7 +137,7 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
     }
 
     const universal: Code[] = []
-    const catGroups: { catId: number; catName: string; catColor: string | null; catIndex: number; codes: Code[] }[] = []
+    const catGroups: { catId: number; catName: string; catColor: string | null; codes: Code[] }[] = []
     const uncategorized: Code[] = []
 
     for (const code of filtered) {
@@ -155,12 +146,10 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
       } else if (code.category_id !== null && !isSearching) {
         let group = catGroups.find(g => g.catId === code.category_id)
         if (!group) {
-          const catIdx = categoryList.findIndex(c => c.id === code.category_id)
           group = {
             catId: code.category_id,
             catName: code.category_name || 'Unknown',
             catColor: code.category_color || null,
-            catIndex: catIdx,
             codes: [],
           }
           catGroups.push(group)
@@ -182,7 +171,7 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
       uncategorizedCodes: uncategorized,
       allDisplayedCodes: all,
     }
-  }, [codes, searchQuery, categoryList])
+  }, [codes, searchQuery])
 
   // Check if search query exactly matches an existing code name (case-insensitive)
   const exactMatchExists = useMemo(() => {
@@ -563,7 +552,7 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
 
               {/* Categorized Groups */}
               {categorizedGroups.map(group => {
-                const shortcutPrefix = group.catIndex >= 0 && group.catIndex < 8 ? group.catIndex + 2 : null
+                const shortcutPrefix = categoryPrefixes.get(group.catId) ?? null
                 const parentPath = parentPathMap.get(group.catId)
                 return (
                   <div key={group.catId} className="border-b">
@@ -587,14 +576,11 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
                         <span className="font-mono text-mm-text-faint">[{shortcutPrefix}]</span>
                       )}
                     </div>
-                    {group.codes.map((code, codeIdx) =>
-                      renderCodeItem(
-                        code,
-                        shortcutPrefix !== null && codeIdx < 9
-                          ? `${shortcutPrefix}.${codeIdx + 1}`
-                          : undefined
-                      )
-                    )}
+                    {/* The label map decides here too (#824) — the old
+                      * `${prefix}.${codeIdx + 1}` re-derived the position from
+                      * the RENDERED order, which is a different list from the
+                      * one the resolver numbers. */}
+                    {group.codes.map(code => renderCodeItem(code, shortcutLabels.get(code.id)))}
                   </div>
                 )
               })}

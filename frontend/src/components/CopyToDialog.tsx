@@ -9,8 +9,7 @@ import {
 import { Checkbox } from '@/components/ui/checkbox'
 import { Button } from '@/components/ui/button'
 import { TypeBadge } from '@/components/TypeBadge'
-
-const RECODE_DISALLOWED_TYPES = new Set(['open_text', 'identifier'])
+import { variableRulesRefusal } from '@/lib/dataset-constants'
 
 // ── Copy-to Dialog ───────────────────────────────────────────────────────────
 
@@ -65,7 +64,13 @@ export function CopyToDialog({
     })
   }
 
-  const otherColumns = columns.filter(q => q.id !== currentColumnId && !RECODE_DISALLOWED_TYPES.has(q.column_type))
+  // Offer only columns that can actually RECEIVE a recode definition. This
+  // carried its own copy of the type list and, like the Variables view's, it
+  // was missing the SOURCE arm — a computed column was offered as a copy target
+  // and `POST …/recode-definitions` 403s it (`routers/recode.py:431`).
+  const otherColumns = columns.filter(
+    q => q.id !== currentColumnId && variableRulesRefusal(q) === null,
+  )
   const selectableColumns = otherColumns.filter(q => !q.recode_definitions?.some(d => d.name === definitionName))
 
   const selectAll = () => {

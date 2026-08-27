@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { ciLabel, ciCaveat, isItemLevelCi, ITEM_LEVEL_CI_METHOD } from './ci-label'
+import { ciLabel, ciCaveat, ciQualifier, isItemLevelCi, ITEM_LEVEL_CI_METHOD } from './ci-label'
 
 /**
  * #715 — a domain aggregate's confidence interval is computed over ITEMS, not
@@ -157,5 +157,65 @@ describe('fail-closed: ciMethod travels wherever ciLower does', () => {
         'comparison payload rather than a metric result_data blob, add the function ' +
         'to COMPARISON_SHAPERS with the reason.',
     ).toEqual([])
+  })
+})
+
+/**
+ * queue #42 — a per-category interval is a different CLAIM, so it takes its own
+ * `ci_method` and its own qualifier. The previous shape was a ternary on
+ * `isItemLevelCi`, which meant any method it did not know rendered as the
+ * ordinary respondent-level case: silently, and in the one module whose whole
+ * job is to stop exactly that.
+ */
+describe('ciLabel — per-category intervals', () => {
+  it('qualifies a per-category Wilson interval', () => {
+    expect(ciLabel('wilson_per_category')).toBe('95% CI per category')
+  })
+
+  it('says the intervals are not simultaneous', () => {
+    // The one thing a reader is most likely to assume and most likely to be
+    // wrong about: seven categories' intervals do NOT jointly cover at 95%.
+    expect(ciCaveat('wilson_per_category')).toMatch(/not a simultaneous set/)
+  })
+
+  it('does not confuse it with the single-proportion Wilson interval', () => {
+    // Both are Wilson; only one is a statement about a category against the
+    // rest. Reusing `wilson` would have made them indistinguishable downstream.
+    expect(ciLabel('wilson')).toBe('95% CI')
+    expect(ciLabel('wilson_per_category')).not.toBe(ciLabel('wilson'))
+  })
+})
+
+describe('ciQualifier', () => {
+  it('returns the qualifier with a leading space, for bare-range tooltips', () => {
+    expect(ciQualifier('item_level_t')).toBe(' across items')
+    expect(ciQualifier('wilson_per_category')).toBe(' per category')
+  })
+
+  it('returns an empty string for the ordinary kind and the unknown', () => {
+    for (const m of ['t_interval', 'wilson', undefined, null, 'something_new']) {
+      expect(ciQualifier(m)).toBe('')
+    }
+  })
+})
+
+describe('ciLabel — the confidence level', () => {
+  it('reads the level the payload states', () => {
+    expect(ciLabel('wilson', 0.9)).toBe('90% CI')
+    expect(ciLabel('item_level_t', 0.99)).toBe('99% CI across items')
+  })
+
+  it('falls back to 95 for an absent or impossible level', () => {
+    // Every stored row holds 0.95; the level has been hard-wired in six places
+    // while `ci_level` rode the payload unread. Reading it costs nothing and is
+    // one of the two ends that must move together when it becomes configurable.
+    for (const lvl of [undefined, null, 0, 1, -0.5, NaN, Infinity]) {
+      expect(ciLabel('wilson', lvl)).toBe('95% CI')
+    }
+  })
+
+  it('does not print a trailing zero for a whole-number level', () => {
+    expect(ciLabel('wilson', 0.9)).toBe('90% CI')
+    expect(ciLabel('wilson', 0.995)).toBe('99.5% CI')
   })
 })

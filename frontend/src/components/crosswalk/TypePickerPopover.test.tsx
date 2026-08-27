@@ -81,7 +81,7 @@ describe('TypePickerPopover', () => {
       screen.getByTestId('type-picker-recode-block').textContent,
     ).toContain('3 recode definitions')
     expect(
-      screen.getByRole('button', { name: /Open Recode Workbench/i }),
+      screen.getByRole('button', { name: /Open the Variables view/i }),
     ).toBeInTheDocument()
     // No type swatches surface in this state
     expect(screen.queryByTestId('type-picker-option-ordinal')).not.toBeInTheDocument()

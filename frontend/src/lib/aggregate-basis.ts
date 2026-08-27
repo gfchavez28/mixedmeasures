@@ -35,9 +35,37 @@
 /** Mirrors `AGGREGATION_BASIS_UNWEIGHTED_ITEM_MEANS` in `services/metrics.py`. */
 export const UNWEIGHTED_ITEM_MEANS = 'unweighted_item_means'
 
+/**
+ * Every basis this client can DESCRIBE. Add a member here when the backend gains
+ * one and the two maps below stop compiling until it has words — which is the
+ * point.
+ */
+export type AggregationBasis = typeof UNWEIGHTED_ITEM_MEANS
+
 export function isUnweightedItemMeans(basis?: string | null): boolean {
   return basis === UNWEIGHTED_ITEM_MEANS
 }
+
+/**
+ * ⚠️ TWO DIFFERENT UNKNOWNS, and they must not be collapsed.
+ *
+ * - **Unknown at RUNTIME** — an older `ComputedResult` row that predates the
+ *   field, or a newer server. Correct answer: silence. Inventing a description
+ *   of a computation we cannot identify is the failure this module prevents.
+ * - **Unknown at COMPILE TIME** — a basis added to `AggregationBasis` with no
+ *   phrase written for it. Correct answer: the build fails.
+ *
+ * The maps are `satisfies Record<AggregationBasis, …>` so the second is caught,
+ * and they are READ through a string-keyed cast so the first still returns
+ * `undefined`. This is property (b) of the stated-basis family rule, and it was
+ * missing here until 2026-08-22: with a bare `isUnweightedItemMeans(…) ? … :
+ * undefined`, **POMP (#693(ii), open and explicitly planned as the second value)
+ * would have compiled, rendered no label at all, and reported nothing** — the
+ * exact `ci-label.ts` defect #42 found, in the module whose job is to prevent it.
+ */
+const BASIS_LABEL = {
+  [UNWEIGHTED_ITEM_MEANS]: 'unweighted mean of item means',
+} satisfies Record<AggregationBasis, string>
 
 /**
  * The short label for the aggregate — the phrase the R export already emits, so
@@ -45,7 +73,8 @@ export function isUnweightedItemMeans(basis?: string | null): boolean {
  * meet the same words.
  */
 export function aggregateBasisLabel(basis?: string | null): string | undefined {
-  return isUnweightedItemMeans(basis) ? 'unweighted mean of item means' : undefined
+  if (basis == null) return undefined
+  return (BASIS_LABEL as Record<string, string>)[basis]
 }
 
 /**
@@ -56,12 +85,16 @@ export function aggregateBasisLabel(basis?: string | null): string | undefined {
  * equivalence is ASSERTED by the researcher when they build the variable group
  * — #693(iii), and the same family as #690, #707 and #708.
  */
+const BASIS_CAVEAT = {
+  [UNWEIGHTED_ITEM_MEANS]:
+    'This score is the unweighted mean of each item’s mean, so every item counts equally '
+    + 'regardless of how many people answered it. Mixed Measures does not test whether the items '
+    + 'measure on a common scale — that equivalence is asserted by you when you group them.',
+} satisfies Record<AggregationBasis, string>
+
 export function aggregateBasisCaveat(basis?: string | null): string | undefined {
-  return isUnweightedItemMeans(basis)
-    ? 'This score is the unweighted mean of each item’s mean, so every item counts equally '
-      + 'regardless of how many people answered it. Mixed Measures does not test whether the items '
-      + 'measure on a common scale — that equivalence is asserted by you when you group them.'
-    : undefined
+  if (basis == null) return undefined
+  return (BASIS_CAVEAT as Record<string, string>)[basis]
 }
 
 /**
@@ -102,4 +135,31 @@ export function aggregateNCaveat(rd: {
   return `Averaged over ${k} ${k === 1 ? 'item' : 'items'}. The ${pooledN} responses behind it are `
     + 'a total across those items, not a count of respondents — one person answering every item '
     + 'is counted once per item.'
+}
+
+/**
+ * How to state the *n* of a mean POOLED over a domain's variables (#823e).
+ *
+ * `mean` over a `dataset_domain` flattens every member column's values into one
+ * list and averages that — a different statistic from `domain_aggregate`'s
+ * mean-of-per-column-means, and one whose *n* is genuinely the number of values
+ * averaged. It is therefore not WRONG, only unreadable: measured on GSS, a
+ * 3-variable domain over a 75,699-respondent survey printed `129613` beside a
+ * mean of 1.99, and a bare five-digit count beside a mean reads as respondents.
+ *
+ * So the cell names its unit. Unlike #693's case there is no better number to
+ * show — the pooled total IS the n of this statistic — which is why this states
+ * the unit rather than replacing the figure.
+ */
+export function pooledNLabel(n: number): string {
+  return `${n.toLocaleString()} values`
+}
+
+/** The tooltip for that cell. */
+export function pooledNCaveat(n: number, memberCount?: number | null): string {
+  const across = memberCount && memberCount > 0
+    ? `the ${memberCount} variables in this group`
+    : 'the variables in this group'
+  return `A mean over ${across}: their values are pooled into one list, so ${n.toLocaleString()} `
+    + 'is a count of VALUES, not of respondents — one person contributes once per variable.'
 }

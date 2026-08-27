@@ -702,8 +702,14 @@ function UnsortedSection({ pendingItems, onInsertPendingItem, onRemovePendingIte
               <span className="text-mm-text-muted shrink-0">
                 {PENDING_ICONS[item.item_type] ?? <FileText className="w-3.5 h-3.5" />}
               </span>
+              {/* #823(j): the NAME, not the primary key. This read
+                  `"Chart #5"` — a type word and a raw id — while the Materials
+                  drawer two panels away showed the real name, which is what
+                  made the inbox look broken rather than unimplemented. The id
+                  survives only as the fallback for a source row that is gone. */}
               <span className="text-mm-text truncate">
-                {PENDING_LABELS[item.item_type] ?? item.item_type} #{item.source_id}
+                {item.source_label?.trim()
+                  || `${PENDING_LABELS[item.item_type] ?? item.item_type} #${item.source_id}`}
               </span>
             </button>
             <button

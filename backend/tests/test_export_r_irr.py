@@ -81,7 +81,7 @@ def _seed(db):
 
 
 async def _export_zip_bytes(db, user):
-    resp = await export_r_data(project_id=PID, user=user, db=db)
+    resp = export_r_data(project_id=PID, user=user, db=db)
     chunks = [c async for c in resp.body_iterator]
     return b"".join(chunks if isinstance(chunks[0], bytes) else [c.encode() for c in chunks])
 

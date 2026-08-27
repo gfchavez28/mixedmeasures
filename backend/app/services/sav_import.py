@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 # Structural caps: a .sav is compressed, so a small upload can inflate a lot.
 # These bound the parse work independently of the 50 MB upload cap. Mirrors the
 # .xlsx adapter's caps so the two formats fail the same way.
+from .dataset_import import cell_count_error  # noqa: E402  (cell cap, #803)
+
 MAX_SAV_ROWS = 100_000
 MAX_SAV_COLS = 500
 
@@ -447,6 +449,12 @@ def sav_to_csv_text(content: bytes) -> tuple[str, dict[str, SavColumnMeta]]:
 
     if meta.number_columns and meta.number_columns > MAX_SAV_COLS:
         raise SavImportError(f"The SPSS file has more than {MAX_SAV_COLS} variables.")
+    # #803: the CELL cap, applied identically to every format. SPSS declares
+    # both dimensions in its metadata, so this refuses before any data is read.
+    if meta.number_rows and meta.number_columns:
+        over = cell_count_error(meta.number_rows, meta.number_columns)
+        if over:
+            raise SavImportError(over)
     if meta.number_rows and meta.number_rows > MAX_SAV_ROWS:
         raise SavImportError(
             f"The SPSS file has more than {MAX_SAV_ROWS:,} rows. "

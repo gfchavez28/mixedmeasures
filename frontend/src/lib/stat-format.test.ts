@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { NO_VALUE, formatStat, describeUndefined, undefinedTooltip } from './stat-format'
+import { NO_VALUE, formatStat, formatDescriptive, describeUndefined, undefinedTooltip } from './stat-format'
 
 /**
  * #689 — the client half of "an undefined statistic is null with a reason".
@@ -49,5 +49,51 @@ describe('describeUndefined', () => {
   it('falls back to a neutral tooltip when the reason is unknown', () => {
     expect(undefinedTooltip('no_variance')).toContain('identical')
     expect(undefinedTooltip('some_future_reason')).toBe('Not computable for this data.')
+  })
+})
+
+describe('formatDescriptive — #823(e), the summary table\'s decimals', () => {
+  it('never renders a non-zero value as zero', () => {
+    // The measured case: SE = sd/√n on a 43,029-respondent scale. At 1 dp this
+    // printed `0.0`, on the one column whose job is to state precision — and it
+    // gets WORSE as the study gets bigger, which is the wrong direction.
+    expect(formatDescriptive(0.9681 / Math.sqrt(43029))).toBe('0.0047')
+    expect(formatDescriptive(0.0004)).toBe('0.00040')
+    expect(formatDescriptive(-0.0047)).toBe('-0.0047')
+  })
+
+  it('separates values that 1 dp collapsed', () => {
+    // Three real SDs from the same screen, all of which rendered `1.0`.
+    expect(formatDescriptive(0.9681)).toBe('0.97')
+    expect(formatDescriptive(0.9506)).toBe('0.95')
+    expect(formatDescriptive(0.9630)).toBe('0.96')
+    // …and two means 0.04 apart, both of which rendered `2.0`.
+    expect(formatDescriptive(1.9948)).toBe('1.99')
+    expect(formatDescriptive(2.0367)).toBe('2.04')
+  })
+
+  it('keeps a REAL zero, at the base precision', () => {
+    // The falsy-zero rule: a measured 0 is a finding, not an absence, and must
+    // not be chased down six decimals looking for a significant digit.
+    expect(formatDescriptive(0)).toBe('0.00')
+    expect(formatDescriptive(-0)).toBe('0.00')
+  })
+
+  it('says NO_VALUE for what has none', () => {
+    expect(formatDescriptive(null)).toBe(NO_VALUE)
+    expect(formatDescriptive(undefined)).toBe(NO_VALUE)
+    expect(formatDescriptive(NaN)).toBe(NO_VALUE)
+    expect(formatDescriptive(Infinity)).toBe(NO_VALUE)
+  })
+
+  it('stops chasing digits rather than running away', () => {
+    // A vanishingly small number gets the cap, not 300 decimals.
+    expect(formatDescriptive(1e-30)).toBe('0.000000')
+    expect(formatDescriptive(1e-30).length).toBeLessThan(12)
+  })
+
+  it('leaves ordinary magnitudes at two decimals', () => {
+    expect(formatDescriptive(43029)).toBe('43029.00')
+    expect(formatDescriptive(2.5)).toBe('2.50')
   })
 })

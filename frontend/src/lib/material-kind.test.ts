@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isQualitativeMaterialConfig, materialAnalysisPath, describeMissingRefs } from './material-kind'
+import { isQualitativeMaterialConfig, materialAnalysisPath, describeMissingRefs, describeStaleInputs } from './material-kind'
 import type { MaterialRefKind } from './api/materials'
 
 /**
@@ -137,5 +137,52 @@ describe('describeMissingRefs', () => {
 
   it('returns nothing when nothing is missing', () => {
     expect(describeMissingRefs([])).toBe('')
+  })
+})
+
+describe('describeStaleInputs', () => {
+  it('names the one variable rather than counting it', () => {
+    // "A variable needs recomputing" sends a researcher hunting through forty
+    // of them. The name is the whole of what they need in order to act.
+    expect(describeStaleInputs([{ column_name: 'Score Gain' }]))
+      .toBe('Score Gain has changed since it was last computed.')
+  })
+
+  it('prefers the short name, falls back to the label', () => {
+    expect(describeStaleInputs([{ column_name: null, column_text: 'Change in score' }]))
+      .toBe('Change in score has changed since it was last computed.')
+  })
+
+  it('never renders an empty name', () => {
+    // `column_name` is nullable and `column_text` is only NOT NULL server-side;
+    // a blank string would print " has changed since…" with nothing in front.
+    expect(describeStaleInputs([{ column_name: '  ', column_text: '' }]))
+      .toBe('An unnamed variable has changed since it was last computed.')
+  })
+
+  it('names two, and caps the list past that', () => {
+    // A chart can read a whole variable group; without the cap one embed could
+    // print a paragraph of names above a chart.
+    expect(describeStaleInputs([{ column_name: 'A' }, { column_name: 'B' }]))
+      .toBe('A and B have changed since they were last computed.')
+    expect(describeStaleInputs([{ column_name: 'A' }, { column_name: 'B' }, { column_name: 'C' }]))
+      .toBe('A, B and 1 other have changed since they were last computed.')
+    expect(describeStaleInputs([
+      { column_name: 'A' }, { column_name: 'B' }, { column_name: 'C' }, { column_name: 'D' },
+    ])).toBe('A, B and 2 others have changed since they were last computed.')
+  })
+
+  it('says nothing when nothing is stale', () => {
+    expect(describeStaleInputs([])).toBe('')
+  })
+
+  it('🔴 never claims the FIGURES are stale', () => {
+    // The dead prop's wording was "Data stale", which for this surface is false:
+    // a canvas chart re-fetches on every render, so its figures are never old.
+    // What is out of date is an upstream computed variable. #808 is the signal
+    // that would justify the other wording, and it does not exist yet.
+    const said = describeStaleInputs([{ column_name: 'Score Gain' }])
+    expect(said).not.toMatch(/data (is )?stale/i)
+    expect(said).toMatch(/last computed/)
   })
 })

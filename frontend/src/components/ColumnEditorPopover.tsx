@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Link } from 'react-router'
 import { SELECTED_SEGMENT } from '@/lib/selection'
-import { Trash2, FunctionSquare, RefreshCw, Settings2, Users, Tags, ArrowLeftRight } from 'lucide-react'
+import { Trash2, RefreshCw, Users } from 'lucide-react'
 import {
   Popover,
   PopoverContent,
@@ -11,7 +11,9 @@ import {
   type DatasetColumn,
   type RecodeDefinitionSummary,
 } from '@/lib/api'
-import { COLUMN_TYPES, TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
+import { COLUMN_TYPES, TYPE_BADGE_CLASSES, variableDeleteEndpoint } from '@/lib/dataset-constants'
+import { columnDisplayLabel } from '@/lib/dataset-column-label'
+import { variableViewPath } from '@/lib/dataset-routes'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -27,24 +29,20 @@ interface ColumnEditorPopoverProps {
   onColumnNameEdit: (columnId: number, newName: string) => void
   onColumnTextEdit: (columnId: number, newText: string) => void
   onTypeChange: (columnId: number, newType: string) => void
-  onSubtypeChange: (columnId: number, subtype: string | null) => void
   onSelectDef: (defId: number | null) => void
   activeDef: RecodeDefinitionSummary | null
   // Navigation
   onNextColumn: (field: EditorField) => void
   onPrevColumn: (field: EditorField) => void
   // Action callbacks
-  onOpenDetails: (column: DatasetColumn) => void
   onDeleteColumn: (column: DatasetColumn) => void
-  onEditComputed?: (column: DatasetColumn) => void
+  /** A stale computed column is recomputable from here BY DESIGN — the marker
+   * that says it is stale is rendered in this very grid. The formula EDITOR
+   * lives in the Variables view (design note E). */
   onRecompute?: (column: DatasetColumn) => void
   /** #414 (DEC-8): retro bulk-link — identifier columns only. Links unlinked
    * rows by this column's values; never overwrites manual links. */
   onLinkByColumn?: (column: DatasetColumn) => void
-  /** #576/#577: open the value-labels editor for a numbers-only column. */
-  onEditValueLabels?: (column: DatasetColumn) => void
-  /** #575: swap column_name ↔ column_text (promote label→name when name empty). */
-  onSwapNameLabel?: (column: DatasetColumn) => void
   // Context
   projectId: number
   datasetId: number
@@ -64,18 +62,13 @@ export function ColumnEditorPopover({
   onColumnNameEdit,
   onColumnTextEdit,
   onTypeChange,
-  onSubtypeChange,
   onSelectDef,
   activeDef,
   onNextColumn,
   onPrevColumn,
-  onOpenDetails,
   onDeleteColumn,
-  onEditComputed,
   onRecompute,
   onLinkByColumn,
-  onEditValueLabels,
-  onSwapNameLabel,
   projectId,
   datasetId,
   columnIndex,
@@ -161,15 +154,30 @@ export function ColumnEditorPopover({
     })
   }, [editingField])
 
+  // #575's precedence, not a hand-rolled one. The chain here read
+  // `column_name || column_code || column_text`, which puts the MACHINE code
+  // ahead of the label — so on any dataset whose columns carry no short name (an
+  // ordinary CSV/Excel import: the header row lands in `column_text`) this
+  // announced "Editing column 3 of 41, C003" instead of the variable's own name.
+  // An accessible name is the one place the fallback matters most.
+  //
+  // ⚠️ Resolved at RENDER, not inside the effect below, and the effect then
+  // depends on the resulting STRING. Calling the helper inside the effect makes
+  // `column` — the whole object — a dependency, and that object gets a fresh
+  // identity on every `listColumns` refetch: the effect would re-run and
+  // re-announce with nothing having changed, which is #770's mechanism (a live
+  // region firing for a reason that is not the user's action). A primitive dep
+  // can only change when the announced words actually change.
+  const announceLabel = columnDisplayLabel(column, { maxLength: 40 })
+
   // ── Announce column on open ──────────────────────────────────────────
   useEffect(() => {
     if (open) {
-      const label = column.column_name || column.column_code || column.column_text.slice(0, 40)
-      setAnnouncement(`Editing column ${columnIndex + 1} of ${columnCount}, ${label}`)
+      setAnnouncement(`Editing column ${columnIndex + 1} of ${columnCount}, ${announceLabel}`)
     } else {
       setAnnouncement('')
     }
-  }, [open, columnIndex, columnCount, column.column_name, column.column_code, column.column_text])
+  }, [open, columnIndex, columnCount, announceLabel])
 
   // ── Reset on close ───────────────────────────────────────────────────
   useEffect(() => {
@@ -255,16 +263,23 @@ export function ColumnEditorPopover({
         onKeyDown={handleKeyDown}
         onOpenAutoFocus={(e) => e.preventDefault()}
         aria-roledescription="column editor"
-        aria-label={`Column editor: ${column.column_name || column.column_code || column.column_text.slice(0, 40)}`}
+        aria-label={`Column editor: ${announceLabel}`}
       >
         {/* SR announcement */}
         <span className="sr-only" aria-live="polite" aria-atomic="true">
           {announcement}
         </span>
 
-        {/* Column name (click-to-edit) */}
+        {/* Column name (click-to-edit).
+            ⚠️ These two captions are `<span>`, not `<label>`. Chrome reports
+            "no label associated with a form field" for both, because the thing
+            below is a BUTTON until you click it and only then an input — a
+            `<label>` can associate with neither reliably, and one that
+            associates with nothing is markup that promises a relationship it
+            does not have. The accessible name comes from each input's own
+            `aria-label`, which is what a reader actually announces. */}
         <div className="mb-1.5">
-          <label className="text-[10px] text-mm-text-muted uppercase tracking-wider">Short name</label>
+          <span className="block text-[10px] text-mm-text-muted uppercase tracking-wider">Short name</span>
           {editingField === 'name' ? (
             <input
               ref={nameInputRef}
@@ -290,7 +305,7 @@ export function ColumnEditorPopover({
 
         {/* Column label (click-to-edit) */}
         <div className="mb-2">
-          <label className="text-[10px] text-mm-text-muted uppercase tracking-wider">Label</label>
+          <span className="block text-[10px] text-mm-text-muted uppercase tracking-wider">Label</span>
           {editingField === 'label' ? (
             <textarea
               ref={labelInputRef}
@@ -336,21 +351,9 @@ export function ColumnEditorPopover({
             ))}
           </select>
 
-          {column.column_type === 'demographic' && (
-            <select
-              value={column.demographic_subtype || ''}
-              onChange={(e) => onSubtypeChange(column.id, e.target.value || null)}
-              aria-label="Demographic subtype"
-              className="mt-1 w-full text-xs border border-mm-border-subtle rounded px-1.5 py-0.5 bg-mm-surface text-mm-text-secondary"
-            >
-              <option value="">No subtype</option>
-              <option value="role">Role</option>
-              <option value="gender">Gender</option>
-              <option value="race">Race</option>
-              <option value="age">Age</option>
-              <option value="other">Other</option>
-            </select>
-          )}
+          {/* The demographic-subtype select moved to the Variables view
+              (design note E — the popover thinning). It is a property of the
+              variable, and this popover is the DATA view's quick editor. */}
 
           {column.scale_labels && (
             <p className="text-[11px] text-mm-text-faint mt-1">
@@ -391,10 +394,10 @@ export function ColumnEditorPopover({
         {/* Recode workbench link */}
         <div className="border-t pt-2 mt-2">
           <Link
-            to={`/projects/${projectId}/datasets/${datasetId}/recode?column=${column.id}`}
+            to={variableViewPath(projectId, datasetId, column.id)}
             className="text-xs text-mm-blue-text hover:underline"
           >
-            Edit in Recode Workbench
+            Edit in the Variables view
           </Link>
         </div>
 
@@ -412,54 +415,14 @@ export function ColumnEditorPopover({
                   Link rows to participants
                 </button>
               )}
-              {onEditValueLabels &&
-                ['ordinal', 'nominal', 'numeric', 'percentage', 'binary'].includes(column.column_type) && (
-                <button
-                  onClick={() => onEditValueLabels(column)}
-                  className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-mm-surface-hover text-mm-text-secondary flex items-center gap-1.5"
-                >
-                  <Tags className="w-3 h-3" />
-                  {/* #592: the dialog owns value labels AND missing values now,
-                      so a column with neither still needs a way in — a
-                      continuous `age` declaring "-99 to -1" missing has no
-                      labels at all (the gated-entry-point rule). */}
-                  {/* `[]` ("nothing is missing") IS a declaration — key on
-                      null-ness, never length (#609c). */}
-                  {(column.scale_labels && column.scale_labels.length > 0) ||
-                   column.missing_values != null
-                    ? 'Edit value labels & missing...'
-                    : 'Value labels & missing...'}
-                </button>
-              )}
-              {onSwapNameLabel && (
-                <button
-                  onClick={() => onSwapNameLabel(column)}
-                  className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-mm-surface-hover text-mm-text-secondary flex items-center gap-1.5"
-                >
-                  <ArrowLeftRight className="w-3 h-3" />
-                  {column.column_name ? 'Swap name ↔ label' : 'Use label as short name'}
-                </button>
-              )}
-              {/* #575: "Column details" edits scale metadata via the manual-only
-                  PATCH, which 403s on imported columns. For imported columns the
-                  popover already covers name/label (header PATCH), type, and value
-                  labels — so only offer the details dialog for manual columns. */}
-              {isManual && (
-                <button
-                  onClick={() => onOpenDetails(column)}
-                  className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-mm-surface-hover text-mm-text-secondary flex items-center gap-1.5"
-                >
-                  <Settings2 className="w-3 h-3" />
-                  Column details...
-                </button>
-              )}
-              <button
-                onClick={() => onDeleteColumn(column)}
-                className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 flex items-center gap-1.5"
-              >
-                <Trash2 className="w-3 h-3" />
-                Delete column
-              </button>
+              {/* The "Value labels & missing…" modal that used to sit here is
+                  GONE (design note E, slab 3), and so are "Swap name ↔ label"
+                  and "Column details…" (the thinning). All three are property
+                  FORMS — they change what the variable IS — and they now have
+                  one home, the Variables view, reachable by the link above.
+                  What stays here is what belongs to the DATA view: the quick
+                  name/label/type edit you make while reading the grid, the
+                  display lens, and the actions on this column's cells. */}
             </div>
           </>
         )}
@@ -472,15 +435,12 @@ export function ColumnEditorPopover({
               <p className="text-[10px] text-mm-text-muted font-mono mb-2 break-all">{column.expression}</p>
             )}
             <div className="space-y-1">
-              {onEditComputed && (
-                <button
-                  onClick={() => onEditComputed(column)}
-                  className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-mm-surface-hover text-mm-text-secondary flex items-center gap-1.5"
-                >
-                  <FunctionSquare className="w-3 h-3" />
-                  Edit formula...
-                </button>
-              )}
+              {/* "Edit formula…" moved to the Variables view with the other
+                  property forms. `Recompute` deliberately did NOT: it is a VERB
+                  acting on state this view RENDERS — the amber pulse marking a
+                  stale computed column sits a few pixels away — so sending the
+                  researcher to another screen to act on what is in front of
+                  them would be worse than having it in both places. */}
               {column.stale && onRecompute && (
                 <button
                   onClick={() => onRecompute(column)}
@@ -490,14 +450,30 @@ export function ColumnEditorPopover({
                   Recompute
                 </button>
               )}
-              <button
-                onClick={() => onDeleteColumn(column)}
-                className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 flex items-center gap-1.5"
-              >
-                <Trash2 className="w-3 h-3" />
-                Delete column
-              </button>
             </div>
+          </>
+        )}
+
+        {/* 🔴 ONE delete, gated by the ONE predicate (#812).
+            There were two buttons here, and the gates they inherited from their
+            surrounding branches disagreed: the first sat inside
+            `isManual || imported`, so it offered to delete an IMPORTED column —
+            which `delete_manual_column` 403s ("Only manual columns can be
+            deleted") — while the second, inside `isComputed`, was correct. With
+            the column-header context menu offering it ungated as well, that is
+            three triggers and three different gates for one destructive verb:
+            #807's shape, on the operation where getting it wrong is worst.
+            The endpoint choice now lives in `useDeleteVariable`. */}
+        {variableDeleteEndpoint(column) !== null && (
+          <>
+            <div className="border-t my-2" />
+            <button
+              onClick={() => onDeleteColumn(column)}
+              className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 flex items-center gap-1.5"
+            >
+              <Trash2 className="w-3 h-3" />
+              Delete variable…
+            </button>
           </>
         )}
       </PopoverContent>

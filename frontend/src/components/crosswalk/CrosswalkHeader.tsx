@@ -321,7 +321,8 @@ export function CrosswalkHeader({
                 aria-label={`Toggle ${ds.dataset_name} dataset visibility`}
                 className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors focus-visible:ring-2 focus-visible:ring-ring focus:outline-none ${
                   active
-                    ? 'bg-mm-blue/15 text-mm-blue border-mm-blue/30'
+                    // #852: the AA-safe text token, not the raw fill hue.
+                    ? 'bg-mm-blue/15 text-mm-blue-text border-mm-blue/30'
                     : 'bg-mm-surface text-mm-text-muted border-mm-border-subtle hover:text-mm-text hover:border-mm-border-medium'
                 }`}
               >

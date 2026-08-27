@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { stripComments } from './strip-comments'
 
 /**
  * #718 / #717 — the two ways this app's chrome assumed a wide window.
@@ -40,11 +41,7 @@ const HIDDEN_AT_BREAKPOINT = /className=["'{`][^"'`}]*\bhidden\s+\w+:inline/
  * describing it trains people to weaken the guard. Strip the prose instead.
  */
 function code(rel: string): string[] {
-  const raw = read(rel)
-  const stripped = raw
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length))
-  return stripped.split('\n')
+  return stripComments(read(rel)).split('\n')
 }
 
 /** Every source file under src/ that mentions `needle` (tests excluded). */
@@ -354,5 +351,106 @@ describe('#717 — the frozen band yields when it would occlude', () => {
       'By Record must keep naming the column each answer came from — it is the only ' +
         'view that mixes columns, so without it an answer has no question (#719).',
     ).toMatch(/comment\.column_name \|\| comment\.column_text/)
+  })
+})
+
+
+/**
+ * #830(a) — the rail overflowed the narrow viewport, and the fix is which
+ * label gives way.
+ *
+ * 🔴 **Measured live at the 625x345 CSS viewport a 1280x720 window has at 200%
+ * zoom: `scrollWidth` 667 against `clientWidth` 610.** The page scrolled
+ * horizontally (WCAG 1.4.10 reflow) and the overflowing subtree was the
+ * `ml-auto shrink-0` action group at 400px, ending in the 128px coder button.
+ *
+ * ⚠️ **#718's own remedy was ALREADY APPLIED and was not enough**, which is the
+ * part worth pinning: the breadcrumb carries `truncate min-w-0` and had already
+ * collapsed to 0px. Everything else in the row is fixed, so the row overflowed
+ * with a flexible child present and doing its job. Auditing the absence of one
+ * would have been a false negative here.
+ *
+ * ⚠️ jsdom computes no layout, so none of this can be measured in a unit test.
+ * These pin the TECHNIQUE — that the label collapses, and collapses the way the
+ * rail's other labels do. Re-drive at 625x345 after touching the rail.
+ */
+describe('#830(a) — the coder name collapses at a breakpoint', () => {
+  const railSource = code('components/TopRail.tsx').join('\n')
+
+  it('declares the collapse as a named constant, like RAIL_LABEL and TAB_LABEL', () => {
+    // Not hand-rolled at the call site: the rule keeps the collapse and any
+    // padding it needs inside ONE constant so the #721 pair cannot separate.
+    expect(railSource).toMatch(/const CODER_LABEL = 'sr-only sm:not-sr-only'/)
+  })
+
+  it('the coder name USES it', () => {
+    // The VISIBLE label span, not the aria-label a line above it — both mention
+    // `user.username`, and matching the wrong one is how this test first passed
+    // against a hand-rolled class string.
+    const line = code('components/TopRail.tsx').find(l => l.includes('max-w-[80px]'))
+    expect(line, 'the coder button label must route through CODER_LABEL').toBeTruthy()
+    expect(line!).toContain('CODER_LABEL')
+  })
+
+  it('collapses LATER than the pills and the tabs', () => {
+    // Ordering is a decision, not an accident: at a narrow width, which coder
+    // you are attributing work to matters more than a search label does.
+    const bp = (name: string) => railSource.match(new RegExp(`const ${name} = 'sr-only (\\w+):not-sr-only'`))?.[1]
+    expect(bp('RAIL_LABEL')).toBe('xl')
+    expect(bp('TAB_LABEL')).toBe('lg')
+    expect(bp('CODER_LABEL')).toBe('sm')
+  })
+
+  it('the identity survives the collapse', () => {
+    // `sr-only` keeps the name in the tree, AND the button carries its own
+    // aria-label — so the control is named twice over below `sm`. The colour
+    // dot is what a sighted user reads at that width.
+    const line = code('components/TopRail.tsx').find(l => l.includes('Coder menu'))
+    expect(line, 'the coder button must name itself independently of the visible label').toBeTruthy()
+    expect(line!).toContain('user.username')
+  })
+})
+
+
+describe("the scanner's own parser", () => {
+  /**
+   * SELF-CHECK, and the reason it exists rather than being assumed.
+   *
+   * The previous stripper was a pair of regexes, and a string literal
+   * containing `/*` — `matchPath('/projects/:projectId/*', …)` — opened a false
+   * comment that swallowed 95 lines of `TopRail.tsx`, the block holding the
+   * coder menu. Every scan above ran against a file with a hole in it and
+   * reported clean. **A scan that goes blind passes.**
+   */
+  it('keeps code that follows a string containing a comment opener', () => {
+    const src = [
+      "const m = matchPath('/projects/:projectId/*', location.pathname)",
+      'const keep = <span className="hidden sm:inline">Label</span>',
+    ].join('\n')
+    const lines = stripComments(src).split('\n')
+    expect(lines[1]).toContain('hidden sm:inline')
+  })
+
+  it('still removes real comments, and keeps the line count', () => {
+    const src = ['/* a\n   b */ const x = 1', '// gone', 'const y = 2'].join('\n')
+    const lines = stripComments(src).split('\n')
+    expect(lines).toHaveLength(4)
+    expect(lines.join('\n')).not.toContain('gone')
+    expect(lines[1]).toContain('const x = 1')
+    expect(lines[3]).toContain('const y = 2')
+  })
+
+  it('does not treat an apostrophe inside a comment as a string', () => {
+    // The walk leaves comment bodies as spaces, so a stray quote in prose
+    // cannot flip it into string state and swallow the rest of the file.
+    const src = ["/* don't do this */", 'const z = 3'].join('\n')
+    expect(stripComments(src).split('\n')[1]).toContain('const z = 3')
+  })
+
+  it('the real TopRail block that was invisible is now scanned', () => {
+    // POPULATION check against the actual file, not a synthetic one: if the
+    // stripper regresses, this names the symptom rather than a lost assertion.
+    const lines = code('components/TopRail.tsx')
+    expect(lines.some(l => l.includes('Coder menu'))).toBe(true)
   })
 })

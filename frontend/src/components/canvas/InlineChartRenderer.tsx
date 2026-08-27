@@ -8,11 +8,11 @@
  * Supports: horizontal_bar, heatmap, vertical_bar, stacked_bar, line.
  * Unsupported chart types fall back to a text label.
  */
-import { useCallback, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
-import { metricsApi, codeAnalysisApi } from '@/lib/api'
-import type { MetricDefinitionResponse } from '@/lib/api'
+import { metricsApi, codeAnalysisApi, comparisonsApi } from '@/lib/api'
+import type { MetricDefinitionResponse, AnalysisCrossTabResponse } from '@/lib/api'
 import {
   detectChartType,
   shapeScalarBars,
@@ -29,6 +29,11 @@ import {
   DEFAULT_FORMATTING,
   type ChartType,
   type ChartFormatting,
+  shapeHistogramBars,
+  describeHistogramBasis,
+  shapeDumbbellRows,
+  computeDumbbellChartN,
+  shapeSummaryStats,
 } from '@/lib/chart-data'
 import HorizontalBarChart from '@/components/charts/HorizontalBarChart'
 import HeatmapTable from '@/components/charts/HeatmapTable'
@@ -36,6 +41,10 @@ import FrequencyBarChart from '@/components/charts/FrequencyBarChart'
 import StackedHorizontalBarChart from '@/components/charts/StackedHorizontalBarChart'
 import VerticalBarChart from '@/components/charts/VerticalBarChart'
 import LineChartComponent from '@/components/charts/LineChart'
+import DumbbellChart from '@/components/charts/DumbbellChart'
+import SummaryStatsTable from '@/components/charts/SummaryStatsTable'
+import DetailedFrequencyTable from '@/components/charts/DetailedFrequencyTable'
+import AnalysisCrossTabTable from '@/components/charts/AnalysisCrossTabTable'
 import {
   extractComputeParams,
   buildRequest,
@@ -44,9 +53,22 @@ import {
   buildQualComparisonRequest,
   qualChartKind,
   qualChartHasEnoughToFetch,
+  extractComparisonParams,
+  isComparisonMaterialConfig,
+  isCorrelationMaterialConfig,
+  isCrossTabMaterialConfig,
+  extractCrossTabParams,
 } from './inline-chart-params'
+import ComparisonChartRouter from './ComparisonChartRouter'
+import {
+  fingerprintComparison,
+  fingerprintMetrics,
+  fingerprintSourceFrequencies,
+  type FigureFingerprint,
+} from './figure-baseline'
 import QualChartRouter from './QualChartRouter'
 import { isQualitativeMaterialConfig } from '@/lib/material-kind'
+import { describeUnavailable } from '@/lib/comparison-unavailable'
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -54,14 +76,39 @@ export interface InlineChartRendererProps {
   projectId: number
   materialId: number
   content: Record<string, unknown>
-  isStale?: boolean
-  onRefresh?: () => void
+  /**
+   * 🔴 `isStale?: boolean` and `onRefresh?: () => void` USED TO BE HERE, and
+   * neither was ever passed — `git log -S"isStale"` on the only consumer,
+   * `extensions/ChartEmbedView.tsx`, is empty. They were optional, so nothing
+   * type-errored and nothing linted, and the "Data stale" indicator they drove
+   * could not render (#795, the #624/#626/#627/#630 half-landed-wire class).
+   *
+   * Do not re-add them. The wording was also wrong for this component: the
+   * chart re-fetches through `quickCompute` on every render, so its figures are
+   * never old. What CAN be out of date is an upstream computed column, and that
+   * is now derived in `ChartEmbedView` beside the `missingRefs` warning — where
+   * it cannot depend on a caller remembering to pass anything.
+   */
   /**
    * The heading the embed already renders above this component (the material's
    * name). Passed in only so an identical config-side title is not printed a
    * second line below it — a config `title` that differs is still shown.
    */
   embedTitle?: string | null
+  /**
+   * #808 — report the numbers this embed DREW, so the view can diff them
+   * against the baseline stored on the node.
+   *
+   * ⚠️ **REQUIRED, and that is the whole point.** The `isStale` prop this
+   * component used to carry was optional and was never once passed (#795, the
+   * half-landed-wire class) — nothing type-errored and the indicator could not
+   * render. A second mount site cannot forget a required prop.
+   *
+   * ⚠️ Called on every successful data change, so the receiver must be stable
+   * and must no-op on an unchanged value — the same guard the co-occurrence N
+   * callback needs, for the same reason.
+   */
+  onFigure: (fingerprint: FigureFingerprint | null) => void
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -80,9 +127,8 @@ export default function InlineChartRenderer({
   projectId,
   materialId,
   content,
-  isStale,
-  onRefresh,
   embedTitle,
+  onFigure,
 }: InlineChartRendererProps) {
   // #652: a material is quantitative or qualitative by its CONFIG — the same
   // discriminator the "Open in Analysis" link routes on. Both branches' queries
@@ -90,8 +136,27 @@ export default function InlineChartRenderer({
   // stable across a config change.
   const isQual = useMemo(() => isQualitativeMaterialConfig(content), [content])
 
+  // #817 — a QUANTITATIVE group comparison. Detected before the metric branch
+  // because its config carries `column_ids` too, so `hasSelection` would be
+  // true and it would compute a metric on the comparison's own variables — a
+  // plausible wrong figure under the right title, which is exactly what shipped.
+  const isComparisonMaterial = useMemo(() => !isQual && isComparisonMaterialConfig(content), [isQual, content])
+
+  // #831 — a CORRELATION or SCATTER matrix. Detected for the same reason the
+  // comparison is (its config carries `column_ids`, so the metric branch would
+  // happily draw a frequency chart of the correlation's own variables) but
+  // handled differently: there is no inline correlation renderer, so this
+  // branch REFUSES rather than draws. A visible limit beats a silent wrong
+  // figure — the whole lesson of #817.
+  const isCorrelationMaterial = useMemo(
+    () => !isQual && !isComparisonMaterial && isCorrelationMaterialConfig(content),
+    [isQual, isComparisonMaterial, content],
+  )
+  const comparisonParams = useMemo(() => extractComparisonParams(content), [content])
+
   const params = useMemo(() => extractComputeParams(content), [content])
-  const hasSelection = !isQual && (params.columnIds.length > 0 || params.domainIds.length > 0)
+  const hasSelection = !isQual && !isComparisonMaterial && !isCorrelationMaterial
+    && (params.columnIds.length > 0 || params.domainIds.length > 0)
 
   const request = useMemo(
     () => (hasSelection ? buildRequest(params) : null),
@@ -102,6 +167,36 @@ export default function InlineChartRenderer({
     queryKey: ['canvas-chart', projectId, materialId, request],
     queryFn: () => metricsApi.quickCompute(projectId, request!),
     enabled: hasSelection && request != null,
+    staleTime: 5 * 60 * 1000,
+  })
+
+  // #823(g) — a cross-tab is the one missing descriptives type that needs its
+  // OWN endpoint; the other three shape from the metrics already fetched.
+  //
+  // ⚠️ #832: the axis derivation moved to `inline-chart-params.ts` so the EXPORT
+  // reads the same one. It was inline here, and the export never learned it —
+  // so `.md` carried the marginal distribution while this drew the cross-tab.
+  const crossTabParams = useMemo(() => extractCrossTabParams(content), [content])
+  const {
+    data: crossTabData,
+    isLoading: crossTabLoading,
+  } = useQuery({
+    queryKey: ['canvas-cross-tab', projectId, materialId, crossTabParams.request],
+    queryFn: () => metricsApi.crossTabulation(projectId, crossTabParams.request!),
+    enabled: !isQual && !isComparisonMaterial && !isCorrelationMaterial
+      && isCrossTabMaterialConfig(content)
+      && crossTabParams.request != null,
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const {
+    data: comparisonData,
+    isLoading: comparisonEmbedLoading,
+    isError: comparisonEmbedError,
+  } = useQuery({
+    queryKey: ['canvas-comparison', projectId, materialId, comparisonParams.request],
+    queryFn: () => comparisonsApi.groupComparison(projectId, comparisonParams.request!),
+    enabled: isComparisonMaterial && comparisonParams.request != null,
     staleTime: 5 * 60 * 1000,
   })
 
@@ -164,6 +259,25 @@ export default function InlineChartRenderer({
     setCooccurrenceN(prev => (prev === next ? prev : next))
   }, [])
 
+  // #808 — one place computes what this embed drew, whichever branch drew it.
+  // Derived rather than reported from each render path: a per-branch call would
+  // be five sites to keep in step, and a branch added later would silently stop
+  // reporting.
+  const figure = useMemo<FigureFingerprint | null>(() => {
+    if (isComparisonMaterial) {
+      return comparisonData && comparisonData.rows.length > 0
+        ? fingerprintComparison(comparisonData)
+        : null
+    }
+    if (isQual) {
+      return qualData ? fingerprintSourceFrequencies(qualData) : null
+    }
+    const ms = computeResult?.metrics ?? []
+    return ms.length > 0 ? fingerprintMetrics(ms) : null
+  }, [isComparisonMaterial, isQual, comparisonData, qualData, computeResult])
+
+  useEffect(() => { onFigure(figure) }, [figure, onFigure])
+
   // #652: `content.auto_name` was read here and is NEVER populated — on ANY
   // path. `auto_name` is a sibling field in the create-material payload
   // (AnalysisView:1093 / QualitativeAnalysisView:737) and a sibling COLUMN on
@@ -198,21 +312,6 @@ export default function InlineChartRenderer({
   // Defined before the early returns so both branches print the same title /
   // subtitle / footnote furniture around whatever they draw.
 
-  const staleIndicator = isStale && (
-    <div className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400 mb-2">
-      <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-      Data stale
-      {onRefresh && (
-        <button
-          onClick={onRefresh}
-          className="underline hover:no-underline ml-1"
-        >
-          Refresh
-        </button>
-      )}
-    </div>
-  )
-
   const titleBlock = (chartTitle || chartSubtitle) && (
     <div className="mb-2">
       {chartTitle && (
@@ -233,7 +332,6 @@ export default function InlineChartRenderer({
    */
   const frame = (children: ReactNode, chartN?: number | null) => (
     <div className="max-w-[640px]" data-chart-capture-root>
-      {staleIndicator}
       {titleBlock}
       {chartN != null && (
         <div className="text-mm-text-secondary mb-2" style={{ fontSize: formatting.labelFontSize, fontWeight: 500 }}>
@@ -354,6 +452,44 @@ export default function InlineChartRenderer({
     )
   }
 
+  // ── Quantitative COMPARISON branch (#817) ───────────────────────────────
+
+  if (isCorrelationMaterial) {
+    // No inline renderer for a correlation matrix or a scatter matrix. Naming
+    // which it is matters: "this chart type" would read as a rendering fault,
+    // where the researcher's actual next step is one click away.
+    return notice(
+      <>
+        {content?.show_scatter ? 'Scatter matrices' : 'Correlation matrices'} can&rsquo;t be
+        drawn on the canvas yet.
+        <br />
+        Open it in Analysis to view it.
+      </>,
+    )
+  }
+
+  if (isComparisonMaterial) {
+    if (comparisonParams.request == null) return notice('No data configured')
+    if (comparisonEmbedLoading) return spinner
+    if (comparisonEmbedError || !comparisonData) return notice('Chart unavailable')
+    if (comparisonData.rows.length === 0) {
+      // The same reason vocabulary the analysis view reads (#823c/#827) — the
+      // canvas must not invent its own sentence for an empty comparison either.
+      const copy = describeUnavailable(comparisonData.unavailable_reason)
+      return notice(copy?.title ?? 'No comparison data available.')
+    }
+    return frame(
+      <ComparisonChartRouter
+        data={comparisonData}
+        chartType={comparisonParams.chartType}
+        sigLevels={comparisonParams.sigLevels}
+        nonparametric={comparisonParams.nonparametric}
+        postHocExpanded={comparisonParams.postHocExpanded}
+        formatting={formatting}
+      />,
+    )
+  }
+
   // ── Quantitative branch ─────────────────────────────────────────────────
 
   if (!hasSelection) return notice('No data configured')
@@ -367,6 +503,11 @@ export default function InlineChartRenderer({
       metricType={params.metricType}
       formatting={formatting}
       content={content}
+      crossTab={crossTabData ?? null}
+      crossTabLoading={crossTabLoading}
+      crossTabConfigured={crossTabParams.request != null}
+      crossTabDisplay={crossTabParams.display}
+      crossTabScaleOrder={crossTabParams.scaleOrder}
     />,
   )
 }
@@ -379,9 +520,25 @@ interface ChartRouterProps {
   metricType: string
   formatting: ChartFormatting
   content: Record<string, unknown>
+  /** #823(g) — the cross-tab's own payload; null until it resolves. */
+  crossTab: AnalysisCrossTabResponse | null
+  crossTabLoading: boolean
+  /** Whether the saved config names both axes; a cross-tab needs two columns. */
+  crossTabConfigured: boolean
+  /**
+   * #832 — threaded from `extractCrossTabParams` rather than re-read from
+   * `content` here, so this table and the EXPORT'S table cannot disagree about
+   * which cell field to show. ⚠️ `cross_tab_display` is a DIFFERENT key from the
+   * `display` this router reads for every other chart type.
+   */
+  crossTabDisplay: string
+  crossTabScaleOrder: string
 }
 
-function ChartRouter({ chartType, metrics, metricType, formatting, content }: ChartRouterProps) {
+function ChartRouter({
+  chartType, metrics, metricType, formatting, content,
+  crossTab, crossTabLoading, crossTabConfigured, crossTabDisplay, crossTabScaleOrder,
+}: ChartRouterProps) {
   const display = (content.display as 'percentage' | 'count') ?? 'percentage'
   const scaling = (content.scaling as 'relative' | 'absolute') ?? 'relative'
   const hiddenResponseOptions = (content.hiddenResponseOptions as string[]) ?? []
@@ -492,11 +649,113 @@ function ChartRouter({ chartType, metrics, metricType, formatting, content }: Ch
       )
     }
 
+    case 'histogram': {
+      // #522 — the canvas draws the histogram rather than falling through to
+      // "histogram chart", so a saved distribution stays a distribution. The
+      // bins come from `formatting.binWidth`, which rides the material config
+      // like every other formatting field, and the basis line rides the chart.
+      const { bars, histogram } = shapeHistogramBars(metrics[0], { binWidth: formatting.binWidth })
+      const nInfo = computeFreqBarChartN(metrics)
+      return (
+        <div>
+          <VerticalBarChart
+            histogram
+            frequencyData={bars}
+            display={display}
+            sortOrder="none"
+            chartN={nInfo.chartN}
+            formatting={formatting}
+          />
+          <p className="text-xs text-mm-text-faint mt-1">{describeHistogramBasis(histogram)}</p>
+        </div>
+      )
+    }
+
+    // ── #823(g): the four types that used to print their own name ──────────
+    //
+    // They fell to the `default` below, which rendered the raw token — the
+    // literal string "frequency_table chart" — on a user surface. Three of the
+    // six materials the GSS pass saved were these types. The data was already
+    // here for three of them; only the cross-tab needed a second request.
+
+    case 'dumbbell': {
+      const dumbbellData = shapeDumbbellRows(metrics, undefined, {
+        hiddenGroupValues: (content.hidden_group_values as string[]) ?? undefined,
+      })
+      const nInfo = computeDumbbellChartN(dumbbellData)
+      return (
+        <DumbbellChart
+          data={dumbbellData}
+          showCI={content.showCI === true}
+          chartN={nInfo.chartN}
+          groupNs={nInfo.groupNs}
+          hasVaryingGroupN={nInfo.hasVaryingGroupN}
+          formatting={formatting}
+          metricType={metricType}
+        />
+      )
+    }
+
+    case 'table':
+      return (
+        <SummaryStatsTable
+          data={shapeSummaryStats(metrics, undefined, metricType)}
+          showCI={content.showCI === true}
+          formatting={formatting}
+          metricType={metricType}
+        />
+      )
+
+    case 'frequency_table':
+      return (
+        <DetailedFrequencyTable
+          metrics={metrics}
+          formatting={formatting}
+          reverseScale={reverseScale}
+          hiddenLabels={shapeOpts.hiddenLabels}
+          hiddenGroupValues={(content.hidden_group_values as string[]) ?? undefined}
+        />
+      )
+
+    case 'cross_tab': {
+      // A cross-tab needs BOTH axes. The analysis view can prompt for the
+      // missing one; an embed cannot, so it says which half is absent rather
+      // than rendering an empty table.
+      if (!crossTabConfigured) {
+        return (
+          <div className="text-sm text-mm-text-faint py-4 text-center" role="status">
+            This cross-tab has no comparison column saved.
+          </div>
+        )
+      }
+      if (crossTabLoading || !crossTab) {
+        return (
+          <div className="flex items-center justify-center py-8 text-mm-text-faint text-sm gap-2" role="status">
+            <RefreshCw className="w-4 h-4 animate-spin" aria-hidden />
+            Loading chart...
+          </div>
+        )
+      }
+      return (
+        <AnalysisCrossTabTable
+          data={crossTab}
+          display={crossTabDisplay}
+          scaleOrder={crossTabScaleOrder}
+          formatting={formatting}
+        />
+      )
+    }
+
     default:
-      // Fallback for unsupported chart types (dumbbell, table, frequency_table, cross_tab)
+      // ⚠️ Names no type. The old fallback printed `{chartType} chart` — a raw
+      // token like "frequency_table chart" — which reads as a rendering bug
+      // rather than a limit, and tells the researcher nothing about what to do.
+      // Wording matches the qualitative branch's equivalent notice.
       return (
         <div className="text-sm text-mm-text-faint py-4 text-center" role="status">
-          {chartType} chart
+          This chart type can&rsquo;t be drawn on the canvas yet.
+          <br />
+          Open it in Analysis to view it.
         </div>
       )
   }

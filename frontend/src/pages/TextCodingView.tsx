@@ -21,8 +21,9 @@ import {
 } from '@/lib/api'
 import { useHistory } from '@/hooks/useHistory'
 import TextCodingColumnPicker from '@/components/TextColumnPicker'
-import ByTextTable from '@/components/ByTextTable'
+import ByTextTable, { type ByTextTableHandle } from '@/components/ByTextTable'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
+import { codeKeyHint } from '@/lib/codeShortcuts'
 import ByRecordPanel from '@/components/ByRecordPanel'
 import { useCoders } from '@/hooks/useCoders'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
@@ -112,6 +113,8 @@ export default function TextCodingView() {
   const [activeColumnId, setActiveColumnId] = useState<number | null>(null)
 
   const history = useHistory()
+  // #825: the jump handler lives here; the scroller lives in ByTextTable.
+  const byTextRef = useRef<ByTextTableHandle>(null)
   const configLoadedRef = useRef(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -300,19 +303,19 @@ export default function TextCodingView() {
   })
   const categories = useMemo(() => categoriesData?.categories ?? [], [categoriesData?.categories])
 
-  // Derive chord numbers from display_order position (digits 2-9 for first 8 categories)
-  const chordNumberMap = useMemo(() => {
-    const sorted = [...categories].sort((a, b) => a.display_order - b.display_order)
-    const map = new Map<number, number>()
-    sorted.forEach((cat, i) => {
-      if (i < 8) map.set(cat.id, i + 2)
-    })
-    return map
-  }, [categories])
-
-  // The chord map now lives inside useCodeChordShortcuts (derived from `codes` via the
-  // shared buildShortcutCategories helper — #388 P3.3). chordNumberMap is still used below
-  // for the CodePanel labels.
+  // #824: THE PANEL'S LABELS ARE NOT DERIVED HERE ANY MORE, and the map that
+  // used to be is why `6.1` applied *Teacher Attitudes*.
+  //
+  // This built `categoryId → digit` from EVERY category returned by the
+  // categories endpoint, sorted by `display_order`. The chord RESOLVER builds
+  // from `buildShortcutCategories(codes)` — only categories that HAVE codes, in
+  // first-appearance order. The two diverge the instant an empty category sorts
+  // before a populated one, and project 1 has four such categories. Measured on
+  // real data: one of five advertised prefixes was correct, by coincidence.
+  //
+  // `TextCodePanel` now reads `useCodeShortcutLabels` + `categoryShortcutPrefixes`
+  // directly, like `CodePanel` does. `categories` is still passed for names and
+  // colours — it just no longer decides which key anything answers to.
 
   // ── Auto-save config ──────────────────────────────────────────────────
 
@@ -514,13 +517,32 @@ export default function TextCodingView() {
           queryClient.invalidateQueries({ queryKey: ['excerpts-quoted', projectId] })
         },
         undo: async () => {
-          // Refetch to find new excerpt IDs
-          const freshComments = queryClient.getQueryData<{ comments: typeof comments }>(['text-data', projectId])
-          if (freshComments) {
-            for (const dvId of valueIds) {
-              const c = freshComments.comments?.find((cm) => cm.dataset_value_id === dvId)
-              if (c?.excerpt_id) await excerptsApi.delete(projectId, c.excerpt_id)
+          // #844 scoping, 2026-08-27 — this undo DELETED NOTHING and announced
+          // success, for two independent reasons either of which was fatal:
+          //
+          //  1. `getQueryData` is EXACT-match (the #800 rule). This query's real key
+          //     is 8 elements — ['text-data', projectId, columnIdsStr, datasetFilterIds,
+          //     hideEmpty, searchText, randomSeed, quotedOnly] — so a 2-element key
+          //     matched nothing and returned undefined every time.
+          //  2. It then read `.comments`; the response field is `texts`.
+          //
+          // Fixed with the PREFIX-matching pair, which also means the undo does not
+          // have to restate an 8-element key it cannot keep in step. `refetchQueries`
+          // is awaited first because `redo` only INVALIDATED — without the await the
+          // cache still holds the pre-quote rows, where every `excerpt_id` is null,
+          // and the undo silently no-ops exactly as before.
+          await queryClient.refetchQueries({ queryKey: ['text-data', projectId] })
+          const excerptIdByValueId = new Map<number, number>()
+          for (const [, page] of queryClient.getQueriesData<{ texts?: { dataset_value_id: number; excerpt_id: number | null }[] }>(
+            { queryKey: ['text-data', projectId] },
+          )) {
+            for (const t of page?.texts ?? []) {
+              if (t.excerpt_id != null) excerptIdByValueId.set(t.dataset_value_id, t.excerpt_id)
             }
+          }
+          for (const dvId of valueIds) {
+            const excerptId = excerptIdByValueId.get(dvId)
+            if (excerptId != null) await excerptsApi.delete(projectId, excerptId)
           }
           queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
           queryClient.invalidateQueries({ queryKey: ['excerpts-quoted', projectId] })
@@ -568,6 +590,13 @@ export default function TextCodingView() {
       const idx = (currentIdx + offset) % searchPool.length
       if (!isSegmentCodedVisible(searchPool[idx].applied_code_details, effectiveHidden)) {
         setSelectedValueIds([searchPool[idx].dataset_value_id])
+        // #825: SCROLL, or the selection advances invisibly and the next chord
+        // codes a record the researcher never saw (reproduced: `Curriculum
+        // fidelity` landed on R0038, a row react-virtuoso had not rendered).
+        // ⚠️ Only in By Text: `searchPool` is `filteredComments`, the exact array
+        // `ByTextTable` virtualises, so the index means the same thing on both
+        // sides. In By Record the table is not mounted and the ref is null.
+        if (viewMode === 'by_text') byTextRef.current?.scrollToIndex(idx)
         setAnnouncement(`Jumped to uncoded text ${idx + 1}`)
         return
       }
@@ -1250,6 +1279,7 @@ export default function TextCodingView() {
                       containing the measured scroller is not. */}
                   <div className="flex-1 min-h-0 @container">
                     <ByTextTable
+                      ref={byTextRef}
                       comments={filteredComments}
                       loading={commentsLoading}
                       selectedValueIds={selectedValueIds}
@@ -1334,7 +1364,6 @@ export default function TextCodingView() {
                     selectedCount={selectedValueIds.length}
                     isFocused={focusedPanel === 'codes'}
                     onFocusChange={(f) => f && setFocusedPanel('codes')}
-                    chordNumberMap={chordNumberMap}
                   />
                 </PageErrorBoundary>
               </CollapsiblePanel>
@@ -1459,7 +1488,7 @@ export default function TextCodingView() {
         {activeTab === 'coding' && selectedValueIds.length > 0 && <span>{selectedValueIds.length} selected</span>}
         <div className="flex-1" />
         {activeTab === 'coding' && (
-          <span className="opacity-60">0-9: code · s: quote · c: create code · n: note · j: next uncoded · []: {viewMode === 'by_text' ? 'prev/next column' : 'prev/next record'} · Ctrl+Z/Y: undo/redo</span>
+          <span className="opacity-60">{codeKeyHint(codes)} · s: quote · c: create code · n: note · j: next uncoded · []: {viewMode === 'by_text' ? 'prev/next column' : 'prev/next record'} · Ctrl+Z/Y: undo/redo</span>
         )}
       </div>
     </div>

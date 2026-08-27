@@ -1,4 +1,6 @@
 import api from './client'
+import { EXPORT_TIMEOUT_MS } from './download'
+import { safeFilename } from '../filename'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -46,6 +48,13 @@ export interface PendingItem {
   item_type: string
   source_id: number
   created_at: string
+  /**
+   * What this item IS — the material's name, the memo's title, or the start of
+   * the excerpt (#823j). Server-resolved: the three item types are three
+   * different entities, so the client cannot derive it. `null` when the source
+   * row is gone, which is what the id fallback is for.
+   */
+  source_label?: string | null
 }
 
 export interface CanvasDetail {
@@ -217,12 +226,25 @@ export const canvasApi = {
     const { data } = await api.post<Blob>(
       `${base(projectId)}/${canvasId}/export-docx`,
       { chart_images },
-      { responseType: 'blob' },
+      {
+        responseType: 'blob',
+        // #833 — the project-scale export budget, not the 30 s client default.
+        // This POST carries every chart's PNG up and a rendered document back;
+        // `downloadFromApi` cannot be used (it is GET-only), so the budget is
+        // applied explicitly rather than re-derived.
+        timeout: EXPORT_TIMEOUT_MS,
+      },
     )
     const url = URL.createObjectURL(data)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${filename.replace(/[/\\?%*:|"<>]/g, '_').slice(0, 80)}.docx`
+    // #833/#734 — `lib/filename.ts::safeFilename` is the ONE client-side name
+    // rule. The inline regex here was a second implementation of it, and a
+    // narrower one: it stripped a fixed punctuation set and truncated, so a
+    // non-Latin canvas name survived here while `chart-export`/`canvas-export`
+    // treated it correctly. `a.download` is a DOM string, never an HTTP header
+    // — the ASCII allow-list belongs on the SERVER side only.
+    a.download = `${safeFilename(filename, { maxLength: 80 })}.docx`
     a.click()
     URL.revokeObjectURL(url)
   },

@@ -8,6 +8,7 @@ import {
   clampMediaSeek,
   findClipsAtTime,
   isBeyondRecording,
+  playheadRowSuffix,
   recordingEndsAtTimelineTime,
   scrubberPlayheadTime,
   PLAYBACK_SPEEDS,
@@ -264,5 +265,28 @@ describe('findClipsAtTime — interval containment for overlapping clips (D27)',
   it('a point event matches only at exact equality (a half-open empty interval would never match)', () => {
     expect(findClipsAtTime(clips, 45).map(c => c.id)).toEqual([2, 3, 4])
     expect(findClipsAtTime(clips, 45.01).map(c => c.id)).toEqual([2, 3])
+  })
+})
+
+describe('playheadRowSuffix (#775)', () => {
+  it('says nothing when the playhead is not in this unit', () => {
+    expect(playheadRowSuffix(false, false)).toBe('')
+    // Playing elsewhere is still nothing to say about THIS row.
+    expect(playheadRowSuffix(false, true)).toBe('')
+  })
+
+  it('distinguishes a rolling transport from a parked one', () => {
+    expect(playheadRowSuffix(true, true)).toBe(' — now playing')
+    expect(playheadRowSuffix(true, false)).toBe(' — paused here')
+  })
+
+  /**
+   * The defect, stated as its own case: #770 read containment as "playing", so
+   * selecting a clip that starts at 0:00 announced playback on a recording that
+   * had never been played (the selection seek's lead-in clamps to 0, landing
+   * inside the clip). Containment WITHOUT the transport must never say playing.
+   */
+  it('#775: containment alone never claims playback', () => {
+    expect(playheadRowSuffix(true, false)).not.toMatch(/now playing/)
   })
 })

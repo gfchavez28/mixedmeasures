@@ -1,10 +1,11 @@
 import { lazy } from 'react'
-import { Routes, Route, Navigate, useParams } from 'react-router'
+import { Routes, Route, Navigate, useParams, useLocation } from 'react-router'
 import { Toaster } from 'sonner'
 import { AuthProvider, useAuth } from '@/lib/auth-context'
 import { ThemeProvider } from '@/lib/theme-context'
 import { ZoomProvider } from '@/lib/zoom-context'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { variableViewPath } from '@/lib/dataset-routes'
 import Dashboard from '@/pages/Dashboard'
 import ProjectLayout from '@/layouts/ProjectLayout'
 import OverviewPage from '@/pages/OverviewPage'
@@ -53,9 +54,38 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+/**
+ * Redirect a retired project-scoped path to its replacement.
+ *
+ * Builds an ABSOLUTE path from `useParams` rather than a relative `<Navigate>`,
+ * which is #636: a relative `to` resolves against the ROUTE, not the URL, and
+ * both `"x"` and `"../x"` miss every route and fall through to the catch-all.
+ *
+ * ⚠️ **`location.search` is CARRIED, and that is load-bearing (2026-08-23).**
+ * Without it this helper silently drops query parameters — and the Variables
+ * view is deep-linked as `?column=N` from five surfaces, so a bookmark or a
+ * pasted link would have landed on the right page with nothing selected and no
+ * error. The two pre-existing callers pass no parameters, so carrying them is
+ * a no-op there; dropping them was never a decision anyone took.
+ */
 function LegacyRedirect({ to }: { to: string }) {
   const { projectId } = useParams()
-  return <Navigate to={`/projects/${projectId}/${to}`} replace />
+  const { search } = useLocation()
+  return <Navigate to={`/projects/${projectId}/${to}${search}`} replace />
+}
+
+/**
+ * `…/datasets/:id/recode` → `…/datasets/:id/variables`, query string intact.
+ *
+ * Its own component rather than a `LegacyRedirect` call because the target
+ * needs `:datasetId` as well as `:projectId`, and the path comes from
+ * `lib/dataset-routes.ts` so the redirect cannot drift from what the five
+ * in-app call sites link to.
+ */
+function LegacyRecodeRedirect() {
+  const { projectId, datasetId } = useParams()
+  const { search } = useLocation()
+  return <Navigate to={`${variableViewPath(projectId!, datasetId!)}${search}`} replace />
 }
 
 function AppRoutes() {
@@ -98,7 +128,14 @@ function AppRoutes() {
         <Route path="datasets/variable-groups" element={<CrosswalkView />} />
         <Route path="datasets/text-coding" element={<TextCodingView />} />
         <Route path="datasets/:datasetId" element={<DatasetView />} />
-        <Route path="datasets/:datasetId/recode" element={<RecodeWorkbench />} />
+        <Route path="datasets/:datasetId/variables" element={<RecodeWorkbench />} />
+        {/* Retired 2026-08-23: the page was never only about recoding — it edits
+            name, label and type too (design note §10.5). The redirect carries
+            `?column=N`, which five surfaces deep-link. */}
+        <Route
+          path="datasets/:datasetId/recode"
+          element={<LegacyRecodeRedirect />}
+        />
         <Route path="datasets/:datasetId/append" element={<AppendImport />} />
         <Route path="documents" element={<DocumentsListPage />} />
         <Route path="documents/import" element={<DocumentImport />} />
