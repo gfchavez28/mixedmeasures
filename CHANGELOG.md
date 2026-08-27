@@ -98,6 +98,14 @@ overwriting the old one, and several numbers the app reported are now correct.
 
 ### Fixed
 
+- 🔴 **Statistical tests could not run in the installed app at all, and now can.**
+  In 1.3.1 and 1.3.2, every group comparison — t-test, ANOVA, Mann-Whitney,
+  Kruskal-Wallis — failed with a server error in the packaged desktop app. The
+  statistics library was not fully included when the app was bundled, and the
+  missing piece was only reached the moment a test ran, so nothing detected it
+  until the app was installed and used. Descriptive statistics, frequencies,
+  charts and everything else were unaffected. **If comparisons have been failing
+  for you, this release fixes it** — no change to your data or projects is needed.
 - **Large surveys work end to end.** A real 75,699-record, 41-variable survey
   could not be previewed, imported, opened, or deleted. All four are fixed:
   previewing no longer times out, importing writes in batches instead of one

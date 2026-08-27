@@ -6,6 +6,7 @@ A corrective release, and a large one. Most of it is work that makes existing fe
 hold up on real research data — a survey with tens of thousands of records, a fully
 coded transcript, a project with hundreds of variables.
 
+- 🔴 **If statistical comparisons have been failing for you, this release fixes them.** In 1.3.1 and 1.3.2 every group comparison — t-test, ANOVA, Mann-Whitney, Kruskal-Wallis — returned a server error in the installed app, because the statistics library was not fully included when the app was bundled. Descriptives, frequencies and charts were unaffected. Nothing in your projects needs changing.
 - **A dataset now has two views: Data and Variables.** *Data* is the grid of records. *Variables* is where a variable is described — name and label, type, value labels, which values count as missing, and its recode rules — with the rules on screen while you edit the dictionary. The old recoding link redirects automatically.
 - **A recode rule can produce a new variable, leaving the original untouched**, and it records which variable and which rule produced it.
 - **Applying a rule to the variable it sits on is now something you ask for.** Three paths used to apply a rule without asking, including saving your first rule. A rule in effect rewrites every stored number in that variable and there is no undo, so it is now a deliberate choice.

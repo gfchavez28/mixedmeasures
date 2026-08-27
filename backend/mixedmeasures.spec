@@ -20,10 +20,26 @@ sqlcipher_datas, sqlcipher_binaries, sqlcipher_hiddenimports = collect_all("sqlc
 # Without both, the frozen backend raises ModuleNotFoundError on the first .sav upload.
 pyreadstat_datas, pyreadstat_binaries, pyreadstat_hiddenimports = collect_all("pyreadstat")
 
+# 🔴 scipy's VENDORED subtree (#858). `scipy/_lib/_array_api.py` reaches
+# `scipy._external.array_api_compat` through a dynamic `importlib.import_module`, so
+# modulegraph cannot see it and the OFFICIAL scipy hook does not collect it either.
+# The result is the worst shape available: every gate passes against source, and the
+# frozen app raises `ModuleNotFoundError: scipy._external.array_api_compat.numpy.fft`
+# on the FIRST statistical test — i.e. `import scipy.stats` itself fails, so t-test,
+# ANOVA, Mann-Whitney and Kruskal-Wallis all 500. Measured on the shipped v1.3.2 and
+# v1.4.0 Linux builds; "scipy.stats" in hiddenimports below is NOT sufficient, because
+# the name resolves and its own import is what dies.
+# ⚠️ Collect the WHOLE `_external` subtree, not just array_api_compat: scipy vendors
+# array_api_extra, cobyqa, pyprima and packaging_version there under the same dynamic
+# resolution, so pinning the one module that happened to fail would leave the next one
+# to be discovered by a user.
+scipy_external_hiddenimports = collect_submodules("scipy._external")
+
 hiddenimports = (
     [
         # Lazy / function-local imports in services (belt-and-suspenders; scipy/numpy
-        # also have official PyInstaller hooks).
+        # also have official PyInstaller hooks — but see the scipy._external note above:
+        # the hook does NOT reach the vendored subtree).
         "scipy.stats",
         "scipy.special",
         "numpy",
@@ -44,6 +60,7 @@ hiddenimports = (
     + sqlcipher_hiddenimports         # SQLCipher driver (collected above) — at-rest encryption
     + pyreadstat_hiddenimports        # SPSS .sav reader (compiled submodules)
     + collect_submodules("narwhals")  # pyreadstat's backend layer resolves by dynamic import
+    + scipy_external_hiddenimports    # scipy's vendored subtree (#858) — see the note above
 )
 
 # Read-only resources the running app needs. Alembic loads versions/*.py via importlib at
