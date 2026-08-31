@@ -30,12 +30,23 @@ const readOnlyExtensions: AnyExtension[] = [
 
 // ── Read-only theme renderer ─────────────────────────────────────────────────
 
-function ReadOnlyTheme({ name, color, content, diffClass, materialDiff }: {
+function ReadOnlyTheme({ name, color, content, diffClass, materialDiff, changed, changedLabel, statusLabel }: {
   name: string
   color: string | null
   content: Record<string, unknown> | null
   diffClass?: string
   materialDiff?: string
+  /** #850(b) — this matched theme's prose differs between the two sides. */
+  changed?: boolean
+  /**
+   * #865 — the WORD for that, passed in rather than chosen here. It used to be
+   * picked from a `changedSide` prop, which is how the left pane came to say
+   * *"Text changed since"* — not a sentence, and a second place for the page's
+   * mark vocabulary to live. The caller owns the wording; this owns the render.
+   */
+  changedLabel?: string
+  /** #850(c) — the word for an added/removed theme, paired with its colour. */
+  statusLabel?: string
 }) {
   const parsedContent = useMemo(() => {
     if (!content) return null
@@ -49,6 +60,17 @@ function ReadOnlyTheme({ name, color, content, diffClass, materialDiff }: {
     content: parsedContent,
     editable: false,
     additionalExtensions: readOnlyExtensions,
+    // #850(a) — this hook names the editor only when passed a label, and every
+    // other Tiptap surface threads one through here; this one was the exception.
+    //
+    // ⚠️ **The filed finding was "8 unnamed `role=\"textbox\"` nodes" and that
+    // does NOT reproduce in this build** — measured in Chrome's accessibility
+    // tree on 2026-08-31, these read-only nodes carry `role: null` and expose as
+    // StaticText, so there is no textbox to leave unnamed. The label is set
+    // anyway: it is the documented channel, it costs nothing, and it is correct
+    // the moment the role comes back. Recorded rather than dropped so the next
+    // reader does not re-derive a Lighthouse count that has moved.
+    ariaLabel: `${name} — theme text`,
     // #848: this renderer's content prop is the source of truth, so the editor
     // must follow it. Without this, an instance React reuses across a data
     // change keeps the prose it was created with. See the hook's docstring.
@@ -56,10 +78,28 @@ function ReadOnlyTheme({ name, color, content, diffClass, materialDiff }: {
   })
 
   return (
-    <div className={cn('mb-6 pl-3 border-l-4', diffClass ?? 'border-transparent')}>
-      <div className="flex items-center gap-2 mb-2">
-        {color && <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color }} />}
+    <div className={cn(
+      'mb-6 pl-3 border-l-4',
+      diffClass ?? (changed ? 'border-l-amber-500' : 'border-transparent'),
+    )}>
+      <div className="flex items-center gap-2 mb-2 flex-wrap">
+        {color && <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color }} aria-hidden="true" />}
         <h3 className="text-sm font-semibold text-mm-text">{name}</h3>
+        {/* #850(c) — every marked card carries the WORD, not just the hue. The
+            relationship-diff footer below has labelled its two lists all along
+            ("Added (N)" / "Removed (N)"), so the vocabulary already existed;
+            the theme panes simply did not use it. Colour-blind readers and
+            browse-mode readers get the same answer as everyone else. */}
+        {statusLabel && (
+          <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-mm-bg text-mm-text-secondary border border-mm-border-subtle">
+            {statusLabel}
+          </span>
+        )}
+        {changed && !statusLabel && changedLabel && (
+          <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 dark:bg-amber-950/30 dark:text-amber-200 dark:border-amber-900">
+            {changedLabel}
+          </span>
+        )}
       </div>
       {materialDiff && (
         <p className="text-[11px] text-mm-text-muted mb-2">{materialDiff}</p>
@@ -88,15 +128,86 @@ function parseRefs(raw: string | SourceRef[] | null): SourceRef[] {
 
 function refKey(r: SourceRef): string { return `${r.type}:${r.id}` }
 
-function computeMaterialDiff(leftRefs: SourceRef[], rightRefs: SourceRef[]): string {
+/**
+ * Did a MATCHED theme's prose change? — #850(b).
+ *
+ * 🔴 There was no code path that could answer this. `diff.matched` rendered with
+ * `diffClass` undefined on BOTH panes, so only wholly added or removed themes
+ * were marked — and the question a snapshot diff exists to answer is *what did I
+ * write since?* A reader compared two columns of long prose by eye.
+ *
+ * ⚠️ Compared as SERIALIZED CONTENT, deliberately, not by walking the Tiptap
+ * doc. The blob is what the snapshot stored and what the editor renders, so a
+ * mismatch is exactly "these two render differently"; a structural walk would
+ * have to decide which node attrs count, and getting that wrong reports a change
+ * that is not there — worse than the silence it replaces, because this marker's
+ * whole value is that it can be trusted.
+ *
+ * ⚠️ Key ORDER is not normalised and does not need to be: both sides come from
+ * the same producer (`CanvasTheme.content`, written by one editor), so a
+ * key-order difference would mean the storage format changed under us — which is
+ * a real change worth surfacing, not a false positive to suppress.
+ */
+function themeContentChanged(left: ThemeForCompare, right: ThemeForCompare): boolean {
+  return canonicalContent(left.content) !== canonicalContent(right.content)
+}
+
+/**
+ * A theme's content as ONE canonical string, whichever shape it arrived in.
+ *
+ * 🔴 **The two sides do not store it the same way, and that is not obvious from
+ * either type.** A snapshot serialises `content` to a JSON STRING when it is
+ * written (`snapshot_data.themes[].content`), while the live canvas carries the
+ * parsed OBJECT. Comparing them raw makes every matched theme differ, so the
+ * "text changed" marker fires on every row — noise on a page whose only value is
+ * that its marks can be trusted, and strictly worse than the silence it
+ * replaced.
+ *
+ * ⚠️ Caught by the discrimination test (identical themes must NOT be marked),
+ * not by the positive one. A guard that only checks the marker APPEARS passes
+ * against a marker that never stops appearing.
+ *
+ * ⚠️ This is the same parse `ReadOnlyTheme` does before handing content to the
+ * editor, which is what keeps the comparison honest: it compares what the two
+ * sides actually RENDER.
+ */
+function canonicalContent(content: ThemeForCompare['content']): string {
+  if (content == null) return ''
+  const parsed = typeof content === 'string'
+    ? (() => { try { return JSON.parse(content) } catch { return content } })()
+    : content
+  return JSON.stringify(parsed)
+}
+
+/**
+ * The material delta between a matched pair, worded FROM THE RIGHT PANE.
+ *
+ * 🔴 #850(d) — this returned a bare `+2 materials` that BOTH panes rendered, the
+ * left one prefixed `"Snapshot: "`. The two call sites were textually the same
+ * call with the same arguments, so the strings could not differ — and `added`
+ * counts present-in-RIGHT, so the snapshot's own pane claimed a gain that
+ * belongs to the current state. Exactly backwards, stated confidently.
+ *
+ * One delta is ONE fact about a PAIR, so it is computed once and rendered once,
+ * on the side it is true of. ⚠️ The wording has to name the other side, and
+ * which that is depends on the mode: a snapshot comparison and a
+ * canvas-vs-canvas comparison are not the same sentence. #795's rule — ask
+ * whether the label's implied sentence is true of THIS thing.
+ */
+function computeMaterialDiff(
+  leftRefs: SourceRef[],
+  rightRefs: SourceRef[],
+  sinceLabel: string,
+): string {
   const leftSet = new Set(leftRefs.map(refKey))
   const rightSet = new Set(rightRefs.map(refKey))
   const added = rightRefs.filter(r => !leftSet.has(refKey(r))).length
   const removed = leftRefs.filter(r => !rightSet.has(refKey(r))).length
   const parts: string[] = []
-  if (added > 0) parts.push(`+${added} material${added !== 1 ? 's' : ''}`)
-  if (removed > 0) parts.push(`-${removed} material${removed !== 1 ? 's' : ''}`)
-  return parts.join(', ')
+  if (added > 0) parts.push(`${added} material${added !== 1 ? 's' : ''} added`)
+  if (removed > 0) parts.push(`${removed} removed`)
+  if (parts.length === 0) return ''
+  return `${parts.join(', ')} since ${sinceLabel}`
 }
 
 interface ThemeForCompare {
@@ -296,6 +407,39 @@ export default function CanvasCompareView() {
     ? `Snapshot: ${snapshot?.name ?? '...'} (${snapshot ? formatRelativeTime(snapshot.created_at) : ''})`
     : canvas?.name ?? '...'
   const rightLabel = isSideBySide ? (canvas2?.name ?? '...') : 'Current state'
+  // #850(d) — the delta's sentence has to name the OTHER side, and which that is
+  // depends on the mode. "since the snapshot" is wrong for canvas-vs-canvas.
+  //
+  // ⚠️ #865: the second branch is UNREACHABLE today — this is read only inside
+  // the `diff` arm, and `diff` is null unless `isSnapshotMode`. Kept rather than
+  // collapsed to a constant because it is correct the moment a canvas-vs-canvas
+  // diff ships, and a hardcoded "the snapshot" would then be silently wrong in
+  // the mode that has no snapshot.
+  const sinceLabel = isSnapshotMode
+    ? 'the snapshot'
+    : (canvas?.name ? `"${canvas.name}"` : 'the other canvas')
+
+  /**
+   * The three marks, worded ONCE (#865).
+   *
+   * 🔴 **The legend and the badges used to say different things about the same
+   * mark.** The key read *"Only in Current state"* while the card it explains
+   * was stamped *"Added since"* — a dangling phrase with no object, and one the
+   * reader had to match up by colour. The pane badges and the key now read from
+   * one object, so a wording change cannot land on one and not the other.
+   *
+   * ⚠️ **Mode-aware, because "since" is a claim about time** that a
+   * canvas-vs-canvas comparison cannot make. Same reasoning as `sinceLabel`.
+   */
+  const marks = {
+    leftOnly: isSnapshotMode ? 'Only in the snapshot' : `Only in ${leftLabel}`,
+    rightOnly: isSnapshotMode ? 'Added since the snapshot' : `Only in ${rightLabel}`,
+    // ⚠️ ONE word for both panes, deliberately. #850(c)'s rule is that a mark
+    // carries a WORD and not only a hue; which side you are reading is already
+    // said by the pane's own named region and heading, and "Text changed since"
+    // — the old left-hand wording — is not a sentence.
+    changed: 'Text changed',
+  }
 
   const handleBack = () => {
     navigate(`/projects/${projectId}/analysis/canvas?canvas=${canvasId}`)
@@ -402,34 +546,82 @@ export default function CanvasCompareView() {
         >
           <ArrowLeft className="w-4 h-4" />
         </button>
+        {/* #850(a) — these were two bare spans, so the page had NO h1/h2 at all
+            and a reader navigating by heading met only theme `h3`s, twice, with
+            nothing saying which side was which. */}
         <div className="flex-1 flex items-center justify-center gap-2 text-sm">
-          <span className="font-medium text-mm-text truncate max-w-[300px]">{leftLabel}</span>
-          <span className="text-mm-text-faint">{'\u2194'}</span>
-          <span className="font-medium text-mm-text truncate max-w-[300px]">{rightLabel}</span>
+          <h1 id="compare-left-label" className="font-medium text-mm-text truncate max-w-[300px]">{leftLabel}</h1>
+          <span className="text-mm-text-faint" aria-hidden="true">{'\u2194'}</span>
+          <h1 id="compare-right-label" className="font-medium text-mm-text truncate max-w-[300px]">{rightLabel}</h1>
         </div>
       </div>
+
+      {/* #850(c) — the KEY. Added/removed were encoded by border colour alone
+          with nothing on the page to decode them, and a changed theme had no
+          marking at all. Every mark here is word + colour, never colour alone;
+          the overlay flags colour-only encoding as a standing check because no
+          colourblind mode exists.
+
+          🔴 #865 — gated on `diff`, which is the thing that PRODUCES the marks.
+          It used to render unconditionally, so a canvas-vs-canvas comparison —
+          where `diff` is null and both panes render plain, unmarked themes —
+          showed a key explaining three marks that cannot occur. A legend for
+          absent marks is the same wrong-information shape as #850(d)'s
+          mislabelled delta, one element up.
+
+          ⚠️ Gated on `diff` rather than on `isSnapshotMode`: they coincide
+          today, and only the first is the honest predicate — if a side-by-side
+          diff ever ships, the key should appear with it and not need finding. */}
+      {diff && (
+      <div className="shrink-0 flex items-center flex-wrap gap-x-4 gap-y-1 px-4 py-1.5 border-b border-mm-border-subtle bg-mm-bg text-[11px] text-mm-text-secondary">
+        <span className="font-medium text-mm-text-muted">What the marks mean:</span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-3 border-l-4 border-l-indigo-500 h-3" aria-hidden="true" />
+          {marks.leftOnly}
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-3 border-l-4 border-l-rose-500 h-3" aria-hidden="true" />
+          {marks.rightOnly}
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-3 border-l-4 border-l-amber-500 h-3" aria-hidden="true" />
+          {marks.changed}
+        </span>
+      </div>
+      )}
 
       {/* Dual panel */}
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
         {/* Left panel */}
-        <div className="flex-1 overflow-auto border-b lg:border-b-0 lg:border-r border-mm-border-subtle">
+        <section
+          aria-labelledby="compare-left-label"
+          className="flex-1 overflow-auto border-b lg:border-b-0 lg:border-r border-mm-border-subtle"
+        >
           <div className="max-w-[600px] mx-auto px-6 py-6">
             {diff ? (
               <>
+                {/* #850(d): the LEFT pane carries no delta. It is the BEFORE
+                    side, and the one delta this pair has is rendered on the
+                    right, where its sentence is true. */}
                 {diff.matched.map(m => (
                   <ReadOnlyTheme
                     key={`m-l-${m.left.id}`}
                     name={m.left.name}
                     color={m.left.color}
                     content={m.left.content}
-                    materialDiff={computeMaterialDiff(
-                      parseRefs(m.left.referenced_source_ids),
-                      parseRefs(m.right.referenced_source_ids),
-                    ) ? `Snapshot: ${computeMaterialDiff(parseRefs(m.left.referenced_source_ids), parseRefs(m.right.referenced_source_ids))}` : undefined}
+                    changed={themeContentChanged(m.left, m.right)}
+                    changedLabel={marks.changed}
                   />
                 ))}
                 {diff.leftOnly.map(t => (
-                  <ReadOnlyTheme key={`lo-${t.id}`} name={t.name} color={t.color} content={t.content} diffClass="border-l-indigo-500" />
+                  <ReadOnlyTheme
+                    key={`lo-${t.id}`}
+                    name={t.name}
+                    color={t.color}
+                    content={t.content}
+                    diffClass="border-l-indigo-500"
+                    statusLabel={marks.leftOnly}
+                  />
                 ))}
               </>
             ) : (
@@ -441,10 +633,10 @@ export default function CanvasCompareView() {
               <p className="text-sm text-mm-text-faint text-center py-8">No themes</p>
             )}
           </div>
-        </div>
+        </section>
 
         {/* Right panel */}
-        <div className="flex-1 overflow-auto">
+        <section aria-labelledby="compare-right-label" className="flex-1 overflow-auto">
           <div className="max-w-[600px] mx-auto px-6 py-6">
             {diff ? (
               <>
@@ -452,6 +644,7 @@ export default function CanvasCompareView() {
                   const md = computeMaterialDiff(
                     parseRefs(m.left.referenced_source_ids),
                     parseRefs(m.right.referenced_source_ids),
+                    sinceLabel,
                   )
                   return (
                     <ReadOnlyTheme
@@ -460,11 +653,20 @@ export default function CanvasCompareView() {
                       color={m.right.color}
                       content={m.right.content}
                       materialDiff={md || undefined}
+                      changed={themeContentChanged(m.left, m.right)}
+                      changedLabel={marks.changed}
                     />
                   )
                 })}
                 {diff.rightOnly.map(t => (
-                  <ReadOnlyTheme key={`ro-${t.id}`} name={t.name} color={t.color} content={t.content} diffClass="border-l-rose-500" />
+                  <ReadOnlyTheme
+                    key={`ro-${t.id}`}
+                    name={t.name}
+                    color={t.color}
+                    content={t.content}
+                    diffClass="border-l-rose-500"
+                    statusLabel={marks.rightOnly}
+                  />
                 ))}
               </>
             ) : (
@@ -476,7 +678,7 @@ export default function CanvasCompareView() {
               <p className="text-sm text-mm-text-faint text-center py-8">No themes</p>
             )}
           </div>
-        </div>
+        </section>
       </div>
 
       {/* Relationship diff (snapshot mode only) */}

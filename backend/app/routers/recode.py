@@ -81,6 +81,7 @@ from ..services.recode import (
     recompute_primary_value_numeric as _recompute_primary_value_numeric,
     write_back_scale_metadata as _write_back_scale_metadata,
 )
+from ..services.recode_ranges import RangeBandError, normalize_ranges, parse_ranges
 from ..services.audit import log_action
 
 from ..services.staleness import mark_metrics_stale
@@ -166,6 +167,11 @@ def _definition_to_response(
 
     unmapped = get_unmapped_values(db, definition.column_id, definition)
 
+    # #823(d): read through `parse_ranges`, which re-checks the SHAPE. A stored
+    # non-list would otherwise reach the matcher and raise mid-apply, on the
+    # startup path.
+    ranges = parse_ranges(definition.ranges)
+
     if column_missing_values is _UNSET:
         column_missing_values = (
             db.query(DatasetColumn.missing_values)
@@ -180,6 +186,7 @@ def _definition_to_response(
         recode_type=definition.recode_type.value if hasattr(definition.recode_type, "value") else str(definition.recode_type),
         output_type=definition.output_type.value if hasattr(definition.output_type, "value") else str(definition.output_type),
         mapping=mapping,
+        ranges=ranges,
         exclude_values=exclude_values,
         is_primary=bool(definition.is_primary),
         is_auto_detected=bool(definition.is_auto_detected),
@@ -460,6 +467,33 @@ async def create_definition(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid output_type: {data.output_type}")
 
+    # #823(d) — validate the band list HERE, where the recode_type is known.
+    #
+    # ⚠️ **The refusal belongs at the router, never in the service.** The same
+    # boundary as #794: `apply_definition_to_column` is reached from startup via
+    # `repair_reverse_recode_mappings`, so a raise on the apply path fires during
+    # boot on existing data. `normalize_ranges` is called from write paths only;
+    # the read path uses `parse_ranges`, which degrades instead.
+    #
+    # ⚠️ A REVERSE is refused outright: it has no mapping of its own — it
+    # reflects its source's — so a band on one would be silently inert, which is
+    # the half-landed-wire shape (#816) rather than a feature.
+    if data.ranges and recode_type == RecodeType.REVERSE:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A reverse rule cannot have ranges — it reflects the rule it is "
+                "based on. Put the ranges on that rule instead."
+            ),
+        )
+    try:
+        validated_ranges = normalize_ranges(
+            data.ranges,
+            allow_output_text=(recode_type == RecodeType.CATEGORY_GROUP),
+        )
+    except RangeBandError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     # Auto sequence_order: max + 1
     max_seq = (
         db.query(RecodeDefinition.sequence_order)
@@ -503,6 +537,7 @@ async def create_definition(
         recode_type=recode_type,
         output_type=output_type,
         mapping=json.dumps(data.mapping),
+        ranges=json.dumps(validated_ranges) if validated_ranges else None,
         exclude_values=json.dumps(data.exclude_values) if data.exclude_values else None,
         is_primary=False,
         is_auto_detected=False,
@@ -562,6 +597,30 @@ async def update_definition(
 
     if "mapping" in update_data:
         update_data["mapping"] = json.dumps(update_data["mapping"])
+
+    if "ranges" in update_data:
+        # #823(d). The type this list must be legal for is the EFFECTIVE one —
+        # the same request may be changing it — so read the incoming value first
+        # and fall back to what is stored. Validating against the stored type
+        # would let a scale_map→category_group switch smuggle text outputs past
+        # the numeric check, or refuse a legal one on the way back.
+        effective_type = update_data.get("recode_type", definition.recode_type)
+        if update_data["ranges"] and effective_type == RecodeType.REVERSE:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "A reverse rule cannot have ranges — it reflects the rule it "
+                    "is based on. Put the ranges on that rule instead."
+                ),
+            )
+        try:
+            cleaned = normalize_ranges(
+                update_data["ranges"],
+                allow_output_text=(effective_type == RecodeType.CATEGORY_GROUP),
+            )
+        except RangeBandError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        update_data["ranges"] = json.dumps(cleaned) if cleaned else None
 
     if "exclude_values" in update_data:
         ev = update_data["exclude_values"]
@@ -869,6 +928,13 @@ async def copy_to(
 
     mapping = source.mapping
     exclude_values = source.exclude_values
+    # #823(d): the bands copy VERBATIM, unlike the crosswalk's label remap.
+    # A band's bounds are numbers on the same measured quantity — "18 to 29" is
+    # the same claim about `age` in either dataset — so there is nothing to
+    # remap. ⚠️ Omitting this would copy a banding rule that maps NOTHING, since
+    # a pure-range rule has an empty `mapping`: the copy would look successful
+    # and produce a column of NULLs.
+    ranges = source.ranges
 
     created = 0
     skipped = 0
@@ -933,6 +999,7 @@ async def copy_to(
             recode_type=source.recode_type,
             output_type=source.output_type,
             mapping=mapping,
+            ranges=ranges,
             exclude_values=exclude_values,
             is_primary=has_primary is None,
             is_auto_detected=False,

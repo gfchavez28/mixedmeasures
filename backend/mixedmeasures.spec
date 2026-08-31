@@ -3,7 +3,17 @@
 # Produces an onedir bundle at backend/dist/mm-backend/ (exe: mm-backend).
 # P1 will add the built SPA to `datas` (('../frontend/dist','frontend_dist')).
 # See the internal design notes
+import sys as _sys
+
 from PyInstaller.utils.hooks import collect_submodules, collect_all
+
+# The list of modules that must survive freezing is single-sourced in
+# lazy_native_imports.py, which the frozen binary ALSO probes at runtime under
+# MM_PREFLIGHT=1 (#858). Keeping the two in one file is the point: they were separate
+# hand-maintained lists and neither was a superset of the other. SPECPATH is the spec's
+# own directory (backend/), injected by PyInstaller.
+_sys.path.insert(0, SPECPATH)  # noqa: F821 — SPECPATH is a PyInstaller spec global
+from lazy_native_imports import LAZY_NATIVE_IMPORTS  # noqa: E402
 
 # sqlcipher3 ships SQLCipher 4.12.0 as a compiled C extension plus bundled binaries.
 # PyInstaller's static analysis can't find it (database.py imports it lazily and the
@@ -36,25 +46,15 @@ pyreadstat_datas, pyreadstat_binaries, pyreadstat_hiddenimports = collect_all("p
 scipy_external_hiddenimports = collect_submodules("scipy._external")
 
 hiddenimports = (
-    [
-        # Lazy / function-local imports in services (belt-and-suspenders; scipy/numpy
-        # also have official PyInstaller hooks — but see the scipy._external note above:
-        # the hook does NOT reach the vendored subtree).
-        "scipy.stats",
-        "scipy.special",
-        "numpy",
-        "statsmodels.stats.multicomp",
-        "docx",
-        "pdfminer.high_level",
-        "pdfminer.layout",
-        "pdfminer.pdfdocument",
-        "tinytag",
-        "sqlite3",
-        "alembic.config",
-        "alembic.command",
-        "bcrypt",
-        "pydantic_core",
-    ]
+    # Lazy / function-local imports in services (belt-and-suspenders; scipy/numpy also
+    # have official PyInstaller hooks — but see the scipy._external note above: the hook
+    # does NOT reach the vendored subtree). ⚠️ Do NOT re-inline this list here: it is
+    # shared with the runtime preflight so a module cannot be bundled-but-unprobed, which
+    # is precisely how #858 shipped.
+    list(LAZY_NATIVE_IMPORTS)
+    # The shared list module itself: run_server.py imports it from INSIDE _preflight(), and
+    # relying on modulegraph to follow a function-local import is the very gamble #858 lost.
+    + ["lazy_native_imports"]
     + collect_submodules("app")       # ensure every app.* module (incl. models) is bundled
     + collect_submodules("uvicorn")   # uvicorn[standard] loads protocol/loop impls dynamically
     + sqlcipher_hiddenimports         # SQLCipher driver (collected above) — at-rest encryption

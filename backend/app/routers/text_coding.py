@@ -53,8 +53,34 @@ router = APIRouter(
 
 
 
-def _get_text_value_or_404(db: Session, project_id: int, dataset_value_id: int) -> DatasetValue:
-    """Validate DatasetValue exists, belongs to text column, in this project."""
+def _get_text_value_or_404(
+    db: Session, project_id: int, dataset_value_id: int, user_id: int
+) -> DatasetValue:
+    """Load a text-column DatasetValue, folding the ownership gate in (REQUIRED ``user_id``).
+
+    🔴 **This helper is a `GATE_TOKENS` entry and until #845 it did not gate (2026-08-30).**
+    It took no ``user_id`` and never reached ``_get_project_or_404`` — it answered only the
+    CHILD-ENTITY half (*"does this DatasetValue belong to this project, on a text
+    column?"*). Mutation-confirmed at filing: deleting the real gate from ``apply_code``
+    left both designated guards green (`test_ownership_gate_sweep.py` 6 passed,
+    `test_multiuser_ownership_gate.py` 15 passed), because the AST scan sees a token name
+    and is satisfied. Nothing was exploitable — all 16 endpoints in this router gate
+    directly — but the next endpoint written here would have passed the fail-closed scan
+    while gating nothing.
+
+    ⚠️ **Do not add a default or a user-less overload.** The signature is what stops a new
+    endpoint from forgetting, exactly as for ``_get_dataset_or_404`` /
+    ``_get_column_or_404`` / ``_get_document_or_404`` / ``_get_observation_or_404``.
+    ``tests/test_ownership_gate_sweep.py`` now derives that requirement from ``GATE_TOKENS``
+    itself rather than from a hand-written list of three, so a future token cannot lie the
+    way this one did.
+
+    ⚠️ The callers' own ``_get_project_or_404`` calls are deliberately KEPT. They are a
+    cheap indexed PK lookup, and they preserve the error ORDER a researcher sees: an
+    unknown project 404s before this helper's 400 can claim the value "is not a text
+    column in this project".
+    """
+    _get_project_or_404(db, project_id, user_id)
     dv = (
         db.query(DatasetValue)
         .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
@@ -684,7 +710,7 @@ async def apply_code(
     db: Session = Depends(get_db),
 ):
     _get_project_or_404(db, project_id, user.id)
-    dv = _get_text_value_or_404(db, project_id, data.dataset_value_id)
+    dv = _get_text_value_or_404(db, project_id, data.dataset_value_id, user.id)
 
     code = db.query(Code).filter(
         Code.id == data.code_id,
@@ -740,7 +766,7 @@ async def remove_code(
     db: Session = Depends(get_db),
 ):
     _get_project_or_404(db, project_id, user.id)
-    _get_text_value_or_404(db, project_id, dataset_value_id)
+    _get_text_value_or_404(db, project_id, dataset_value_id, user.id)
 
     ca = db.query(CodeApplication).filter(
         CodeApplication.dataset_value_id == dataset_value_id,
@@ -916,7 +942,7 @@ async def create_text_note(
     db: Session = Depends(get_db),
 ):
     _get_project_or_404(db, project_id, user.id)
-    _get_text_value_or_404(db, project_id, data.dataset_value_id)
+    _get_text_value_or_404(db, project_id, data.dataset_value_id, user.id)
 
     note = Note(
         conversation_id=None,
@@ -947,7 +973,7 @@ async def list_text_notes(
 
     if dataset_value_id is not None:
         # Single-text mode (original behavior)
-        _get_text_value_or_404(db, project_id, dataset_value_id)
+        _get_text_value_or_404(db, project_id, dataset_value_id, user.id)
         notes = (
             db.query(Note)
             .filter(
@@ -997,7 +1023,7 @@ async def update_text_note(
         raise HTTPException(status_code=404, detail="Text note not found")
 
     # Verify ownership: DatasetValue → DatasetColumn → Dataset → Project
-    _get_text_value_or_404(db, project_id, note.dataset_value_id)
+    _get_text_value_or_404(db, project_id, note.dataset_value_id, user.id)
 
     if data.content is not None:
         note.content = data.content
@@ -1019,7 +1045,7 @@ async def delete_text_note(
     if not note or not note.dataset_value_id:
         raise HTTPException(status_code=404, detail="Text note not found")
 
-    _get_text_value_or_404(db, project_id, note.dataset_value_id)
+    _get_text_value_or_404(db, project_id, note.dataset_value_id, user.id)
 
     note.is_archived = True
     db.commit()
@@ -1048,6 +1074,7 @@ async def get_config_endpoint(
         hide_empty=bool(config.hide_empty),
         starred_value_ids=json.loads(config.starred_value_ids) if config.starred_value_ids else [],
         treat_as_empty=_get_treat_as_empty(config),
+        treat_as_empty_is_default=config.treat_as_empty is None,
     )
 
 
@@ -1091,6 +1118,7 @@ async def update_config(
         hide_empty=bool(config.hide_empty),
         starred_value_ids=json.loads(config.starred_value_ids) if config.starred_value_ids else [],
         treat_as_empty=_get_treat_as_empty(config),
+        treat_as_empty_is_default=config.treat_as_empty is None,
     )
 
 

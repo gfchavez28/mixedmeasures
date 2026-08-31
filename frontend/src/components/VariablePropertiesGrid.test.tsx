@@ -174,3 +174,42 @@ describe('VariablePropertiesGrid', () => {
     })
   })
 })
+
+describe('#854(a) — Label in Name (WCAG 2.5.3)', () => {
+  /**
+   * Lighthouse `label-content-name-mismatch` failed on all 48 Missing cells:
+   * `<button aria-label="Missing values for year">` whose VISIBLE text is
+   * "6 rules". The accessible name must CONTAIN the visible label, or a
+   * speech-input user saying "click 6 rules" cannot activate the control.
+   *
+   * ⚠️ The filed entry cited the Missing cells alone. The Values cell has the
+   * identical construction, so both are asserted here — the per-control form is
+   * what lets this class ship half-fixed (#771 → #785, four times).
+   */
+  it('folds the Missing cell\'s visible text into its name', () => {
+    renderGrid([col({ id: 1, column_name: 'year', missing_values: [{ value: '99' }] })])
+    const btn = screen.getByRole('button', { name: /Missing values for year/ })
+    const visible = (btn.textContent ?? '').trim()
+    expect(visible).toBe('1 rule')
+    expect(btn.getAttribute('aria-label')).toContain(visible)
+  })
+
+  it('folds the Values cell\'s visible text into its name', () => {
+    renderGrid([col({ id: 1, column_name: 'year', scale_labels: ['Low', 'Mid', 'High'] })])
+    const btn = screen.getByRole('button', { name: /Value labels for year/ })
+    const visible = (btn.textContent ?? '').trim()
+    expect(visible).not.toBe('')
+    expect(btn.getAttribute('aria-label')).toContain(visible)
+  })
+
+  it('🔴 does NOT fold in the em-dash placeholder', () => {
+    // Found by driving: an unlabelled column read "— — value labels for year".
+    // 2.5.3 is about matching a visible LABEL and nobody says "dash", so
+    // folding it in adds noise to the name of every unlabelled variable — which
+    // on a real survey is most of them.
+    renderGrid([col({ id: 1, column_name: 'year', scale_labels: null })])
+    const btn = screen.getByRole('button', { name: /Value labels for year/ })
+    expect(btn.textContent?.trim()).toBe('—')
+    expect(btn.getAttribute('aria-label')).toBe('Value labels for year')
+  })
+})

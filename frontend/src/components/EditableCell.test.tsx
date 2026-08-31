@@ -103,3 +103,85 @@ describe('computeDisplayValue — #578 reverse reflects the stored forward code'
     expect(out.display).toBe('10 (2)')
   })
 })
+
+describe('#823(d) — the grid resolves RANGE bands, not just mapping keys', () => {
+  /**
+   * 🔴 The consumer test, not the predicate test. `lib/recode-ranges.test.ts`
+   * proves `resolveRangeOutput` is right (against a fixture the Python suite
+   * runs too); this proves the GRID actually calls it.
+   *
+   * Without it the Data view renders a banded cell as unmapped plain text while
+   * `value_numeric` holds the band's code — the #578 display-vs-storage drift,
+   * on the one surface a researcher checks a recode against. The project's own
+   * rule: a component test proves the COMPONENT, not the MOUNT — here the
+   * component IS the consumer, so this is the mount.
+   */
+  const banded = (
+    recodeType: 'scale_map' | 'category_group' | 'reverse' = 'scale_map',
+    mapping: Record<string, number | string> = {},
+  ): RecodeDefinitionSummary =>
+    ({
+      id: 1,
+      recode_type: recodeType,
+      mapping,
+      exclude_values: [],
+      ranges: [
+        { lo: 18, hi: 29, output: 1 },
+        { lo: 30, hi: null, output: 2 },
+      ],
+    }) as unknown as RecodeDefinitionSummary
+
+  it('resolves a cell through a band when no mapping key matches', () => {
+    expect(computeDisplayValue(cell('22'), column, banded()).numericValue).toBe(1)
+    expect(computeDisplayValue(cell('80'), column, banded()).numericValue).toBe(2)
+  })
+
+  it('🔴 lets an explicit mapping key beat a band, as the backend does', () => {
+    const d = banded('scale_map', { '22': 9 })
+    expect(computeDisplayValue(cell('22'), column, d).numericValue).toBe(9)
+  })
+
+  it('leaves a cell outside every band unmapped', () => {
+    expect(computeDisplayValue(cell('4'), column, banded()).isNumeric).toBe(false)
+  })
+
+  it('🔴 derives the scale top from the BANDS when the mapping is empty', () => {
+    // A pure-band rule has no mapping, so `Math.max(...[])` is -Infinity and the
+    // intensity tint silently disappears — on exactly the rules that produce a
+    // small ordered set of codes, where it reads best.
+    expect(computeDisplayValue(cell('80'), column, banded()).maxValue).toBe(2)
+  })
+
+  it('never bands a REVERSE, which reflects its source instead', () => {
+    expect(computeDisplayValue(cell('22'), column, banded('reverse')).isNumeric).toBe(false)
+  })
+
+  it('is unchanged for a definition carrying no bands at all', () => {
+    // The old payload shape: `ranges` absent entirely.
+    const d = def({ Agree: 1 })
+    expect(computeDisplayValue(cell('Agree'), column, d).numericValue).toBe(1)
+    expect(computeDisplayValue(cell('22'), column, d).isNumeric).toBe(false)
+  })
+
+  it('🔴 #861 — an EXCLUDED response is not banded, on this side either', () => {
+    /**
+     * This lens already ordered the channels correctly — the exclude check runs
+     * before the mapping and the band — and the BACKEND did not, which is how
+     * #861 was found: the grid said "excluded" while the server stored the
+     * band's code. Both sides agree now, and this pins the client half so a
+     * later tidy-up that moves the exclude test below the band cannot re-open it
+     * silently.
+     *
+     * ⚠️ Per VALUE, not per definition — `30` is in the same open-topped band
+     * and must still resolve. Without that half, "bands off whenever
+     * `exclude_values` is non-empty" passes.
+     */
+    const d = { ...banded('scale_map'), exclude_values: ['22'] } as RecodeDefinitionSummary
+
+    const excluded = computeDisplayValue(cell('22'), column, d)
+    expect(excluded.isExcluded).toBe(true)
+    expect(excluded.numericValue).toBeNull()
+
+    expect(computeDisplayValue(cell('30'), column, d).numericValue).toBe(2)
+  })
+})

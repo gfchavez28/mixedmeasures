@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
-import { useParams, useSearchParams } from 'react-router'
+import { useParams, useSearchParams, useNavigate } from 'react-router'
 import { FOCUS_RING, SELECTED_ROW, SELECTED_SEGMENT, SELECTED_TINT } from '@/lib/selection'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
@@ -16,8 +16,12 @@ import {
 import { columnDisplayLabel, swapNameLabelValues } from '@/lib/dataset-column-label'
 import RederiveDependentsDialog from '@/components/RederiveDependentsDialog'
 import DeriveVariableDialog from '@/components/DeriveVariableDialog'
+import AddVariableMenu from '@/components/AddVariableMenu'
+import PickRuleToDeriveDialog from '@/components/PickRuleToDeriveDialog'
 import ApplyRuleDialog from '@/components/ApplyRuleDialog'
+import { variableViewPath } from '@/lib/dataset-routes'
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle, useDefaultLayout } from 'react-resizable-panels'
+import { useCreateVariable } from '@/hooks/useCreateVariable'
 import { useDeriveVariable } from '@/hooks/useDeriveVariable'
 import { useDeleteVariable } from '@/hooks/useDeleteVariable'
 import { DeleteVariableDialog } from '@/components/DeleteVariableDialog'
@@ -34,6 +38,13 @@ import { CopyToDialog } from '@/components/CopyToDialog'
 import { CopyToEquivalentsDialog } from '@/components/CopyToEquivalentsDialog'
 import { compareValueLabels } from '@/lib/chart-data'
 import { reflectReverseValue, recodeMappingPayload } from '@/lib/recode-utils'
+import RecodeRangeRows from '@/components/RecodeRangeRows'
+import {
+  buildRangePayload,
+  rangesToRows,
+  type RangeRow,
+  type RecodeRange,
+} from '@/lib/recode-ranges'
 import {
   AlertDialog,
   AlertDialogContent,
@@ -148,10 +159,17 @@ function ScaleMapEditor({
   mapping,
   excludeValues,
   onChange,
+  rangeRows,
+  onRangesChange,
+  rangeBadRow,
 }: {
   mapping: Record<string, number | string>
   excludeValues: string[]
   onChange: (mapping: Record<string, number | string>, excludeValues: string[]) => void
+  /** #823(d) — the band rows, alongside the per-response mapping above them. */
+  rangeRows: RangeRow[]
+  onRangesChange: (rows: RangeRow[]) => void
+  rangeBadRow?: number
 }) {
   const [newLabel, setNewLabel] = useState('')
   const entries = Object.entries(mapping)
@@ -267,20 +285,33 @@ function ScaleMapEditor({
                   placeholder="Add label (e.g. Not Applicable)..."
                   className="h-7 text-sm flex-grow bg-mm-surface"
                 />
+                {/* #854(c) — an icon-only button needs a NAME. lucide marks
+                    its svg `aria-hidden` by default, so this had no accessible
+                    name at all, and it renders DISABLED (the input starts
+                    empty) — so a reader met a bare, unavailable "button".
+                    ⚠️ The entry reported ONE; both rule editors carry the
+                    identical block. */}
                 <Button
                   variant="ghost"
                   size="sm"
                   onClick={handleAddLabel}
                   disabled={!newLabel.trim() || newLabel.trim() in mapping}
                   className="h-7 px-2 text-xs shrink-0"
+                  aria-label="Add response"
                 >
-                  <Plus className="w-3 h-3" />
+                  <Plus className="w-3 h-3" aria-hidden="true" />
                 </Button>
               </div>
             </td>
           </tr>
         </tbody>
       </table>
+      <RecodeRangeRows
+        rows={rangeRows}
+        onChange={onRangesChange}
+        numericOutput={true}
+        badRow={rangeBadRow}
+      />
     </div>
   )
 }
@@ -291,10 +322,19 @@ function CategoryGroupEditor({
   mapping,
   excludeValues,
   onChange,
+  rangeRows,
+  onRangesChange,
+  rangeBadRow,
 }: {
   mapping: Record<string, number | string>
   excludeValues: string[]
   onChange: (mapping: Record<string, number | string>, excludeValues: string[]) => void
+  /** #823(d) — the band rows. This is the type #830(j) singled out: "Category
+   *  Group — the rule type literally named for grouping — has the same shape"
+   *  of one row per distinct value. */
+  rangeRows: RangeRow[]
+  onRangesChange: (rows: RangeRow[]) => void
+  rangeBadRow?: number
 }) {
   const [newLabel, setNewLabel] = useState('')
   const entries = Object.entries(mapping)
@@ -390,20 +430,33 @@ function CategoryGroupEditor({
                   placeholder="Add label (e.g. Not Applicable)..."
                   className="h-7 text-sm flex-grow bg-mm-surface"
                 />
+                {/* #854(c) — an icon-only button needs a NAME. lucide marks
+                    its svg `aria-hidden` by default, so this had no accessible
+                    name at all, and it renders DISABLED (the input starts
+                    empty) — so a reader met a bare, unavailable "button".
+                    ⚠️ The entry reported ONE; both rule editors carry the
+                    identical block. */}
                 <Button
                   variant="ghost"
                   size="sm"
                   onClick={handleAddLabel}
                   disabled={!newLabel.trim() || newLabel.trim() in mapping}
                   className="h-7 px-2 text-xs shrink-0"
+                  aria-label="Add response"
                 >
-                  <Plus className="w-3 h-3" />
+                  <Plus className="w-3 h-3" aria-hidden="true" />
                 </Button>
               </div>
             </td>
           </tr>
         </tbody>
       </table>
+      <RecodeRangeRows
+        rows={rangeRows}
+        onChange={onRangesChange}
+        numericOutput={false}
+        badRow={rangeBadRow}
+      />
     </div>
   )
 }
@@ -537,6 +590,9 @@ export function DefinitionCard({
   const [localName, setLocalName] = useState(definition.name)
   const [localMapping, setLocalMapping] = useState<Record<string, number | string>>(definition.mapping)
   const [localExcludes, setLocalExcludes] = useState<string[]>(definition.exclude_values || [])
+  // #823(d) — the band rows, kept as STRINGS mid-edit like every other numeric
+  // input in this file, and validated only on save.
+  const [localRanges, setLocalRanges] = useState<RangeRow[]>(() => rangesToRows(definition.ranges))
   const [hasChanges, setHasChanges] = useState(false)
 
   // Reset local state when definition changes
@@ -545,6 +601,7 @@ export function DefinitionCard({
     setLocalName(definition.name)
     setLocalMapping(definition.mapping)
     setLocalExcludes(definition.exclude_values || [])
+    setLocalRanges(rangesToRows(definition.ranges))
     setHasChanges(false)
   }, [definition.id, definition.updated_at]) // eslint-disable-line react-hooks/exhaustive-deps -- intentionally reset only on id/timestamp change, not on every field
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -555,6 +612,17 @@ export function DefinitionCard({
     setHasChanges(true)
   }
 
+  const handleRangesChange = (rows: RangeRow[]) => {
+    setLocalRanges(rows)
+    setHasChanges(true)
+  }
+
+  // Validated on every render so the Save button can refuse a malformed band
+  // BEFORE the round trip — the researcher meets the message here rather than
+  // as a 400. The backend re-validates regardless; this is the mirror, not the
+  // authority.
+  const rangeCheck = buildRangePayload(localRanges, definition.recode_type === 'scale_map')
+
   const handleSave = () => {
     const data: Record<string, unknown> = {}
     if (localName !== definition.name) data.name = localName
@@ -562,13 +630,24 @@ export function DefinitionCard({
     // changes only `localExcludes`, so an unstripped diff reports the mapping
     // unchanged, sends `exclude_values` alone, and leaves the stale code on the
     // server: the defect surviving its own fix.
-    const payload = recodeMappingPayload(localMapping, localExcludes)
+    // #823(d) — the bands are the THIRD half and are computed here with the
+    // other two, for #818's reason: a caller that diffs the mapping alone sees
+    // no change when only a band moved.
+    const payload = recodeMappingPayload(localMapping, localExcludes, rangeCheck.ranges)
     if (JSON.stringify(payload.mapping) !== JSON.stringify(definition.mapping)) data.mapping = payload.mapping
     if (JSON.stringify(payload.exclude_values) !== JSON.stringify(definition.exclude_values || [])) {
       data.exclude_values = payload.exclude_values.length > 0 ? payload.exclude_values : null
     }
+    if (JSON.stringify(payload.ranges) !== JSON.stringify(definition.ranges ?? [])) {
+      data.ranges = payload.ranges
+    }
     if (Object.keys(data).length > 0) {
-      onSave(data as { name?: string; mapping?: Record<string, number | string>; exclude_values?: string[] | null })
+      onSave(data as {
+        name?: string
+        mapping?: Record<string, number | string>
+        exclude_values?: string[] | null
+        ranges?: RecodeRange[]
+      })
     }
   }
 
@@ -669,6 +748,9 @@ export function DefinitionCard({
               mapping={localMapping}
               excludeValues={localExcludes}
               onChange={handleMappingChange}
+              rangeRows={localRanges}
+              onRangesChange={handleRangesChange}
+              rangeBadRow={rangeCheck.badRow}
             />
           )}
           {definition.recode_type === 'category_group' && (
@@ -676,6 +758,9 @@ export function DefinitionCard({
               mapping={localMapping}
               excludeValues={localExcludes}
               onChange={handleMappingChange}
+              rangeRows={localRanges}
+              onRangesChange={handleRangesChange}
+              rangeBadRow={rangeCheck.badRow}
             />
           )}
           {definition.recode_type === 'reverse' && (
@@ -698,9 +783,22 @@ export function DefinitionCard({
           {/* Actions */}
           <div className="mt-3 flex items-center gap-2 flex-wrap">
             {hasChanges && (
-              <Button size="sm" onClick={handleSave} disabled={isSaving} className="h-7 text-xs">
+              <Button
+                size="sm"
+                onClick={handleSave}
+                disabled={isSaving || !rangeCheck.ok}
+                className="h-7 text-xs"
+              >
                 {isSaving ? 'Saving...' : 'Save'}
               </Button>
+            )}
+            {/* ⚠️ SAYS why Save is off. A disabled control with no explanation
+                reads as broken, and the offending row already carries
+                `aria-invalid` — this is the sentence that names the problem. */}
+            {!rangeCheck.ok && (
+              <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+                {rangeCheck.msg}
+              </p>
             )}
             {/*
               🔴 Decision B, and the VISUAL WEIGHT is the decision, not decoration.
@@ -789,6 +887,13 @@ function NewDefinitionForm({
   const [sourceDefId, setSourceDefId] = useState<number | null>(null)
   const [draftMapping, setDraftMapping] = useState<Record<string, number | string>>({})
   const [draftExcludeValues, setDraftExcludeValues] = useState<string[]>([])
+  // #823(d) — bands on a NEW rule, so a researcher can band without saving an
+  // empty rule first and coming back to it.
+  const [draftRanges, setDraftRanges] = useState<RangeRow[]>([])
+  // Mirrors the saved editor: validate on render so Create can refuse a
+  // malformed band before the round trip. A REVERSE never bands, so its check
+  // is over an empty list and always passes.
+  const draftRangeCheck = buildRangePayload(draftRanges, type === 'scale_map')
 
   const scaleMapDefs = existingDefinitions.filter(d => d.recode_type === 'scale_map')
   const labels = useMemo(
@@ -854,6 +959,7 @@ function NewDefinitionForm({
       // never be saved carrying the code it had before the tick.
       mapping: recodeMappingPayload(draftMapping, draftExcludeValues).mapping,
       ...(draftExcludeValues.length > 0 ? { exclude_values: draftExcludeValues } : {}),
+      ...(draftRangeCheck.ranges.length > 0 ? { ranges: draftRangeCheck.ranges } : {}),
       ...(type === 'reverse' && sourceDefId ? { source_definition_id: sourceDefId } : {}),
     })
     setName('')
@@ -948,6 +1054,9 @@ function NewDefinitionForm({
                   setDraftMapping(mapping)
                   setDraftExcludeValues(excludes)
                 }}
+                rangeRows={draftRanges}
+                onRangesChange={setDraftRanges}
+                rangeBadRow={draftRangeCheck.badRow}
               />
             )}
             {type === 'category_group' && (
@@ -958,6 +1067,9 @@ function NewDefinitionForm({
                   setDraftMapping(mapping)
                   setDraftExcludeValues(excludes)
                 }}
+                rangeRows={draftRanges}
+                onRangesChange={setDraftRanges}
+                rangeBadRow={draftRangeCheck.badRow}
               />
             )}
             {type === 'reverse' && (
@@ -984,11 +1096,20 @@ function NewDefinitionForm({
         <Button
           size="sm"
           onClick={handleCreate}
-          disabled={!name.trim() || isCreating || (type === 'reverse' && !sourceDefId)}
+          disabled={
+            !name.trim() || isCreating
+            || (type === 'reverse' && !sourceDefId)
+            || !draftRangeCheck.ok
+          }
           className="h-7 text-xs"
         >
           {isCreating ? 'Creating...' : 'Create'}
         </Button>
+        {!draftRangeCheck.ok && (
+          <p role="alert" className="text-xs text-red-600 dark:text-red-400 mt-1">
+            {draftRangeCheck.msg}
+          </p>
+        )}
       </div>
     </div>
   )
@@ -1002,6 +1123,7 @@ export default function RecodeWorkbench() {
   const pid = parseInt(projectId || '0')
   const did = parseInt(datasetId || '0')
   const { setBreadcrumbLabel } = useProjectLayout()
+  const navigate = useNavigate()
 
   const queryClient = useQueryClient()
 
@@ -1437,6 +1559,14 @@ export default function RecodeWorkbench() {
   const derive = useDeriveVariable(pid, did, (newColumnId) => setSelectedColumn(newColumnId))
 
   /**
+   * #830f — the same asymmetry a third time, for the three kinds of new
+   * variable. `onCreated` SELECTS the new variable here because this view has a
+   * detail pane and the researcher would otherwise stay parked on whatever was
+   * selected before, with the thing they just made invisible.
+   */
+  const createVariable = useCreateVariable(pid, did, (newColumnId) => setSelectedColumn(newColumnId))
+
+  /**
    * #812 — the other half of that asymmetry. Same hook shape, same reason: one
    * implementation, and `onDeleted` is the only thing this surface decides for
    * itself. The Data view passes nothing (the column leaves the grid in front of
@@ -1742,6 +1872,28 @@ export default function RecodeWorkbench() {
             </Button>
           </>
         )}
+        {/* #830f — the SAME `Add ▾` the Data view renders, for the same reason
+            Variable Groups left both toolbars together (below): these two views
+            sit under ONE nav strip, so a create action on one and not the other
+            makes two tabs of one workspace disagree about what belongs to a
+            dataset.
+
+            🔴 This view is where recode RULES are authored, and
+            `PickRuleToDeriveDialog`'s empty state says so in as many words —
+            so until now the flow sent researchers to the one screen that could
+            not start it.
+
+            ⚠️ ONE control added to a row of three. Measured at the 640×360 CSS
+            viewport a 1280×720 window has at 200% zoom before shipping; jsdom
+            computes no layout, so `DatasetToolbar.test.ts` can only proxy this
+            with a count. */}
+        <AddVariableMenu
+          onAddVariable={() => createVariable.open('manual')}
+          onAddComputed={() => createVariable.open('computed')}
+          onAddRecoded={() => createVariable.open('recoded')}
+          onAppendRecords={() => navigate(`/projects/${pid}/datasets/${did}/append`)}
+        />
+
         {/* "Variable Groups" left BOTH views' toolbars together (Decision F).
             F's stated reason — the route carries no `:datasetId`, so it is
             project-scoped and does not belong to a dataset's action row — is
@@ -2444,9 +2596,40 @@ export default function RecodeWorkbench() {
         onConfirm={() => { if (pendingApply) setPrimaryMutation.mutate(pendingApply.id) }}
       />
 
+      {/* #830f — the three kinds of new variable, from the shared hook. */}
+      <ColumnFormDialog {...createVariable.manualDialogProps} title="Add Variable" />
+      <ColumnFormDialog
+        {...createVariable.computedDialogProps}
+        title="Add Computed Variable"
+        mode="computed"
+        projectId={pid}
+        datasetId={did}
+        availableColumns={allColumns}
+      />
+      <PickRuleToDeriveDialog
+        open={createVariable.isRecodedPickerOpen}
+        columns={allColumns}
+        variablesHref={variableViewPath(pid, did)}
+        onOpenChange={(o) => { if (!o) createVariable.close() }}
+        onPick={(columnId, definition) => {
+          createVariable.close()
+          void derive.open({ columnId, definition })
+        }}
+      />
+
+      {/* 🔴 The source is the hook's `sourceColumnId`, NOT the page's selection.
+          Those coincided while the only way in was a rule card on the selected
+          variable; `Add ▾ → Recoded variable...` can pick ANY variable's rule,
+          and reading the selection would then name the wrong variable in the
+          confirm — on the one dialog whose whole job is to say what is about to
+          be derived from what. The hook exposes `sourceColumnId` for exactly
+          this, and the Data view has resolved it that way since Stage 3. */}
       <DeriveVariableDialog
         {...derive.dialogProps}
-        sourceLabel={selectedColumn ? columnDisplayLabel(selectedColumn) : ''}
+        sourceLabel={(() => {
+          const src = allColumns.find(c => c.id === derive.sourceColumnId)
+          return src ? columnDisplayLabel(src) : 'the source variable'
+        })()}
       />
 
       {/* The SAME dialog the Data view renders, from the same hook (#812). */}

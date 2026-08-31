@@ -250,6 +250,44 @@ class PrimaryRecodeSummary(BaseModel):
     remaps_codes: bool = False
 
 
+class RecodeDefinitionSummary(BaseModel):
+    """Compact recode definition, embedded in every column response.
+
+    ⚠️ **MOVED above `DatasetColumnResponse` (2026-08-31, #830f) because that
+    class now declares it.** Until then this rode `/data` alone, which made the
+    Data view the only surface that could offer "new variable from a rule" —
+    `Add ▾`'s third kind was unbuildable on the Variables view, the very screen
+    where rules are authored. `_column_to_response` builds these now, so the two
+    payloads cannot disagree about a definition (the #602 lesson: a field
+    populated on one payload and not the other is how a reader ends up believing
+    the wrong one).
+    """
+    id: int
+    name: str
+    recode_type: str
+    output_type: str
+    mapping: dict
+    #: #823(d) — the rule's RANGE bands, ordered, first match wins. Rides this
+    #: summary because the Data view's display lens resolves a cell through the
+    #: active definition client-side: without the bands it would render a banded
+    #: cell as unmapped text while `value_numeric` holds the band's code, which
+    #: is the #578 display-vs-storage drift on the one grid a researcher checks
+    #: a recode against.
+    ranges: list[dict] = []
+    exclude_values: list[str] | None = None
+    is_primary: bool
+    is_auto_detected: bool
+    source_definition_id: int | None = None
+    # #600: THE reflection offset for a REVERSE recode, computed server-side by
+    # services/recode.py::effective_reverse_offset over the mapping's NON-null-set
+    # values (a missing/excluded key is not a scale point and must not set the
+    # endpoint). The client MUST display `offset - code` using this, never
+    # re-derive it from `mapping`: the null set needs the recognized-N/A rule and
+    # the column's missing declaration, so a client mirror would drift from
+    # storage (#578). None for non-reverse definitions.
+    reverse_offset: float | None = None
+
+
 class DatasetColumnResponse(BaseModel):
     id: int
     column_code: str | None = None
@@ -287,6 +325,18 @@ class DatasetColumnResponse(BaseModel):
     # `None` always means "no primary", never "not loaded" (the stated-basis
     # ambiguity this codebase keeps meeting).
     primary_recode: PrimaryRecodeSummary | None = None
+    # #830f — every saved rule on this column, not just the primary one.
+    #
+    # ⚠️ **`primary_recode` above is NOT redundant with this and must stay.** It
+    # carries `remaps_codes`, a computed shape test no client can derive from a
+    # summary without re-implementing it — and it is the field whose `None` means
+    # "no primary" rather than "not loaded".
+    #
+    # ⚠️ Costs no extra query: `list_columns` already `selectinload`s this
+    # relationship to compute `primary_recode`, and the single-column callers
+    # already pay one lazy load for it. Measured on the largest local corpus
+    # (GSS, 48 columns): 7 definitions totalling 1,838 bytes of mapping JSON.
+    recode_definitions: list[RecodeDefinitionSummary] = []
     # Decision B (2026-08-24) — where a derived variable came from. The ID, not
     # a label: `columnDisplayLabel` is the single source for naming a column
     # (#575) and the Variables view already holds every column of the dataset,
@@ -350,27 +400,6 @@ class DatasetRowPosition(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Data view schemas (spreadsheet-like grid)
 # ═══════════════════════════════════════════════════════════════════════════════
-
-
-class RecodeDefinitionSummary(BaseModel):
-    """Compact recode definition for embedding in data endpoint responses."""
-    id: int
-    name: str
-    recode_type: str
-    output_type: str
-    mapping: dict
-    exclude_values: list[str] | None = None
-    is_primary: bool
-    is_auto_detected: bool
-    source_definition_id: int | None = None
-    # #600: THE reflection offset for a REVERSE recode, computed server-side by
-    # services/recode.py::effective_reverse_offset over the mapping's NON-null-set
-    # values (a missing/excluded key is not a scale point and must not set the
-    # endpoint). The client MUST display `offset - code` using this, never
-    # re-derive it from `mapping`: the null set needs the recognized-N/A rule and
-    # the column's missing declaration, so a client mirror would drift from
-    # storage (#578). None for non-reverse definitions.
-    reverse_offset: float | None = None
 
 
 class DatasetDataColumnResponse(BaseModel):

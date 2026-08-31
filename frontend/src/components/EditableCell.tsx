@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, type CSSProperties } from 'react'
 import type { DatasetColumn, DatasetValueCell, RecodeDefinitionSummary } from '@/lib/api'
 import { useTheme } from '@/lib/theme-context'
 import { reflectReverseValue } from '@/lib/recode-utils'
+import { resolveRangeOutput } from '@/lib/recode-ranges'
 
 // ── Ordinal color helper ─────────────────────────────────────────────────────
 
@@ -56,7 +57,17 @@ export function computeDisplayValue(
   const lowerMap = new Map(
     Object.entries(activeDef.mapping).map(([k, v]) => [k.toLowerCase(), v])
   )
+  // #823(d): the RANGE channel, second — an explicit key beats a band, exactly
+  // as `plan_definition_over_column` orders them. Without this the grid renders
+  // a banded cell as unmapped plain text while `value_numeric` holds the band's
+  // code: the #578 display-vs-storage drift, on the surface a researcher checks
+  // a recode against. ⚠️ The exclude check above still runs FIRST, mirroring the
+  // backend's null-set-before-everything rule; this client cannot evaluate the
+  // column's full missing declaration and deliberately does not try (#600).
   const mappedValue = lowerMap.get(valueText.trim().toLowerCase())
+    ?? (activeDef.recode_type === 'reverse'
+      ? undefined
+      : resolveRangeOutput(valueText, activeDef.ranges))
 
   if (mappedValue === undefined) {
     return { display: valueText, isNumeric: false, numericValue: null, isExcluded: false, maxValue: 0 }
@@ -72,7 +83,16 @@ export function computeDisplayValue(
     const numVal = activeDef.recode_type === 'reverse'
       ? reflectReverseValue(Number(mappedValue), activeDef.mapping, activeDef.reverse_offset)
       : Number(mappedValue)
-    const maxVal = Math.max(...Object.values(activeDef.mapping).map(Number).filter(n => !isNaN(n)))
+    // #823(d): the scale's top must include BAND outputs, or a rule built
+    // entirely from ranges has an empty `mapping` and `Math.max(...[])` is
+    // -Infinity. `ordinalBgStyle` guards `<= 0` so that is not a crash — it
+    // silently drops the intensity tint for exactly the rules that produce a
+    // small ordered set of codes, which is where it reads best.
+    const scaleOutputs = [
+      ...Object.values(activeDef.mapping),
+      ...(activeDef.ranges ?? []).map(r => r.output),
+    ].map(Number).filter(n => !isNaN(n))
+    const maxVal = scaleOutputs.length > 0 ? Math.max(...scaleOutputs) : 0
     // #561: the .sav dedupe suffix (#541a) bakes the code into the label —
     // "Agree (1)" — and appending our own annotation renders "Agree (1) (1)".
     // Skip the annotation ONLY when the label's trailing (N) equals the

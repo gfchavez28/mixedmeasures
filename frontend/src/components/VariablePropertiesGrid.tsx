@@ -45,9 +45,25 @@ const HEADERS = ['Name', 'Label', 'Type', 'Values', 'Missing', 'Rule in effect']
 const COL_COUNT = HEADERS.length
 
 /** What the Values cell says without opening anything. */
+/**
+ * Fold a cell's VISIBLE text into its accessible name (#854(a), WCAG 2.5.3), so
+ * a speech-input user saying "click 6 rules" activates it.
+ *
+ * ⚠️ **An em-dash placeholder is skipped.** Found by driving: a column with no
+ * value labels rendered `"— — value labels for year"`, because the summary IS
+ * the placeholder. 2.5.3 is about matching a visible LABEL, and nobody says
+ * "dash" — folding it in adds noise to the name of every unlabelled variable,
+ * which on GSS is most of them.
+ */
+const EM_DASH = '—'
+
+function nameWithVisible(summary: string, rest: string): string {
+  return summary === EM_DASH ? rest : `${summary} — ${rest}`
+}
+
 function valuesSummary(column: DatasetColumn): string {
   const labels = column.scale_labels ?? []
-  if (labels.length === 0) return '—'
+  if (labels.length === 0) return EM_DASH
   const preview = labels.slice(0, 2).join(', ')
   return labels.length > 2 ? `${preview}, +${labels.length - 2}` : preview
 }
@@ -216,7 +232,18 @@ export default function VariablePropertiesGrid({
                     // The visible text is a SUMMARY; the name says which
                     // variable it belongs to, because a browse-mode reader meets
                     // this button with no row context (#785).
-                    aria-label={`Value labels for ${columnDisplayLabel(column)}`}
+                    //
+                    // 🔴 #854(a) — the visible text is FOLDED IN, not replaced.
+                    // WCAG 2.5.3 (Label in Name) requires the accessible name to
+                    // CONTAIN the visible label, so a speech-input user saying
+                    // "click 6 rules" can activate it. The name said only
+                    // "Missing values for year" while the button read "6 rules".
+                    // ⚠️ The filed entry cited the Missing cells alone; this
+                    // Values cell has the identical construction, so both move.
+                    aria-label={nameWithVisible(
+                      valuesSummary(column),
+                      `Value labels for ${columnDisplayLabel(column)}`,
+                    )}
                     tabIndex={-1}
                   >
                     <Tags className="w-3 h-3 flex-none" aria-hidden="true" />
@@ -227,7 +254,10 @@ export default function VariablePropertiesGrid({
                   <button
                     onClick={e => { e.stopPropagation(); onEditValues(column) }}
                     className="text-left text-mm-text-secondary hover:text-mm-blue"
-                    aria-label={`Missing values for ${columnDisplayLabel(column)}`}
+                    aria-label={nameWithVisible(
+                      missingSummary(column),
+                      `Missing values for ${columnDisplayLabel(column)}`,
+                    )}
                     tabIndex={-1}
                   >
                     {missingSummary(column)}

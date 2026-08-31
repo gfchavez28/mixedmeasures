@@ -1,6 +1,7 @@
 import api from './client'
 import { datasetUploadTimeoutMs } from '../dataset-import-formats'
 import type { LinkableRow } from './participants'
+import type { RecodeRange } from '../recode-ranges'
 
 // Dataset types
 export interface DatasetColumnPreview {
@@ -136,6 +137,10 @@ export interface RecodeDefinition {
   recode_type: 'scale_map' | 'category_group' | 'reverse'
   output_type: 'numeric' | 'categorical'
   mapping: Record<string, number | string>
+  /** #823(d) — RANGE bands, ordered, first match wins. Always present on this
+   *  payload (the server sends `[]` when there are none), unlike the `/data`
+   *  summary's optional field, which must tolerate an older build's response. */
+  ranges: RecodeRange[]
   exclude_values: string[] | null
   is_primary: boolean
   is_auto_detected: boolean
@@ -286,6 +291,13 @@ export interface RecodeDefinitionSummary {
   recode_type: 'scale_map' | 'category_group' | 'reverse'
   output_type: 'numeric' | 'categorical'
   mapping: Record<string, number | string>
+  /**
+   * #823(d) — the rule's RANGE bands, ordered, first match wins.
+   *
+   * ⚠️ Optional because a payload from a build before this change carries no
+   * such field; `resolveRangeOutput` treats undefined as "no bands".
+   */
+  ranges?: RecodeRange[]
   exclude_values: string[] | null
   is_primary: boolean
   is_auto_detected: boolean
@@ -364,13 +376,22 @@ export interface DatasetColumn {
   depends_on_column_ids?: number[] | null
   stale?: boolean | null
   demographic_subtype?: string | null
+  /**
+   * Every saved rule on this column.
+   *
+   * ⚠️ **Rode the `/data` payload ALONE until 2026-08-31 (#830f)** — which is
+   * why it is still optional: a payload built before that change carries no
+   * such field. It is on every column response the backend builds now, so the
+   * Variables view can offer "new variable from a rule" too.
+   */
   recode_definitions?: RecodeDefinitionSummary[]
   /**
    * The rule driving this column's `value_numeric`, or null when none.
    *
-   * ⚠️ Unlike `recode_definitions` — which rides ONLY the `/data` payload —
-   * this is on every column response the backend builds, so `null` always
-   * means "no primary" and never "this endpoint did not look".
+   * ⚠️ Not redundant with `recode_definitions`: it carries `remaps_codes`,
+   * which is COMPUTED server-side and cannot be read off a summary. Populated
+   * by every column response the backend builds, so `null` always means "no
+   * primary" and never "this endpoint did not look".
    */
   primary_recode?: PrimaryRecodeSummary | null
   equivalence_group_id?: number | null

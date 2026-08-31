@@ -85,6 +85,29 @@ export function ReliabilityTabView({ projectId, codes, observations, selectedId,
               Frozen observations are included in the numbers below. {RELIABILITY_EXPLAINER_FROZEN}
             </p>
           )}
+          {/* 🔴 #859 — the SIGNPOST, at gate 4.
+              `OpenCutReliability` renders only after a NON-DEFAULT selection in
+              the picker above, and this tab opens on "All sources — pooled". So
+              a researcher who installed because the marketing site describes
+              open-cut reliability lands here and sees a pooled matrix with no
+              hint that the other measure exists — four decisions deep, three of
+              them individually defensible.
+
+              ⚠️ The remedy is deliberately NOT to weaken blind mode (gate 2 is
+              a methodological choice, DEC-G) and NOT to change the default
+              (pooled is the right answer for most projects). It is to SAY, where
+              the pooled number renders, that these observations are not in it
+              and where to look. */}
+          {open.length > 0 && (
+            <p className="text-xs text-mm-text-muted max-w-3xl">
+              {open.length === 1 ? 'One observation has' : `${open.length} observations have`}
+              {' '}open cuts, so {open.length === 1 ? 'it is' : 'they are'} not part of the pooled
+              figures below — each coder marked their own clips, so agreement there is about
+              <em> how the recording was carved up</em> as well as how it was coded. Choose
+              {open.length === 1 ? ` "${open[0].name}"` : ' one'} in <strong>Reliability
+              scope</strong> above to see it.
+            </p>
+          )}
           <IrrMatrix projectId={projectId} codes={codes} />
         </>
       )}

@@ -5,6 +5,27 @@ All notable changes to Mixed Measures are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Very large projects can now be shared, duplicated and merged.** The
+  `.mmproject` limit was **500,000 dataset values**; it is now **4,000,000**.
+  Both halves of the round trip were rebuilt to get there, because fixing only
+  one produces a file that takes half an hour to read back. Measured on a real
+  75,699-record survey with 41 questions (3.6 million values): exporting went
+  from about two minutes to **80 seconds** and now uses a small fraction of the
+  memory, and re-importing that file went from **26 minutes to under three**.
+- **Importing a project no longer freezes the rest of the app** while it runs,
+  and neither does exporting or duplicating one.
+
+### Known limit
+
+- **Memory on very large project files.** Reading a `.mmproject` file still holds
+  the whole file in memory while it is unpacked — about 2.6 GB for a 3.6-million-
+  value project. That is now the thing that limits project size, rather than time.
+  It affects sharing and merging only; **`.mmbackup` is unaffected at any size.**
+
 ## [1.4.0] - 2026-08-27
 
 A corrective release, and a large one. Most of it is work that makes existing

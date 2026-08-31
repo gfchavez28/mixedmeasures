@@ -71,9 +71,57 @@ describe('BulkAssignPickerDialog', () => {
         onConfirm={onConfirm}
       />,
     )
+    // #823(i): the group must be CHOSEN. This clicked straight through to Add
+    // and passed on the auto-preselect — i.e. it was pinning the defect.
+    fireEvent.click(screen.getByRole('radio', { name: /Leadership/ }))
     fireEvent.click(screen.getByRole('button', { name: /Add 3/ }))
     expect(onConfirm).toHaveBeenCalledTimes(1)
     expect(onConfirm).toHaveBeenCalledWith(50)
+  })
+
+  it('🔴 #823(i) — no group is preselected, so nothing can be extended silently', () => {
+    // It seeded the FIRST bracket, so adding a second scale's items quietly
+    // extended the first: a dialog that already had an answer, and the answer
+    // was whichever group sorted first.
+    const onConfirm = vi.fn()
+    render(
+      <BulkAssignPickerDialog
+        open
+        onOpenChange={vi.fn()}
+        brackets={[
+          bracket({ domain_id: 50, name: 'Leadership' }),
+          bracket({ domain_id: 51, name: 'Trust' }),
+        ]}
+        columnIds={[1, 2, 3]}
+        onConfirm={onConfirm}
+      />,
+    )
+
+    for (const name of [/Leadership/, /Trust/]) {
+      expect(screen.getByRole('radio', { name })).not.toBeChecked()
+    }
+    expect(screen.getByRole('button', { name: /Add 3/ })).toBeDisabled()
+  })
+
+  it('a chosen group still confirms — the guard is a default, not a lockout', () => {
+    // The discrimination assertion: a dialog whose Add never enables would pass
+    // the test above and be useless.
+    const onConfirm = vi.fn()
+    render(
+      <BulkAssignPickerDialog
+        open
+        onOpenChange={vi.fn()}
+        brackets={[
+          bracket({ domain_id: 50, name: 'Leadership' }),
+          bracket({ domain_id: 51, name: 'Trust' }),
+        ]}
+        columnIds={[1, 2, 3]}
+        onConfirm={onConfirm}
+      />,
+    )
+    fireEvent.click(screen.getByRole('radio', { name: /Trust/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Add 3/ }))
+    expect(onConfirm).toHaveBeenCalledWith(51)
   })
 
   it('preselectedBracketId selects that bracket on open', () => {

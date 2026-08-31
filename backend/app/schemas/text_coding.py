@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 from .common import UTCTimestamp, AppliedCodeDetail
+from ..models.text_coding_config import normalize_treat_as_empty
 
 
 # ── Request schemas ─────────────────────────────────────────────────────────
@@ -39,7 +40,23 @@ class TextCodingConfigUpdate(BaseModel):
     context_visibility: dict | None = None
     hide_empty: bool | None = None
     starred_value_ids: list[int] | None = None
+    #: #816 — the project's non-response vocabulary. Three states:
+    #: absent = leave it alone · `null` = go back to the defaults ·
+    #: a list = REPLACE (an empty list means "only a blank cell is empty").
     treat_as_empty: list[str] | None = None
+
+    @field_validator("treat_as_empty")
+    @classmethod
+    def _clean_treat_as_empty(cls, v: list[str] | None) -> list[str] | None:
+        """Strip, de-duplicate and bound the list — never on read (#816).
+
+        ⚠️ `None` passes through UNTOUCHED: it is the "use the defaults" state,
+        not an empty declaration, and normalizing it to `[]` would silently turn
+        a reset into "nothing is a non-response".
+        """
+        if v is None:
+            return None
+        return normalize_treat_as_empty(v)
 
 
 # ── Response schemas ────────────────────────────────────────────────────────
@@ -186,7 +203,22 @@ class TextCodingConfigResponse(BaseModel):
     context_visibility: dict
     hide_empty: bool
     starred_value_ids: list[int]
+    #: The list IN EFFECT — the project's declaration, or the defaults when it
+    #: has none. Always the effective values, so no consumer has to know which.
     treat_as_empty: list[str]
+    #: 🔴 Which of the two produced the list above (#816). The effective list
+    #: alone cannot answer it: a project that declares exactly the default
+    #: values is indistinguishable from one that has declared nothing, and the
+    #: UI needs the difference to know whether "reset to the standard list"
+    #: means anything.
+    #:
+    #: ⚠️ The alternative — comparing the list against a client-side copy of
+    #: `DEFAULT_TREAT_AS_EMPTY` — is a mirror of a backend constant that would
+    #: drift the first time the defaults change, and would answer wrongly for
+    #: the project that declared them deliberately. The server knows; it says.
+    #: (The stated-basis rule: the server states HOW a value was produced and
+    #: the client displays that, rather than inferring it.)
+    treat_as_empty_is_default: bool = True
 
 
 class TextCodeResponse(BaseModel):

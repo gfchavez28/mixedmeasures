@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse, Response
 from sqlalchemy.orm import Session
 
@@ -92,10 +93,28 @@ async def _stream_upload_to_temp(
         raise
 
 
+_PORTABILITY_SYNC_NOTE = """🔴 `export_project_endpoint` and `duplicate_project_endpoint`
+are `def`, NOT `async def` (#837, applied by MEASUREMENT 2026-08-30).
+
+A FastAPI endpoint declared `async def` runs ON the event loop; one declared `def` is
+dispatched to the threadpool. Neither body contains an `await`, so `async` put the whole
+operation on the loop and froze every other request — including Electron's `/health` probe —
+for its duration. Measured on the real GSS corpus: the export alone was **118.6 s** before
+this batch's streaming fix, and `duplicate` pays BOTH halves (export + re-import), making it
+the most expensive operation in this router.
+
+⚠️ Converted on a MEASUREMENT, never on the shape. `export.py`'s five CSV exports are
+deliberately still `async def` at 0.01–0.05 s (#837's own note), and
+`export_codebook_endpoint` is left alone here for the same reason — a codebook is small and
+nobody has measured it. ⚠️ `import_project_endpoint` genuinely awaits its upload, so it
+CANNOT become `def`; its synchronous half goes through `run_in_threadpool` instead."""
+
+
 # ── Project export ──────────────────────────────────────────────────────
 
 @router.get("/{project_id}/export-project")
-async def export_project_endpoint(
+# `def`, not `async def` — see the note above `_PORTABILITY_SYNC_NOTE`. (#837)
+def export_project_endpoint(
     project_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -151,7 +170,8 @@ async def export_project_endpoint(
 # ── Project duplicate (#464) ────────────────────────────────────────────
 
 @router.post("/{project_id}/duplicate", response_model=ProjectImportResult)
-async def duplicate_project_endpoint(
+# `def`, not `async def` — see the note above `_PORTABILITY_SYNC_NOTE`. (#837)
+def duplicate_project_endpoint(
     project_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -348,7 +368,24 @@ async def import_project_endpoint(
     tmp_path = await _stream_upload_to_temp(file)
     merge_report: dict | None = {} if import_mode == "merge" else None
     try:
-        new_id, project_name = import_project(
+        # 🔴 **OFF THE EVENT LOOP (#847).** `import_project` is minutes of synchronous
+        # SQLite work, and this endpoint is `async def`, so it ran ON the loop — every
+        # other request, including Electron's `/health` probe, was frozen for the whole
+        # import. ⚠️ **Unlike #837's five endpoints this one cannot simply become `def`**:
+        # it genuinely awaits `_stream_upload_to_temp` above, so the fix is to move the
+        # synchronous half instead.
+        #
+        # ⚠️ **This is the first router in the codebase to hand a `Session` to a threadpool,
+        # and it is safe for a reason worth stating rather than assuming:** both engines are
+        # built with `connect_args={"check_same_thread": False}` (`database.py`), and the
+        # Session is used by exactly ONE thread at a time — the loop awaits and touches
+        # nothing while the worker runs. A Session shared CONCURRENTLY across threads would
+        # still be unsafe.
+        #
+        # ⚠️ It does NOT make the import cancellable: the server keeps working after a
+        # client disconnects, which is why the client budget below had to move too.
+        new_id, project_name = await run_in_threadpool(
+            import_project,
             db, tmp_path, docs_dir, media_dir, user_id=user.id,
             import_mode=import_mode, target_project_id=target_project_id,
             coder_mapping=parsed_mapping, code_mapping=parsed_code_mapping, report=merge_report,

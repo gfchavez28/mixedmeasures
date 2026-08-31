@@ -11,6 +11,7 @@ from ..models.dataset import DatasetValue, DatasetColumn, ColumnType
 from ..models.recode import RecodeDefinition, RecodeType
 from ..services.dataset_import import _coerce_scale_codes
 from ..services.missing_values import is_missing, parse_missing_rules
+from ..services.recode_ranges import parse_ranges, resolve_range_output
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,49 @@ def _effective_null_set_hit(
     if is_missing(value_text, None):
         return True
     return value_text.strip().lower() in lower_excludes
+
+
+def _band_output(value_text: str, lower_excludes: set[str], ranges: list[dict]):
+    """The RANGE channel's own gate — the band a value takes, or ``None`` (#861).
+
+    🔴 **A response the definition EXCLUDES is not eligible for a band**, and that
+    is not implied by the channel order above it. `_effective_null_set_hit` gives
+    a column's declaration sole authority (#592 REPLACE semantics, correct and
+    unchanged), so on a declared column the per-definition `exclude_values`
+    channel never reaches the null set at all. #818 made `Exclude` work anyway by
+    a different route: ticking it REMOVES the response's key from `mapping`
+    (`recodeMappingPayload`), so the value fell through to `unmapped`, which the
+    apply path NULLs and REPORTS. **A covering band caught exactly that
+    fall-through** — measured on GSS `age`, a value the researcher had excluded
+    came back `('mapped', 1.0)` — so the response they explicitly dropped was
+    scored, silently, and did not appear in `unmapped_values` either.
+
+    ⚠️ **This suppresses the BAND only; it does NOT put `exclude_values` back
+    into the null set.** Doing that would reverse #592 on every declared column
+    and change `excluded` / `missing_overridden` for definitions that have no
+    bands at all. Landing the value in `unmapped` restores #818's designed
+    outcome verbatim — NULL, disclosed.
+
+    ⚠️ **The comparison is `value_text.strip().lower()`, matching
+    `_effective_null_set_hit` exactly**, so the two can never disagree about what
+    "excluded" means on the same cell.
+
+    ⚠️ **Per VALUE, never per definition.** A non-excluded response in the same
+    band still bands; a guard that switched the channel off whenever
+    `exclude_values` is non-empty would "fix" this by deleting the feature.
+
+    Shared by BOTH matchers (`compute_value` and `plan_definition_over_column`)
+    for the #542b reason the rest of this module is: one cell, one number,
+    whichever path computed it. The CLIENT already behaved this way —
+    `EditableCell.computeDisplayValue` tests `exclude_values` before consulting a
+    band — so before this fix the grid showed the cell as excluded while the
+    server stored the band's code.
+    """
+    if not ranges:
+        return None
+    if value_text.strip().lower() in lower_excludes:
+        return None
+    return resolve_range_output(value_text, ranges)
 
 
 def effective_reverse_offset(
@@ -202,6 +246,20 @@ def compute_value(
     lower_map = {k.lower(): v for k, v in mapping.items()}
     result = lower_map.get(value_text.strip().lower())
 
+    # #823(d): the RANGE channel, second — an explicit key beats a band, so a
+    # researcher who bands 0–120 and then maps "99" → Refused gets what they
+    # wrote. ⚠️ This must stay in step with `plan_definition_over_column`'s
+    # identical branch: the two paths compute the same cell, and #542b is what
+    # it costs when they disagree. Both call `resolve_range_output`.
+    # ⚠️ A REVERSE is excluded here and refused at the write path — it has no
+    # mapping of its own, it reflects its source's.
+    # ⚠️ #861: through `_band_output`, which also refuses a band to a response
+    # this definition EXCLUDES. On an undeclared column that value already
+    # returned above; on a DECLARED one the exclude channel never reaches the
+    # null set, and this gate is the only thing standing between it and a score.
+    if result is None and definition.recode_type != RecodeType.REVERSE:
+        result = _band_output(value_text, lower_excludes, parse_ranges(definition.ranges))
+
     # Reverse recode: map to numeric first, then reflect about the scale midpoint.
     if result is not None and definition.recode_type == RecodeType.REVERSE:
         try:
@@ -296,18 +354,30 @@ def plan_definition_over_column(
         .all()
     )
 
+    # #823(d): the band list, parsed once for the whole column. A REVERSE never
+    # bands — it reflects its source's mapping — and the write path refuses one.
+    ranges = [] if is_reverse else parse_ranges(definition.ranges)
+
     plan: list[RecodeCellDisposition] = []
     for (val,) in distinct_values:
         lower_val = val.strip().lower()
+        # #861: `_band_output` carries the exclude gate, so this matcher and
+        # `compute_value` cannot drift about which responses a band may claim.
+        banded = None
+        if lower_val not in lower_map:
+            banded = _band_output(val, lower_excludes, ranges)
         if _effective_null_set_hit(val, lower_excludes, missing_rules):
-            # Missing/excluded values get NULL — checked BEFORE the mapping,
-            # so a mapped missing value NULLs anyway (J-D1; Bug B/#594).
+            # Missing/excluded values get NULL — checked BEFORE the mapping AND
+            # before the bands, so a declared sentinel that a band covers
+            # numerically still NULLs (J-D1; Bug B/#594). ⚠️ That ordering is the
+            # reason a range could not just be "another mapping entry": on `age`,
+            # a `-99` sentinel sits inside any plausible band.
             plan.append(RecodeCellDisposition(
                 value_text=val, lower_key=lower_val, kind="null_set", output=None,
-                missing_overridden=lower_val in lower_map,
+                missing_overridden=lower_val in lower_map or banded is not None,
             ))
-        elif lower_val in lower_map:
-            raw = lower_map[lower_val]
+        elif lower_val in lower_map or banded is not None:
+            raw = lower_map[lower_val] if lower_val in lower_map else banded
             if definition.recode_type == RecodeType.CATEGORY_GROUP:
                 # Categorical output is a STRING group name; it is never
                 # floated and never reflected.
@@ -481,24 +551,35 @@ def get_unmapped_values(
     column_id: int,
     definition: RecodeDefinition,
 ) -> list[str]:
-    """Get value_text values that are not in the definition's mapping or exclude_values."""
-    mapping = _parse_mapping(definition)
-    exclude_values = _parse_exclude_values(definition)
+    """The column's distinct values this definition does NOT produce a value for.
 
-    known_lower = {k.lower() for k in mapping} | {v.lower() for v in exclude_values}
+    🔴 **Routes through `plan_definition_over_column` — THE match rule — since
+    #823(d), and it did not before.** It re-derived coverage from `mapping` ∪
+    `exclude_values`, which made it a FOURTH implementation of "does this rule
+    cover this value?" alongside the two backend matchers and the client's
+    display lens. Range bands are invisible to that derivation, so a banding rule
+    reported every banded response as unmapped: **measured on GSS `age`, 75
+    values reported unmapped by a rule whose three bands cover all of them.**
+    That is a wrong-information defect on the disclosure a researcher reads to
+    decide whether their rule is finished.
 
-    distinct_values = (
-        db.query(DatasetValue.value_text)
-        .filter(
-            DatasetValue.column_id == column_id,
-            DatasetValue.value_text.isnot(None),
-            DatasetValue.value_text != "",
-        )
-        .distinct()
-        .all()
-    )
+    ⚠️ **Behaviour change worth knowing, and it is a correction:** a
+    declared-MISSING value is no longer listed. It used to be, unless it also
+    happened to sit in the definition's own `exclude_values` — but a sentinel the
+    column declares missing is not a response the rule failed to map; it is one
+    the rule is right to leave alone. The plan classifies it `null_set`, and
+    `apply_definition_to_column` has always reported that separately as
+    `missing_overridden`.
 
-    return [val for (val,) in distinct_values if val.strip().lower() not in known_lower]
+    ⚠️ `column_id` is kept in the signature (callers pass it) but the plan reads
+    `definition.column_id`; they are the same column, and taking it from the
+    definition is what makes the two agree by construction.
+    """
+    return [
+        d.value_text
+        for d in plan_definition_over_column(db, definition)
+        if d.kind == "unmapped"
+    ]
 
 
 def clear_value_numeric(

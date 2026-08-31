@@ -18,7 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import inspect as sa_inspect, func
+from sqlalchemy import (
+    inspect as sa_inspect,
+    func,
+    insert as sa_insert,
+    select as sa_select,
+)
 from sqlalchemy.orm import Session
 
 from . import media_storage
@@ -108,7 +113,20 @@ logger = logging.getLogger(__name__)
 # converts them on the way in. The version is what makes "is this file's basis
 # UTF-16?" answerable at all; without it a re-import would silently reintroduce the
 # drift the repair migration just removed.
-CURRENT_FORMAT_VERSION = 5
+# v6 = #823(d) — `recode_definitions.ranges`, the band list that lets a rule
+# convert a continuous variable without a row per distinct value. THIS IS A
+# REFUSAL GATE, unlike v5, and it is the v4 case rather than the Decision B one.
+#
+# The test is what a DROPPED field does in an older build. Decision B's two
+# provenance fields are DESCRIPTIVE, so a v1.3.2 build losing them shows a
+# derived column as a plain manual one and computes everything the same — not
+# worth blocking a colleague over. A band list is CONSTITUTIVE: `_build_entity`
+# copies unknown columns verbatim and drops what the model does not declare, so
+# an older build would import a banding rule whose bands are gone. A rule built
+# entirely from ranges has an EMPTY `mapping`, so it would import as a rule that
+# maps NOTHING and, on the next apply, NULL every cell it was written to band.
+# Same silent-wrongness as v4's `missing_values`, which is the precedent.
+CURRENT_FORMAT_VERSION = 6
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
 
 
@@ -130,27 +148,41 @@ class MergeDivergenceError(ValueError):
 
 # ── Export size bound (#842) ────────────────────────────────────────────
 
-MAX_PROJECT_EXPORT_VALUES = 500_000
+MAX_PROJECT_EXPORT_VALUES = 4_000_000
 """The largest project `.mmproject` will export, in dataset values.
 
-**Chosen on TIME, with margin, 2026-08-27.** The binding constraint is the IMPORT
-half, not the export: `import_project` flushes once per entity, measured linear at
-0.376-0.433 s per 1,000 values across a 15x range (#847), against `importProject`'s
-hard-coded 300,000 ms client timeout. 500,000 values imports in roughly 190 s — 37%
-headroom.
+🔴 **RAISED 8x FROM 500,000 ON 2026-08-30, AND THE BINDING CONSTRAINT MOVED.** Both halves
+of the round trip were rebuilt together (#842 streaming export + #847 batched import) and
+the whole trip was then driven end to end on the real 75,699 x 41 GSS corpus — 3,633,552
+values — with a byte-for-byte fidelity check. **Measured, same machine, before and after:**
 
-⚠️ **Do NOT raise this to the ~800,000 where the timeout actually bites.** That is the
-FAILURE POINT, not a bound: at 720,000 the margin is already 9.8% on an unloaded
-6-core machine, and a slower one would abandon a valid import.
+| | wall | peak RSS |
+|---|---|---|
+| export before | 118.6 s | 10,479 MB |
+| export after  | **80.2 s** | **117 MB** |
+| import before | 1,591 s (26:31) | <= 2,485 MB |
+| import after  | **149 s** | 2,842 MB |
 
-⚠️ **This is deliberately NOT `MAX_DATASET_CELLS` (4,000,000) and the 8x gap is
-KNOWN** — the tool imports far more than it can share. The bound makes that honest;
-it does not close it. The real fix is BOTH halves together (streaming export +
-batched import) in v1.5.0 — `docs/release-1.4.0-checklist.md` §4d, tracked by #842
-and #847, which both stay open.
+**The old bound was chosen on TIME and that argument is gone:** 500,000 values now import in
+roughly 20 s, and the full 3.6 M round trip is ~230 s against a 15-minute client budget.
 
-⚠️ Dependency note (the internal design notes's blue block): this value was derived from TIME, so it
-does not key on the parked cloud/VPS question.
+🔴 **The constraint is now MEMORY, and it is the FORMAT's, not the write path's.** Measured
+separately: `json.loads` of this archive's `project.json` alone peaks at **2,611 MB** — 92%
+of the import's total. Batching adds ~231 MB on top of that floor. So raising this bound
+further buys nothing until the format stops requiring the whole payload in memory at once
+(a streaming parse, or per-entity JSONL zip entries); the write path has no more to give.
+**4,000,000 is set just above the largest round trip actually verified** — do not raise it
+on the strength of the time numbers, which are no longer what binds.
+
+⚠️ **`MAX_DATASET_CELLS` is also 4,000,000 and this is NOT the same quantity.** That caps
+CELLS in ONE dataset; this caps VALUES across the whole PROJECT, and a project may hold
+several datasets. The two numbers coinciding is a convenience, not an invariant — quoting
+one in the other's unit is exactly how the old 8x gap got reported as a bug.
+
+⚠️ Dependency note (the internal design notes's blue block): the value is still derived from a MEASUREMENT
+rather than from the `<256 MB` target, so it does not key on the parked cloud/VPS question.
+But note that the measured peak is an order of magnitude over that target, so if the target
+is ever reaffirmed, the FORMAT is what has to change.
 """
 
 
@@ -233,6 +265,115 @@ def _serialize_row(obj, columns: list[str]) -> dict:
 def _serialize_all(objects, columns: list[str]) -> list[dict]:
     """Serialize a list of ORM objects."""
     return [_serialize_row(obj, columns) for obj in objects]
+
+
+# ── Streaming the three entities that scale with the DATA (#842) ────────────
+#
+# 🔴 **MEASURED 2026-08-30 on the real 75,699 x 41 GSS corpus (3,633,552 values), and the
+# baseline was WORSE than #842 projected: 118.6 s at 10,479 MB peak RSS** for a 35.7 MB
+# archive. (#842's scoping note projected ~5 GB and expected a crash first; with 19 GB free
+# it did not crash, it just took ten gigabytes.) The cost is three copies of the same data
+# alive at once — ORM instances, then dicts, then one `json.dumps` string.
+#
+# Everything else in the export is bounded by the project's STRUCTURE (conversations, codes,
+# canvases). These three are bounded by the DATA:
+#   dataset_values 3,633,552 · row_scores 454,194 · dataset_rows 75,699
+# ⚠️ **`row_scores` is named NOWHERE in #842** and appears the moment a researcher computes
+# a scale score — 17 metrics x 75,699 records here. A fix aimed only at `dataset_values`
+# leaves half a million rows on the old path.
+#
+# 🔴 **CORE SELECT, NOT ORM `yield_per`.** An ORM `yield_per` still constructs instances and
+# registers them in the Session's identity map, so the peak is unchanged — the streaming has
+# to bypass the ORM entirely. `_stream_core_rows` returns plain `Row` mappings, which are
+# discarded per partition.
+#
+# ⚠️ **The serialized dict must be IDENTICAL to the ORM path's**, and that is verified by a
+# differential rather than assumed (`tests/test_portability_stream_equivalence.py`): SQLAlchemy
+# applies the same result processors to a Core select of the table, so `DateTime` yields
+# `datetime` and an `Enum` column yields the Python enum — the two branches below are the same
+# two `_serialize_row` has, for the same reason.
+
+#: Rows per streamed partition. Small enough that a partition's dicts are a rounding error
+#: against the archive; large enough that the per-partition overhead disappears.
+STREAM_PARTITION_ROWS = 5_000
+
+
+class _StreamedEntity:
+    """Placeholder in `project_data` marking a key whose rows are streamed, not materialised.
+
+    It occupies the key's ORIGINAL POSITION so the emitted `project.json` keeps the same key
+    order as the pre-streaming export — which is what lets two exports of an unchanged
+    project be compared byte for byte.
+    """
+
+    __slots__ = ("model", "columns", "whereclause", "order_by")
+
+    def __init__(self, model, columns, whereclause, order_by):
+        self.model = model
+        self.columns = columns
+        self.whereclause = whereclause
+        self.order_by = order_by
+
+
+def _serialize_mapping(mapping, columns: list[str]) -> dict:
+    """Serialize a Core result row. Mirrors `_serialize_row` — keep the two in step."""
+    data = {"_original_id": mapping["id"]}
+    for col in columns:
+        if col == "id":
+            continue
+        val = mapping[col]
+        if isinstance(val, datetime):
+            data[col] = val.isoformat()
+        elif isinstance(val, enum.Enum):
+            data[col] = val.value
+        else:
+            data[col] = val
+    return data
+
+
+def _stream_core_rows(db: Session, spec: "_StreamedEntity"):
+    """Yield serialized dicts for one streamed entity, a partition at a time."""
+    if spec.whereclause is None:
+        return
+    stmt = (
+        sa_select(spec.model.__table__)
+        .where(spec.whereclause)
+        .order_by(spec.order_by)
+        .execution_options(yield_per=STREAM_PARTITION_ROWS)
+    )
+    for partition in db.execute(stmt).partitions():
+        for row in partition:
+            yield _serialize_mapping(row._mapping, spec.columns)
+
+
+def _write_project_json(fh, project_data: dict, db: Session) -> dict[str, int]:
+    """Write `project.json` incrementally into an open zip entry. Returns streamed counts.
+
+    ⚠️ **Compact separators, not `indent=2`.** Measured on this corpus: pretty-printing the
+    same payload is ~34% more bytes and several times the `dumps` time, for a file no human
+    reads — it is machine exchange, and `json.tool` is one command away if anyone needs to
+    look. This alone is a large share of the peak the old path paid.
+    """
+    counts: dict[str, int] = {}
+    fh.write(b"{")
+    for i, (key, value) in enumerate(project_data.items()):
+        if i:
+            fh.write(b",")
+        fh.write(json.dumps(key).encode() + b":")
+        if isinstance(value, _StreamedEntity):
+            fh.write(b"[")
+            n = 0
+            for item in _stream_core_rows(db, value):
+                if n:
+                    fh.write(b",")
+                fh.write(json.dumps(item, separators=(",", ":")).encode())
+                n += 1
+            fh.write(b"]")
+            counts[key] = n
+        else:
+            fh.write(json.dumps(value, separators=(",", ":")).encode())
+    fh.write(b"}")
+    return counts
 
 
 # ── Export ──────────────────────────────────────────────────────────────
@@ -347,9 +488,14 @@ def export_project(
     ).all() if dataset_ids else []
     col_ids = [c.id for c in dataset_columns]
 
-    dataset_rows = db.query(DatasetRow).filter(
-        DatasetRow.dataset_id.in_(dataset_ids)
-    ).all() if dataset_ids else []
+    # STREAMED (#842) — see `_StreamedEntity`. Not materialised; the rows go straight into
+    # the zip entry a partition at a time.
+    dataset_rows = _StreamedEntity(
+        DatasetRow,
+        cols[DatasetRow],
+        DatasetRow.dataset_id.in_(dataset_ids) if dataset_ids else None,
+        DatasetRow.id,
+    )
 
     # #842 — JOIN BACK to the dataset; never materialise a project-wide id list.
     #
@@ -364,11 +510,19 @@ def export_project(
     # 2026-08-27 on a 3,633,552-value corpus: identical result sets, 0.45 s, no memory
     # growth. `order_by` keeps the archive reproducible so two exports of an unchanged
     # project can be compared — the shape the v1.5.0 round-trip guard needs.
-    dataset_values = db.query(DatasetValue).join(
-        DatasetRow, DatasetValue.row_id == DatasetRow.id
-    ).filter(
-        DatasetRow.dataset_id.in_(dataset_ids)
-    ).order_by(DatasetValue.id).all() if dataset_ids else []
+    # STREAMED (#842). The join-back stays exactly as it was — it is what keeps a
+    # project-wide id list out of `.in_()`; streaming is a separate concern layered on top.
+    dataset_values = _StreamedEntity(
+        DatasetValue,
+        cols[DatasetValue],
+        (
+            DatasetValue.row_id.in_(
+                sa_select(DatasetRow.id).where(DatasetRow.dataset_id.in_(dataset_ids))
+            )
+            if dataset_ids else None
+        ),
+        DatasetValue.id,
+    )
 
     # Exclude the derived consensus layer from export — it is regenerated on
     # import via materialize_consensus_for_project (§8 decision 4 / C2). This also
@@ -462,9 +616,14 @@ def export_project(
         ComputedResult.metric_definition_id.in_(metric_ids)
     ).all() if metric_ids else []
 
-    row_scores = db.query(RowScore).filter(
-        RowScore.metric_definition_id.in_(metric_ids)
-    ).all() if metric_ids else []
+    # STREAMED (#842) — 454,194 rows on the measured corpus, and named nowhere in that
+    # entry. `metric_ids` is bounded by the project's metric count, so it may pass by value.
+    row_scores = _StreamedEntity(
+        RowScore,
+        cols[RowScore],
+        RowScore.metric_definition_id.in_(metric_ids) if metric_ids else None,
+        RowScore.id,
+    )
 
     statistical_tests = db.query(StatisticalTest).filter(
         StatisticalTest.project_id == project_id
@@ -530,15 +689,15 @@ def export_project(
         "excerpts": _serialize_all(excerpts, cols[Excerpt]),
         "datasets": _serialize_all(datasets, cols[Dataset]),
         "dataset_columns": _serialize_all(dataset_columns, cols[DatasetColumn]),
-        "dataset_rows": _serialize_all(dataset_rows, cols[DatasetRow]),
-        "dataset_values": _serialize_all(dataset_values, cols[DatasetValue]),
+        "dataset_rows": dataset_rows,            # _StreamedEntity (#842)
+        "dataset_values": dataset_values,        # _StreamedEntity (#842)
         "recode_definitions": _serialize_all(recode_definitions, cols[RecodeDefinition]),
         "equivalence_groups": _serialize_all(equivalence_groups, cols[EquivalenceGroup]),
         "analysis_domains": _serialize_all(analysis_domains, cols[AnalysisDomain]),
         "analysis_domain_members": _serialize_all(analysis_domain_members, cols[AnalysisDomainMember]),
         "metric_definitions": _serialize_all(metric_definitions, cols[MetricDefinition]),
         "computed_results": _serialize_all(computed_results, cols[ComputedResult]),
-        "row_scores": _serialize_all(row_scores, cols[RowScore]),
+        "row_scores": row_scores,                # _StreamedEntity (#842)
         "statistical_tests": _serialize_all(statistical_tests, cols[StatisticalTest]),
         "material_collections": _serialize_all(material_collections, cols[MaterialCollection]),
         "materials": _serialize_all(materials_list, cols[Material]),
@@ -598,8 +757,12 @@ def export_project(
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # The manifest is small and human-read (the import preview shows it), so it keeps
+        # `indent=2`. `project.json` is machine exchange and is written incrementally —
+        # see `_write_project_json`.
         zf.writestr("manifest.json", json.dumps(manifest, indent=2))
-        zf.writestr("project.json", json.dumps(project_data, indent=2))
+        with zf.open("project.json", "w") as fh:
+            _write_project_json(fh, project_data, db)
 
         # Add document files
         project_docs_dir = docs_dir / str(project_id)
@@ -778,6 +941,21 @@ def _build_entity(model, item: dict, overrides: dict | None = None, fresh_uuid: 
     ``fresh_uuid``: when True and the model has a J3-2-0 ``uuid`` column, stamp a FRESH
     uuid instead of copying the source's (import-as-new — see note below).
     """
+    return model(**_entity_kwargs(model, item, overrides, fresh_uuid))
+
+
+def _entity_kwargs(
+    model, item: dict, overrides: dict | None = None, fresh_uuid: bool = False
+) -> dict:
+    """The column coercion, shared by the ORM and Core insert paths (#847).
+
+    🔴 **Extracted so the two paths CANNOT diverge.** The batched value/score inserts build
+    dicts for a Core `executemany` instead of ORM instances, and the first version of that
+    change re-derived the payload with a plain comprehension — which silently dropped the
+    ISO-string parsing below and failed 33 tests with *"SQLite DateTime type only accepts
+    Python datetime"*. It failed LOUDLY there; on a column the suite does not exercise it
+    would have written a string into a DateTime column instead.
+    """
     columns = sa_inspect(model).columns
     valid_cols = set(columns.keys()) - {"id"}
     kwargs = {}
@@ -800,7 +978,7 @@ def _build_entity(model, item: dict, overrides: dict | None = None, fresh_uuid: 
     # on uuid) imports with fresh_uuid=False to PRESERVE cross-copy identity.
     if fresh_uuid and "uuid" in valid_cols and not (overrides and "uuid" in overrides):
         kwargs["uuid"] = str(uuid.uuid4())
-    return model(**kwargs)
+    return kwargs
 
 
 def _merge_uuid_match(db: Session, model, incoming_uuid: str, project_id: int):
@@ -2178,31 +2356,161 @@ def import_project(
         # changed every statistic on the column, silently.
 
         # ── m. DatasetRows ─────────────────────────────────────────
-        for item in data.get("dataset_rows", []):
-            _add(DatasetRow, item, {
+        #
+        # 🔴 **BATCHED (#847).** `_add` flushes once PER ENTITY, because it needs `obj.id`
+        # back to populate `remap` before children can re-point at it. On the measured GSS
+        # corpus that is 75,699 + 3,633,552 round trips — **linear at 0.376–0.433 s per
+        # 1,000 values across a 15x range, so ~26 minutes**, against a client that gives up
+        # at five. This is #796b's defect on the path #796b never touched.
+        #
+        # Rows keep the ORM and batch only the FLUSH: there are tens of thousands of them,
+        # and `DatasetRow` carries Python-side `uuid` and `created_at` defaults that a Core
+        # insert would have to re-spell here, where they would silently diverge the day the
+        # model changes. That is #796b's own measured call, and it applies unchanged.
+        _ROW_FLUSH_BATCH = 2_000
+        pending_rows: list[tuple[int, DatasetRow]] = []
+
+        def _drain_rows() -> None:
+            """One flush per batch; ids are assigned to the whole pending set at once."""
+            if not pending_rows:
+                return
+            db.flush()
+            for original_id, obj in pending_rows:
+                remap["dataset_rows"][original_id] = obj.id
+                inserted_ids.setdefault("dataset_rows", set()).add(obj.id)
+            pending_rows.clear()
+
+        # ⚠️ A merge matches each row by its Track J uuid, and `DatasetRow` has no
+        # `project_id`, so `_merge_uuid_match` falls back to the GLOBAL unique index. Doing
+        # that per item is another 75,699 queries; the incoming uuids are known up front, so
+        # they are resolved in CHUNKS. The chunk size also keeps the `.in_()` far below
+        # SQLite's 250,000 bind-parameter ceiling — the #842 trap, one door over.
+        _UUID_LOOKUP_CHUNK = 5_000
+        row_items = data.get("dataset_rows", [])
+        matched_row_ids: dict[str, int] = {}
+        if import_mode == "merge" and row_items:
+            incoming = [it["uuid"] for it in row_items if it.get("uuid")]
+            for i in range(0, len(incoming), _UUID_LOOKUP_CHUNK):
+                chunk = incoming[i:i + _UUID_LOOKUP_CHUNK]
+                matched_row_ids.update(
+                    db.execute(
+                        sa_select(DatasetRow.uuid, DatasetRow.id)
+                        .where(DatasetRow.uuid.in_(chunk))
+                    ).all()
+                )
+
+        for item in row_items:
+            incoming_uuid = item.get("uuid")
+            if import_mode == "merge" and incoming_uuid in matched_row_ids:
+                # Matched entities keep the TARGET's field values — a merge never
+                # overwrites shared sources with the colleague's copy (`_add`'s rule).
+                remap["dataset_rows"][item["_original_id"]] = matched_row_ids[incoming_uuid]
+                continue
+            obj = _build_entity(DatasetRow, item, {
                 "dataset_id": _remap_id(remap, "datasets", item.get("dataset_id")),
                 "participant_id": _remap_id(remap, "participants", item.get("participant_id")),
-            }, "dataset_rows")
+            }, fresh_uuid=(import_mode == "new"))
+            db.add(obj)
+            pending_rows.append((item["_original_id"], obj))
+            if len(pending_rows) >= _ROW_FLUSH_BATCH:
+                _drain_rows()
+        _drain_rows()
 
         # ── n. DatasetValues ───────────────────────────────────────
-        for item in data.get("dataset_values", []):
+        #
+        # 🔴 **CORE `executemany`, then ONE read-back to rebuild the remap (#847).**
+        # `DatasetValue` has no Python-side defaults and no uuid, so nothing needs ORM
+        # instances — and at 3.6 million rows the instances are the memory, exactly as the
+        # export measurement showed. The remap `_add` flushed per entity to obtain is
+        # rebuilt afterwards from `(row_id, column_id)`, which is UNIQUE
+        # (`uq_dataset_values_row_column`) — the same transitive match the MERGE path below
+        # already used, applied to the whole set at once.
+        #
+        # 🔴 **The read-back JOINS BACK to `dataset_id`; it must never be
+        # `.in_(row_ids)`.** That is #842's own 250,000 bind-parameter ceiling, and this is
+        # precisely the shape that would reintroduce it — a project-wide id list handed to
+        # `.in_()`. `new_dataset_ids` is bounded by the project's dataset COUNT.
+        _VALUE_INSERT_BATCH = 10_000
+        value_items = data.get("dataset_values", [])
+        new_dataset_ids = list(remap["datasets"].values())
+
+        # A merge re-points at values that already exist in the target rather than
+        # inserting duplicates. One query builds the whole (row, column) -> id map; the old
+        # per-item `.first()` was another 3.6 million round trips.
+        existing_by_key: dict[tuple[int, int], int] = {}
+        if import_mode == "merge" and new_dataset_ids:
+            existing_by_key = {
+                (r, c): i for i, r, c in db.execute(
+                    sa_select(DatasetValue.id, DatasetValue.row_id, DatasetValue.column_id)
+                    .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+                    .where(DatasetRow.dataset_id.in_(new_dataset_ids))
+                ).all()
+            }
+
+        pending_values: list[dict] = []
+        n_inserted_values = 0
+
+        def _drain_values() -> None:
+            if pending_values:
+                db.execute(sa_insert(DatasetValue), pending_values)
+                pending_values.clear()
+
+        for item in value_items:
             row_id = _remap_id(remap, "dataset_rows", item.get("row_id"))
             column_id = _remap_id(remap, "dataset_columns", item.get("column_id"))
             if import_mode == "merge" and row_id is not None and column_id is not None:
-                # DatasetValue has no uuid — match transitively on (row, column) (unique).
-                # The value already exists in the target (frozen dataset); re-point at it.
-                existing_val = (
-                    db.query(DatasetValue)
-                    .filter(DatasetValue.row_id == row_id, DatasetValue.column_id == column_id)
-                    .first()
-                )
-                if existing_val is not None:
-                    remap["dataset_values"][item["_original_id"]] = existing_val.id
+                existing_id = existing_by_key.get((row_id, column_id))
+                if existing_id is not None:
+                    remap["dataset_values"][item["_original_id"]] = existing_id
                     continue
-            _add(DatasetValue, item, {
+            payload = _entity_kwargs(DatasetValue, item, {
                 "row_id": row_id,
                 "column_id": column_id,
-            }, "dataset_values")
+            }, fresh_uuid=(import_mode == "new"))
+            pending_values.append(payload)
+            n_inserted_values += 1
+            if len(pending_values) >= _VALUE_INSERT_BATCH:
+                _drain_values()
+        _drain_values()
+
+        # Rebuild the remap in ONE query. ⚠️ It must run AFTER the final drain, and the
+        # rows it reads include any the merge matched — harmless, because the lookup below
+        # is keyed on exactly the pairs we inserted.
+        if n_inserted_values and new_dataset_ids:
+            db.flush()
+            key_to_id = {
+                (r, c): i for i, r, c in db.execute(
+                    sa_select(DatasetValue.id, DatasetValue.row_id, DatasetValue.column_id)
+                    .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+                    .where(DatasetRow.dataset_id.in_(new_dataset_ids))
+                ).all()
+            }
+            # ⚠️ Re-ITERATE the parsed items rather than remembering an (original_id, key)
+            # side list. That list measured ~540 MB at 3.6 M values, for information already
+            # present in `value_items` — which the JSON parse is holding regardless. The
+            # second pass is dict lookups over data already in memory.
+            value_remap = remap["dataset_values"]
+            for item in value_items:
+                original_id = item["_original_id"]
+                if original_id in value_remap:
+                    continue  # merge-matched above; it already points at the target's row
+                key = (
+                    _remap_id(remap, "dataset_rows", item.get("row_id")),
+                    _remap_id(remap, "dataset_columns", item.get("column_id")),
+                )
+                new_id = key_to_id.get(key)
+                if new_id is not None:
+                    value_remap[original_id] = new_id
+            del key_to_id
+
+        # ⚠️ **`inserted_ids["dataset_values"]` is deliberately NOT populated, and this is a
+        # DECISION rather than an omission (#714's class).** Nothing reads it — the three
+        # consumers are `dataset_columns`, `excerpts` and `notes` — and at 3.6 M values the
+        # set costs ~200 MB for information no post-pass wants. 🔴 **If you add a post-pass
+        # that MUTATES imported dataset values, populate it in the loop above FIRST:** a
+        # post-pass reading `inserted_ids.get("dataset_values", set())` gets an empty set and
+        # silently does nothing, which is exactly how `renumber_imported_notes` renumbered
+        # nothing on every import while all three of its guards passed.
 
         # ── o. RecodeDefinitions (topological) ─────────────────────
         _import_recodes_topological(
@@ -2409,11 +2717,26 @@ def import_project(
             })
 
         # ── x. RowScores ────────────────────────────────────
+        # #847 — Core `executemany`. `_add` was called with NO `remap_key` here, so nothing
+        # downstream ever needed these ids or these instances; the per-entity flush was pure
+        # cost. 454,194 rows on the measured corpus (17 metrics x 75,699 records), which is
+        # ordinary the moment a researcher computes a scale score.
+        # ⚠️ `RowScore.computed_at` has a Python-side `func.now()` default; a Core insert
+        # applies column defaults, and the exported item carries its own value anyway.
+        _pending_scores: list[dict] = []
         for item in data.get("row_scores", []):
-            _add(RowScore, item, {
-                "metric_definition_id": _remap_id(remap, "metric_definitions", item.get("metric_definition_id")),
-                "dataset_row_id": _remap_id(remap, "dataset_rows", item.get("dataset_row_id")),
-            })
+            payload = _entity_kwargs(RowScore, item, {
+                "metric_definition_id": _remap_id(
+                    remap, "metric_definitions", item.get("metric_definition_id")),
+                "dataset_row_id": _remap_id(
+                    remap, "dataset_rows", item.get("dataset_row_id")),
+            }, fresh_uuid=(import_mode == "new"))
+            _pending_scores.append(payload)
+            if len(_pending_scores) >= 10_000:
+                db.execute(sa_insert(RowScore), _pending_scores)
+                _pending_scores.clear()
+        if _pending_scores:
+            db.execute(sa_insert(RowScore), _pending_scores)
 
         # ── x.5 Tier 3 backfill: auto scale-score metrics for legacy domains ──
         # Projects exported before the crosswalk (pre-Apr 2026) have

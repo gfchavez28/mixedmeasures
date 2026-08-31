@@ -41,10 +41,18 @@ DELIBERATELY_NOT_ON_DATA = {
     # raw ordinal has no consumer there; `DatasetView` reorders through the
     # dedicated PATCH, which reads the full response.
     "display_order",
-    # `/data` carries the richer `recode_definitions` list instead, from which
-    # the client picks the active definition itself. `primary_recode` is the
-    # SUMMARY built for surfaces that do NOT get the full list (the Variables
-    # view's grid, the analysis picker).
+    # `/data` consumers pick the active definition out of `recode_definitions`
+    # themselves, so the summary would be a second way to say the same thing on
+    # the one payload that does not need it.
+    #
+    # ⚠️ **This entry's REASON changed on 2026-08-31 (#830f) even though the
+    # entry did not.** It used to read "the SUMMARY built for surfaces that do
+    # NOT get the full list" — true only while `recode_definitions` rode `/data`
+    # alone. Every column payload carries the full list now, so the surfaces are
+    # no longer the distinction; the consumer's need is. The field still earns
+    # its place on `DatasetColumnResponse` because it carries `remaps_codes`,
+    # which is COMPUTED (`_mapping_remaps_codes`) and cannot be read off a
+    # summary without re-implementing the shape test client-side.
     "primary_recode",
     # A participant-profile opt-out is edited and read on the participant
     # surfaces, never in the data grid.

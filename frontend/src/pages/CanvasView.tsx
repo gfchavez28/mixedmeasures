@@ -344,6 +344,9 @@ export default function CanvasView() {
   const [snapshotPopoverOpen, setSnapshotPopoverOpen] = useState(false)
   const [snapshotName, setSnapshotName] = useState('')
   const [restoreTarget, setRestoreTarget] = useState<CanvasSnapshot | null>(null)
+  // #854(e) — deleting a snapshot confirms, like restoring one. It did not, and
+  // the two controls sit 2px apart.
+  const [deleteSnapshotTarget, setDeleteSnapshotTarget] = useState<CanvasSnapshot | null>(null)
 
   const toggleDrawer = useCallback((section?: 'excerpts' | 'charts' | 'memos') => {
     setDrawerOpen(prev => {
@@ -1377,28 +1380,52 @@ export default function CanvasView() {
                             {snap.theme_count} theme{snap.theme_count !== 1 ? 's' : ''} &middot; {formatRelativeTime(snap.created_at)}
                           </p>
                         </div>
-                        <div className="flex items-center gap-0.5 opacity-0 group-hover/snap:opacity-100 transition-opacity">
+                        {/* #854(e) — three 16x16 targets, 2px apart, two of
+                            them destructive. Now `p-1.5` around a 12px icon =
+                            24x24 with `gap-1`, the WCAG 2.5.8 floor that
+                            `ColorDotButton` (#437) exists to honour elsewhere.
+
+                            🔴 Three things the filed entry did not record, all
+                            found by reading this block:
+
+                            (1) The group revealed on HOVER with no `focus` arm,
+                            so a keyboard user tabbed into invisible controls —
+                            #777 exactly. `focus-within` joins hover.
+
+                            (2) RESTORE and DELETE carried only a `title`, and
+                            all three names were identical across every row —
+                            N controls saying nothing about WHICH snapshot
+                            (#559/#785). Each names its own snapshot now.
+
+                            (3) 🔴 **Delete had NO confirmation while Restore
+                            had one.** A 16px destructive control 2px from
+                            Restore, firing immediately, on a rotation that
+                            keeps ten — and there is no undo. It routes through
+                            the same confirm shape Restore uses. */}
+                        <div className="flex items-center gap-1 opacity-0 group-hover/snap:opacity-100 focus-within:opacity-100 transition-opacity">
                           <button
                             onClick={() => { setSnapshotPopoverOpen(false); navigate(`/projects/${projectId}/analysis/canvas/compare?canvas=${canvasId}&snapshot=${snap.id}`) }}
-                            className="p-0.5 rounded hover:bg-mm-bg transition-colors text-mm-text-muted hover:text-mm-text"
+                            className="p-1.5 rounded hover:bg-mm-bg transition-colors text-mm-text-muted hover:text-mm-text"
                             title="Compare with current"
-                            aria-label="Compare snapshot with current"
+                            aria-label={`Compare "${snap.name}" with current`}
                           >
-                            <GitCompare className="w-3 h-3" />
+                            <GitCompare className="w-3 h-3" aria-hidden="true" />
                           </button>
                           <button
                             onClick={() => setRestoreTarget(snap)}
-                            className="p-0.5 rounded hover:bg-mm-bg transition-colors text-mm-text-muted hover:text-mm-text"
+                            className="p-1.5 rounded hover:bg-mm-bg transition-colors text-mm-text-muted hover:text-mm-text"
                             title="Restore"
+                            aria-label={`Restore "${snap.name}"`}
                           >
-                            <RotateCcw className="w-3 h-3" />
+                            <RotateCcw className="w-3 h-3" aria-hidden="true" />
                           </button>
                           <button
-                            onClick={() => deleteSnapshotMut.mutate(snap.id)}
-                            className="p-0.5 rounded hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors text-mm-text-muted hover:text-red-700"
+                            onClick={() => setDeleteSnapshotTarget(snap)}
+                            className="p-1.5 rounded hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors text-mm-text-muted hover:text-red-700"
                             title="Delete snapshot"
+                            aria-label={`Delete "${snap.name}"`}
                           >
-                            <Trash2 className="w-3 h-3" />
+                            <Trash2 className="w-3 h-3" aria-hidden="true" />
                           </button>
                         </div>
                       </div>
@@ -1605,6 +1632,30 @@ export default function CanvasView() {
               onClick={() => restoreTarget && restoreSnapshotMut.mutate(restoreTarget.id)}
             >
               Restore
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* #854(e): snapshot delete confirmation — the sibling Restore has had one
+          all along, and this is the more destructive of the two: a restore is
+          backed up automatically (see above), a delete is not recoverable. */}
+      <AlertDialog open={deleteSnapshotTarget !== null} onOpenChange={(open) => { if (!open) setDeleteSnapshotTarget(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this snapshot?</AlertDialogTitle>
+            <AlertDialogDescription>
+              "{deleteSnapshotTarget?.name}" will be removed. Your canvas itself is
+              unaffected, and this cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => deleteSnapshotTarget && deleteSnapshotMut.mutate(deleteSnapshotTarget.id)}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              Delete snapshot
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

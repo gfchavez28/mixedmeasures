@@ -6,6 +6,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
+import TreatAsEmptyEditor from '@/components/TreatAsEmptyEditor'
 import type { TextCodingColumn } from '@/lib/api'
 
 interface TextCodingColumnPickerProps {
@@ -13,6 +14,16 @@ interface TextCodingColumnPickerProps {
   selectedColumnIds: number[]
   onSelectionChange: (ids: number[]) => void
   onSwitchToRecordView?: () => void
+  /**
+   * #816 — the project's non-response vocabulary, edited HERE because this is
+   * where its consequence is rendered: every row below prints `N/M responded`,
+   * and that N is exactly what this list decides. See `TreatAsEmptyEditor`.
+   * Omitted by callers that only pick columns.
+   */
+  treatAsEmpty?: string[]
+  treatAsEmptyIsDefault?: boolean
+  onTreatAsEmptyChange?: (next: string[] | null) => void
+  isSavingTreatAsEmpty?: boolean
 }
 
 export default function TextCodingColumnPicker({
@@ -20,6 +31,10 @@ export default function TextCodingColumnPicker({
   selectedColumnIds,
   onSelectionChange,
   onSwitchToRecordView,
+  treatAsEmpty,
+  treatAsEmptyIsDefault = true,
+  onTreatAsEmptyChange,
+  isSavingTreatAsEmpty = false,
 }: TextCodingColumnPickerProps) {
   const [open, setOpen] = useState(false)
 
@@ -145,6 +160,18 @@ export default function TextCodingColumnPicker({
             </div>
           ))}
         </div>
+        {/* #816 — the declaration that governs the counts rendered above it.
+            ⚠️ Above the "try By Record view" hint on purpose: that hint is
+            transient advice about the current selection, while this is the
+            project's own rule, and burying a rule under advice inverts them. */}
+        {treatAsEmpty && onTreatAsEmptyChange && (
+          <TreatAsEmptyEditor
+            values={treatAsEmpty}
+            isDefault={treatAsEmptyIsDefault}
+            onChange={onTreatAsEmptyChange}
+            isSaving={isSavingTreatAsEmpty}
+          />
+        )}
         {selectedCount >= 3 && (
           <div className="p-2 border-t bg-amber-50 dark:bg-amber-900/30 flex items-start gap-2">
             <TriangleAlert className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />

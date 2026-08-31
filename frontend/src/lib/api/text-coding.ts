@@ -103,8 +103,36 @@ export interface TextCodingViewConfig {
   context_visibility: Record<string, boolean>
   hide_empty: boolean
   starred_value_ids: number[]
+  /**
+   * The non-response vocabulary IN EFFECT — the project's declaration, or the
+   * defaults when it has none (#816). Always the effective values.
+   */
   treat_as_empty: string[]
+  /**
+   * 🔴 Which of the two produced the list above. The list alone cannot say: a
+   * project declaring exactly the defaults is identical on the wire to one that
+   * declared nothing, and "use the standard list" means something different in
+   * each. Never re-derive this by comparing against a client-side copy of the
+   * defaults — that is a mirror of a backend constant.
+   */
+  treat_as_empty_is_default: boolean
 }
+
+/**
+ * What may be SENT to `PATCH /config` — deliberately not the response type
+ * (#816).
+ *
+ * The response was doing double duty as the request, which made two states
+ * inexpressible. `treat_as_empty: null` is the "go back to the standard list"
+ * instruction and is DIFFERENT from omitting the field, which means "leave it
+ * alone" (the backend keys on `model_fields_set`). And
+ * `treat_as_empty_is_default` is the server's own statement about where the
+ * list came from — sending it back would be a client asserting a fact it does
+ * not own, so the type removes it.
+ */
+export type TextCodingConfigUpdate =
+  Partial<Omit<TextCodingViewConfig, 'treat_as_empty' | 'treat_as_empty_is_default'>>
+  & { treat_as_empty?: string[] | null }
 
 // API functions - Text Coding
 export const textCodingApi = {
@@ -146,7 +174,7 @@ export const textCodingApi = {
   // Config
   getConfig: (pid: number) =>
     api.get<TextCodingViewConfig>(`/projects/${pid}/text-coding/config`).then(r => r.data),
-  updateConfig: (pid: number, data: Partial<TextCodingViewConfig>) =>
+  updateConfig: (pid: number, data: TextCodingConfigUpdate) =>
     api.patch<TextCodingViewConfig>(`/projects/${pid}/text-coding/config`, data).then(r => r.data),
 
   // Export

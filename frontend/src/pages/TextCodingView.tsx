@@ -16,9 +16,10 @@ import {
   SelectTrigger,
 } from '@/components/ui/select'
 import {
-  textCodingApi, codesApi, categoriesApi, excerptsApi, datasetsApi,
+  textCodingApi, codesApi, categoriesApi, excerptsApi, datasetsApi, extractApiError,
   type TextCodingViewConfig, type TextCodingColumn,
 } from '@/lib/api'
+import { invalidateTextEmptinessReaders } from '@/lib/text-coding-cache'
 import { useHistory } from '@/hooks/useHistory'
 import TextCodingColumnPicker from '@/components/TextColumnPicker'
 import ByTextTable, { type ByTextTableHandle } from '@/components/ByTextTable'
@@ -195,6 +196,23 @@ export default function TextCodingView() {
     })
   }, [focalColumnIds])
 
+  /** #830(e) — the codeable base for the CURRENT focal selection.
+   *
+   * Summed across the selected columns from the same payload the picker
+   * renders, so the toolbar and the picker can never disagree; `non_empty_rows`
+   * is #519's single-sourced numerator and `total_rows` the record count
+   * #830(d) corrected. */
+  const codeableBase = useMemo(() => {
+    let nonEmpty = 0
+    let total = 0
+    for (const col of textColumns) {
+      if (!focalColumnIds.includes(col.column_id)) continue
+      nonEmpty += col.non_empty_rows
+      total += col.total_rows
+    }
+    return { nonEmpty, total }
+  }, [textColumns, focalColumnIds])
+
   const columnLookup = useMemo(() => {
     const map = new Map<number, TextCodingColumn>()
     for (const col of textColumns) map.set(col.column_id, col)
@@ -339,6 +357,39 @@ export default function TextCodingView() {
     }, 500)
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [viewMode, focalColumnIds, datasetFilterIds, randomSeed, hideEmpty, contextVisible]) // eslint-disable-line react-hooks/exhaustive-deps -- configMutation is a stable mutate call; adding it causes infinite loop
+
+  /**
+   * #816 — the project's non-response vocabulary.
+   *
+   * ⚠️ **Deliberately NOT folded into the debounced save above.** That effect
+   * writes six view-STATE fields on a timer; this is a DECLARATION that moves
+   * every denominator in the qualitative stack, so it saves on the gesture and
+   * reports its own outcome. The two never collide: `update_config` keys on
+   * `model_fields_set`, so each request touches only the fields it names.
+   *
+   * ⚠️ `null` means "go back to the standard list" and MUST reach the wire as
+   * an explicit null — an omitted field means "leave it alone", which is a
+   * different instruction. The API type is `list | null` for exactly that.
+   */
+  const treatAsEmptyMutation = useMutation({
+    mutationFn: (next: string[] | null) =>
+      textCodingApi.updateConfig(projectId, { treat_as_empty: next }),
+    onSuccess: () => {
+      // The counts in the picker ARE the disclosure — see `TreatAsEmptyEditor`.
+      invalidateTextEmptinessReaders(queryClient, projectId)
+    },
+    onError: (err: Error) =>
+      toast.error(extractApiError(err, 'Could not update what counts as no response')),
+  })
+
+  /** One object, both picker call sites — a second copy is how two surfaces
+   *  start disagreeing about a project-level rule. */
+  const treatAsEmptyProps = {
+    treatAsEmpty: configData?.treat_as_empty,
+    treatAsEmptyIsDefault: configData?.treat_as_empty_is_default ?? true,
+    onTreatAsEmptyChange: (next: string[] | null) => treatAsEmptyMutation.mutate(next),
+    isSavingTreatAsEmpty: treatAsEmptyMutation.isPending,
+  }
 
   // ── Code creation ───────────────────────────────────────────────────
 
@@ -1031,7 +1082,30 @@ export default function TextCodingView() {
             selectedColumnIds={focalColumnIds}
             onSelectionChange={setFocalColumnIds}
             onSwitchToRecordView={() => setViewMode('by_record')}
+            {...treatAsEmptyProps}
           />
+
+          {/* #830(e), the half that survived its own diagnosis. The entry read
+              the base *n* as "only visible inside a dialog" — true, and it is
+              the number every coding decision is measured against. It states
+              itself on the toolbar now.
+
+              ⚠️ The entry's OTHER half — "the view opens on an identifier
+              column, and the view choosing it as the default focal column is
+              the tool's" — is REFUTED. There is no default-selection code:
+              `focalColumnIds` starts `[]` and is written only by the URL
+              `?columns=` param, the saved config, or this picker; with none
+              selected the view renders its empty state, not a wrong column. The
+              `Student_ID` it opened on had been SAVED in that project's
+              `TextCodingConfig` by an earlier session's debounced write. Adding
+              a "prefer a column with prose" heuristic would have been a fix to
+              a code path that does not exist, and it would have fought the
+              saved config on every load. */}
+          {focalColumnIds.length > 0 && (
+            <span className="text-xs text-mm-text-muted tabular-nums">
+              {codeableBase.nonEmpty}/{codeableBase.total} responded
+            </span>
+          )}
 
           {/* Context toggles (By Text only — By Record has built-in context sidebar) */}
           {viewMode === 'by_text' && (
@@ -1233,10 +1307,15 @@ export default function TextCodingView() {
         </div>
       ) : (
         <div className="flex items-center gap-2 px-4 py-2 border-b bg-mm-surface shrink-0">
+          {/* ⚠️ The ANALYSIS tab gets the same editor, deliberately: this is
+              the tab whose every number is a denominator #519 routes through
+              `treat_as_empty`, so it is at least as much the place to ask what
+              counts as an answer as the coding tab is. */}
           <TextCodingColumnPicker
             columns={textColumns}
             selectedColumnIds={focalColumnIds}
             onSelectionChange={setFocalColumnIds}
+            {...treatAsEmptyProps}
           />
           <span className="text-xs text-muted-foreground">
             {focalColumnIds.length} column{focalColumnIds.length !== 1 ? 's' : ''} selected

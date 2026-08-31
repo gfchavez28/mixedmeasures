@@ -1,20 +1,13 @@
 import { useState, useMemo, useCallback, useRef, useEffect, memo } from 'react'
 import { useParams, Link, useNavigate, useSearchParams } from 'react-router'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuGroup,
-  DropdownMenuSeparator,
-} from '@/components/ui/dropdown-menu'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, FileInput, GripVertical, Undo2, Redo2, MessageSquareText, FunctionSquare, ChevronDown, CornerDownRight } from 'lucide-react'
+import { GripVertical, Undo2, Redo2, MessageSquareText } from 'lucide-react'
 import { columnDisplayLabel, truncatedColumnLabel } from '@/lib/dataset-column-label'
+import AddVariableMenu from '@/components/AddVariableMenu'
 import PickRuleToDeriveDialog from '@/components/PickRuleToDeriveDialog'
 import DeriveVariableDialog from '@/components/DeriveVariableDialog'
+import { useCreateVariable } from '@/hooks/useCreateVariable'
 import { useDeriveVariable } from '@/hooks/useDeriveVariable'
 import { variableViewPath } from '@/lib/dataset-routes'
 import './dataset-view.css'
@@ -42,8 +35,6 @@ import {
   type DatasetColumn,
   type DatasetDataResponse,
   type RecodeDefinitionSummary,
-  type ManualColumnCreate,
-  type ComputedColumnCreate,
   DATASET_PAGE_SIZE,
 } from '@/lib/api'
 import { toast } from 'sonner'
@@ -353,21 +344,14 @@ export default function DatasetView() {
   const [selectedCell, setSelectedCell] = useState<{ rowId: number; columnId: number } | null>(null)
   const [editingCell, setEditingCell] = useState<{ rowId: number; columnId: number } | null>(null)
 
-  // Add Column dialog
-  const [addColumnOpen, setAddColumnOpen] = useState(false)
-  const [addColumnError, setAddColumnError] = useState<string | null>(null)
-
-  // Delete Column confirmation
-
-  // Add Computed Column dialog. The EDIT half lives in the Variables view now
+  // The three kinds of new variable — dialog state, both create mutations and
+  // the invalidation set all live in `useCreateVariable` (#830f), shared with
+  // the Variables view. The EDIT half of the computed form lives there too
   // (design note E — the popover thinning).
-  const [computedColumnOpen, setComputedColumnOpen] = useState(false)
-  const [pickRuleOpen, setPickRuleOpen] = useState(false)
-  // Decision B Stage 3 — the same flow the Variables view uses, from one hook.
-  // ⚠️ No `onCreated`: the new column appears in the grid already on screen, so
-  // navigating would move the researcher away from what they just made.
+  // ⚠️ No `onCreated` on either hook: the new column appears in the grid already
+  // on screen, so navigating would move the researcher away from what they made.
+  const createVariable = useCreateVariable(pid, iid)
   const derive = useDeriveVariable(pid, iid)
-  const [computedColumnError, setComputedColumnError] = useState<string | null>(null)
 
   // Delete Response confirmation
   const [deleteResponse, setDeleteResponse] = useState<{ id: number; label: string } | null>(null)
@@ -900,37 +884,11 @@ export default function DatasetView() {
   }, [data])
 
   // Create column mutation
-  const createColumnMutation = useMutation({
-    mutationFn: (data: ManualColumnCreate) => datasetsApi.createManualColumn(pid, iid, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })
-      queryClient.invalidateQueries({ queryKey: ['dataset-columns', pid, iid] })
-      setAddColumnOpen(false)
-      setAddColumnError(null)
-      toast.success('Column added')
-    },
-    onError: (err: Error) => {
-      setAddColumnError(extractApiError(err, 'Failed to create column'))
-    },
-  })
-
   // Deleting a variable: the confirm, the endpoint choice and the invalidation
   // set all live in `useDeleteVariable` (#812), shared with the Variables view.
   // The Data view passes no `onDeleted` — the column simply leaves the grid the
   // researcher is already looking at.
   const deleteVariable = useDeleteVariable(pid, iid)
-
-  const createComputedMut = useMutation({
-    mutationFn: (d: ComputedColumnCreate) => datasetsApi.createComputedColumn(pid, iid, d),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })
-      queryClient.invalidateQueries({ queryKey: ['dataset-columns', pid, iid] })
-      setComputedColumnOpen(false)
-      setComputedColumnError(null)
-      toast.success('Computed column added')
-    },
-    onError: (err: Error) => setComputedColumnError(extractApiError(err, 'Failed to create computed column')),
-  })
 
   const recomputeMut = useMutation({
     mutationFn: (columnId: number) => datasetsApi.recomputeColumn(pid, iid, columnId),
@@ -1162,72 +1120,17 @@ export default function DatasetView() {
             variable and appending records are two kinds of one act, and they
             are not the same kind as each other.
 
-            ⚠️ The group headings carry that meaning, so they are ASSOCIATED,
-            not merely rendered — Radix's `Group` gives `role="group"` but does
-            NOT wire a sibling `Label` to it. Without `aria-labelledby` a
-            screen reader meets "Variables" and "Records" as loose text and
-            hears four items in one flat list, which is exactly the reading
-            this control exists to replace.
-
-            ⚠️ The orange tint on "Add Column" is GONE (§10.4): `mm-orange`
-            appears nowhere else in this grid, so it was decoration that made
-            two same-kind actions read as different kinds. Violet STAYS on the
-            computed item — it matches the violet `FunctionSquare` marking a
-            computed column in the grid, so it is the one tint here carrying
-            information. */}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline" size="sm" className="text-sm">
-              <Plus className="w-4 h-4 mr-1" aria-hidden="true" />
-              Add
-              <ChevronDown className="w-3.5 h-3.5 ml-1" aria-hidden="true" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuGroup aria-labelledby="add-menu-variables">
-              <DropdownMenuLabel id="add-menu-variables" className="text-xs font-medium">
-                Variables
-              </DropdownMenuLabel>
-              <DropdownMenuItem onSelect={() => setAddColumnOpen(true)}>
-                <Plus className="w-4 h-4 mr-2" aria-hidden="true" />
-                Variable
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setComputedColumnOpen(true)}>
-                <FunctionSquare
-                  className="w-4 h-4 mr-2 text-violet-600 dark:text-violet-400"
-                  aria-hidden="true"
-                />
-                Computed variable
-              </DropdownMenuItem>
-              {/* The THIRD kind (Decision B Stage 3, design note §11). jamovi's
-                  `Add` offers Data / Computed / Transformed in one menu; MM had
-                  built the third kind and listed only two, so a researcher
-                  looking where jamovi taught them to look found nothing.
-
-                  ⚠️ Inside the EXISTING Variables group on purpose — Decision F
-                  established that a Radix `Group` needs an explicit
-                  `aria-labelledby`, and a new group would need its own. A third
-                  ITEM also does not widen the toolbar ROW, which is what F's
-                  640×360 finding was about. */}
-              <DropdownMenuItem onSelect={() => setPickRuleOpen(true)}>
-                <CornerDownRight className="w-4 h-4 mr-2" aria-hidden="true" />
-                Recoded variable...
-              </DropdownMenuItem>
-            </DropdownMenuGroup>
-            <DropdownMenuSeparator />
-            <DropdownMenuGroup aria-labelledby="add-menu-records">
-              <DropdownMenuLabel id="add-menu-records" className="text-xs font-medium">
-                Records
-              </DropdownMenuLabel>
-              {/* "Append Data" said nothing — "Data" is the whole table. The
-                  operation adds ROWS, and it does it from a file (§10.5). */}
-              <DropdownMenuItem onSelect={() => navigate(`/projects/${pid}/datasets/${iid}/append`)}>
-                <FileInput className="w-4 h-4 mr-2" aria-hidden="true" />
-                Append from file...
-              </DropdownMenuItem>
-            </DropdownMenuGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
+            ⚠️ The menu itself moved to `components/AddVariableMenu` on
+            2026-08-31 (#830f) so the Variables view can render the SAME
+            control — including the group headings' `aria-labelledby` wiring,
+            which is the part a second copy loses. Its docstring carries the
+            reasoning that used to live here. */}
+        <AddVariableMenu
+          onAddVariable={() => createVariable.open('manual')}
+          onAddComputed={() => createVariable.open('computed')}
+          onAddRecoded={() => createVariable.open('recoded')}
+          onAppendRecords={() => navigate(`/projects/${pid}/datasets/${iid}/append`)}
+        />
 
         {/* "Variable Groups" LEFT this toolbar: its route carries no
             `:datasetId` (it is project-scoped, and equivalence groups span
@@ -1564,11 +1467,14 @@ export default function DatasetView() {
           in the grid the researcher is already looking at, whereas the Variables
           view navigates because it would otherwise leave them on the source. */}
       <PickRuleToDeriveDialog
-        open={pickRuleOpen}
+        open={createVariable.isRecodedPickerOpen}
         columns={columns}
         variablesHref={variableViewPath(pid, iid)}
-        onOpenChange={setPickRuleOpen}
-        onPick={(columnId, definition) => { void derive.open({ columnId, definition }) }}
+        onOpenChange={(o) => { if (!o) createVariable.close() }}
+        onPick={(columnId, definition) => {
+          createVariable.close()
+          void derive.open({ columnId, definition })
+        }}
       />
       <DeriveVariableDialog
         {...derive.dialogProps}
@@ -1578,29 +1484,14 @@ export default function DatasetView() {
         })()}
       />
 
-      {/* Add Column dialog */}
-      <ColumnFormDialog
-        open={addColumnOpen}
-        onOpenChange={(o) => { setAddColumnOpen(o); if (!o) setAddColumnError(null) }}
-        onSubmit={(data) => createColumnMutation.mutate(data as ManualColumnCreate)}
-        isSubmitting={createColumnMutation.isPending}
-        submitError={addColumnError}
-        title="Add Column"
-      />
-
       {/* The Edit Column and Edit Computed Column dialogs moved to the
           Variables view with their entry points (design note E). The ADD
-          dialogs below stay: creating a variable is a dataset-level act, and
-          Decision F reorganises those two into one `Add ▾`. */}
-
-      {/* Add Computed Column dialog */}
+          dialogs stay on both views: creating a variable is a dataset-level
+          act, and both tabs of the workspace offer it (#830f). */}
+      <ColumnFormDialog {...createVariable.manualDialogProps} title="Add Variable" />
       <ColumnFormDialog
-        open={computedColumnOpen}
-        onOpenChange={(o) => { setComputedColumnOpen(o); if (!o) setComputedColumnError(null) }}
-        onSubmit={(data) => createComputedMut.mutate(data as ComputedColumnCreate)}
-        isSubmitting={createComputedMut.isPending}
-        submitError={computedColumnError}
-        title="Add Computed Column"
+        {...createVariable.computedDialogProps}
+        title="Add Computed Variable"
         mode="computed"
         projectId={pid}
         datasetId={iid}

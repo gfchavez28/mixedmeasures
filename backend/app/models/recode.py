@@ -42,6 +42,18 @@ class RecodeDefinition(Base):
         nullable=False,
     )
     mapping = Column(Text, nullable=False)  # JSON: {"label": value, ...}
+    #: #823(d) — RANGE bands, for banding a continuous variable without typing a
+    #: row per distinct value. JSON list, ORDER IS SIGNIFICANT (first match wins):
+    #: ``[{"lo": num|null, "hi": num|null, "output": num|str}, ...]``.
+    #:
+    #: ⚠️ A sibling of `mapping`, never an encoding inside it: `mapping` is
+    #: matched by case-insensitive TEXT equality, a range by numeric comparison
+    #: on the cell parsed as a number. Keeping them apart is what lets
+    #: `mapping_numeric_values` go on meaning "the scale points".
+    #:
+    #: ⚠️ Only meaningful for SCALE_MAP and CATEGORY_GROUP. A REVERSE has no
+    #: mapping of its own — it reflects its source — and the service refuses one.
+    ranges = Column(Text, nullable=True)
     exclude_values = Column(Text, nullable=True)  # JSON: ["N/A", ...] or null
     is_primary = Column(Boolean, default=False, nullable=False)
     is_auto_detected = Column(Boolean, default=False, nullable=False)

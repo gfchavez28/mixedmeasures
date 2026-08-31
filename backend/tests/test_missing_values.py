@@ -204,7 +204,14 @@ class TestReExportAndWire:
     def test_data_response_carries_missing_values(self):
         """The #586 shape: the /data sibling is splat-constructed and silently
         drops undeclared fields — missing_values must be declared on BOTH
-        column schemas (slab 4's dialog reads /data)."""
+        column schemas (slab 4's dialog reads /data).
+
+        ⚠️ A BARE SPLAT, matching `list_dataset_data` exactly. It passed
+        `recode_definitions=[]` alongside until 2026-08-31, when #830f moved
+        that field onto the base schema — making the second argument a DUPLICATE
+        KEYWORD, i.e. a `TypeError`. A test that constructs the payload
+        differently from the endpoint is how the two drift.
+        """
         from app.schemas.dataset import (
             DatasetColumnResponse, DatasetDataColumnResponse,
         )
@@ -212,7 +219,7 @@ class TestReExportAndWire:
             id=1, column_text="Q1", column_type="numeric", sequence_order=0,
             missing_values=[{"value": "99", "label": "Refused"}],
         )
-        out = DatasetDataColumnResponse(**base.model_dump(), recode_definitions=[])
+        out = DatasetDataColumnResponse(**base.model_dump())
         assert out.missing_values == [{"value": "99", "label": "Refused"}]
         assert "missing_values" in out.model_dump()
 

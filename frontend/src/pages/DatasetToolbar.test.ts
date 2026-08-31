@@ -4,7 +4,8 @@ import { stripComments } from '@/lib/strip-comments'
 import { join } from 'node:path'
 
 /**
- * The dataset toolbar groups by AXIS (design note Decision F, option 1).
+ * The dataset workspace's toolbars group by AXIS (design note Decision F,
+ * option 1) and BOTH tabs offer the same create actions (#830f).
  *
  * The row was six buttons across four unrelated axes with no separators: two
  * created a variable, one added records, one went to a project-scoped page that
@@ -12,6 +13,15 @@ import { join } from 'node:path'
  * another workspace. `Add ▾` says the thing two differently-tinted sibling
  * buttons cannot — that creating a variable and appending records are two kinds
  * of one act, and not the same kind as each other.
+ *
+ * 🔴 **What #830f changed here, and why the shape of this file changed with
+ * it.** The menu lived inline in `DatasetView`, so these assertions could read
+ * one page's source and be done. It is `components/AddVariableMenu` now, shared
+ * with the Variables view — so the menu's OWN rules are asserted once against
+ * the component, and each page is asserted to RENDER it. Leaving the item list
+ * pointed at `DatasetView` would have turned this guard green-and-blind on the
+ * day the items left that file: the population it walks would still resolve,
+ * and would no longer contain the thing it exists to check (#814's class).
  *
  * A source scan rather than a mount: `DatasetView` is ~1,500 lines behind six
  * queries and a `DndContext`, so a render test would exercise the harness more
@@ -27,12 +37,15 @@ const read = (rel: string) => {
   return stripComments(readFileSync(abs, 'utf8'), abs)
 }
 
-describe('the dataset toolbar groups by axis', () => {
-  const view = read('pages/DatasetView.tsx')
+/** The two tabs of the dataset workspace. Both must offer the create actions. */
+const TOOLBAR_PAGES = ['pages/DatasetView.tsx', 'pages/RecodeWorkbench.tsx']
+
+describe('the shared Add menu', () => {
+  const menu = read('components/AddVariableMenu.tsx')
 
   it('read a real file (a scan that resolves to nothing passes by finding nothing)', () => {
-    expect(view.length).toBeGreaterThan(20_000)
-    expect(view).toContain('DropdownMenuTrigger')
+    expect(menu.length).toBeGreaterThan(1_000)
+    expect(menu).toContain('DropdownMenuTrigger')
   })
 
   it('offers ALL THREE variable kinds and the records action inside ONE menu', () => {
@@ -45,7 +58,7 @@ describe('the dataset toolbar groups by axis', () => {
     // BUILT the third kind (Decision B) and listed only two, so a researcher
     // looking where jamovi taught them to look found nothing (design note §11).
     for (const item of ['Variable', 'Computed variable', 'Recoded variable...', 'Append from file...']) {
-      expect(view, `the Add menu must offer "${item}"`).toContain(item)
+      expect(menu, `the Add menu must offer "${item}"`).toContain(item)
     }
   })
 
@@ -55,9 +68,9 @@ describe('the dataset toolbar groups by axis', () => {
     // group for the third kind would need its own wiring and would split a
     // set of three that belongs together; the assertion below is what stops
     // someone "tidying" it into one.
-    const variablesGroup = view.slice(
-      view.indexOf('aria-labelledby="add-menu-variables"'),
-      view.indexOf('aria-labelledby="add-menu-records"'),
+    const variablesGroup = menu.slice(
+      menu.indexOf('aria-labelledby="add-menu-variables"'),
+      menu.indexOf('aria-labelledby="add-menu-records"'),
     )
     expect(variablesGroup.length, 'the Variables group should be real source')
       .toBeGreaterThan(200)
@@ -73,9 +86,13 @@ describe('the dataset toolbar groups by axis', () => {
     // which is precisely the reading this control exists to replace. The
     // grouping is the whole point of Decision F, so it has to survive the
     // accessibility tree, not just the visual one.
+    //
+    // ⚠️ Sharper since #830f: the wiring now exists ONCE for two surfaces,
+    // which is the strongest reason the menu is a component. A copied menu is
+    // how one of the two loses this.
     for (const id of ['add-menu-variables', 'add-menu-records']) {
-      expect(view, `${id} must label a group`).toContain(`aria-labelledby="${id}"`)
-      expect(view, `${id} must be an id on the label itself`).toContain(`id="${id}"`)
+      expect(menu, `${id} must label a group`).toContain(`aria-labelledby="${id}"`)
+      expect(menu, `${id} must be an id on the label itself`).toContain(`id="${id}"`)
     }
   })
 
@@ -84,8 +101,30 @@ describe('the dataset toolbar groups by axis', () => {
     // it was decoration that made two same-kind actions read as different
     // kinds. Violet matches the violet `FunctionSquare` marking a computed
     // column in the grid — the one tint here that carries information.
-    expect(view, 'the orange tint must not return').not.toMatch(/mm-orange/)
-    expect(view, 'violet marks the computed kind, as it does in the grid').toMatch(/text-violet-/)
+    expect(menu, 'the orange tint must not return').not.toMatch(/mm-orange/)
+    expect(menu, 'violet marks the computed kind, as it does in the grid').toMatch(/text-violet-/)
+  })
+})
+
+describe('both tabs of the dataset workspace render it', () => {
+  it.each(TOOLBAR_PAGES)('%s renders the shared Add menu', (rel) => {
+    // 🔴 #830f. `Add ▾` was on the Data view alone, so the Variables view — the
+    // screen where recode rules are authored, and the screen the rule picker's
+    // own empty state sends people to — could not create a variable at all.
+    // A population assertion over the two pages, so a THIRD tab arriving
+    // without it fails here rather than shipping a half-enumerated workspace.
+    const src = read(rel)
+    expect(src.length, `${rel} should be real source`).toBeGreaterThan(20_000)
+    expect(src, `${rel} must render <AddVariableMenu>`).toContain('<AddVariableMenu')
+    expect(src, `${rel} must wire all four actions`).toContain('onAddRecoded')
+  })
+
+  it.each(TOOLBAR_PAGES)('%s does not re-inline the menu', (rel) => {
+    // The whole point of the extraction: a second copy of the items is a second
+    // copy of the `aria-labelledby` wiring, and that is the half that gets lost.
+    const src = read(rel)
+    expect(src, `${rel} must not hand-roll the group headings`)
+      .not.toContain('add-menu-variables')
   })
 
   it('no longer routes to the project-scoped variable-groups page', () => {
@@ -94,13 +133,17 @@ describe('the dataset toolbar groups by axis', () => {
     // from TopRail's Datasets menu and six other places, and the removal was
     // checked against that list first — a removal with no other entry point is
     // a deletion, which is the trap the E4 slab backed out of.
-    for (const rel of ['pages/DatasetView.tsx', 'pages/RecodeWorkbench.tsx']) {
+    for (const rel of TOOLBAR_PAGES) {
       expect(read(rel), `${rel}'s toolbar must not link variable-groups`)
         .not.toMatch(/datasets\/variable-groups/)
     }
     expect(read('components/TopRail.tsx'), 'TopRail keeps the project-level way in')
       .toMatch(/datasets\/variable-groups/)
   })
+})
+
+describe('the Data view toolbar stays short', () => {
+  const view = read('pages/DatasetView.tsx')
 
   it('keeps the row to ONE control plus the cross-workspace jump', () => {
     // ⚠️ A COUNT, because the narrow-viewport cost is what the count buys and
@@ -131,15 +174,23 @@ describe('the dataset toolbar groups by axis', () => {
     // is measuring nothing again.
     expect(toolbar, 'the toolbar slice lost its controls — the scan is vacuous')
       .toContain('Code Text')
+    expect(toolbar, 'the toolbar slice lost the Add menu — the scan is vacuous')
+      .toContain('<AddVariableMenu')
 
     // ⚠️ Count what can render AT ONCE, not `<Button` tags. "Code Text" is a
     // ternary — an enabled anchor-as-button and a disabled real button — so two
     // source tags are one control on screen (2026-08-24). Counting tags would
     // make every future disabled state look like toolbar growth.
+    //
+    // ⚠️ Since #830f the `Add ▾` trigger's own `<Button>` lives in
+    // `AddVariableMenu`, so it is no longer a `<Button` tag in THIS file — it
+    // is counted explicitly below instead of silently dropping out of the
+    // budget, which would have quietly bought room for another control.
     const codeTextArms = (toolbar.match(/Code Text/g) ?? []).length
     expect(codeTextArms, 'Code Text should be exactly two arms of one ternary').toBe(2)
     const tags = (toolbar.match(/<Button\b/g) ?? []).length
-    const simultaneous = tags - (codeTextArms - 1)
+    const addMenus = (toolbar.match(/<AddVariableMenu\b/g) ?? []).length
+    const simultaneous = tags - (codeTextArms - 1) + addMenus
     // Add ▾, Undo, Redo, Code Text — four, and the undo pair is conditional.
     expect(simultaneous, 'the toolbar grew a control; check it at 640x360 first')
       .toBeLessThanOrEqual(4)
@@ -150,5 +201,33 @@ describe('the dataset toolbar groups by axis', () => {
     // stays outside the Add menu and behind a divider.
     expect(view).toContain('Code Text')
     expect(view).toMatch(/text-coding\?columns=/)
+  })
+})
+
+describe('the Variables view toolbar stays short', () => {
+  const view = read('pages/RecodeWorkbench.tsx')
+
+  it('keeps the row to the tab strip, undo/redo and ONE Add control', () => {
+    // #830f added a control to this row, so it earns the same budget the Data
+    // view's has. ⚠️ Same caveat, and it is the important one: jsdom computes
+    // no layout, so this is a PROXY. The row was measured live at 640×360
+    // before shipping; measure again before adding to it.
+    const start = view.indexOf('flex items-center gap-3 px-4 py-2 border-b')
+    const end = view.indexOf('<PanelGroup')
+    expect(start, 'toolbar start marker no longer resolves — re-anchor this scan')
+      .toBeGreaterThan(-1)
+    expect(end, 'toolbar end marker no longer resolves — re-anchor this scan')
+      .toBeGreaterThan(start)
+    const toolbar = view.slice(start, end)
+    expect(toolbar, 'the toolbar slice lost the Add menu — the scan is vacuous')
+      .toContain('<AddVariableMenu')
+    expect(toolbar, 'the toolbar slice lost the tab strip — the scan is vacuous')
+      .toContain('<DatasetTabs')
+
+    const tags = (toolbar.match(/<Button\b/g) ?? []).length
+    const addMenus = (toolbar.match(/<AddVariableMenu\b/g) ?? []).length
+    // Undo, Redo (one conditional pair) + Add ▾ — three.
+    expect(tags + addMenus, 'the toolbar grew a control; check it at 640x360 first')
+      .toBeLessThanOrEqual(3)
   })
 })

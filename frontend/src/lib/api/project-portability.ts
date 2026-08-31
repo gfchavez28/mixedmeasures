@@ -1,5 +1,5 @@
 import api from './client'
-import { downloadBlob, extractFilename } from './download'
+import { downloadBlob, extractFilename, EXPORT_TIMEOUT_MS } from './download'
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -201,7 +201,10 @@ export const projectPortabilityApi = {
     const res = await api.get(`/projects/${projectId}/export-project`, {
       params: { include_media: includeMedia },
       responseType: 'blob',
-      timeout: 300_000,
+      // #847: was a hand-rolled 300_000 (5 min). The project has ONE decided export
+      // budget and it is APPLIED here, not re-derived — see download.ts. A whole-project
+      // export is exactly the class EXPORT_TIMEOUT_MS was measured for.
+      timeout: EXPORT_TIMEOUT_MS,
     })
     const filename = extractFilename(res.headers, `project_export.mmproject`)
     downloadBlob(res.data as Blob, filename)
@@ -210,7 +213,9 @@ export const projectPortabilityApi = {
   /** Duplicate a project server-side (export → re-import as a new copy). #464 */
   duplicateProject: async (projectId: number): Promise<ProjectImportResult> => {
     const res = await api.post<ProjectImportResult>(`/projects/${projectId}/duplicate`, undefined, {
-      timeout: 300_000,
+      // Duplicate is export + re-import server-side, so it is bounded by BOTH halves —
+      // strictly the most expensive operation here, and it inherited the same 5 minutes.
+      timeout: EXPORT_TIMEOUT_MS,
     })
     return res.data
   },
@@ -256,7 +261,14 @@ export const projectPortabilityApi = {
       fd.append('code_mapping', JSON.stringify(opts.codeMapping))
     }
     const res = await api.post<ProjectImportResult>('/projects/import-project', fd, {
-      timeout: 300_000,
+      // #847: the 5-minute budget was the OTHER half of the old export bound — a project
+      // large enough to export took ~26 minutes to read back, so the client gave up while
+      // the server carried on and the project appeared anyway. Measured after the batching
+      // fix: the full 75,699 x 41 GSS corpus (3,633,552 values) imports in 149 s.
+      // The same flat budget as an export, and for the same reason stated in download.ts —
+      // the cost is a property of the whole project and the client knows none of it before
+      // asking.
+      timeout: EXPORT_TIMEOUT_MS,
     })
     return res.data
   },

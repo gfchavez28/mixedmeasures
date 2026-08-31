@@ -2656,7 +2656,7 @@ def test_duplicate_project_endpoint(db_session, populated_project, tmp_path, mon
     monkeypatch.setattr(pp, "_get_data_dirs", lambda: (docs, media))
 
     user = db_session.query(User).filter(User.id == 1).first()
-    result = asyncio.run(pp.duplicate_project_endpoint(pid, db=db_session, user=user))
+    result = pp.duplicate_project_endpoint(pid, db=db_session, user=user)
 
     assert result.project_id != pid
     assert result.project_name == f"{orig_name} (copy)"
@@ -2675,7 +2675,7 @@ def test_duplicate_project_endpoint(db_session, populated_project, tmp_path, mon
 
     # Duplicating again must NOT collide on the name — the second copy gets
     # "(copy 2)" so no two projects in the list ever share a name.
-    result2 = asyncio.run(pp.duplicate_project_endpoint(pid, db=db_session, user=user))
+    result2 = pp.duplicate_project_endpoint(pid, db=db_session, user=user)
     assert result2.project_id not in (pid, result.project_id)
     assert result2.project_name == f"{orig_name} (copy 2)"
     names = [
@@ -2694,15 +2694,42 @@ class TestFormatVersionIsPinned:
     incidental side effect of another change.
     """
 
-    def test_current_version_is_5(self):
+    def test_current_version_is_6(self):
         from app.services.project_portability import CURRENT_FORMAT_VERSION
-        assert CURRENT_FORMAT_VERSION == 5, (
+        assert CURRENT_FORMAT_VERSION == 6, (
             "The .mmproject format version changed. That is a real decision, not a "
             "detail: v2 = #414 identifier, v3 = the third Segment parent, v4 = #592 "
-            "missing declarations, v5 = #687 code-point excerpt offsets. If this is "
+            "missing declarations, v5 = #687 code-point excerpt offsets, "
+            "v6 = #823(d) recode range bands. If this is "
             "intentional, update this pin AND document what the new version means "
             "in project_portability.py, the internal design notes, and the internal design notes."
         )
+
+    def test_v6_is_a_refusal_gate_and_v5_was_not(self):
+        """🔴 The two bumps differ in KIND, and the difference is the rule.
+
+        v5 deliberately let old files in (`_repair_pre_v5_excerpt_offsets`
+        converts them). v6 refuses a NEWER file, which is what every version gate
+        does — the question a bump answers is what an OLDER build does with a
+        file it half-understands.
+
+        A band list is CONSTITUTIVE, not descriptive: `_build_entity` drops what
+        the model does not declare, and a rule built entirely from ranges has an
+        EMPTY `mapping`, so an older build would import a rule that maps NOTHING
+        and NULL every banded cell on the next apply. That is v4's
+        silent-wrongness case, not Decision B's two descriptive fields.
+        """
+        from app.services.project_portability import CURRENT_FORMAT_VERSION
+        # The claim under test is about the SHAPE of the risk, so it is asserted
+        # against the model rather than restated in prose: a definition's bands
+        # live in a column of their own, which is exactly what an older reader
+        # drops.
+        from app.models.recode import RecodeDefinition
+        assert "ranges" in RecodeDefinition.__table__.columns, (
+            "v6 exists because `ranges` is a separate column. If it moved inside "
+            "`mapping`, the bump's justification changed and this pin is stale."
+        )
+        assert CURRENT_FORMAT_VERSION >= 6
 
 
 class TestPreV5OffsetRepairOnImport:

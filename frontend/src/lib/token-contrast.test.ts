@@ -420,9 +420,22 @@ describe('#852 — a blue tint is painted with the TEXT token, not the fill hue'
         if (entry.isDirectory()) { walk(path); continue }
         if (!/\.tsx$/.test(entry.name) || /\.test\.tsx$/.test(entry.name)) continue
         scanned++
+        const raw = readFileSync(path, 'utf-8')
+        // 🔴 #867 — do not parse a file that cannot match. All three regexes
+        // above require `bg-mm-blue/`, and stripping only ever REMOVES
+        // characters, so a file whose RAW text lacks that substring cannot
+        // produce an offender or a correct pairing either way. **41 of 257
+        // files carry it**, and skipping the rest took this test from
+        // **1,919 ms to 705 ms** — the margin that made it flake.
+        //
+        // ⚠️ `scanned++` stays ABOVE this, deliberately: it counts files
+        // VISITED, which is what the population self-check below is about. And
+        // that check guards this filter too — a mistyped substring here drops
+        // `correctPairings` to zero and fails it.
+        if (!raw.includes('bg-mm-blue/')) continue
         // Strip first: the prose explaining this very fix names both classes,
         // and a scan that matches its own comments is the #772 failure mode.
-        for (const [line, i] of stripComments(readFileSync(path, 'utf-8'), entry.name)
+        for (const [line, i] of stripComments(raw, entry.name)
           .split('\n').map((l, i) => [l, i] as const)) {
           if (TINT_THEN_TEXT.test(line) || TEXT_THEN_TINT.test(line)) {
             offenders.push(`${path.slice(SRC_DIR.length + 1)}:${i + 1}`)
@@ -436,13 +449,27 @@ describe('#852 — a blue tint is painted with the TEXT token, not the fill hue'
     return { offenders, correctPairings, scanned }
   }
 
-  it('no component paints text-mm-blue on a blue tint', () => {
+  // 🔴 #867 — EXPLICIT TIMEOUTS, matching every other whole-tree scan in this
+  // suite. This file was the ONLY one of eight such scanners without them, and
+  // it is the one that failed 2 of 9 full-suite runs while passing 8 of 8 in
+  // isolation. It was never an assertion failure: measured, **no line in
+  // `src/**/*.tsx` matches these regexes before OR after stripping**, so
+  // `offenders` cannot be non-empty. It was vitest's 5,000 ms default (measured,
+  // not assumed) against a scan that costs 1,919 ms alone and 3,721 ms inside a
+  // full run — and vitest reports a timed-out SYNC test by pointing its caret at
+  // the `it()` line with the assertion below as mere context, which is what made
+  // it read like a failed assertion.
+  //
+  // ⚠️ The pre-filter above is what makes it fast; this is what stops contention
+  // deciding whether a guard passes. `strip-comments.test.ts` states the same
+  // rationale for the same reason.
+  it('no component paints text-mm-blue on a blue tint', { timeout: 60_000 }, () => {
     const { offenders } = scan()
     expect(offenders, 'a blue tint must carry `text-mm-blue-text`; the raw '
       + '`--mm-blue` fill hue is below AA as text on its own tint (#852)').toEqual([])
   })
 
-  it('the scan reaches real class strings (it cannot pass by seeing nothing)', () => {
+  it('the scan reaches real class strings (it cannot pass by seeing nothing)', { timeout: 60_000 }, () => {
     // The self-check a narrowing needs (#814): if the regex, the extension
     // filter or the comment-stripper broke, `offenders` would be empty for the
     // wrong reason. The CORRECT pairing is the positive control — it is the

@@ -321,3 +321,154 @@ describe('#849 — the comparison never states something it has not established'
     )
   })
 })
+
+describe('#850 — the diff has to COMMUNICATE, not just render the right content', () => {
+  /**
+   * The page rendered the right themes and told you almost nothing about what
+   * changed, which is the only reason to open it. All four arms below were
+   * confirmed against source before the fix; (b) and (d) had no code path at
+   * all, so they could not be caught by driving either.
+   */
+  // `theme()`'s inferred type pins `referenced_source_ids` to null, so the
+  // widening is explicit rather than a cast at every call site.
+  const withMaterials = (t: ReturnType<typeof theme>, refs: { type: string; id: number }[]) =>
+    ({ ...t, referenced_source_ids: refs }) as unknown as ReturnType<typeof theme>
+
+  async function renderMatched(rightThemes: ReturnType<typeof theme>[]) {
+    vi.mocked(canvasApi.getSnapshot).mockResolvedValue(SNAPSHOT as never)
+    vi.mocked(canvasApi.get).mockResolvedValue({
+      id: 2, name: 'C', themes: rightThemes,
+    } as never)
+    renderCompare('?canvas=2&snapshot=1')
+    await waitFor(() => expect(cards().length).toBeGreaterThan(0))
+  }
+
+  it('🔴 (d) states the material delta ONCE, on the side it is true of', async () => {
+    // Both panes rendered the SAME string from the same call, and the left one
+    // captioned it "Snapshot: ". `added` counts present-in-RIGHT, so the
+    // snapshot's own pane claimed a gain belonging to the current state.
+    const ASSESSMENT_PLUS = withMaterials(ASSESSMENT, [
+      { type: 'material', id: 1 },
+      { type: 'material', id: 2 },
+    ])
+    await renderMatched([ASSESSMENT_PLUS, BARRIERS, TRAINING])
+
+    const body = document.body.textContent ?? ''
+    expect(body).toContain('2 materials added since the snapshot')
+    // The old wording is the assertion that would have caught it.
+    expect(body).not.toContain('Snapshot: +2 materials')
+    // ...and exactly once, because one delta is one fact about a PAIR.
+    expect(body.split('2 materials added since').length - 1).toBe(1)
+  })
+
+  /**
+   * ⚠️ Scoped to the CARDS, never `document.body`.
+   *
+   * 🔴 The legend added by (c) contains the words "Text changed", so a
+   * body-wide assertion passes whether or not a single card is ever marked —
+   * both the positive AND the negative form. The first draft of these two tests
+   * did exactly that, and the negative one is what exposed it. Assert in the
+   * channel the property actually lives in.
+   */
+  const markedCards = () =>
+    Array.from(document.querySelectorAll('div.mb-6.pl-3'))
+      .filter(c => (c.textContent ?? '').includes('Text changed'))
+      .map(c => c.querySelector('h3')?.textContent ?? '')
+
+  it('🔴 (b) marks a matched theme whose TEXT changed', async () => {
+    // `diff.matched` rendered with `diffClass` undefined on BOTH panes, so only
+    // wholly added or removed themes were marked — and "what did I write since?"
+    // is the question this page exists for.
+    const EDITED = { ...ASSESSMENT, content: prose('Post-test scores were rewritten entirely.') }
+    await renderMatched([EDITED, BARRIERS, TRAINING])
+
+    // Both sides of the pair are marked — the reader is looking at one of them.
+    expect(markedCards()).toEqual(['Assessment Outcomes', 'Assessment Outcomes'])
+  })
+
+  it('🔴 (b) does NOT mark a matched theme whose text is identical', async () => {
+    // The discrimination assertion, and it earned its place twice: it caught
+    // the marker firing on EVERY row, because a snapshot serialises `content`
+    // to a JSON string while the live canvas carries the parsed object.
+    await renderMatched([ASSESSMENT, BARRIERS, TRAINING])
+
+    expect(markedCards()).toEqual([])
+  })
+
+  it('🔴 (c) pairs every colour with a WORD, and renders a key', async () => {
+    // Added/removed were border colour alone with no legend anywhere on the
+    // page. The relationship-diff footer had labelled its lists all along.
+    await renderMatched([ASSESSMENT, BARRIERS, TRAINING, ADDED])
+
+    const body = document.body.textContent ?? ''
+    expect(body).toContain('What the marks mean:')
+    expect(body).toContain('Added since')
+  })
+
+  it('🔴 (a) names both panes and both read-only editors', async () => {
+    await renderMatched([ASSESSMENT, BARRIERS, TRAINING])
+
+    // Two panes, each named by its own heading.
+    expect(screen.getByRole('region', { name: /Snapshot: Before/ })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: /Current state/ })).toBeInTheDocument()
+    // The page had no h1/h2 at all — only theme h3s, rendered twice.
+    expect(document.querySelectorAll('h1').length).toBe(2)
+  })
+
+  describe('🔴 #865 — the key appears only where the marks can', () => {
+    /**
+     * `diff` is null unless the comparison is against a SNAPSHOT, so a
+     * canvas-vs-canvas view renders plain, unmarked themes — under a key
+     * explaining three marks that cannot occur. Same wrong-information shape as
+     * (d)'s mislabelled delta, one element up the page.
+     */
+    const legendText = () => {
+      const label = screen.queryByText('What the marks mean:')
+      return label?.parentElement?.textContent ?? null
+    }
+
+    it('renders NO key in side-by-side mode, where nothing is ever marked', async () => {
+      vi.mocked(canvasApi.get).mockResolvedValue({
+        id: 2, name: 'Canvas A', themes: [ASSESSMENT, BARRIERS],
+      } as never)
+      renderCompare('?canvas=2&canvas2=3')
+      await waitFor(() => expect(cards().length).toBeGreaterThan(0))
+
+      expect(legendText()).toBeNull()
+      // ...and the reason: no card carries a mark either.
+      expect(markedCards()).toEqual([])
+    })
+
+    it('still renders it in snapshot mode — the positive control', async () => {
+      // Without this, "delete the legend" passes the test above.
+      await renderMatched([ASSESSMENT, BARRIERS, TRAINING, ADDED])
+      expect(legendText()).toContain('What the marks mean:')
+    })
+
+    it('🔴 says the SAME words on the key and on the card it explains', async () => {
+      // The key said "Only in Current state" while the card it describes was
+      // stamped "Added since" — two vocabularies for one mark, matched up by
+      // colour. One object owns both now.
+      await renderMatched([ASSESSMENT, BARRIERS, TRAINING, ADDED])
+
+      const addedCard = Array.from(document.querySelectorAll('div.mb-6.pl-3'))
+        .find(c => c.querySelector('h3')?.textContent === 'New theme')
+      const badge = addedCard?.querySelector('span.uppercase')?.textContent?.trim()
+
+      expect(badge).toBe('Added since the snapshot')
+      expect(legendText()).toContain(badge)
+    })
+
+    it('no badge is a dangling phrase — every mark ends in a noun', async () => {
+      // "Added since" and "Text changed since" both stopped mid-sentence.
+      await renderMatched([
+        { ...ASSESSMENT, content: prose('Rewritten.') }, BARRIERS, TRAINING, ADDED,
+      ])
+      const badges = Array.from(document.querySelectorAll('div.mb-6.pl-3 span.uppercase'))
+        .map(b => (b.textContent ?? '').trim())
+
+      expect(badges.length).toBeGreaterThan(0)
+      for (const b of badges) expect(b).not.toMatch(/\bsince$/i)
+    })
+  })
+})

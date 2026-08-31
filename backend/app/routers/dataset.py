@@ -101,6 +101,7 @@ from ..services.recode import (
     compute_value,
     definition_reflection_offset,
 )
+from ..services.recode_ranges import parse_ranges
 from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
 from ..models.metric import MetricDefinition
 from ..models.row_score import RowScore
@@ -141,8 +142,8 @@ def _safe_json_loads(text: str | None, fallback=None):
         return fallback
 
 
-def _mapping_remaps_codes(mapping_json: str | None) -> bool:
-    """Does this mapping send a NUMERIC key somewhere other than itself?
+def _mapping_remaps_codes(mapping_json: str | None, ranges_json: str | None = None) -> bool:
+    """Does this rule send a NUMERIC value somewhere other than itself?
 
     A flip (`{"1": 5}`) or a collapse (`{"1": 1, "2": 1}`) means `value_numeric`
     is the rule's OUTPUT rather than the response's own code. Used to describe
@@ -154,7 +155,26 @@ def _mapping_remaps_codes(mapping_json: str | None) -> bool:
     cannot run per column across a list response. Non-numeric keys are skipped
     rather than judged: on a labelled column the keys ARE the labels, and
     `value_numeric` is the code — the ordinary case.
+
+    🔴 **RANGE BANDS COUNT, and omitting them would have been a false negative
+    on the rule most obviously guilty (#823d).** A banding rule collapses many
+    codes into few by construction — that IS the operation — and a rule built
+    entirely from bands has an EMPTY `mapping`, so a mapping-only test would
+    report `remaps_codes: False` for the clearest possible case. Any band whose
+    output is a number remaps; a `category_group`'s named bands do not write
+    `value_numeric` at all (that type clears it), so they are not judged here.
     """
+    for band in parse_ranges(ranges_json):
+        output = band.get("output")
+        if isinstance(output, (int, float)) and not isinstance(output, bool):
+            return True
+        if isinstance(output, str):
+            try:
+                float(output)
+                return True
+            except ValueError:
+                continue
+
     try:
         mapping = json.loads(mapping_json) if mapping_json else {}
     except (json.JSONDecodeError, TypeError):
@@ -168,6 +188,50 @@ def _mapping_remaps_codes(mapping_json: str | None) -> bool:
         except (TypeError, ValueError):
             continue
     return False
+
+
+def _recode_definition_summary(d, missing_values_json) -> RecodeDefinitionSummary:
+    """Serialize ONE recode definition. The single builder for both payloads.
+
+    ⚠️ **Extracted from the `/data` loop (2026-08-31, #830f), not copied.** It
+    lived inline there, so `recode_definitions` rode `/data` alone and the
+    Variables view — the screen where rules are AUTHORED — could not offer
+    "new variable from a rule" at all. A second copy here would be the #602 shape
+    (one field, two population rules) on the very field #602 was about.
+    """
+    mapping = {}
+    try:
+        mapping = json.loads(d.mapping) if d.mapping else {}
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning("Failed to parse mapping JSON for recode definition %s: %s", d.id, e)
+    exclude_values = None
+    try:
+        if d.exclude_values:
+            exclude_values = json.loads(d.exclude_values)
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning("Failed to parse exclude_values JSON for recode definition %s: %s", d.id, e)
+
+    # #600/#602: the authoritative reflection offset, over the mapping's REAL
+    # scale points using the same null set the cells use. The client cannot
+    # compute this (it has neither the recognized-N/A rule nor the column's
+    # declaration), and a client mirror would be the #578 display-vs-storage
+    # drift. Populated for EVERY definition type, not just `reverse`: a
+    # `scale_map`'s offset is what the reverse editor's DRAFT preview shows.
+    # Branch on `recode_type`, never on this field's presence.
+    rtype = d.recode_type.value if hasattr(d.recode_type, "value") else str(d.recode_type)
+    return RecodeDefinitionSummary(
+        id=d.id,
+        name=d.name,
+        recode_type=rtype,
+        output_type=d.output_type.value if hasattr(d.output_type, "value") else str(d.output_type),
+        mapping=mapping,
+        exclude_values=exclude_values,
+        is_primary=bool(d.is_primary),
+        is_auto_detected=bool(d.is_auto_detected),
+        source_definition_id=d.source_definition_id,
+        reverse_offset=definition_reflection_offset(d, missing_values_json),
+        ranges=parse_ranges(d.ranges),
+    )
 
 
 def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
@@ -200,6 +264,14 @@ def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
     # of this builder then returns an accurate value, so `None` can only ever
     # mean "no primary" — never "this endpoint did not look". That distinction
     # is the one the stated-basis family keeps being bitten by.
+    #
+    # #830f: the FULL list rides here too, from the same already-loaded
+    # relationship. `primary_recode` stays because it carries `remaps_codes`,
+    # which is computed rather than readable off a summary.
+    recode_definitions = [
+        _recode_definition_summary(d, q.missing_values) for d in q.recode_definitions
+    ]
+
     primary_recode = None
     primary = next((d for d in q.recode_definitions if d.is_primary), None)
     if primary is not None:
@@ -209,7 +281,7 @@ def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
             id=primary.id,
             name=primary.name,
             recode_type=rtype,
-            remaps_codes=_mapping_remaps_codes(primary.mapping),
+            remaps_codes=_mapping_remaps_codes(primary.mapping, primary.ranges),
         )
 
     return DatasetColumnResponse(
@@ -236,6 +308,7 @@ def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
         stale=q.stale,
         demographic_subtype=q.demographic_subtype,
         primary_recode=primary_recode,
+        recode_definitions=recode_definitions,
         # Decision B provenance. The ID rides the wire and the LABEL does not,
         # deliberately: `lib/dataset-column-label.ts::columnDisplayLabel` is the
         # single source for how a column is named (#575), the Variables view
@@ -1164,56 +1237,18 @@ async def get_dataset_data(
             values=values_dict,
         ))
 
-    # Build column responses with recode definitions
-    data_columns = []
-    for q in columns:
-        base = _column_to_response(q)
-        defs = []
-        for d in q.recode_definitions:
-            mapping = {}
-            try:
-                mapping = json.loads(d.mapping) if d.mapping else {}
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning("Failed to parse mapping JSON for recode definition %s: %s", d.id, e)
-            exclude_values = None
-            try:
-                if d.exclude_values:
-                    exclude_values = json.loads(d.exclude_values)
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning("Failed to parse exclude_values JSON for recode definition %s: %s", d.id, e)
-
-            # #600: the authoritative reflection offset — over the mapping's
-            # REAL scale points, using the same null set the cells use. Sent so
-            # the grid displays exactly what apply_definition_to_column wrote;
-            # the client cannot compute this (it has neither the recognized-N/A
-            # rule nor the declaration), and a client mirror would be the #578
-            # display-vs-storage drift class.
-            # #602: computed by the SHARED `definition_reflection_offset`, which
-            # the definition endpoints also use — one field name, one population
-            # rule. It is no longer gated on `reverse` here: a `scale_map`'s
-            # offset is what the reverse editor's DRAFT preview must show, and a
-            # field populated on one payload but not the other is how a reader
-            # ends up believing the wrong one. Non-numeric mappings yield None.
-            rtype = d.recode_type.value if hasattr(d.recode_type, "value") else str(d.recode_type)
-            rev_offset = definition_reflection_offset(d, q.missing_values)
-
-            defs.append(RecodeDefinitionSummary(
-                id=d.id,
-                name=d.name,
-                recode_type=rtype,
-                output_type=d.output_type.value if hasattr(d.output_type, "value") else str(d.output_type),
-                mapping=mapping,
-                exclude_values=exclude_values,
-                is_primary=bool(d.is_primary),
-                is_auto_detected=bool(d.is_auto_detected),
-                source_definition_id=d.source_definition_id,
-                reverse_offset=rev_offset,
-            ))
-
-        data_columns.append(DatasetDataColumnResponse(
-            **base.model_dump(),
-            recode_definitions=defs,
-        ))
+    # Build column responses. `_column_to_response` carries `recode_definitions`
+    # since #830f, so this is a plain splat — the per-definition serialization
+    # that used to live here moved into `_recode_definition_summary`.
+    #
+    # ⚠️ Passing `recode_definitions=` again here would be a DUPLICATE keyword
+    # argument, i.e. a `TypeError` on every `/data` request. The field crossing
+    # from the base schema is exactly what `test_column_schema_siblings.py`
+    # requires (#586), so the splat is the whole construction.
+    data_columns = [
+        DatasetDataColumnResponse(**_column_to_response(q).model_dump())
+        for q in columns
+    ]
 
     return DatasetDataResponse(
         dataset=dataset_resp,

@@ -138,7 +138,7 @@ describe('#842 — the size refusal reaches the researcher', () => {
     // ⚠️ The refusal is ~380 chars — four times the longest plain toast in this app.
     // Title = what failed (the client knows which operation it invoked); description
     // = the server's reason verbatim (it is the authority on why).
-    const detail = 'This project holds 3,633,552 dataset values, over the 500,000 limit…'
+    const detail = 'This project holds 9,200,000 dataset values, over the 4,000,000 limit…'
     const failure = describeProjectExportError(new ApiError(400, { detail }, {}), FALLBACK)
     expect(failure.title).toBe(FALLBACK)
     expect(failure.description).toBe(detail)

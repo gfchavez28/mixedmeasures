@@ -19,6 +19,11 @@ class RecodeDefinitionCreate(BaseModel):
     recode_type: str
     output_type: str
     mapping: dict  # {"label": value, ...}
+    #: #823(d) — RANGE bands, ordered, first match wins. A sibling of `mapping`
+    #: because a range is a numeric predicate rather than a key; see
+    #: `services/recode_ranges.py`. Validated (and refused for a REVERSE) at the
+    #: router, which knows the recode_type this list has to be legal for.
+    ranges: list[dict] | None = None
     exclude_values: list[str] | None = None
     source_definition_id: int | None = None
 
@@ -56,6 +61,11 @@ class RecodeDefinitionUpdate(BaseModel):
             raise ValueError(f"output_type must be one of: {', '.join(sorted(VALID_OUTPUT_TYPES))}")
         return v
     mapping: dict | None = None
+    #: #823(d). ⚠️ Declared here, below the validators, matching `mapping`'s
+    #: existing placement in this class. An OMITTED field leaves the stored bands
+    #: alone; an explicit `[]` clears them — the router keys on
+    #: `model_fields_set`, so the two are different instructions.
+    ranges: list[dict] | None = None
     exclude_values: list[str] | None = None
     source_definition_id: int | None = None
     is_primary: bool | None = None
@@ -82,6 +92,7 @@ class RecodeDefinitionResponse(BaseModel):
     recode_type: str
     output_type: str
     mapping: dict
+    ranges: list[dict] = []
     exclude_values: list[str] | None = None
     is_primary: bool
     is_auto_detected: bool

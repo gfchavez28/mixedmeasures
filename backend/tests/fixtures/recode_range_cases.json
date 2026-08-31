@@ -1,0 +1,217 @@
+{
+  "_comment": [
+    "#823(d) — the CROSS-LANGUAGE contract for the range matcher.",
+    "",
+    "Two implementations resolve a cell against a band list: Python's",
+    "`services/recode_ranges.py::resolve_range_output` (the authority, reached",
+    "from apply, derive and a grid edit) and TypeScript's",
+    "`lib/recode-ranges.ts::resolveRangeOutput` (the Data view's display lens).",
+    "",
+    "#542b is the standing record of what a second implementation costs here:",
+    "one cell got two different numbers depending on which path computed it. A",
+    "table in each suite would drift silently the first time somebody fixed one",
+    "side; both suites execute THIS file, so a divergence fails in whichever",
+    "language changed.",
+    "",
+    "`expected: null` means no band matched. The Python side reads null as None",
+    "and the TS side as undefined — those are each language's 'no match', and",
+    "each suite asserts its own spelling."
+  ],
+  "cases": [
+    {
+      "name": "inclusive at the low bound",
+      "value": "18",
+      "ranges": [{ "lo": 18, "hi": 29, "output": "Under 30" }],
+      "expected": "Under 30"
+    },
+    {
+      "name": "inclusive at the high bound",
+      "value": "29",
+      "ranges": [{ "lo": 18, "hi": 29, "output": "Under 30" }],
+      "expected": "Under 30"
+    },
+    {
+      "name": "just past the high bound",
+      "value": "30",
+      "ranges": [{ "lo": 18, "hi": 29, "output": "Under 30" }],
+      "expected": null
+    },
+    {
+      "name": "an open top is unbounded",
+      "value": "120",
+      "ranges": [{ "lo": 45, "hi": null, "output": "45 and over" }],
+      "expected": "45 and over"
+    },
+    {
+      "name": "an open bottom is unbounded",
+      "value": "-40",
+      "ranges": [{ "lo": null, "hi": 17, "output": "Child" }],
+      "expected": "Child"
+    },
+    {
+      "name": "first declared band wins on overlap",
+      "value": "65",
+      "ranges": [
+        { "lo": 65, "hi": 65, "output": "Exactly 65" },
+        { "lo": 18, "hi": null, "output": "Adult" }
+      ],
+      "expected": "Exactly 65"
+    },
+    {
+      "name": "the later band still matches outside the earlier one",
+      "value": "66",
+      "ranges": [
+        { "lo": 65, "hi": 65, "output": "Exactly 65" },
+        { "lo": 18, "hi": null, "output": "Adult" }
+      ],
+      "expected": "Adult"
+    },
+    {
+      "name": "a thousands separator parses the same on both sides",
+      "value": "1,200",
+      "ranges": [{ "lo": 1000, "hi": 2000, "output": "High" }],
+      "expected": "High"
+    },
+    {
+      "name": "surrounding whitespace is trimmed",
+      "value": "  25  ",
+      "ranges": [{ "lo": 18, "hi": 29, "output": "Under 30" }],
+      "expected": "Under 30"
+    },
+    {
+      "name": "a non-numeric cell matches nothing",
+      "value": "Very happy",
+      "ranges": [{ "lo": 18, "hi": 29, "output": "Under 30" }],
+      "expected": null
+    },
+    {
+      "name": "an EMPTY cell is not zero",
+      "value": "",
+      "ranges": [{ "lo": -10, "hi": 10, "output": "Near zero" }],
+      "expected": null
+    },
+    {
+      "name": "a whitespace-only cell is not zero either",
+      "value": "   ",
+      "ranges": [{ "lo": -10, "hi": 10, "output": "Near zero" }],
+      "expected": null
+    },
+    {
+      "name": "part-numeric text matches nothing",
+      "value": "12abc",
+      "ranges": [{ "lo": 1, "hi": 100, "output": "In range" }],
+      "expected": null
+    },
+    {
+      "name": "a negative value lands in a negative band",
+      "value": "-99",
+      "ranges": [{ "lo": -100, "hi": -1, "output": "Sentinel-ish" }],
+      "expected": "Sentinel-ish"
+    },
+    {
+      "name": "a decimal lands in its band",
+      "value": "3.5",
+      "ranges": [{ "lo": 3, "hi": 4, "output": "Three to four" }],
+      "expected": "Three to four"
+    },
+    {
+      "name": "a numeric output survives as a number",
+      "value": "22",
+      "ranges": [{ "lo": 18, "hi": 29, "output": 1 }],
+      "expected": 1
+    },
+    {
+      "name": "no bands means no match",
+      "value": "22",
+      "ranges": [],
+      "expected": null
+    },
+
+    {
+      "_comment": [
+        "#862 — the glyph and radix cases. The table above carried NO",
+        "glyph-bearing cell, so both suites passed while the client stripped",
+        "commas and nothing else: measured across 39 inputs, 16 disagreed, and",
+        "every currency and percent cell was one of them — on exactly the column",
+        "types a researcher bands. These are the cases that fail in whichever",
+        "language is wrong."
+      ],
+      "name": "a currency cell bands by its number",
+      "value": "$50,000",
+      "ranges": [{ "lo": 1000, "hi": 100000, "output": "High" }],
+      "expected": "High"
+    },
+    {
+      "name": "a percent cell bands by its FACE value, not by hundredths",
+      "value": "45%",
+      "ranges": [{ "lo": 40, "hi": 50, "output": "Mid" }],
+      "expected": "Mid"
+    },
+    {
+      "name": "a euro sign is stripped like a dollar sign",
+      "value": "€30",
+      "ranges": [{ "lo": 18, "hi": 44, "output": "Adult" }],
+      "expected": "Adult"
+    },
+    {
+      "name": "a pound sign is stripped like a dollar sign",
+      "value": "£30",
+      "ranges": [{ "lo": 18, "hi": 44, "output": "Adult" }],
+      "expected": "Adult"
+    },
+    {
+      "name": "a yen sign is stripped like a dollar sign",
+      "value": "¥30",
+      "ranges": [{ "lo": 18, "hi": 44, "output": "Adult" }],
+      "expected": "Adult"
+    },
+    {
+      "name": "a glyph is removed ANYWHERE, not only at the ends",
+      "value": "1$2",
+      "ranges": [{ "lo": 10, "hi": 20, "output": "Teens" }],
+      "expected": "Teens"
+    },
+    {
+      "name": "a sign SURVIVES the glyph strip",
+      "value": "$-3",
+      "ranges": [{ "lo": -10, "hi": 0, "output": "Negative" }],
+      "expected": "Negative"
+    },
+    {
+      "name": "a hex literal is NOT a number — the client used to say 16",
+      "value": "0x10",
+      "ranges": [{ "lo": 10, "hi": 20, "output": "Teens" }],
+      "expected": null
+    },
+    {
+      "name": "a binary literal is not a number either",
+      "value": "0b101",
+      "ranges": [{ "lo": 1, "hi": 10, "output": "Small" }],
+      "expected": null
+    },
+    {
+      "name": "an underscore between digits parses, as float() allows",
+      "value": "1_000",
+      "ranges": [{ "lo": 500, "hi": 2000, "output": "Mid" }],
+      "expected": "Mid"
+    },
+    {
+      "name": "a doubled underscore does not",
+      "value": "1__0",
+      "ranges": [{ "lo": 1, "hi": 100, "output": "Small" }],
+      "expected": null
+    },
+    {
+      "name": "an exponent parses on both sides",
+      "value": "1e3",
+      "ranges": [{ "lo": 500, "hi": 2000, "output": "Mid" }],
+      "expected": "Mid"
+    },
+    {
+      "name": "a bare sign is not a number",
+      "value": "$",
+      "ranges": [{ "lo": -100, "hi": 100, "output": "Any" }],
+      "expected": null
+    }
+  ]
+}

@@ -225,13 +225,20 @@ def test_data_response_carries_scale_values(col):
     this schema doesn't declare. When scale_values was missing the editor's
     edit-mode pre-fill always missed and it re-seeded from the OBSERVED codes,
     silently dropping any declared zero-response level (#577's whole point).
+
+    ⚠️ The construction below is a BARE SPLAT, matching `list_dataset_data`
+    exactly. It passed `recode_definitions=[]` alongside until 2026-08-31, when
+    #830f moved that field onto the base schema — which makes the second
+    argument a DUPLICATE KEYWORD, i.e. a `TypeError`. Keeping the old shape here
+    would have been a test constructing the payload differently from the
+    endpoint it exists to protect, which is how the two drift.
     """
     from app.schemas.dataset import DatasetColumnResponse, DatasetDataColumnResponse
     base = DatasetColumnResponse(
         id=1, column_text="Q1", column_type="ordinal", sequence_order=0,
         scale_labels=["Low", "Top"], scale_values=[2.0, 10.0], scale_points=2,
     )
-    out = DatasetDataColumnResponse(**base.model_dump(), recode_definitions=[])
+    out = DatasetDataColumnResponse(**base.model_dump())
     assert out.scale_values == [2.0, 10.0]
     assert "scale_values" in out.model_dump()
 

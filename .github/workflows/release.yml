@@ -257,6 +257,37 @@ jobs:
           pip install -r requirements-dev.txt
           pyinstaller mixedmeasures.spec
 
+      # 2a) 🔴 PREFLIGHT the FROZEN bundle's lazy/native imports (#858). THE CHEAPEST GATE
+      #     IN THIS WORKFLOW AND THE ONE THAT WAS MISSING: `MM_PREFLIGHT=1` imports every
+      #     module in `lazy_native_imports.LAZY_NATIVE_IMPORTS` *inside the bundle* and then
+      #     EXECUTES a scipy t-test, exiting non-zero on any failure.
+      #
+      #     ⚠️ This mode existed from packaging P0 and had ZERO callers until 2026-08-30.
+      #     It would have failed the v1.3.2 AND v1.4.0 builds on the spot; instead every
+      #     statistical test was dead in two shipped releases (scipy reaches its vendored
+      #     `_external` subtree by dynamic import, so `import scipy.stats` resolves as a
+      #     NAME and dies in its own body) and a hand-run smoke found it four days after
+      #     publishing. A capability nothing invokes is not a guard.
+      #
+      #     Runs on ALL THREE platforms, unlike the HTTP smoke below — PyInstaller's
+      #     collection differs by OS, and this gives the Windows bundle its first automated
+      #     frozen check. Placement is deliberate: BEFORE the boot smoke and before signing,
+      #     because a bundle that cannot import its dependencies must not be packaged,
+      #     signed or published, and this answers in ~2 s against the smoke's 60 s boot loop.
+      - name: Preflight — frozen bundle imports its lazy/native deps + runs scipy (#858)
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          # An explicit `if`, not `[ … ] && BIN=…`: the && form's overall status is 1 on
+          # the non-Windows legs, which is a live foot-gun under `set -e` the moment
+          # anything is appended after it.
+          if [ "${{ matrix.eb_target }}" = "win" ]; then
+            BIN="./dist/mm-backend/mm-backend.exe"
+          else
+            BIN="./dist/mm-backend/mm-backend"
+          fi
+          MM_PREFLIGHT=1 "$BIN"
+
       # 2b) Smoke the FROZEN backend on this OS — the one macOS-functional check we can
       #     do without a real Mac. Boots the onedir binary against a throwaway temp DB
       #     (so it runs Alembic migrations + app startup exactly like a first launch) and

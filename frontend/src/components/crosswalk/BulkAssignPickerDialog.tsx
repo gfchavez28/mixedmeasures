@@ -65,8 +65,18 @@ export function BulkAssignPickerDialog({
         // eslint-disable-next-line react-hooks/set-state-in-effect -- initialize selected bracket from props when the dialog opens
         setBracketId(preselectedBracketId)
       } else {
-        const first = brackets.find((b) => b.sequence_order != null) ?? brackets[0]
-        setBracketId(first?.domain_id ?? null)
+        // 🔴 #823(i) — NO default. This seeded the FIRST bracket, so adding a
+        // second scale's items silently extended the first one: the researcher
+        // confirms a dialog that already had an answer, and the answer was
+        // whichever group happened to sort first.
+        //
+        // ⚠️ The fix is an absent default, not a smarter one. "Preselect the
+        // empty group just created" guesses at intent and is wrong the moment
+        // two are empty; `canConfirm` already gates on `bracketId != null`, so
+        // an unset value costs one deliberate click and cannot be wrong.
+        // ⚠️ `preselectedBracketId` is untouched — the callers that DO know the
+        // target (the row-end drop, the cell context menu) still pass it.
+        setBracketId(null)
       }
     }
   }, [open, brackets, preselectedBracketId])

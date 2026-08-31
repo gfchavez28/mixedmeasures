@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { formatP, getSignificanceStars } from '@/lib/chart-data'
 
@@ -33,6 +33,7 @@ export default function PostHocTable({
   onToggle,
 }: PostHocTableProps) {
   const [sortAsc, setSortAsc] = useState(true)
+  const tableId = useId()
 
   const sorted = useMemo(() => {
     const copy = [...comparisons]
@@ -48,7 +49,21 @@ export default function PostHocTable({
         className="flex items-center gap-1.5 text-[11px] text-mm-text-muted hover:text-mm-text transition-colors"
         onClick={onToggle}
         aria-expanded={expanded}
-        aria-controls={`posthoc-${variableName}`}
+        // #853 — the id is `useId()`, never the variable NAME. MM labels
+        // routinely contain spaces ("Trust scale A (Depends = middle)"), an id
+        // with ASCII whitespace is invalid HTML, and `aria-controls` is an
+        // ID-LIST attribute — so the value parsed as six tokens, none of which
+        // resolved. A reader was told the button controls something and could
+        // not reach it.
+        //
+        // ⚠️ And only while the table EXISTS. `aria-controls` pointing at an
+        // unmounted element is the same `aria-valid-attr-value` failure by
+        // another route, which this entry's own history records TWICE (the
+        // dangling `rctab-*` idrefs, and `ColumnPicker`'s unmounted
+        // `TabsContent`). Fixing the id alone would have left the third
+        // instance live in the collapsed state, which is the state this
+        // disclosure spends most of its life in.
+        aria-controls={expanded ? tableId : undefined}
       >
         {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
         <span>Tukey HSD post-hoc ({sigCount} of {comparisons.length} pairs significant)</span>
@@ -56,7 +71,7 @@ export default function PostHocTable({
 
       {expanded && (
         <table
-          id={`posthoc-${variableName}`}
+          id={tableId}
           className="mt-1.5 border-collapse text-[11px] w-full"
           aria-label={`Tukey HSD post-hoc comparisons for ${variableName}`}
         >

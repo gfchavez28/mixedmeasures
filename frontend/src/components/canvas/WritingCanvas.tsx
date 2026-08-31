@@ -717,7 +717,8 @@ function UnsortedSection({ pendingItems, onInsertPendingItem, onRemovePendingIte
               onClick={() => onRemovePendingItem(item.id)}
               className="p-1 rounded text-mm-text-muted hover:text-red-500 transition-colors shrink-0"
               title="Dismiss"
-              aria-label="Dismiss pending item"
+              aria-label={`Dismiss ${item.source_label?.trim()
+                || `${PENDING_LABELS[item.item_type] ?? item.item_type} #${item.source_id}`}`}
             >
               <Trash2 className="w-3 h-3" />
             </button>
@@ -735,11 +736,38 @@ function DraggablePendingItem({ item, children }: { item: PendingItem; children:
     id: `pending-item-${item.id}`,
     data: { pendingItemId: item.id, itemType: item.item_type, sourceId: item.source_id },
   })
+  // 🔴 #854(d) — the LISTENERS are spread; the a11y ATTRIBUTES deliberately are
+  // not. dnd-kit's defaults are `role: 'button'`, `tabIndex: 0` and
+  // `aria-roledescription: 'draggable'`, and this wrapper CONTAINS two real
+  // buttons (insert and dismiss) — so spreading them nested interactive content
+  // inside an interactive role and cost THREE tab stops per item (measured: 18
+  // on a six-item inbox).
+  //
+  // ⚠️ **Nothing is lost, and that is the whole argument.** This canvas's
+  // `DndContext` is `PointerSensor` ONLY (see `sensors` above), so there is no
+  // KeyboardSensor for that tab stop to activate: it was a stop that did
+  // nothing, wrapping two controls that do. Mouse drag is unaffected — the
+  // pointer sensor works off `listeners`.
+  //
+  // ⚠️ **If a KeyboardSensor is ever added, this needs a real drag HANDLE**,
+  // not the attributes back on the wrapper — the crosswalk's `Bracket` already
+  // establishes that shape (attributes/listeners on the grip alone, #327).
+  // #776's rule is the general one: a library's ARIA defaults are copy you did
+  // not write and did not review.
+  // ⚠️ `aria-roledescription` goes too: it is only meaningful on an element
+  // that HAS a role, so leaving it on a now-role-less div trades one finding for
+  // another.
+  const {
+    role: _role,
+    tabIndex: _tabIndex,
+    'aria-roledescription': _roleDesc,
+    ...dragAttributes
+  } = attributes
   return (
     <div
       ref={setNodeRef}
       className={`flex items-center gap-1 ${isDragging ? 'opacity-40' : ''}`}
-      {...attributes}
+      {...dragAttributes}
       {...listeners}
     >
       {children}

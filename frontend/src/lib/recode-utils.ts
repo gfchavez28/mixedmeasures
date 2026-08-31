@@ -4,6 +4,8 @@
  * cell context menu (copy-recode-to flow).
  */
 
+import type { RecodeRange } from '@/lib/recode-ranges'
+
 export type CompatibilityType = 'exact' | 'positional' | 'incompatible'
 
 /**
@@ -157,15 +159,28 @@ export function remapExcludeValues(
  * ⚠️ **The editor's local state deliberately KEEPS the value while excluded**,
  * so unticking restores it and the row never moves. Nothing stale is ever
  * persisted, which is the property that matters.
+ *
+ * ⚠️ **#823(d) made this THREE halves, not two.** Range bands join the return
+ * for the same reason `exclude_values` did: a caller that diffs the mapping
+ * alone sees no change when only a band moved, and would send a rule whose
+ * bands are the ones it had before. Bands are NOT stripped by `excludeValues` —
+ * an exclusion is keyed on a response's text and a band is a numeric predicate,
+ * so there is nothing to strip — but they are computed HERE so that one
+ * function still produces the whole save payload.
  */
 export function recodeMappingPayload(
   mapping: Record<string, number | string>,
   excludeValues: string[],
-): { mapping: Record<string, number | string>; exclude_values: string[] } {
+  ranges: RecodeRange[] = [],
+): {
+  mapping: Record<string, number | string>
+  exclude_values: string[]
+  ranges: RecodeRange[]
+} {
   const excluded = new Set(excludeValues)
   const kept: Record<string, number | string> = {}
   for (const [label, value] of Object.entries(mapping)) {
     if (!excluded.has(label)) kept[label] = value
   }
-  return { mapping: kept, exclude_values: excludeValues }
+  return { mapping: kept, exclude_values: excludeValues, ranges }
 }
