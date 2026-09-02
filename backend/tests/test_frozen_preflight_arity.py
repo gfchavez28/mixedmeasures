@@ -27,6 +27,7 @@ two halves are complementary: this one fails at push, that one fails at cut.
 from __future__ import annotations
 
 import ast
+import os
 import pathlib
 import sys
 
@@ -176,3 +177,103 @@ def test_each_probed_module_is_bundled_by_the_spec(module):
     # The parametrization is the arity: adding a module to the list adds a case here, so
     # the count can never silently diverge from what the spec bundles.
     assert module in LAZY_NATIVE_IMPORTS
+
+
+def test_preflight_reports_through_an_ascii_stdout(tmp_path):
+    """The preflight's OWN output must survive a non-UTF-8 stdout (v1.5.0 cut, 2026-09-02).
+
+    🔴 This is the defect that failed the FIRST release run of the `release.yml` preflight
+    step: the frozen Windows interpreter writes **cp1252**, all 21 probes reported `ok`,
+    and the step still exited 1 — `print` raised `UnicodeEncodeError` on the `✅` in the
+    success line, *after* every probe had passed. Both summaries carried an emoji, so on
+    Windows the mode could never report anything correctly: a pass died on `✅` and a real
+    failure died on `❌` before reaching its `sys.exit(2)`, and both surfaced as exit 1.
+
+    ⚠️ **Asserted in the channel the property lives in.** A source scan for non-ASCII
+    would be the wrong instrument twice over — it cannot see a runtime f-string, and this
+    file is itself full of emoji in prose that such a scan would have to except. What
+    matters is the BYTES the process writes, so this runs the real thing with an ASCII
+    stdout and reads the exit code.
+
+    ⚠️ The subprocess needs `PYTHONUTF8=0` **and** `PYTHONCOERCECLOCALE=0`: since 3.7,
+    `LC_ALL=C` alone is silently coerced back to UTF-8 (PEP 538), so the obvious form of
+    this test passes against the broken code. Measured — the first attempt did exactly
+    that.
+    """
+    import subprocess
+
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "MM_PREFLIGHT": "1",
+        "MM_DATABASE_PATH": ":memory:",
+        "PYTHONUTF8": "0",
+        "PYTHONCOERCECLOCALE": "0",
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PYTHONPATH": str(BACKEND),
+    }
+    proc = subprocess.run(
+        [sys.executable, str(BACKEND / "run_server.py")],
+        env=env, capture_output=True, timeout=300,
+    )
+    out = proc.stdout.decode("ascii", errors="replace") + proc.stderr.decode("ascii", errors="replace")
+    assert "UnicodeEncodeError" not in out, (
+        "the preflight's own summary line is not encodable on a non-UTF-8 stdout — this is "
+        "the Windows cp1252 case that failed the v1.5.0 build with every probe passing. "
+        "Keep this output ASCII (see the note in run_server.py::_preflight); do NOT reach "
+        f"for PYTHONIOENCODING, which the frozen interpreter ignores (#762).\n{out[-2000:]}"
+    )
+    assert proc.returncode == 0, f"preflight exited {proc.returncode} under an ASCII stdout:\n{out[-2000:]}"
+    assert "OK preflight" in out, f"the success summary did not reach stdout:\n{out[-2000:]}"
+
+
+def test_every_preflight_output_literal_is_ascii():
+    """The ARM the behavioural test above cannot reach — the FAILURE path (#873).
+
+    🔴 The first fix for #873 was INCOMPLETE and the subprocess test could not see it.
+    That test necessarily takes the success branch (every probe passes against the source
+    tree), so the `FAILED` summary and the per-module `- {status}` suffix — which only
+    render when a probe fails — kept their em-dashes and were never executed. An AST scan
+    reaches them; running the code does not, short of synthesising a broken bundle.
+
+    ⚠️ This is deliberately an AST scan and NOT a text grep: `run_server.py` documents
+    this rule in prose that necessarily *contains* the characters it forbids, so a grep
+    would match its own explanation. Reading `print()` arguments as syntax is what makes
+    the comment and the code distinguishable (#772's lesson — a guard's own parser must
+    not read prose as markup).
+
+    ⚠️ **The two guards are a pair, and neither is redundant.** This one proves the
+    literals are ASCII; the subprocess one proves the *runtime* result is (an f-string
+    can interpolate a non-ASCII value that no literal contains) and that the process
+    actually exits 0. Deleting either leaves a live gap.
+    """
+    tree = ast.parse((BACKEND / "run_server.py").read_text(encoding="utf-8"))
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fname = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if fname not in ("print", "write"):
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                non_ascii = sorted({c for c in sub.value if ord(c) > 127})
+                if non_ascii:
+                    offenders.append((sub.lineno, non_ascii, sub.value[:60]))
+    assert not offenders, (
+        "run_server.py writes non-ASCII to stdout/stderr. The frozen Windows interpreter "
+        "encodes cp1252 and the packaged binary dies on it — that is #873, and it blocked "
+        "the whole v1.5.0 Windows leg with every probe passing. Keep this output ASCII; do "
+        f"NOT reach for PYTHONIOENCODING (#762 — the frozen interpreter ignores it).\n"
+        f"offenders: {offenders}"
+    )
+    # POPULATION self-check (#730): a scan whose walk finds nothing passes by finding
+    # nothing. The preflight has at least the per-module row, the machine-readable line,
+    # and the two summaries.
+    printed = [n for n in ast.walk(tree)
+               if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "print"]
+    assert len(printed) >= 4, (
+        f"the scan found only {len(printed)} print() calls in run_server.py — it has gone "
+        "blind (moved file? renamed function?), and an empty scan is indistinguishable "
+        "from a pass"
+    )

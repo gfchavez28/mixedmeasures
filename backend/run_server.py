@@ -37,17 +37,33 @@ def _preflight() -> None:
     # build, by someone deciding whether to publish.
     for name, status in results:
         print(f"  {'ok  ' if status == 'ok' else 'FAIL'}  {name}"
-              + ("" if status == "ok" else f"  — {status}"), flush=True)
+              + ("" if status == "ok" else f"  - {status}"), flush=True)
     # Machine-readable second, on one line, so CI and scripts need no parsing of the above.
     print("PREFLIGHT_RESULT " + json.dumps(dict(results)), flush=True)
 
+    # 🔴 THIS OUTPUT IS ASCII-ONLY, DELIBERATELY (v1.5.0 cut, 2026-09-02). The frozen
+    # Windows interpreter writes **cp1252**, so a `✅` here raises UnicodeEncodeError
+    # from `print` itself — AFTER every probe has passed — and the gate exits 1 on a
+    # perfectly good bundle. It shipped that way in the step's first release run: all
+    # 21 probes reported `ok` and the Windows leg still failed, on the success line.
+    # Both summaries were affected, so on Windows this mode could never report
+    # ANYTHING correctly — a pass died on `✅`, a real failure died on `❌` before
+    # reaching `sys.exit(2)`, and both surfaced as a bare exit 1.
+    #
+    # ⚠️ Do NOT "fix" this with PYTHONIOENCODING — that is #762 exactly: the frozen
+    # interpreter ignores it (measured; `sys.stderr.encoding` stays cp1252 with the
+    # variable set in the child's environ). The writer owns its encoding, so either
+    # write UTF-8 bytes to `sys.stdout.buffer` as `startup_errors._write_marker_line`
+    # does, or — as here, where the text is ours and carries no user data — keep it
+    # ASCII. Same family as #409's ban on emoji glyphs in the UI: an ornament that
+    # the destination cannot render is a defect, not a decoration.
     if failures:
-        print(f"\n❌ preflight: {len(failures)} of {len(results)} probes failed — the frozen "
+        print(f"\nFAILED preflight: {len(failures)} of {len(results)} probes failed - the frozen "
               f"bundle is missing a dependency it needs at runtime (#858). Add it to "
               f"lazy_native_imports.LAZY_NATIVE_IMPORTS and/or collect it in "
               f"mixedmeasures.spec.", flush=True)
         sys.exit(2)
-    print(f"\n✅ preflight: all {len(results)} probes passed (imports + a real scipy "
+    print(f"\nOK preflight: all {len(results)} probes passed (imports + a real scipy "
           f"computation).", flush=True)
     sys.exit(0)
 
