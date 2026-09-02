@@ -19,6 +19,7 @@ from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
 from ..models.dataset import DatasetColumn, DatasetRow, Dataset
 from ..models.equivalence_group import EquivalenceGroup
 from .grouping import order_value_labels
+from .reliability_basis import RELIABILITY_FACET_ITEMS
 from .undefined_stats import finite_or_none
 from .metrics import (
     resolve_dataset_column,
@@ -505,6 +506,11 @@ def compute_cronbachs_alpha(db: Session, test: StatisticalTest) -> dict:
         "total_variance": round(total_variance, STATS_PRECISION),
         "interpretation": _interpret_alpha(alpha),
         "interpretation_thresholds": ALPHA_THRESHOLDS,
+        # #35 — the stated basis. This α is over ITEMS; the Reliability tab's
+        # Krippendorff's α (and the rating α beside it) are over CODERS, and a
+        # bare "α = 0.82" cannot be told apart across the two screens. The
+        # client displays the facet and never infers it from the test type.
+        "reliability_facet": RELIABILITY_FACET_ITEMS,
     }
 
 

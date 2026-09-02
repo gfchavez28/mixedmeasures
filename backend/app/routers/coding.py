@@ -15,7 +15,8 @@ from ..schemas.coding import (
     BulkCodeRequest,
     CodeApplicationResponse,
     BulkCodeResponse,
-    CodingProgressResponse
+    CodingProgressResponse,
+    MagnitudeValueUpdate,
 )
 from ..auth import get_current_user
 from ..services.audit import log_action
@@ -26,6 +27,7 @@ from ..services.coding_counts import (
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
 from ..services.coding_layers import project_scoped_segments
+from ..services import magnitude
 from .helpers import _get_project_or_404, _verify_segment_ownership, _verify_conversation_ownership
 
 router = APIRouter(prefix="/api", tags=["coding"])
@@ -76,6 +78,35 @@ def _mark_segment_consensus_stale(db: Session, project_id: int, segment: Segment
     mark_consensus_stale(db, project_id, segment_ids=ids)
 
 
+def _fan_out_rating(
+    db: Session, segment: Segment, code_id: int, user_id: int, rating: float | None,
+) -> None:
+    """Write THIS coder's rating (and clear the merge flag) across a segment group.
+
+    A group is coded as ONE unit — that is what it is for — so it is rated as one
+    unit; rating its members differently would be a distinction the interface
+    never offered. ⚠️ #869 (f): there are THREE doors that write a rating
+    (`set_code_magnitude`, `apply_code`'s first apply, `apply_code`'s re-rate on
+    an existing row) and two of them fanned out while the third updated one
+    row. The rule lives HERE so a fourth door cannot forget it. No-op outside a
+    group. Scoped to this coder's rows and to VISIBLE members, exactly like the
+    apply path's sibling loop.
+    """
+    if not segment.group_id:
+        return
+    db.query(CodeApplication).filter(
+        CodeApplication.code_id == code_id,
+        CodeApplication.user_id == user_id,
+        CodeApplication.segment_id.in_(
+            db.query(Segment.id).filter(
+                Segment.group_id == segment.group_id,
+                Segment.merged_into_id == None,  # noqa: E711
+                Segment.split_into_id == None,  # noqa: E711
+            )
+        ),
+    ).update({"magnitude": rating, "magnitude_conflict": None}, synchronize_session=False)
+
+
 @router.post("/segments/{segment_id}/codes/{code_id}", response_model=CodeApplicationResponse)
 async def apply_code(
     segment_id: int,
@@ -109,12 +140,42 @@ async def apply_code(
         CodeApplication.user_id == user.id
     ).first()
 
+    # #35 — a rating supplied here is validated against the code's declared scale
+    # BEFORE anything is written, so a bad value cannot half-apply a code. Omitted
+    # and explicit-null are different instructions (see `ApplyCodeRequest`).
+    rating_supplied = bool(data and "magnitude" in data.model_fields_set)
+    rating = None
+    if rating_supplied:
+        try:
+            rating = magnitude.validate_value(code, data.magnitude)
+        except magnitude.MagnitudeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     if existing:
+        # Already applied by this coder. Re-applying is a no-op EXCEPT for a
+        # rating: variant A's flow can arrive here when a coder re-rates, and
+        # silently discarding the value would make the strip appear to save.
+        # ⚠️ #869 (f): the group fan-out runs here too — this was the one rating
+        # door that updated a single row. It runs whenever the segment is grouped,
+        # not only when THIS row changed, because a sibling may carry a stale
+        # value or a merge flag this row does not.
+        if rating_supplied and (
+            existing.magnitude != rating
+            or existing.magnitude_conflict is not None
+            or segment.group_id
+        ):
+            existing.magnitude = rating
+            # #35 — rating it again IS the adjudication of a merge conflict.
+            existing.magnitude_conflict = None
+            _fan_out_rating(db, segment, code_id, user.id, rating)
+            _mark_segment_consensus_stale(db, project_id, segment)
+            db.commit()
         return CodeApplicationResponse(
             segment_id=segment_id,
             code_id=code_id,
             applied=True,
-            created_at=existing.created_at
+            created_at=existing.created_at,
+            magnitude=existing.magnitude,
         )
 
     # Apply code
@@ -122,7 +183,8 @@ async def apply_code(
         segment_id=segment_id,
         code_id=code_id,
         user_id=user.id,
-        attribution=data.attribution if data else None
+        attribution=data.attribution if data else None,
+        magnitude=rating,
     )
     db.add(application)
 
@@ -143,16 +205,27 @@ async def apply_code(
             ).first()
 
             if not existing_group:
+                # #35 — the rating fans out with the code. A segment group is
+                # coded as ONE unit (that is what the group is for), so rating
+                # the group's segments differently would be a distinction the UI
+                # never offered the coder a way to make.
                 group_app = CodeApplication(
                     segment_id=group_seg.id,
                     code_id=code_id,
                     user_id=user.id,
-                    attribution=data.attribution if data else None
+                    attribution=data.attribution if data else None,
+                    magnitude=rating,
                 )
                 db.add(group_app)
 
     # Flush to get the application.id without committing
     db.flush()
+
+    # A sibling that was ALREADY coded (before it joined the group, or by an
+    # earlier apply) was skipped above and still carries its old rating; the
+    # group is rated as one unit, so a rating given now reaches it too (#869 f).
+    if rating_supplied:
+        _fan_out_rating(db, segment, code_id, user.id, rating)
 
     log_action(
         db,
@@ -170,7 +243,89 @@ async def apply_code(
         segment_id=segment_id,
         code_id=code_id,
         applied=True,
-        created_at=application.created_at
+        created_at=application.created_at,
+        magnitude=application.magnitude,
+    )
+
+
+@router.patch("/segments/{segment_id}/codes/{code_id}/magnitude", response_model=CodeApplicationResponse)
+def set_code_magnitude(
+    segment_id: int,
+    code_id: int,
+    data: MagnitudeValueUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Set or clear THIS coder's rating on an already-applied code (#35).
+
+    Separate from `apply_code` on purpose. That endpoint returns early when the
+    application already exists, so it is structurally unable to edit one — and
+    "edit the rating afterwards" is a requirement, not a nicety: it is the only
+    way to correct a mis-keyed value, and the one affordance Dedoose's own
+    interface provides (weights are editable in its Selection Info panel).
+
+    ⚠️ Rates the CALLER's application only, never a colleague's — the per-coder
+    layer rule. A rating is that coder's judgement; overwriting someone else's
+    would fabricate agreement, which is the one thing a reliability statistic
+    must never be handed.
+
+    ⚠️ `magnitude: null` UNRATES. It does not write 0.
+    """
+    segment = _verify_segment_ownership(db, segment_id, user.id)
+
+    code = db.query(Code).filter(Code.id == code_id).first()
+    if not code:
+        raise HTTPException(status_code=404, detail="Code not found")
+
+    project_id = _get_segment_project_id(db, segment)
+    if not project_id or project_id != code.project_id:
+        raise HTTPException(status_code=400, detail="Segment and code must belong to the same project")
+
+    application = db.query(CodeApplication).filter(
+        CodeApplication.segment_id == segment_id,
+        CodeApplication.code_id == code_id,
+        CodeApplication.user_id == user.id,
+    ).first()
+    if not application:
+        raise HTTPException(
+            status_code=404,
+            detail="You have not applied this code to this segment, so there is nothing to rate.",
+        )
+
+    try:
+        rating = magnitude.validate_value(code, data.magnitude)
+    except magnitude.MagnitudeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    application.magnitude = rating
+    # #35 — re-rating (or unrating) IS the adjudication of a merge conflict: the
+    # coder has looked at this application and decided. The flag goes with it.
+    application.magnitude_conflict = None
+
+    # A group is coded as one unit, so it is rated as one unit — the same rule the
+    # apply path follows, through the same helper (#869 f).
+    _fan_out_rating(db, segment, code_id, user.id, rating)
+
+    log_action(
+        db,
+        action="code_magnitude_set" if rating is not None else "code_magnitude_cleared",
+        entity_type="code_application",
+        entity_id=application.id,
+        user_id=user.id,
+        project_id=project_id,
+        details={"segment_id": segment_id, "code_id": code_id, "magnitude": rating},
+    )
+    # A rating change moves what a consensus over this target would say, so it
+    # staleizes exactly like an apply/remove does (the every-mutation-site rule).
+    _mark_segment_consensus_stale(db, project_id, segment)
+    db.commit()
+
+    return CodeApplicationResponse(
+        segment_id=segment_id,
+        code_id=code_id,
+        applied=True,
+        created_at=application.created_at,
+        magnitude=rating,
     )
 
 

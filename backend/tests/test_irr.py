@@ -418,7 +418,7 @@ class TestObservationClipsInIrr:
             _apply(db, ids["code"], 1, segment_id=sid)
             _apply(db, ids["code"], 2, segment_id=sid)
 
-        _coders, _applied, unit_source, _engaged, _multi = gather_coder_applications(db, 80)
+        _coders, _applied, unit_source, _engaged, _multi, _ratings = gather_coder_applications(db, 80)
 
         assert unit_source[("seg", ids["frozen_clips"][0])] == ("obs", ids["frozen_obs"])
         assert all(sid is not None for (_tag, sid) in unit_source.values()), \
@@ -438,7 +438,7 @@ class TestObservationClipsInIrr:
             _apply(db, ids["code"], 1, segment_id=sid)
             _apply(db, ids["code"], 2, segment_id=sid)
 
-        _c, _a, unit_source, _e, multi = gather_coder_applications(db, 81)
+        _c, _a, unit_source, _e, multi, _r = gather_coder_applications(db, 81)
 
         assert ("obs", ids["frozen_obs"]) in multi, "the frozen observation is a shared source"
         assert ("obs", ids["open_obs"]) not in multi, "the OPEN observation must not be a source"
@@ -661,3 +661,363 @@ class TestSourceScopedIrr:
         res = compute_irr(db, 7450, source=("col", 999999))
         assert res["available"] is False
         assert res["sources"], "the picker's options must survive an empty scope"
+
+
+# ── 6. Confidence intervals reach the payload (#43) ───────────────────────────
+
+
+class TestReliabilityIntervals:
+    """The wiring, not the arithmetic — that lives in
+    `test_reliability_intervals.py`. What this class pins is that the intervals
+    are computed from the SAME rows as the estimates, that an undefined
+    statistic carries none, and that the headline's interval CLUSTERS by unit.
+    """
+
+    def _two_coder_project(self, db, pid, *, n_units=12):
+        """Two conversations, two coders, one code they mostly agree on.
+
+        ⚠️ The SECOND conversation exists for the zero-prevalence test, and the
+        reason is recorded three hundred lines above in `TestSourceScopedIrr`:
+        **a code applied nowhere never enters `all_codes` at all**, so a fixture
+        that merely declares an unused code cannot reach the rider. The
+        reachable state is a code applied on ANOTHER source and unused in the
+        one being scoped to — found here the same way, by writing the naive
+        fixture and watching the lookup come back empty.
+        """
+        db.add_all([
+            Project(id=pid, name="P", user_id=1),
+            Conversation(id=pid, project_id=pid, name="Interview"),
+            Conversation(id=pid + 5000, project_id=pid, name="Elsewhere"),
+        ])
+        db.flush()
+        _coder(db, 2, "Bob")
+        db.add(Code(id=pid, project_id=pid, name="Fidelity", numeric_id=2,
+                    is_active=True, is_universal=False))
+        db.add(Code(id=pid + 1, project_id=pid, name="Unused here", numeric_id=3,
+                    is_active=True, is_universal=False))
+        db.flush()
+        for i in range(n_units):
+            _seg(db, pid + 100 + i, pid, i)
+        # Alice codes the first two thirds; Bob agrees on all but the last one.
+        applied_by_alice = list(range(0, (n_units * 2) // 3))
+        for i in applied_by_alice:
+            _apply(db, pid, 1, segment_id=pid + 100 + i)
+        for i in applied_by_alice[:-1]:
+            _apply(db, pid, 2, segment_id=pid + 100 + i)
+        # The other conversation, where `Unused here` IS applied by both.
+        _seg(db, pid + 5001, pid + 5000, 0)
+        _seg(db, pid + 5002, pid + 5000, 1)
+        _apply(db, pid + 1, 1, segment_id=pid + 5001)
+        _apply(db, pid + 1, 2, segment_id=pid + 5001)
+        db.flush()
+
+    def test_both_coefficients_carry_an_interval_with_its_method(self, db_session):
+        db = db_session
+        self._two_coder_project(db, 7500)
+        res = compute_irr(db, 7500)
+
+        code = next(c for c in res["per_code"] if c["code_id"] == 7500)
+        assert code["cohens_kappa"] is not None and code["krippendorff_alpha"] is not None
+
+        kappa_ci, alpha_ci = code["kappa_ci"], code["alpha_ci"]
+        assert kappa_ci["method"] == "kappa_analytic_se"
+        assert alpha_ci["method"] == "alpha_bootstrap_units"
+        # Different METHODS, so they cannot share one `ci_method` field — the
+        # schema keeps them as separate objects for exactly this reason.
+        assert kappa_ci["method"] != alpha_ci["method"]
+        for ci, value in ((kappa_ci, code["cohens_kappa"]),
+                          (alpha_ci, code["krippendorff_alpha"])):
+            assert ci["level"] == 0.95
+            assert ci["lower"] <= value <= ci["upper"]
+        assert alpha_ci["n_resamples"] > 0
+        assert kappa_ci["n_resamples"] is None, "the analytic interval resamples nothing"
+
+    def test_an_undefined_statistic_carries_no_interval(self, db_session):
+        """#829's zero-prevalence rider, one level up.
+
+        A code nobody applied in scope has no variance to agree about, so κ/α
+        are None WITH a reason. An interval there would bracket a number that
+        does not exist — and a SECOND reason on the same blank cell is noise,
+        so the interval is simply absent rather than absent-with-an-excuse.
+        """
+        db = db_session
+        self._two_coder_project(db, 7510)
+        # SCOPED to the conversation where `Unused here` was never applied —
+        # per-source scoping is what makes this state reachable (#829).
+        res = compute_irr(db, 7510, source=("conv", 7510))
+
+        unused = next(c for c in res["per_code"] if c["code_id"] == 7510 + 1)
+        assert unused["undefined_reason"] == "no_variance"
+        assert unused["cohens_kappa"] is None and unused["krippendorff_alpha"] is None
+        assert unused["kappa_ci"] is None and unused["alpha_ci"] is None
+
+    def test_the_headline_alpha_carries_a_cluster_bootstrap_interval(self, db_session):
+        db = db_session
+        self._two_coder_project(db, 7520)
+        res = compute_irr(db, 7520)
+
+        ci = res["overall_alpha_ci"]
+        assert ci is not None
+        assert ci["method"] == "alpha_bootstrap_units"
+        assert ci["lower"] <= res["overall_alpha"] <= ci["upper"]
+
+    def test_the_headline_interval_resamples_units_not_pooled_rows(self, db_session):
+        """🔴 The wiring assertion the unit tests cannot make.
+
+        `compute_irr` could satisfy every other test here by bootstrapping
+        `global_rows` — the concatenated (unit × code) rows — and the interval
+        would look perfectly reasonable while being too NARROW, because a unit's
+        rows move together. This compares the payload against BOTH candidate
+        computations and requires it to match the clustered one.
+
+        Mutation-checked: swapping `pooled_unit_contributions(pooled_matrices)`
+        for `unit_contributions(global_rows)` fails this and nothing else.
+        """
+        from app.services.reliability_intervals import (
+            alpha_interval, pooled_unit_contributions, unit_contributions,
+        )
+
+        db = db_session
+        # Several codes over the same units, so the two computations differ.
+        self._two_coder_project(db, 7530, n_units=15)
+        for extra in (2, 3, 4):
+            db.add(Code(id=7530 + 10 * extra, project_id=7530,
+                        name=f"Extra {extra}", numeric_id=10 + extra,
+                        is_active=True, is_universal=False))
+            db.flush()
+            for i in range(0, 15, extra):
+                _apply(db, 7530 + 10 * extra, 1, segment_id=7530 + 100 + i)
+                if i % 2 == 0:
+                    _apply(db, 7530 + 10 * extra, 2, segment_id=7530 + 100 + i)
+        db.flush()
+
+        res = compute_irr(db, 7530)
+        _cids, _names, per_code, _sel, _scope, _mag = build_irr_matrices(db, 7530)
+        contributing = [
+            rows for code_id, rows in per_code.items()
+            if next((c for c in res["per_code"] if c["code_id"] == code_id), {})
+            .get("krippendorff_alpha") is not None
+        ]
+        clustered = alpha_interval(pooled_unit_contributions(contributing))
+        naive = alpha_interval(unit_contributions([r for rows in contributing for r in rows]))
+
+        assert clustered != naive, (
+            "fixture cannot tell the two apart — it proves nothing about which "
+            "one the payload used"
+        )
+        assert res["overall_alpha_ci"]["lower"] == clustered["lower"]
+        assert res["overall_alpha_ci"]["upper"] == clustered["upper"]
+
+    def test_the_unavailable_payload_still_declares_the_field(self, db_session):
+        """A missing key and a null value read the same to a client that does
+        `?.` on it, and differently to one that destructures."""
+        db = db_session
+        db.add(Project(id=7540, name="Solo", user_id=1))
+        db.flush()
+        res = compute_irr(db, 7540)
+        assert res["available"] is False
+        assert "overall_alpha_ci" in res and res["overall_alpha_ci"] is None
+
+
+# ── #35 — rating agreement (magnitude α) ──────────────────────────────────────
+
+
+def _rate(db, code_id, uid, segment_id, magnitude):
+    """An application WITH a rating (`None` = applied but left unrated)."""
+    db.add(CodeApplication(code_id=code_id, user_id=uid, segment_id=segment_id,
+                           magnitude=magnitude))
+    db.flush()
+
+
+class TestMagnitudeAlpha:
+    """#35 — one interval-metric α per code that declares a scale.
+
+    🔴 The scale is −1…+1 with step 0.5, so ZERO IS INTERIOR: two coders both
+    rating a unit 0 is a real, comparable pair, and a truthiness slip anywhere in
+    the gather drops that unit — changing n_units, n_rated and α at once. The
+    fixture also carries one applied-but-unrated cell, one unit only one coder
+    applied, and one nobody coded, so the three kinds of "no rating" are all
+    present and all distinct from a rating of zero.
+    """
+
+    #: unit index → (coder 1, coder 2). A shorter tuple = coder 2 never applied
+    #: the code there; `None` = applied but unrated.
+    RATINGS = {
+        0: (1.0, 1.0),
+        1: (0.5, 0.0),
+        2: (0.0, 0.0),      # zero, both — the falsy-zero axis
+        3: (-1.0, -0.5),
+        4: (0.5, None),     # coder 2 applied but skipped the rating
+        5: (1.0,),          # coder 2 never applied it
+        # 6: nobody
+        7: (-0.5, -0.5),
+    }
+
+    def _project(self, db, pid, ratings=None):
+        ratings = self.RATINGS if ratings is None else ratings
+        db.add_all([
+            Project(id=pid, name="P", user_id=1),
+            Conversation(id=pid, project_id=pid, name="Interview"),
+        ])
+        db.flush()
+        _coder(db, 2, "Bob")
+        db.add(Code(id=pid, project_id=pid, name="District support", numeric_id=2,
+                    is_active=True, is_universal=False,
+                    magnitude_min=-1.0, magnitude_max=1.0, magnitude_step=0.5))
+        db.add(Code(id=pid + 1, project_id=pid, name="Pacing", numeric_id=3,
+                    is_active=True, is_universal=False))
+        db.flush()
+        for i in range(8):
+            _seg(db, pid + 100 + i, pid, i)
+        for i, values in ratings.items():
+            for uid, value in zip((1, 2), values):
+                _rate(db, pid, uid, pid + 100 + i, value)
+        # The plain code — so the categorical table has a row the rating table
+        # lacks, and so BOTH coders engage the source whatever the ratings say.
+        _apply(db, pid + 1, 1, segment_id=pid + 100)
+        _apply(db, pid + 1, 2, segment_id=pid + 100)
+        _apply(db, pid + 1, 1, segment_id=pid + 101)
+        db.flush()
+
+    def _matrix(self, ratings=None):
+        """The coder×unit rating matrix, built INDEPENDENTLY of the service."""
+        ratings = self.RATINGS if ratings is None else ratings
+        rows = []
+        for i in range(8):
+            row: list = [None, None]
+            for j, v in enumerate(ratings.get(i, ())):
+                row[j] = v
+            rows.append(row)
+        return rows
+
+    def test_a_rating_row_exists_for_the_scaled_code_only(self, db_session):
+        self._project(db_session, 7600)
+        res = compute_irr(db_session, 7600)
+        assert [r["code_id"] for r in res["magnitude_per_code"]] == [7600]
+        # The categorical table still lists both codes.
+        assert {c["code_id"] for c in res["per_code"]} == {7600, 7601}
+
+    def test_alpha_is_the_interval_metric_over_units_both_rated(self, db_session):
+        self._project(db_session, 7600)
+        row = compute_irr(db_session, 7600)["magnitude_per_code"][0]
+        expected = _krippendorff_alpha(self._matrix(), "interval")
+        assert row["krippendorff_alpha"] == pytest.approx(expected, abs=1e-12)
+        assert row["alpha_metric"] == "interval"
+        # Discrimination: on this fixture the nominal metric gives a DIFFERENT
+        # number, so the assertion above can tell the two apart.
+        assert abs(_krippendorff_alpha(self._matrix(), "nominal") - expected) > 1e-3
+
+    def test_zero_is_a_rating_so_the_unit_counts(self, db_session):
+        """Mutation target: `if value is not None` → `if value` in
+        `build_irr_matrices` drops unit 2 and reports 4 / 10 here."""
+        self._project(db_session, 7600)
+        row = compute_irr(db_session, 7600)["magnitude_per_code"][0]
+        # Units 0, 1, 2, 3, 7 — unit 2 is the pair of zeros.
+        assert row["n_units"] == 5
+        assert row["n_rated"] == 12 and row["n_applications"] == 13
+
+    def test_mean_abs_difference_is_in_scale_units(self, db_session):
+        self._project(db_session, 7600)
+        row = compute_irr(db_session, 7600)["magnitude_per_code"][0]
+        # |1−1| + |0.5−0| + |0−0| + |−1−(−0.5)| + |−0.5−(−0.5)|, over 5 pairs.
+        assert row["mean_abs_difference"] == pytest.approx(0.2)
+
+    def test_the_interval_is_scored_on_the_same_metric_as_the_estimate(self, db_session):
+        """The interval must bracket the number it sits beside. Before the
+        `metric` parameter existed a nominal interval was the only kind."""
+        from app.services.reliability_intervals import alpha_interval, unit_contributions
+
+        self._project(db_session, 7600)
+        row = compute_irr(db_session, 7600)["magnitude_per_code"][0]
+        contribs = unit_contributions(self._matrix())
+        interval_ci = alpha_interval(contribs, metric="interval")
+        nominal_ci = alpha_interval(contribs)
+        assert (interval_ci["lower"], interval_ci["upper"]) != (nominal_ci["lower"], nominal_ci["upper"]), (
+            "fixture cannot tell the two metrics apart"
+        )
+        assert row["alpha_ci"]["lower"] == interval_ci["lower"]
+        assert row["alpha_ci"]["upper"] == interval_ci["upper"]
+        assert row["alpha_ci"]["method"] == "alpha_bootstrap_units"
+
+    def test_identical_ratings_everywhere_are_no_variance_not_perfect(self, db_session):
+        """#829 through ratings. ⚠️ Unit 3 carries a DIFFERENT value rated by ONE
+        coder: a check over every present value sees two values and computes
+        α — which the formula's zero-D_e convention then returns as 1.0
+        "reliable". Only the COMPARED values decide, and they are all 1.0."""
+        self._project(db_session, 7610, ratings={
+            0: (1.0, 1.0), 1: (1.0, 1.0), 2: (1.0, 1.0), 3: (0.5,),
+        })
+        row = compute_irr(db_session, 7610)["magnitude_per_code"][0]
+        assert row["krippendorff_alpha"] is None
+        assert row["undefined_reason"] == "no_variance"
+        assert row["alpha_ci"] is None
+        assert row["n_units"] == 3, "coverage is still a fact"
+
+    def test_one_coder_alone_is_insufficient_n_with_coverage_still_visible(self, db_session):
+        """The row still renders: HOW thin the ratings are is the information,
+        and the reason the optional-rating variant was rejected."""
+        self._project(db_session, 7620, ratings={0: (1.0,), 1: (0.5,), 2: (0.0,)})
+        row = compute_irr(db_session, 7620)["magnitude_per_code"][0]
+        assert row["n_units"] == 0
+        assert row["undefined_reason"] == "insufficient_n"
+        assert row["krippendorff_alpha"] is None and row["alpha_ci"] is None
+        assert row["mean_abs_difference"] is None
+        assert row["n_rated"] == 3 and row["n_applications"] == 3
+
+    def test_a_cleared_scale_yields_no_row(self, db_session):
+        """Ratings on a code whose scale was cleared are uninterpretable until a
+        scale returns — the same rule the chip renders by."""
+        db = db_session
+        self._project(db, 7630)
+        code = db.get(Code, 7630)
+        code.magnitude_min = None
+        code.magnitude_max = None
+        db.flush()
+        assert compute_irr(db, 7630)["magnitude_per_code"] == []
+
+    def test_source_scoping_narrows_the_rating_units(self, db_session):
+        db = db_session
+        self._project(db, 7640)
+        db.add(Conversation(id=7640 + 5000, project_id=7640, name="Elsewhere"))
+        db.flush()
+        _seg(db, 7640 + 5001, 7640 + 5000, 0)
+        _seg(db, 7640 + 5002, 7640 + 5000, 1)
+        for sid, (a, b) in {7640 + 5001: (1.0, 0.5), 7640 + 5002: (-1.0, 1.0)}.items():
+            _rate(db, 7640, 1, sid, a)
+            _rate(db, 7640, 2, sid, b)
+        pooled = compute_irr(db, 7640)["magnitude_per_code"][0]
+        scoped = compute_irr(db, 7640, source=("conv", 7640))["magnitude_per_code"][0]
+        assert pooled["n_units"] == 7 and scoped["n_units"] == 5
+        assert pooled["krippendorff_alpha"] != scoped["krippendorff_alpha"]
+
+    def test_rating_rows_never_lift_the_headline(self, db_session):
+        """The overall α is a statement about presence/absence. Each rated code
+        is its own instrument, so ratings are NOT pooled into it."""
+        db = db_session
+        self._project(db, 7650)
+        res = compute_irr(db, 7650)
+        _cids, _names, per_code, _sel, _scope, _mag = build_irr_matrices(db, 7650)
+        categorical_rows = [r for rows in per_code.values() for r in rows]
+        assert res["overall_alpha"] == pytest.approx(_krippendorff_alpha(categorical_rows))
+
+    def test_the_facet_and_metric_survive_the_response_schema(self, db_session):
+        """`/irr` serializes through `IrrResponse`; a field the schema does not
+        declare is dropped SILENTLY (the half-landed-wire class)."""
+        from app.schemas.code_analysis import IrrResponse
+
+        self._project(db_session, 7660)
+        wire = IrrResponse(**compute_irr(db_session, 7660)).model_dump()
+        assert wire["reliability_facet"] == "coders"
+        row = wire["magnitude_per_code"][0]
+        assert row["alpha_metric"] == "interval"
+        assert row["scale"] == {"min": -1.0, "max": 1.0, "step": 0.5, "anchors": []}
+        assert row["n_rated"] == 12
+        assert all(c["alpha_metric"] == "nominal" for c in wire["per_code"])
+
+    def test_the_unavailable_payload_declares_the_rating_fields(self, db_session):
+        db = db_session
+        db.add(Project(id=7670, name="Solo", user_id=1))
+        db.flush()
+        res = compute_irr(db, 7670)
+        assert res["magnitude_per_code"] == []
+        assert res["reliability_facet"] == "coders"

@@ -58,6 +58,8 @@ export type CiMethod =
   | 'wilson'
   | 'item_level_t'
   | 'wilson_per_category'
+  | 'kappa_analytic_se'
+  | 'alpha_bootstrap_units'
 
 interface CiDescriptor {
   /** Qualifier appended after the level, e.g. "across items". Empty for the
@@ -80,7 +82,57 @@ const CI_DESCRIPTORS = {
     caveat:
       'Each interval covers ONE response category against all the others. They are separate binomial intervals, not a simultaneous set — so they do not jointly cover at this level, and a category whose interval excludes another’s is not thereby significantly different from it.',
   },
+  kappa_analytic_se: {
+    qualifier: '',
+    caveat:
+      'A large-sample interval, so it is approximate when few units were double-coded — with a small number of units, or a code that is very rare or near-universal, read it as a rough guide rather than an exact range.',
+  },
+  alpha_bootstrap_units: {
+    qualifier: 'over units',
+    caveat:
+      'Resampled from the coded UNITS, not from the coders — it answers "how much would α move if we had coded a different sample of this material?", not "…if different people had coded it". Adding coders will not narrow it.',
+  },
 } satisfies Record<CiMethod, CiDescriptor>
+
+/**
+ * Why a coefficient carries NO interval (#43).
+ *
+ * u-α and time-binned κ sit on the same screen as coefficients that DO have
+ * intervals, so a silent blank reads as an oversight rather than as the
+ * deliberate refusal it is. Each of these is a statement about the METHOD, not
+ * about this project's data — which is why the sentence is fixed rather than
+ * computed, and why the server sends the reason instead of the client guessing
+ * from which table it is rendering.
+ *
+ * Mirrors `reliability_intervals.CI_UNAVAILABLE_*`; pinned by
+ * `test_ci_method_contract.py`.
+ */
+export type CiUnavailableReason =
+  | 'single_continuum'
+  | 'autocorrelated_bins'
+  | 'insufficient_units'
+  | 'no_variance_in_resamples'
+
+const CI_UNAVAILABLE_NOTES = {
+  single_continuum:
+    'No confidence interval: this measures one continuous recording, and the marked stretches a resample would draw are the very things whose boundaries are being scored — so there is no defined way to resample it.',
+  autocorrelated_bins:
+    'No confidence interval: neighbouring time bins are not independent (one mark fills several bins in a row), so the usual resampling would report an interval that is too narrow.',
+  insufficient_units:
+    'No confidence interval: too few units were coded by two or more people for the range to settle.',
+  no_variance_in_resamples:
+    'No confidence interval: this code is rare enough here that most resamples contain no instance of it, leaving nothing to agree or disagree about. Coding more of the same material will not fix it — the interval needs more instances of this code, not more units.',
+} satisfies Record<CiUnavailableReason, string>
+
+/**
+ * The sentence explaining an absent interval, or `undefined` for an unknown
+ * reason. Same fall-through discipline as `ciLabel`: saying nothing is correct
+ * for a payload this client does not understand, and inventing a reason is not.
+ */
+export function ciUnavailableNote(reason?: string | null): string | undefined {
+  if (!reason) return undefined
+  return (CI_UNAVAILABLE_NOTES as Record<string, string>)[reason]
+}
 
 /**
  * The confidence level a payload states, as a percentage string.

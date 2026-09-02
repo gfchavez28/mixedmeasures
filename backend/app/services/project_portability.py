@@ -126,6 +126,28 @@ logger = logging.getLogger(__name__)
 # entirely from ranges has an EMPTY `mapping`, so it would import as a rule that
 # maps NOTHING and, on the next apply, NULL every cell it was written to band.
 # Same silent-wrongness as v4's `missing_values`, which is the precedent.
+#
+# v6 ALSO CARRIES #35 MAGNITUDE CODING (widened 2026-09-01, NOT a second bump).
+# `codes.magnitude_{min,max,step,labels}` + `code_applications.magnitude` — and,
+# widened again the same day, `code_applications.magnitude_conflict` (the rating
+# a merged copy carried when it differed from ours; per-application state that
+# must survive a round trip, or a flagged disagreement vanishes on re-import). The
+# release decision of 2026-08-31 is what makes this free: v6 was bumped for range
+# bands and has never shipped, so no build in the field knows it, and the wedge's
+# field can ride the same refusal boundary instead of forcing a v7 that would
+# block the same colleagues twice for one release.
+#
+# It qualifies on its own merits regardless. A rating is CONSTITUTIVE in the v4
+# sense: an older build drops `magnitude` silently (`_build_entity` keeps only
+# what its model declares), so a project's ratings — and every reliability figure
+# computed from them — would vanish from a round trip with no error. The scale
+# declaration on `codes` would go the same way, leaving applications whose numbers
+# have no instrument to be read against.
+#
+# ⚠️ Widening a version's MEANING still obliges the same three documents the pin
+# test names (`project_portability.py`, the internal design notes,
+# the internal design notes) — a version whose recorded meaning is narrower than its contents is
+# how the next reader mis-scopes a compatibility question.
 CURRENT_FORMAT_VERSION = 6
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
 
@@ -1848,6 +1870,8 @@ def import_project(
         report.setdefault("codes_collapsed", 0)
         report.setdefault("codes_linked", 0)
         report.setdefault("codes_created", 0)
+        # #35 — matched applications whose copy carried a DIFFERENT rating.
+        report.setdefault("magnitude_conflicts", 0)
     with zipfile.ZipFile(str(file_path), "r") as zf:
         # Cheap pre-flight (matches validate_project_file). Per-member containment
         # is enforced inside `_extract_zip_member`; the expansion cap is #696.
@@ -2561,9 +2585,28 @@ def import_project(
                     if seg_id is not None
                     else dup_q.filter(CodeApplication.dataset_value_id == dv_id)
                 )
-                if dup_q.first() is not None:
+                existing = dup_q.first()
+                if existing is not None:
                     if report is not None:
                         report["duplicates_skipped"] += 1
+                    # #35 — a matched application whose copy carries a DIFFERENT
+                    # rating: keep the TARGET's value, flag the disagreement with
+                    # the incoming number (decided 2026-09-01; never block the
+                    # merge). The same coder's own two copies disagree — the
+                    # match is on (target, code, coder) — so nothing about a
+                    # colleague rides the flag. An equal rating, or a copy with
+                    # no rating, has nothing to say and CLEARS a stale flag from
+                    # an earlier merge rather than leaving it standing.
+                    incoming = item.get("magnitude")
+                    if not (isinstance(incoming, (int, float)) and not isinstance(incoming, bool)
+                            and math.isfinite(incoming)):
+                        incoming = None
+                    if incoming is not None and incoming != existing.magnitude:
+                        existing.magnitude_conflict = float(incoming)
+                        if report is not None:
+                            report["magnitude_conflicts"] += 1
+                    else:
+                        existing.magnitude_conflict = None
                     continue
             _add(CodeApplication, item, {
                 "segment_id": seg_id,

@@ -19,6 +19,15 @@ export interface SegmentCodeResponse {
   color: string | null
   is_universal: boolean
   user_id: number | null  // coder who applied this code (Track J · J1)
+  /**
+   * #35 / #868 (a) — this coder's rating (null = UNRATED, never 0) and the merge
+   * disagreement flag. REQUIRED, not optional: the document workbench once
+   * projected `appliedCodeDetails` from this type without them, and the chip
+   * then announced "not rated" over a rating it could not see. A required field
+   * makes a projection that drops it a compile error.
+   */
+  magnitude: number | null
+  magnitude_conflict: number | null
 }
 
 export interface ExcerptInfo {

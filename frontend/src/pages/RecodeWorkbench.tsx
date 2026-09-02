@@ -162,6 +162,7 @@ function ScaleMapEditor({
   rangeRows,
   onRangesChange,
   rangeBadRow,
+  ownerLabel,
 }: {
   mapping: Record<string, number | string>
   excludeValues: string[]
@@ -170,6 +171,17 @@ function ScaleMapEditor({
   rangeRows: RangeRow[]
   onRangesChange: (rows: RangeRow[]) => void
   rangeBadRow?: number
+  /**
+   * #823(f) — the rule this editor belongs to, for its controls' NAMES.
+   *
+   * ⚠️ Required, not optional: **several rule cards can be expanded at once**,
+   * and each renders one of these editors. Without it a reader tabbing the page
+   * meets two identically-named "Add a response" controls with nothing saying
+   * which rule they act on — the #785 defect (N identical names) reappearing in
+   * a surface that had never had names at all. A required prop is what makes a
+   * new call site decide.
+   */
+  ownerLabel: string
 }) {
   const [newLabel, setNewLabel] = useState('')
   const entries = Object.entries(mapping)
@@ -278,11 +290,18 @@ function ScaleMapEditor({
           <tr className="border-t">
             <td colSpan={4} className="py-1.5">
               <div className="flex items-center gap-1">
+                {/* #823(f) — a PLACEHOLDER is not a name. It satisfies axe
+                    (which accepts it as a name source, so Lighthouse passed on
+                    this field), but the first character typed erases it —
+                    #559's "a tooltip is not a name" one control over. The name
+                    carries the RULE because several cards can be expanded at
+                    once, and two identical names are the #785 defect. */}
                 <Input
                   value={newLabel}
                   onChange={e => setNewLabel(e.target.value)}
                   onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddLabel() } }}
                   placeholder="Add label (e.g. Not Applicable)..."
+                  aria-label={`Add a response to ${ownerLabel}`}
                   className="h-7 text-sm flex-grow bg-mm-surface"
                 />
                 {/* #854(c) — an icon-only button needs a NAME. lucide marks
@@ -297,7 +316,7 @@ function ScaleMapEditor({
                   onClick={handleAddLabel}
                   disabled={!newLabel.trim() || newLabel.trim() in mapping}
                   className="h-7 px-2 text-xs shrink-0"
-                  aria-label="Add response"
+                  aria-label={`Add response to ${ownerLabel}`}
                 >
                   <Plus className="w-3 h-3" aria-hidden="true" />
                 </Button>
@@ -325,6 +344,7 @@ function CategoryGroupEditor({
   rangeRows,
   onRangesChange,
   rangeBadRow,
+  ownerLabel,
 }: {
   mapping: Record<string, number | string>
   excludeValues: string[]
@@ -335,6 +355,8 @@ function CategoryGroupEditor({
   rangeRows: RangeRow[]
   onRangesChange: (rows: RangeRow[]) => void
   rangeBadRow?: number
+  /** #823(f) — the rule this editor belongs to; see `ScaleMapEditor`. */
+  ownerLabel: string
 }) {
   const [newLabel, setNewLabel] = useState('')
   const entries = Object.entries(mapping)
@@ -423,11 +445,18 @@ function CategoryGroupEditor({
           <tr className="border-t">
             <td colSpan={4} className="py-1.5">
               <div className="flex items-center gap-1">
+                {/* #823(f) — a PLACEHOLDER is not a name. It satisfies axe
+                    (which accepts it as a name source, so Lighthouse passed on
+                    this field), but the first character typed erases it —
+                    #559's "a tooltip is not a name" one control over. The name
+                    carries the RULE because several cards can be expanded at
+                    once, and two identical names are the #785 defect. */}
                 <Input
                   value={newLabel}
                   onChange={e => setNewLabel(e.target.value)}
                   onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddLabel() } }}
                   placeholder="Add label (e.g. Not Applicable)..."
+                  aria-label={`Add a response to ${ownerLabel}`}
                   className="h-7 text-sm flex-grow bg-mm-surface"
                 />
                 {/* #854(c) — an icon-only button needs a NAME. lucide marks
@@ -442,7 +471,7 @@ function CategoryGroupEditor({
                   onClick={handleAddLabel}
                   disabled={!newLabel.trim() || newLabel.trim() in mapping}
                   className="h-7 px-2 text-xs shrink-0"
-                  aria-label="Add response"
+                  aria-label={`Add response to ${ownerLabel}`}
                 >
                   <Plus className="w-3 h-3" aria-hidden="true" />
                 </Button>
@@ -686,7 +715,7 @@ export function DefinitionCard({
         onClick={onToggleExpand}
       >
         {isExpanded ? <ChevronDown className="w-4 h-4 text-mm-text-faint" /> : <ChevronRight className="w-4 h-4 text-mm-text-faint" />}
-        <span className="font-medium text-sm flex-grow">{definition.name}</span>
+        <span id={`rule-title-${definition.id}`} className="font-medium text-sm flex-grow">{definition.name}</span>
         <span className={`px-1.5 py-0.5 rounded text-[11px] font-medium ${recodeTypeBadge.cls}`}>
           {recodeTypeBadge.label}
         </span>
@@ -731,11 +760,36 @@ export function DefinitionCard({
       </button>
 
       {isExpanded && (
-        <div className="px-3 pb-3 border-t">
+        // #823(f) — the expanded card is a LABELLED REGION, and that is what
+        // disambiguates its controls rather than lengthening their names.
+        //
+        // Several cards can be open at once, so the per-row controls collide:
+        // measured live with two expanded, `Value for Depends` appeared twice
+        // and `Value for Try to be helpful` three times. Folding the rule into
+        // each name would read as "Value for Depends in Helpful 3-point
+        // (Depends = middle)" on every one of up to 40 rows — the #785 problem
+        // solved by creating a worse one. One group label carries the context
+        // for every control inside it.
+        //
+        // ⚠️ Structure only. Whether a given screen reader ANNOUNCES the group
+        // on entry is not something a DOM check can certify (the standing rule:
+        // Lighthouse and the a11y tree certify structure, never audio), so this
+        // is unverified by ear here.
+        <div role="group" aria-labelledby={`rule-title-${definition.id}`} className="px-3 pb-3 border-t">
           {/* Name edit */}
+          {/* 🔴 #823(f) — THE ONE LIGHTHOUSE `label` FAILURE ON THIS VIEW. The
+              visible <label> was never associated: no `htmlFor`, no `id`, so
+              axe reported "Form elements do not have associated labels" and a
+              reader met a bare textbox holding the rule's name. Associating the
+              EXISTING label is the right fix rather than an `aria-label` — the
+              visible text stays the accessible name (WCAG 2.5.3), and clicking
+              "Name" now focuses the field, which it never did.
+              ⚠️ The id is per-DEFINITION because several cards can be expanded
+              at once and ids must be unique in the document. */}
           <div className="mt-2 mb-3">
-            <label className="text-xs text-mm-text-muted block mb-1">Name</label>
+            <label htmlFor={`rule-name-${definition.id}`} className="text-xs text-mm-text-muted block mb-1">Name</label>
             <Input
+              id={`rule-name-${definition.id}`}
               value={localName}
               onChange={(e) => { setLocalName(e.target.value); setHasChanges(true) }}
               className="h-8 text-sm bg-mm-surface"
@@ -751,6 +805,7 @@ export function DefinitionCard({
               rangeRows={localRanges}
               onRangesChange={handleRangesChange}
               rangeBadRow={rangeCheck.badRow}
+              ownerLabel={definition.name}
             />
           )}
           {definition.recode_type === 'category_group' && (
@@ -761,6 +816,7 @@ export function DefinitionCard({
               rangeRows={localRanges}
               onRangesChange={handleRangesChange}
               rangeBadRow={rangeCheck.badRow}
+              ownerLabel={definition.name}
             />
           )}
           {definition.recode_type === 'reverse' && (
@@ -976,6 +1032,11 @@ function NewDefinitionForm({
           value={name}
           onChange={e => setName(e.target.value)}
           placeholder="Definition name..."
+          // #823(f) — the placeholder is erased by the first character typed,
+          // so it cannot be this field's name. "Definition" matches the visible
+          // heading above it, keeping the accessible name and the words on
+          // screen in step.
+          aria-label="Definition name"
           className="h-8 text-sm bg-mm-surface"
         />
         <div role="radiogroup" aria-label="Recode type" className="flex gap-2 flex-wrap">
@@ -1057,6 +1118,7 @@ function NewDefinitionForm({
                 rangeRows={draftRanges}
                 onRangesChange={setDraftRanges}
                 rangeBadRow={draftRangeCheck.badRow}
+                ownerLabel={name.trim() || 'the new rule'}
               />
             )}
             {type === 'category_group' && (
@@ -1070,6 +1132,7 @@ function NewDefinitionForm({
                 rangeRows={draftRanges}
                 onRangesChange={setDraftRanges}
                 rangeBadRow={draftRangeCheck.badRow}
+                ownerLabel={name.trim() || 'the new rule'}
               />
             )}
             {type === 'reverse' && (

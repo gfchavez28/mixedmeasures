@@ -109,11 +109,11 @@ where a variable is described.
   (`.d`, `.n`, `.i` for "Don't know", "Refused", "Inapplicable"). Declared-missing
   values are excluded from statistics and blank in exports, and the data
   dictionary records what each one meant.
-- **Recode rules** — collapse categories, map scale points, or reverse-score an
-  item, with the rule saved and named rather than applied and forgotten. Each
-  saved rule says whether it is currently **in effect**, and applying one to the
-  variable it sits on is a deliberate step, because it rewrites stored numbers and
-  cannot be undone.
+- **Recode rules** — collapse categories, map scale points, reverse-score an item,
+  or **band a continuous variable into groups** (`18–24`, `25–34`, …), with the
+  rule saved and named rather than applied and forgotten. Each saved rule says
+  whether it is currently **in effect**, and applying one to the variable it sits
+  on is a deliberate step, because it rewrites stored numbers and cannot be undone.
 - **Or recode into a new variable** and leave the original untouched. The new
   variable records which variable and which rule produced it.
 - **Computed variables** via a safe expression language (`[Post] - [Pre]`,
@@ -186,6 +186,13 @@ across, leaving the original and its coding untouched.
 - A structured **codebook** (codes, categories, universal codes), coded-segment
   tracking, **excerpts** and a **Quote Board**, **memos**, **notes**, and a
   quick-capture **Scratchpad**.
+- **Rating scales on codes** — a code can declare a scale (minimum, maximum, step,
+  anchor labels) and a coder rates each application on it: not just *is this
+  present* but *how much*. Unrated is a real, distinct state, never a zero. Ratings
+  carry into the reliability figures, the consensus layer and the exports. *(In
+  this release the rating control is offered on conversation and document
+  transcripts; observation clips and text coding display ratings but cannot yet
+  record them.)*
 - **Participants** and **speakers** form a shared cross-source identity spine, so a
   person links across their survey record and their interview. Datasets with an
   identifier column ("Participant ID", "Respondent", …) link their rows to
@@ -245,8 +252,9 @@ Being honest about scope:
   no live co-editing. Team coding works asynchronously instead: colleagues code
   separate **copies** of a project and merge them back together, with per-coder
   attribution, blind coding, intercoder reliability (Cohen's kappa, Krippendorff's
-  alpha, percent agreement), side-by-side reconciliation, and a derived consensus
-  layer. Several coders can also take turns on one computer under named
+  alpha, percent agreement — each with a **95% confidence interval**, and a stated
+  reason where one cannot be computed), agreement on **code ratings** as well as on
+  the codes themselves, side-by-side reconciliation, and a derived consensus layer. Several coders can also take turns on one computer under named
   identities. (Separate researchers with unrelated projects on a shared computer
   should still use separate operating-system accounts.)
 - **Not cloud-based.** Everything runs locally against a local database. Moving a

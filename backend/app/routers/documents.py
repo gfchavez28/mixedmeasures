@@ -376,13 +376,7 @@ async def get_document(
     segment_responses = []
     for seg in segments:
         codes = [
-            SegmentCodeResponse(
-                id=ca.code.id,
-                name=ca.code.name,
-                color=ca.code.color,
-                is_universal=ca.code.is_universal,
-                user_id=ca.user_id,
-            )
+            _code_application_to_response(ca)
             for ca in seg.code_applications
             # J2-B / P-1: human/working layer only; consensus is shown by the
             # reconciliation view, never the document workbench. Inactive codes
@@ -850,10 +844,30 @@ async def list_document_notes(
 # Segment split/merge
 # ---------------------------------------------------------------------------
 
+def _code_application_to_response(ca: CodeApplication) -> SegmentCodeResponse:
+    """The ONE constructor of a document segment's per-application code entry.
+
+    #868 (a): `get_document` and `_segment_to_doc_response` each built this inline,
+    and when #35 added the rating to the three OTHER payload builders neither of
+    these learned it — the rules file said "all three builders carry the field"
+    and this router was a fourth. One constructor means the next per-application
+    field is added once, and a test on either call path covers the other.
+    """
+    return SegmentCodeResponse(
+        id=ca.code.id,
+        name=ca.code.name,
+        color=ca.code.color,
+        is_universal=ca.code.is_universal,
+        user_id=ca.user_id,
+        magnitude=ca.magnitude,
+        magnitude_conflict=ca.magnitude_conflict,
+    )
+
+
 def _segment_to_doc_response(seg: Segment) -> DocumentSegmentResponse:
     """Convert an eagerly-loaded Segment model to DocumentSegmentResponse."""
     codes = [
-        SegmentCodeResponse(id=ca.code.id, name=ca.code.name, color=ca.code.color, is_universal=ca.code.is_universal, user_id=ca.user_id)
+        _code_application_to_response(ca)
         for ca in seg.code_applications
         # J2-B / P-1: human/working layer only (consensus → reconciliation view).
         if ca.code and ca.code.is_active and ca.origin != CONSENSUS_ORIGIN

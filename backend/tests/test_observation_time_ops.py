@@ -717,3 +717,84 @@ class TestMergeCarriesQuotes:
         assert _quotes_on(db, a.id) == [(1.0, 2.0)]
         assert _quotes_on(db, b.id) == [(None, None)]
         assert _quotes_on(db, merged.id) == []
+
+
+# ── #35 / #869 (a): a clip's RATING survives both time ops ────────────────────
+
+
+class TestTimeOpsCarryTheRating:
+    """`_carried_app_fields` feeds every writer in `segment_operations.py`, so the
+    clip ops inherit the fix — but a claim about the observation arm needs its own
+    fixture, because the text-op tests never construct a clip.
+
+    🔴 Rated ZERO on a scale where zero is interior, and carrying a merge flag: a
+    carry that re-created the row with `magnitude=None` would read as "unrated"
+    and a truthiness slip would drop exactly the zero.
+    """
+
+    def _scaled_code(self, db, pid):
+        _code(db, 1, pid)
+        code = db.get(Code, 1)
+        code.magnitude_min, code.magnitude_max, code.magnitude_step = -1.0, 1.0, 0.5
+        db.flush()
+
+    def test_split_carries_the_rating_and_the_flag_to_both_halves(self, db_session):
+        db = db_session
+        pid = _obs_project(db)
+        u = _user(db)
+        clip = _clip(db, u, pid, 0.0, 10.0, "lesson")
+        self._scaled_code(db, pid)
+        db.add(CodeApplication(code_id=1, user_id=1, segment_id=clip.id,
+                               magnitude=0.0, magnitude_conflict=1.0))
+        db.flush()
+
+        halves = _run(split_clip(pid, pid, clip.id, ClipSplitRequest(time=4.0),
+                                 user=u, db=db))
+        for h in halves:
+            detail = next(d for d in h.applied_code_details if d.code_id == 1)
+            assert detail.magnitude == 0.0 and detail.magnitude is not None
+            assert detail.magnitude_conflict == 1.0
+
+    def test_merge_keeps_the_first_rating_and_flags_the_dropped_one(self, db_session):
+        """Two clips, one coder, one code, two DIFFERENT ratings: the widened unique
+        index fits one row, so the first (time-ordered) rating is kept and the
+        other lands in `magnitude_conflict` — the project merge's §6d shape, not
+        a silent drop. The dropped one is ZERO, so `is not None` is what this pins."""
+        db = db_session
+        pid = _obs_project(db)
+        u = _user(db)
+        a = _clip(db, u, pid, 0.0, 2.0)
+        b = _clip(db, u, pid, 8.0, 10.0)
+        self._scaled_code(db, pid)
+        db.add_all([
+            CodeApplication(code_id=1, user_id=1, segment_id=a.id, magnitude=0.5),
+            CodeApplication(code_id=1, user_id=1, segment_id=b.id, magnitude=0.0),
+        ])
+        db.flush()
+
+        merged = _run(merge_observation_clips(
+            pid, pid, ClipMergeRequest(segment_ids=[b.id, a.id]), user=u, db=db))
+        detail = next(d for d in merged.applied_code_details if d.code_id == 1)
+        assert detail.magnitude == 0.5, "the time-first clip's rating is kept"
+        assert detail.magnitude_conflict == 0.0 and detail.magnitude_conflict is not None
+
+    def test_merge_of_an_equal_or_absent_rating_flags_nothing(self, db_session):
+        db = db_session
+        pid = _obs_project(db)
+        u = _user(db)
+        a = _clip(db, u, pid, 0.0, 2.0)
+        b = _clip(db, u, pid, 8.0, 10.0)
+        c = _clip(db, u, pid, 12.0, 14.0)
+        self._scaled_code(db, pid)
+        db.add_all([
+            CodeApplication(code_id=1, user_id=1, segment_id=a.id, magnitude=-0.5),
+            CodeApplication(code_id=1, user_id=1, segment_id=b.id, magnitude=-0.5),
+            CodeApplication(code_id=1, user_id=1, segment_id=c.id),  # unrated
+        ])
+        db.flush()
+
+        merged = _run(merge_observation_clips(
+            pid, pid, ClipMergeRequest(segment_ids=[a.id, b.id, c.id]), user=u, db=db))
+        detail = next(d for d in merged.applied_code_details if d.code_id == 1)
+        assert detail.magnitude == -0.5
+        assert detail.magnitude_conflict is None

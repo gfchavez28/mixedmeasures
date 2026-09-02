@@ -83,12 +83,23 @@ class TextResponse(BaseModel):
 
 
 class TextsListResponse(BaseModel):
+    """One PAGE of texts plus the totals for the WHOLE selection (#844).
+
+    ⚠️ `texts` is a page; every count beside it describes the selection the
+    filters define, not the page — the #800 rule. `len(texts)` is never a
+    record count.
+    """
     texts: list[TextResponse]
     total_texts: int
     non_empty_texts: int
     coded_texts: int
     total_rows: int
     coded_rows: int
+    # Explicit rather than left to client arithmetic: the paging client needs
+    # "is there another page?" on every fetch, and `offset + len(texts) <
+    # total_texts` is exactly the sum a caller gets wrong once and then
+    # under-reports the corpus forever.
+    has_more: bool = False
 
 
 class RecordResponse(BaseModel):

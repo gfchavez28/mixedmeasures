@@ -30,8 +30,17 @@ from ..models.document import Document
 from ..models.observation import Observation
 from ..models.segment import Segment
 from ..models.user import User
-from .consensus import _decide_consensus, has_disagreement
+from .coding_layers import build_effective_code_map, resolve_effective_code
+from .consensus import (
+    _decide_consensus,
+    _decide_magnitude,
+    _rating_values,
+    has_disagreement,
+    has_rating_disagreement,
+    scales_for_project,
+)
 from .irr import gather_coder_applications
+from .magnitude import read_scale
 
 # Frontend source_type ←→ the gather's source-key tag. All four maps move together:
 # an "obs" tag missing from _SOURCE_TYPE raised KeyError → 500, while the same
@@ -54,6 +63,37 @@ _UNAVAILABLE_REASON = (
 )
 
 
+def _merge_conflicts(db: Session, project_id: int) -> dict[tuple, dict[int, dict[int, float]]]:
+    """``{unit_key: {coder_id: {raw_code_id: the rating the merged copy carried}}}``
+    for every application whose merge left an unresolved disagreement (#35).
+
+    Keyed exactly like the shared gather's ``ratings`` so the same canonical
+    filter applies. Scoped by the project's codes (bounded by the codebook, never
+    by rows) and by the consensus filter — a consensus row is never merged.
+    """
+    from ..models.code_application import CodeApplication
+    from .coding_layers import non_consensus_filter
+
+    out: dict[tuple, dict[int, dict[int, float]]] = {}
+    rows = (
+        db.query(
+            CodeApplication.segment_id, CodeApplication.dataset_value_id,
+            CodeApplication.user_id, CodeApplication.code_id, CodeApplication.magnitude_conflict,
+        )
+        .join(Code, CodeApplication.code_id == Code.id)
+        .filter(
+            Code.project_id == project_id,
+            CodeApplication.magnitude_conflict.isnot(None),
+            non_consensus_filter(),
+        )
+        .all()
+    )
+    for seg_id, val_id, uid, code_id, incoming in rows:
+        ukey = ("seg", seg_id) if seg_id is not None else ("val", val_id)
+        out.setdefault(ukey, {}).setdefault(uid, {})[code_id] = incoming
+    return out
+
+
 def build_reconciliation(
     db: Session,
     project_id: int,
@@ -68,7 +108,10 @@ def build_reconciliation(
     """Build one page of reconciliation rows. See module docstring for the voter
     models. ``available=False`` (mirrors IRR) when <2 roster coders share a source.
     """
-    coder_id_list, applied, unit_source, engaged, multi_sources = gather_coder_applications(
+    # `ratings` (#35) — each coder's magnitude per application, keyed by the RAW
+    # code; the grid shows them beside the codes and derives the rating consensus
+    # live, exactly as it derives the categorical one.
+    coder_id_list, applied, unit_source, engaged, multi_sources, ratings = gather_coder_applications(
         db, project_id, coder_ids
     )
     coders = (
@@ -102,6 +145,30 @@ def build_reconciliation(
         if src in multi_sources and (want_src is None or src == want_src)
     ]
 
+    # #35 — the declared instruments, and the equivalence map that says which
+    # raw code is its group's canonical: a rating rides the grid ONLY under the
+    # canonical id, because that is the id the chips are keyed by and the scale
+    # they would render it against (`_rating_values` states the pooling rule).
+    scales = scales_for_project(db, project_id)
+    effective_map = build_effective_code_map(db, project_id) if scales else {}
+    # #35 — the merge disagreement flags: applications whose merged copy carried
+    # a DIFFERENT rating. Bounded by the number of unresolved conflicts, which is
+    # small, so a dedicated query beats widening the shared gather's tuple again.
+    conflicts = _merge_conflicts(db, project_id) if scales else {}
+
+    def _canonical_ratings(unit_ratings: dict[int, dict[int, float | None]], coder_ids_here) -> dict:
+        out: dict[int, dict[int, float]] = {}
+        for cid in coder_ids_here:
+            mine = {
+                code_id: value
+                for code_id, value in unit_ratings.get(cid, {}).items()
+                if value is not None and code_id in scales
+                and resolve_effective_code(effective_map, code_id) == code_id
+            }
+            if mine:
+                out[cid] = mine
+        return out
+
     # Per-unit records (no text/labels yet — those are batched for the page only).
     records = []
     for u in unit_keys:
@@ -111,20 +178,45 @@ def build_reconciliation(
         # SOURCE-level projection: every engaged coder, blank set if uncoded here.
         projection = {cid: target_voters.get(cid, set()) for cid in engaged_coders}
         disagree = has_disagreement(projection)
-        if disagreements_only and not disagree:
+        unit_ratings = ratings.get(u, {})
+        canonical_ratings = _canonical_ratings(unit_ratings, engaged_coders)
+        # A SECOND fact, never folded into the first: codes can agree while the
+        # ratings on them do not, and the row must be able to say which.
+        rating_disagree = has_rating_disagreement(canonical_ratings, scales)
+        # And a THIRD: a coder's own two copies disagreed at a merge (the
+        # target's rating was kept, the other value flagged). Adjudicated by
+        # re-rating, so it belongs in the review set until then.
+        unit_conflicts = _canonical_ratings(conflicts.get(u, {}), engaged_coders)
+        merge_conflict = bool(unit_conflicts)
+        if disagreements_only and not (disagree or rating_disagree or merge_conflict):
             continue
         decisions = _decide_consensus(target_voters)
+        context: dict[str, dict] = {}
+        for eff, rule, agree, voters in decisions:
+            entry: dict = {"rule": rule, "agree": agree, "voters": voters}
+            if eff in scales:
+                rating = _decide_magnitude(_rating_values(unit_ratings, target_voters, eff), scales[eff])
+                if rating is not None:
+                    entry["magnitude"] = rating
+            context[str(eff)] = entry
         records.append({
             "u": u,
             "src": src,
             "by_coder": {str(cid): sorted(target_voters.get(cid, set())) for cid in engaged_coders},
+            "ratings_by_coder": {
+                str(cid): {str(code_id): value for code_id, value in mine.items()}
+                for cid, mine in canonical_ratings.items()
+            },
+            "rating_conflicts_by_coder": {
+                str(cid): {str(code_id): value for code_id, value in mine.items()}
+                for cid, mine in unit_conflicts.items()
+            },
             "engaged": sorted(engaged_coders),
             "consensus": [eff for (eff, _r, _a, _v) in decisions],
-            "consensus_context": {
-                str(eff): {"rule": rule, "agree": agree, "voters": voters}
-                for (eff, rule, agree, voters) in decisions
-            },
+            "consensus_context": context,
             "has_disagreement": disagree,
+            "has_rating_disagreement": rating_disagree,
+            "has_merge_conflict": merge_conflict,
         })
 
     # Deterministic read order: source group, then segment sequence / value id.
@@ -198,9 +290,11 @@ def build_reconciliation(
         for codes in r["by_coder"].values():
             page_codes.update(codes)
         page_codes.update(r["consensus"])
+    # #35 — the legend carries each code's declared SCALE, so a rating in a cell
+    # renders against the instrument it was given on (a bare 7 says nothing).
     codes_legend = (
-        [{"id": cid, "name": name, "color": color}
-         for cid, name, color in db.query(Code.id, Code.name, Code.color).filter(Code.id.in_(page_codes)).all()]
+        [{"id": c.id, "name": c.name, "color": c.color, "scale": read_scale(c)}
+         for c in db.query(Code).filter(Code.id.in_(page_codes)).all()]
         if page_codes else []
     )
 
@@ -223,10 +317,14 @@ def build_reconciliation(
             "start_time": start_time,
             "end_time": end_time,
             "by_coder": r["by_coder"],
+            "ratings_by_coder": r["ratings_by_coder"],
+            "rating_conflicts_by_coder": r["rating_conflicts_by_coder"],
             "engaged": r["engaged"],
             "consensus": r["consensus"],
             "consensus_context": r["consensus_context"],
             "has_disagreement": r["has_disagreement"],
+            "has_rating_disagreement": r["has_rating_disagreement"],
+            "has_merge_conflict": r["has_merge_conflict"],
         })
 
     return {

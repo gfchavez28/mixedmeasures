@@ -5,6 +5,22 @@ from .common import UTCTimestamp
 
 class ApplyCodeRequest(BaseModel):
     attribution: str | None = None
+    # #35 — rate at the moment of applying (variant A's one-round-trip form).
+    #
+    # ⚠️ OMITTED and `null` mean different things and the endpoint tells them
+    # apart with `model_fields_set`: omitted leaves any existing rating alone,
+    # explicit `null` clears it. Collapsing the two would make every ordinary
+    # apply-without-a-rating silently unrate an already-rated application.
+    magnitude: float | None = None
+
+
+class MagnitudeValueUpdate(BaseModel):
+    """Set or clear one coder's rating on one already-applied code (#35).
+
+    `magnitude: null` is an explicit *unrate* — the value an Esc-skip stores, and
+    never the same as a rating of zero.
+    """
+    magnitude: float | None = None
 
 
 class BulkCodeRequest(BaseModel):
@@ -30,6 +46,10 @@ class CodeApplicationResponse(BaseModel):
     code_id: int
     applied: bool
     created_at: UTCTimestamp | None = None
+    # #35 — this coder's rating, or None for UNRATED. Never coerce a None here to
+    # 0 for the wire: the client renders the two differently on purpose, and a
+    # zero is a legal rating on any scale whose range includes it.
+    magnitude: float | None = None
 
 
 class BulkCodeResponse(BaseModel):

@@ -3,8 +3,33 @@ import type { BulkCodeResponse } from '../bulk-code-result'
 
 // API functions - Coding
 export const codingApi = {
-  applyCode: (segmentId: number, codeId: number, attribution?: string) =>
-    api.post(`/segments/${segmentId}/codes/${codeId}`, { attribution }).then(res => res.data),
+  /**
+   * Apply a code; optionally with a rating (#35).
+   *
+   * ⚠️ `magnitude` is sent ONLY when the caller passes it — `undefined` omits
+   * the key, and the server reads presence through `model_fields_set`: absent
+   * means "leave any existing rating alone", an explicit `null` means UNRATE.
+   * #868 (f): undoing a REMOVAL re-applies through this argument with the
+   * rating captured when the entry was built, so Ctrl+Z no longer unrates.
+   */
+  applyCode: (segmentId: number, codeId: number, attribution?: string, magnitude?: number | null) =>
+    api.post(
+      `/segments/${segmentId}/codes/${codeId}`,
+      magnitude === undefined ? { attribution } : { attribution, magnitude },
+    ).then(res => res.data),
+  /**
+   * #35 — set or clear THIS coder's rating on an already-applied code.
+   *
+   * ⚠️ `null` is an explicit UNRATE and must be sent as `null`, never omitted:
+   * the server distinguishes "field absent" (leave alone) from "field null"
+   * (clear), so dropping the key turns an Esc-skip into a no-op.
+   *
+   * ⚠️ Deliberately NOT folded into `applyCode`. That endpoint returns early when
+   * the application already exists, so it cannot edit one — and editing a rating
+   * afterwards is the only way to correct a mis-keyed value.
+   */
+  setMagnitude: (segmentId: number, codeId: number, magnitude: number | null) =>
+    api.patch(`/segments/${segmentId}/codes/${codeId}/magnitude`, { magnitude }).then(res => res.data),
   removeCode: (segmentId: number, codeId: number) =>
     api.delete(`/segments/${segmentId}/codes/${codeId}`).then(res => res.data),
   // #678: typed, because a partial failure arrives as a 200 body — not a throw.

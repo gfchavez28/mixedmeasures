@@ -23,20 +23,40 @@ from pathlib import Path
 
 import pytest
 
-from app.services import metrics
+from app.services import metrics, reliability_intervals
 
 CI_LABEL_TS = (
     Path(__file__).resolve().parents[2]
     / "frontend" / "src" / "lib" / "ci-label.ts"
 )
 
+#: ⚠️ **The vocabulary lives in MORE THAN ONE module, and this test is the only
+#: thing that knows it.** #43 put the reliability methods in
+#: `reliability_intervals` rather than in `metrics` (IRR is not a metrics
+#: surface), and a scan that walked only `metrics` would have passed while the
+#: client had no descriptor for either new value — the exact silent
+#: fall-through this file exists to prevent, reached from a direction the file
+#: did not previously cover. A new module that mints a `CI_METHOD_*` MUST be
+#: added here.
+_VOCABULARY_MODULES = (metrics, reliability_intervals)
+
 
 def _server_methods() -> dict[str, str]:
-    """Every `CI_METHOD_*` constant in the metrics service, by name."""
+    """Every `CI_METHOD_*` constant the server can send, by name."""
     return {
-        name: getattr(metrics, name)
-        for name in dir(metrics)
+        name: getattr(module, name)
+        for module in _VOCABULARY_MODULES
+        for name in dir(module)
         if name.startswith("CI_METHOD_")
+    }
+
+
+def _server_unavailable_reasons() -> dict[str, str]:
+    """Every `CI_UNAVAILABLE_*` constant — why a coefficient has NO interval."""
+    return {
+        name: getattr(reliability_intervals, name)
+        for name in dir(reliability_intervals)
+        if name.startswith("CI_UNAVAILABLE_") and name != "CI_UNAVAILABLE_REASONS"
     }
 
 
@@ -55,12 +75,18 @@ def test_the_server_declares_its_vocabulary_as_constants():
     vacuously — the failure mode a fail-closed scan is most prone to.
     """
     found = _server_methods()
-    assert len(found) >= 4, (
-        f"expected at least the four known ci_method constants, found {sorted(found)}"
+    assert len(found) >= 6, (
+        f"expected at least the six known ci_method constants, found {sorted(found)}"
     )
-    # A literal, not a set built from the same call: this is the fixed point the
-    # rest of the test triangulates against.
+    # Literals, not a set built from the same call: these are the fixed points
+    # the rest of the test triangulates against. One per module, so a walk that
+    # silently stops covering a module fails here rather than passing thinner.
     assert "wilson_per_category" in found.values()
+    assert "alpha_bootstrap_units" in found.values()
+
+    reasons = _server_unavailable_reasons()
+    assert len(reasons) >= 3, f"found only {sorted(reasons)}"
+    assert "single_continuum" in reasons.values()
 
 
 @pytest.mark.parametrize("const_name", sorted(_server_methods()))
@@ -97,4 +123,37 @@ def test_the_client_union_lists_every_server_method():
         f"`CiMethod` in ci-label.ts is missing {sorted(missing)}. Add them to the "
         "union AND to CI_DESCRIPTORS — the union alone leaves the descriptor "
         "lookup falling through at runtime."
+    )
+
+
+@pytest.mark.parametrize("const_name", sorted(_server_unavailable_reasons()))
+def test_every_unavailable_reason_has_a_client_sentence(const_name):
+    """A coefficient with NO interval must say why (#43).
+
+    u-α and time-binned κ sit beside coefficients that DO carry intervals, so a
+    silent blank reads as an oversight rather than as the deliberate refusal it
+    is. The reason rides the wire and the client renders a sentence for it; a
+    value with no sentence renders nothing, which is the same silent blank.
+    """
+    value = _server_unavailable_reasons()[const_name]
+    source = _client_source()
+    key_pattern = rf"^\s*{re.escape(value)}\s*:"
+    assert re.search(key_pattern, source, re.MULTILINE), (
+        f"`ci-label.ts` has no CI_UNAVAILABLE_NOTES entry for {const_name} "
+        f"({value!r}) — the coefficient would render a bare blank with no "
+        "explanation, which is what this vocabulary exists to prevent."
+    )
+
+
+def test_the_client_union_lists_every_unavailable_reason():
+    """`CiUnavailableReason` is what makes a missing sentence a COMPILE error."""
+    source = _client_source()
+    union = re.search(
+        r"export type CiUnavailableReason\s*=([^\n]*(?:\n\s*\|[^\n]*)*)", source)
+    assert union, "could not find the `CiUnavailableReason` union in ci-label.ts"
+    declared = set(re.findall(r"'([a-z_]+)'", union.group(1)))
+
+    missing = set(_server_unavailable_reasons().values()) - declared
+    assert not missing, (
+        f"`CiUnavailableReason` in ci-label.ts is missing {sorted(missing)}."
     )

@@ -217,12 +217,17 @@ def polluted_session():
     code = Code(
         id=1, project_id=1, numeric_id=1, name=ATTACK_EQUALS + " Code",
         description=ATTACK_AT + " desc", is_active=True, category_id=1,
+        # #35 — a declared rating scale whose ANCHOR LABEL is poisoned: the
+        # label is user text that reaches the coded-segments CSV and the
+        # workbook's Ratings sheet, so both sweeps must see it.
+        magnitude_min=0.0, magnitude_max=10.0, magnitude_step=1.0,
+        magnitude_labels=json.dumps([{"value": 7.0, "label": ATTACK_EQUALS + " anchor"}]),
     )
     s.add(code)
 
-    # Apply the code to the segment
+    # Apply the code to the segment, RATED at the poisoned anchor.
     s.flush()
-    ca = CodeApplication(segment_id=1, code_id=1, user_id=1)
+    ca = CodeApplication(segment_id=1, code_id=1, user_id=1, magnitude=7.0)
     s.add(ca)
 
     # Memo + note

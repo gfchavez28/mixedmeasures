@@ -155,9 +155,17 @@ export default function InlineCodeActions({
         hiddenCoderIds,
       ).map(id => {
         const userId = codeCoderIds?.get(id) ?? null
-        return { key: `${id}-${userId ?? 'na'}`, codeId: id, userId }
+        // #35 — `null` here means "no per-application detail exists", which is
+        // UNKNOWN rather than unrated. The distinction is load-bearing: this
+        // branch passes the chip no `scale` (see `detailsKnown`), so it renders
+        // no rating UI at all rather than asserting a dashed "not rated" over an
+        // application that may well carry one.
+        return { key: `${id}-${userId ?? 'na'}`, codeId: id, userId, magnitude: null, magnitudeConflict: null }
       })
   ).filter(r => !(excludeCodeId && r.codeId === excludeCodeId))
+
+  // Only the details branch can speak to ratings at all.
+  const detailsKnown = !!appliedCodeDetails
 
   return (
     <div className="group/actions flex flex-wrap items-center gap-1">
@@ -167,7 +175,17 @@ export default function InlineCodeActions({
         const coder = (coderMap && row.userId != null) ? coderMap.get(row.userId) ?? null : null
         return (
           <span key={row.key} className="group/chip relative inline-flex min-w-0 max-w-full">
-            <CodeChip code={c} size="xs" onClick={onFocusCode} coder={coder} truncate tabbable={tabbable} />
+            <CodeChip
+              code={c}
+              size="xs"
+              onClick={onFocusCode}
+              coder={coder}
+              truncate
+              tabbable={tabbable}
+              magnitude={row.magnitude}
+              magnitudeConflict={row.magnitudeConflict}
+              scale={detailsKnown ? c.magnitude_scale ?? null : null}
+            />
             {/* The reveal carries `focus:` AND `group-focus-within/chip:` for
                 the same reason the hover pair does: a keyboard user arriving by
                 Tab must SEE this control (WCAG 2.4.7), and focusing the chip

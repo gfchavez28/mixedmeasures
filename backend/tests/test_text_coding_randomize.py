@@ -13,7 +13,7 @@ import asyncio
 from app.models.project import Project
 from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from app.models.user import User
-from app.routers.text_coding import list_texts
+from app.routers.text_coding import list_texts, MAX_TEXT_PAGE_SIZE
 
 
 N_ROWS = 30  # enough that an accidental identity permutation is implausible
@@ -35,11 +35,17 @@ def _seed_texts(db):
 
 
 def _order(db, random_seed):
-    res = asyncio.run(list_texts(
+    # #844: a plain `def` now (#837), and `limit` is explicit even though
+    # N_ROWS (30) fits inside the 200-row default — this helper asserts a WHOLE
+    # ordering, so it must not silently become an assertion about page one if
+    # either number ever moves. Paging the shuffle is covered separately, in
+    # `test_text_coding_paging.py`.
+    res = list_texts(
         810, column_ids="8100", dataset_ids=None, hide_empty=True, record_id=None,
         search=None, sort_by="column_asc", random_seed=random_seed,
-        quoted_only=False, user=db.get(User, 1), db=db,
-    ))
+        quoted_only=False, limit=MAX_TEXT_PAGE_SIZE, offset=0,
+        user=db.get(User, 1), db=db,
+    )
     return [t.dataset_value_id for t in res.texts]
 
 

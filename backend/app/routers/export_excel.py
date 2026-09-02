@@ -45,7 +45,7 @@ from ..services.coding_layers import (
     visible_target_filter,
 )
 from ..auth import get_current_user
-from .helpers import _get_project_or_404, sanitize_content_disposition
+from .helpers import _get_project_or_404, sanitize_content_disposition, visible_segment_filter
 from ..services.timestamp import format_timecode
 from .excerpts import _base_excerpt_query, _excerpt_to_response
 from .export_helpers import (
@@ -73,6 +73,7 @@ def export_study_excel(
     include_quotes: bool = True,
     include_summaries: bool = True,
     include_audit: bool = True,
+    include_ratings: bool = True,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -183,8 +184,7 @@ def export_study_excel(
             ),
             project_id,
         ).filter(
-            Segment.merged_into_id == None,
-            Segment.split_into_id == None,
+            *visible_segment_filter(),
         ).order_by(
             func.coalesce(Conversation.name, Document.name, Observation.name),
             Segment.sequence_order,
@@ -231,6 +231,83 @@ def export_study_excel(
     else:
         # Remove the default sheet if not including coded data
         wb.remove(wb.active)
+
+    # ==================== Sheet 1b: Ratings (#35) ====================
+    #
+    # A rating lives at the APPLICATION grain — one coder, one code, one unit —
+    # and the Coded Data sheet above is a segment × code matrix whose "X" is the
+    # union of every coder. Writing a number into that cell would have to pick
+    # one coder's rating or invent an aggregate, so the ratings get their OWN
+    # sheet at their own grain, the way Quotes did (#620). One row per RATED
+    # human application; an unrated application is absent, never a 0. The
+    # sheet exists only when some code declares a scale — an empty "Ratings"
+    # tab on every project would be noise. The merge-conflict flag is NOT
+    # exported: it is workflow state awaiting adjudication, not data.
+    from ..services.magnitude import _fmt as fmt_rating, read_scale
+
+    scaled_codes = {c.id: read_scale(c) for c in codes if read_scale(c) is not None}
+    if include_ratings and scaled_codes:
+        ws_ratings = wb.create_sheet("Ratings", index=1 if include_coded_data else 0)
+        worksheets.append(ws_ratings)
+
+        rating_headers = [
+            "Source Type", "Source", "Segment ID", "Sequence", "Speaker",
+            "Code", "Coder", "Rating", "Rating Scale", "Rating Anchor",
+        ]
+        for col, header in enumerate(rating_headers, 1):
+            cell = ws_ratings.cell(row=1, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+
+        rated_apps = project_scoped_segments(
+            db.query(CodeApplication)
+            .join(Segment, CodeApplication.segment_id == Segment.id)
+            .options(
+                joinedload(CodeApplication.segment).joinedload(Segment.speaker),
+                joinedload(CodeApplication.segment).joinedload(Segment.conversation),
+                joinedload(CodeApplication.segment).joinedload(Segment.document),
+                joinedload(CodeApplication.segment).joinedload(Segment.observation),
+            ),
+            project_id,
+        ).filter(
+            # Visible, human, rated — each clause its chokepoint (#869 h): the
+            # J-A visibility tuple and the J2-B consensus exclusion, never a
+            # hand-rolled `origin !=` that is byte-identical today and will not
+            # stay so. The consensus row's median is DERIVED from these ratings;
+            # exporting it beside them would count one judgement twice.
+            *visible_segment_filter(),
+            CodeApplication.code_id.in_(list(scaled_codes)),
+            CodeApplication.magnitude.isnot(None),
+            non_consensus_filter(),
+        ).order_by(
+            func.coalesce(Conversation.name, Document.name, Observation.name),
+            Segment.sequence_order,
+            CodeApplication.code_id,
+            CodeApplication.user_id,
+        ).all()
+
+        rating_coder_names = dict(
+            db.query(User.id, User.username)
+            .filter(User.id.in_({a.user_id for a in rated_apps if a.user_id is not None}))
+            .all()
+        ) if rated_apps else {}
+
+        for row_num, app in enumerate(rated_apps, 2):
+            seg = app.segment
+            scale = scaled_codes[app.code_id]
+            source_kind, source_name = segment_source_pair(seg)
+            anchor = next((a for a in scale["anchors"] if a["value"] == app.magnitude), None)
+            ws_ratings.cell(row=row_num, column=1, value=source_kind)
+            excel_set_safe(ws_ratings.cell(row=row_num, column=2), source_name)
+            ws_ratings.cell(row=row_num, column=3, value=seg.id)
+            ws_ratings.cell(row=row_num, column=4, value=seg.sequence_order)
+            excel_set_safe(ws_ratings.cell(row=row_num, column=5), seg.speaker.name if seg.speaker else "")
+            excel_set_safe(ws_ratings.cell(row=row_num, column=6), code_id_to_name.get(app.code_id, ""))
+            excel_set_safe(ws_ratings.cell(row=row_num, column=7), rating_coder_names.get(app.user_id, ""))
+            # A NUMBER, not its string: this is the column a researcher averages.
+            ws_ratings.cell(row=row_num, column=8, value=app.magnitude)
+            ws_ratings.cell(row=row_num, column=9, value=f"{fmt_rating(scale['min'])} to {fmt_rating(scale['max'])}")
+            excel_set_safe(ws_ratings.cell(row=row_num, column=10), anchor["label"] if anchor else "")
 
     # ==================== Sheet 2: Code-Source Matrix ====================
     # #629: was "Code-Conversation Matrix", gated on `conversations` and keyed by
@@ -515,7 +592,7 @@ def export_study_excel(
         ).filter(
             or_(
                 Excerpt.segment_id.is_(None),
-                and_(Segment.merged_into_id == None, Segment.split_into_id == None),
+                and_(*visible_segment_filter()),
             )
         ).order_by(Excerpt.created_at).all()
 

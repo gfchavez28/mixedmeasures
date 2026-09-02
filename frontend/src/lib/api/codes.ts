@@ -1,4 +1,5 @@
 import api from './client'
+import type { MagnitudeScale } from '../magnitude'
 
 // Code types
 export interface Code {
@@ -17,6 +18,15 @@ export interface Code {
   category_name: string | null
   category_color: string | null
   category_order: number | null
+  /**
+   * #35 — the declared rating instrument, or null when this code carries none.
+   *
+   * Rides every code payload so a chip can position a value within its own range
+   * without a second request: the normalized track is meaningless without
+   * min/max, and a client that had to fetch them separately would render an
+   * un-normalized bar in the gap.
+   */
+  magnitude_scale?: MagnitudeScale | null
 }
 
 export interface CodeCategory {
@@ -43,6 +53,19 @@ export const codesApi = {
     api.post<Code>(`/projects/${projectId}/codes`, data).then(res => res.data),
   update: (projectId: number, id: number, data: Partial<Code>) =>
     api.patch<Code>(`/projects/${projectId}/codes/${id}`, data).then(res => res.data),
+  /**
+   * #35 — declare, replace, or clear this code's rating scale.
+   *
+   * ⚠️ A PUT because the declaration is replaced WHOLE. A PATCH would invite
+   * "change only the max", which is precisely the edit that can strand existing
+   * ratings without the caller stating the new range — the server refuses that
+   * by count, and a partial payload would make the refusal unattributable.
+   *
+   * ⚠️ `null` CLEARS. The server keeps the ratings; they simply stop being
+   * interpretable until a scale returns.
+   */
+  setMagnitudeScale: (projectId: number, id: number, scale: MagnitudeScale | null) =>
+    api.put<Code>(`/projects/${projectId}/codes/${id}/magnitude-scale`, { scale }).then(res => res.data),
   reorderInCategory: (projectId: number, categoryId: number | null, orderedCodeIds: number[]) =>
     api.post(`/projects/${projectId}/codes/reorder-in-category`, {
       category_id: categoryId,

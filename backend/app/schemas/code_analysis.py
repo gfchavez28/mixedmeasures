@@ -368,6 +368,30 @@ class IrrCoderInfo(BaseModel):
     name: str
 
 
+class IrrInterval(BaseModel):
+    """A confidence interval, with the method that produced it (#43).
+
+    Part of the stated-basis family: the server says HOW the interval was made
+    and the client displays that, never inferring it from which coefficient it
+    sits beside. κ's is analytic, α's is a bootstrap over units — different in
+    kind, and a reader who cannot tell them apart cannot judge either.
+
+    ``lower``/``upper`` are None only when ``unavailable_reason`` says why the
+    resampling could not produce a usable interval; when the STATISTIC itself is
+    undefined the whole object is None instead (its own `undefined_reason`
+    already explains the blank cell).
+    """
+    lower: float | None = None
+    upper: float | None = None
+    level: float
+    #: `reliability_intervals.CI_METHOD_*` — mirrored in `lib/ci-label.ts`.
+    method: str
+    #: Resamples that produced a defined α; None for the analytic κ interval.
+    n_resamples: int | None = None
+    #: `reliability_intervals.CI_UNAVAILABLE_*`.
+    unavailable_reason: str | None = None
+
+
 class IrrCodeResult(BaseModel):
     code_id: int
     code_name: str
@@ -382,6 +406,51 @@ class IrrCodeResult(BaseModel):
     #: in scope (or everybody did), so there is nothing to agree about; reporting
     #: κ = 1 "almost perfect" was the defect (#689's rule, one surface over).
     undefined_reason: str | None = None
+    #: #43 — each coefficient's own interval. Separate objects because the two
+    #: are produced by different methods, so one shared `ci_method` would have
+    #: to lie about one of them.
+    kappa_ci: IrrInterval | None = None
+    alpha_ci: IrrInterval | None = None
+    #: #35 — how α scored a difference: `reliability_basis.ALPHA_METRIC_*`,
+    #: mirrored in `lib/reliability-basis.ts`. Nominal here (presence/absence).
+    alpha_metric: str | None = None
+
+
+class IrrMagnitudeScale(BaseModel):
+    """The declared instrument a rating row was scored on — `magnitude.read_scale`."""
+    min: float
+    max: float
+    step: float
+    anchors: list[dict] = []
+
+
+class IrrMagnitudeResult(BaseModel):
+    """Rating agreement for ONE code that declares a scale (#35).
+
+    Never pooled into a headline: each code is its own instrument with its own
+    range, so an α over "Joy 0–100" and "Anxiety −1…+1" together would average
+    disagreement measured in different units.
+    """
+    code_id: int
+    code_name: str
+    scale: IrrMagnitudeScale
+    #: Units two or more coders both applied AND rated — the α basis.
+    n_units: int
+    #: Applications of this code in scope, by roster coders (rated or not).
+    n_applications: int
+    #: …of which carry a rating. `n_rated / n_applications` is the coverage a
+    #: coefficient over thin ratings would otherwise hide.
+    n_rated: int
+    #: Mean |a − b| over coder pairs on shared units, in the scale's own units.
+    mean_abs_difference: float | None = None
+    krippendorff_alpha: float | None = None
+    alpha_interpretation: str | None = None
+    #: `reliability_basis.ALPHA_METRIC_*` — interval, by the declaration.
+    alpha_metric: str
+    #: `insufficient_n` (no unit rated by two coders) · `no_variance` (every
+    #: compared rating identical) · None.
+    undefined_reason: str | None = None
+    alpha_ci: IrrInterval | None = None
 
 
 class IrrSourceInfo(BaseModel):
@@ -408,7 +477,19 @@ class IrrResponse(BaseModel):
     per_code: list[IrrCodeResult] = []
     overall_alpha: float | None = None
     overall_alpha_interpretation: str | None = None
+    #: #43 — a CLUSTER bootstrap over units. The headline pools every code, so a
+    #: unit contributes one row per code and those rows move together; treating
+    #: them as independent would report an interval that is too narrow.
+    overall_alpha_ci: IrrInterval | None = None
     interpretation_thresholds: dict = {}
+    #: #35 — the stated basis: every α here is over CODERS
+    #: (`reliability_basis.RELIABILITY_FACET_*`). ⚠️ Declared on the schema or
+    #: the endpoint's `response_model` drops it silently — the half-landed-wire
+    #: class `test_reliability_basis.py` pins.
+    reliability_facet: str | None = None
+    #: #35 — rating agreement per scaled code. Empty when no code declares a
+    #: scale, or none was applied in scope.
+    magnitude_per_code: list[IrrMagnitudeResult] = []
 
 
 class ConsensusStatusResponse(BaseModel):
@@ -436,6 +517,9 @@ class ReconciliationCodeInfo(BaseModel):
     id: int
     name: str
     color: str | None = None
+    #: #35 — the declared rating scale (`magnitude.read_scale`), or None. A cell's
+    #: rating renders only against this; a bare number is not a rating.
+    scale: dict | None = None
 
 
 class ReconciliationUnit(BaseModel):
@@ -462,10 +546,28 @@ class ReconciliationUnit(BaseModel):
     start_time: float | None = None
     end_time: float | None = None
     by_coder: dict[str, list[int]]  # str(coder_id) → effective code ids applied here
+    #: #35 — str(coder_id) → {str(code_id): rating}. Only RATED applications on a
+    #: code with a scale, keyed by the canonical code id (the id the chips use).
+    #: An unrated application is absent, never 0. Declared here or the
+    #: `response_model` drops it silently.
+    ratings_by_coder: dict[str, dict[str, float]] = {}
+    #: #35 — str(coder_id) → {str(code_id): the rating a MERGED copy of that
+    #: same application carried when it differed}. The target's rating was kept
+    #: (`ratings_by_coder`); this is the other number. Cleared by re-rating.
+    rating_conflicts_by_coder: dict[str, dict[str, float]] = {}
     engaged: list[int]  # source-engaged coder ids (reviewed the source)
     consensus: list[int]  # effective code ids in the derived consensus
-    consensus_context: dict[str, dict]  # str(effective_code_id) → {rule, agree, voters}
+    #: str(effective_code_id) → {rule, agree, voters[, magnitude: {rule, median,
+    #: n_rated, spread, step, flag}]} — the `magnitude` key only when the code
+    #: carries a rating consensus (#35).
+    consensus_context: dict[str, dict]
     has_disagreement: bool
+    #: #35 — a SECOND fact: two coders' ratings on some scaled code differ by more
+    #: than one declared step. Codes can agree while ratings do not.
+    has_rating_disagreement: bool = False
+    #: #35 — a THIRD: some coder's own two copies disagreed at a merge and the
+    #: coder has not re-rated since. In the review set until adjudicated.
+    has_merge_conflict: bool = False
 
 
 class ReconciliationResponse(BaseModel):
@@ -518,6 +620,9 @@ class OpenCutDisclosureResponse(BaseModel):
     n_clips_without_times: int
     engaged_coder_ids: list[int]
     excluded_coder_ids: list[int]
+    #: #43 — `reliability_intervals.CI_UNAVAILABLE_*`: why this coefficient
+    #: carries no interval when the Reliability tab's κ and α do.
+    ci_unavailable_reason: str | None = None
 
 
 class UnitizingCategoryResult(BaseModel):

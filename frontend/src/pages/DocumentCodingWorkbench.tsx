@@ -12,6 +12,7 @@ import { useTextSplitSelection } from '@/hooks/useTextSplitSelection'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
+import MagnitudeStrip from '@/components/MagnitudeStrip'
 import { codeKeyHint } from '@/lib/codeShortcuts'
 import SplitToolbar from '@/components/SplitToolbar'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
@@ -23,6 +24,7 @@ import {
   excerptsApi,
   type Code,
   type Coder,
+  type DocumentDetailResponse,
   type DocumentSegmentResponse,
 } from '@/lib/api'
 import { useHistory } from '@/hooks/useHistory'
@@ -471,6 +473,89 @@ export default function DocumentCodingWorkbench() {
     codePanelRef.current?.focusCode(codeId)
   }, [])
 
+  // ── #35 magnitude: rate at apply (variant A) — the DOCUMENT strip (#868 b) ──
+  // Which application is awaiting a rating. Set after a single-segment APPLY of a
+  // code that declares a scale; the strip below the list is the surface. Mirrors
+  // `CodingWorkbench` against THIS page's cache shape: the document detail's
+  // `segments[].codes[]`, one entry per (code, coder), each carrying `magnitude`.
+  const [ratingTarget, setRatingTarget] = useState<{ segmentId: number; code: Code } | null>(null)
+
+  // The rating THIS coder currently holds, read from the cache the chips render
+  // from, so the strip opens showing what is actually stored. `?? null`, never
+  // `|| null` — a stored 0 is a real rating.
+  const currentMagnitude = useCallback(
+    (segmentId: number, codeId: number): number | null => {
+      const entry = segmentMap.get(segmentId)?.codes.find(
+        c => c.id === codeId && c.user_id === selfId,
+      )
+      return entry?.magnitude ?? null
+    },
+    [segmentMap, selfId],
+  )
+
+  // Optimistically patch ONE coder's rating on ONE segment. Documents have no
+  // segment groups (those are conversation-scoped), so there is no fan-out to
+  // mirror. Scoped to the active coder's own entry: a rating is that coder's
+  // judgement, and painting a colleague's would show agreement that does not
+  // exist. Rating again clears the merge flag server-side (rules §6d), so the
+  // paint clears it too.
+  const patchDocumentMagnitude = useCallback(
+    (segmentId: number, codeId: number, value: number | null) => {
+      queryClient.setQueryData<DocumentDetailResponse>(
+        ['document', projectId, documentId],
+        (old) => {
+          if (!old?.segments) return old
+          return {
+            ...old,
+            segments: old.segments.map(s => s.id !== segmentId ? s : {
+              ...s,
+              codes: s.codes.map(c =>
+                c.id === codeId && c.user_id === selfId
+                  ? { ...c, magnitude: value, magnitude_conflict: null }
+                  : c,
+              ),
+            }),
+          }
+        },
+      )
+    },
+    [queryClient, projectId, documentId, selfId],
+  )
+
+  const runOptimisticMagnitude = useCallback(
+    async (segmentId: number, codeId: number, value: number | null) => {
+      const snapshot = queryClient.getQueryData(['document', projectId, documentId])
+      patchDocumentMagnitude(segmentId, codeId, value)
+      try {
+        await codingApi.setMagnitude(segmentId, codeId, value)
+        // Deliberately NO invalidation: a rating changes no coded COUNT, and
+        // this page's refetch-everything settle would be work for nothing.
+      } catch (e) {
+        queryClient.setQueryData(['document', projectId, documentId], snapshot)
+        throw e  // `useHistory` toasts the server's own reason (a refused rating names why)
+      }
+    },
+    [queryClient, projectId, documentId, patchDocumentMagnitude],
+  )
+
+  const commitMagnitude = useCallback(
+    (value: number) => {
+      const target = ratingTarget
+      if (!target) return
+      const previous = currentMagnitude(target.segmentId, target.code.id)
+      setRatingTarget(null)
+      // Undoable like every other coding mutation here; the inverse restores the
+      // PREVIOUS value, which may legitimately be null (unrated) or 0.
+      history.execute({
+        type: 'code_apply',
+        description: `Rate "${target.code.name}"`,
+        redo: () => runOptimisticMagnitude(target.segmentId, target.code.id, value),
+        undo: () => runOptimisticMagnitude(target.segmentId, target.code.id, previous),
+      })
+    },
+    [ratingTarget, currentMagnitude, history, runOptimisticMagnitude],
+  )
+
   const invalidateNotes = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['document-notes', projectId, documentId] })
     queryClient.invalidateQueries({ queryKey: ['document', projectId, documentId] })
@@ -504,11 +589,15 @@ export default function DocumentCodingWorkbench() {
     if (selectedSegments.length === 1) {
       const segmentId = selectedSegments[0]
       if (allHaveCode) {
+        // #868 (f): the rating is captured NOW, while the application still
+        // exists, and the inverse re-applies WITH it — an undo that re-applied
+        // bare silently unrated. `previous` may legitimately be 0.
+        const previous = currentMagnitude(segmentId, codeId)
         history.execute({
           type: 'code_remove',
           description: `Remove code "${codeName}"`,
           redo: async () => { await codingApi.removeCode(segmentId, codeId); invalidateAfterCodeChange() },
-          undo: async () => { await codingApi.applyCode(segmentId, codeId); invalidateAfterCodeChange() },
+          undo: async () => { await codingApi.applyCode(segmentId, codeId, undefined, previous); invalidateAfterCodeChange() },
         })
       } else {
         history.execute({
@@ -517,18 +606,40 @@ export default function DocumentCodingWorkbench() {
           redo: async () => { await codingApi.applyCode(segmentId, codeId); invalidateAfterCodeChange() },
           undo: async () => { await codingApi.removeCode(segmentId, codeId); invalidateAfterCodeChange() },
         })
+        // #35 variant A — a code that declares a scale opens its rating strip
+        // straight after applying, so the judgement is made with the anchors on
+        // screen. ⚠️ Only on the APPLY branch and only for a single segment —
+        // the same two gates as the conversation workbench: removing has
+        // nothing to rate, and one rating standing in for several judgements
+        // is not a rating.
+        if (code.magnitude_scale) setRatingTarget({ segmentId, code })
       }
     } else {
       const action = allHaveCode ? 'remove' : 'apply'
+      // #868 (f), the multi-segment arm: one captured rating per segment; the
+      // inverse re-applies per segment when any was rated, because the bulk
+      // endpoint carries no rating.
+      const captured = allHaveCode
+        ? new Map(segmentIds.map(id => [id, currentMagnitude(id, codeId)] as const))
+        : null
+      const anyRated = captured != null && [...captured.values()].some(v => v != null)
       history.execute({
         type: allHaveCode ? 'code_remove' : 'code_apply',
         description: `${action === 'apply' ? 'Apply' : 'Remove'} code "${codeName}" from ${segmentIds.length} segments`,
         redo: async () => { reportBulkOutcome(await codingApi.bulkCode(segmentIds, codeId, action), action); invalidateAfterCodeChange() },
-        undo: async () => { const inv = action === 'apply' ? 'remove' as const : 'apply' as const; reportBulkOutcome(await codingApi.bulkCode(segmentIds, codeId, inv), inv); invalidateAfterCodeChange() },
+        undo: async () => {
+          const inv = action === 'apply' ? 'remove' as const : 'apply' as const
+          if (inv === 'apply' && anyRated) {
+            await Promise.all(segmentIds.map(id => codingApi.applyCode(id, codeId, undefined, captured!.get(id) ?? null)))
+          } else {
+            reportBulkOutcome(await codingApi.bulkCode(segmentIds, codeId, inv), inv)
+          }
+          invalidateAfterCodeChange()
+        },
       })
     }
     showSaved()
-  }, [selectedSegments, segmentMap, history, invalidateAfterCodeChange, reportBulkOutcome, showSaved, selfId])
+  }, [selectedSegments, segmentMap, history, invalidateAfterCodeChange, reportBulkOutcome, showSaved, selfId, currentMagnitude])
 
   const handleMultiCodeToggle = useCallback((codesToToggle: Code[]) => {
     if (selectedSegments.length === 0 || codesToToggle.length === 0) return
@@ -1031,6 +1142,8 @@ export default function DocumentCodingWorkbench() {
     // Then toggle via normal path — but since selection updates async, call directly
     const seg = segmentMap.get(segmentId)
     const has = seg?.codes?.some(c => c.id === codeId && (selfId == null || c.user_id === selfId)) ?? false
+    // #868 (f): the inverse of a removal re-applies with the captured rating.
+    const previous = has ? currentMagnitude(segmentId, codeId) : null
     history.execute({
       type: has ? 'code_remove' : 'code_apply',
       description: `${has ? 'Remove' : 'Apply'} code "${code.name}"`,
@@ -1040,13 +1153,13 @@ export default function DocumentCodingWorkbench() {
         invalidateAfterCodeChange()
       },
       undo: async () => {
-        if (has) await codingApi.applyCode(segmentId, codeId)
+        if (has) await codingApi.applyCode(segmentId, codeId, undefined, previous)
         else await codingApi.removeCode(segmentId, codeId)
         invalidateAfterCodeChange()
       },
     })
     showSaved()
-  }, [codeMap, selectedSegments, segmentMap, history, invalidateAfterCodeChange, showSaved, selfId])
+  }, [codeMap, selectedSegments, segmentMap, history, invalidateAfterCodeChange, showSaved, selfId, currentMagnitude])
 
   // ── Render ──
 
@@ -1560,6 +1673,29 @@ export default function DocumentCodingWorkbench() {
           {/* Split selection announcements */}
           <div role="status" aria-live="polite" className="sr-only">{splitAnnouncement}</div>
           </div>
+          {/*
+            #35 / #868 (b) — the rating strip, mounted BELOW the list rather than
+            inside a row, for the two reasons the conversation workbench records:
+            no room for a tick row in the Codes column at 640×360, and the rows
+            are virtualised — a conditional child inside a row risks the remount
+            that drops DOM focus to <body> (#826). Outside the scroller, neither
+            can happen. Keyed on the target (#870 c) so a second scaled apply
+            remounts it with a fresh cursor and focus.
+          */}
+          {ratingTarget && ratingTarget.code.magnitude_scale && (
+            // py-1, not py-2: the vertical budget at 640×360 is 85px for the
+            // whole control (measured; see MagnitudeStrip's root comment).
+            <div className="border-t border-mm-border bg-mm-surface px-3 py-1 shrink-0">
+              <MagnitudeStrip
+                key={`${ratingTarget.segmentId}-${ratingTarget.code.id}`}
+                codeName={ratingTarget.code.name}
+                scale={ratingTarget.code.magnitude_scale}
+                value={currentMagnitude(ratingTarget.segmentId, ratingTarget.code.id)}
+                onCommit={commitMagnitude}
+                onSkip={() => setRatingTarget(null)}
+              />
+            </div>
+          )}
         </div>
 
         {/* Right panel — fixed width (#565: the resizer never worked; removed) */}
@@ -2015,7 +2151,15 @@ export function DocumentSegmentRow({
                   onCodeChange={onCodeChange}
                   onFocusCode={onFocusCode}
                   coderMap={coderMap}
-                  appliedCodeDetails={segment.codes.map(c => ({ code_id: c.id, user_id: c.user_id }))}
+                  // #868 (a): the projection carries the rating and the merge
+                  // flag. It once built `{ code_id, user_id }` from a payload
+                  // that had neither, and the chip then announced "not rated"
+                  // over a rating it could not see. Both fields are REQUIRED on
+                  // the detail type now, so dropping one here does not compile.
+                  appliedCodeDetails={segment.codes.map(c => ({
+                    code_id: c.id, user_id: c.user_id,
+                    magnitude: c.magnitude, magnitude_conflict: c.magnitude_conflict,
+                  }))}
                   hiddenCoderIds={hiddenCoderIds}
                 />
               )}

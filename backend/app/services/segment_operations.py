@@ -194,6 +194,13 @@ def _carried_app_fields(ca: CodeApplication) -> dict:
     attribution/provenance — benign under a single shared layer, data loss the
     instant per-coder layers exist (the widened ``(target, code, user_id)``
     index). The per-coder uniqueness key is ``(code_id, user_id)``.
+
+    #35 / #869 (a): the RATING and the merge disagreement flag are part of the
+    layer too. Both are that coder's own judgement on that (target, code), and
+    before this carried them every merge / split / unmerge / unsplit and both clip
+    ops re-created the application UNRATED — silent data loss on an ordinary
+    editing gesture. ⚠️ Enumerate the fields by what the model declares as
+    per-application STATE, not by the five this used to list.
     """
     return {
         "code_id": ca.code_id,
@@ -201,7 +208,44 @@ def _carried_app_fields(ca: CodeApplication) -> dict:
         "attribution": ca.attribution,
         "origin": ca.origin,
         "origin_context": ca.origin_context,
+        "magnitude": ca.magnitude,
+        "magnitude_conflict": ca.magnitude_conflict,
     }
+
+
+def _dedup_carried_layers(rows: list[dict]) -> list[dict]:
+    """Collapse carried application layers onto the per-coder key, first wins.
+
+    Shared by the two MERGES (text segments and clips). The widened unique index
+    permits ONE row per ``(target, code, user_id)``, so when two originals carry
+    the same coder's same code only the first survives — and its attribution
+    note, origin context and RATING are the ones kept.
+
+    #35: **a dropped duplicate's DIFFERING rating is recorded as the kept row's
+    ``magnitude_conflict``**, the same shape the project merge uses (the rules
+    file's §6d — keep ours, record the other number, never block). The coder's
+    two ratings of one code are being collapsed into one row; silently keeping
+    the first would lose a judgement they made, and the reconciliation grid
+    already knows how to say "your other copy rated this N". Rating the merged
+    segment again clears it, exactly like every other conflict. A duplicate
+    with NO rating, or an EQUAL one, has nothing to say and leaves whatever flag
+    the kept row already carried alone (that flag names a DIFFERENT other copy).
+    ⚠️ ``is not None`` — a duplicate rated ZERO is a real disagreement against a
+    rated first row, and against an UNRATED first row it is flagged while the
+    kept ``magnitude`` stays NULL (a merge never promotes a rating the coder did
+    not give to that row).
+    """
+    kept: dict[tuple[int, int | None], dict] = {}
+    for row in rows:
+        key = (row["code_id"], row["user_id"])
+        first = kept.get(key)
+        if first is None:
+            kept[key] = dict(row)
+            continue
+        other = row.get("magnitude")
+        if other is not None and other != first.get("magnitude"):
+            first["magnitude_conflict"] = other
+    return list(kept.values())
 
 
 def _carried_back_fields(
@@ -297,19 +341,17 @@ def merge_segments(
     db.flush()
 
     # Carry every coder's layer onto the merged segment (Track J · J2-0):
-    # distinct (code, coder, attribution, origin, origin_context) tuples — NOT a
-    # bare code_id union re-stamped to the operator. Dedup on the per-coder key
-    # (code_id, user_id); first occurrence wins when two originals carry the same
-    # coder's same code (their attribution notes may differ — only one row fits
-    # the widened unique index).
-    seen_apps: set[tuple[int, int | None]] = set()
-    for seg in segments:
-        for ca in seg.code_applications:
-            key = (ca.code_id, ca.user_id)
-            if key in seen_apps:
-                continue
-            seen_apps.add(key)
-            db.add(CodeApplication(segment_id=merged_segment.id, **_carried_app_fields(ca)))
+    # distinct (code, coder, attribution, origin, origin_context, rating) tuples
+    # — NOT a bare code_id union re-stamped to the operator. Dedup on the
+    # per-coder key (code_id, user_id); first occurrence wins when two originals
+    # carry the same coder's same code (their attribution notes may differ —
+    # only one row fits the widened unique index), and a dropped duplicate's
+    # differing RATING lands in the kept row's `magnitude_conflict` (#35).
+    carried = _dedup_carried_layers([
+        _carried_app_fields(ca) for seg in segments for ca in seg.code_applications
+    ])
+    for app in carried:
+        db.add(CodeApplication(segment_id=merged_segment.id, **app))
 
     # Soft-delete originals
     deleted_count = len(segments)
@@ -1457,14 +1499,12 @@ def merge_clips(
     db.add(merged)
     db.flush()
 
-    seen: set[tuple[int, int | None]] = set()
-    for seg in segments:
-        for app in _human_app_fields(seg):
-            key = (app["code_id"], app["user_id"])
-            if key in seen:
-                continue
-            seen.add(key)
-            db.add(CodeApplication(segment_id=merged.id, **app))
+    # (code, coder) dedup, first wins, a dropped duplicate's differing rating
+    # recorded on the kept row — the same rule as the text merge (#35).
+    for app in _dedup_carried_layers([
+        app for seg in segments for app in _human_app_fields(seg)
+    ]):
+        db.add(CodeApplication(segment_id=merged.id, **app))
 
     # Quotes (#621) — deduped against the two partial unique indexes.
     seen_quotes: set[tuple[float, float] | None] = set()

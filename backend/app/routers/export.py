@@ -449,10 +449,27 @@ async def export_coded_segments_csv(
     # so rate/airtime/bout analyses can't be reconstructed outside the tool —
     # which matters while the timed-analytics surfaces are still being built.
     # Conversation/document rows leave it blank exactly as they do the start.
+    # #35 — the RATING rides this export because this is the one coded-data
+    # export at the application grain, which is the grain a rating lives at.
+    # Three columns, APPENDED so every existing column keeps its position:
+    # the value (integer-aware, so 7 not 7.0; blank when unrated OR when the
+    # code declares no scale — a number with no instrument is not a rating),
+    # the declared scale it was given on, and the anchor label for that value
+    # if the scale names one. The merge-conflict flag is deliberately NOT
+    # exported: it is workflow state awaiting adjudication, not data.
+    from ..services.magnitude import _fmt as fmt_rating, read_scale
+
+    scale_cache: dict[int, dict | None] = {}
+
+    def _scale_for(code_obj):
+        if code_obj.id not in scale_cache:
+            scale_cache[code_obj.id] = read_scale(code_obj)
+        return scale_cache[code_obj.id]
+
     writer.writerow([
         "Code", "Category", "Coder", "Source Type", "Source", "Speaker", "Participant",
         "Participant Role", "Segment Text", "Other Codes", "Is Quoted", "Timestamp",
-        "End Timestamp",
+        "End Timestamp", "Rating", "Rating Scale", "Rating Anchor",
     ])
 
     for app in apps:
@@ -470,6 +487,16 @@ async def export_coded_segments_csv(
 
         other = [c for c in other_codes_map.get(seg.id, []) if c != code.name]
 
+        scale = _scale_for(code)
+        # `is not None`, never truthiness: a rating of 0 is a rating (#35 §2).
+        rated = scale is not None and app.magnitude is not None
+        rating_cell = fmt_rating(app.magnitude) if rated else ""
+        scale_cell = f"{fmt_rating(scale['min'])} to {fmt_rating(scale['max'])}" if scale else ""
+        anchor_cell = ""
+        if rated:
+            anchor = next((a for a in scale["anchors"] if a["value"] == app.magnitude), None)
+            anchor_cell = anchor["label"] if anchor else ""
+
         writer.writerow([
             csv_safe(code.name),
             csv_safe(code.category.name if code.category else ""),
@@ -484,6 +511,9 @@ async def export_coded_segments_csv(
             "Yes" if seg and seg.id in csv_quoted_seg_ids else "",
             f"{seg.start_time:.2f}" if seg and seg.start_time is not None else "",
             f"{seg.end_time:.2f}" if seg and seg.end_time is not None else "",
+            rating_cell,
+            scale_cell,
+            csv_safe(anchor_cell),
         ])
 
     output.seek(0)

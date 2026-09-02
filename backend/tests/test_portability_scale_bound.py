@@ -55,6 +55,65 @@ APP_DIR = Path(pp.__file__).resolve().parent.parent
 
 DATASET_SCALED_SOURCES = {"dataset_values", "dataset_rows", "rows", "values"}
 
+# ⚠️ #844 CHANGED THE PREMISE FOR ONE OF THESE FUNCTIONS, and the entry is
+# RE-AIMED rather than deleted.
+#
+# `list_texts` now serves a PAGE (`limit`, hard-capped at `MAX_TEXT_PAGE_SIZE` =
+# 1,000), so the id list it hands to `.in_()` is bounded three orders of
+# magnitude under the 250,000 ceiling — and the `scalar_subquery` that fixed
+# #842 was deliberately removed, because against a page it re-runs the whole
+# filtered scan three extra times per request.
+#
+# So for that function the invariant is no longer "no id list reaches `.in_()`";
+# it is **"the id list is BOUNDED, and the bound is enforced at the signature"**.
+# Deleting the parametrize entry would have left nothing watching either
+# property — including the case where someone removes the cap and leaves the
+# `.in_()` bindings, which is precisely how #842 comes back.
+PAGED_BOUND = {
+    ("routers/text_coding.py", "list_texts"): "MAX_TEXT_PAGE_SIZE",
+}
+
+
+def _assert_bounded_by_a_capped_page(path: Path, fn_name: str, const: str) -> None:
+    """The function pages, and the page size is capped by a module constant.
+
+    ⚠️ **Read STRUCTURALLY, off the `limit` argument's own annotation — never as
+    text over the function body.** The first version of this check was
+    `f"le={const}" in ast.get_source_segment(...)`, and it PASSED under a mutant
+    that deleted the cap from the signature: `list_texts`' body carries a
+    comment explaining why the cap is what makes its `.in_()` bindings safe, so
+    the scan was reading its own prose (#772, and the tests manual's
+    strip-comments rule reached from the other side). An AST walk of the
+    annotation cannot be fooled by a comment.
+    """
+    src = path.read_text()
+    fn = _function(path, fn_name)
+
+    assert f"\n{const} = " in src, (
+        f"{path.name} no longer defines `{const}`, so the id lists "
+        f"{fn_name} binds to `.in_()` are unbounded again (#842)."
+    )
+    limit_arg = next(
+        (a for a in fn.args.args + fn.args.kwonlyargs if a.arg == "limit"), None,
+    )
+    assert limit_arg is not None, (
+        f"{fn_name} no longer takes `limit`, so it does not page — its "
+        f"`.in_()` bindings are dataset-scaled again (#844)."
+    )
+    capped = any(
+        isinstance(node, ast.keyword)
+        and node.arg == "le"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == const
+        for node in ast.walk(limit_arg.annotation)
+    ) if limit_arg.annotation is not None else False
+    assert capped, (
+        f"{fn_name}'s `limit` is not capped by `{const}` in its own annotation. "
+        f"The cap is what keeps its `.in_()` bindings under SQLite's 250,000-"
+        f"parameter ceiling; without it a caller may ask for the whole corpus "
+        f"and #842 returns."
+    )
+
 
 def _comprehension_bound_names(fn: ast.FunctionDef) -> dict[str, str]:
     """Names assigned from a comprehension, mapped to the collection iterated."""
@@ -108,6 +167,12 @@ def _function(path: Path, name: str) -> ast.FunctionDef:
 )
 def test_no_dataset_scaled_id_list_reaches_in_(rel, fn_name):
     path = APP_DIR / rel
+    const = PAGED_BOUND.get((rel, fn_name))
+    if const:
+        # This function is allowed a bounded id list — see PAGED_BOUND. The
+        # assertion moves to the bound itself rather than disappearing.
+        _assert_bounded_by_a_capped_page(path, fn_name, const)
+        return
     fn = _function(path, fn_name)
     bound = _comprehension_bound_names(fn)
     offenders = [

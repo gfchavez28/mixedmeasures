@@ -4,6 +4,7 @@ import { Loader2 } from 'lucide-react'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import SegmentedControl from '@/components/ui/segmented-control'
 import { codeAnalysisApi, type OpenCutDisclosure } from '@/lib/api'
+import { ciUnavailableNote } from '@/lib/ci-label'
 
 /**
  * Reliability for an observation whose clips are still OPEN (slab 6b-A).
@@ -235,9 +236,18 @@ function DisclosureNote({
   if (d.excluded_coder_ids.length > 0) {
     bits.push(`${d.excluded_coder_ids.length} coder${d.excluded_coder_ids.length === 1 ? '' : 's'} marked nothing here and are not counted`)
   }
+  // #43 — the Reliability tab's κ and α now carry confidence intervals and
+  // these coefficients do not. A silent blank reads as an oversight; the
+  // refusal is deliberate and has a different reason for each statistic, so the
+  // server sends which one and this renders it. An unknown reason renders
+  // nothing rather than an invented sentence.
+  const noInterval = ciUnavailableNote(d.ci_unavailable_reason)
   return (
-    <p className="text-xs text-mm-text-faint max-w-3xl">
-      How this was measured: {bits.join(' · ')}.
-    </p>
+    <>
+      <p className="text-xs text-mm-text-faint max-w-3xl">
+        How this was measured: {bits.join(' · ')}.
+      </p>
+      {noInterval && <p className="text-xs text-mm-text-faint max-w-3xl">{noInterval}</p>}
+    </>
   )
 }

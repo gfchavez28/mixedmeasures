@@ -1,4 +1,6 @@
 import api from './client'
+import type { ReliabilityInterval } from '../reliability-interval'
+import type { MagnitudeScale } from '../magnitude'
 
 // Code Analysis types
 export interface CodeFrequencyItem {
@@ -382,12 +384,32 @@ export interface ReconciliationCodeInfo {
   id: number
   name: string
   color: string | null
+  /** #35 — the declared rating scale, or null. A rating renders only against it. */
+  scale?: MagnitudeScale | null
+}
+
+/**
+ * #35 — the rating consensus for one code on one unit: the MEDIAN of the
+ * voters' ratings, and whether they differ by more than one declared step.
+ * Mirrors `services/consensus.py::_decide_magnitude`.
+ */
+export interface ReconciliationRatingConsensus {
+  rule: string // "median"
+  median: number
+  n_rated: number
+  /** max − min of the ratings, in the scale's own units. */
+  spread: number
+  step: number
+  /** `spread > step` — the coders differ by more than one step of the scale. */
+  flag: boolean
 }
 
 export interface ReconciliationConsensusContext {
   rule: string // "unanimous" | "majority"
   agree: number
   voters: number
+  /** Present only when the code carries a rating consensus (#35). */
+  magnitude?: ReconciliationRatingConsensus | null
 }
 
 
@@ -408,6 +430,9 @@ export interface OpenCutDisclosure {
   n_clips_without_times: number
   engaged_coder_ids: number[]
   excluded_coder_ids: number[]
+  /** #43 — `CiUnavailableReason`: why this coefficient carries no interval when
+   *  the Reliability tab's κ and α do. Rendered, never inferred. */
+  ci_unavailable_reason: string | null
 }
 
 export interface UnitizingCategoryResult {
@@ -475,13 +500,37 @@ export interface ReconciliationUnit {
   end_time: number | null
   /** coderId → effective code ids they applied here (an engaged coder who left it blank → []). */
   by_coder: Record<string, number[]>
+  /**
+   * #35 — coderId → { codeId → rating } for RATED applications on scaled codes,
+   * keyed by the canonical code id (the id the chips use). An unrated
+   * application is absent — never 0. Optional so older payloads and fixtures
+   * still type-check; absent renders as "no rating known".
+   */
+  ratings_by_coder?: Record<string, Record<string, number>>
+  /**
+   * #35 — coderId → { codeId → the rating a MERGED copy of that same
+   * application carried when it differed }. The target's rating was kept and
+   * sits in `ratings_by_coder`; this is the other number.
+   */
+  rating_conflicts_by_coder?: Record<string, Record<string, number>>
   /** source-engaged coder ids (Option B: reviewed the source). */
   engaged: number[]
   /** effective code ids in the derived consensus. */
   consensus: number[]
-  /** effective code id → {rule, agree, voters}. */
+  /** effective code id → {rule, agree, voters[, magnitude]}. */
   consensus_context: Record<string, ReconciliationConsensusContext>
   has_disagreement: boolean
+  /**
+   * #35 — a SECOND fact, never folded into `has_disagreement`: two coders'
+   * ratings on some scaled code differ by more than one declared step. Codes
+   * can agree while ratings do not, and the row says which.
+   */
+  has_rating_disagreement?: boolean
+  /**
+   * #35 — a THIRD fact: some coder's own two copies disagreed at a merge and
+   * the coder has not re-rated since. In the review set until adjudicated.
+   */
+  has_merge_conflict?: boolean
 }
 
 export interface ReconciliationResponse {
@@ -541,6 +590,57 @@ export interface IrrCodeResult {
    * κ = 1 "almost perfect" was the defect.
    */
   undefined_reason: string | null
+  /**
+   * #43 — each coefficient's own interval, or null when the coefficient itself
+   * is undefined (then `undefined_reason` above explains the blank).
+   *
+   * ⚠️ Two objects, not one shared `ci_method`: κ's interval is analytic and
+   * α's is a bootstrap over units, so a single method field would have to lie
+   * about one of them.
+   */
+  kappa_ci: ReliabilityInterval | null
+  alpha_ci: ReliabilityInterval | null
+  /**
+   * #35 — how α scored a difference (`lib/reliability-basis.ts::AlphaMetric`).
+   * `nominal` here; the rating rows below are `interval`. Absent on older
+   * payloads, and the client says nothing rather than guessing.
+   */
+  alpha_metric?: string | null
+}
+
+/** The declared instrument a rating row was scored on (mirrors `MagnitudeScale`). */
+export interface IrrMagnitudeScale {
+  min: number
+  max: number
+  step: number
+  anchors: { value: number; label: string }[]
+}
+
+/**
+ * Rating agreement for ONE code that declares a scale (#35).
+ *
+ * Never pooled into a headline — each code is its own instrument with its own
+ * range, so there is no "overall rating α".
+ */
+export interface IrrMagnitudeResult {
+  code_id: number
+  code_name: string
+  scale: IrrMagnitudeScale
+  /** Units two or more coders both applied AND rated — the α basis. */
+  n_units: number
+  /** Applications of this code in scope by roster coders, rated or not. */
+  n_applications: number
+  /** …of which carry a rating. The coverage a coefficient alone would hide. */
+  n_rated: number
+  /** Mean |a − b| over coder pairs on shared units, in the scale's own units. */
+  mean_abs_difference: number | null
+  krippendorff_alpha: number | null
+  alpha_interpretation: string | null
+  /** `interval`, by the declaration (`lib/reliability-basis.ts`). */
+  alpha_metric: string
+  /** `insufficient_n` · `no_variance` · null. */
+  undefined_reason: string | null
+  alpha_ci: ReliabilityInterval | null
 }
 
 export interface IrrThresholds {
@@ -569,7 +669,18 @@ export interface IrrResponse {
   per_code: IrrCodeResult[]
   overall_alpha: number | null
   overall_alpha_interpretation: string | null
+  /** #43 — a CLUSTER bootstrap over units, not over the pooled per-code rows. */
+  overall_alpha_ci: ReliabilityInterval | null
   interpretation_thresholds: IrrThresholds
+  /**
+   * #35 — the stated basis: every α on this payload is over CODERS
+   * (`lib/reliability-basis.ts::ReliabilityFacet`). Optional so a mocked or
+   * older payload still type-checks; the client renders nothing for an absent
+   * facet rather than inventing one.
+   */
+  reliability_facet?: string | null
+  /** #35 — rating agreement per scaled code; empty when none declares a scale. */
+  magnitude_per_code?: IrrMagnitudeResult[]
 }
 
 export interface IrrParams {

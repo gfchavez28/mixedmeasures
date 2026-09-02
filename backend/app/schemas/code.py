@@ -18,6 +18,36 @@ class CodeUpdate(BaseModel):
     category_id: int | None = Field(None)
 
 
+class MagnitudeAnchor(BaseModel):
+    """One labelled point on a rating scale ("3 · intense")."""
+    value: float
+    label: str = Field(..., min_length=1, max_length=80)
+
+
+class MagnitudeScale(BaseModel):
+    """A code's declared rating instrument (#35).
+
+    Rides every code payload so a client can render the rating control and
+    position a value within its own range WITHOUT a second request — the chip's
+    normalized track is meaningless without `min`/`max`, and a client that has to
+    fetch them separately will render an un-normalized bar in the gap.
+    """
+    min: float
+    max: float
+    step: float = 1.0
+    anchors: list[MagnitudeAnchor] = []
+
+
+class MagnitudeScaleUpdate(BaseModel):
+    """Declare or clear a code's rating scale.
+
+    ⚠️ `scale: null` CLEARS. That is a real instruction and must not be confused
+    with "field omitted" — the endpoint requires the key, so an absent body cannot
+    silently wipe a declaration.
+    """
+    scale: MagnitudeScale | None = None
+
+
 class CodeResponse(BaseModel):
     id: int
     project_id: int
@@ -34,6 +64,10 @@ class CodeResponse(BaseModel):
     category_name: str | None = None
     category_color: str | None = None
     category_order: int | None = None
+    # #35 — the declared instrument, or None when this code carries no scale.
+    # `None` can only mean "no scale declared", never "this endpoint did not
+    # look": it is computed in `code_to_response`, the single builder.
+    magnitude_scale: MagnitudeScale | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

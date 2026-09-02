@@ -43,3 +43,14 @@ class AppliedCodeDetail(BaseModel):
     user_id: int | None = None
     attribution: str | None = None
     is_universal: bool = False
+    # #35 — this coder's rating on the code's declared scale, or None for UNRATED.
+    #
+    # Rides the detail rather than a parallel array for the same reason `user_id`
+    # does: a detail IS the (code, coder) pair, which is exactly the grain a rating
+    # lives at. ⚠️ None means unrated and NEVER zero — a real 0 is a legal rating on
+    # any scale whose range includes it, so no consumer may coerce one to the other.
+    magnitude: float | None = None
+    # #35 — the rating a MERGED copy of this same application carried when it
+    # differed from ours (the merge kept ours, flagged the difference). None =
+    # no unresolved conflict. The coder clears it by rating again.
+    magnitude_conflict: float | None = None

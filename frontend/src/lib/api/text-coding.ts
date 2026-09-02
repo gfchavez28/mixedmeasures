@@ -4,6 +4,13 @@ import type { AppliedCodeDetail } from './segments'
 import type { BulkTextCodeResponse } from '../bulk-code-result'
 
 // Text Coding types
+/** #844 — the page size the texts endpoint serves when a caller doesn't say.
+ *
+ * Mirrors `routers/text_coding.py::TEXT_PAGE_SIZE`. Kept here so a caller can
+ * size its own "load more" step without hard-coding a number the server owns.
+ */
+export const TEXT_PAGE_SIZE = 200
+
 export interface TextQueryParams {
   column_ids: string
   dataset_ids?: string
@@ -13,6 +20,9 @@ export interface TextQueryParams {
   sort_by?: string
   random_seed?: number
   quoted_only?: boolean
+  /** #844: one page. Omit and the server serves `TEXT_PAGE_SIZE`. */
+  limit?: number
+  offset?: number
 }
 
 export interface TextCodingResponse {
@@ -36,6 +46,11 @@ export interface TextCodingResponse {
   note_count: number
 }
 
+/**
+ * ⚠️ #844: `texts` is ONE PAGE; every count beside it describes the whole
+ * selection the filters define. `texts.length` is never a record count — the
+ * #800 rule, which this endpoint now follows too.
+ */
 export interface TextCodingListResponse {
   texts: TextCodingResponse[]
   total_texts: number
@@ -43,6 +58,8 @@ export interface TextCodingListResponse {
   coded_texts: number
   total_rows: number
   coded_rows: number
+  /** Whether a further page exists after this one. */
+  has_more: boolean
 }
 
 export interface TextCodingRecord {

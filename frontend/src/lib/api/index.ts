@@ -2,7 +2,7 @@
 export { default as api } from './client'
 export { default } from './client'
 export { setCsrfToken, ApiError } from './client'
-export { extractApiError } from './error-utils'
+export { extractApiError, serverDetailMessage } from './error-utils'
 
 // Downloads — the canonical blob→anchor helpers. Exported here because they
 // were not reachable from the barrel, and six components hand-rolled their own
@@ -303,17 +303,20 @@ export type {
   BinnedKappaResponse,
   BinnedKappaCodeResult,
   ReconciliationResponse,
+  ReconciliationRatingConsensus,
   ReconciliationParams,
   RecomputeConsensusResponse,
   IrrCoderInfo,
   IrrCodeResult,
+  IrrMagnitudeScale,
+  IrrMagnitudeResult,
   IrrThresholds,
   IrrResponse,
   IrrParams,
 } from './code-analysis'
 
 // Text Coding
-export { textCodingApi } from './text-coding'
+export { textCodingApi, TEXT_PAGE_SIZE } from './text-coding'
 export type {
   TextQueryParams,
   TextCodingResponse,

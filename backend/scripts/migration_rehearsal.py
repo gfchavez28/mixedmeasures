@@ -88,28 +88,43 @@ def _cols(conn, table: str) -> set[str]:
 # correctness. A DATA-REPAIR migration inverts that — the rows it is supposed to
 # rewrite MUST move, and a corpus on which it no-ops proves nothing while exiting 0.
 #
-# ── v1.4.0 (2026-08-27) — STRUCTURAL, and the two v1.3.1 fixtures CHANGE SIDES ──
+# ── v1.5.0 (2026-09-02) — PURELY ADDITIVE, and v1.4.0's fixture CHANGES SIDES ──
 #
-# This cut carries exactly one migration, `d7f3a91c8b24` (Decision B provenance),
-# and it is a rebuild: `batch_alter_table('dataset_columns', recreate='always')`
-# to add `derived_from_column_id` + `derived_via`. So invariance IS correctness
-# here, and the interesting table is `dataset_columns` — whose children
-# (`dataset_values`, `recode_definitions`) are the cascade canaries, because
-# SQLite's DROP+RENAME would take them with it if `PRAGMA foreign_keys` were ever
-# left ON.
+# `--from-revision d7f3a91c8b24` (v1.4.0's head). THREE migrations, and every one
+# of them is `op.add_column` of a NULLABLE column — no FK, no default, no
+# server_default, no backfill:
 #
-# 🔴 The v1.3.1 repairs (`a1b2c3d4e5f7` astral offsets, `b8e4c2a70d19` note
-# numbering) now sit AT OR BELOW `--from-revision`, so they DO NOT RUN in this
-# rehearsal. Their fixtures are kept, but seeded at their POST-repair values — the
-# state a real v1.3.2 database is already in — and asserted as rows this release
-# must NOT touch. Deleting them would throw away coverage of the shapes a rebuild
-# damages; leaving them on the "must change" side would fail for the wrong reason,
-# which is what this script did as written.
+#   c9e1f4a2b7d3  recode_definitions.ranges                (#823d range bands)
+#   e5c7a91d3f28  codes.magnitude_{min,max,step,labels}    (#35 the declared scale)
+#                 code_applications.magnitude              (#35 the rating)
+#   a9c3e7b1d5f2  code_applications.magnitude_conflict     (#35 the merge flag)
 #
-# What v1.4.0 must CHANGE is the schema, so the "must change" assertions below are
-# structural — plus one BEHAVIOURAL check. Reflecting the FK back only re-reads
-# what the migration wrote; deleting a source column and watching the dependent
-# go NULL is the assertion that the declared `ON DELETE SET NULL` is real.
+# 🔴 **THERE IS NO TABLE REBUILD THIS RELEASE, WHICH CHANGES WHAT THIS SCRIPT IS
+# FOR.** v1.3.0's danger was DROP+RENAME cascading into children; v1.4.0's was the
+# same on `dataset_columns`. `add_column` does none of that, so the parentage and
+# cascade checks below are cheap insurance this time rather than the point.
+#
+# **The point this time is the NULLS.** `magnitude` is nullable precisely because
+# NULL means UNRATED and must never be confused with a rating of ZERO (rules
+# `magnitude-coding.md` §2 — MAXQDA default-stamps 0 and thereby destroys the
+# distinction; on a −1…+1 scale zero is a real, meaningful neutral). A migration
+# that acquired a `server_default` of 0, or a backfill "to tidy up", would
+# silently fabricate a rating on every application that already exists — and
+# **no count, no parentage check and no integrity_check could see it.** That is
+# what the positive assertions below are for: the columns must arrive, and they
+# must arrive EMPTY on pre-existing rows.
+#
+# 🔴 v1.4.0's own fixture CHANGES SIDES, exactly as the v1.3.1 repairs did at the
+# last cut. `d7f3a91c8b24` IS `--from-revision` now, so it does NOT run here:
+# `derived_from_column_id`, `derived_via` and their index are already present
+# before this release's migrations start. **Asserting they exist would pass
+# VACUOUSLY** — the inert-gate failure this block warns about above — so they move
+# to the "must NOT touch" side. The ON DELETE SET NULL behavioural check is
+# retained as coverage of the built DB, not as a claim about this release.
+#
+# ⚠️ The v1.3.1 repairs (`a1b2c3d4e5f7` astral offsets, `b8e4c2a70d19` note
+# numbering) remain seeded at their POST-repair values and asserted invariant,
+# for the same reason they were at the last cut.
 
 # The v1.3.1 fixtures, now seeded post-repair and asserted INVARIANT.
 #
@@ -129,12 +144,24 @@ NOTE_SEQ_INVARIANT = [
     (4, 1),   # observation clip — its own parent, so numbering restarts
 ]
 
-# `dataset_columns` is the table this release REBUILDS. Ids are deliberately
-# NON-CONTIGUOUS: a rebuild that renumbers instead of preserving ids breaks every
-# child FK, and contiguous ids would let that pass.
+# `dataset_columns` ids are deliberately NON-CONTIGUOUS: a rebuild that renumbers
+# instead of preserving ids breaks every child FK, and contiguous ids would let
+# that pass. ⚠️ v1.5.0 rebuilds NOTHING — these are now invariance fixtures.
 DC_SOURCE, DC_TARGET, DC_EQUIV, DC_PLAIN = 41, 47, 53, 61
-NEW_COLUMNS = ("derived_from_column_id", "derived_via")
-NEW_INDEX = "ix_dataset_columns_derived_from_column_id"
+
+# v1.4.0's additions. At `--from-revision d7f3a91c8b24` they are ALREADY PRESENT,
+# so they are asserted UNCHANGED, never as evidence that anything ran.
+V140_COLUMNS = ("derived_from_column_id", "derived_via")
+V140_INDEX = "ix_dataset_columns_derived_from_column_id"
+
+# ── What v1.5.0 must ADD, per table. Every one nullable and EMPTY on existing
+# rows; see the NULLS paragraph in the block above for why "empty" is the
+# assertion that matters and not merely the column's presence.
+NEW_COLUMNS_BY_TABLE = {
+    "recode_definitions": ("ranges",),
+    "codes": ("magnitude_min", "magnitude_max", "magnitude_step", "magnitude_labels"),
+    "code_applications": ("magnitude", "magnitude_conflict"),
+}
 
 
 def seed(db_path: Path) -> dict:
@@ -376,32 +403,51 @@ def verify(db_path: Path, before: dict) -> list[str]:
          "SELECT id, column_id, name, is_primary FROM recode_definitions ORDER BY id",
          "recode_defs")
 
-    # ── What this release must have CHANGED: the schema ───────────────────
+    # ── What v1.5.0 must have CHANGED: three additive, EMPTY columns ──────
     #
-    # v1.4.0 carries no data repair, so "nothing moved" above IS correctness. What
-    # must be different is the shape of the rebuilt table. Assert it positively —
-    # a rebuild that silently no-opped would pass every invariance check above.
-    dc_cols = _cols(conn, "dataset_columns")
-    for c in NEW_COLUMNS:
-        if c not in dc_cols:
-            fails.append(f"d7f3a91c8b24: column `{c}` absent after the upgrade")
-    if all(c in dc_cols for c in NEW_COLUMNS):
-        nonnull = x("SELECT COUNT(*) FROM dataset_columns WHERE derived_from_column_id "
-                    "IS NOT NULL OR derived_via IS NOT NULL").fetchone()[0]
-        if nonnull:
-            fails.append(f"d7f3a91c8b24: {nonnull} pre-existing column(s) came out of the "
-                         "migration with provenance set — it must add the fields EMPTY")
+    # No data repair and no rebuild, so "nothing moved" above IS correctness for
+    # the rows. What must be different is the SHAPE — and, more importantly, what
+    # must NOT have arrived with it is a value. See the NULLS paragraph at the top
+    # of this file: a `server_default` of 0 or a helpful backfill on `magnitude`
+    # would fabricate a rating on every pre-existing application, and no count,
+    # parentage or integrity check in this script could see it.
+    for table, cols in NEW_COLUMNS_BY_TABLE.items():
+        have_cols = _cols(conn, table)
+        missing = [c for c in cols if c not in have_cols]
+        if missing:
+            fails.append(f"v1.5.0: {table} is missing {missing} after the upgrade")
+            continue
+        rows = x(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        if not rows:
+            fails.append(f"v1.5.0: {table} has NO rows, so 'the new columns are empty' "
+                         "proves nothing — seed one before trusting this run")
+            continue
+        where = " OR ".join(f"{c} IS NOT NULL" for c in cols)
+        dirty = x(f"SELECT COUNT(*) FROM {table} WHERE {where}").fetchone()[0]
+        if dirty:
+            fails.append(
+                f"v1.5.0: {dirty} pre-existing {table} row(s) came out of the migration "
+                f"with one of {list(cols)} SET. These columns must arrive EMPTY — for "
+                "`magnitude`, NULL means UNRATED and a default of 0 would fabricate a "
+                "rating on every application that already exists (magnitude-coding.md §2)")
 
+    # v1.4.0's provenance fields are BELOW --from-revision now: present before this
+    # release starts, so they are checked as INVARIANT, never as evidence anything ran.
+    dc_cols = _cols(conn, "dataset_columns")
+    for c in V140_COLUMNS:
+        if c not in dc_cols:
+            fails.append(f"v1.4.0 column `{c}` vanished — this release must not touch it")
     idx_now = sorted(r[0] for r in x(
         "SELECT name FROM sqlite_master WHERE type='index' "
         "AND tbl_name='dataset_columns' AND name NOT LIKE 'sqlite_%'"))
-    if NEW_INDEX not in idx_now:
-        fails.append(f"d7f3a91c8b24: index `{NEW_INDEX}` absent after the upgrade")
-    # The rebuild REPLAYS reflected indexes, including the partial
-    # ix_equivalence_unique_column_per_dataset. Losing one is silent and permanent.
+    if V140_INDEX not in idx_now:
+        fails.append(f"v1.4.0 index `{V140_INDEX}` vanished — this release must not touch it")
+    # Kept from the v1.4.0 cut: nothing here rebuilds, so losing an index would mean
+    # something rebuilt that should not have. Cheap, and it fails loudly if it does.
     lost = set(before["dc_indexes"]) - set(idx_now)
     if lost:
-        fails.append(f"indexes lost in the dataset_columns rebuild: {sorted(lost)}")
+        fails.append(f"indexes lost on dataset_columns — nothing in v1.5.0 rebuilds "
+                     f"that table, so this means something did: {sorted(lost)}")
 
     # ── BEHAVIOURAL: the FK actually does what it declares ────────────────
     #
@@ -409,8 +455,12 @@ def verify(db_path: Path, before: dict) -> list[str]:
     # source column and watching the dependant degrade is the assertion that
     # `ON DELETE SET NULL` is live — and it is the property the migration's own
     # docstring rests on ("degrades the trail rather than leaving a dangling id").
+    # ⚠️ RETAINED at the v1.5.0 cut as coverage of the BUILT DB, not as a claim
+    # about this release: `d7f3a91c8b24` is `--from-revision` now, so the FK it
+    # declares was created before these migrations ran. It still proves the
+    # constraint survives an upgrade, which is worth keeping and costs nothing.
     # ⚠️ MUTATES the DB (the delete cascades), so it must run LAST.
-    if all(c in dc_cols for c in NEW_COLUMNS) and \
+    if all(c in dc_cols for c in V140_COLUMNS) and \
             x("SELECT 1 FROM dataset_columns WHERE id=?", (DC_SOURCE,)).fetchone():
         conn.execute("PRAGMA foreign_keys=ON")
         x("UPDATE dataset_columns SET derived_from_column_id=?, derived_via=? WHERE id=?",

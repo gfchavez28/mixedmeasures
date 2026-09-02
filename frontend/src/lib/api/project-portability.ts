@@ -123,6 +123,12 @@ export interface MergeReport {
   codes_collapsed: number
   codes_linked: number
   codes_created: number
+  /**
+   * #35 — matched applications whose copy carried a DIFFERENT rating. The
+   * target's rating was kept and the difference flagged for reconciliation.
+   * Optional: a report from a server that predates the field simply omits it.
+   */
+  magnitude_conflicts?: number
 }
 
 /** Track J · J3-2c: structured 409 body when a merge is refused for divergence. */

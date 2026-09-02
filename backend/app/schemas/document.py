@@ -40,6 +40,13 @@ class SegmentCodeResponse(BaseModel):
     color: str | None = None
     is_universal: bool = False  # lets the coding workbench exclude universal-only segments from "coded" (#398 / invariant J-A)
     user_id: int | None = None  # coder who applied this code (Track J · J1)
+    # #35 / #868 (a) — this coder's rating and the merge disagreement flag. The
+    # document router is the FOURTH builder of a per-application code list, and it
+    # carried neither field while the workbench fabricated details from it — so
+    # every scaled-code chip on a document announced "not rated" over a rating it
+    # could not see. null = UNRATED, never 0 (the falsy-zero class).
+    magnitude: float | None = None
+    magnitude_conflict: float | None = None
 
 
 class ExcerptInfo(BaseModel):

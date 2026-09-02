@@ -6,11 +6,12 @@ import io
 import csv
 from datetime import datetime, timezone
 from collections import defaultdict
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, case
 
 from ..database import get_db
 from ..models.user import User
@@ -124,8 +125,53 @@ def _is_empty(value_text: str | None, treat_as_empty: list[str]) -> bool:
 
 # ── 1. GET /texts ───────────────────────────────────────────────────────────
 
+# Paging (#844). Sized from the MEASURED cost: unpaginated, this endpoint
+# returned **37.8 MB of JSON for 75,699 texts** on ONE open-text column (~500
+# bytes per text) at ~239 MB transient against a <256 MB resident budget — on
+# the ENTRY SCREEN of the Text Coding workspace, not an export. 200 texts is
+# ~100 KB. `ByTextTable` is virtualised, so the page bounds the PAYLOAD; it was
+# never a render bound.
+#
+# ⚠️ Raising MAX_TEXT_PAGE_SIZE re-opens the payload problem in proportion. It
+# bounds what a caller may ASK for — and it is ALSO what keeps the three
+# per-page join-backs below under SQLite's 250,000 bind-parameter ceiling
+# (#842), which is why it is a hard `le=` and not a suggestion.
+TEXT_PAGE_SIZE = 200
+MAX_TEXT_PAGE_SIZE = 1_000
+
+
+def _text_order_clauses(sort_by: str):
+    """THE ordering for a page of texts — with a DETERMINISTIC final tiebreak.
+
+    ⚠️ **The tiebreak is load-bearing, and it is new with paging.** Before #844
+    the whole result set was materialised and sorted in Python, so rows that
+    compared equal fell back to whatever order SQLite happened to return and
+    nothing could observe it. Under LIMIT/OFFSET an unstable order is a
+    CORRECTNESS bug: two equal-comparing rows can both land on page 1 and page
+    2, or on neither, so a researcher paging through responses silently sees
+    one twice and never sees another. And ties are the COMMON case here, not an
+    edge case — `column_sequence_order` ties on every row of the same column.
+
+    `coalesce(row_identifier, '')` mirrors the Python ``t.row_identifier or ""``
+    this replaces: a NULL identifier sorts as the empty string, not last.
+    """
+    ident = func.coalesce(DatasetRow.row_identifier, "")
+    seq = DatasetColumn.sequence_order
+    if sort_by == "record_asc":
+        keys = (ident.asc(), seq.asc())
+    elif sort_by == "record_desc":
+        keys = (ident.desc(), seq.desc())
+    elif sort_by == "column_desc":
+        keys = (seq.desc(), ident.desc())
+    else:  # column_asc (default)
+        keys = (seq.asc(), ident.asc())
+    # ASC in every direction: this key exists to make the page boundary
+    # reproducible, not to be part of the researcher's chosen sort.
+    return (*keys, DatasetValue.id.asc())
+
+
 @router.get("/texts", response_model=TextsListResponse)
-async def list_texts(
+def list_texts(
     project_id: int,
     column_ids: str = Query(..., description="Comma-separated DatasetColumn IDs"),
     dataset_ids: str | None = Query(None, description="Comma-separated Dataset IDs to filter"),
@@ -135,10 +181,25 @@ async def list_texts(
     sort_by: str = Query("column_asc"),
     random_seed: int | None = Query(None),
     quoted_only: bool = Query(False),
+    limit: Annotated[int, Query(ge=1, le=MAX_TEXT_PAGE_SIZE)] = TEXT_PAGE_SIZE,
+    offset: Annotated[int, Query(ge=0)] = 0,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    project = _get_project_or_404(db, project_id, user.id)
+    """One PAGE of codeable texts, plus whole-selection totals (#844).
+
+    ⚠️ **`texts` is a PAGE; the five totals describe the SELECTION** — #800's
+    rule, and the reason this endpoint reports them at all. A `texts.length`
+    record count is a bug.
+
+    ⚠️ **Declared `def`, not `async def` (#837).** The body contains no `await`,
+    so as an `async def` every query ran ON the event loop — measured at 2.2–3.6
+    s for one column and 6.8 s for three, during which the server answered
+    nothing, including Electron's `/health` probe. Paging makes that fast, but
+    the aggregate pass below still scans the selection, so the endpoint stays
+    off the loop rather than relying on it being small.
+    """
+    _get_project_or_404(db, project_id, user.id)
     parsed_column_ids = parse_int_list(column_ids)
     if not parsed_column_ids:
         raise HTTPException(status_code=400, detail="column_ids is required")
@@ -147,155 +208,233 @@ async def list_texts(
     config = _get_config(db, project_id)
     treat_as_empty = _get_treat_as_empty(config)
 
-    # Base query: DatasetValue joined to column/dataset/row/participant
-    query = (
-        db.query(
-            DatasetValue.id,
-            DatasetValue.value_text,
-            DatasetValue.row_id,
-            DatasetColumn.id.label("col_id"),
-            DatasetColumn.column_name,
-            DatasetColumn.column_text,
-            DatasetColumn.sequence_order,
-            Dataset.id.label("ds_id"),
-            Dataset.name.label("ds_name"),
-            DatasetRow.id.label("row_id"),
-            DatasetRow.row_identifier,
-            DatasetRow.participant_id,
-            Participant.display_name.label("participant_display_name"),
-            Participant.identifier.label("participant_identifier_name"),
-        )
-        .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
-        .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
-        .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-        .outerjoin(Participant, DatasetRow.participant_id == Participant.id)
-        .filter(
-            Dataset.project_id == project_id,
-            DatasetColumn.column_type.in_(TEXT_TYPES),
-            DatasetColumn.id.in_(parsed_column_ids),
-        )
-    )
-
-    if parsed_dataset_ids:
-        query = query.filter(Dataset.id.in_(parsed_dataset_ids))
-
-    if record_id:
-        query = query.filter(DatasetRow.id == record_id)
-
-    if search:
-        escaped_search = search.replace("%", r"\%").replace("_", r"\_")
-        query = query.filter(DatasetValue.value_text.ilike(f"%{escaped_search}%", escape="\\"))
-
-    rows = query.all()
-
-    # #842/#844 — the three follow-up queries below all scope to "the values THIS
-    # request selected". That used to be a Python id list handed to `.in_()`, which
-    # renders ONE BIND PARAMETER PER ELEMENT: SQLite's SQLITE_MAX_VARIABLE_NUMBER is
-    # exactly 250,000, so selecting four open-text questions on a 75,699-record survey
-    # (302,796 values) raised a raw OperationalError and took the whole screen down.
-    # Measured 2026-08-26: 1 column OK, 3 columns 6.76 s / 699 MB, 4 columns CRASH.
-    #
-    # `value_scope` is THE SAME query with its selected columns swapped for the id, so
-    # the predicate cannot drift from the one that produced `rows` — it is DERIVED,
-    # not restated, which matters because two of this endpoint's filters are optional
-    # (`dataset_ids`, `record_id`, `search`). It renders as a SQL subquery: zero bind
-    # parameters, no ceiling. Never rebuild this as a list comprehension over `rows`.
-    #
-    # ⚠️ This removes the CRASH, not the COST — `rows` is still materialised and the
-    # payload is still whole-population. Pagination is #844's v1.5.0 half; see
-    # `docs/release-1.4.0-checklist.md` §4d.
-    value_scope = query.with_entities(DatasetValue.id).scalar_subquery()
-
-    # Batch-fetch quoted excerpts scoped to result values
-    quoted_excerpts = dict(
-        db.query(Excerpt.dataset_value_id, Excerpt.id)
+    # ── The selection, expressed ONCE ───────────────────────────────────────
+    # Both of these are correlated EXISTS clauses rather than joins, and that is
+    # deliberate: joining `CodeApplication` multiplies a value's row by its
+    # number of applications, which would silently inflate `total_texts` and
+    # `non_empty_texts` in the aggregate pass below. An EXISTS cannot.
+    quoted_exists = (
+        db.query(Excerpt.id)
         .filter(
             Excerpt.project_id == project_id,
-            Excerpt.dataset_value_id.in_(value_scope),
+            Excerpt.dataset_value_id == DatasetValue.id,
         )
-        .all()
+        .exists()
     )
-
-    code_apps = {}
-    code_details: dict[int, list[AppliedCodeDetail]] = {}
-    # Join Code for is_universal so the enriched detail can drive the
-    # coder-scoped isSegmentCoded predicate (Track J · J1). code_id FK is
-    # non-null so the inner join drops nothing the bare-ID list had.
-    ca_query = (
-        db.query(
-            CodeApplication.dataset_value_id,
-            CodeApplication.code_id,
-            CodeApplication.user_id,
-            CodeApplication.attribution,
-            Code.is_universal,
-        )
+    # "Coded" = ≥1 NON-universal, non-consensus application — invariant J-A
+    # (#488), the same predicate `text_columns` and the coding gauge use. A bare
+    # any-application check counts universal-only values and makes this endpoint
+    # disagree with the gauge on the same screen.
+    coded_exists = (
+        db.query(CodeApplication.id)
         .join(Code, Code.id == CodeApplication.code_id)
         .filter(
-            CodeApplication.dataset_value_id.in_(value_scope),  # #844 join-back
-            CodeApplication.dataset_value_id.isnot(None),
-            # J2-B / P-1: workbench shows the human/working layer only; never
-            # leak derived consensus rows into the client coded predicate.
+            CodeApplication.dataset_value_id == DatasetValue.id,
+            Code.is_universal == False,
+            # J2-B / P-1: the workbench shows the human/working layer only;
+            # never let derived consensus rows inflate a coded count.
             non_consensus_filter(),
         )
-        .all()
+        .exists()
     )
-    for dv_id, code_id, ca_user_id, attribution, is_universal in ca_query:
-        code_apps.setdefault(dv_id, []).append(code_id)
-        code_details.setdefault(dv_id, []).append(
-            AppliedCodeDetail(
-                code_id=code_id,
-                user_id=ca_user_id,
-                attribution=attribution,
-                is_universal=bool(is_universal),
+
+    filters = [
+        Dataset.project_id == project_id,
+        DatasetColumn.column_type.in_(TEXT_TYPES),
+        DatasetColumn.id.in_(parsed_column_ids),
+    ]
+    if parsed_dataset_ids:
+        filters.append(Dataset.id.in_(parsed_dataset_ids))
+    if record_id:
+        filters.append(DatasetRow.id == record_id)
+    if search:
+        escaped_search = search.replace("%", r"\%").replace("_", r"\_")
+        filters.append(DatasetValue.value_text.ilike(f"%{escaped_search}%", escape="\\"))
+    if hide_empty:
+        # #840's shared SQL expression of `is_empty_text` — the SAME predicate
+        # the Python `_is_empty` applied here before #844, pinned to it by
+        # `TestSubstantiveTextClauseAgreement`. Moving it into SQL is what lets
+        # a page and the totals be computed without materialising the
+        # population; a third hand-rolled `!= val` chain here is exactly what
+        # #840 removed.
+        filters.append(substantive_text_clause(treat_as_empty))
+    if quoted_only:
+        filters.append(quoted_exists)
+
+    def scoped(query):
+        """Apply the joins + every active filter to a query over DatasetValue.
+
+        The `Participant` outer join rides along even for the aggregate pass:
+        it is an equality on Participant's PRIMARY KEY, so it can never
+        multiply a row, and keeping ONE scoping helper is what stops the page
+        and the totals from being computed over two different sets.
+        """
+        return (
+            query
+            .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
+            .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+            .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+            .outerjoin(Participant, DatasetRow.participant_id == Participant.id)
+            .filter(*filters)
+        )
+
+    # ── The five totals: ONE aggregate pass over the whole selection ────────
+    # ⚠️ Before #844 these were accumulated while scanning every row, which IS
+    # what made the endpoint unbounded — and they were quietly computed over
+    # THREE different sets: `non_empty_texts` counted before the `quoted_only`
+    # filter, the three id-sets after it, and `total_texts` was just
+    # `len(texts)`. All five now describe the same filtered selection.
+    totals = scoped(
+        db.query(
+            func.count(DatasetValue.id),
+            func.sum(case((substantive_text_clause(treat_as_empty), 1), else_=0)),
+            func.count(func.distinct(DatasetRow.id)),
+            func.sum(case((coded_exists, 1), else_=0)),
+            func.count(func.distinct(case((coded_exists, DatasetRow.id)))),
+        )
+    ).one()
+    # SUM over zero rows is NULL, not 0.
+    total_texts = totals[0] or 0
+    non_empty_texts = totals[1] or 0
+    total_rows = totals[2] or 0
+    coded_texts = totals[3] or 0
+    coded_rows = totals[4] or 0
+
+    # ── The page ────────────────────────────────────────────────────────────
+    selected = (
+        DatasetValue.id,
+        DatasetValue.value_text,
+        DatasetValue.row_id,
+        DatasetColumn.id.label("col_id"),
+        DatasetColumn.column_name,
+        DatasetColumn.column_text,
+        DatasetColumn.sequence_order,
+        Dataset.id.label("ds_id"),
+        Dataset.name.label("ds_name"),
+        DatasetRow.id.label("row_id"),
+        DatasetRow.row_identifier,
+        DatasetRow.participant_id,
+        Participant.display_name.label("participant_display_name"),
+        Participant.identifier.label("participant_identifier_name"),
+    )
+
+    if random_seed is not None:
+        # Deterministic shuffle: hash (seed, id) so the same seed always
+        # reproduces the same order across sessions/platforms. A multiplicative
+        # key (id * seed % p) is NOT a shuffle here — products never reach the
+        # modulus for realistic ids, leaving the key monotone in id (#486).
+        #
+        # ⚠️ It MUST stay blake2b, and that is what forces the id-list shape
+        # below: `random_seed` is PERSISTED in `TextCodingConfig`, so changing
+        # the function would silently reorder a review order a researcher has
+        # already worked through. It is not expressible in SQLite, so the IDS
+        # alone are ordered in Python and the page is then fetched by id —
+        # 75,699 ints is ~600 KB and no text, against the 37.8 MB the old
+        # whole-population fetch cost.
+        all_ids = [r[0] for r in scoped(db.query(DatasetValue.id)).all()]
+        all_ids.sort(key=lambda i: (
+            hashlib.blake2b(f"{random_seed}:{i}".encode(), digest_size=8).digest(), i
+        ))
+        page_ids = all_ids[offset:offset + limit]
+        rows = (
+            scoped(db.query(*selected)).filter(DatasetValue.id.in_(page_ids)).all()
+            if page_ids else []
+        )
+        position = {dv_id: pos for pos, dv_id in enumerate(page_ids)}
+        rows.sort(key=lambda r: position[r[0]])
+    else:
+        rows = (
+            scoped(db.query(*selected))
+            .order_by(*_text_order_clauses(sort_by))
+            .limit(limit)
+            .offset(offset)
+            .all()
+        )
+
+    # ── Per-page enrichment ─────────────────────────────────────────────────
+    # #842 history: these three join-backs used to scope to the whole selection.
+    # A Python id list handed to `.in_()` renders ONE BIND PARAMETER PER ELEMENT
+    # and SQLite's SQLITE_MAX_VARIABLE_NUMBER is exactly 250,000, so four
+    # open-text questions on a 75,699-record survey (302,796 values) raised a raw
+    # OperationalError; the fix was a derived `scalar_subquery`.
+    #
+    # ⚠️ **That subquery is deliberately GONE, and the reason it is now safe to
+    # bind ids is the `le=MAX_TEXT_PAGE_SIZE` cap** — this list is at most 1,000
+    # elements, three orders of magnitude under the ceiling. Keeping the
+    # subquery would re-run the whole filtered scan three more times per
+    # request. **Do not remove the cap and leave these as-is.**
+    page_value_ids = [r[0] for r in rows]
+    quoted_excerpts: dict[int, int] = {}
+    code_apps: dict[int, list[int]] = {}
+    code_details: dict[int, list[AppliedCodeDetail]] = {}
+    note_counts: dict[int, int] = {}
+
+    if page_value_ids:
+        quoted_excerpts = dict(
+            db.query(Excerpt.dataset_value_id, Excerpt.id)
+            .filter(
+                Excerpt.project_id == project_id,
+                Excerpt.dataset_value_id.in_(page_value_ids),
             )
+            .all()
         )
 
-    # Get note counts
-    nc_query = (
-        db.query(Note.dataset_value_id, func.count(Note.id))
-        .filter(
-            Note.dataset_value_id.in_(value_scope),  # #844 join-back
-            Note.is_archived == False,
+        # Join Code for is_universal so the enriched detail can drive the
+        # coder-scoped isSegmentCoded predicate (Track J · J1). code_id FK is
+        # non-null so the inner join drops nothing the bare-ID list had.
+        ca_query = (
+            db.query(
+                CodeApplication.dataset_value_id,
+                CodeApplication.code_id,
+                CodeApplication.user_id,
+                CodeApplication.attribution,
+                Code.is_universal,
+                # #35 — the rating rides the same projection rather than a second
+                # query: this endpoint is page-bounded (#800) and one more column
+                # costs nothing, while a lookup per detail would be an N+1.
+                CodeApplication.magnitude,
+                CodeApplication.magnitude_conflict,
+            )
+            .join(Code, Code.id == CodeApplication.code_id)
+            .filter(
+                CodeApplication.dataset_value_id.in_(page_value_ids),
+                CodeApplication.dataset_value_id.isnot(None),
+                non_consensus_filter(),
+            )
+            .all()
         )
-        .group_by(Note.dataset_value_id)
-        .all()
-    )
-    note_counts = {dv_id: cnt for dv_id, cnt in nc_query}
+        for dv_id, code_id, ca_user_id, attribution, is_universal, ca_magnitude, ca_magnitude_conflict in ca_query:
+            code_apps.setdefault(dv_id, []).append(code_id)
+            code_details.setdefault(dv_id, []).append(
+                AppliedCodeDetail(
+                    code_id=code_id,
+                    user_id=ca_user_id,
+                    attribution=attribution,
+                    is_universal=bool(is_universal),
+                    magnitude=ca_magnitude,
+                    magnitude_conflict=ca_magnitude_conflict,
+                )
+            )
 
-    # Apply in-memory filtering and build response
+        nc_query = (
+            db.query(Note.dataset_value_id, func.count(Note.id))
+            .filter(
+                Note.dataset_value_id.in_(page_value_ids),
+                Note.is_archived == False,
+            )
+            .group_by(Note.dataset_value_id)
+            .all()
+        )
+        note_counts = {dv_id: cnt for dv_id, cnt in nc_query}
+
     texts = []
-    coded_value_ids = set()
-    coded_record_ids = set()
-    non_empty_count = 0
-    all_record_ids = set()
-
     for r in rows:
         value_text = r.value_text
-        is_empty = _is_empty(value_text, treat_as_empty)
-
-        if hide_empty and is_empty:
-            continue
-
-        if not is_empty:
-            non_empty_count += 1
-
         dv_id = r[0]
         is_quoted = dv_id in quoted_excerpts
-
-        if quoted_only and not is_quoted:
-            continue
-
         applied_codes = code_apps.get(dv_id, [])
         nc = note_counts.get(dv_id, 0)
         word_count = len(value_text.split()) if value_text and value_text.strip() else 0
-
-        all_record_ids.add(r.row_id)
-        # #488: "coded" = ≥1 NON-universal application (invariant J-A) — the
-        # bare any-application check counted universal-only values, so these
-        # response fields disagreed with the coding-progress gauge.
-        if any(not d.is_universal for d in code_details.get(dv_id, [])):
-            coded_value_ids.add(dv_id)
-            coded_record_ids.add(r.row_id)
 
         texts.append(TextResponse(
             dataset_value_id=dv_id,
@@ -318,31 +457,18 @@ async def list_texts(
             note_count=nc,
         ))
 
-    # Sort
-    if random_seed is not None:
-        # Deterministic shuffle: hash (seed, id) so the same seed always reproduces
-        # the same order across sessions/platforms. A multiplicative key
-        # (id * seed % p) is NOT a shuffle here — products never reach the modulus
-        # for realistic ids, leaving the key monotone in id (#486).
-        texts.sort(key=lambda t: hashlib.blake2b(
-            f"{random_seed}:{t.dataset_value_id}".encode(), digest_size=8
-        ).digest())
-    elif sort_by == "record_asc":
-        texts.sort(key=lambda t: (t.row_identifier or "", t.column_sequence_order))
-    elif sort_by == "record_desc":
-        texts.sort(key=lambda t: (t.row_identifier or "", t.column_sequence_order), reverse=True)
-    elif sort_by == "column_desc":
-        texts.sort(key=lambda t: (t.column_sequence_order, t.row_identifier or ""), reverse=True)
-    else:  # column_asc (default)
-        texts.sort(key=lambda t: (t.column_sequence_order, t.row_identifier or ""))
-
+    # The ordering is the DATABASE's now (`_text_order_clauses`) or, for the
+    # seeded shuffle, the id-list order restored above — never a re-sort here,
+    # which could only ever reorder within the page and would contradict the
+    # boundary the page was cut on.
     return TextsListResponse(
         texts=texts,
-        total_texts=len(texts),
-        non_empty_texts=non_empty_count,
-        coded_texts=len(coded_value_ids),
-        total_rows=len(all_record_ids),
-        coded_rows=len(coded_record_ids),
+        total_texts=total_texts,
+        non_empty_texts=non_empty_texts,
+        coded_texts=coded_texts,
+        total_rows=total_rows,
+        coded_rows=coded_rows,
+        has_more=offset + len(texts) < total_texts,
     )
 
 

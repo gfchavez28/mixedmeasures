@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useParams, useSearchParams } from 'react-router'
-import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import {
   BookOpen, Shuffle, Eye, EyeOff, Quote, Search, Download, BarChart3, Undo2, Redo2,
   ChevronLeft, ChevronRight, Check, Pencil,
@@ -17,12 +17,14 @@ import {
 } from '@/components/ui/select'
 import {
   textCodingApi, codesApi, categoriesApi, excerptsApi, datasetsApi, extractApiError,
+  TEXT_PAGE_SIZE,
   type TextCodingViewConfig, type TextCodingColumn,
 } from '@/lib/api'
 import { invalidateTextEmptinessReaders } from '@/lib/text-coding-cache'
 import { useHistory } from '@/hooks/useHistory'
 import TextCodingColumnPicker from '@/components/TextColumnPicker'
 import ByTextTable, { type ByTextTableHandle } from '@/components/ByTextTable'
+import TextPagingStatus from '@/components/TextPagingStatus'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
 import { codeKeyHint } from '@/lib/codeShortcuts'
 import ByRecordPanel from '@/components/ByRecordPanel'
@@ -166,21 +168,51 @@ export default function TextCodingView() {
 
   const columnIdsStr = focalColumnIds.join(',')
 
-  const { data: commentsData, isLoading: commentsLoading } = useQuery({
+  /** #844 — the texts arrive one PAGE at a time.
+   *
+   * Unpaginated this was 37.8 MB for a single open-text column on a
+   * 75,699-record survey, on the screen the workspace OPENS on. It is an
+   * infinite query rather than an offset-swapping one for a reason that is not
+   * cosmetic: `comments` is read by the selection, the bulk-quote handlers and
+   * the undo stack via `comments.find(...)`, so pages must ACCUMULATE. If a
+   * page replaced its predecessor, a row the researcher selected and then
+   * scrolled past would vanish from that lookup and `handleBulkQuoteToggle`
+   * would silently take its "not quoted" branch and duplicate the excerpt.
+   */
+  const {
+    data: commentsData,
+    isLoading: commentsLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
     queryKey: ['text-data', projectId, columnIdsStr, datasetFilterIds, hideEmpty, searchText, randomSeed, quotedOnly],
-    queryFn: () => textCodingApi.list(projectId, {
+    queryFn: ({ pageParam }) => textCodingApi.list(projectId, {
       column_ids: columnIdsStr,
       dataset_ids: datasetFilterIds?.join(','),
       hide_empty: hideEmpty,
       search: searchText || undefined,
       random_seed: randomSeed ?? undefined,
       quoted_only: quotedOnly,
+      limit: TEXT_PAGE_SIZE,
+      offset: pageParam,
     }),
+    initialPageParam: 0,
+    // The server states whether another page exists; the client never infers
+    // it from `texts.length === limit`, which is wrong on an exact multiple.
+    getNextPageParam: (last, all) =>
+      last.has_more ? all.reduce((n, p) => n + p.texts.length, 0) : undefined,
     enabled: focalColumnIds.length > 0,
     placeholderData: keepPreviousData,
   })
 
-  const comments = useMemo(() => commentsData?.texts ?? [], [commentsData?.texts])
+  const comments = useMemo(
+    () => commentsData?.pages.flatMap(p => p.texts) ?? [],
+    [commentsData?.pages],
+  )
+  /** Totals for the WHOLE selection — identical on every page, so page 0 is
+   * as good as any. Never `comments.length`, which is what is LOADED. */
+  const totalTexts = commentsData?.pages[0]?.total_texts ?? 0
 
   // ── Column banner state ─────────────────────────────────────────────
 
@@ -582,13 +614,23 @@ export default function TextCodingView() {
           // is awaited first because `redo` only INVALIDATED — without the await the
           // cache still holds the pre-quote rows, where every `excerpt_id` is null,
           // and the undo silently no-ops exactly as before.
+          // ⚠️ #844: the cache entry is an INFINITE query now, so its shape is
+          // `{ pages: [...] }` and the old `page?.texts` read would silently
+          // yield nothing — resurrecting the exact "deleted nothing and
+          // announced success" bug described above, through a third door.
+          // `refetchQueries` refetches every loaded page, so the excerpt ids
+          // this walk needs are present for every text the researcher could
+          // have selected (selection can only come from a LOADED row).
           await queryClient.refetchQueries({ queryKey: ['text-data', projectId] })
           const excerptIdByValueId = new Map<number, number>()
-          for (const [, page] of queryClient.getQueriesData<{ texts?: { dataset_value_id: number; excerpt_id: number | null }[] }>(
+          type QuotePage = { texts?: { dataset_value_id: number; excerpt_id: number | null }[] }
+          for (const [, entry] of queryClient.getQueriesData<{ pages?: QuotePage[] }>(
             { queryKey: ['text-data', projectId] },
           )) {
-            for (const t of page?.texts ?? []) {
-              if (t.excerpt_id != null) excerptIdByValueId.set(t.dataset_value_id, t.excerpt_id)
+            for (const page of entry?.pages ?? []) {
+              for (const t of page?.texts ?? []) {
+                if (t.excerpt_id != null) excerptIdByValueId.set(t.dataset_value_id, t.excerpt_id)
+              }
             }
           }
           for (const dvId of valueIds) {
@@ -1384,8 +1426,17 @@ export default function TextCodingView() {
                       showArchived={showArchivedCoders}
                       searchText={searchText}
                       onClearSearch={() => { setSearchInput(''); setSearchText('') }}
+                      totalRowCount={activeColumnId ? undefined : totalTexts}
+                      onEndReached={() => { if (hasNextPage) void fetchNextPage() }}
                     />
                   </div>
+                  <TextPagingStatus
+                    loaded={comments.length}
+                    total={totalTexts}
+                    hasMore={!!hasNextPage}
+                    isLoadingMore={isFetchingNextPage}
+                    onLoadMore={() => void fetchNextPage()}
+                  />
                 </div>
               ) : (
                 <ByRecordPanel

@@ -146,4 +146,111 @@ describe('#823(f) — every control in the Variables view is reachable', () => {
       expect(header.slice(0, 400)).toContain('w-full text-left')
     })
   })
+  // ── The NAMING arm (#823f, 2026-08-31) ────────────────────────────────────
+  //
+  // The reachability arm above shipped 2026-08-26 and this half did not, so the
+  // item was stamped fixed while Lighthouse still failed on it. Re-measured live
+  // before this batch, and TWO of the three filed claims had expired:
+  //
+  //  - `select-name` PASSES. All four `<select>`s gained an `aria-label` in
+  //    `a09db12` (#857, the surfaces fix), which never mentioned #823(f).
+  //  - The `Exclude` checkboxes were named by #818, as the entry predicted.
+  //  - What remained: `label` failing on TWO nodes, both the saved-rule Name
+  //    field, whose visible <label> was never associated.
+  //
+  // After: accessibility 95 → 100, zero failing a11y audits.
+  describe('the naming arm — every field states what it is', () => {
+    /**
+     * Opening `<Input …/>` tags. Comments already stripped (#772).
+     *
+     * ⚠️ **A `[^>]*` regex finds ZERO of them and the population self-check is
+     * what caught that** — these tags carry arrow functions
+     * (`onChange={e => setNewLabel(...)}`), so the first `>` a naive matcher
+     * meets is the one in `=>`, not the end of the tag. The walker tracks brace
+     * depth and quotes and stops at the real terminator. #772's lesson applied
+     * to this guard's own parser: a scan that reads its target wrongly reports
+     * clean, and blindness is worse than a phantom because it is silent.
+     */
+    const inputTags = (src: string): string[] => {
+      const out: string[] = []
+      const re = /<Input\b/g
+      let m: RegExpExecArray | null
+      while ((m = re.exec(src))) {
+        let depth = 0, quote = '', i = m.index
+        for (; i < src.length; i++) {
+          const c = src[i]
+          if (quote) { if (c === quote && src[i - 1] !== '\\') quote = '' ; continue }
+          if (c === '"' || c === "'" || c === '`') { quote = c; continue }
+          if (c === '{') depth++
+          else if (c === '}') depth--
+          else if (c === '>' && depth === 0) break
+        }
+        out.push(src.slice(m.index, i + 1))
+      }
+      return out
+    }
+
+    it('THE INPUT SCAN FOUND A REAL POPULATION', () => {
+      // POPULATION self-check: `toEqual([])` below cannot detect its own
+      // blindness if the tag shape changes or the file moves.
+      expect(inputTags(source).length).toBeGreaterThanOrEqual(6)
+    })
+
+    it('every Input has a name that is not just a placeholder', () => {
+      // A placeholder IS accepted by axe as a name source — which is why
+      // Lighthouse passed four of these fields — but the first character typed
+      // erases it. #559's rule ("a tooltip is not a name") one control over.
+      const offenders = inputTags(source)
+        .filter(t => !/aria-label|aria-labelledby|\bid=/.test(t))
+        .map(t => t.replace(/\s+/g, ' ').slice(0, 100))
+
+      expect(
+        offenders,
+        'An <Input> with neither an aria-label nor an id (for a <label ' +
+          'htmlFor>) has no durable accessible name. A placeholder is not one.',
+      ).toEqual([])
+    })
+
+    it('the saved-rule Name field is ASSOCIATED with its visible label', () => {
+      // The one Lighthouse `label` failure. Associating the existing visible
+      // label beats an aria-label here: the visible text stays the accessible
+      // name (WCAG 2.5.3) and clicking "Name" focuses the field.
+      expect(source).toContain('htmlFor={`rule-name-${definition.id}`}')
+      expect(source).toContain('id={`rule-name-${definition.id}`}')
+    })
+
+    it('the expanded card is a labelled region, so its controls need no suffix', () => {
+      // Several cards can be open at once. Measured live with two expanded:
+      // `Value for Depends` appeared twice and `Value for Try to be helpful`
+      // three times. The fix is ONE group label, not a rule name folded into
+      // up to 40 row names — which would trade #785 for unusable verbosity.
+      expect(source).toContain('role="group" aria-labelledby={`rule-title-${definition.id}`}')
+      expect(source).toContain('id={`rule-title-${definition.id}`}')
+    })
+
+    it('the add-response controls name their own rule', () => {
+      // These are per-EDITOR, not per-row, so there are two or three on screen
+      // and the rule name is cheap context rather than noise.
+      expect(source).toContain('aria-label={`Add a response to ${ownerLabel}`}')
+      expect(source).toContain('aria-label={`Add response to ${ownerLabel}`}')
+    })
+
+    it('both editors require ownerLabel, so a new call site must decide', () => {
+      // Required (not optional) is what stops the next editor call site from
+      // silently reintroducing an unnamed control.
+      const required = source.match(/^\s*ownerLabel: string$/gm) ?? []
+      expect(required.length).toBe(2)
+    })
+
+    it('the Input scan can actually fail', () => {
+      // PREDICATE falsifier, written against literal text so fixing the
+      // codebase can never invalidate the control (#729).
+      const bad = '<Input value={x} placeholder="Type here..." className="h-7" />'
+      expect(inputTags(bad).filter(t => !/aria-label|aria-labelledby|\bid=/.test(t)))
+        .toHaveLength(1)
+      const good = '<Input value={x} aria-label="Rule name" />'
+      expect(inputTags(good).filter(t => !/aria-label|aria-labelledby|\bid=/.test(t)))
+        .toHaveLength(0)
+    })
+  })
 })

@@ -74,13 +74,52 @@ export function computeCoverage<T>(
 export interface AppliedCodeDetailLike {
   code_id: number
   user_id: number | null
+  /**
+   * #35 — this coder's rating, or null for UNRATED.
+   *
+   * 🔴 REQUIRED, not optional, since #868 (a). It was optional "so every
+   * existing caller and fixture keeps compiling", and that is exactly how the
+   * document workbench came to project `{ code_id, user_id }` from a payload
+   * that carried no rating: the projection compiled, `InlineCodeActions` took
+   * the details-known branch, and every scaled-code chip on a document
+   * announced "not rated" over a rating it could not see. A required field
+   * turns that projection into a compile error. ⚠️ NEVER default it to 0 — that
+   * is a legal rating on any scale whose range includes it.
+   */
+  magnitude: number | null
+  /** #35 — the rating a merged copy carried when it differed; null = no conflict. */
+  magnitude_conflict: number | null
 }
+
+/**
+ * The IDENTITY half of a detail — what a consumer that only asks "which code,
+ * which coder?" needs. `distinctVisibleCodeIds`, `isCodeAppliedByActiveCoder`
+ * and the timed analytics read nothing else, so they accept this rather than
+ * the full detail: a caller with bare ids can build one honestly, while the
+ * chip-row chokepoint (`visibleCodeChipRows`), which RENDERS the rating, keeps
+ * demanding the full shape so a projection cannot fabricate "not rated".
+ */
+export type CodeApplicationIdentity = Pick<AppliedCodeDetailLike, 'code_id' | 'user_id'>
 
 export interface CodeChipRow {
   /** Unique render key — (code, coder); array index disambiguates null appliers. */
   key: string
   codeId: number
   userId: number | null
+  /**
+   * #35 — carried HERE rather than looked up by each renderer.
+   *
+   * A chip row is already the (code, coder) pair, which is exactly the grain a
+   * rating lives at, so a renderer that reached back into `applied_code_details`
+   * to find "the magnitude for this code" would have to re-solve the per-coder
+   * join this chokepoint exists to solve — the #441 class, one field over.
+   */
+  magnitude: number | null
+  /**
+   * #35 — the merge disagreement flag, carried by the same chokepoint for the
+   * same reason: it is a fact about ONE (code, coder) application.
+   */
+  magnitudeConflict: number | null
 }
 
 /**
@@ -96,7 +135,15 @@ export function visibleCodeChipRows(
   const rows: CodeChipRow[] = []
   details.forEach((d, i) => {
     if (!isCoderVisible(d.user_id, hidden)) return
-    rows.push({ key: `${d.code_id}-${d.user_id ?? `na${i}`}`, codeId: d.code_id, userId: d.user_id })
+    rows.push({
+      key: `${d.code_id}-${d.user_id ?? `na${i}`}`,
+      codeId: d.code_id,
+      userId: d.user_id,
+      // `?? null` normalises a missing field to the unrated sentinel WITHOUT
+      // touching a real 0 — `||` here would erase every zero rating.
+      magnitude: d.magnitude ?? null,
+      magnitudeConflict: d.magnitude_conflict ?? null,
+    })
   })
   return rows
 }
@@ -107,7 +154,7 @@ export function visibleCodeChipRows(
  * Omit `hidden` to count across all coders (e.g. a data-loss warning).
  */
 export function distinctVisibleCodeIds(
-  details: readonly AppliedCodeDetailLike[],
+  details: readonly CodeApplicationIdentity[],
   hidden?: Set<number>,
 ): number[] {
   const seen = new Set<number>()
@@ -128,7 +175,7 @@ export function distinctVisibleCodeIds(
  * legacy payloads) — there any-coder == my-coder, so behavior is unchanged.
  */
 export function isCodeAppliedByActiveCoder(
-  details: readonly AppliedCodeDetailLike[] | undefined,
+  details: readonly CodeApplicationIdentity[] | undefined,
   appliedCodeIds: readonly number[],
   codeId: number,
   activeCoderId: number | null,

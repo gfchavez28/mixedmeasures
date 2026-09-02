@@ -206,7 +206,7 @@ const CLIPS = [
   clip(13, 760, 902.4, ''),                              // unlabeled
   clip(14, 1000, 1100, 'Coded moment', {
     applied_codes: [7],
-    applied_code_details: [{ code_id: 7, user_id: 1, attribution: null, is_universal: false }],
+    applied_code_details: [{ code_id: 7, user_id: 1, attribution: null, is_universal: false, magnitude: null, magnitude_conflict: null }],
     // #740: MORE THAN ONE note, on the clip that already carries the extras.
     // A zero-note fixture cannot tell a per-note control from a count badge —
     // the old code rendered nothing there either, so both pass. The defect only
@@ -1064,14 +1064,14 @@ describe('chips + blind mode (the #441 chokepoints through the blind lens)', () 
   const bothCoded = clip(21, 0, 10, 'Both coded', {
     applied_codes: [7, 7],
     applied_code_details: [
-      { code_id: 7, user_id: 1, attribution: null, is_universal: false },
-      { code_id: 7, user_id: 2, attribution: null, is_universal: false },
+      { code_id: 7, user_id: 1, attribution: null, is_universal: false, magnitude: null, magnitude_conflict: null },
+      { code_id: 7, user_id: 2, attribution: null, is_universal: false, magnitude: null, magnitude_conflict: null },
     ],
   })
   const colleagueOnly = clip(22, 20, 30, 'Bob only', {
     applied_codes: [7],
     applied_code_details: [
-      { code_id: 7, user_id: 2, attribution: null, is_universal: false },
+      { code_id: 7, user_id: 2, attribution: null, is_universal: false, magnitude: null, magnitude_conflict: null },
     ],
   })
 
@@ -1171,8 +1171,8 @@ describe('chips + blind mode (the #441 chokepoints through the blind lens)', () 
     listSegments.mockResolvedValue([clip(23, 0, 10, 'Shared', {
       applied_codes: [7, 8],
       applied_code_details: [
-        { code_id: 7, user_id: 1, attribution: null, is_universal: false }, // me
-        { code_id: 8, user_id: 2, attribution: null, is_universal: false }, // Bob
+        { code_id: 7, user_id: 1, attribution: null, is_universal: false, magnitude: null, magnitude_conflict: null }, // me
+        { code_id: 8, user_id: 2, attribution: null, is_universal: false, magnitude: null, magnitude_conflict: null }, // Bob
       ],
     })])
     renderWorkbench()
@@ -1202,14 +1202,14 @@ describe('chips + blind mode (the #441 chokepoints through the blind lens)', () 
       clip(24, 0, 10, 'Both', {
         applied_codes: [9, 7],
         applied_code_details: [
-          { code_id: 9, user_id: 1, attribution: null, is_universal: true },
-          { code_id: 7, user_id: 1, attribution: null, is_universal: false },
+          { code_id: 9, user_id: 1, attribution: null, is_universal: true, magnitude: null, magnitude_conflict: null },
+          { code_id: 7, user_id: 1, attribution: null, is_universal: false, magnitude: null, magnitude_conflict: null },
         ],
       }),
       clip(25, 20, 30, 'Universal only', {
         applied_codes: [9],
         applied_code_details: [
-          { code_id: 9, user_id: 1, attribution: null, is_universal: true },
+          { code_id: 9, user_id: 1, attribution: null, is_universal: true, magnitude: null, magnitude_conflict: null },
         ],
       }),
     ])
@@ -1491,6 +1491,7 @@ describe('#656 — several codes on one clip in one lane', () => {
     applied_codes: ids,
     applied_code_details: ids.map(id => ({
       code_id: id, user_id: 1, attribution: null, is_universal: false,
+      magnitude: null, magnitude_conflict: null,
     })),
   })
 
@@ -1592,7 +1593,7 @@ describe('#657/#658/#659 — finding the drag band, and having words for the tim
       clip(11, 0, 130, 'Uncoded one'),
       clip(14, 1000, 1100, 'Coded one', {
         applied_codes: [7],
-        applied_code_details: [{ code_id: 7, user_id: 1, attribution: null, is_universal: false }],
+        applied_code_details: [{ code_id: 7, user_id: 1, attribution: null, is_universal: false, magnitude: null, magnitude_conflict: null }],
       }),
     ])
     renderWorkbench()
@@ -1888,11 +1889,11 @@ describe('coverage gauge + density strip + `u` (6a — D33/D34/D35/D36)', () => 
   const BOB = { id: 2, username: 'Bob', display_color: null, archived: false }
   const codedByMe = (id: number, start: number, end: number) => clip(id, start, end, 'Mine', {
     applied_codes: [7],
-    applied_code_details: [{ code_id: 7, user_id: 1, attribution: null, is_universal: false }],
+    applied_code_details: [{ code_id: 7, user_id: 1, attribution: null, is_universal: false, magnitude: null, magnitude_conflict: null }],
   })
   const codedByBob = (id: number, start: number, end: number) => clip(id, start, end, 'Bob only', {
     applied_codes: [7],
-    applied_code_details: [{ code_id: 7, user_id: 2, attribution: null, is_universal: false }],
+    applied_code_details: [{ code_id: 7, user_id: 2, attribution: null, is_universal: false, magnitude: null, magnitude_conflict: null }],
   })
 
   // 0–50 mine · 40–60 Bob's · 100–120 uncoded, over a 200 s recording.
@@ -1935,7 +1936,7 @@ describe('coverage gauge + density strip + `u` (6a — D33/D34/D35/D36)', () => 
   it('a universal-only coded clip covers NOTHING (invariant J-A)', async () => {
     const universalOnly = clip(34, 0, 100, 'Unclear only', {
       applied_codes: [9],
-      applied_code_details: [{ code_id: 9, user_id: 1, attribution: null, is_universal: true }],
+      applied_code_details: [{ code_id: 9, user_id: 1, attribution: null, is_universal: true, magnitude: null, magnitude_conflict: null }],
     })
     listSegments.mockResolvedValue([universalOnly, codedByMe(31, 100, 150)])
     renderWorkbench()
@@ -2051,7 +2052,7 @@ describe('coverage gauge + density strip + `u` (6a — D33/D34/D35/D36)', () => 
     })
     const archivedCoded = clip(35, 100, 150, 'Carla only', {
       applied_codes: [7],
-      applied_code_details: [{ code_id: 7, user_id: ARCHIVED.id, attribution: null, is_universal: false }],
+      applied_code_details: [{ code_id: 7, user_id: ARCHIVED.id, attribution: null, is_universal: false, magnitude: null, magnitude_conflict: null }],
     })
     localStorage.setItem('mm-blind-revealed-1-1', '1') // not blind — isolate the archived arm
     listSegments.mockResolvedValue([codedByMe(31, 0, 50), archivedCoded])
@@ -2147,5 +2148,31 @@ describe('coverage gauge + density strip + `u` (6a — D33/D34/D35/D36)', () => 
       fireEvent.keyDown(window, { key: 'u' })
       await waitFor(() => expect(announce()).toBe('Uncoded clip at 1:40.0'))
     })
+  })
+})
+
+describe('undo carries the rating (#868 f) — the observation surface', () => {
+  it('removing a rated code then Ctrl+Z re-applies WITH the previous rating — a ZERO', async () => {
+    // A clip cannot be RATED on this surface yet (#868 c), but a rating arrives by
+    // import or merge and the payload carries it — so its removal's undo must
+    // carry it back. Rated ZERO: the falsy-zero fixture rule.
+    listSegments.mockResolvedValue([
+      clip(15, 0, 100, 'Rated moment', {
+        applied_codes: [7],
+        applied_code_details: [{ code_id: 7, user_id: 1, attribution: null, is_universal: false,
+                                 magnitude: 0, magnitude_conflict: null }],
+      }),
+    ])
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.click(rows[0])
+    fireEvent.keyDown(window, { key: '1' })   // numeric_id 1 → Engagement (id 7) → toggle = remove
+    await waitFor(() => expect(removeCode).toHaveBeenCalledWith(15, 7))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+
+    // Fourth argument: the captured rating. `undefined` there is the old bug.
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(15, 7, undefined, 0))
   })
 })

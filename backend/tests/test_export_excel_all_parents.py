@@ -129,6 +129,63 @@ class TestCodedDataSheetSpansAllParents:
         }
 
 
+class TestRatingsSheet:
+    """#35 — ratings export at the APPLICATION grain, on their own sheet.
+
+    ⚠️ The document segment is rated ZERO on purpose: the sheet's row set is
+    "rated applications", and a truthiness slip would drop exactly that row
+    while every other assertion here still passed.
+    """
+
+    def _rate(self, db):
+        code = db.get(Code, PID)
+        code.magnitude_min, code.magnitude_max, code.magnitude_step = 0.0, 10.0, 1.0
+        code.magnitude_labels = '[{"value": 7.0, "label": "the main cause"}]'
+        apps = {a.segment_id: a for a in db.query(CodeApplication).filter(CodeApplication.code_id == PID)}
+        apps[8601].magnitude = 7.0   # conversation: rated at an anchor
+        apps[8602].magnitude = 0.0   # document: rated ZERO
+        # 8603 (the clip): applied, unrated — must be ABSENT.
+        db.flush()
+
+    def test_one_row_per_RATED_application_with_the_number_and_its_scale(self, three_parent_project):
+        db = three_parent_project
+        self._rate(db)
+        wb = _sheets(db)
+        assert "Ratings" in wb.sheetnames
+        # Beside Coded Data, where a reader looks for coding output.
+        assert wb.sheetnames.index("Ratings") == wb.sheetnames.index("Coded Data") + 1
+        header, rows = _rows(wb["Ratings"])
+        assert header[:10] == [
+            "Source Type", "Source", "Segment ID", "Sequence", "Speaker",
+            "Code", "Coder", "Rating", "Rating Scale", "Rating Anchor",
+        ]
+        by_kind = {r["Source Type"]: r for r in rows}
+        assert set(by_kind) == {"conversation", "document"}, "the unrated clip is absent, never a 0"
+        conv, doc = by_kind["conversation"], by_kind["document"]
+        assert conv["Rating"] == 7 and conv["Rating Anchor"] == "the main cause"
+        assert doc["Rating"] == 0 and doc["Rating"] is not None
+        assert doc["Rating Anchor"] in (None, "")
+        assert conv["Rating Scale"] == "0 to 10" and conv["Code"] == "Belonging"
+        assert conv["Coder"] == "testuser"
+        # A number a researcher can average, not the string of one.
+        assert isinstance(conv["Rating"], (int, float))
+
+    def test_no_declared_scale_means_no_sheet(self, three_parent_project):
+        db = three_parent_project
+        # Ratings with no instrument (hand-edited state) do not earn a sheet.
+        db.query(CodeApplication).filter(CodeApplication.segment_id == 8601).one().magnitude = 3.0
+        db.flush()
+        assert "Ratings" not in _sheets(db).sheetnames
+
+    def test_the_coded_data_matrix_is_untouched(self, three_parent_project):
+        """The union "X" keeps its meaning; ratings never leak into it."""
+        db = three_parent_project
+        self._rate(db)
+        header, rows = _rows(_sheets(db)["Coded Data"])
+        code_col = next(h for h in header if h and h.startswith("1 - "))
+        assert {r[code_col] for r in rows} == {"X"}
+
+
 class TestNotesSheetSpansAllParents:
     def test_document_and_observation_notes_are_present_and_named(self, three_parent_project):
         wb = _sheets(three_parent_project)
@@ -270,3 +327,35 @@ class TestCodeSourceMatrixSheet:
         header, rows = _rows(wb["Code-Source Matrix"])
         assert header[1:-1] == ["Playground C (observation)"]
         assert rows[0]["Playground C (observation)"] == 1
+
+
+class TestRatingsSheetScope:
+    """#869 (h) — the sheet's row set is VISIBLE, HUMAN, rated applications, each
+    clause through its chokepoint (`visible_segment_filter`, `non_consensus_filter`).
+
+    Both exclusions were byte-identical to the hand-rolled clauses they replace,
+    which is exactly why a test has to pin them: the J2-B rule exists because a
+    hand-rolled `origin !=` will not STAY identical.
+    """
+
+    def test_a_consensus_row_and_a_hidden_original_never_reach_the_sheet(self, three_parent_project):
+        db = three_parent_project
+        code = db.get(Code, PID)
+        code.magnitude_min, code.magnitude_max, code.magnitude_step = 0.0, 10.0, 1.0
+        apps = {a.segment_id: a for a in db.query(CodeApplication).filter(CodeApplication.code_id == PID)}
+        apps[8601].magnitude = 7.0
+        apps[8602].magnitude = 0.0
+        # A merged-away original: UI-unreachable, its rating must not export.
+        db.add(Segment(id=8604, conversation_id=PID, text="hidden original",
+                       sequence_order=1, merged_into_id=8601))
+        db.flush()
+        db.add(CodeApplication(code_id=PID, user_id=1, segment_id=8604, magnitude=9.0))
+        # The DERIVED consensus row on the clip: its median is computed FROM the
+        # coders' ratings, so exporting it beside them counts a judgement twice.
+        db.add(CodeApplication(code_id=PID, user_id=None, segment_id=8603,
+                               origin="consensus", magnitude=5.0))
+        db.flush()
+
+        _, rows = _rows(_sheets(db)["Ratings"])
+        ratings = sorted(r["Rating"] for r in rows)
+        assert ratings == [0, 7], f"a hidden or consensus rating leaked: {ratings}"

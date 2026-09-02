@@ -698,8 +698,13 @@ export default function ObservationWorkbench() {
   // deliberately does not know the clip-list keys (the #450 helper's contract).
   const settleAfterCodeChange = invalidateAfterCodeChange
 
+  // #868 (f): an APPLY may carry a rating (the undo of a removal re-applies with
+  // the one captured when the entry was built), and this settle refetches the
+  // clip list anyway — but the optimistic paint must not flash "not rated" in
+  // between. `magnitude` is per call, not per clip: the observation apply paths
+  // are single-clip or bulk-unrated.
   const patchClipCodes = useCallback(
-    (clipIds: number[], codeId: number, action: 'apply' | 'remove') => {
+    (clipIds: number[], codeId: number, action: 'apply' | 'remove', magnitude: number | null = null) => {
       queryClient.setQueryData<ObservationSegment[]>(
         ['observation-segments', projectId, observationId],
         (old) => {
@@ -710,6 +715,8 @@ export default function ObservationWorkbench() {
             user_id: selfId,
             attribution: null,
             is_universal: codeMap.get(codeId)?.is_universal ?? false,
+            magnitude,
+            magnitude_conflict: null,
           }
           return old.map((c) => {
             if (!targetIds.has(c.id)) return c
@@ -747,9 +754,10 @@ export default function ObservationWorkbench() {
       codeId: number,
       action: 'apply' | 'remove',
       serverCall: () => Promise<unknown>,
+      magnitude: number | null = null,
     ) => {
       const snapshot = queryClient.getQueryData(['observation-segments', projectId, observationId])
-      patchClipCodes(clipIds, codeId, action)
+      patchClipCodes(clipIds, codeId, action, magnitude)
       try {
         const result = await serverCall()
         settleAfterCodeChange()
@@ -785,11 +793,21 @@ export default function ObservationWorkbench() {
     if (clipIds.length === 1) {
       const clipId = clipIds[0]
       if (allHaveCode) {
+        // #868 (f): a clip cannot be RATED here yet (#868 c), but a rating can
+        // arrive by import or merge and the payload shows it — so the undo of a
+        // removal re-applies with the rating captured now, never bare.
+        // `?? null`, never `||`: a stored 0 is a rating.
+        const previous = clipMap.get(clipId)?.applied_code_details
+          .find(d => d.code_id === codeId && d.user_id === selfId)?.magnitude ?? null
         history.execute({
           type: 'code_remove',
           description: `Remove code "${codeName}"`,
           redo: () => runOptimisticCode([clipId], codeId, 'remove', () => codingApi.removeCode(clipId, codeId)),
-          undo: () => runOptimisticCode([clipId], codeId, 'apply', () => codingApi.applyCode(clipId, codeId)),
+          undo: () => runOptimisticCode(
+            [clipId], codeId, 'apply',
+            () => codingApi.applyCode(clipId, codeId, undefined, previous),
+            previous,
+          ),
         })
       } else {
         history.execute({

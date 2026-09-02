@@ -412,7 +412,7 @@ async def comment_columns(
 
 
 @router.get("/irr", response_model=IrrResponse)
-async def inter_rater_reliability(
+def inter_rater_reliability(
     project_id: int,
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs to compare; omit = all roster coders"),
     source: str | None = Query(None, description='Scope to ONE source: "conv:7" | "doc:3" | "obs:2" | "col:16". Omit = pooled across every multi-coder source.'),
@@ -428,6 +428,11 @@ async def inter_rater_reliability(
     observation / text column. ⚠️ **That is a UNIT filter, never a CODER filter** —
     the matrix stays all-roster, because a visibility filter must not change a
     reliability statistic (J2-5). Omitting it keeps the pooled behaviour.
+
+    ⚠️ **A plain `def`, not `async def` (#837, converted with #43).** It carries
+    no `await`, so as a coroutine every query AND the α bootstrap ran ON the
+    event loop, during which the server answers nothing — including Electron's
+    `/health` probe. As a `def` FastAPI runs it in the threadpool.
     """
     _get_project_or_404(db, project_id, user.id)
     return compute_irr(
@@ -438,7 +443,7 @@ async def inter_rater_reliability(
 
 
 @router.get("/unitizing-alpha", response_model=UnitizingAlphaResponse)
-async def unitizing_alpha_endpoint(
+def unitizing_alpha_endpoint(
     project_id: int,
     observation_id: int,
     coder_ids: str | None = Query(None, description="Comma-separated coder IDs; omit = all roster coders"),
@@ -470,7 +475,7 @@ async def unitizing_alpha_endpoint(
 
 
 @router.get("/binned-kappa", response_model=BinnedKappaResponse)
-async def binned_kappa_endpoint(
+def binned_kappa_endpoint(
     project_id: int,
     observation_id: int,
     bin_seconds: float = Query(DEFAULT_BIN_SECONDS, gt=0, description="Bin width in seconds — a reported parameter; it changes the result"),

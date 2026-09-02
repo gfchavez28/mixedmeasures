@@ -29,13 +29,14 @@
 
 import { unionIntervals, coveredSeconds, assignTracks } from './clip-timeline'
 import { formatTimecode } from './utils'
-import type { AppliedCodeDetailLike } from './coding-progress'
+import type { CodeApplicationIdentity } from './coding-progress'
 
 export interface TimedClipLike {
   id: number
   start_time: number
   end_time: number
-  applied_code_details: readonly AppliedCodeDetailLike[]
+  // Identity only: the timeline asks which code and which coder, never the rating.
+  applied_code_details: readonly CodeApplicationIdentity[]
 }
 
 /** null = no filter (all coders + unattributed). A set = ONLY these coder ids. */

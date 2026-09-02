@@ -111,10 +111,18 @@ HAS_R: bool = RSCRIPT is not None
 #: Rscript AND the `irr` package — required by the reliability oracles.
 HAS_IRR: bool = HAS_R and "irr" not in MISSING_R_PACKAGES
 
+#: Rscript AND `psych` — the oracle for κ's CONFIDENCE INTERVAL (#43).
+#: `irr::kappa2` cannot serve here: its z-statistic uses the null-hypothesis SE,
+#: which is the wrong width for an interval around the observed κ. `psych` was
+#: already required (it oracles the α item diagnostics), so the interval half of
+#: #43 cost no new CI package.
+HAS_PSYCH: bool = HAS_R and "psych" not in MISSING_R_PACKAGES
+
 # Reason strings for `pytest.mark.skipif`. Kept verbatim from the pre-#642
 # decorators so skip output is unchanged for anyone reading old logs.
 SKIP_REASON_R = "Rscript not available"
 SKIP_REASON_IRR = "Rscript + irr package not available"
+SKIP_REASON_PSYCH = "Rscript + psych package not available"
 
 
 def r_is_required() -> bool:

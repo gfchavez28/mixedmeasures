@@ -41,6 +41,7 @@ from ..services.recode import (
     effective_reverse_offset,
     mapping_numeric_values,
 )
+from ..services.reliability_basis import ALPHA_METRIC_NOMINAL, MAGNITUDE_ALPHA_METRIC
 from ..services.computed_columns import (
     parse as parse_expression,
     validate as validate_expression,
@@ -488,6 +489,7 @@ def _build_r_script(
     irr_coder_ids: list[int] | None = None,
     irr_per_code: dict | None = None,
     irr_code_names: dict | None = None,
+    irr_magnitude: dict | None = None,
     na_blanked_count: int = 0,
     identifier_cols: list[dict] | None = None,
 ) -> str:
@@ -2362,6 +2364,18 @@ def _build_r_script(
         r_lines.append("# Per code, over the human coder roster (Option B source-level")
         r_lines.append("# engagement). Krippendorff's alpha (any n), plus Cohen's kappa +")
         r_lines.append("# percent agreement when exactly 2 coders. Reproduces the tool's IRR.")
+        # #43 — the app reports confidence intervals on these coefficients and
+        # this script does NOT recompute them. Said out loud rather than left to
+        # inference: a researcher comparing the two would otherwise read the
+        # absence as disagreement. Neither is cheap to reproduce faithfully here
+        # — the alpha interval is a seeded bootstrap (a re-run under R's RNG
+        # gives a DIFFERENT interval, which is worse than none), and the kappa
+        # interval needs `psych`, which this section does not otherwise require.
+        r_lines.append("# NOTE: the app also reports 95% confidence intervals on these")
+        r_lines.append("#   coefficients. They are not recomputed here: alpha's is a seeded")
+        r_lines.append("#   bootstrap over units (R's RNG would give a different one), and")
+        r_lines.append("#   kappa's needs psych::cohen.kappa. The point estimates below are")
+        r_lines.append("#   what this script reproduces.")
         r_lines.append(f'irr_raw <- read_csv("{project_slug}_irr.csv", na = c("", "NA"))')
         r_lines.append(f"irr_coder_cols <- c({coder_cols_r})")
         r_lines.append("for (cid in unique(irr_raw$code_id)) {")
@@ -2369,7 +2383,9 @@ def _build_r_script(
         r_lines.append("  cname <- as.character(rows_c$code_name[1])")
         r_lines.append("  m <- as.matrix(rows_c[, irr_coder_cols, drop = FALSE])")
         r_lines.append('  storage.mode(m) <- "numeric"')
-        r_lines.append('  a <- kripp.alpha(t(m), method = "nominal")$value')
+        # The metric is the constant the app scored with, never a restated
+        # literal — the rating block below uses a DIFFERENT one on purpose.
+        r_lines.append(f'  a <- kripp.alpha(t(m), method = "{ALPHA_METRIC_NOMINAL}")$value')
         r_lines.append("  k <- NA; ag <- NA")
         r_lines.append("  if (ncol(m) == 2) {")
         r_lines.append("    dc <- m[stats::complete.cases(m), , drop = FALSE]")
@@ -2378,6 +2394,38 @@ def _build_r_script(
         r_lines.append('  cat(sprintf("IRR\\tcode=%s\\talpha=%.6f\\tkappa=%s\\tagree=%s\\tname=%s\\n",')
         r_lines.append('              cid, a, ifelse(is.na(k), "NA", sprintf("%.6f", k)),')
         r_lines.append('              ifelse(is.na(ag), "NA", sprintf("%.6f", ag)), cname))')
+        r_lines.append("}")
+        r_lines.append("")
+
+    # #35 — rating agreement. Per code that declares a scale, the coders' RATINGS
+    # as a coder×unit matrix, scored on the INTERVAL metric (the declared scale
+    # is an interval instrument — `services/reliability_basis.py`). Its own CSV
+    # and its own loop: a rating matrix holds numbers on the code's scale, not
+    # 0/1, and `kripp.alpha`'s `method` differs — the two must never share a
+    # call. Gated on the same predicate as its CSV (`irr_magnitude` is already
+    # narrowed to rated codes by the caller) so the file and the read_csv agree.
+    if irr_coder_ids and len(irr_coder_ids) >= 2 and irr_magnitude:
+        needs_irr = True
+        coder_cols_r = ", ".join(f'"coder_{cid}"' for cid in irr_coder_ids)
+        toc_sections.append("Rating agreement (magnitude coding)")
+        r_lines.append("# ---- Rating agreement (magnitude coding) ----")
+        r_lines.append("# Per code that declares a rating scale: Krippendorff's alpha over the")
+        r_lines.append(f"# coders' RATINGS, scored on the {MAGNITUDE_ALPHA_METRIC} metric (a 3 and a 4")
+        r_lines.append("# disagree less than a 3 and a 9). A blank cell means that coder did not")
+        r_lines.append("# apply the code on that unit, or applied it unrated — neither is a")
+        r_lines.append("# rating, so alpha is over units two or more coders both applied AND")
+        r_lines.append("# rated. One alpha per code, never pooled: each code is its own")
+        r_lines.append("# instrument with its own range. Reproduces the app's Reliability tab.")
+        r_lines.append("# NOTE: as above, the app's confidence intervals are not recomputed here.")
+        r_lines.append(f'irr_mag_raw <- read_csv("{project_slug}_irr_magnitude.csv", na = c("", "NA"))')
+        r_lines.append(f"irr_mag_coder_cols <- c({coder_cols_r})")
+        r_lines.append("for (cid in unique(irr_mag_raw$code_id)) {")
+        r_lines.append("  rows_c <- irr_mag_raw[irr_mag_raw$code_id == cid, , drop = FALSE]")
+        r_lines.append("  cname <- as.character(rows_c$code_name[1])")
+        r_lines.append("  m <- as.matrix(rows_c[, irr_mag_coder_cols, drop = FALSE])")
+        r_lines.append('  storage.mode(m) <- "numeric"')
+        r_lines.append(f'  a <- kripp.alpha(t(m), method = "{MAGNITUDE_ALPHA_METRIC}")$value')
+        r_lines.append('  cat(sprintf("IRR_MAGNITUDE\\tcode=%s\\talpha=%.6f\\tname=%s\\n", cid, a, cname))')
         r_lines.append("}")
         r_lines.append("")
 
@@ -2860,8 +2908,16 @@ def export_r_data(
     # ⚠️ #829 added two trailing values (the selectable source set and the scope's
     # engaged coders). The export is deliberately POOLED — it emits what it has
     # always emitted (#402, test_export_r_irr.py) — so it takes no `source` and
-    # discards both.
-    irr_coder_ids, irr_code_names, irr_per_code, _, _ = build_irr_matrices(db, project_id)
+    # discards both. #35 added a sixth: the per-scaled-code RATING matrices.
+    irr_coder_ids, irr_code_names, irr_per_code, _, _, irr_magnitude_all = build_irr_matrices(
+        db, project_id,
+    )
+    # A scaled code nobody has rated yet has an all-blank matrix, which is not
+    # a coefficient R can compute; the app reports it as coverage (0 rated).
+    # Narrowed ONCE, here, so the CSV and the R block that reads it agree.
+    irr_magnitude = {
+        code_id: entry for code_id, entry in irr_magnitude_all.items() if entry["n_rated"] > 0
+    }
 
     # ── Step 8: Assemble CSV ─────────────────────────────────────────────
     csv_output = io.StringIO()
@@ -2976,6 +3032,28 @@ def export_r_data(
                 irr_writer.writerow([code_id, csv_safe(cname)] + ["" if v is None else v for v in row])
         irr_csv_content = irr_io.getvalue()
 
+    # #35 — the rating matrices, same long format, its OWN file: the cells are
+    # ratings on the code's declared scale, not 0/1, and the reading R block
+    # scores them on a different metric. The scale's bounds ride each row so a
+    # reader of the CSV alone can interpret a 7 (out of 10? of 100?).
+    irr_magnitude_csv_content = None
+    if len(irr_coder_ids) >= 2 and irr_magnitude:
+        mag_io = io.StringIO()
+        mag_io.write("\ufeff")  # UTF-8 BOM (readr strips it)
+        mag_writer = csv.writer(mag_io, lineterminator="\n")
+        mag_writer.writerow(
+            ["code_id", "code_name", "scale_min", "scale_max"]
+            + [f"coder_{cid}" for cid in irr_coder_ids]
+        )
+        for code_id, entry in irr_magnitude.items():
+            cname = csv_safe(entry["code_name"])
+            lo, hi = entry["scale"]["min"], entry["scale"]["max"]
+            for row in entry["rows"]:
+                mag_writer.writerow(
+                    [code_id, cname, lo, hi] + ["" if v is None else v for v in row]
+                )
+        irr_magnitude_csv_content = mag_io.getvalue()
+
     # ── Step 9: Generate R script ────────────────────────────────────────
     project_slug = _slugify(project.name, max_len=40)
     n_variables = len(header) - 2  # exclude record_id and dataset
@@ -3005,6 +3083,7 @@ def export_r_data(
         irr_coder_ids=irr_coder_ids,
         irr_per_code=irr_per_code,
         irr_code_names=irr_code_names,
+        irr_magnitude=irr_magnitude,
         na_blanked_count=na_blanked_count,
         identifier_cols=identifier_cols,
     )
@@ -3016,6 +3095,8 @@ def export_r_data(
         zf.writestr(f"{project_slug}_setup.R", r_script)
         if irr_csv_content is not None:
             zf.writestr(f"{project_slug}_irr.csv", irr_csv_content)
+        if irr_magnitude_csv_content is not None:
+            zf.writestr(f"{project_slug}_irr_magnitude.csv", irr_magnitude_csv_content)
     zip_buffer.seek(0)
 
     date_str = datetime.now(timezone.utc).strftime("%Y%m%d")

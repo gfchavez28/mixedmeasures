@@ -1,8 +1,8 @@
 {
   "name": "mixedmeasures-frontend",
   "private": true,
-  "version": "1.4.0",
-  "releaseDate": "2026-08-27",
+  "version": "1.5.0",
+  "releaseDate": "2026-09-02",
   "type": "module",
   "engines": {
     "node": ">=24"

@@ -50,7 +50,13 @@ from .coding_layers import (
     non_consensus_filter,
     resolve_effective_code,
 )
-from .undefined_stats import NO_VARIANCE
+from .magnitude import read_scale
+from .reliability_basis import (
+    ALPHA_METRIC_NOMINAL,
+    MAGNITUDE_ALPHA_METRIC,
+    RELIABILITY_FACET_CODERS,
+)
+from .undefined_stats import INSUFFICIENT_N, NO_VARIANCE
 
 
 # ── The source axis (#829) ────────────────────────────────────────────────────
@@ -219,35 +225,48 @@ def _delta_squared_table(
     return d2
 
 
-def _krippendorff_alpha(
-    units: list[list[int | None]], metric: str = "nominal",
-) -> float | None:
-    """Krippendorff's α, n coders, missing-data tolerant.
+def unit_coincidence(row: list[int | None]) -> dict[tuple, float]:
+    """ONE unit's contribution to the coincidence matrix.
 
-    Builds the coincidence matrix the canonical way (each unit with m≥2 present
-    values contributes 1/(m-1) per ordered value pair), then
-    α = 1 − (n−1)·Σ_{c,k} o_ck·δ²_ck / Σ_{c,k} n_c·n_k·δ²_ck with the metric's
-    difference function δ² (nominal: 1 for c≠k). Reproduces
-    ``irr::kripp.alpha(method=metric)`` for numeric data. Non-nominal metrics
-    require numeric values; ratio additionally requires non-negative values.
+    Each unit with m≥2 present values contributes 1/(m-1) per ordered value
+    pair. Split out of ``_krippendorff_alpha`` for #43: the bootstrap resamples
+    UNITS, and a resample's coincidence matrix is the weighted sum of these —
+    so the interval and the point estimate are built from the same arithmetic
+    rather than from a second implementation of it (the #733 class).
 
-    The binary presence/absence IRR surfaces use the nominal default; the metric
-    generalization is the designed extension point for ordinal/interval magnitude
-    ratings (#35) and the v1.4 honest-ICR arc.
+    ⚠️ **A unit's contribution depends only on its VALUE COUNTS**, not on which
+    coder held which value. That is what lets `reliability_intervals` collapse
+    thousands of units into a handful of interchangeable types.
     """
     o: dict[tuple, float] = defaultdict(float)
-    for row in units:
-        present = [v for v in row if v is not None]
-        m = len(present)
-        if m < 2:
-            continue
-        inv = 1.0 / (m - 1)
-        for i in range(m):
-            for j in range(m):
-                if i != j:
-                    o[(present[i], present[j])] += inv
+    present = [v for v in row if v is not None]
+    m = len(present)
+    if m < 2:
+        return o
+    inv = 1.0 / (m - 1)
+    for i in range(m):
+        for j in range(m):
+            if i != j:
+                o[(present[i], present[j])] += inv
+    return o
+
+
+def alpha_from_coincidence(
+    o: dict[tuple, float], metric: str = "nominal",
+) -> float | None:
+    """α from an assembled coincidence matrix — the formula itself, once.
+
+    α = 1 − (n−1)·Σ_{c,k} o_ck·δ²_ck / Σ_{c,k} n_c·n_k·δ²_ck with the metric's
+    difference function δ² (nominal: 1 for c≠k).
+
+    Returns None when ``o`` is empty (no unit had ≥2 raters → α undefined), and
+    1.0 when only one value was observed anywhere (no possible disagreement).
+    Both edges are reachable inside a BOOTSTRAP resample even when the full
+    sample reaches neither, which is why they are documented here rather than
+    left to the caller (#43).
+    """
     if not o:
-        return None  # no unit had ≥2 raters → α undefined
+        return None
 
     n_c: dict = defaultdict(float)
     for (c, _k), val in o.items():
@@ -265,6 +284,27 @@ def _krippendorff_alpha(
     if de_num == 0:
         return 1.0  # only one value observed anywhere → no possible disagreement
     return 1.0 - (n - 1) * do_num / de_num
+
+
+def _krippendorff_alpha(
+    units: list[list[int | None]], metric: str = "nominal",
+) -> float | None:
+    """Krippendorff's α, n coders, missing-data tolerant.
+
+    Builds the coincidence matrix the canonical way, then applies the α formula.
+    Reproduces ``irr::kripp.alpha(method=metric)`` for numeric data. Non-nominal
+    metrics require numeric values; ratio additionally requires non-negative
+    values.
+
+    The binary presence/absence IRR surfaces use the nominal default; the metric
+    generalization is the designed extension point for ordinal/interval magnitude
+    ratings (#35) and the v1.4 honest-ICR arc.
+    """
+    o: dict[tuple, float] = defaultdict(float)
+    for row in units:
+        for pair, val in unit_coincidence(row).items():
+            o[pair] += val
+    return alpha_from_coincidence(o, metric)
 
 
 def _project_to_pair(
@@ -340,6 +380,44 @@ def _n_comparable_units(units: list[list[int | None]]) -> int:
     return sum(1 for row in units if sum(1 for v in row if v is not None) >= 2)
 
 
+def _distinct_comparable_values(units: list[list]) -> set:
+    """The distinct values among units ≥2 coders judged — the set α is scored over.
+
+    ⚠️ Only COMPARABLE units count. A unit one coder rated contributes nothing
+    to the coincidence matrix, so its value cannot create variance; if every
+    compared value is identical the expected disagreement is zero and
+    `alpha_from_coincidence` returns its 1.0 sentinel — which is #829's "almost
+    perfect" reached through ratings. The caller refuses with `no_variance`.
+    """
+    out: set = set()
+    for row in units:
+        present = [v for v in row if v is not None]
+        if len(present) >= 2:
+            out.update(present)
+    return out
+
+
+def _mean_abs_difference(units: list[list[float | None]]) -> float | None:
+    """Mean |a − b| over every coder pair on every unit both rated (#35).
+
+    A plain-language companion to the interval-metric α: α says whether the
+    coders agree beyond chance, this says HOW FAR APART they typically are, in
+    the scale's own units — "about 1.3 points on a 0–10 scale" is the sentence
+    a researcher can act on. Dedoose reports the same quantity beside its
+    (weaker) Pearson r. None when no unit was rated by two coders.
+    """
+    total = 0.0
+    pairs = 0
+    for row in units:
+        present = [v for v in row if v is not None]
+        m = len(present)
+        for i in range(m):
+            for j in range(i + 1, m):
+                total += abs(present[i] - present[j])
+                pairs += 1
+    return total / pairs if pairs else None
+
+
 # ── Option-B gather (mirrors consensus.py's roster-coder recipe) ───────────────
 
 
@@ -351,10 +429,12 @@ def gather_coder_applications(
     dict[tuple, tuple],
     dict[tuple, set[int]],
     set[tuple],
+    dict[tuple, dict[int, dict[int, float | None]]],
 ]:
     """Option-B coder-application gather shared by IRR and reconciliation.
 
-    Returns ``(coder_id_list, applied, unit_source, engaged, multi_sources)``:
+    Returns ``(coder_id_list, applied, unit_source, engaged, multi_sources,
+    ratings)``:
 
     - ``coder_id_list`` — sorted non-archived roster coder ids (the DEC-F roster,
       optionally filtered to ``coder_ids``). Single-sourced HERE so IRR,
@@ -366,6 +446,13 @@ def gather_coder_applications(
     - ``engaged[source_key]`` — coders who applied ≥1 code anywhere in that source.
     - ``multi_sources`` — sources engaged by ≥2 coders (the only contributors);
       empty set when none.
+    - ``ratings[ukey][coder_id][raw_code_id]`` — that coder's magnitude on that
+      application, ``None`` when unrated (#35). ⚠️ Keyed by the RAW code, never
+      the effective one: a rating lives on its code's OWN declared scale, and two
+      codes in an equivalence group may declare different instruments, so ratings
+      are never pooled across a group. An entry exists for EVERY application, so
+      "applied but unrated" (``None``) and "never applied" (absent) stay distinct
+      — the coverage figures need both.
 
     ``ukey`` is ``("seg", id)`` / ``("val", id)``; source keys
     ``("conv"|"doc"|"obs", id)`` / ``("col", id)`` — tag-prefixed, so ids drawn from
@@ -379,13 +466,15 @@ def gather_coder_applications(
         coder_q = coder_q.filter(User.id.in_(coder_ids))
     coder_id_list = sorted(c.id for c in coder_q.all())
     if len(coder_id_list) < 2:
-        return coder_id_list, {}, {}, {}, set()
+        return coder_id_list, {}, {}, {}, set(), {}
     eff = build_effective_code_map(db, project_id)
 
     # applied[unit_key][coder_id] = set of effective codes that coder put on the unit
     applied: dict[tuple, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
     unit_source: dict[tuple, tuple] = {}
     engaged: dict[tuple, set[int]] = defaultdict(set)  # source_key -> coders who worked it
+    # ratings[unit_key][coder_id][raw_code_id] = magnitude or None (#35)
+    ratings: dict[tuple, dict[int, dict[int, float | None]]] = defaultdict(lambda: defaultdict(dict))
 
     base_filters = [
         non_consensus_filter(),
@@ -411,7 +500,8 @@ def gather_coder_applications(
         consensus_scoped_segments(
             db.query(Segment.id, Segment.conversation_id, Segment.document_id,
                      Segment.observation_id,
-                     CodeApplication.user_id, CodeApplication.code_id)
+                     CodeApplication.user_id, CodeApplication.code_id,
+                     CodeApplication.magnitude)
             .join(CodeApplication, CodeApplication.segment_id == Segment.id)
             .join(Code, CodeApplication.code_id == Code.id)
             .join(User, CodeApplication.user_id == User.id),
@@ -420,17 +510,19 @@ def gather_coder_applications(
         .filter(*visible_segment_filter(), *base_filters)
         .all()
     )
-    for seg_id, conv_id, doc_id, obs_id, uid, code_id in seg_app_rows:
+    for seg_id, conv_id, doc_id, obs_id, uid, code_id, magnitude in seg_app_rows:
         src = _segment_source_key(conv_id, doc_id, obs_id)
         ukey = ("seg", seg_id)
         unit_source[ukey] = src
         engaged[src].add(uid)
         applied[ukey][uid].add(resolve_effective_code(eff, code_id))
+        ratings[ukey][uid][code_id] = magnitude
 
     # Dataset-value applications (open-ended text coding).
     val_app_rows = (
         db.query(DatasetValue.id, DatasetValue.column_id,
-                 CodeApplication.user_id, CodeApplication.code_id)
+                 CodeApplication.user_id, CodeApplication.code_id,
+                 CodeApplication.magnitude)
         .join(CodeApplication, CodeApplication.dataset_value_id == DatasetValue.id)
         .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
         .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
@@ -439,17 +531,18 @@ def gather_coder_applications(
         .filter(Dataset.project_id == project_id, *base_filters)
         .all()
     )
-    for val_id, col_id, uid, code_id in val_app_rows:
+    for val_id, col_id, uid, code_id, magnitude in val_app_rows:
         src = ("col", col_id)
         ukey = ("val", val_id)
         unit_source[ukey] = src
         engaged[src].add(uid)
         applied[ukey][uid].add(resolve_effective_code(eff, code_id))
+        ratings[ukey][uid][code_id] = magnitude
 
     # Sources engaged by ≥2 coders are the only ones that can contribute.
     multi_sources = {s for s, cs in engaged.items() if len(cs) >= 2}
     if not multi_sources:
-        return coder_id_list, applied, unit_source, engaged, set()
+        return coder_id_list, applied, unit_source, engaged, set(), ratings
 
     # Pull EVERY in-play unit of those sources (incl. units no coder coded → real
     # 0s under Option B). Segments: all visible. Dataset values: non-empty only
@@ -490,26 +583,43 @@ def gather_coder_applications(
         ):
             unit_source.setdefault(("val", val_id), ("col", col_id))
 
-    return coder_id_list, applied, unit_source, engaged, multi_sources
+    return coder_id_list, applied, unit_source, engaged, multi_sources, ratings
 
 
 def build_irr_matrices(
     db: Session, project_id: int, coder_ids: list[int] | None = None,
     source: tuple[str, int] | None = None,
-) -> tuple[list[int], dict[int, str], dict[int, list[list[int | None]]], set[tuple], set[int]]:
-    """Return ``(coder_ids_ordered, {code_id: name}, {effective_code_id: units})``.
+) -> tuple[
+    list[int], dict[int, str], dict[int, list[list[int | None]]],
+    set[tuple], set[int], dict[int, dict],
+]:
+    """Return ``(coder_ids_ordered, {code_id: name}, {effective_code_id: units},
+    selectable_sources, scope_coders, magnitude)``.
 
     ``units`` is the per-code matrix (one row per in-play unit; each row a list of
     length n_coders with 0/1/None). Source-level engagement (Option B) governs
     which cells are None. Built on the shared ``gather_coder_applications`` so IRR
     and reconciliation see identical coder/unit data; the per-code matrix shaping
     below is IRR-specific.
+
+    ``magnitude`` (#35) is ``{raw_code_id: {"code_name", "scale", "rows",
+    "n_applications", "n_rated"}}`` for every code that DECLARES a scale and was
+    applied at least once in scope. Its ``rows`` are the same shape and in the
+    same unit order as ``units``, holding the coder's RATING or ``None``.
+
+    🔴 **A cell is ``None`` both when the coder never applied the code and when
+    they applied it unrated.** Neither is a judgement about the magnitude — the
+    first is Option B's "no opinion recorded", the second is an explicit skip —
+    so magnitude α is over the units two or more coders both applied AND rated.
+    It is conditional on agreeing to apply, and the payload says so. Do not
+    read an unrated application as a rating of the scale's minimum, or of zero:
+    that is MAXQDA's default-stamping mistake, arriving through the statistic.
     """
-    coder_id_list, applied, unit_source, engaged, multi_sources = gather_coder_applications(
+    coder_id_list, applied, unit_source, engaged, multi_sources, ratings = gather_coder_applications(
         db, project_id, coder_ids
     )
     if len(coder_id_list) < 2 or not multi_sources:
-        return coder_id_list, {}, {}, set(), set()
+        return coder_id_list, {}, {}, set(), set(), {}
 
     # #829 — the SOURCE axis. `multi_sources` is the selectable set (every source
     # ≥2 coders engaged); narrowing it to one is the whole scoping mechanism,
@@ -522,7 +632,7 @@ def build_irr_matrices(
     if source is not None:
         multi_sources = {source} & multi_sources
         if not multi_sources:
-            return coder_id_list, {}, {}, selectable, set()
+            return coder_id_list, {}, {}, selectable, set(), {}
 
     n = len(coder_id_list)
     coder_idx = {cid: i for i, cid in enumerate(coder_id_list)}
@@ -548,7 +658,53 @@ def build_irr_matrices(
                 row[coder_idx[cid]] = 1 if code_id in applied_here.get(cid, empty) else 0
             rows.append(row)
         per_code[code_id] = rows
-    return coder_id_list, code_names, per_code, selectable, scope_coders
+
+    # #35 — the RATING matrices, one per code that declares a scale. Keyed by
+    # the RAW code (see `gather_coder_applications`): the instrument is the
+    # code's own. A code whose scale was cleared keeps its stored ratings but
+    # gets no row here — a number with no declared range is not interpretable,
+    # which is the same rule the chip renders by (`lib/magnitude.ts`).
+    magnitude: dict[int, dict] = {}
+    scaled_codes = (
+        db.query(Code)
+        .filter(
+            Code.project_id == project_id,
+            Code.magnitude_min.isnot(None),
+            Code.magnitude_max.isnot(None),
+        )
+        .all()
+    )
+    for code in scaled_codes:
+        scale = read_scale(code)
+        if scale is None:
+            continue
+        rows_m: list[list[float | None]] = []
+        n_applications = n_rated = 0
+        for u in units:
+            src_coders = engaged[unit_source[u]]
+            row_m: list[float | None] = [None] * n
+            per_coder = ratings.get(u, {})
+            for cid in src_coders:
+                by_code = per_coder.get(cid)
+                if by_code is None or code.id not in by_code:
+                    continue
+                n_applications += 1
+                value = by_code[code.id]
+                # `is not None`, never truthiness: 0 is a rating (#35 §2).
+                if value is not None:
+                    n_rated += 1
+                    row_m[coder_idx[cid]] = value
+            rows_m.append(row_m)
+        if n_applications == 0:
+            continue
+        magnitude[code.id] = {
+            "code_name": code.name,
+            "scale": scale,
+            "rows": rows_m,
+            "n_applications": n_applications,
+            "n_rated": n_rated,
+        }
+    return coder_id_list, code_names, per_code, selectable, scope_coders, magnitude
 
 
 def compute_irr(
@@ -568,7 +724,7 @@ def compute_irr(
     α 0.06 pooled against 0.0023 on the notes alone, under *"Overall α 0.62 ·
     unreliable"* as the largest text on screen.
     """
-    coder_id_list, code_names, per_code, selectable, scope_coders = build_irr_matrices(
+    coder_id_list, code_names, per_code, selectable, scope_coders, magnitude = build_irr_matrices(
         db, project_id, coder_ids, source
     )
     n = len(coder_id_list)
@@ -591,7 +747,10 @@ def compute_irr(
             "per_code": [],
             "overall_alpha": None,
             "overall_alpha_interpretation": None,
+            "overall_alpha_ci": None,
             "interpretation_thresholds": thresholds,
+            "reliability_facet": RELIABILITY_FACET_CODERS,
+            "magnitude_per_code": [],
         }
 
     # #828 — κ belongs to a SOURCE, not to the install. The engaged pair is the
@@ -602,8 +761,22 @@ def compute_irr(
         a, b = sorted(scope_coders, key=coder_id_list.index)
         pair_idx = (coder_id_list.index(a), coder_id_list.index(b))
 
+    # #43 — the interval machinery. Imported at CALL time because
+    # `reliability_intervals` imports this module's α formula: a top-level
+    # import here would make the pair circular and fail at load.
+    from .reliability_intervals import (
+        alpha_interval,
+        kappa_interval,
+        pooled_unit_contributions,
+        unit_contributions,
+    )
+
     per_code_results = []
     global_rows: list[list[int | None]] = []
+    # The per-code matrices pooled into the headline, kept SEPARATE from
+    # `global_rows` so the headline's interval can resample UNITS rather than
+    # (unit × code) rows — see `pooled_unit_contributions`.
+    pooled_matrices: list[list[list[int | None]]] = []
     for code_id, rows in per_code.items():
         n_units = _n_comparable_units(rows)
         if n_units == 0:
@@ -639,12 +812,18 @@ def compute_irr(
                 "kappa_interpretation": None,
                 "krippendorff_alpha": None,
                 "alpha_interpretation": None,
+                "alpha_metric": ALPHA_METRIC_NOMINAL,
                 "undefined_reason": NO_VARIANCE,
+                # #43 — an undefined statistic gets no interval, and no SECOND
+                # reason: `undefined_reason` above already explains the blank.
+                "kappa_ci": None,
+                "alpha_ci": None,
             })
             continue
 
         alpha = _krippendorff_alpha(rows)
-        kappa = _cohens_kappa(_project_to_pair(rows, *pair_idx)) if pair_idx else None
+        pair_rows = _project_to_pair(rows, *pair_idx) if pair_idx else None
+        kappa = _cohens_kappa(pair_rows) if pair_rows is not None else None
         per_code_results.append({
             "code_id": code_id,
             "code_name": code_names.get(code_id, str(code_id)),
@@ -655,12 +834,86 @@ def compute_irr(
             "kappa_interpretation": _interpret_kappa(kappa),
             "krippendorff_alpha": alpha,
             "alpha_interpretation": _interpret_alpha(alpha),
+            # Presence/absence is categorical, so its α is scored NOMINALLY.
+            # Stated on the row rather than assumed: the rating table below
+            # scores its α on the INTERVAL metric, and the two must never be
+            # read as the same number.
+            "alpha_metric": ALPHA_METRIC_NOMINAL,
             "undefined_reason": None,
+            # The interval is computed from the SAME rows the estimate came
+            # from — `pair_rows` for κ, the full matrix for α — so a scope
+            # change can never move one without the other.
+            "kappa_ci": kappa_interval(pair_rows) if kappa is not None else None,
+            "alpha_ci": alpha_interval(unit_contributions(rows)) if alpha is not None else None,
         })
         global_rows.extend(rows)
+        pooled_matrices.append(rows)
 
     per_code_results.sort(key=lambda r: r["code_name"].lower())
     overall_alpha = _krippendorff_alpha(global_rows) if global_rows else None
+    overall_alpha_ci = (
+        alpha_interval(pooled_unit_contributions(pooled_matrices))
+        if overall_alpha is not None else None
+    )
+
+    # ── #35 — rating agreement, one α PER scaled code, never pooled ───────────
+    #
+    # "Joy 0–100" and "Anxiety −1…+1" are different instruments; one coefficient
+    # over both would average disagreement measured in different units. So there
+    # is no rating headline, and these rows are deliberately NOT added to
+    # `global_rows` — the overall α above stays a statement about presence/absence.
+    magnitude_results: list[dict] = []
+    for code_id, entry in magnitude.items():
+        rows_m = entry["rows"]
+        n_units_m = _n_comparable_units(rows_m)
+        base = {
+            "code_id": code_id,
+            "code_name": entry["code_name"],
+            "scale": entry["scale"],
+            "n_units": n_units_m,
+            "n_applications": entry["n_applications"],
+            "n_rated": entry["n_rated"],
+            "mean_abs_difference": _mean_abs_difference(rows_m),
+            "alpha_metric": MAGNITUDE_ALPHA_METRIC,
+        }
+        if n_units_m == 0:
+            # Every rating here is one coder's alone — coverage, not agreement.
+            # The row still renders so the researcher sees HOW thin the ratings
+            # are; that visibility is why variant C (optional rating) was
+            # rejected in the design round.
+            magnitude_results.append({
+                **base,
+                "krippendorff_alpha": None,
+                "alpha_interpretation": None,
+                "undefined_reason": INSUFFICIENT_N,
+                "alpha_ci": None,
+            })
+            continue
+        if len(_distinct_comparable_values(rows_m)) < 2:
+            # #829's rule through ratings: identical values everywhere is not
+            # "perfect agreement", it is no variance to agree about.
+            magnitude_results.append({
+                **base,
+                "krippendorff_alpha": None,
+                "alpha_interpretation": None,
+                "undefined_reason": NO_VARIANCE,
+                "alpha_ci": None,
+            })
+            continue
+        alpha_m = _krippendorff_alpha(rows_m, MAGNITUDE_ALPHA_METRIC)
+        magnitude_results.append({
+            **base,
+            "krippendorff_alpha": alpha_m,
+            "alpha_interpretation": _interpret_alpha(alpha_m),
+            "undefined_reason": None,
+            # The SAME metric as the point estimate, by construction — the
+            # interval brackets the number it sits beside, not a nominal cousin.
+            "alpha_ci": (
+                alpha_interval(unit_contributions(rows_m), metric=MAGNITUDE_ALPHA_METRIC)
+                if alpha_m is not None else None
+            ),
+        })
+    magnitude_results.sort(key=lambda r: r["code_name"].lower())
 
     return {
         "available": True,
@@ -674,5 +927,13 @@ def compute_irr(
         "per_code": per_code_results,
         "overall_alpha": overall_alpha,
         "overall_alpha_interpretation": _interpret_alpha(overall_alpha),
+        # ⚠️ A CLUSTER bootstrap over units, not over the pooled rows — a unit
+        # contributes one row per code and those rows move together (#43).
+        "overall_alpha_ci": overall_alpha_ci,
         "interpretation_thresholds": thresholds,
+        # The stated basis (#35): every α on this payload is over CODERS. A
+        # dataset scale score's α is over ITEMS and says so on its own payload;
+        # the client displays each and never infers either from the screen.
+        "reliability_facet": RELIABILITY_FACET_CODERS,
+        "magnitude_per_code": magnitude_results,
     }

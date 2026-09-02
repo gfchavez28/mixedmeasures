@@ -167,3 +167,114 @@ for (cid in unique(d$code_id)) {{
         # 2-coder fixture → κ + % agreement also round-trip.
         assert r_kappa == pytest.approx(exp["cohens_kappa"], abs=1e-6)
         assert r_agree == pytest.approx(exp["percent_agreement"], abs=1e-6)
+
+
+# ── #35 — rating agreement (magnitude coding) ─────────────────────────────────
+
+RATED_CODE = 9591
+
+
+def _seed_with_ratings(db):
+    """`_seed` plus a code that declares a −1…+1 scale, applied AND rated by both
+    coders on every segment.
+
+    ⚠️ Zero is INTERIOR on this scale and one rating IS zero (S2, coder 1): a
+    truthiness slip anywhere between the row and the CSV would blank that cell,
+    and the exported α would silently differ from the app's.
+    """
+    user = _seed(db)
+    db.add(Code(id=RATED_CODE, project_id=PID, name="District support", numeric_id=3,
+                is_active=True, is_universal=False,
+                magnitude_min=-1.0, magnitude_max=1.0, magnitude_step=0.5))
+    db.flush()
+    ratings = {95000: (1.0, 1.0), 95001: (0.5, 0.0), 95002: (0.0, -0.5), 95003: (-1.0, -1.0)}
+    for sid, (a, b) in ratings.items():
+        db.add(CodeApplication(code_id=RATED_CODE, user_id=1, segment_id=sid, magnitude=a))
+        db.add(CodeApplication(code_id=RATED_CODE, user_id=2, segment_id=sid, magnitude=b))
+    db.flush()
+    return user
+
+
+def test_export_emits_a_rating_csv_and_its_own_r_block(db_session):
+    """Always-on (no R): a rated code gets its OWN matrix file and loop — the
+    cells are ratings on the code's scale, not 0/1, and the metric differs."""
+    db = db_session
+    user = _seed_with_ratings(db)
+    raw = asyncio.run(_export_zip_bytes(db, user))
+
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        names = zf.namelist()
+        mag_name = next((n for n in names if n.endswith("_irr_magnitude.csv")), None)
+        assert mag_name, f"export did not emit a rating CSV; got {names}"
+        mag_csv = zf.read(mag_name).decode("utf-8-sig")
+        setup = zf.read(next(n for n in names if n.endswith(".R"))).decode("utf-8")
+        # The categorical file is untouched by the addition.
+        irr_csv = zf.read(next(n for n in names if n.endswith("_irr.csv"))).decode("utf-8-sig")
+
+    lines = mag_csv.splitlines()
+    assert lines[0] == "code_id,code_name,scale_min,scale_max,coder_1,coder_2"
+    body = [ln for ln in lines[1:] if ln.strip()]
+    assert len(body) == 4, "one row per in-play unit of the rated code"
+    assert all(ln.startswith(f"{RATED_CODE},District support,-1.0,1.0,") for ln in body)
+    # The zero rating is a CELL, not a blank.
+    assert f"{RATED_CODE},District support,-1.0,1.0,0.0,-0.5" in body
+
+    assert "_irr_magnitude.csv" in setup
+    assert 'kripp.alpha(t(m), method = "interval")' in setup
+    assert "Rating agreement (magnitude coding)" in setup  # TOC + section header
+    # The categorical block still scores nominally, in its own loop.
+    assert 'kripp.alpha(t(m), method = "nominal")' in setup
+
+    # `_irr.csv` carries BOTH codes' presence/absence rows now (the rated code
+    # is also an applied code) — but no rating value leaks into it.
+    assert "0.5" not in irr_csv and "-0.5" not in irr_csv
+
+
+def test_export_omits_the_rating_csv_when_no_code_is_rated(db_session):
+    """No scaled code → no file and no block that would `read_csv` it."""
+    db = db_session
+    user = _seed(db)
+    raw = asyncio.run(_export_zip_bytes(db, user))
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        names = zf.namelist()
+        setup = zf.read(next(n for n in names if n.endswith(".R"))).decode("utf-8")
+    assert not any(n.endswith("_irr_magnitude.csv") for n in names)
+    assert "_irr_magnitude.csv" not in setup
+    assert "Rating agreement" not in setup
+
+
+@pytest.mark.skipif(not _HAS_IRR, reason="Rscript + irr package not available")
+def test_exported_rating_alpha_reproduces_tool_number(db_session):
+    """#402 for ratings: R's interval-metric α over the exported matrix equals
+    the app's rating α for that code."""
+    db = db_session
+    user = _seed_with_ratings(db)
+    res = compute_irr(db, PID)
+    row = next(r for r in res["magnitude_per_code"] if r["code_id"] == RATED_CODE)
+    assert row["krippendorff_alpha"] is not None, "fixture must produce a defined rating α"
+
+    raw = asyncio.run(_export_zip_bytes(db, user))
+    with tempfile.TemporaryDirectory() as d:
+        workdir = Path(d)
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            zf.extractall(workdir)
+            mag_csv = next(p for p in workdir.iterdir() if p.name.endswith("_irr_magnitude.csv"))
+        runner = workdir / "runner.R"
+        runner.write_text(f"""
+suppressMessages(library(irr)); suppressMessages(library(readr))
+d <- read_csv("{mag_csv.name}", na = c("", "NA"), show_col_types = FALSE)
+coder_cols <- grep("^coder_", names(d), value = TRUE)
+for (cid in unique(d$code_id)) {{
+  m <- as.matrix(d[d$code_id == cid, coder_cols, drop = FALSE]); storage.mode(m) <- "numeric"
+  a <- kripp.alpha(t(m), method = "interval")$value
+  cat(sprintf("RES %s %.8f\\n", cid, a))
+}}
+""", encoding="utf-8")
+        proc = subprocess.run([_RSCRIPT, runner.name], cwd=str(workdir),
+                              capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, f"R failed:\n{proc.stderr}"
+
+    got = {int(m.group(1)): float(m.group(2))
+           for m in re.finditer(r"^RES (\d+) ([-\d.eE+]+)\s*$", proc.stdout, re.MULTILINE)}
+    assert set(got) == {RATED_CODE}
+    assert got[RATED_CODE] == pytest.approx(row["krippendorff_alpha"], abs=1e-6)

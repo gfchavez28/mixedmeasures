@@ -36,6 +36,7 @@ the portability import and the future staleness sweep).
 from __future__ import annotations
 
 import json
+import statistics
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -56,6 +57,7 @@ from .coding_layers import (
     project_scoped_segments,
     resolve_effective_code,
 )
+from .magnitude import read_scale
 
 
 def consensus_enabled(db: Session) -> bool:
@@ -137,6 +139,137 @@ def _decide_consensus(per_coder: dict[int, set[int]]) -> list[tuple[int, str, in
     return decisions
 
 
+# ── #35 — consensus over RATINGS ───────────────────────────────────────────────
+#
+# A rating consensus is NOT a vote. Across coders, spread is ERROR to be
+# minimised (the design note §2's one asymmetry), so the consensus rating is the
+# MEDIAN of the voters' ratings — robust to one harsh coder — and the disagreement
+# signal is the SPREAD, in the scale's own units. The categorical decider above is
+# a majority over SETS and is deliberately not extended to carry this: a rating is
+# one number per coder, a code set is many codes per coder, and the two questions
+# ("did they agree it applies?" and "did they agree HOW MUCH?") are asked in
+# sequence — the second only of a code that reached consensus on the first.
+
+MAGNITUDE_CONSENSUS_RULE = "median"
+
+
+def _decide_magnitude(values: list[float | None], scale: dict) -> dict | None:
+    """The rating consensus for ONE code on ONE target, or None with no ratings.
+
+    ``values`` are the ratings the VOTERS gave on the code's own scale. A coder
+    who applied the code but left it unrated contributes nothing — an explicit
+    skip is not a rating of zero (#35 §2), and a rating OF zero is kept. Returns::
+
+        {"rule": "median", "median": 7.5, "n_rated": 2,
+         "spread": 1.0, "step": 1.0, "flag": False}
+
+    🔴 **The flag is `spread > step`: the coders differ by MORE THAN ONE STEP of
+    the declared scale.** The step is the researcher's own granularity — on a
+    0–10 step-1 scale a 7 and an 8 are neighbours while a 7 and a 9 are worth
+    adjudicating; on a 0–100 step-5 scale the same threshold is five points. Any
+    other cutoff would be a number nobody declared. Every field is carried so the
+    grid can SAY the rule rather than only show a mark.
+
+    ⚠️ The median of an even count can fall between steps (7 and 8 → 7.5). That
+    is correct: the consensus row is DERIVED, not a coder's judgement, and a
+    median snapped to one side would be taking that coder's side.
+    """
+    rated = [v for v in values if v is not None]
+    if not rated:
+        return None
+    step = float(scale.get("step") or 1.0)
+    spread = float(max(rated) - min(rated))
+    return {
+        "rule": MAGNITUDE_CONSENSUS_RULE,
+        "median": float(statistics.median(rated)),
+        "n_rated": len(rated),
+        "spread": spread,
+        "step": step,
+        # A hair of tolerance: 0.1 + 0.2 is not 0.3 in binary, and two coders on
+        # adjacent ticks of a fractional-step scale must not be flagged.
+        "flag": spread > step + 1e-9,
+    }
+
+
+def has_rating_disagreement(
+    per_coder_ratings: dict[int, dict[int, float | None]], scales: dict[int, dict],
+) -> bool:
+    """True iff for some scaled code two coders' ratings on this unit differ by
+    more than one step — the SAME rule `_decide_magnitude` flags with, asked of
+    a unit that need not have a consensus at all (a tie on WHETHER the code
+    applies can still carry two ratings that disagree on HOW MUCH)."""
+    by_code: dict[int, list[float]] = {}
+    for ratings in per_coder_ratings.values():
+        for code_id, value in ratings.items():
+            if value is not None and code_id in scales:
+                by_code.setdefault(code_id, []).append(value)
+    for code_id, values in by_code.items():
+        if len(values) >= 2:
+            decision = _decide_magnitude(values, scales[code_id])
+            if decision is not None and decision["flag"]:
+                return True
+    return False
+
+
+def scales_for_project(db: Session, project_id: int) -> dict[int, dict]:
+    """Every scaled code's declaration, keyed by code id — ONE query per rebuild.
+
+    A code whose scale was cleared keeps its stored ratings but is absent here,
+    so they reach no consensus and no flag: a number with no declared range is
+    not interpretable (the chip and the α table apply the same rule).
+    """
+    out: dict[int, dict] = {}
+    for code in (
+        db.query(Code)
+        .filter(
+            Code.project_id == project_id,
+            Code.magnitude_min.isnot(None),
+            Code.magnitude_max.isnot(None),
+        )
+        .all()
+    ):
+        scale = read_scale(code)
+        if scale is not None:
+            out[code.id] = scale
+    return out
+
+
+def _rating_values(
+    ratings: dict[int, dict[int, float | None]], voters: dict[int, set[int]], eff: int,
+) -> list[float | None]:
+    """The voters' ratings on effective code ``eff`` — taken ONLY from
+    applications of the canonical code itself (``ratings`` is keyed by the RAW
+    code). A rating on a grouped sibling was given on the sibling's own scale,
+    which may differ, so it is never pooled — the rule the α table applies."""
+    return [ratings[uid][eff] for uid in voters if eff in ratings.get(uid, {})]
+
+
+def _consensus_row(
+    consensus_user_id: int, eff: int, rule: str, agree: int, voters: int,
+    rating: dict | None, *, segment_id: int | None = None, dataset_value_id: int | None = None,
+) -> CodeApplication:
+    """ONE constructor for both writers, so the stored shape cannot drift.
+
+    The ``magnitude`` key rides `origin_context` ONLY when a rating consensus
+    exists — an unrated code keeps the exact three-key shape it always had. The
+    row's own `magnitude` column carries the median (or stays NULL), so the
+    consensus layer's chips render a rating the same way a coder's do.
+    """
+    context: dict = {"rule": rule, "agree": agree, "voters": voters}
+    if rating is not None:
+        context["magnitude"] = rating
+    return CodeApplication(
+        code_id=eff,
+        user_id=consensus_user_id,
+        origin=CONSENSUS_ORIGIN,
+        origin_context=json.dumps(context),
+        # `is not None`, never truthiness: a median of 0 is a rating (#35 §2).
+        magnitude=rating["median"] if rating is not None else None,
+        segment_id=segment_id,
+        dataset_value_id=dataset_value_id,
+    )
+
+
 def has_disagreement(per_engaged_coder: dict[int, set[int]]) -> bool:
     """True iff ≥2 SOURCE-engaged coders gave non-identical effective-code sets.
 
@@ -181,7 +314,7 @@ def recompute_consensus_for_target(
     )
 
     voters = (
-        db.query(CodeApplication.user_id, CodeApplication.code_id)
+        db.query(CodeApplication.user_id, CodeApplication.code_id, CodeApplication.magnitude)
         .join(Code, CodeApplication.code_id == Code.id)
         .join(User, CodeApplication.user_id == User.id)
         .filter(
@@ -218,8 +351,12 @@ def recompute_consensus_for_target(
         )
     rows = voters.all()
     per_coder: dict[int, set[int]] = {}
-    for user_id, code_id in rows:
+    # #35 — each voter's RATINGS, keyed by the RAW code (the instrument is the
+    # code's own scale; `_rating_values` says why they are never pooled).
+    ratings: dict[int, dict[int, float | None]] = {}
+    for user_id, code_id, magnitude in rows:
         per_coder.setdefault(user_id, set()).add(resolve_effective_code(effective_map, code_id))
+        ratings.setdefault(user_id, {})[code_id] = magnitude
 
     db.query(CodeApplication).filter(
         CodeApplication.origin == CONSENSUS_ORIGIN,
@@ -228,17 +365,16 @@ def recompute_consensus_for_target(
     db.flush()
 
     decisions = _decide_consensus(per_coder)
+    scales = scales_for_project(db, project_id) if decisions else {}
     for eff, rule, agree, voters in decisions:
-        db.add(
-            CodeApplication(
-                code_id=eff,
-                user_id=consensus_user.id,
-                origin=CONSENSUS_ORIGIN,
-                origin_context=json.dumps({"rule": rule, "agree": agree, "voters": voters}),
-                segment_id=segment_id,
-                dataset_value_id=dataset_value_id,
-            )
+        rating = (
+            _decide_magnitude(_rating_values(ratings, per_coder, eff), scales[eff])
+            if eff in scales else None
         )
+        db.add(_consensus_row(
+            consensus_user.id, eff, rule, agree, voters, rating,
+            segment_id=segment_id, dataset_value_id=dataset_value_id,
+        ))
     db.flush()
     return len(decisions)
 
@@ -258,7 +394,8 @@ def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
     seg_rows = (
         consensus_scoped_segments(
             db.query(
-                CodeApplication.segment_id, CodeApplication.user_id, CodeApplication.code_id
+                CodeApplication.segment_id, CodeApplication.user_id, CodeApplication.code_id,
+                CodeApplication.magnitude,
             )
             .join(Segment, CodeApplication.segment_id == Segment.id)
             .join(Code, CodeApplication.code_id == Code.id)
@@ -275,7 +412,8 @@ def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
         .all()
     )
     val_rows = (
-        db.query(CodeApplication.dataset_value_id, CodeApplication.user_id, CodeApplication.code_id)
+        db.query(CodeApplication.dataset_value_id, CodeApplication.user_id, CodeApplication.code_id,
+                 CodeApplication.magnitude)
         .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
         .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
         .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
@@ -292,13 +430,19 @@ def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
     )
 
     seg_buckets: dict[int, dict[int, set[int]]] = {}
-    for seg_id, user_id, code_id in seg_rows:
+    seg_ratings: dict[int, dict[int, dict[int, float | None]]] = {}
+    for seg_id, user_id, code_id, magnitude in seg_rows:
         eff = resolve_effective_code(effective_map, code_id)
         seg_buckets.setdefault(seg_id, {}).setdefault(user_id, set()).add(eff)
+        seg_ratings.setdefault(seg_id, {}).setdefault(user_id, {})[code_id] = magnitude
     val_buckets: dict[int, dict[int, set[int]]] = {}
-    for val_id, user_id, code_id in val_rows:
+    val_ratings: dict[int, dict[int, dict[int, float | None]]] = {}
+    for val_id, user_id, code_id, magnitude in val_rows:
         eff = resolve_effective_code(effective_map, code_id)
         val_buckets.setdefault(val_id, {}).setdefault(user_id, set()).add(eff)
+        val_ratings.setdefault(val_id, {}).setdefault(user_id, {})[code_id] = magnitude
+    # #35 — the declared instruments, once per rebuild.
+    scales = scales_for_project(db, project_id)
 
     # Project-scoped DELETE of the prior consensus layer (ADJ-1).
     # The CLEANER's scope — deliberately BROADER than the writer's (which is
@@ -322,31 +466,31 @@ def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
     ).delete(synchronize_session="fetch")
     db.flush()
 
-    created = unanimous = majority = 0
+    created = unanimous = majority = rated = 0
 
-    def _emit(decisions, *, segment_id=None, dataset_value_id=None):
-        nonlocal created, unanimous, majority
-        for eff, rule, agree, voters in decisions:
-            db.add(
-                CodeApplication(
-                    code_id=eff,
-                    user_id=consensus_user.id,
-                    origin=CONSENSUS_ORIGIN,
-                    origin_context=json.dumps({"rule": rule, "agree": agree, "voters": voters}),
-                    segment_id=segment_id,
-                    dataset_value_id=dataset_value_id,
-                )
+    def _emit(per_coder, ratings, *, segment_id=None, dataset_value_id=None):
+        nonlocal created, unanimous, majority, rated
+        for eff, rule, agree, voters in _decide_consensus(per_coder):
+            rating = (
+                _decide_magnitude(_rating_values(ratings, per_coder, eff), scales[eff])
+                if eff in scales else None
             )
+            db.add(_consensus_row(
+                consensus_user.id, eff, rule, agree, voters, rating,
+                segment_id=segment_id, dataset_value_id=dataset_value_id,
+            ))
             created += 1
             if rule == "unanimous":
                 unanimous += 1
             else:
                 majority += 1
+            if rating is not None:
+                rated += 1
 
     for seg_id, per_coder in seg_buckets.items():
-        _emit(_decide_consensus(per_coder), segment_id=seg_id)
+        _emit(per_coder, seg_ratings.get(seg_id, {}), segment_id=seg_id)
     for val_id, per_coder in val_buckets.items():
-        _emit(_decide_consensus(per_coder), dataset_value_id=val_id)
+        _emit(per_coder, val_ratings.get(val_id, {}), dataset_value_id=val_id)
 
     db.flush()
     return {
@@ -354,5 +498,7 @@ def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
         "created": created,
         "unanimous": unanimous,
         "majority": majority,
+        # #35 — consensus rows that also carry a rating consensus (a median).
+        "rated": rated,
         "targets": len(seg_buckets) + len(val_buckets),
     }

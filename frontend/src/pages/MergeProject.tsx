@@ -791,6 +791,12 @@ function ReportStep({ report, targetId, navigate }: {
     ['Codes added', report.codes_created],
     ['Codes linked', report.codes_linked],
     ['Codes folded in', report.codes_collapsed],
+    // #35 — the merge kept this project's ratings; the differences wait in
+    // Reconciliation. Shown only when there were any, so a project without
+    // rating scales never meets the row.
+    ...(report.magnitude_conflicts
+      ? [['Rating differences flagged for reconciliation', report.magnitude_conflicts] as [string, number]]
+      : []),
   ]
   return (
     <Card>

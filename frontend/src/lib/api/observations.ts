@@ -1,4 +1,5 @@
 import api from './client'
+import type { AppliedCodeDetail } from './segments'
 
 /**
  * An Observation — a recording coded on its OWN timeline, with no transcript.
@@ -63,12 +64,10 @@ export interface ObservationSegment {
   end_time: number
   text: string
   applied_codes: number[]
-  applied_code_details: {
-    code_id: number
-    user_id: number | null
-    attribution: string | null
-    is_universal: boolean
-  }[]
+  // The SAME detail shape the conversation payload carries (#868 a): this was
+  // an inline copy that never learned the rating fields, so the type said the
+  // clip payload carried no rating while the server had been sending one.
+  applied_code_details: AppliedCodeDetail[]
   attached_notes: { id: number; sequence_number: number }[]
   created_at: string
 }

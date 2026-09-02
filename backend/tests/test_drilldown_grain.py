@@ -144,10 +144,13 @@ def test_text_columns_coded_rows_follow_ja(multicoder_text_project, db_session):
     badge_count = next(c for c in badge if c["column_id"] == 7400)["coded_count"]
     assert badge_count == 2, "ContentBySource badge disagrees with the picker"
 
-    texts_resp = _run(list_texts(
+    # #844: `list_texts` is a plain `def` now (see its docstring — #837), so it
+    # is called directly rather than through `_run`, which the async siblings
+    # in this file still need.
+    texts_resp = list_texts(
         project_id=740, column_ids="7400", dataset_ids=None, hide_empty=True,
         record_id=None, search=None, sort_by="column_asc", random_seed=None,
         quoted_only=False, user=multicoder_text_project, db=db_session,
-    ))
+    )
     assert texts_resp.coded_texts == 2  # #488: was universal-inclusive
     assert texts_resp.coded_rows == 2

@@ -15,8 +15,18 @@ import {
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
 import { codeAnalysisApi, type Code, type ReconciliationUnit, type ReconciliationCodeInfo } from '@/lib/api'
 import { cn, formatTimecode } from '@/lib/utils'
+import { formatMagnitude } from '@/lib/magnitude'
 
 const RENDER_CAP = 200 // matches the backend limit; disagreements-first keeps the set small
+
+/**
+ * #35 — a unit needs review for EITHER fact: the coders applied different codes,
+ * or they agreed on a code and rated it more than one step apart. The two ride
+ * the payload separately so the row can say which; every "needs review" gate in
+ * this grid (the filter's counterpart, j/k, the badge) reads THIS predicate.
+ */
+const needsReview = (u: ReconciliationUnit): boolean =>
+  u.has_disagreement || !!u.has_rating_disagreement || !!u.has_merge_conflict
 
 interface ReconciliationGridProps {
   projectId: number
@@ -146,12 +156,12 @@ export default function ReconciliationGrid({
       case 'Home': if (e.ctrlKey) { nr = 0 } nc = 0; break
       case 'End': if (e.ctrlKey) { nr = rows - 1 } nc = totalCols - 1; break
       case 'j': case 'J': {
-        const next = units.findIndex((u, i) => i > r && u.has_disagreement)
+        const next = units.findIndex((u, i) => i > r && needsReview(u))
         if (next >= 0) { nr = next; setSrAnnouncement('Next disagreement') }
         break
       }
       case 'k': case 'K': {
-        for (let i = r - 1; i >= 0; i--) { if (units[i].has_disagreement) { nr = i; setSrAnnouncement('Previous disagreement'); break } }
+        for (let i = r - 1; i >= 0; i--) { if (needsReview(units[i])) { nr = i; setSrAnnouncement('Previous disagreement'); break } }
         break
       }
       case 'Enter': case ' ': {
@@ -321,6 +331,13 @@ export default function ReconciliationGrid({
               {' '}= the coder coded this source but not this unit (a real disagreement);{' '}
               <span className="italic">— not reviewed</span> = the coder didn’t code this source (excluded from reliability).
             </p>
+            {/* #35 — the rating half, said once. The consensus rating is a MEDIAN,
+                not a vote, and the flag's rule is the researcher's own step. */}
+            <p>
+              A code with a declared rating scale shows each coder’s rating on its chip. The consensus
+              rating is the median of the ratings given; <span className="italic">differ by</span> marks
+              ratings more than one step of the scale apart — codes can agree while ratings do not.
+            </p>
           </div>
         </>
       )}
@@ -361,7 +378,21 @@ const ReconciliationRow = memo(function ReconciliationRow({
     ? `${formatTimecode(unit.start_time)} – ${formatTimecode(unit.end_time)}`
     : null
   const unitWord = isClip ? 'Clip' : unit.unit_type === 'segment' ? 'Segment' : 'Response'
-  const rowheaderLabel = `${unitWord} · ${unit.source_label}: ${timeRange ?? unit.text.slice(0, 80)} · ${unit.has_disagreement ? 'needs review' : 'agreement'}`
+  // #35 — "ratings differ" is a distinct state from "codes differ": the coders
+  // agreed the code applies and disagreed on how much. It gets its own words
+  // (badge AND spoken label) so the reviewer knows which conversation to have.
+  const ratingsOnly = !unit.has_disagreement && !!unit.has_rating_disagreement
+  // And a THIRD state (#35): a merge found a different rating in a coder's own
+  // copy. The project's rating was kept; rating it again settles it.
+  const mergeOnly = !unit.has_disagreement && !unit.has_rating_disagreement && !!unit.has_merge_conflict
+  const reviewWord = unit.has_disagreement
+    ? 'needs review'
+    : ratingsOnly
+      ? 'needs review, ratings differ'
+      : mergeOnly
+        ? 'needs review, a merge left a rating difference'
+        : 'agreement'
+  const rowheaderLabel = `${unitWord} · ${unit.source_label}: ${timeRange ?? unit.text.slice(0, 80)} · ${reviewWord}`
 
   return (
     <div role="row" className="grid border-b last:border-b-0 hover:bg-mm-surface-hover/40" style={{ gridTemplateColumns: 'var(--recon-cols)' }}>
@@ -382,7 +413,17 @@ const ReconciliationRow = memo(function ReconciliationRow({
                 className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-600 dark:text-amber-400"
                 title="Flagged for review: the coders who engaged this source applied different codes here — including a coder who coded elsewhere in this source but left this unit blank. The unit may still have a majority consensus."
               ><TriangleAlert className="w-3 h-3" aria-hidden="true" />Needs review</span>
-            : <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"><Check className="w-3 h-3" aria-hidden="true" />Agree</span>}
+            : ratingsOnly
+              ? <span
+                  className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                  title="Flagged for review: the coders agree on the codes, but their ratings on at least one of them differ by more than one step of its scale."
+                ><TriangleAlert className="w-3 h-3" aria-hidden="true" />Ratings differ</span>
+              : mergeOnly
+                ? <span
+                    className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                    title="Flagged for review: a merge found a different rating in a coder's own copy of this coding. This project's rating was kept; rating it again settles the difference."
+                  ><TriangleAlert className="w-3 h-3" aria-hidden="true" />Merge difference</span>
+                : <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"><Check className="w-3 h-3" aria-hidden="true" />Agree</span>}
           <span className="text-[10px] text-mm-text-faint truncate" title={unit.source_label}>{unit.source_label}</span>
         </div>
         {timeRange ? (
@@ -416,6 +457,8 @@ const ReconciliationRow = memo(function ReconciliationRow({
             coderName={coder.name}
             reviewed={engaged.has(coder.id)}
             codeIds={codeIds}
+            ratings={unit.ratings_by_coder?.[String(coder.id)]}
+            conflicts={unit.rating_conflicts_by_coder?.[String(coder.id)]}
             consensusSet={consensusSet}
             legendMap={legendMap}
             // own-cell editing:
@@ -461,6 +504,10 @@ interface ReconciliationCellProps {
   coderName?: string
   reviewed?: boolean
   codeIds: number[]
+  /** #35 — this coder's ratings here, `codeId → rating`; absent = no rating known. */
+  ratings?: Record<string, number>
+  /** #35 — `codeId → the rating a merged copy carried`; absent = no unresolved conflict. */
+  conflicts?: Record<string, number>
   consensusSet: Set<number>
   consensusContext?: ReconciliationUnit['consensus_context']
   legendMap: Map<number, ReconciliationCodeInfo>
@@ -476,9 +523,24 @@ interface ReconciliationCellProps {
 }
 
 const ReconciliationCell = memo(function ReconciliationCell(props: ReconciliationCellProps) {
-  const { rowIndex, colIndex, tabbable, onFocusCell, kind, coderName, reviewed, codeIds, consensusSet, consensusContext, legendMap } = props
+  const { rowIndex, colIndex, tabbable, onFocusCell, kind, coderName, reviewed, codeIds, ratings, conflicts, consensusSet, consensusContext, legendMap } = props
 
   const codeName = (id: number) => legendMap.get(id)?.name ?? `#${id}`
+  // #35 — `!= null`, never truthiness: a rating of 0 is a rating.
+  const ratingOf = (id: number): number | null => {
+    const v = ratings?.[String(id)]
+    return v != null ? v : null
+  }
+  const conflictOf = (id: number): number | null => {
+    const v = conflicts?.[String(id)]
+    return v != null ? v : null
+  }
+  const withRating = (id: number): string => {
+    const v = ratingOf(id)
+    const c = conflictOf(id)
+    const base = v != null ? `${codeName(id)} rated ${formatMagnitude(v)}` : codeName(id)
+    return c != null ? `${base}, a merged copy rated it ${formatMagnitude(c)}` : base
+  }
 
   // #471(b): a chip jumps to where its coding lives. Consensus → read-only jump; a
   // colleague's cell → confirm-switch to them then jump (the #471(d) fix-a-colleague
@@ -493,10 +555,20 @@ const ReconciliationCell = memo(function ReconciliationCell(props: Reconciliatio
   let ariaLabel: string
   if (kind === 'consensus') {
     if (codeIds.length === 0) ariaLabel = 'Consensus: none'
-    else ariaLabel = `Consensus: ${codeIds.map(id => { const ctx = consensusContext?.[String(id)]; return ctx ? `${codeName(id)} (${ctx.rule}, ${ctx.agree} of ${ctx.voters})` : codeName(id) }).join(', ')}`
+    else ariaLabel = `Consensus: ${codeIds.map(id => {
+      const ctx = consensusContext?.[String(id)]
+      if (!ctx) return codeName(id)
+      // #35 — the rating consensus rides the same sentence: the median, how
+      // many rated, and whether they differ by more than a step.
+      const m = ctx.magnitude
+      const rating = m
+        ? `, rated ${formatMagnitude(m.median)} by ${m.n_rated}${m.flag ? `, ratings differ by ${formatMagnitude(m.spread)}` : ''}`
+        : ''
+      return `${codeName(id)} (${ctx.rule}, ${ctx.agree} of ${ctx.voters}${rating})`
+    }).join(', ')}`
   } else if (codeIds.length > 0) {
     const diverging = codeIds.some(id => !consensusSet.has(id))
-    ariaLabel = `${coderName}: ${codeIds.map(codeName).join(', ')}${diverging ? ' · differs from consensus' : ''}`
+    ariaLabel = `${coderName}: ${codeIds.map(withRating).join(', ')}${diverging ? ' · differs from consensus' : ''}`
   } else {
     ariaLabel = `${coderName}: ${reviewed ? 'blank (reviewed)' : 'not reviewed'}`
   }
@@ -529,6 +601,14 @@ const ReconciliationCell = memo(function ReconciliationCell(props: Reconciliatio
           itemType={props.unit.unit_type === 'segment' ? 'segment' : 'text'}
           itemId={props.unit.unit_id}
           appliedCodeIds={codeIds}
+          // #35 — per-application details so the own cell's chips show YOUR
+          // ratings. Bare ids take the "unknown, not unrated" branch, which
+          // renders no rating UI at all — correct where ratings are unknown,
+          // and wrong here, where the payload carries them.
+          appliedCodeDetails={codeIds.map(id => ({
+            code_id: id, user_id: props.coder?.id ?? null,
+            magnitude: ratingOf(id), magnitude_conflict: conflictOf(id),
+          }))}
           codeMap={props.codeMap}
           allCodes={props.allCodes}
           onCodeChange={props.onCodeChange}
@@ -543,18 +623,39 @@ const ReconciliationCell = memo(function ReconciliationCell(props: Reconciliatio
             if (!info) return null
             const diverging = kind !== 'consensus' && !consensusSet.has(id)
             const ctx = kind === 'consensus' ? consensusContext?.[String(id)] : undefined
+            // #35 — the chip carries the rating against the code's declared
+            // scale (the legend's, single-sourced on the wire): a coder's own in
+            // a coder cell, the MEDIAN in the consensus cell. No scale, no
+            // rating UI — a bare number is not a rating.
+            const scale = info.scale ?? null
+            const magnitude = kind === 'consensus' ? (ctx?.magnitude?.median ?? null) : ratingOf(id)
             return (
               <span
                 key={id}
                 className={cn('inline-flex items-center gap-0.5 rounded-full max-w-full min-w-0', diverging && 'ring-1 ring-amber-500/70')}
               >
-                <CodeChip code={info} size="xs" truncate onClick={chipClick} />
+                <CodeChip
+                  code={info} size="xs" truncate onClick={chipClick}
+                  magnitude={magnitude} scale={scale}
+                  magnitudeConflict={kind === 'consensus' ? null : conflictOf(id)}
+                />
                 {ctx && (
                   <span
                     className="text-[9px] text-mm-text-faint shrink-0"
                     title={ctx.rule === 'unanimous' ? `All ${ctx.voters} coders agreed` : `${ctx.agree} of ${ctx.voters} coders (majority)`}
                   >
                     {ctx.rule === 'unanimous' ? '✓' : `${ctx.agree}/${ctx.voters}`}
+                  </span>
+                )}
+                {ctx?.magnitude?.flag && (
+                  // The spread in the scale's own units, dual-encoded (icon +
+                  // words); the rule rides the title so the mark explains itself.
+                  <span
+                    className="inline-flex items-center gap-0.5 text-[9px] font-medium text-amber-600 dark:text-amber-400 shrink-0"
+                    title={`Ratings differ by ${formatMagnitude(ctx.magnitude.spread)} — more than one step (${formatMagnitude(ctx.magnitude.step)}) of the scale. The consensus rating is the median of ${ctx.magnitude.n_rated}.`}
+                  >
+                    <TriangleAlert className="w-3 h-3" aria-hidden="true" />
+                    differ by {formatMagnitude(ctx.magnitude.spread)}
                   </span>
                 )}
               </span>

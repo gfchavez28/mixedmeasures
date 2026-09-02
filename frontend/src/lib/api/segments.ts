@@ -22,6 +22,23 @@ export interface AppliedCodeDetail {
   user_id: number | null
   attribution: string | null
   is_universal: boolean
+  /**
+   * #35 — this coder's rating on the code's declared scale, or null for UNRATED.
+   *
+   * ⚠️ Never coerce a null here to 0 anywhere downstream: on a scale whose range
+   * includes zero, 0 is a legal and meaningful rating.
+   *
+   * REQUIRED since #868 (a): every payload builder carries it (the server declares
+   * the field on every detail), and an optional type let a surface fabricate a
+   * detail without it and render "not rated" over a rating it never received.
+   */
+  magnitude: number | null
+  /**
+   * #35 — the rating a MERGED copy of this same application carried when it
+   * differed from ours (the merge kept ours and flagged the difference). Null =
+   * no unresolved conflict; the coder clears it by rating again.
+   */
+  magnitude_conflict: number | null
 }
 
 export interface Segment {

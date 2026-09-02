@@ -43,6 +43,7 @@ import { DataQualityContent } from '@/components/analysis/DataQualityTab'
 import AnalysisSidebar from '@/components/analysis/AnalysisSidebar'
 import AlphaItemDiagnostics, { type AlphaItem } from '@/components/analysis/AlphaItemDiagnostics'
 import { splitBasisLabel, splitBasisDetail, describeHalves } from '@/lib/split-basis'
+import { reliabilityFacetQualifier } from '@/lib/reliability-basis'
 import { useAnalysisUrlState } from '@/hooks/useAnalysisUrlState'
 import { useAnalysisDerived } from '@/hooks/useAnalysisDerived'
 import { useQuickCompute } from '@/hooks/useQuickCompute'
@@ -125,7 +126,12 @@ function formatTestResult(test: StatisticalTestResponse): string {
   if (!rd) return 'Not yet computed'
 
   if (test.test_type === 'cronbachs_alpha') {
-    return `Cronbach's \u03B1 = ${rd.alpha} (${rd.interpretation}), k = ${rd.k}, n = ${rd.n}`
+    // #35 \u2014 the stated facet. This \u03B1 is over ITEMS; the Reliability tab's \u03B1 is
+    // over CODERS, and the letter alone cannot tell them apart. Read from the
+    // payload, never inferred from the test type; absent on rows computed
+    // before the field existed, which render exactly as they did.
+    const facet = reliabilityFacetQualifier(rd.reliability_facet)
+    return `Cronbach's \u03B1 = ${rd.alpha} (${rd.interpretation})${facet ? ` ${facet}` : ''}, k = ${rd.k}, n = ${rd.n}`
   }
   if (test.test_type === 'independent_t_test') {
     return `t(${typeof rd.df === 'number' ? rd.df.toFixed(1) : rd.df}) = ${rd.t_statistic}, ${formatPValue(rd.p_value)}, d = ${rd.cohens_d} (${rd.effect_size_label}) \u2014 ${rd.group1_label} (M = ${rd.group1_mean}) vs ${rd.group2_label} (M = ${rd.group2_mean})`

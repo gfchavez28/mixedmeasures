@@ -1,7 +1,8 @@
 import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react'
 import { SELECTED_TINT } from '@/lib/selection'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Search, Plus, Ellipsis, Pencil, Check, X, Power, PowerOff, StickyNote, FolderInput, ChevronLeft } from 'lucide-react'
+import { Search, Plus, Ellipsis, Pencil, Check, X, Power, PowerOff, StickyNote, FolderInput, ChevronLeft, Gauge } from 'lucide-react'
+import MagnitudeScaleDialog from '@/components/MagnitudeScaleDialog'
 import { type Code, codesApi, categoriesApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -660,6 +661,7 @@ function CodeItem({
   const [isEditingDescription, setIsEditingDescription] = useState(false)
   const [descriptionValue, setDescriptionValue] = useState(code.description || '')
   const [showDeactivateDialog, setShowDeactivateDialog] = useState(false)
+  const [showScaleDialog, setShowScaleDialog] = useState(false)  // #35 rating scale
 
   // #462: categories for the "Move to category" picker. Only fetched once the
   // user opens that view (React Query dedupes the shared key across rows).
@@ -933,6 +935,20 @@ function CodeItem({
                   Move to category
                 </button>
               )}
+              {/* #35 — a rating scale is a per-code instrument. Gated on
+                  `!is_universal` to match the SERVER's refusal exactly: the 0/1
+                  row marks artifacts and is excluded from every coded-count and
+                  reliability surface, so a rating there would never reach a
+                  statistic. Offering a menu item that 400s is the #806 shape. */}
+              {!code.is_universal && (
+                <button
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-mm-surface-hover rounded"
+                  onClick={(e) => { e.stopPropagation(); setMenuOpen(false); setShowScaleDialog(true) }}
+                >
+                  <Gauge className="w-4 h-4" />
+                  {code.magnitude_scale ? 'Edit rating scale' : 'Add rating scale'}
+                </button>
+              )}
               {/* Don't show deactivate for universal codes */}
               {!code.is_universal && (
                 <button
@@ -971,6 +987,16 @@ function CodeItem({
       </Popover>
 
       {/* Deactivate confirmation dialog */}
+      {/* #35 — mounted only while open so a codebook of 32 codes does not
+          carry 32 dialogs' worth of state. */}
+      {showScaleDialog && (
+        <MagnitudeScaleDialog
+          projectId={projectId}
+          code={code}
+          open={showScaleDialog}
+          onOpenChange={setShowScaleDialog}
+        />
+      )}
       <Dialog open={showDeactivateDialog} onOpenChange={setShowDeactivateDialog}>
         <DialogContent onClick={(e: React.MouseEvent) => e.stopPropagation()}>
           <DialogHeader>

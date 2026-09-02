@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Boolean, Index
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Boolean, Float, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from uuid import uuid4
@@ -33,6 +33,26 @@ class Code(Base):
 
     # Track J · J3-2-0: stable cross-instance identity for merge matching
     uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
+
+    # ── Magnitude coding (#35): the DECLARED INSTRUMENT ────────────────────────
+    # A code may opt into a per-application rating scale — "how much does this
+    # segment have this characteristic?" — declared as a range, a granularity and
+    # optional anchor labels. Every rule about these four columns lives in
+    # `services/magnitude.py`; never read or write them directly.
+    #
+    # ⚠️ Stored INLINE rather than in a side table, deliberately, and the shape
+    # mirrors `DatasetColumn`'s (`numeric_min`/`numeric_max`/`scale_labels`) —
+    # declaring a magnitude scale and declaring a variable's value labels are the
+    # same act, so the researcher meets one vocabulary. Inline also means
+    # `.mmproject`'s reflection-driven `_build_entity` carries them with no new
+    # export branch.
+    #
+    # ⚠️ `magnitude_min`/`_max` are a PAIR — both or neither. `has_scale` is the
+    # predicate; a half-declared scale has no range to normalise a value against.
+    magnitude_min = Column(Float, nullable=True)
+    magnitude_max = Column(Float, nullable=True)
+    magnitude_step = Column(Float, nullable=True)  # granularity; None ⇒ 1.0
+    magnitude_labels = Column(Text, nullable=True)  # JSON [{"value": n, "label": str}]
 
     # Relationships
     project = relationship("Project", back_populates="codes")

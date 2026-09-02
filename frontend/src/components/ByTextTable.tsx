@@ -39,6 +39,17 @@ interface ByTextTableProps {
   activeCoderId?: number | null  // Track J · J1 active coder (#446 context-menu check)
   extraCoders?: Coder[]  // #451 archived-who-coded — folded into the chip map
   showArchived?: boolean  // #451 "view all coders" — reveal archived chips
+  /**
+   * #844 — how many texts the CURRENT SELECTION holds, which is not how many
+   * are loaded. `comments` is the loaded prefix; this is the whole set.
+   *
+   * It drives `aria-rowcount`, which ARIA defines as the total row count when
+   * it is known — so a screen-reader user hears "row 40 of 12,431" and learns
+   * the list continues past what is rendered, rather than "40 of 40".
+   */
+  totalRowCount?: number
+  /** #844 — called when the scroller reaches the end, to load the next page. */
+  onEndReached?: () => void
 }
 
 /**
@@ -220,6 +231,8 @@ function ByTextTable({
   activeCoderId,
   extraCoders,
   showArchived,
+  totalRowCount,
+  onEndReached,
 }: ByTextTableProps, ref: Ref<ByTextTableHandle>) {
   const virtuosoRef = useRef<TableVirtuosoHandle>(null)
 
@@ -350,7 +363,10 @@ function ByTextTable({
     activeDescendantId: selectedValueIds.length > 0
       ? `text-${selectedValueIds[selectedValueIds.length - 1]}`
       : undefined,
-    rowCount: comments.length,
+    // #844: the SELECTION's size, not the loaded prefix's. Loaded rows are a
+    // prefix of the ordering, so `dvIdToIndex` still yields correct global
+    // `aria-rowindex` values against this larger count.
+    rowCount: totalRowCount ?? comments.length,
     selectedValueIds,
     dvIdToIndex,
     onRowClick: handleRowClick,
@@ -364,7 +380,7 @@ function ByTextTable({
     onContextCreateNote,
     activeCoderId,
   }), [
-    selectedValueIds, comments.length, dvIdToIndex, handleRowClick, onSelectionChange,
+    selectedValueIds, comments.length, totalRowCount, dvIdToIndex, handleRowClick, onSelectionChange,
     activeCodes, codeIdToShortcutLabel, onQuoteToggle, onContextCodeApply,
     onContextCreateCode, onContextCreateNote, activeCoderId,
   ])
@@ -391,6 +407,11 @@ function ByTextTable({
       ref={virtuosoRef}
       data={comments}
       overscan={10}
+      // #844: load the next page as the researcher reaches the end. Virtuoso
+      // fires this repeatedly while the end stays in view, so the handler must
+      // be idempotent — `fetchNextPage` already is (React Query drops a call
+      // while one is in flight or when no page remains).
+      endReached={onEndReached}
       fixedHeaderContent={() => (
         <tr className="bg-mm-surface">
           <th scope="col" className={`px-1 sticky left-0 z-20 bg-mm-surface ${STICKY_RELAX_AT}`} style={QUOTE_COL_CLAMP} aria-label="Quote" />

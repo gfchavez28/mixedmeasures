@@ -26,6 +26,8 @@ from app.models.segment import Segment
 from app.models.user import User
 from app.services.consensus import (
     _decide_consensus,
+    _decide_magnitude,
+    has_rating_disagreement,
     materialize_consensus_for_project,
     recompute_consensus_for_target,
 )
@@ -143,6 +145,178 @@ def test_decide_consensus_pure():
     assert _decide_consensus({1: {10}, 2: {10}, 3: {20}}) == [(10, "majority", 2, 3)]
     # even split 2/4 is NOT a majority → dropped
     assert _decide_consensus({1: {10}, 2: {10}, 3: {20}, 4: {20}}) == []
+
+
+# ── #35 · consensus over RATINGS (median + spread flag) ──────────────────────
+
+
+def _rate(db, code_id, user_id, segment_id, magnitude):
+    db.add(CodeApplication(code_id=code_id, user_id=user_id, segment_id=segment_id,
+                           magnitude=magnitude))
+    db.flush()
+
+
+def _scaled_code(db, cid, pid, numeric_id, *, lo=-1.0, hi=1.0, step=0.5, name="Support"):
+    """🔴 −1…+1 so ZERO IS INTERIOR — a median of 0 must be written, and a
+    truthiness slip on the way to the row would drop it (#35 §2)."""
+    db.add(Code(id=cid, project_id=pid, name=name, numeric_id=numeric_id,
+                is_active=True, is_universal=False,
+                magnitude_min=lo, magnitude_max=hi, magnitude_step=step))
+    db.flush()
+
+
+class TestDecideMagnitudePure:
+    SCALE = {"min": -1.0, "max": 1.0, "step": 0.5, "anchors": []}
+
+    def test_no_ratings_is_None_not_a_zero(self):
+        assert _decide_magnitude([], self.SCALE) is None
+        assert _decide_magnitude([None, None], self.SCALE) is None
+
+    def test_the_median_and_an_unrated_voter_contributes_nothing(self):
+        d = _decide_magnitude([1.0, 0.0, None, 0.5], self.SCALE)
+        assert d["rule"] == "median"
+        assert d["median"] == 0.5 and d["n_rated"] == 3
+
+    def test_a_median_of_ZERO_is_a_rating(self):
+        d = _decide_magnitude([0.0, 0.0], self.SCALE)
+        assert d is not None and d["median"] == 0.0
+
+    def test_the_flag_fires_only_past_ONE_step(self):
+        # Exactly one step apart: neighbours, not a disagreement.
+        assert _decide_magnitude([0.0, 0.5], self.SCALE)["flag"] is False
+        # Two steps apart: adjudicate.
+        assert _decide_magnitude([0.0, 1.0], self.SCALE)["flag"] is True
+        # The spread is reported in the scale's units either way.
+        assert _decide_magnitude([-1.0, 1.0], self.SCALE)["spread"] == 2.0
+
+    def test_a_fractional_step_does_not_flag_adjacent_ticks(self):
+        # 0.1 + 0.2 ≠ 0.3 in binary; the tolerance keeps neighbours unflagged.
+        assert _decide_magnitude([0.1, 0.2], {"min": 0, "max": 1, "step": 0.1})["flag"] is False
+
+    def test_an_even_count_may_land_between_steps(self):
+        d = _decide_magnitude([7.0, 8.0], {"min": 0, "max": 10, "step": 1})
+        assert d["median"] == 7.5
+
+    def test_has_rating_disagreement_asks_the_same_rule_without_a_consensus(self):
+        scales = {901: self.SCALE}
+        assert has_rating_disagreement({1: {901: 0.0}, 2: {901: 1.0}}, scales) is True
+        assert has_rating_disagreement({1: {901: 0.0}, 2: {901: 0.5}}, scales) is False
+        # One rater is never a disagreement; an unscaled code never counts.
+        assert has_rating_disagreement({1: {901: 0.0}}, scales) is False
+        assert has_rating_disagreement({1: {902: 0.0}, 2: {902: 1.0}}, scales) is False
+
+
+class TestRatingConsensusIsMaterialized:
+    def test_the_consensus_row_carries_the_median_and_says_the_rule(self, db_session):
+        db = db_session
+        pid, sid = _conv_project(db)
+        _coder(db, 2, "B")
+        _coder(db, 3, "C")
+        _scaled_code(db, 901, pid, 1)
+        _rate(db, 901, 1, sid, 1.0)
+        _rate(db, 901, 2, sid, 0.0)
+        _rate(db, 901, 3, sid, 0.5)
+
+        summary = materialize_consensus_for_project(db, pid)
+        row = _consensus_rows(db, segment_id=sid)[0]
+        assert row.magnitude == 0.5
+        ctx = json.loads(row.origin_context)
+        assert ctx["rule"] == "unanimous" and ctx["agree"] == 3
+        assert ctx["magnitude"] == {
+            "rule": "median", "median": 0.5, "n_rated": 3,
+            "spread": 1.0, "step": 0.5, "flag": True,
+        }
+        assert summary["rated"] == 1
+
+    def test_a_median_of_zero_is_WRITTEN_not_dropped(self, db_session):
+        db = db_session
+        pid, sid = _conv_project(db)
+        _coder(db, 2, "B")
+        _scaled_code(db, 901, pid, 1)
+        _rate(db, 901, 1, sid, 0.0)
+        _rate(db, 901, 2, sid, 0.0)
+        materialize_consensus_for_project(db, pid)
+        row = _consensus_rows(db, segment_id=sid)[0]
+        assert row.magnitude == 0.0 and row.magnitude is not None
+        assert json.loads(row.origin_context)["magnitude"]["median"] == 0.0
+
+    def test_an_unrated_code_keeps_the_exact_old_shape(self, db_session):
+        """Backward-compatible by construction: no `magnitude` key, NULL column —
+        the four pre-#35 tests asserting the exact dict stay honest."""
+        db = db_session
+        pid, sid = _conv_project(db)
+        _coder(db, 2, "B")
+        _scaled_code(db, 901, pid, 1)
+        _apply(db, 901, 1, segment_id=sid)   # applied, unrated
+        _apply(db, 901, 2, segment_id=sid)
+        materialize_consensus_for_project(db, pid)
+        row = _consensus_rows(db, segment_id=sid)[0]
+        assert row.magnitude is None
+        assert json.loads(row.origin_context) == {"rule": "unanimous", "agree": 2, "voters": 2}
+
+    def test_one_rater_among_two_voters_still_gives_a_median_of_one(self, db_session):
+        db = db_session
+        pid, sid = _conv_project(db)
+        _coder(db, 2, "B")
+        _scaled_code(db, 901, pid, 1)
+        _rate(db, 901, 1, sid, -0.5)
+        _apply(db, 901, 2, segment_id=sid)   # B applied it but skipped the rating
+        materialize_consensus_for_project(db, pid)
+        row = _consensus_rows(db, segment_id=sid)[0]
+        ctx = json.loads(row.origin_context)["magnitude"]
+        assert row.magnitude == -0.5 and ctx["n_rated"] == 1 and ctx["flag"] is False
+
+    def test_per_target_recompute_agrees_with_the_rebuild(self, db_session):
+        """Two writers, one constructor: the sweep's per-target path must produce
+        the byte-identical row the project rebuild does."""
+        db = db_session
+        pid, sid = _conv_project(db)
+        _coder(db, 2, "B")
+        _scaled_code(db, 901, pid, 1)
+        _rate(db, 901, 1, sid, 1.0)
+        _rate(db, 901, 2, sid, -1.0)
+        materialize_consensus_for_project(db, pid)
+        rebuilt = _consensus_rows(db, segment_id=sid)[0]
+        rebuilt_ctx, rebuilt_mag = rebuilt.origin_context, rebuilt.magnitude
+        recompute_consensus_for_target(db, pid, segment_id=sid)
+        again = _consensus_rows(db, segment_id=sid)[0]
+        assert again.origin_context == rebuilt_ctx and again.magnitude == rebuilt_mag
+        assert json.loads(again.origin_context)["magnitude"]["flag"] is True
+
+    def test_a_cleared_scale_yields_no_rating_consensus(self, db_session):
+        db = db_session
+        pid, sid = _conv_project(db)
+        _coder(db, 2, "B")
+        _code(db, 901, pid, 1)   # no scale declared; ratings are hand-edited state
+        _rate(db, 901, 1, sid, 1.0)
+        _rate(db, 901, 2, sid, 1.0)
+        materialize_consensus_for_project(db, pid)
+        row = _consensus_rows(db, segment_id=sid)[0]
+        assert row.magnitude is None
+        assert "magnitude" not in json.loads(row.origin_context)
+
+    def test_ratings_come_only_from_the_canonical_code_of_a_group(self, db_session):
+        """A grouped sibling's rating was given on the SIBLING's scale, which may
+        differ, so it is never pooled into the canonical code's consensus."""
+        db = db_session
+        pid, sid = _conv_project(db)
+        _coder(db, 2, "B")
+        db.add(CodeEquivalenceGroup(id=77, project_id=pid, label="Support", canonical_code_id=None))
+        db.flush()
+        db.add(Code(id=901, project_id=pid, name="Support", numeric_id=1, is_active=True,
+                    is_universal=False, code_equivalence_group_id=77,
+                    magnitude_min=-1.0, magnitude_max=1.0, magnitude_step=0.5))
+        db.add(Code(id=902, project_id=pid, name="SUPPORT", numeric_id=2, is_active=True,
+                    is_universal=False, code_equivalence_group_id=77,
+                    magnitude_min=0.0, magnitude_max=100.0, magnitude_step=1.0))
+        db.flush()
+        _rate(db, 901, 1, sid, 1.0)     # canonical (lowest id), on −1…+1
+        _rate(db, 902, 2, sid, 90.0)    # sibling, on 0–100
+        materialize_consensus_for_project(db, pid)
+        row = _consensus_rows(db, segment_id=sid)[0]
+        assert row.code_id == 901, "the group agrees categorically"
+        ctx = json.loads(row.origin_context)["magnitude"]
+        assert ctx["n_rated"] == 1 and row.magnitude == 1.0, "90 on a 0–100 scale is not pooled"
 
 
 def test_unanimous_two_coders_creates_one_consensus_row(db_session):

@@ -676,6 +676,146 @@ class TestMergeLoop:
         db.flush()
         assert len(self._human_apps(db, seg.id)) == first
 
+
+class TestMergeRatingConflict:
+    """#35 — the merge disagreement flag (decided by the developer 2026-09-01).
+
+    A matched application whose copy carries a DIFFERENT rating keeps the
+    TARGET's value and records the incoming one in `magnitude_conflict`, so the
+    reconciliation grid can surface it; the merge is never blocked.
+
+    🔴 The scale is −1…+1 so ZERO is interior: a copy that rated it 0 must be a
+    conflict against a target rated 1, and a truthiness slip on `incoming` would
+    read that 0 as "no rating" and drop the flag.
+    """
+
+    def _project(self, db, tmp_path, *, file_rating, target_rating, bob_rating=0.5):
+        """Alice (u1) rated the shared segment `file_rating` when the file was
+        exported, then changed her mind to `target_rating` locally; Bob (u2)'s
+        rating rides the file only. Returns (project, segment, code, file)."""
+        db.add(User(id=2, username="Bob", password_hash="x", is_admin=False, coder_type="human"))
+        db.flush()
+        p, conv, seg = _seed_coded(db, "Team Study")
+        code = db.query(Code).filter(Code.project_id == p.id).first()
+        code.magnitude_min, code.magnitude_max, code.magnitude_step = -1.0, 1.0, 0.5
+        alice = CodeApplication(segment_id=seg.id, code_id=code.id, user_id=1, origin="human",
+                                magnitude=file_rating)
+        bob = CodeApplication(segment_id=seg.id, code_id=code.id, user_id=2, origin="human",
+                              magnitude=bob_rating)
+        db.add_all([alice, bob])
+        db.flush()
+        f = _export_to_file(db, p.id, tmp_path / "docs", tmp_path / "team.mmproject")
+        db.delete(bob)
+        alice.magnitude = target_rating
+        db.flush()
+        return p, seg, code, f
+
+    def _alice(self, db, seg_id):
+        return (
+            db.query(CodeApplication)
+            .filter(CodeApplication.segment_id == seg_id, CodeApplication.user_id == 1)
+            .one()
+        )
+
+    def test_a_differing_rating_keeps_the_targets_and_flags_the_incoming(self, db_session, tmp_path):
+        db = db_session
+        p, seg, code, f = self._project(db, tmp_path, file_rating=1.0, target_rating=-0.5)
+        report: dict = {}
+        import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge",
+                       target_project_id=p.id, report=report)
+        db.flush()
+        alice = self._alice(db, seg.id)
+        assert alice.magnitude == -0.5, "the target's rating is KEPT"
+        assert alice.magnitude_conflict == 1.0, "the incoming rating is the flag"
+        assert report["magnitude_conflicts"] == 1
+        # Bob's application arrived with its rating and no conflict — nothing to
+        # disagree with, it was not matched.
+        bob = db.query(CodeApplication).filter(
+            CodeApplication.segment_id == seg.id, CodeApplication.user_id == 2).one()
+        assert bob.magnitude == 0.5 and bob.magnitude_conflict is None
+
+    def test_a_copy_that_rated_ZERO_is_a_conflict_against_a_rated_target(self, db_session, tmp_path):
+        db = db_session
+        p, seg, code, f = self._project(db, tmp_path, file_rating=0.0, target_rating=1.0)
+        report: dict = {}
+        import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge",
+                       target_project_id=p.id, report=report)
+        db.flush()
+        alice = self._alice(db, seg.id)
+        assert alice.magnitude == 1.0
+        assert alice.magnitude_conflict == 0.0 and alice.magnitude_conflict is not None
+        assert report["magnitude_conflicts"] == 1
+
+    def test_an_equal_rating_flags_nothing_and_clears_a_stale_flag(self, db_session, tmp_path):
+        db = db_session
+        p, seg, code, f = self._project(db, tmp_path, file_rating=0.5, target_rating=0.5)
+        # A leftover from an earlier merge, since resolved on the file's side.
+        self._alice(db, seg.id).magnitude_conflict = -1.0
+        db.flush()
+        report: dict = {}
+        import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge",
+                       target_project_id=p.id, report=report)
+        db.flush()
+        alice = self._alice(db, seg.id)
+        assert alice.magnitude == 0.5 and alice.magnitude_conflict is None
+        assert report["magnitude_conflicts"] == 0
+
+    def test_an_unrated_copy_has_nothing_to_say(self, db_session, tmp_path):
+        db = db_session
+        p, seg, code, f = self._project(db, tmp_path, file_rating=None, target_rating=1.0)
+        report: dict = {}
+        import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge",
+                       target_project_id=p.id, report=report)
+        db.flush()
+        alice = self._alice(db, seg.id)
+        assert alice.magnitude == 1.0 and alice.magnitude_conflict is None
+        assert report["magnitude_conflicts"] == 0
+
+    def test_an_unrated_target_is_flagged_with_the_copys_rating(self, db_session, tmp_path):
+        """The target has no opinion yet; the copy does. Keeping NULL and flagging
+        lets the coder adopt the other value from the grid — never silently
+        promoting it to a rating they did not give."""
+        db = db_session
+        p, seg, code, f = self._project(db, tmp_path, file_rating=0.5, target_rating=None)
+        import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge", target_project_id=p.id)
+        db.flush()
+        alice = self._alice(db, seg.id)
+        assert alice.magnitude is None and alice.magnitude_conflict == 0.5
+
+    def test_the_flag_survives_an_export_and_reimport(self, db_session, tmp_path):
+        """Per-application state must round-trip, or a flagged disagreement
+        vanishes on re-import — `.mmproject` v6 carries it by reflection."""
+        db = db_session
+        p, seg, code, f = self._project(db, tmp_path, file_rating=1.0, target_rating=-0.5)
+        import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge", target_project_id=p.id)
+        db.flush()
+        assert self._alice(db, seg.id).magnitude_conflict == 1.0
+        again = _export_to_file(db, p.id, tmp_path / "docs", tmp_path / "again.mmproject")
+        new_id, _ = import_project(db, again, tmp_path / "docs", user_id=1)
+        db.flush()
+        carried = (
+            db.query(CodeApplication)
+            .join(Segment, CodeApplication.segment_id == Segment.id)
+            .join(Conversation, Segment.conversation_id == Conversation.id)
+            .filter(Conversation.project_id == new_id, CodeApplication.user_id == 1)
+            .one()
+        )
+        assert carried.magnitude == -0.5 and carried.magnitude_conflict == 1.0
+
+    def test_the_conflict_count_reaches_the_wire(self, db_session, tmp_path):
+        """Through the ENDPOINT, into the response model, and out of `model_dump`
+        — the three places #855's fourteenth could be dropped. The four tests
+        above assert on the service dict, which is exactly what let it ship."""
+        db = db_session
+        p, seg, code, f = self._project(db, tmp_path, file_rating=1.0, target_rating=-0.5)
+        result = _run(import_project_endpoint(
+            file=_upload(f.read_bytes()), import_mode="merge", target_project_id=p.id,
+            coder_mapping=None, code_mapping=None, db=db, user=db.get(User, 1),
+        ))
+        assert result.merge_report is not None
+        assert result.merge_report.magnitude_conflicts == 1
+        assert result.model_dump()["merge_report"]["magnitude_conflicts"] == 1
+
     def test_merge_rejects_uuid_mismatch(self, db_session, tmp_path):
         db = db_session
         p1, _, _ = _seed_coded(db, "P1")
@@ -825,6 +965,37 @@ class TestMergeReport:
         assert report["sources_matched"] == 1       # the shared conversation
         assert report["coders_created"] == 0        # Alice + Bob both exist locally
         assert report["coders_matched"] == 2
+
+    def test_every_key_the_service_writes_is_a_field_on_the_wire_schema(self):
+        """#855's fourteenth instance, and the DETECTOR for the class.
+
+        `import_project` writes `report["magnitude_conflicts"]`, `MergeProject.tsx`
+        read it, and `MergeReport` never declared it — so Pydantic's default
+        `extra='ignore'` dropped it at the wire for a whole release cycle while
+        every test asserted on the service dict. The consumer existing is not
+        proof the wire carries the field. This scan asks the one-language
+        cross-layer question directly: does every key the service emits appear
+        on the schema that serialises it — and the reverse, so a field the
+        service stopped writing is a finding too.
+        """
+        import re
+        from pathlib import Path
+        from app.schemas.project_portability import MergeReport
+
+        src = (
+            Path(__file__).resolve().parents[1] / "app" / "services" / "project_portability.py"
+        ).read_text(encoding="utf-8")
+        written = set(re.findall(r'report\[\s*"(\w+)"\s*\]', src)) | set(
+            re.findall(r'report\.setdefault\(\s*"(\w+)"', src)
+        )
+        # Population self-check: a regex that matches nothing passes `==` against
+        # nothing only if the schema is empty too, but say it outright.
+        assert len(written) >= 5, f"the report-key scan found too little: {written}"
+        declared = set(MergeReport.model_fields)
+        assert written == declared, (
+            f"service writes {sorted(written - declared)} that the schema drops; "
+            f"schema declares {sorted(declared - written)} that the service never writes"
+        )
 
 
 class TestMergeCoderPreview:

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Index, CheckConstraint, text
+from sqlalchemy import Column, Integer, String, Text, DateTime, Float, ForeignKey, Index, CheckConstraint, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from ..database import Base
@@ -22,6 +22,39 @@ class CodeApplication(Base):
     origin = Column(String(20), nullable=False, default="human", server_default="human")
     origin_context = Column(Text, nullable=True)  # D15 consultation / provenance home
     created_at = Column(DateTime, default=func.now(), nullable=False)
+
+    # ── Magnitude coding (#35) ────────────────────────────────────────────────
+    # This coder's RATING of this code on this target, on the scale declared by
+    # `Code.magnitude_{min,max,step,labels}`. Rides the per-`(target, code, coder)`
+    # grain the unique indexes below already enforce, which is why the feature
+    # needs no new table: "how much" is a property of one coder's application.
+    #
+    # 🔴 NULLABLE, AND NULL MEANS *UNRATED* — NEVER ZERO. MAXQDA default-stamps a
+    # weight of 0 onto every coded segment, which makes "not rated" and "rated
+    # zero" indistinguishable; on a −1…+1 scale zero is a real neutral, so that
+    # conflation destroys data. Never give this column a default, never write 0 to
+    # mean "skipped", and never test it with a bare falsy check — a real measured
+    # zero must survive (the #689 / falsy-zero class).
+    #
+    # ⚠️ Values are validated against the code's scale in
+    # `services/magnitude.py::validate_value`, in the SERVICE — the import and
+    # portability paths reach this column without passing any router (#589).
+    magnitude = Column(Float, nullable=True)
+
+    # ── Merge disagreement flag (#35, decided 2026-09-01) ────────────────────
+    # When a MERGE matches this application (same target, code and coder) in a
+    # colleague's copy and the copy carries a DIFFERENT rating, the target's
+    # `magnitude` is KEPT and the incoming value lands HERE, so reconciliation
+    # can surface "your other copy rated this 5" and the coder can adjudicate.
+    # NULL = no unresolved conflict. Cleared the moment the coder re-rates (or
+    # unrates) the application — that act IS the adjudication.
+    #
+    # ⚠️ The OTHER number, not a bit: a flag alone would tell the coder there
+    # was a disagreement and nothing about what it was, which is the piece of
+    # information the merge is the last place to have seen.
+    # ⚠️ No coder identity leaks through it: a match is on (target, code,
+    # CODER), so the value is the same coder's own other copy.
+    magnitude_conflict = Column(Float, nullable=True)
 
     # Relationships
     segment = relationship("Segment", back_populates="code_applications")

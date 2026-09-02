@@ -102,6 +102,150 @@ def test_agreement_unit_has_consensus_and_no_disagreement(db_session):
     assert {c["id"] for c in resp["codes"]} == {901}
 
 
+# ── #35 — ratings ride the grid, and a rating disagreement is a SECOND fact ──
+
+
+def _rate(db, code_id, user_id, segment_id, magnitude):
+    db.add(CodeApplication(code_id=code_id, user_id=user_id, segment_id=segment_id,
+                           magnitude=magnitude))
+    db.flush()
+
+
+def _scaled(db, cid, pid, numeric_id, name="Support"):
+    db.add(Code(id=cid, project_id=pid, name=name, numeric_id=numeric_id, is_active=True,
+                is_universal=False, magnitude_min=-1.0, magnitude_max=1.0, magnitude_step=0.5))
+    db.flush()
+
+
+class TestRatingsInTheGrid:
+    def _project(self, db, ratings, *, pid=900):
+        pid, cid = _conv(db, pid=pid, cid=pid)
+        _coder(db, 2, "B")
+        _seg(db, pid + 1, cid, 0)
+        _scaled(db, pid + 10, pid, 1)
+        for uid, value in ratings.items():
+            _rate(db, pid + 10, uid, pid + 1, value)
+        return pid
+
+    def test_ratings_ride_by_coder_and_the_consensus_carries_the_median(self, db_session):
+        db = db_session
+        pid = self._project(db, {1: 1.0, 2: 0.0})
+        resp = build_reconciliation(db, pid)
+        u = _unit(resp, "segment", pid + 1)
+        assert u["ratings_by_coder"] == {"1": {str(pid + 10): 1.0}, "2": {str(pid + 10): 0.0}}
+        ctx = u["consensus_context"][str(pid + 10)]
+        assert ctx["rule"] == "unanimous"
+        assert ctx["magnitude"] == {
+            "rule": "median", "median": 0.5, "n_rated": 2, "spread": 1.0, "step": 0.5, "flag": True,
+        }
+        # The legend carries the instrument the ratings render against.
+        legend = next(c for c in resp["codes"] if c["id"] == pid + 10)
+        assert legend["scale"]["min"] == -1.0 and legend["scale"]["max"] == 1.0
+
+    def test_codes_can_agree_while_ratings_do_not(self, db_session):
+        """The second fact: categorical agreement AND a rating disagreement."""
+        db = db_session
+        pid = self._project(db, {1: 1.0, 2: -1.0})
+        u = _unit(build_reconciliation(db, pid), "segment", pid + 1)
+        assert u["has_disagreement"] is False
+        assert u["has_rating_disagreement"] is True
+
+    def test_neighbouring_ratings_are_not_a_disagreement(self, db_session):
+        db = db_session
+        pid = self._project(db, {1: 0.0, 2: 0.5})
+        u = _unit(build_reconciliation(db, pid), "segment", pid + 1)
+        assert u["has_rating_disagreement"] is False
+        assert u["consensus_context"][str(pid + 10)]["magnitude"]["flag"] is False
+
+    def test_needs_review_filter_surfaces_a_rating_disagreement(self, db_session):
+        db = db_session
+        pid = self._project(db, {1: 1.0, 2: -1.0})
+        # A second unit in the same source whose ratings are NEIGHBOURS: codes
+        # agree and ratings sit one step apart, so it is not review material.
+        _seg(db, pid + 2, pid, 1)
+        _rate(db, pid + 10, 1, pid + 2, 0.0)
+        _rate(db, pid + 10, 2, pid + 2, 0.5)
+        only = build_reconciliation(db, pid, disagreements_only=True)
+        assert _unit(only, "segment", pid + 1) is not None, "codes agree, ratings do not — still review"
+        assert _unit(only, "segment", pid + 2) is None, "neighbouring ratings are not a disagreement"
+        assert only["total"] == 1
+
+    def test_an_unrated_application_is_absent_never_zero(self, db_session):
+        db = db_session
+        pid, cid = _conv(db)
+        _coder(db, 2, "B")
+        _seg(db, 9001, cid, 0)
+        _scaled(db, 910, pid, 1)
+        _rate(db, 910, 1, 9001, 0.0)          # a real rating of ZERO
+        _apply(db, 910, 2, segment_id=9001)   # applied, unrated
+        u = _unit(build_reconciliation(db, pid), "segment", 9001)
+        assert u["ratings_by_coder"] == {"1": {"910": 0.0}}
+        assert "2" not in u["ratings_by_coder"]
+        assert u["consensus_context"]["910"]["magnitude"]["n_rated"] == 1
+        assert u["has_rating_disagreement"] is False
+
+    def test_an_unscaled_code_carries_no_rating_fields(self, db_session):
+        db = db_session
+        pid, cid = _conv(db)
+        _coder(db, 2, "B")
+        _seg(db, 9001, cid, 0)
+        _code(db, 901, pid, 1, name="X")
+        _apply(db, 901, 1, segment_id=9001)
+        _apply(db, 901, 2, segment_id=9001)
+        u = _unit(build_reconciliation(db, pid), "segment", 9001)
+        assert u["ratings_by_coder"] == {}
+        assert "magnitude" not in u["consensus_context"]["901"]
+        assert u["has_rating_disagreement"] is False
+
+    def test_the_wire_keeps_the_rating_fields(self, db_session):
+        """`response_model=ReconciliationResponse` drops what the schema does not
+        declare — the half-landed-wire class."""
+        from app.schemas.code_analysis import ReconciliationResponse
+
+        db = db_session
+        pid = self._project(db, {1: 1.0, 2: -1.0})
+        wire = ReconciliationResponse(**build_reconciliation(db, pid)).model_dump()
+        u = wire["units"][0]
+        assert u["ratings_by_coder"]["1"][str(pid + 10)] == 1.0
+        assert u["has_rating_disagreement"] is True
+        assert u["consensus_context"][str(pid + 10)]["magnitude"]["median"] == 0.0
+        assert wire["codes"][0]["scale"]["step"] == 0.5
+
+    # ── the merge disagreement flag (#35) ──────────────────────────────────
+
+    def test_a_merge_conflict_is_a_THIRD_review_fact(self, db_session):
+        """Codes agree, ratings are neighbours — and one coder's own two copies
+        disagreed at a merge. That alone keeps the unit in the review set."""
+        from app.schemas.code_analysis import ReconciliationResponse
+
+        db = db_session
+        pid = self._project(db, {1: 0.5, 2: 0.5})
+        app = db.query(CodeApplication).filter(
+            CodeApplication.segment_id == pid + 1, CodeApplication.user_id == 1).one()
+        app.magnitude_conflict = 0.0     # the merged copy rated it ZERO
+        db.flush()
+
+        u = _unit(build_reconciliation(db, pid), "segment", pid + 1)
+        assert u["has_disagreement"] is False and u["has_rating_disagreement"] is False
+        assert u["has_merge_conflict"] is True
+        assert u["rating_conflicts_by_coder"] == {"1": {str(pid + 10): 0.0}}
+        assert "2" not in u["rating_conflicts_by_coder"]
+
+        only = build_reconciliation(db, pid, disagreements_only=True)
+        assert _unit(only, "segment", pid + 1) is not None
+
+        wire = ReconciliationResponse(**build_reconciliation(db, pid)).model_dump()
+        assert wire["units"][0]["rating_conflicts_by_coder"]["1"][str(pid + 10)] == 0.0
+        assert wire["units"][0]["has_merge_conflict"] is True
+
+    def test_no_conflict_carries_no_fields(self, db_session):
+        db = db_session
+        pid = self._project(db, {1: 0.5, 2: 0.5})
+        u = _unit(build_reconciliation(db, pid), "segment", pid + 1)
+        assert u["has_merge_conflict"] is False and u["rating_conflicts_by_coder"] == {}
+        assert _unit(build_reconciliation(db, pid, disagreements_only=True), "segment", pid + 1) is None
+
+
 def test_majority_unit_has_consensus_and_disagreement(db_session):
     db = db_session
     pid, cid = _conv(db)

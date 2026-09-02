@@ -8,7 +8,9 @@
  * F2 rename-at-0 fix) as the target behavior.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { renderHook, act } from '@testing-library/react'
+import { renderHook, act, render, cleanup } from '@testing-library/react'
+import { createElement } from 'react'
+import MagnitudeStrip from '@/components/MagnitudeStrip'
 import { useCodeChordShortcuts, CHORD_TIMEOUT_MS, type UseCodeChordShortcutsOptions } from './useCodeChordShortcuts'
 import type { ShortcutCodeInput } from '@/lib/codeShortcuts'
 import { ACTIVATION_KEYS } from '@/lib/keyboard-scope'
@@ -583,5 +585,67 @@ describe('#789 arrow keys follow real focus', () => {
       expect(onArrowHorizontal).toHaveBeenCalledTimes(1)
       view.unmount()
     })
+  })
+})
+
+describe('#870 (a) — the focused rating strip claims its keys, so the chord layer stands down', () => {
+  // The REAL component, not a stand-in `div role="radiogroup"`: the stand-down
+  // rides on the strip calling `preventDefault`, and a fixture that prevents on
+  // the test's behalf would pass with the fix deleted (the #784 lesson — a
+  // stand-down guard that passes by breaking the feature is the easy failure).
+  afterEach(() => {
+    cleanup()
+    document.body.innerHTML = ''
+  })
+
+  // 0–1 by 1: the digit 2 is NOT a value here, and IS a chord prefix in CODES
+  // (category 100 numbers 2). That is the collision the defect lived on.
+  const SCALE = { min: 0, max: 1, step: 1, anchors: [] }
+
+  function mountStrip() {
+    return render(createElement(MagnitudeStrip, {
+      codeName: 'Joy', scale: SCALE, value: null, onCommit: vi.fn(), onSkip: vi.fn(),
+    }))
+  }
+
+  function pressOnFocused(key: string) {
+    const target = document.activeElement
+    expect(target).not.toBe(document.body)
+    act(() => {
+      ;(target as Element).dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+    })
+  }
+
+  it('an unmatched digit typed into the strip does not arm a chord', () => {
+    const { view, onToggleCode } = setup()
+    mountStrip()
+    pressOnFocused('2')
+    expect(view.result.current.chordPrefix).toBeNull()
+    expect(onToggleCode).not.toHaveBeenCalled()
+    view.unmount()
+  })
+
+  it('a letter verb typed into the strip does not fire', () => {
+    const { view, onCreateNote, onCreateCode, onToggleQuote } = setup()
+    mountStrip()
+    pressOnFocused('n')
+    pressOnFocused('c')
+    pressOnFocused('s')
+    expect(onCreateNote).not.toHaveBeenCalled()
+    expect(onCreateCode).not.toHaveBeenCalled()
+    expect(onToggleQuote).not.toHaveBeenCalled()
+    view.unmount()
+  })
+
+  it('POSITIVE CONTROL — with the strip gone, the same keys reach the hook', () => {
+    const { view, onCreateNote } = setup()
+    const strip = mountStrip()
+    strip.unmount()
+    expect(document.activeElement).toBe(document.body)
+    press('n')
+    expect(onCreateNote).toHaveBeenCalledTimes(1)
+    press('2')
+    expect(view.result.current.chordPrefix).toBe(2)
+    view.unmount()
   })
 })

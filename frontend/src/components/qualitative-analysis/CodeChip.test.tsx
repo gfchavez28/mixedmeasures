@@ -99,3 +99,74 @@ describe('CodeChip coder attribution badge (Track J · J1)', () => {
     expect(screen.getByTitle('coded by Kwame (archived)')).toHaveTextContent('KW')
   })
 })
+
+describe('CodeChip — magnitude (#35)', () => {
+  const code = { id: 1, name: 'District support', color: '#3b82f6' }
+  const BIPOLAR = {
+    min: -1,
+    max: 1,
+    step: 0.5,
+    anchors: [
+      { value: -1, label: 'strongly negative' },
+      { value: 0, label: 'neither' },
+      { value: 1, label: 'strongly positive' },
+    ],
+  }
+
+  it('#35 merge flag — shows the OTHER number beside the kept rating, and says so as text', () => {
+    render(<CodeChip code={code} magnitude={0.5} scale={BIPOLAR} magnitudeConflict={-1} />)
+    // The kept rating is still the rating…
+    expect(screen.getByText(/, 0\.5 on a scale from −1 to 1/)).toBeInTheDocument()
+    // …and the merged copy's value is a separate fact, spoken as such.
+    expect(screen.getByText(/, a merged copy rated it −1/)).toBeInTheDocument()
+    expect(screen.getByTitle(/A merged copy of your coding rated this −1; your rating was kept/)).toBeInTheDocument()
+  })
+
+  it('#35 merge flag — a copy that rated ZERO is a conflict, not "no conflict"', () => {
+    render(<CodeChip code={code} magnitude={1} scale={BIPOLAR} magnitudeConflict={0} />)
+    expect(screen.getByText(/a merged copy rated it 0/)).toBeInTheDocument()
+  })
+
+  it('#35 merge flag — renders nothing without a conflict, and nothing without a scale', () => {
+    const { rerender } = render(<CodeChip code={code} magnitude={0.5} scale={BIPOLAR} magnitudeConflict={null} />)
+    expect(screen.queryByText(/merged copy/)).toBeNull()
+    rerender(<CodeChip code={code} magnitude={0.5} scale={null} magnitudeConflict={-1} />)
+    expect(screen.queryByText(/merged copy/)).toBeNull()
+  })
+
+  it('renders NO magnitude UI when the code has no declared scale', () => {
+    // A number with no instrument is exactly the MAXQDA "fuzzy variable" this
+    // feature exists not to be, so a scale-less code is chipped as before.
+    render(<CodeChip code={code} magnitude={0.5} scale={null} />)
+    expect(screen.queryByText('0.5')).not.toBeInTheDocument()
+  })
+
+  it('carries the whole fact as TEXT, because the bar announces nothing', () => {
+    // #753's split: the visual encoding is aria-hidden, the meaning is sr-only
+    // text that reaches the accessible name through name-from-contents.
+    render(<CodeChip code={code} magnitude={0.5} scale={BIPOLAR} />)
+    expect(screen.getByText(/on a scale from −1 to 1/)).toBeInTheDocument()
+  })
+
+  it('speaks an anchor label when the value has one', () => {
+    render(<CodeChip code={code} magnitude={0} scale={BIPOLAR} />)
+    expect(screen.getByText(/neither/)).toBeInTheDocument()
+  })
+
+  it('🔴 a ZERO rating announces as a rating, not as unrated', () => {
+    // The falsy-zero trap at the render layer. `!magnitude` here would print
+    // "not rated" over a real, meaningful neutral.
+    render(<CodeChip code={code} magnitude={0} scale={BIPOLAR} />)
+    expect(screen.queryByText(/not rated/)).not.toBeInTheDocument()
+  })
+
+  it('announces an unrated application as "not rated", never as 0', () => {
+    render(<CodeChip code={code} magnitude={null} scale={BIPOLAR} />)
+    expect(screen.getByText(/not rated/)).toBeInTheDocument()
+  })
+
+  it('renders a Unicode minus so −1 cannot be misread as 1 at 10px', () => {
+    render(<CodeChip code={code} magnitude={-1} scale={BIPOLAR} />)
+    expect(screen.getByText('−1')).toBeInTheDocument()
+  })
+})

@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useInfiniteQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
 import {
   ChevronRight,
@@ -12,11 +12,13 @@ import {
   X,
 } from 'lucide-react'
 import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
 import {
   segmentsApi,
   textCodingApi,
   documentsApi,
   observationsApi,
+  TEXT_PAGE_SIZE,
   type Code,
   type ConversationOption,
   type TextColumnInfo,
@@ -588,11 +590,33 @@ function CommentColumnReader({
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
 }) {
-  const { data, isLoading } = useQuery({
-    queryKey: ['text-column-readonly', projectId, columnId],
-    queryFn: () => textCodingApi.list(projectId, {
+  /**
+   * #844 — the second caller of the texts endpoint, and it had TWO problems
+   * with one fix.
+   *
+   * It fetched every text for the column (37.8 MB on a 75,699-record survey,
+   * measured), and it filtered `search` CLIENT-SIDE over that whole set. Paging
+   * the endpoint without moving the search to the server would have quietly
+   * turned this pane's search into "search the first page" — a filter that
+   * silently under-reports is worse than no filter, because it looks like it
+   * worked. The endpoint has always supported `search`; this now uses it.
+   *
+   * ⚠️ `search` therefore belongs in the QUERY KEY. Leaving it out serves the
+   * previous term's results for the new term.
+   */
+  const {
+    data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage,
+  } = useInfiniteQuery({
+    queryKey: ['text-column-readonly', projectId, columnId, search ?? ''],
+    queryFn: ({ pageParam }) => textCodingApi.list(projectId, {
       column_ids: String(columnId),
+      search: search || undefined,
+      limit: TEXT_PAGE_SIZE,
+      offset: pageParam,
     }),
+    initialPageParam: 0,
+    getNextPageParam: (last, all) =>
+      last.has_more ? all.reduce((n, p) => n + p.texts.length, 0) : undefined,
     enabled: !!columnId,
   })
 
@@ -605,8 +629,8 @@ function CommentColumnReader({
   const datasetLabel = columnInfo?.dataset_name ?? ''
 
   const searchLower = (search ?? '').toLowerCase()
-  const allComments = data.texts ?? []
-  const comments = searchLower ? allComments.filter(c => (c.value_text || '').toLowerCase().includes(searchLower)) : allComments
+  const comments = data.pages.flatMap(p => p.texts)
+  const totalTexts = data.pages[0]?.total_texts ?? 0
 
   return (
     <div>
@@ -692,11 +716,31 @@ function CommentColumnReader({
         )}
       </div>
 
-      <p className="text-xs text-mm-text-faint mt-2">
-        {searchLower ? `${comments.length} match${comments.length !== 1 ? 'es' : ''} of ` : ''}
-        {allComments.length} comment{allComments.length !== 1 ? 's' : ''}
-        {columnInfo && ` \u00B7 ${columnInfo.coded_count} coded`}
-      </p>
+      {/* #844: the counts describe the SELECTION (the server's `total_texts`),
+          while `comments.length` is what has been loaded. With the search now
+          server-side, a match count is the server's too \u2014 the old
+          `comments.length` of a client-filtered array would have counted only
+          the loaded page. */}
+      <div className="flex items-center gap-3 mt-2">
+        <p className="text-xs text-mm-text-faint" aria-live="polite">
+          {searchLower
+            ? `${totalTexts.toLocaleString()} match${totalTexts !== 1 ? 'es' : ''}`
+            : `${totalTexts.toLocaleString()} comment${totalTexts !== 1 ? 's' : ''}`}
+          {hasNextPage && ` \u00B7 ${comments.length.toLocaleString()} shown`}
+          {columnInfo && ` \u00B7 ${columnInfo.coded_count} coded`}
+        </p>
+        {hasNextPage && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void fetchNextPage()}
+            disabled={isFetchingNextPage}
+            aria-label={`Load more comments \u2014 ${(totalTexts - comments.length).toLocaleString()} remaining`}
+          >
+            {isFetchingNextPage ? 'Loading\u2026' : 'Load more'}
+          </Button>
+        )}
+      </div>
     </div>
   )
 }

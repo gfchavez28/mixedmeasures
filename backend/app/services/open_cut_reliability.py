@@ -62,6 +62,10 @@ from .irr import (
     _prevalence,
 )
 from .observation_segmentation import coverage_extent
+from .reliability_intervals import (
+    CI_UNAVAILABLE_AUTOCORRELATED_BINS,
+    CI_UNAVAILABLE_SINGLE_CONTINUUM,
+)
 from .unitizing import UnitizingUnit, unitizing_alpha
 
 # 100 ms. The continuum is discretized because `unitizing.py` takes INTEGER
@@ -95,6 +99,12 @@ class OpenCutDisclosure:
     n_clips_without_times: int = 0
     engaged_coder_ids: list[int] = field(default_factory=list)
     excluded_coder_ids: list[int] = field(default_factory=list)
+    #: #43 — why these coefficients carry no confidence interval when the
+    #: Reliability tab's κ and α do. Set per statistic by the two computers
+    #: below, because the two have DIFFERENT reasons. Stated rather than left
+    #: blank: a coefficient that silently lacks an interval its neighbour has
+    #: reads as an oversight, and the reason is the honest part.
+    ci_unavailable_reason: str | None = None
 
 
 def seconds_to_ticks(seconds: float) -> int:
@@ -250,9 +260,19 @@ def compute_unitizing_alpha(
     db: Session, project_id: int, observation: Observation,
     coder_ids: list[int] | None = None,
 ) -> dict:
-    """α_U over one unfrozen observation: overall + per effective code."""
+    """α_U over one unfrozen observation: overall + per effective code.
+
+    🔴 **No confidence interval, deliberately (#43).** α_U is measured over ONE
+    continuum, and the things a bootstrap would resample — the marked stretches —
+    are the very objects whose boundaries the statistic is scoring. Resampling
+    them changes the continuum, the gap distribution and therefore the expected
+    disagreement, so the interval would not be an interval for this coefficient.
+    Neither Krippendorff (1995, 2004) nor the DKPro reference implementation
+    defines one. The reason rides the disclosure instead.
+    """
     data = gather_open_cut_marks(db, project_id, observation, coder_ids)
     d = data.disclosure
+    d.ci_unavailable_reason = CI_UNAVAILABLE_SINGLE_CONTINUUM
 
     if len(data.coder_ids) < 2:
         return _unavailable(
@@ -343,9 +363,18 @@ def compute_binned_kappa(
     Wider bins absorb boundary disagreements and read as more agreement; narrower
     bins increase the uncoded mass, which inflates percent agreement while κ stays
     honest. That gap is why prevalence is reported beside every coefficient.
+
+    🔴 **No confidence interval, deliberately (#43), and for a DIFFERENT reason
+    than α_U's.** The bins are not independent observations: a 5 s mark occupies
+    five consecutive 1 s bins, so neighbouring bins are strongly autocorrelated
+    and a naive bin bootstrap would understate the interval — the more so the
+    wider the marks, i.e. exactly where a reader would trust it most. The correct
+    instrument is a block bootstrap whose block length is itself a research
+    decision, which is a design call and not a detail to pick silently here.
     """
     data = gather_open_cut_marks(db, project_id, observation, coder_ids)
     d = data.disclosure
+    d.ci_unavailable_reason = CI_UNAVAILABLE_AUTOCORRELATED_BINS
 
     if len(data.coder_ids) < 2:
         return _unavailable(

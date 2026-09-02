@@ -103,11 +103,13 @@ def test_text_payload_details_and_bulk_attribution(db_session):
     db.flush()
 
     user1 = db.get(User, 1)
-    res = asyncio.run(list_texts(
+    # #844: `list_texts` is a plain `def` (it has no `await`, so as an
+    # `async def` its whole query set ran on the event loop — #837's class).
+    res = list_texts(
         702, column_ids="7020", dataset_ids=None, hide_empty=True, record_id=None,
         search=None, sort_by="column_asc", random_seed=None, quoted_only=False,
         user=user1, db=db,
-    ))
+    )
     by_dv = {t.dataset_value_id: t for t in res.texts}
     detail = by_dv[70210].applied_code_details
     assert by_dv[70210].applied_code_ids == [721]  # bare ID list preserved

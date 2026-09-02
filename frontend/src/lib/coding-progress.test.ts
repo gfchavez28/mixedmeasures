@@ -79,9 +79,23 @@ describe('computeCoverage', () => {
 // #441 — per-(code, coder) chip rendering. The bare arrays carry one entry per
 // coder; rendering must produce one chip per (code, coder), NOT N collapsed onto
 // one code_id key showing the last coder.
-const cd = (code_id: number, user_id: number | null) => ({ code_id, user_id })
+// An UNRATED detail. Both rating fields are REQUIRED since #868 (a) — a fixture
+// that omits them no longer compiles, which is the guard: the document
+// workbench once projected exactly `{ code_id, user_id }` and its chips read
+// "not rated" over ratings the payload never carried.
+const cd = (code_id: number, user_id: number | null) =>
+  ({ code_id, user_id, magnitude: null, magnitude_conflict: null })
 
 describe('visibleCodeChipRows', () => {
+  it('#35 — carries the rating AND the merge-conflict value per (code, coder), never coercing a zero', () => {
+    const rows = visibleCodeChipRows([
+      { code_id: 7, user_id: 1, magnitude: 0, magnitude_conflict: 0 },
+      { code_id: 7, user_id: 2, magnitude: 5, magnitude_conflict: null },
+      cd(7, 3),
+    ])
+    expect(rows.map(r => [r.magnitude, r.magnitudeConflict])).toEqual([[0, 0], [5, null], [null, null]])
+  })
+
   it('one code applied by N coders → N rows with UNIQUE keys (the #441 collision)', () => {
     const rows = visibleCodeChipRows([cd(7, 1), cd(7, 2), cd(7, 3)])
     expect(rows.map(r => r.codeId)).toEqual([7, 7, 7])

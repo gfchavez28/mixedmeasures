@@ -28,6 +28,7 @@ from ..schemas.code import (
     CategoryBulkMoveRequest,
     CategoryBulkMoveResponse,
     GroupIntoCategoryRequest,
+    MagnitudeScaleUpdate,
 )
 from ..models.memo import Memo
 from ..auth import get_current_user
@@ -40,6 +41,7 @@ from ..services.coding_layers import (
 )
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
+from ..services import magnitude
 from .helpers import _get_project_or_404
 
 router = APIRouter(prefix="/api/projects/{project_id}/codes", tags=["codes"])
@@ -72,6 +74,10 @@ def code_to_response(code: Code, db: Session, usage_count: int | None = None) ->
         category_name=code.category.name if code.category else None,
         category_color=code.category.color if code.category else None,
         category_order=code.category_order,
+        # #35 — read through the service, never off the columns. `read_scale`
+        # re-checks the stored shape, so a legacy or hand-edited row degrades to
+        # "no anchors" instead of raising on every coding surface in the project.
+        magnitude_scale=magnitude.read_scale(code),
     )
 
 
@@ -288,6 +294,101 @@ async def update_code(
     db.commit()
     db.refresh(code)
 
+    return code_to_response(code, db)
+
+
+@router.put("/{code_id}/magnitude-scale", response_model=CodeResponse)
+def set_magnitude_scale(
+    project_id: int,
+    code_id: int,
+    data: MagnitudeScaleUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Declare, replace, or clear this code's rating scale (#35).
+
+    A PUT because the declaration is replaced whole — a PATCH would invite
+    "change only the max", which is precisely the edit that can strand existing
+    ratings without the caller stating the new range.
+
+    🔴 **Narrowing a scale that would put existing ratings out of range is
+    REFUSED, and the refusal names the count.** Clamping was considered and
+    rejected: a clamped rating is a number no coder ever gave, and it would be
+    indistinguishable afterwards from one they did. Clearing the scale is
+    deliberately allowed — the values stay, they merely stop being interpretable
+    until a scale returns, which is recoverable.
+    """
+    _get_project_or_404(db, project_id, user.id)
+
+    code = db.query(Code).filter(
+        Code.id == code_id, Code.project_id == project_id
+    ).first()
+    if not code:
+        raise HTTPException(status_code=404, detail="Code not found")
+
+    refusal = magnitude.scale_refusal(code)
+    if refusal == "universal":
+        raise HTTPException(
+            status_code=400,
+            detail="Universal codes mark artifacts and cannot carry a rating scale.",
+        )
+    if refusal == "inactive":
+        raise HTTPException(
+            status_code=400,
+            detail="This code is inactive. Restore it before declaring a rating scale.",
+        )
+
+    try:
+        scale = magnitude.normalize_scale(
+            data.scale.model_dump() if data.scale else None
+        )
+    except magnitude.MagnitudeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # Existing ratings are checked against the PROPOSED scale before anything is
+    # written. Read only the column, not whole ORM instances — a widely-used code
+    # can carry thousands of applications and this runs on every declaration edit.
+    #
+    # #869 (e): the count is scoped the way every other count surface is — VISIBLE
+    # targets (a merged-away original's rating is one the UI can neither reach nor
+    # clear, so a refusal naming it is unsatisfiable) and NON-consensus rows (the
+    # derived median is recomputed from the coders' ratings, not a rating anyone
+    # gave). Dataset-value targets pass the visibility clause by its NULL-safe
+    # first arm; the outerjoin is what makes that arm reachable.
+    existing = [
+        row[0] for row in db.query(CodeApplication.magnitude)
+        .outerjoin(Segment, CodeApplication.segment_id == Segment.id)
+        .filter(
+            CodeApplication.code_id == code.id,
+            CodeApplication.magnitude.isnot(None),
+            visible_target_filter(),
+            non_consensus_filter(),
+        ).all()
+    ]
+    stranded = magnitude.scale_change_would_strand(existing, scale)
+    if stranded:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{stranded} existing rating{'s' if stranded != 1 else ''} would fall outside "
+                f"the new range. Widen the range, or clear those ratings first — "
+                f"they are not adjusted automatically."
+            ),
+        )
+
+    magnitude.write_scale(code, scale)
+
+    log_action(
+        db,
+        action="magnitude_scale_set" if scale else "magnitude_scale_cleared",
+        entity_type="code",
+        entity_id=code.id,
+        user_id=user.id,
+        project_id=project_id,
+        details=scale or {},
+    )
+    db.commit()
+    db.refresh(code)
     return code_to_response(code, db)
 
 

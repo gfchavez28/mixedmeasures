@@ -2700,9 +2700,30 @@ class TestFormatVersionIsPinned:
             "The .mmproject format version changed. That is a real decision, not a "
             "detail: v2 = #414 identifier, v3 = the third Segment parent, v4 = #592 "
             "missing declarations, v5 = #687 code-point excerpt offsets, "
-            "v6 = #823(d) recode range bands. If this is "
+            "v6 = #823(d) recode range bands AND #35 magnitude coding. If this is "
             "intentional, update this pin AND document what the new version means "
             "in project_portability.py, the internal design notes, and the internal design notes."
+        )
+
+    def test_v6_also_covers_magnitude_coding(self):
+        """#35 rides v6 rather than forcing v7 — and the model must still show why.
+
+        The release decision of 2026-08-31 kept v6 UNSPENT in the field precisely
+        so the ICR wedge's new field could share its refusal boundary. That is a
+        scheduling argument; this pin records the STRUCTURAL one, so the two do
+        not drift apart.
+
+        A rating is constitutive in v4's sense: `_build_entity` keeps only columns
+        the model declares, so an older build drops `magnitude` silently and every
+        reliability figure computed from it vanishes from a round trip with no
+        error.
+        """
+        from app.models.code_application import CodeApplication
+        from app.models.code import Code
+        assert "magnitude" in CodeApplication.__table__.columns
+        assert "magnitude_min" in Code.__table__.columns, (
+            "v6's meaning was widened to cover #35. If the scale moved off `codes`, "
+            "that justification changed and this pin is stale."
         )
 
     def test_v6_is_a_refusal_gate_and_v5_was_not(self):

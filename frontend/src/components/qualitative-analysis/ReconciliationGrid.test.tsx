@@ -80,7 +80,13 @@ import type { Code } from '@/lib/api'
 afterEach(() => { cleanup(); navigateMock.mockClear() })
 
 const CODES = [
-  { id: 10, name: 'Positive', color: '#10b981', is_active: true, is_universal: false },
+  // `magnitude_scale` is what the project's live code list carries; the own
+  // cell's chips (InlineCodeActions) read the scale from here, colleague cells
+  // from the payload's legend — the same declaration by two routes.
+  {
+    id: 10, name: 'Positive', color: '#10b981', is_active: true, is_universal: false,
+    magnitude_scale: { min: 0, max: 10, step: 1, anchors: [] },
+  },
   { id: 20, name: 'Negative', color: '#ef4444', is_active: true, is_universal: false },
 ] as unknown as Code[]
 
@@ -277,5 +283,145 @@ describe('ReconciliationSourcePicker mapping', () => {
       { id: 8, segmentation_frozen_at: null },
     ]
     expect(selectableObservations(rows).map(o => o.id)).toEqual([7])
+  })
+})
+
+describe('#35 — ratings in the grid', () => {
+  const SCALE = { min: 0, max: 10, step: 1, anchors: [] }
+  const RATED = {
+    available: true, reason: null, n_coders: 2,
+    coders: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }],
+    codes: [{ id: 10, name: 'Positive', color: null, scale: SCALE }],
+    units: [
+      {
+        unit_type: 'segment', unit_id: 100, source_type: 'conversation', source_id: 5,
+        source_label: 'Interview 1', text: 'Agreed code, ratings far apart.',
+        by_coder: { '1': [10], '2': [10] }, engaged: [1, 2],
+        ratings_by_coder: { '1': { '10': 8 }, '2': { '10': 3 } },
+        consensus: [10],
+        consensus_context: {
+          '10': {
+            rule: 'unanimous', agree: 2, voters: 2,
+            magnitude: { rule: 'median', median: 5.5, n_rated: 2, spread: 5, step: 1, flag: true },
+          },
+        },
+        has_disagreement: false, has_rating_disagreement: true,
+      },
+      {
+        unit_type: 'segment', unit_id: 101, source_type: 'conversation', source_id: 5,
+        source_label: 'Interview 1', text: 'Rated zero by one, unrated by the other.',
+        by_coder: { '1': [10], '2': [10] }, engaged: [1, 2],
+        // Alice rated ZERO; Bob applied it unrated — absent, never 0.
+        ratings_by_coder: { '1': { '10': 0 } },
+        consensus: [10],
+        consensus_context: {
+          '10': {
+            rule: 'unanimous', agree: 2, voters: 2,
+            magnitude: { rule: 'median', median: 0, n_rated: 1, spread: 0, step: 1, flag: false },
+          },
+        },
+        has_disagreement: false, has_rating_disagreement: false,
+      },
+    ],
+    total: 2, has_more: false,
+  }
+
+  async function renderRated(payload = RATED) {
+    const { codeAnalysisApi } = await import('@/lib/api')
+    ;(codeAnalysisApi.reconciliation as ReturnType<typeof vi.fn>).mockResolvedValueOnce(payload)
+    renderGrid(1) // Alice is the active coder
+    await waitFor(() => screen.getByRole('grid', { name: /reconciliation/i }))
+  }
+
+  it('flags a unit whose CODES agree but whose RATINGS differ, in its own words', async () => {
+    await renderRated()
+    expect(screen.getByText('Ratings differ')).toBeInTheDocument()
+    expect(screen.getByTitle(/agree on the codes, but their ratings/)).toBeInTheDocument()
+    const headers = screen.getAllByRole('rowheader')
+    expect(headers[0]).toHaveAttribute('aria-label', expect.stringContaining('needs review, ratings differ'))
+    expect(headers[1]).toHaveAttribute('aria-label', expect.stringContaining('agreement'))
+  })
+
+  it('announces each coder’s rating in the cell — including a rating of ZERO, and never inventing one', async () => {
+    await renderRated()
+    expect(screen.getByRole('gridcell', { name: 'Bob: Positive rated 3' })).toBeInTheDocument()
+    // Alice's own cell is editable (InlineCodeActions), and still carries her rating.
+    expect(screen.getByRole('gridcell', { name: 'Alice: Positive rated 8' })).toBeInTheDocument()
+    expect(screen.getByRole('gridcell', { name: 'Alice: Positive rated 0' })).toBeInTheDocument()
+    // Bob applied unit 101's code unrated: the cell says nothing about a rating.
+    expect(screen.getByRole('gridcell', { name: 'Bob: Positive' })).toBeInTheDocument()
+  })
+
+  it('shows the consensus MEDIAN, and the spread flag carries the rule in its title', async () => {
+    await renderRated()
+    const flagged = screen.getByRole('gridcell', {
+      name: /Consensus: Positive \(unanimous, 2 of 2, rated 5\.5 by 2, ratings differ by 5\)/,
+    })
+    expect(within(flagged).getByText('differ by 5')).toBeInTheDocument()
+    expect(within(flagged).getByTitle(/more than one step \(1\) of the scale/)).toBeInTheDocument()
+    const quiet = screen.getByRole('gridcell', {
+      name: /Consensus: Positive \(unanimous, 2 of 2, rated 0 by 1\)/,
+    })
+    expect(within(quiet).queryByText(/differ by/)).toBeNull()
+  })
+
+  it('j jumps to a unit that needs review for RATINGS alone', async () => {
+    // The quiet unit first, so the jump has somewhere to go.
+    await renderRated({ ...RATED, units: [RATED.units[1], RATED.units[0]] })
+    const headers = screen.getAllByRole('rowheader')
+    expect(headers[0]).toHaveAttribute('tabindex', '0')
+    fireEvent.keyDown(headers[0], { key: 'j' })
+    expect(headers[1]).toHaveAttribute('tabindex', '0')
+    expect(headers[0]).toHaveAttribute('tabindex', '-1')
+  })
+
+  it('explains the rating half of the grid once, in the legend', async () => {
+    await renderRated()
+    expect(screen.getByText(/The consensus rating is the median/)).toBeInTheDocument()
+  })
+
+  it('#35 merge flag — a unit whose codes AND ratings agree is still review material when a merge left a difference', async () => {
+    const merged = {
+      ...RATED,
+      units: [{
+        ...RATED.units[1],
+        // Alice rated 0; her merged copy had rated it 7. Bob agrees on the code.
+        ratings_by_coder: { '1': { '10': 0 }, '2': { '10': 0 } },
+        rating_conflicts_by_coder: { '1': { '10': 7 } },
+        consensus_context: {
+          '10': {
+            rule: 'unanimous', agree: 2, voters: 2,
+            magnitude: { rule: 'median', median: 0, n_rated: 2, spread: 0, step: 1, flag: false },
+          },
+        },
+        has_disagreement: false, has_rating_disagreement: false, has_merge_conflict: true,
+      }],
+      total: 1,
+    }
+    await renderRated(merged)
+    expect(screen.getByText('Merge difference')).toBeInTheDocument()
+    expect(screen.getByTitle(/a merge found a different rating in a coder's own copy/)).toBeInTheDocument()
+    expect(screen.getAllByRole('rowheader')[0]).toHaveAttribute(
+      'aria-label', expect.stringContaining('needs review, a merge left a rating difference'))
+    // Alice's own cell carries both numbers; Bob's carries none of it.
+    expect(screen.getByRole('gridcell', { name: 'Alice: Positive rated 0, a merged copy rated it 7' })).toBeInTheDocument()
+    expect(screen.getByRole('gridcell', { name: 'Bob: Positive rated 0' })).toBeInTheDocument()
+    // The chip itself shows the other number (through InlineCodeActions' details).
+    expect(screen.getByTitle(/A merged copy of your coding rated this 7/)).toBeInTheDocument()
+    // The consensus cell never carries a merge flag — it is not anyone's copy.
+    const consensus = screen.getByRole('gridcell', { name: /^Consensus:/ })
+    expect(within(consensus).queryByText(/merged copy/)).toBeNull()
+  })
+
+  it('renders a pre-#35 payload exactly as before', async () => {
+    // No `ratings_by_coder`, no `has_rating_disagreement`, no `scale` — the
+    // module-level fixture. Nothing about ratings appears.
+    renderGrid(1)
+    await waitFor(() => screen.getByRole('grid', { name: /reconciliation/i }))
+    expect(screen.queryByText('Ratings differ')).toBeNull()
+    // The legend's standing sentence still names the flag; no CELL carries one.
+    expect(screen.queryByTitle(/more than one step/)).toBeNull()
+    expect(screen.queryByText(/^differ by \d/)).toBeNull()
+    expect(screen.getByRole('gridcell', { name: 'Bob: Negative · differs from consensus' })).toBeInTheDocument()
   })
 })

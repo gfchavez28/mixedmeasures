@@ -7,8 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-02
+
+The reliability release. Two features that go together: every reliability
+coefficient now reports how precise it is, and a code can carry a rating scale
+so coders can record *how much* — with agreement on those ratings measured the
+same way agreement on the codes themselves is. Recode rules also learn to band a
+continuous variable into groups.
+
+### Added
+
+- **Confidence intervals on the reliability coefficients.** Cohen's κ carries an
+  analytic 95% interval and Krippendorff's α a cluster-bootstrap one, shown inside
+  the Reliability tab's cells, with a note when the interval spans an
+  interpretation cutoff. Unitizing α and time-binned κ deliberately report no
+  interval, and say why.
+- **Magnitude coding.** A code can declare a rating scale (minimum, maximum, step,
+  anchor labels), and a coder rates each application on it — "how much does this
+  segment have this characteristic?". Unrated is a real state, never a zero. The
+  Reliability tab gains a second table with one interval-metric α per rated code;
+  the consensus layer carries the median rating and flags coders who differ by
+  more than one step; the reconciliation grid gains *Ratings differ* and *Merge
+  difference* review states; the coded-segments CSV gains three trailing columns
+  and the study workbook a `Ratings` sheet. **In this release the rating control
+  is offered on conversation and document transcripts; observation clips and text
+  coding display ratings but cannot give them yet.**
+- **Range bands in recode rules.** A rule can band a continuous variable
+  (`18–24 → 1`, `25–34 → 2`, …) with inclusive, optionally open-ended bounds.
+
+### Upgrade notes
+
+- **Project files saved by this version do not open in 1.4.0 or earlier.** The
+  `.mmproject` format is now version 6 (range bands and ratings are part of the
+  file); older files still open here. A colleague on 1.4.0 cannot open a project
+  you export from 1.5.0 — you both need 1.5.0 before exchanging `.mmproject`
+  files. **`.mmbackup` is unaffected.**
+- **Your database is upgraded on first launch, and a backup is taken first.** The
+  upgrade adds empty fields for code rating scales, the ratings themselves, and
+  recode range bands; it changes none of your existing data. As always, the
+  automatic pre-upgrade backup is kept only for the five most recent launches —
+  if you want a copy you control, take one before updating (Settings → Backup &
+  Data).
+
 ### Changed
 
+- **A refused action now says why.** When the server declines something with a
+  reason — a rating on a retired code, a scale change that would strand existing
+  ratings, changing the type of a variable that has a recode rule on it — the
+  message shows that reason instead of a bare "Action failed".
 - **Very large projects can now be shared, duplicated and merged.** The
   `.mmproject` limit was **500,000 dataset values**; it is now **4,000,000**.
   Both halves of the round trip were rebuilt to get there, because fixing only
@@ -725,7 +771,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.0...v1.3.1

@@ -4,7 +4,7 @@
  * not color-only), the per-row aria-label, and the unavailable state.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { readFileSync } from 'node:fs'
@@ -228,5 +228,312 @@ describe('#829 — reliability source scope', () => {
     const key = src.match(/queryKey:\s*\[([^\]]*)\]/)?.[1]
     expect(key, 'no queryKey found — the scan is reading the wrong shape').toBeTruthy()
     expect(key).toMatch(/\bsource\b/)
+  })
+})
+
+/**
+ * #43 — confidence intervals on the coefficients.
+ *
+ * What these pin is not the arithmetic (that is
+ * `backend/tests/test_reliability_intervals.py`) but the three DISPLAY claims:
+ * the interval reaches the cell it belongs to, it is announced as a range
+ * rather than as punctuation, and the straddle warning fires exactly when the
+ * data cannot settle the band.
+ */
+describe('#43 — reliability intervals', () => {
+  const withCi = {
+    ...TWO_CODER,
+    sources: [], source: null,
+    per_code: [{
+      ...TWO_CODER.per_code[0],
+      undefined_reason: null,
+      kappa_ci: {
+        lower: 0.58, upper: 0.86, level: 0.95,
+        method: 'kappa_analytic_se', n_resamples: null, unavailable_reason: null,
+      },
+      alpha_ci: {
+        lower: 0.55, upper: 0.83, level: 0.95,
+        method: 'alpha_bootstrap_units', n_resamples: 2000, unavailable_reason: null,
+      },
+    }],
+    interpretation_thresholds: { kappa: {}, alpha: { tentative: 0.667, reliable: 0.8 } },
+    overall_alpha_ci: {
+      lower: 0.55, upper: 0.85, level: 0.95,
+      method: 'alpha_bootstrap_units', n_resamples: 2000, unavailable_reason: null,
+    },
+  }
+
+  beforeEach(() => irr.mockReset())
+
+  it('puts each interval in its own coefficient cell, adding no columns', async () => {
+    irr.mockResolvedValue(withCi)
+    const { container } = renderMatrix()
+    await screen.findByText('Empathy')
+
+    // The header row is unchanged: this table already scrolls horizontally, and
+    // two more columns would push content off a 640×360 viewport (#717/#718).
+    const headers = container.querySelectorAll('thead th')
+    expect(headers).toHaveLength(6)
+
+    const row = screen.getByText('Empathy').closest('tr')!
+    expect(row.textContent).toContain('[0.58, 0.86]')
+    expect(row.textContent).toContain('[0.55, 0.83]')
+  })
+
+  it('announces a range, never the bracket punctuation', async () => {
+    irr.mockResolvedValue(withCi)
+    renderMatrix()
+    await screen.findByText('Empathy')
+
+    // A reader renders "[0.55, 0.83]" as "left bracket … comma …", so the
+    // bracket form is aria-hidden and the spoken form spells the range out.
+    const spoken = screen.getAllByText(/95% confidence interval 0\.55 to 0\.83/)
+    expect(spoken.length).toBeGreaterThan(0)
+    const visual = screen.getAllByText('[0.55, 0.83]')[0]
+    expect(visual).toHaveAttribute('aria-hidden', 'true')
+  })
+
+  it('carries the interval into the row summary a browse-mode reader hears', async () => {
+    irr.mockResolvedValue(withCi)
+    renderMatrix()
+    await screen.findByText('Empathy')
+
+    const aria = screen.getByText('Empathy').closest('tr')!.getAttribute('aria-label') ?? ''
+    expect(aria).toContain('κ=0.72 substantial, 95% confidence interval 0.58 to 0.86')
+    expect(aria).toContain('α=0.70 tentative, 95% confidence interval 0.55 to 0.83 over units')
+  })
+
+  it('warns when the headline interval spans a cutoff the band word claims to settle', async () => {
+    irr.mockResolvedValue(withCi)   // overall α 0.68, interval [0.55, 0.85]
+    renderMatrix()
+    await screen.findByText('Empathy')
+
+    // The whole point of the feature: "tentative" is not a fact about the study
+    // when the interval also contains "unreliable" and "reliable".
+    const note = screen.getByText(/spans the .* cutoffs/)
+    expect(note.textContent).toContain('0.667 (tentative) and 0.8 (reliable)')
+    expect(note.textContent).toContain('cannot tell those readings apart')
+  })
+
+  it('stays silent when the interval settles the band', async () => {
+    irr.mockResolvedValue({
+      ...withCi,
+      overall_alpha: 0.9, overall_alpha_interpretation: 'reliable',
+      overall_alpha_ci: { ...withCi.overall_alpha_ci, lower: 0.85, upper: 0.95 },
+    })
+    renderMatrix()
+    await screen.findByText('Empathy')
+    expect(screen.queryByText(/spans the/)).not.toBeInTheDocument()
+  })
+
+  it('states how the intervals were made, once, as visible content', async () => {
+    irr.mockResolvedValue(withCi)
+    const { container } = renderMatrix()
+    await screen.findByText('Empathy')
+    const text = container.textContent ?? ''
+
+    // The basis is the dangerous half — a reader who thinks the α interval
+    // narrows by adding coders has misread the number entirely.
+    expect(text).toContain('Resampled from the coded UNITS, not from the coders')
+    expect(text).toContain('2,000 resamples')
+    expect(text).toContain('fixed starting point')
+  })
+
+  it('renders no interval for a coefficient that is undefined', async () => {
+    // #829's rider: the statistic's own reason explains the blank, and a second
+    // explanation on one empty cell is noise rather than disclosure.
+    irr.mockResolvedValue({
+      ...withCi,
+      per_code: [{
+        ...withCi.per_code[0],
+        cohens_kappa: null, kappa_interpretation: null,
+        krippendorff_alpha: null, alpha_interpretation: null,
+        undefined_reason: 'no_variance', kappa_ci: null, alpha_ci: null,
+      }],
+    })
+    renderMatrix()
+    await screen.findByText('Empathy')
+    const row = screen.getByText('Empathy').closest('tr')!
+    expect(row.textContent).not.toContain('[')
+  })
+})
+
+describe('#35 — rating agreement', () => {
+  const RATED = {
+    ...TWO_CODER,
+    sources: [], source: null,
+    reliability_facet: 'coders',
+    per_code: [{
+      ...TWO_CODER.per_code[0],
+      undefined_reason: null, kappa_ci: null, alpha_ci: null, alpha_metric: 'nominal',
+    }],
+    magnitude_per_code: [
+      {
+        code_id: 20, code_name: 'District support',
+        scale: {
+          min: -1, max: 1, step: 0.5,
+          anchors: [{ value: -1, label: 'strongly negative' }, { value: 1, label: 'strongly positive' }],
+        },
+        n_units: 5, n_applications: 13, n_rated: 12, mean_abs_difference: 0.2,
+        krippendorff_alpha: 0.74, alpha_interpretation: 'tentative', alpha_metric: 'interval',
+        undefined_reason: null,
+        alpha_ci: {
+          lower: 0.41, upper: 0.92, level: 0.95,
+          method: 'alpha_bootstrap_units', n_resamples: 2000, unavailable_reason: null,
+        },
+      },
+      {
+        code_id: 21, code_name: 'Enthusiasm',
+        scale: { min: 0, max: 10, step: 1, anchors: [] },
+        n_units: 0, n_applications: 3, n_rated: 3, mean_abs_difference: null,
+        krippendorff_alpha: null, alpha_interpretation: null, alpha_metric: 'interval',
+        undefined_reason: 'insufficient_n', alpha_ci: null,
+      },
+    ],
+  }
+
+  beforeEach(() => irr.mockReset())
+
+  it('renders a SECOND table for rated codes and leaves the first one its six columns', async () => {
+    irr.mockResolvedValue(RATED)
+    renderMatrix()
+    await screen.findByText('District support')
+
+    const section = screen.getByRole('heading', { name: 'Rating agreement' }).closest('section')!
+    const headers = [...section.querySelectorAll('thead th')].map(th => th.textContent)
+    expect(headers).toEqual([
+      'Code', 'Scale', 'Units', 'Rated', 'Mean difference', "Krippendorff's α (interval)",
+    ])
+    // The presence/absence table is untouched: at 640×360 it is at capacity,
+    // and a rating α is a different coefficient over a different unit set.
+    const first = screen.getByText('Empathy').closest('table')!
+    expect(first.querySelectorAll('thead th')).toHaveLength(6)
+    expect(first.textContent).not.toContain('District support')
+  })
+
+  it('states the facet and each table’s metric from the payload, never from the screen', async () => {
+    irr.mockResolvedValue(RATED)
+    const { container } = renderMatrix()
+    await screen.findByText('District support')
+    const text = container.textContent ?? ''
+    expect(text).toContain("Krippendorff's α over coders")
+    expect(text).toContain('agreement between the people who coded')
+    expect(text).toContain('a 3 and a 4 disagree less than a 3 and a 9')
+    expect(text).toContain('match or they do not')
+  })
+
+  it('shows the scale, the coverage and the mean difference beside α — and announces the whole row', async () => {
+    irr.mockResolvedValue(RATED)
+    renderMatrix()
+    const row = (await screen.findByText('District support')).closest('tr')!
+    expect(row.textContent).toContain('−1 to 1')
+    expect(row.textContent).toContain('12/13')
+    expect(row.textContent).toContain('12 of 13')
+    expect(row.textContent).toContain('0.20')
+    expect(row.textContent).toContain('[0.41, 0.92]')
+
+    // A browse-mode reader hears the row, not the cells (`rowAriaLabel`'s rule).
+    const label = row.getAttribute('aria-label')!
+    expect(label).toContain('scale −1 to 1')
+    expect(label).toContain('α=0.74 tentative')
+    expect(label).toContain('0.41 to 0.92 over units')
+    expect(label).toContain('12 of 13 applications rated')
+    expect(label).toContain('coders differ by 0.20 on average')
+  })
+
+  it('says once, as visible content, how many applications carry no rating', async () => {
+    irr.mockResolvedValue(RATED)
+    const { container } = renderMatrix()
+    await screen.findByText('District support')
+    expect(container.textContent).toContain(
+      '1 of 16 applications of these codes carry no rating',
+    )
+  })
+
+  it('explains a code only one coder rated instead of printing a bare dash', async () => {
+    irr.mockResolvedValue(RATED)
+    renderMatrix()
+    const row = (await screen.findByText('Enthusiasm')).closest('tr')!
+    expect(row.getAttribute('aria-label')).toContain('Too few values to compute this')
+    expect(row.textContent).toContain('3/3')
+    expect(row.textContent).toContain('0 to 10')
+  })
+
+  it('renders no rating section when the payload has none — or predates the field', async () => {
+    irr.mockResolvedValue({ ...RATED, magnitude_per_code: [] })
+    renderMatrix()
+    await screen.findByText('Empathy')
+    expect(screen.queryByRole('heading', { name: 'Rating agreement' })).toBeNull()
+    expect(screen.queryByText(/carry no rating/)).toBeNull()
+
+    cleanup()
+    irr.mockResolvedValue(TWO_CODER)   // no `magnitude_per_code`, no `reliability_facet`
+    const { container } = renderMatrix()
+    await screen.findByText('Empathy')
+    expect(screen.queryByRole('heading', { name: 'Rating agreement' })).toBeNull()
+    // An older payload is not relabelled with a facet it never stated.
+    expect(container.textContent).not.toContain('over coders')
+  })
+})
+
+describe('#43 rider — a band colour is withdrawn when the interval spans its cutoff', () => {
+  // κ = 0.72 "substantial" with [0.62, 0.79]: no Landis & Koch cutoff inside,
+  // so the band is SETTLED. α = 0.70 "tentative" with [0.55, 0.83]: spans both
+  // 0.667 and 0.8, so the band is NOT — green or amber there would assert a
+  // certainty the interval denies.
+  const payload = {
+    ...TWO_CODER,
+    sources: [], source: null,
+    per_code: [{
+      ...TWO_CODER.per_code[0],
+      undefined_reason: null,
+      kappa_ci: {
+        lower: 0.62, upper: 0.79, level: 0.95,
+        method: 'kappa_analytic_se', n_resamples: null, unavailable_reason: null,
+      },
+      alpha_ci: {
+        lower: 0.55, upper: 0.83, level: 0.95,
+        method: 'alpha_bootstrap_units', n_resamples: 2000, unavailable_reason: null,
+      },
+    }],
+    interpretation_thresholds: {
+      kappa: { slight: 0, fair: 0.2, moderate: 0.4, substantial: 0.6, almost_perfect: 0.8 },
+      alpha: { tentative: 0.667, reliable: 0.8 },
+    },
+    overall_alpha_ci: null,
+  }
+
+  beforeEach(() => irr.mockReset())
+
+  it('mutes the unsettled band and keeps the settled one coloured — and says so in text', async () => {
+    irr.mockResolvedValue(payload)
+    renderMatrix()
+    const row = (await screen.findByText('Empathy')).closest('tr')!
+
+    const alphaValue = within(row).getByText('0.70').closest('span')!
+    expect(alphaValue.className).toContain('text-mm-text-muted')
+    expect(alphaValue.className).not.toContain('text-amber-600')
+    // The word itself stays: it is still what the estimate says.
+    expect(alphaValue.textContent).toContain('tentative')
+    // Never colour alone, in either direction: the withdrawal is also text.
+    expect(alphaValue.textContent).toContain('(the interval spans a cutoff)')
+
+    const kappaValue = within(row).getByText('0.72').closest('span')!
+    expect(kappaValue.className).toContain('text-emerald-600')
+    expect(kappaValue.textContent).not.toContain('spans a cutoff')
+
+    // And the row summary a browse-mode reader hears carries it once — for α.
+    const label = row.getAttribute('aria-label')!
+    expect(label.split('spans a cutoff').length - 1).toBe(1)
+    expect(label).toMatch(/α=0\.70 tentative.*spans a cutoff/)
+  })
+
+  it('does not mute when the payload carries no cutoffs to judge against', async () => {
+    irr.mockResolvedValue({ ...payload, interpretation_thresholds: {} })
+    renderMatrix()
+    const row = (await screen.findByText('Empathy')).closest('tr')!
+    const alphaValue = within(row).getByText('0.70').closest('span')!
+    expect(alphaValue.className).toContain('text-amber-600')
+    expect(row.textContent).not.toContain('spans a cutoff')
   })
 })

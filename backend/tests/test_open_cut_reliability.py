@@ -9,7 +9,6 @@ Three layers, mirroring test_irr.py:
    pin the GATHER (seconds→ticks, overlap merge, roster) instead.
 3. DB integration + the ownership gate.
 """
-import asyncio
 import subprocess
 from datetime import datetime
 
@@ -326,9 +325,9 @@ class TestEndpoints:
         user = db.get(User, 1)
 
         with pytest.raises(HTTPException) as exc:
-            asyncio.run(unitizing_alpha_endpoint(
+            unitizing_alpha_endpoint(
                 project_id=600, observation_id=obs.id, coder_ids=None,
-                user=user, db=db))
+                user=user, db=db)
         assert exc.value.status_code == 400
         assert "inter-rater reliability" in exc.value.detail
 
@@ -353,9 +352,9 @@ class TestEndpoints:
 
         user = db.get(User, 1)
         with pytest.raises(HTTPException) as exc:
-            asyncio.run(unitizing_alpha_endpoint(
+            unitizing_alpha_endpoint(
                 project_id=mine.project_id, observation_id=700, coder_ids=None,
-                user=user, db=db))
+                user=user, db=db)
         assert exc.value.status_code == 404
 
     def test_alpha_reaches_the_wire_through_its_schema(self, db_session):
@@ -370,8 +369,10 @@ class TestEndpoints:
         _mark(db, 6002, obs.id, 2, 12.0, 32.0, 600, order=1)
         user = db.get(User, 1)
 
-        raw = asyncio.run(unitizing_alpha_endpoint(
-            project_id=600, observation_id=obs.id, coder_ids=None, user=user, db=db))
+        # A plain `def` since #43 (#837's conversion) — wrapping it in
+        # `asyncio.run` would now raise "a coroutine was expected".
+        raw = unitizing_alpha_endpoint(
+            project_id=600, observation_id=obs.id, coder_ids=None, user=user, db=db)
         validated = UnitizingAlphaResponse(**raw)
 
         assert validated.available is True

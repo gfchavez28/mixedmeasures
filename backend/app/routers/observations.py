@@ -816,6 +816,8 @@ def _clip_to_response(segment: Segment) -> ObservationSegmentResponse:
                 user_id=ca.user_id,
                 attribution=ca.attribution,
                 is_universal=bool(ca.code.is_universal) if ca.code else False,
+                magnitude=ca.magnitude,
+                magnitude_conflict=ca.magnitude_conflict,
             )
             for ca in human_apps
         ],

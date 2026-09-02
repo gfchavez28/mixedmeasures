@@ -119,6 +119,14 @@ class MergeReport(BaseModel):
     codes_collapsed: int = 0
     codes_linked: int = 0
     codes_created: int = 0
+    # #35 — matched applications whose copy carried a DIFFERENT rating (the merge
+    # disagreement flag, `CodeApplication.magnitude_conflict`). ⚠️ #855's
+    # fourteenth: the service wrote this key and the client read it for a full
+    # release cycle while this schema did not declare it — Pydantic's default
+    # `extra='ignore'` dropped it at the wire, silently, with every test asserting
+    # on the SERVICE dict. `test_trackj_j3_roundtrip.py::TestMergeReport` now pins
+    # that every key the service writes is a field here.
+    magnitude_conflicts: int = 0
 
 
 class ProjectImportResult(BaseModel):
