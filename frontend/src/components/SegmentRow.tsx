@@ -154,6 +154,15 @@ interface SegmentRowProps {
   onCodeChange?: () => void
   /** Clicking an applied-code chip pivots to that code in the codes panel (#422a). */
   onFocusCode?: (codeId: number) => void
+  /**
+   * #875 / #868 (e-f) — the HOST owns the chip's gestures and the rate menu, so
+   * the rating capture, the history entry and the strip live in one place per
+   * workbench. Optional: the read-only fallback branch below renders no chips.
+   */
+  onChipRemove?: (segmentId: number, codeId: number) => void
+  onChipApply?: (segmentId: number, codeId: number) => void
+  onRateCode?: (segmentId: number, code: Code) => void
+  ratableCodesFor?: (segmentId: number) => Code[]
   /** Track J · J1: user_id → Coder lens for attribution badges (only set in multi-coder mode). */
   coderMap?: Map<number, Coder>
   /** Track J · J1: coder ids hidden by the visibility filter (chips by these coders are hidden). */
@@ -209,6 +218,10 @@ function SegmentRow({
   codeMap,
   onCodeChange,
   onFocusCode,
+  onChipRemove,
+  onChipApply,
+  onRateCode,
+  ratableCodesFor,
   coderMap,
   hiddenCoderIds,
   activeCoderId,
@@ -658,6 +671,11 @@ function SegmentRow({
                     coderMap={coderMap}
                     appliedCodeDetails={segment.applied_code_details}
                     hiddenCoderIds={hiddenCoderIds}
+                    // #875 — the host owns both gestures, so the `×` captures the
+                    // rating and is undoable with Ctrl+Z like every sibling door,
+                    // and the `+ Add code` apply opens the rating strip (#868 e).
+                    onRemoveCode={onChipRemove ? (codeId) => onChipRemove(segment.id, codeId) : undefined}
+                    onApplyCode={onChipApply ? (codeId) => onChipApply(segment.id, codeId) : undefined}
                   />
                 ) : (
                   <div className="flex flex-wrap gap-1">
@@ -757,6 +775,16 @@ function SegmentRow({
               Add Note
             </ContextMenuItem>
           )}
+          {/* #868 (e/f) — the pointer route to re-rating. One item per code THIS
+              coder has applied that declares a scale; `ratableCodes` already
+              excludes a colleague's application and an inactive code, both of
+              which the server would refuse. Absent when there is nothing to
+              rate, rather than a permanently dead item. */}
+          {onRateCode && ratableCodesFor?.(segment.id).map(code => (
+            <ContextMenuItem key={`rate-${code.id}`} onClick={() => onRateCode(segment.id, code)}>
+              Rate &ldquo;{code.name}&rdquo;… <span className="text-xs text-mm-text-faint ml-2 font-mono">r</span>
+            </ContextMenuItem>
+          ))}
           {/* Quote/Excerpt actions */}
           {textSelection && textSelection.start < textSelection.end && onSaveExcerpt && (
             <ContextMenuItem onClick={() => onSaveExcerpt(segment.id, textSelection.start, textSelection.end)}>
@@ -1034,6 +1062,10 @@ export default React.memo(SegmentRow, (prevProps, nextProps) => {
     prevProps.codeMap === nextProps.codeMap &&
     prevProps.onCodeChange === nextProps.onCodeChange &&
     prevProps.onFocusCode === nextProps.onFocusCode &&
+    prevProps.onChipRemove === nextProps.onChipRemove &&
+    prevProps.onChipApply === nextProps.onChipApply &&
+    prevProps.onRateCode === nextProps.onRateCode &&
+    prevProps.ratableCodesFor === nextProps.ratableCodesFor &&
     prevProps.coderMap === nextProps.coderMap &&
     prevProps.hiddenCoderIds === nextProps.hiddenCoderIds &&
     prevProps.activeCoderId === nextProps.activeCoderId &&

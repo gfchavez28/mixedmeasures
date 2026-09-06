@@ -77,11 +77,24 @@ export const codesApi = {
       target_category_id: targetCategoryId,
     }).then(res => res.data),
   merge: (projectId: number, sourceCodeId: number, targetCodeId: number, deleteSource = false) =>
-    api.post<{ merged: number; skipped: number; source_action: string }>(
+    api.post<MergeCodesResponse>(
       `/projects/${projectId}/codes/${sourceCodeId}/merge/${targetCodeId}`,
       null,
       { params: { delete_source: deleteSource } },
     ).then(res => res.data),
+}
+
+/** What a code merge did — incl. the ratings (#869 b). */
+export interface MergeCodesResponse {
+  merged: number
+  skipped: number
+  source_action: string
+  /** Re-pointed applications that carry a rating. */
+  ratings_carried: number
+  /** Duplicates whose DIFFERING rating was recorded as the kept row's merge conflict. */
+  rating_conflicts: number
+  /** False when carried ratings landed on a code that has no scale to show them on. */
+  target_has_scale: boolean
 }
 
 // Category operation response types

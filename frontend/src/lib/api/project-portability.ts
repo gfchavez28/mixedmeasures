@@ -1,5 +1,6 @@
 import api from './client'
 import { downloadBlob, extractFilename, EXPORT_TIMEOUT_MS } from './download'
+import type { MagnitudeScale } from '../magnitude'
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -20,6 +21,14 @@ export interface ProjectSummary {
    * filtering the field again.
    */
   observation_count: number
+  /**
+   * Canvases (2026-09-04). Written by every exporter since the canvas shipped
+   * and DROPPED at the wire until the test-time `extra='forbid'` detector
+   * (#855) found the schema never declared them. Defaulted server-side like
+   * `observation_count`, so a pre-canvas archive reads 0.
+   */
+  canvas_count: number
+  canvas_theme_count: number
 }
 
 export interface ProjectExportManifest {
@@ -66,6 +75,8 @@ export interface MergeCodeCandidate {
   usage: number
   similarity: number
   confident: boolean
+  /** #869: the local code's declared rating scale, null when it has none. */
+  magnitude_scale: MagnitudeScale | null
 }
 
 /** Track J · J3-2b: a code in the file that isn't in your codebook (divergent), with
@@ -78,6 +89,8 @@ export interface MergeCodePreview {
   category_name: string | null
   file_app_count: number
   candidates: MergeCodeCandidate[]
+  /** #869: the FILE code's declared rating scale, null when it has none. */
+  magnitude_scale: MagnitudeScale | null
 }
 
 export interface ImportValidationResult {
@@ -129,6 +142,9 @@ export interface MergeReport {
    * Optional: a report from a server that predates the field simply omits it.
    */
   magnitude_conflicts?: number
+  /** #869 (c): NEW applications whose incoming rating fell outside the target
+   * code's scale — imported unrated, the number kept as the row's merge conflict. */
+  ratings_out_of_range?: number
 }
 
 /** Track J · J3-2c: structured 409 body when a merge is refused for divergence. */
@@ -185,6 +201,8 @@ export interface CodebookImportResult {
   codes_created: number
   codes_skipped: number
   codes_uncategorized: number
+  /** #869 (d): codes created WITH their declared rating scale. */
+  scales_imported: number
 }
 
 // ── API ────────────────────────────────────────────────────────────────

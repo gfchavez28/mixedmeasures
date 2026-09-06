@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ciLabel, ciCaveat, ciQualifier, isItemLevelCi, ITEM_LEVEL_CI_METHOD } from './ci-label'
+import { sourceFiles } from '@/test-support/source-tree'
 
 /**
  * #715 — a domain aggregate's confidence interval is computed over ITEMS, not
@@ -55,33 +56,16 @@ describe('fail-closed: a CI display site may not hand-write its own label', () =
     ['components/analysis/PostHocTable.tsx', 'Tukey mean-difference intervals — a different quantity entirely'],
   ])
 
-  function walk(dir: string, out: string[] = []): string[] {
-    for (const entry of readdirSync(dir)) {
-      const p = join(dir, entry)
-      if (statSync(p).isDirectory()) walk(p, out)
-      else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) out.push(p)
-    }
-    return out
-  }
-
   /**
    * The scanned population, proven non-trivial before use (#730).
    *
    * The scan below asserts an EMPTY offender list, which a walk that found
-   * nothing satisfies just as well. `readdirSync` throws on a missing path, so
-   * the risk is not a blind walk but a VALID-but-narrower one — moving this
-   * file changes what `join(__dirname, '..')` resolves to. The floor detects
-   * that; it is NOT a growth pin (394 `.ts`/`.tsx` files today).
+   * nothing satisfies just as well. The walk and its floor live in
+   * `sourceFiles()` (#729); a valid-but-narrower root fails there. NOT a
+   * growth pin (394 `.ts`/`.tsx` files today).
    */
   function scannedFiles(): string[] {
-    const files = walk(SRC)
-    expect(
-      files.length,
-      `the scan walked ${files.length} files under ${SRC} — far fewer than expected, `
-        + 'so it is reading the wrong subtree and the assertion would pass '
-        + 'vacuously. Fix the root; do NOT lower this floor.',
-    ).toBeGreaterThan(250)
-    return files
+    return sourceFiles({ ext: 'both', floor: 250 })
   }
 
   it('scans the whole tree for a hand-written 95% CI label', () => {

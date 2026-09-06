@@ -302,7 +302,10 @@ export default function ConversationsListPage() {
               }
             }}
           >
-            <SelectTrigger className="w-[120px] h-8 text-sm">
+            {/* #892: `combobox` is not a name-from-content role, so the visible
+                "Date ↓" is the trigger's VALUE and never its name — measured in
+                Chrome's tree, this announced as a bare unnamed combobox. */}
+            <SelectTrigger className="w-[120px] h-8 text-sm" aria-label="Sort conversations">
               <ArrowUpDown className="w-3.5 h-3.5 mr-1.5 shrink-0 text-mm-text-faint" />
               <SelectValue />
               <span className="ml-1 text-mm-text-faint text-[11px]">{sortDir === 'asc' ? '↑' : '↓'}</span>

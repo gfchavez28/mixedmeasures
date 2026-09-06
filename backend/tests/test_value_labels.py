@@ -233,12 +233,14 @@ def test_data_response_carries_scale_values(col):
     would have been a test constructing the payload differently from the
     endpoint it exists to protect, which is how the two drift.
     """
-    from app.schemas.dataset import DatasetColumnResponse, DatasetDataColumnResponse
+    from app.schemas.dataset import DatasetColumnResponse, data_column_response
     base = DatasetColumnResponse(
         id=1, column_text="Q1", column_type="ordinal", sequence_order=0,
         scale_labels=["Low", "Top"], scale_values=[2.0, 10.0], scale_points=2,
     )
-    out = DatasetDataColumnResponse(**base.model_dump())
+    # The SAME projection the router runs (#855, 2026-09-04) — a re-typed splat
+    # here would construct the payload differently from the endpoint.
+    out = data_column_response(base)
     assert out.scale_values == [2.0, 10.0]
     assert "scale_values" in out.model_dump()
 

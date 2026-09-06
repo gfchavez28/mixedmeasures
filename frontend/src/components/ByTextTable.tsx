@@ -8,7 +8,8 @@ import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import { Quote } from 'lucide-react'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
-import { textCodingApi, type TextCodingResponse, type RecordContext, type Coder } from '@/lib/api'
+import { textCodingApi, type Code, type TextCodingResponse, type RecordContext, type Coder } from '@/lib/api'
+import type { MagnitudeScale } from '@/lib/magnitude'
 import CodeChip from '@/components/qualitative-analysis/CodeChip'
 import { useCoders } from '@/hooks/useCoders'
 import { mergeArchivedIntoCoderMap, chipHiddenWithArchived } from '@/lib/coder-color'
@@ -29,10 +30,16 @@ interface ByTextTableProps {
   onContextCodeApply?: (dvId: number, codeId: number) => void
   onContextCreateCode?: (coords: FloatingCoords) => void
   onContextCreateNote?: (dvId: number, coords: FloatingCoords) => void
+  /** #868 (d) — the re-rate route; see `TextCodingContextMenu`. */
+  onRateCode?: (dvId: number, code: Code) => void
+  ratableCodesFor?: (dvId: number) => Code[]
   contextVisible: { demographics: boolean; otherComments: boolean; nonComments: boolean }
   focalColumnIds: number[]
   projectId: number
-  codes: Array<{ id: number; name: string; color: string | null; description?: string | null; is_active?: boolean; category_id?: number | null; category_color?: string | null; is_universal?: boolean; numeric_id?: number | null }>
+  // `magnitude_scale` rides along so the chip can render a rating against its
+  // instrument (#868 d) — the payload already carried the rating; the chip was
+  // handed neither it nor the scale, so this surface showed nothing.
+  codes: Array<{ id: number; name: string; color: string | null; description?: string | null; is_active?: boolean; category_id?: number | null; category_color?: string | null; is_universal?: boolean; numeric_id?: number | null; magnitude_scale?: MagnitudeScale | null }>
   searchText?: string
   onClearSearch?: () => void
   hiddenCoderIds?: Set<number>  // Track J · J1 visibility filter
@@ -129,6 +136,8 @@ interface ByTextTableContext {
   onContextCreateCode?: (coords: FloatingCoords) => void
   onContextCreateNote?: (dvId: number, coords: FloatingCoords) => void
   activeCoderId?: number | null
+  onRateCode?: (dvId: number, code: Code) => void
+  ratableCodesFor?: (dvId: number) => Code[]
 }
 
 const byTextComponents: TableComponents<TextCodingResponse, ByTextTableContext> = {
@@ -188,6 +197,8 @@ const byTextComponents: TableComponents<TextCodingResponse, ByTextTableContext> 
             onContextCreateNote={context.onContextCreateNote}
             lastCoordsRef={context.lastCoordsRef}
             activeCoderId={context.activeCoderId}
+            onRateCode={context.onRateCode}
+            ratableCodesFor={context.ratableCodesFor}
           />
         )}
       </ContextMenu>
@@ -221,6 +232,8 @@ function ByTextTable({
   onContextCodeApply,
   onContextCreateCode,
   onContextCreateNote,
+  onRateCode,
+  ratableCodesFor,
   contextVisible,
   focalColumnIds,
   projectId,
@@ -379,10 +392,12 @@ function ByTextTable({
     onContextCreateCode,
     onContextCreateNote,
     activeCoderId,
+    onRateCode,
+    ratableCodesFor,
   }), [
     selectedValueIds, comments.length, totalRowCount, dvIdToIndex, handleRowClick, onSelectionChange,
     activeCodes, codeIdToShortcutLabel, onQuoteToggle, onContextCodeApply,
-    onContextCreateCode, onContextCreateNote, activeCoderId,
+    onContextCreateCode, onContextCreateNote, activeCoderId, onRateCode, ratableCodesFor,
   ])
 
   if (loading) {
@@ -463,6 +478,12 @@ function ByTextTable({
       itemContent={(_index, comment) => {
         const isSelected = selectedValueIds.includes(comment.dataset_value_id)
         const ctx = contextCache[comment.dataset_row_id]
+        // #892: ONE derivation, shared by the Record cell and the quote
+        // control's name. This table has no <th scope="row"> — the Record cell
+        // is a plain <td> — so unlike the dataset grid's identical `Link...`
+        // buttons, nothing else tells these apart and the name must carry it.
+        const recordLabel =
+          comment.row_identifier || comment.participant_name || `R${comment.dataset_row_id}`
 
         return (
           <>
@@ -470,7 +491,7 @@ function ByTextTable({
               <button
                 className={`shrink-0 ${comment.is_quoted ? '' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'} transition-opacity`}
                 onClick={e => { e.stopPropagation(); onQuoteToggle(comment.dataset_value_id) }}
-                aria-label={comment.is_quoted ? 'Unquote' : 'Quote'}
+                aria-label={comment.is_quoted ? `Unquote ${recordLabel}` : `Quote ${recordLabel}`}
               >
                 <Quote className={`w-3.5 h-3.5 ${comment.is_quoted ? 'fill-amber-400 text-amber-400' : 'text-mm-text-faint'}`} />
               </button>
@@ -479,7 +500,7 @@ function ByTextTable({
               className={`w-[120px] px-4 py-2 border-b ${isSelected ? SELECTED_CELL : 'bg-mm-surface group-hover:bg-mm-surface-hover'}`}
             >
               <span className="font-mono text-xs truncate block">
-                {comment.row_identifier || comment.participant_name || `R${comment.dataset_row_id}`}
+                {recordLabel}
               </span>
             </td>
             <td
@@ -516,6 +537,12 @@ function ByTextTable({
                       code={{ id: code.id, name: code.name, color: code.color }}
                       size="xs"
                       coder={coder}
+                      // #868 (d): the rating and its instrument reach the chip
+                      // through the same chokepoint row the other three surfaces
+                      // use (#441's grain, one field over).
+                      magnitude={row.magnitude}
+                      magnitudeConflict={row.magnitudeConflict}
+                      scale={code.magnitude_scale ?? null}
                     />
                   )
                 })}

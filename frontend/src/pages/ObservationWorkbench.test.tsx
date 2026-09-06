@@ -46,6 +46,7 @@ const deleteExcerpt = vi.fn()
 const applyCode = vi.fn()
 const removeCode = vi.fn()
 const bulkCode = vi.fn()
+const setMagnitude = vi.fn()
 const listMemos = vi.fn()
 const coderCoverage = vi.fn()
 
@@ -98,6 +99,7 @@ vi.mock('@/lib/api', async () => {
       applyCode: (...a: unknown[]) => applyCode(...a),
       removeCode: (...a: unknown[]) => removeCode(...a),
       bulkCode: (...a: unknown[]) => bulkCode(...a),
+      setMagnitude: (...a: unknown[]) => setMagnitude(...a),
     },
     memosApi: {
       ...actual.memosApi,
@@ -277,6 +279,7 @@ beforeEach(() => {
   applyCode.mockResolvedValue({ applied: true })
   removeCode.mockResolvedValue({ removed: true })
   bulkCode.mockResolvedValue({ results: [] })
+  setMagnitude.mockResolvedValue({ applied: true, magnitude: 7 })
   listMemos.mockResolvedValue({ memos: [], total: 0 })
   coderCoverage.mockResolvedValue({ coders: [], count: 0 })
 })
@@ -983,6 +986,45 @@ describe('coding a clip (slab 4d)', () => {
     await waitFor(() => expect(bulkCode).toHaveBeenCalledWith([11, 12, 13], 7, 'apply'))
     expect(bulkCode).toHaveBeenCalledTimes(1)
     expect(applyCode).not.toHaveBeenCalled()
+  })
+
+  /**
+   * #876 — the SIXTH arm of #868 (f). The single-clip arm captured the rating;
+   * this one re-applied BARE through `bulkCode`, so undoing a multi-clip removal
+   * unrated every clip silently. A clip rating can only arrive by merge or
+   * import today (#868 c), which is exactly what the single-clip arm's own
+   * comment says — so the case was known and one of two arms was covered.
+   *
+   * ⚠️ The fixture rates ZERO on purpose (`magnitude-coding.md` §2): on a 0–10
+   * scale a falsy-zero slip and a correct implementation agree about everything
+   * else, so a positive rating cannot tell them apart.
+   */
+  it('#876 — undoing a MULTI-clip removal restores each clip’s own rating, incl. 0', async () => {
+    const rated = (id: number, magnitude: number | null) => clip(id, id * 100, id * 100 + 50, `Clip ${id}`, {
+      applied_codes: [7],
+      applied_code_details: [{
+        code_id: 7, user_id: 1, attribution: null, is_universal: false,
+        magnitude, magnitude_conflict: null,
+      }],
+    })
+    listSegments.mockResolvedValue([rated(21, 0), rated(22, null)])
+
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.click(rows[0])
+    fireEvent.click(rows[1], { shiftKey: true })
+
+    // Both carry the code, so the digit REMOVES — one bulk call (D23).
+    fireEvent.keyDown(window, { key: '1' })
+    await waitFor(() => expect(bulkCode).toHaveBeenCalledWith([21, 22], 7, 'remove'))
+
+    bulkCode.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
+
+    // The restore goes PER CLIP, because the bulk endpoint carries no rating.
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(21, 7, undefined, 0))
+    expect(applyCode).toHaveBeenCalledWith(22, 7, undefined, null)
+    expect(bulkCode).not.toHaveBeenCalled()
   })
 
   it('arming a category prefix shows the chord HUD', async () => {
@@ -2174,5 +2216,129 @@ describe('undo carries the rating (#868 f) — the observation surface', () => {
 
     // Fourth argument: the captured rating. `undefined` there is the old bug.
     await waitFor(() => expect(applyCode).toHaveBeenCalledWith(15, 7, undefined, 0))
+  })
+})
+
+/**
+ * #868 (c) — the rating strip on the OBSERVATION surface.
+ *
+ * Until 2026-09-03 a clip could not be rated here at all: the strip was mounted
+ * on the conversation and document workbenches only, while this page's chips
+ * already DISPLAYED a rating that could only arrive by merge or import. These
+ * pin the same contract the document harness pins, against this page's cache:
+ *
+ *   · applying a scaled code by digit opens the strip BELOW the listbox and
+ *     outside the virtualiser (#826); a digit typed into it rates through
+ *     `setMagnitude` WITHOUT applying a second code (the #870 a stand-down);
+ *   · `r` re-opens it for an application that already exists (seeded at the
+ *     current value — a ZERO, the falsy-zero fixture rule) and falls through
+ *     where there is nothing to rate;
+ *   · the row menu names each ratable code and offers nothing otherwise;
+ *   · a multi-clip apply opens no strip; a rating is undoable and its inverse
+ *     restores the previous value, which is `null` for a fresh apply.
+ */
+describe('#868 (c) — the rating strip on the observation workbench', () => {
+  const SCALED = [
+    makeCode(7, 1, 'Engagement', { magnitude_scale: { min: 0, max: 10, step: 1, anchors: [] } }),
+    makeCode(8, 2, 'Disruption'),
+  ]
+  const ratedClips = () => [
+    clip(11, 0, 130, 'Arrival & settling'),
+    clip(14, 1000, 1100, 'Coded moment', {
+      applied_codes: [7],
+      // Rated ZERO by this coder: a `previous || null` slip and a bare re-apply
+      // both lose exactly this value.
+      applied_code_details: [{ code_id: 7, user_id: 1, attribution: null, is_universal: false,
+                               magnitude: 0, magnitude_conflict: null }],
+    }),
+  ]
+
+  beforeEach(() => {
+    listCodes.mockResolvedValue({ codes: SCALED, total: SCALED.length })
+    listSegments.mockResolvedValue(ratedClips())
+  })
+
+  it('applying a scaled code by digit opens the strip below the list, and a digit in it rates without coding', async () => {
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.click(rows[0])  // clip 11, uncoded
+    fireEvent.keyDown(window, { key: '1' })  // numeric_id 1 → Engagement, which declares a scale
+
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(11, 7))
+    const strip = await screen.findByTestId('magnitude-strip')
+
+    // Outside the listbox and after it: a conditional child inside a
+    // virtualised row risks the remount that drops focus to <body> (#826).
+    const listbox = screen.getByRole('listbox', { name: 'Clips' })
+    expect(listbox.contains(strip)).toBe(false)
+    expect(strip.compareDocumentPosition(listbox) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
+
+    // It took focus — that is what stands the chord layer down.
+    const group = screen.getByRole('radiogroup')
+    expect(document.activeElement).toBe(group)
+
+    // A digit typed INTO the strip is the rating, not a second code (#870 a).
+    fireEvent.keyDown(group, { key: '7' })
+    await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(11, 7, 7))
+    expect(applyCode).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('magnitude-strip')).not.toBeInTheDocument()
+  })
+
+  it('`r` re-opens the strip for an application that already exists, seeded at its current rating — a ZERO', async () => {
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.click(rows[1])  // clip 14: Engagement rated 0 by this coder
+    fireEvent.keyDown(window, { key: 'r' })
+
+    await screen.findByTestId('magnitude-strip')
+    const checked = screen.getByRole('radio', { checked: true })
+    expect(checked).toHaveAccessibleName('0')
+    // Nothing was applied or removed — `r` only opens the strip.
+    expect(applyCode).not.toHaveBeenCalled()
+    expect(removeCode).not.toHaveBeenCalled()
+  })
+
+  it('`r` falls through where there is nothing to rate, and a multi-clip apply opens no strip', async () => {
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.click(rows[0])  // clip 11: no code of mine
+    fireEvent.keyDown(window, { key: 'r' })
+    expect(screen.queryByTestId('magnitude-strip')).not.toBeInTheDocument()
+
+    fireEvent.click(rows[1], { shiftKey: true })  // range 11, 14 → the multi-clip arm
+    fireEvent.keyDown(window, { key: '2' })  // Disruption on both, ONE bulk call
+    await waitFor(() => expect(bulkCode).toHaveBeenCalledWith([11, 14], 8, 'apply'))
+    expect(screen.queryByTestId('magnitude-strip')).not.toBeInTheDocument()
+  })
+
+  it('the row menu names each ratable code, and offers nothing on a clip with none', async () => {
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+
+    fireEvent.contextMenu(rows[1])  // clip 14 carries my rated Engagement
+    const menu = await screen.findByRole('menu')
+    expect(within(menu).getByText('Rate “Engagement”…')).toBeInTheDocument()
+    fireEvent.keyDown(menu, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument())
+
+    fireEvent.contextMenu(rows[0])  // clip 11: nothing of mine
+    const menu2 = await screen.findByRole('menu')
+    expect(within(menu2).queryByText(/^Rate /)).not.toBeInTheDocument()
+  })
+
+  it('a rating is undoable, and the inverse restores the PREVIOUS value — null for a fresh apply', async () => {
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.click(rows[0])
+    fireEvent.keyDown(window, { key: '1' })
+    const group = await screen.findByRole('radiogroup')
+    fireEvent.keyDown(group, { key: '7' })
+    await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(11, 7, 7))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+    await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(11, 7, null))
+    // The undo of the RATING, not of the apply: the code stays on the clip.
+    expect(removeCode).not.toHaveBeenCalled()
   })
 })

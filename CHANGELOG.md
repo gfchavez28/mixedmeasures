@@ -7,6 +7,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-09-06
+
+### Added
+
+- **Ratings on observation clips and text responses.** The rating strip that
+  1.5.0 offered on conversation and document transcripts now opens on the
+  observation workbench and on Text Coding too — after applying a code that has
+  a scale, from the keyboard, the row menu or the chip's `+`. On every coding
+  surface, **`r`** re-opens the strip for a code you have already applied, and
+  the row's right-click menu lists a *Rate "…"* item per ratable code. The
+  keyboard-shortcuts dialog and the status bars name the key.
+- **Ratings on text responses reach the study workbook.** The `Ratings` sheet
+  gains rows for dataset-cell ratings, named by dataset and column, with a new
+  trailing `Record` column carrying the response's record identifier.
+- **The import preview counts canvases.** The "what's in this file" summary
+  shown before a `.mmproject` import now lists canvases beside conversations,
+  documents, datasets and observations. The count had been written into every
+  exported file since the canvas shipped and never reached the preview.
+- **Four configuration variables are documented.** `MM_AUTO_BACKUP_INTERVAL_HOURS`,
+  `MM_AUTO_BACKUP_MAX_COUNT`, `MM_SESSION_EXPIRE_HOURS` and `MM_CSRF_ENABLED`
+  have been honoured for months and named nowhere; they are in the README's
+  configuration table now.
+- **Codebook files carry rating scales.** A `.mmcodebook` export now includes
+  each code's declared rating scale, and importing one declares it on the new
+  code (the import result says how many arrived with a scale). The REFI-QDA
+  `.qdc` format has no place for a scale and stays without one.
+- **Merging codes says what happens to ratings, before and after.** The merge
+  dialog notes when two codes have different rating scales, or when the code
+  you keep has none; the confirmation names any rating differences flagged for
+  reconciliation and any ratings kept on a code that cannot show them yet.
+- **Merging a colleague's project says when scales differ.** The reconcile
+  step shows each incoming code's rating scale and warns when folding it into
+  one of yours would cross scales; the final report counts the ratings that
+  did not fit.
+
+### Fixed
+
+- **Merging one code into another could put ratings outside the target's
+  scale.** The merge now refuses, naming how many ratings would not fit and
+  what to do, instead of moving them silently; a duplicate application's
+  differing rating is kept as a reconciliation difference rather than deleted.
+- **Merging a colleague's project could import ratings the receiving code's
+  scale cannot hold.** Such a rating now arrives as a flagged difference on an
+  unrated application, never as a rating, and non-numeric values in the file
+  are dropped rather than stored.
+- **Participant actions now say whose record they act on.** On the Participants
+  page every row offered *Edit*, *Remove this participant's data* and *Delete
+  record* under those exact words — thirty rows, ninety controls, none naming
+  the person. A screen-reader user had no way to tell whose withdrawal request
+  they were about to send. Each names the participant now.
+- **Two "Expand" controls said only "Expand".** The category rows in the
+  qualitative code picker and the dataset rows in the codebook's hide panel gave
+  no clue which section they opened; they name it now.
+- **A value-label row could be announced as invalid with no reason given.** When
+  the editor was set to stay quiet until you type a label, an untouched row was
+  still marked invalid and pointed at an explanation that was not on screen.
+- **Four controls announced as an unlabelled "button".** Moving between documents,
+  the previous/next arrows and the document picker had no spoken name — the
+  arrow at each end of the list was silent even to a mouse-over tooltip. And
+  when editing a code's description, the tick and cross that save and discard
+  the edit were indistinguishable to a screen reader. All four are named now.
+- **A screen reader did not hear the merge dialog's rating-scale warning.** The
+  note explaining what happens to ratings when two codes are rated on different
+  scales was on screen but was replaced by the words "Rating scales" when the
+  dialog and its Merge button were announced. The full sentence is now read out
+  on both — the warning matters most on an action that cannot be undone.
+
+- **Six controls that told a screen reader nothing.** The sort controls on the
+  Conversations and Documents lists, the File Encoding chooser when appending to
+  a dataset, and both target choosers in the Memos panel's new-memo form
+  announced only their current value and no name at all. They are named now.
+- **Every "Quote" button on the Text Coding view said only "Quote".** With
+  fourteen responses on screen, a screen-reader user heard the same word
+  fourteen times with nothing saying which response each one acted on. Each
+  names its record now (or, in the By Record view, its column). (#892)
+
+- **Removing a code from a text response could delete a colleague's coding.**
+  In a multi-coder project, the single remove gesture on Text Coding was not
+  scoped to the coder making it and could remove the lowest-numbered coder's
+  application instead of your own. It now removes only yours. (#879)
+- **A rating given quickly after applying the code could show as "not rated".**
+  On documents and observations, a rating committed before the apply had
+  finished refreshing the page was overwritten by that refresh; the server had
+  the rating, the chip did not. (#881)
+- **Undoing twice in quick succession on an observation could leave a deleted
+  code on screen** until the page was reloaded. (#881)
+- **One refused undo could jam undo for the rest of the session.** If the app
+  declined to reverse a step — for example a rating on a code no longer applied
+  to that segment — the history stopped there: every later Ctrl+Z retried the
+  same impossible step and nothing behind it could be reached again without
+  reloading the page, which discarded the history anyway. A step the server
+  settles is now dropped from the history, and says so; a step that failed for a
+  passing reason, like a dropped connection, is kept so you can retry it. (#874)
+- **Coding quickly could silently discard a code.** While one action was still
+  saving, the next was dropped with no request and no message — pressing two
+  code keys in succession at ordinary coding speed applied one and lost the
+  other. Actions are now queued and applied in order. (#877)
+- **Undoing a code removal could bring the code back without its rating.** The
+  chip's `×` and the multi-clip removal on the observation workbench both
+  re-applied the code bare. Every removal door now restores the rating it
+  captured. (#875, #876)
+- **A code's rating bar could stretch across the whole page** on the
+  reconciliation grid — every other coder's cell and the consensus cell, on the
+  one screen whose job is comparing ratings. (#878)
+- **Two screens had no room for content at 200% zoom.** The Text Coding view and
+  the observation workbench filled the entire window with their own toolbars, so
+  no responses or clips were visible at all. Both now show their content at that
+  zoom level, with nothing hidden at normal window sizes. More of this work is
+  still to come. (#880)
+
+### Security
+
+- **Updated the rich-text editor behind the Canvas** (Tiptap 3.31.3, which
+  carries prosemirror-view 1.42.3) — the new version fixes a clipboard
+  vulnerability in the editor's paste handling. The Canvas is a paste target, so
+  the fix applies directly. (#872)
+
 ## [1.5.0] - 2026-09-02
 
 The reliability release. Two features that go together: every reliability
@@ -771,7 +888,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.1...v1.3.2

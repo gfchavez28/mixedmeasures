@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { stripComments } from './strip-comments'
 import { join } from 'node:path'
+import { SOURCE_SCAN_TIMEOUT_MS, sourceFiles } from '@/test-support/source-tree'
 
 /**
  * #8 — controls and tables must carry an accessible name.
@@ -27,37 +28,18 @@ import { join } from 'node:path'
 
 const SRC = join(__dirname, '..')
 
-function walk(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
-    const p = join(dir, entry)
-    if (statSync(p).isDirectory()) walk(p, out)
-    else if (/\.tsx$/.test(entry) && !/\.test\.tsx$/.test(entry)) out.push(p)
-  }
-  return out
-}
-
 /**
  * The scanned population, proven non-trivial before it is used (#730).
  *
  * Both scans below assert an EMPTY offender list, which a walk that found
- * nothing satisfies just as well. `readdirSync` throws on a missing path, so
- * the risk here is not a blind walk but a VALID-but-narrower one — moving this
- * file changes what `join(__dirname, '..')` resolves to, and the scan would go
- * quietly green over a subtree.
- *
- * The floor detects that; it is NOT a growth pin. 237 `.tsx` files today —
- * `.tsx` only, and deliberately: this guard matches JSX elements, which
- * TypeScript permits only in `.tsx`.
+ * nothing satisfies just as well. The walk and its floor live in
+ * `sourceFiles()` (#729): a valid-but-narrower root fails there, with the
+ * count and the remedy. The floor detects that; it is NOT a growth pin. 237
+ * `.tsx` files today — `.tsx` only, and deliberately: this guard matches JSX
+ * elements, which TypeScript permits only in `.tsx`.
  */
 function scannedFiles(): string[] {
-  const files = walk(SRC)
-  expect(
-    files.length,
-    `the scan walked ${files.length} files under ${SRC} — far fewer than expected, `
-      + 'so it is reading the wrong subtree and both assertions here would pass '
-      + 'vacuously. Fix the root; do NOT lower this floor.',
-  ).toBeGreaterThan(150)
-  return files
+  return sourceFiles({ ext: 'tsx', floor: 150 })
 }
 
 /** The opening tag starting at `from`, respecting nested braces in JSX expressions. */
@@ -98,7 +80,7 @@ describe('accessible names (#8)', () => {
   // The SECOND scan below is ~20 ms: `stripComments` caches on source text, and
   // that cache is per-FILE (vitest runs each test file in its own process), so
   // the first test in each file pays and the rest are free.
-  it('every PopoverContent has a name', { timeout: 60_000 }, () => {
+  it('every PopoverContent has a name', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
     // Radix renders PopoverContent as role="dialog" (verified in the installed
     // package). A dialog with no accessible name announces as an unnamed dialog:
     // the user is told they entered something, but not what.
@@ -116,7 +98,9 @@ describe('accessible names (#8)', () => {
       offenders,
       'PopoverContent renders role="dialog"; without aria-label (or aria-labelledby ' +
         'pointing at a heading it already renders) it announces as an unnamed dialog. ' +
-        'Name it after what it contains.',
+        'Name it after what it contains. (This scan is a structural proxy for the ' +
+        'accessibility tree — confirm the name in a live browser snapshot, not by ' +
+        're-running this test.)',
     ).toEqual([])
   })
 

@@ -402,6 +402,32 @@ class DatasetRowPosition(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+#: Fields of `DatasetColumnResponse` that the `/data` sibling DELIBERATELY omits.
+#:
+#: `DatasetDataColumnResponse` is built by splatting `DatasetColumnResponse.model_dump()`,
+#: and every field must cross unless it is named here with the reason no `/data`
+#: consumer needs it (`tests/test_column_schema_siblings.py` asserts exactly that, in
+#: both directions). Since 2026-09-04 the router passes this set as `exclude=` — the
+#: narrowing is an explicit projection, not Pydantic's silent `extra='ignore'`, which
+#: the test session now turns into `extra='forbid'` (#855; `tests/conftest.py`).
+#:
+#: An entry here is a CLAIM about the frontend — add one only after checking it.
+DATA_PAYLOAD_OMITS: frozenset[str] = frozenset({
+    # The grid renders columns in the order `/data` already sorts them, so the raw
+    # ordinal has no consumer there; `DatasetView` reorders through the dedicated
+    # PATCH, which reads the full response.
+    "display_order",
+    # `/data` consumers pick the active definition out of `recode_definitions`
+    # themselves. The summary earns its place on `DatasetColumnResponse` because it
+    # carries `remaps_codes`, which is COMPUTED (`_mapping_remaps_codes`) and cannot
+    # be read off a summary without re-implementing the shape test client-side.
+    "primary_recode",
+    # A participant-profile opt-out is edited and read on the participant surfaces,
+    # never in the data grid.
+    "show_in_participant_profile",
+})
+
+
 class DatasetDataColumnResponse(BaseModel):
     """Column with recode definitions for the data view."""
     id: int
@@ -450,6 +476,21 @@ class DatasetDataColumnResponse(BaseModel):
     equivalence_group_label: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+def data_column_response(full: DatasetColumnResponse) -> DatasetDataColumnResponse:
+    """THE projection of the full column response onto the `/data` payload.
+
+    Every field crosses except `DATA_PAYLOAD_OMITS`. The router and the three tests
+    that pin the crossing (`test_value_labels`, `test_missing_values`,
+    `test_column_recode_definitions_payload`) all call this — a test that
+    constructed the payload its own way would be a test of a different
+    construction from the endpoint it protects, which is exactly how the #586
+    class hid three times. Under the test session's `extra='forbid'` (#855) a
+    bare splat of the full dump is a ValidationError, so there is one way to build
+    this payload and this is it.
+    """
+    return DatasetDataColumnResponse(**full.model_dump(exclude=DATA_PAYLOAD_OMITS))
 
 
 class DatasetValueCell(BaseModel):

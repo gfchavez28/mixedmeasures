@@ -683,19 +683,29 @@ function ParticipantRow({
             </>
           ) : (
             <>
-              <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-secondary hover:text-mm-text" onClick={() => setIsEditing(true)} title="Edit participant">
-                <Pencil className="w-4 h-4" />
+              {/*
+                🔴 #891: each of these NAMES THE PARTICIPANT, because the row does not.
+                Measured in Chrome's tree: 30 rows × these three, every one announcing the
+                same words, and the Name cell is a plain <td> — so unlike the dataset grid
+                (whose first cell is a `<th scope="row">`, which is what makes its 48
+                identical "Link..." buttons legible) nothing here carries the row. The
+                withdrawal button is irreversible and was one of thirty identically-named
+                controls. #785's rule: the NAME must carry the row. `title` stays for the
+                sighted hover; it is a last-resort naming route, not the name.
+              */}
+              <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-secondary hover:text-mm-text" onClick={() => setIsEditing(true)} aria-label={`Edit ${rawName}`} title="Edit participant">
+                <Pencil className="w-4 h-4" aria-hidden />
               </Button>
               {/*
                 #702(3) — distinct from Delete on purpose. Delete removes the
                 record and leaves everything else (right for tidying an orphan,
                 wrong for a withdrawal request); this removes their data.
               */}
-              <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-faint hover:text-destructive" onClick={onWithdraw} title="Remove this participant's data (withdrawal request)">
-                <UserMinus className="w-4 h-4" />
+              <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-faint hover:text-destructive" onClick={onWithdraw} aria-label={`Remove ${rawName}'s data (withdrawal request)`} title="Remove this participant's data (withdrawal request)">
+                <UserMinus className="w-4 h-4" aria-hidden />
               </Button>
-              <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-faint hover:text-destructive" onClick={onDelete} title="Delete participant record only">
-                <Trash2 className="w-4 h-4" />
+              <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-faint hover:text-destructive" onClick={onDelete} aria-label={`Delete ${rawName}'s participant record only`} title="Delete participant record only">
+                <Trash2 className="w-4 h-4" aria-hidden />
               </Button>
             </>
           )}

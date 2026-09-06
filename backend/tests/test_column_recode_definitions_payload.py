@@ -117,10 +117,11 @@ def test_both_column_payloads_state_the_same_rules(column_with_two_rules):
     this compares what `/data` would send against what `list_columns` sends. It
     is the assertion that stops the `/data` endpoint growing its own copy back.
     """
-    from app.schemas.dataset import DatasetDataColumnResponse
+    from app.schemas.dataset import data_column_response
 
     base = _column_to_response(column_with_two_rules)
-    data_payload = DatasetDataColumnResponse(**base.model_dump())
+    # The SAME projection the router runs (#855, 2026-09-04).
+    data_payload = data_column_response(base)
 
     assert (
         [d.model_dump() for d in data_payload.recode_definitions]

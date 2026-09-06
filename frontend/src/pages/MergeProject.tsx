@@ -17,6 +17,7 @@ import { coderColor, coderInitials } from '@/lib/coder-color'
 import { getContrastColor, cn } from '@/lib/utils'
 import { consumePendingMerge } from '@/lib/pending-merge'
 import { MMPROJECT_ACCEPT } from '@/lib/mm-formats'
+import { describeScaleCrossing, scaleRange } from '@/lib/magnitude'
 import {
   defaultDecisions, decisionToValue, parseDecisionValue, buildCoderMapping, resultingCoderCount,
 } from '@/lib/merge-coder-mapping'
@@ -95,7 +96,7 @@ export default function MergeProject() {
   const localCodes: LocalCodeLite[] = useMemo(
     () => (codesData?.codes ?? [])
       .filter((c: Code) => !c.is_universal && c.is_active)
-      .map((c: Code) => ({ id: c.id, name: c.name, color: c.color })),
+      .map((c: Code) => ({ id: c.id, name: c.name, color: c.color, magnitude_scale: c.magnitude_scale ?? null })),
     [codesData],
   )
 
@@ -573,7 +574,10 @@ function ReconcileStep(p: ReconcileStepProps) {
                       <div>
                         <span className="font-medium text-mm-text">{pr.name}</span>
                         {pr.description && <div className="text-xs text-mm-text-muted mt-0.5 max-w-[42ch]">{pr.description}</div>}
-                        <div className="text-xs text-mm-text-faint mt-1 font-mono">{codings(pr.file_app_count)}</div>
+                        <div className="text-xs text-mm-text-faint mt-1 font-mono">
+                          {codings(pr.file_app_count)}
+                          {pr.magnitude_scale && <> · rated {scaleRange(pr.magnitude_scale)}</>}
+                        </div>
                         {best && best.confident ? (
                           <div className="mt-1.5 inline-flex items-start gap-1 text-xs text-primary">
                             <Sparkles className="w-3.5 h-3.5 flex-none mt-px" aria-hidden="true" />
@@ -644,6 +648,25 @@ function ReconcileStep(p: ReconcileStepProps) {
                         </Select>
                       </div>
                     )}
+
+                    {/* #869: say BEFORE the merge when ratings will cross scales. A
+                        collapse re-points the file code's applications onto the
+                        target; a link keeps both codes but groups them, and the
+                        α table keys ratings by the RAW code — so the note is for
+                        collapse, where the crossing actually happens. */}
+                    {action === 'collapse' && target != null && (() => {
+                      const local = pr.candidates.find(c => c.code_id === target)?.magnitude_scale
+                        ?? p.localCodes.find(c => c.id === target)?.magnitude_scale
+                      const note = describeScaleCrossing(
+                        { name: pr.name, scale: pr.magnitude_scale },
+                        { name: localName(target), scale: local },
+                      )
+                      return note ? (
+                        <p className="mt-2 text-xs text-amber-700 dark:text-amber-400" role="note">
+                          {note}{' '}Out-of-range ratings are flagged for reconciliation, not imported as ratings.
+                        </p>
+                      ) : null
+                    })()}
 
                     {action === 'link' && d?.action === 'link' && (
                       <div className="mt-2 space-y-1">
@@ -796,6 +819,11 @@ function ReportStep({ report, targetId, navigate }: {
     // rating scales never meets the row.
     ...(report.magnitude_conflicts
       ? [['Rating differences flagged for reconciliation', report.magnitude_conflicts] as [string, number]]
+      : []),
+    // #869 (c): a colleague's rating that does not fit the code's scale here
+    // arrives unrated, with the number kept as a merge difference to adjudicate.
+    ...(report.ratings_out_of_range
+      ? [['Ratings outside a code’s scale, kept as differences', report.ratings_out_of_range] as [string, number]]
       : []),
   ]
   return (

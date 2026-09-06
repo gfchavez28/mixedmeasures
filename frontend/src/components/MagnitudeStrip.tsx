@@ -28,7 +28,7 @@ import { SELECTION_TEXT_FLOOR } from '@/lib/selection'
  * chord — and a toggle can REMOVE, in which case there is nothing to rate.
  *
  * Making the strip a focusable control instead needs **zero changes to that hook**,
- * which three workbenches share: it already bails entirely on `INPUT`/`TEXTAREA`/
+ * which all four workbenches share: it already bails entirely on `INPUT`/`TEXTAREA`/
  * `contenteditable`, on `isEditing`, and on `e.defaultPrevented`. That is the same
  * escape hatch its own docs name for the inline-edit layer.
  *

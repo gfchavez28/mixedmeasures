@@ -53,6 +53,12 @@ function renderRow(over: Record<string, unknown> = {}, isSelected = false) {
         isEditing={false}
         onClick={vi.fn()}
         onDoubleClick={vi.fn()}
+        // #875/#868(e): the host owns the chip's gestures and the rate menu.
+        // Required props, so a row that forgets them does not compile.
+        onChipRemove={vi.fn()}
+        onChipApply={vi.fn()}
+        onRateCode={vi.fn()}
+        ratableCodesFor={() => []}
         onEditSave={vi.fn()}
         onEditCancel={vi.fn()}
         showCodes

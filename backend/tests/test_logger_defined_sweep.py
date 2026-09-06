@@ -22,28 +22,18 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-APP_ROOT = Path(__file__).resolve().parent.parent / "app"
+from tests.guard_support import APP_DIR as APP_ROOT, app_files
 
 # #730: the assertion below expects an EMPTY offender list, which a scan that
 # read nothing satisfies just as well — and `rglob` on a mistyped root yields
-# `[]` rather than raising. Prove the population first. 163 files today; the
-# floor detects a BAD ROOT, not growth.
+# `[]` rather than raising. The walk, its floor and the `main.py` identity check
+# live in `tests/guard_support.py` (#729). 177 files today; the floor detects a
+# BAD ROOT, not growth.
 _MIN_APP_FILES = 100
 
 
 def _app_files() -> list[Path]:
-    files = sorted(APP_ROOT.rglob("*.py"))
-    assert len(files) >= _MIN_APP_FILES, (
-        f"This sweep's population is {len(files)} file(s) under {APP_ROOT} — "
-        f"expected at least {_MIN_APP_FILES}. rglob returns [] for a bad path "
-        "instead of raising, so the offender assertion would pass VACUOUSLY. "
-        "Fix APP_ROOT — do NOT lower this floor."
-    )
-    assert (APP_ROOT / "main.py").is_file(), (
-        f"the sweep cannot see main.py under {APP_ROOT}: a file COUNT alone "
-        "cannot tell this tree from another that also contains .py files"
-    )
-    return files
+    return app_files(floor=_MIN_APP_FILES)
 
 
 def _bound_names(tree: ast.Module) -> set[str]:

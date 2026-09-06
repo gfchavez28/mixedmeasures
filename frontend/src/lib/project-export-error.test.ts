@@ -18,28 +18,19 @@
  * that was missing.
  */
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stripComments } from './strip-comments'
 import { ApiError } from './api/client'
 import { describeProjectExportError, LONG_TOAST_MS } from './project-export-error'
+import { SOURCE_SCAN_TIMEOUT_MS, sourceFiles } from '@/test-support/source-tree'
 
 const SRC = join(__dirname, '..')
 const FALLBACK = 'Export failed'
 
-function sourceFiles(dir: string): string[] {
-  const out: string[] = []
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry)
-    if (statSync(full).isDirectory()) out.push(...sourceFiles(full))
-    else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) out.push(full)
-  }
-  return out
-}
-
 /** Files that call the two portability operations, excluding the api module itself. */
 function callSites(): { file: string; src: string }[] {
-  return sourceFiles(SRC)
+  return sourceFiles({ ext: 'both', floor: 250 })
     .filter(f => !f.endsWith(join('api', 'project-portability.ts')))
     .map(f => ({ file: f.slice(SRC.length + 1), src: stripComments(readFileSync(f, 'utf8'), f) }))
     .filter(({ src }) => /projectPortabilityApi\.(exportProject|duplicateProject)\s*\(/.test(src))
@@ -82,7 +73,7 @@ describe('#842 — the size refusal reaches the researcher', () => {
   // `strip-comments.test.ts`. `stripComments` caches on source text and the
   // cache is per-FILE (vitest gives each test file its own process), so the
   // first scan in this file pays and the rest are nearly free.
-  it('finds the real call sites (the scan is not blind)', { timeout: 60_000 }, () => {
+  it('finds the real call sites (the scan is not blind)', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
     // POPULATION self-check (#730): `toEqual([])` below passes by finding nothing.
     const files = callSites().map(c => c.file)
     expect(files.length).toBeGreaterThanOrEqual(3)
@@ -92,7 +83,7 @@ describe('#842 — the size refusal reaches the researcher', () => {
     expect(handlers.length).toBeGreaterThanOrEqual(4)
   })
 
-  it('no call site swallows the server’s reason', { timeout: 60_000 }, () => {
+  it('no call site swallows the server’s reason', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
     const offenders: string[] = []
     for (const { file, src } of callSites()) {
       for (const o of handlerOffenders(src)) offenders.push(`${file}: ${o}`)

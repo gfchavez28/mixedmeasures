@@ -20,13 +20,14 @@
  * combination that cannot occur, WITH the reason, rather than quietly omitting
  * it.
  */
-import { readdirSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
 import { AA_LARGE, AA_NORMAL, NON_TEXT, contrast, over, readToken, type Rgb } from './contrast'
 import { stripComments } from './strip-comments'
+import { SOURCE_SCAN_TIMEOUT_MS, sourceFiles } from '@/test-support/source-tree'
 
 const CSS = readFileSync(join(__dirname, '..', 'index.css'), 'utf-8')
 
@@ -332,23 +333,18 @@ describe('#699(c) — border tokens are not foreground colours', () => {
   it('no component paints text or an icon with a border token', () => {
     const offenders: string[] = []
     let scanned = 0
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const path = join(dir, entry.name)
-        if (entry.isDirectory()) { walk(path); continue }
-        if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue
-        scanned++
-        const src = readFileSync(path, 'utf-8')
-        for (const [line, i] of src.split('\n').map((l, i) => [l, i] as const)) {
-          // `text-…` only: `border-mm-border-*` and `bg-mm-border-*` are the
-          // token doing its own job.
-          if (/\btext-mm-border-[a-z]+/.test(line)) {
-            offenders.push(`${path.slice(SRC_DIR.length + 1)}:${i + 1}`)
-          }
+    // The walk and its floor live in `sourceFiles()` (#729/#730).
+    for (const path of sourceFiles({ ext: 'both', floor: 200 })) {
+      scanned++
+      const src = readFileSync(path, 'utf-8')
+      for (const [line, i] of src.split('\n').map((l, i) => [l, i] as const)) {
+        // `text-…` only: `border-mm-border-*` and `bg-mm-border-*` are the
+        // token doing its own job.
+        if (/\btext-mm-border-[a-z]+/.test(line)) {
+          offenders.push(`${path.slice(SRC_DIR.length + 1)}:${i + 1}`)
         }
       }
     }
-    walk(SRC_DIR)
     // Population (#730): a scan that walked nothing would report a clean sweep.
     expect(scanned).toBeGreaterThan(200)
     expect(offenders, 'a border token is a 1px line, not a foreground — use a '
@@ -414,38 +410,34 @@ describe('#852 — a blue tint is painted with the TEXT token, not the fill hue'
     const offenders: string[] = []
     let correctPairings = 0
     let scanned = 0
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const path = join(dir, entry.name)
-        if (entry.isDirectory()) { walk(path); continue }
-        if (!/\.tsx$/.test(entry.name) || /\.test\.tsx$/.test(entry.name)) continue
-        scanned++
-        const raw = readFileSync(path, 'utf-8')
-        // 🔴 #867 — do not parse a file that cannot match. All three regexes
-        // above require `bg-mm-blue/`, and stripping only ever REMOVES
-        // characters, so a file whose RAW text lacks that substring cannot
-        // produce an offender or a correct pairing either way. **41 of 257
-        // files carry it**, and skipping the rest took this test from
-        // **1,919 ms to 705 ms** — the margin that made it flake.
-        //
-        // ⚠️ `scanned++` stays ABOVE this, deliberately: it counts files
-        // VISITED, which is what the population self-check below is about. And
-        // that check guards this filter too — a mistyped substring here drops
-        // `correctPairings` to zero and fails it.
-        if (!raw.includes('bg-mm-blue/')) continue
-        // Strip first: the prose explaining this very fix names both classes,
-        // and a scan that matches its own comments is the #772 failure mode.
-        for (const [line, i] of stripComments(raw, entry.name)
-          .split('\n').map((l, i) => [l, i] as const)) {
-          if (TINT_THEN_TEXT.test(line) || TEXT_THEN_TINT.test(line)) {
-            offenders.push(`${path.slice(SRC_DIR.length + 1)}:${i + 1}`)
-          } else if (CORRECT.test(line)) {
-            correctPairings++
-          }
+    // `.tsx` only — a class string on an element is JSX. The walk and its
+    // floor live in `sourceFiles()` (#729/#730).
+    for (const path of sourceFiles({ ext: 'tsx', floor: 100 })) {
+      scanned++
+      const raw = readFileSync(path, 'utf-8')
+      // 🔴 #867 — do not parse a file that cannot match. All three regexes
+      // above require `bg-mm-blue/`, and stripping only ever REMOVES
+      // characters, so a file whose RAW text lacks that substring cannot
+      // produce an offender or a correct pairing either way. **41 of 257
+      // files carry it**, and skipping the rest took this test from
+      // **1,919 ms to 705 ms** — the margin that made it flake.
+      //
+      // ⚠️ `scanned++` stays ABOVE this, deliberately: it counts files
+      // VISITED, which is what the population self-check below is about. And
+      // that check guards this filter too — a mistyped substring here drops
+      // `correctPairings` to zero and fails it.
+      if (!raw.includes('bg-mm-blue/')) continue
+      // Strip first: the prose explaining this very fix names both classes,
+      // and a scan that matches its own comments is the #772 failure mode.
+      for (const [line, i] of stripComments(raw, path)
+        .split('\n').map((l, i) => [l, i] as const)) {
+        if (TINT_THEN_TEXT.test(line) || TEXT_THEN_TINT.test(line)) {
+          offenders.push(`${path.slice(SRC_DIR.length + 1)}:${i + 1}`)
+        } else if (CORRECT.test(line)) {
+          correctPairings++
         }
       }
     }
-    walk(SRC_DIR)
     return { offenders, correctPairings, scanned }
   }
 
@@ -463,13 +455,13 @@ describe('#852 — a blue tint is painted with the TEXT token, not the fill hue'
   // ⚠️ The pre-filter above is what makes it fast; this is what stops contention
   // deciding whether a guard passes. `strip-comments.test.ts` states the same
   // rationale for the same reason.
-  it('no component paints text-mm-blue on a blue tint', { timeout: 60_000 }, () => {
+  it('no component paints text-mm-blue on a blue tint', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
     const { offenders } = scan()
     expect(offenders, 'a blue tint must carry `text-mm-blue-text`; the raw '
       + '`--mm-blue` fill hue is below AA as text on its own tint (#852)').toEqual([])
   })
 
-  it('the scan reaches real class strings (it cannot pass by seeing nothing)', { timeout: 60_000 }, () => {
+  it('the scan reaches real class strings (it cannot pass by seeing nothing)', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
     // The self-check a narrowing needs (#814): if the regex, the extension
     // filter or the comment-stripper broke, `offenders` would be empty for the
     // wrong reason. The CORRECT pairing is the positive control — it is the

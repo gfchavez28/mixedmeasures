@@ -216,3 +216,45 @@ describe('undo carries the rating (#868 f)', () => {
     await waitFor(() => expect(applyCode).toHaveBeenCalledWith(52, 7, undefined, 0))
   })
 })
+
+/**
+ * #888 — the document switcher's three controls must be NAMED, including at the
+ * ends of the list where there is no target to name them after.
+ *
+ * Found by the #887 name sweep reading Chrome's accessibility tree, not by any
+ * static check: all three carried only a CONDITIONAL `title`, so the prev chevron
+ * announced as a bare "button" on the first document and the next chevron on the
+ * last — #559's documented rider, fixed on the conversation twin long ago and
+ * never here. ⚠️ A source scan cannot own this class: a name can arrive by
+ * aria-label, by an unconditional `title`, by a spread helper
+ * (`modeDisabledProps`), or from a placeholder — three of those defeated a scan
+ * written during the same sweep. The SWEEP is the guard; this pins the fix.
+ */
+describe('the document switcher is named at both ends of the list (#888)', () => {
+  const twoDocs = [
+    { id: 5, name: 'Field notes' },
+    { id: 6, name: 'District report' },
+  ]
+
+  it('names prev, next and the selector — and keeps the name when the control is disabled', async () => {
+    // documentId 5 is FIRST, so "Previous document" is disabled: the exact state
+    // where a conditional title supplies no name at all.
+    listDocuments.mockResolvedValue(twoDocs)
+    renderWorkbench()
+
+    const prev = await screen.findByRole('button', { name: 'Previous document' })
+    expect(prev).toBeDisabled()                       // disabled AND still named
+    expect(await screen.findByRole('button', { name: 'Next document' })).toBeEnabled()
+    expect(await screen.findByRole('combobox', { name: 'Select document' })).toBeInTheDocument()
+  })
+
+  it('the names do not come from the title, so they survive having no target', async () => {
+    listDocuments.mockResolvedValue(twoDocs)
+    renderWorkbench()
+
+    // The transient detail may ride `title`; the NAME must not depend on it.
+    const prev = await screen.findByRole('button', { name: 'Previous document' })
+    expect(prev.getAttribute('aria-label')).toBe('Previous document')
+    expect(prev.getAttribute('title')).toBeNull()     // no previous document exists
+  })
+})

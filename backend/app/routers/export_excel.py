@@ -250,9 +250,15 @@ def export_study_excel(
         ws_ratings = wb.create_sheet("Ratings", index=1 if include_coded_data else 0)
         worksheets.append(ws_ratings)
 
+        # `Record` is APPENDED (#868 d): the sheet was segment-keyed from the day
+        # it shipped, so a rating on a dataset cell — text coding's unit — had
+        # no row at all. A dataset-cell row names its dataset · column in
+        # `Source` (the Notes sheet's exact vocabulary for the same locator) and
+        # the response's record identifier here; its segment columns stay blank.
+        # Appended, so every existing column keeps its position.
         rating_headers = [
             "Source Type", "Source", "Segment ID", "Sequence", "Speaker",
-            "Code", "Coder", "Rating", "Rating Scale", "Rating Anchor",
+            "Code", "Coder", "Rating", "Rating Scale", "Rating Anchor", "Record",
         ]
         for col, header in enumerate(rating_headers, 1):
             cell = ws_ratings.cell(row=1, column=col, value=header)
@@ -286,28 +292,75 @@ def export_study_excel(
             CodeApplication.user_id,
         ).all()
 
-        rating_coder_names = dict(
-            db.query(User.id, User.username)
-            .filter(User.id.in_({a.user_id for a in rated_apps if a.user_id is not None}))
+        # The SECOND arm (#868 d): ratings on dataset cells, the text-coding unit.
+        # Joined back to the project through value → column → dataset (a
+        # DatasetValue carries no project_id), human layer only through the same
+        # chokepoint as the segment arm. There is no visibility tuple to apply —
+        # a dataset cell is never merged or split away — so the NULL-safe arm of
+        # `visible_target_filter` would pass every row and is not repeated here.
+        rated_cell_apps = (
+            db.query(CodeApplication, DatasetRow.row_identifier)
+            .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
+            .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+            .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
+            .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+            .filter(
+                Dataset.project_id == project_id,
+                CodeApplication.code_id.in_(list(scaled_codes)),
+                CodeApplication.magnitude.isnot(None),
+                non_consensus_filter(),
+            )
+            .order_by(
+                Dataset.name,
+                DatasetColumn.sequence_order,
+                func.coalesce(DatasetRow.row_identifier, ""),
+                CodeApplication.code_id,
+                CodeApplication.user_id,
+            )
             .all()
-        ) if rated_apps else {}
+        )
 
-        for row_num, app in enumerate(rated_apps, 2):
-            seg = app.segment
+        rating_user_ids = {a.user_id for a in rated_apps if a.user_id is not None}
+        rating_user_ids |= {a.user_id for a, _ in rated_cell_apps if a.user_id is not None}
+        rating_coder_names = dict(
+            db.query(User.id, User.username).filter(User.id.in_(rating_user_ids)).all()
+        ) if rating_user_ids else {}
+
+        def _write_rating_row(row_num: int, app, source_kind: str, source_name: str,
+                              segment_id, sequence, speaker: str, record: str) -> None:
             scale = scaled_codes[app.code_id]
-            source_kind, source_name = segment_source_pair(seg)
             anchor = next((a for a in scale["anchors"] if a["value"] == app.magnitude), None)
             ws_ratings.cell(row=row_num, column=1, value=source_kind)
             excel_set_safe(ws_ratings.cell(row=row_num, column=2), source_name)
-            ws_ratings.cell(row=row_num, column=3, value=seg.id)
-            ws_ratings.cell(row=row_num, column=4, value=seg.sequence_order)
-            excel_set_safe(ws_ratings.cell(row=row_num, column=5), seg.speaker.name if seg.speaker else "")
+            ws_ratings.cell(row=row_num, column=3, value=segment_id)
+            ws_ratings.cell(row=row_num, column=4, value=sequence)
+            excel_set_safe(ws_ratings.cell(row=row_num, column=5), speaker)
             excel_set_safe(ws_ratings.cell(row=row_num, column=6), code_id_to_name.get(app.code_id, ""))
             excel_set_safe(ws_ratings.cell(row=row_num, column=7), rating_coder_names.get(app.user_id, ""))
             # A NUMBER, not its string: this is the column a researcher averages.
             ws_ratings.cell(row=row_num, column=8, value=app.magnitude)
             ws_ratings.cell(row=row_num, column=9, value=f"{fmt_rating(scale['min'])} to {fmt_rating(scale['max'])}")
             excel_set_safe(ws_ratings.cell(row=row_num, column=10), anchor["label"] if anchor else "")
+            excel_set_safe(ws_ratings.cell(row=row_num, column=11), record)
+
+        row_num = 2
+        for app in rated_apps:
+            seg = app.segment
+            source_kind, source_name = segment_source_pair(seg)
+            _write_rating_row(
+                row_num, app, source_kind, source_name,
+                seg.id, seg.sequence_order, seg.speaker.name if seg.speaker else "", "",
+            )
+            row_num += 1
+        for app, row_identifier in rated_cell_apps:
+            _write_rating_row(
+                row_num, app,
+                # "dataset value" + "Dataset · Column": the Notes sheet's words
+                # for the same locator, so one workbook names a cell one way.
+                "dataset value", dataset_value_source.get(app.dataset_value_id, ""),
+                "", "", "", row_identifier or "",
+            )
+            row_num += 1
 
     # ==================== Sheet 2: Code-Source Matrix ====================
     # #629: was "Code-Conversation Matrix", gated on `conversations` and keyed by

@@ -342,7 +342,14 @@ export default function CodebookHidePanel({
                         <button
                           className="flex items-center gap-1 flex-1 min-w-0 text-left"
                           onClick={() => toggleDatasetExpand(datasetId)}
-                          aria-label={expanded ? 'Collapse' : 'Expand'}
+                          /* #891: NAME THE DATASET. This label overrides the button's own
+                             content — the dataset name and column count are children of it —
+                             so six of these announced the single word "Expand" with nothing
+                             to tell them apart (measured in Chrome's tree). Its siblings
+                             already do this: `CodebookSlideOut` names the category,
+                             `crosswalk/Bracket` names the bracket. #886's shape — a label
+                             replacing information rather than summarising it. */
+                          aria-label={`${expanded ? 'Collapse' : 'Expand'} ${datasetName}`}
                         >
                           {expanded
                             ? <ChevronDown className="w-3 h-3 text-mm-text-faint shrink-0" />

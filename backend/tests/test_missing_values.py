@@ -212,14 +212,13 @@ class TestReExportAndWire:
         KEYWORD, i.e. a `TypeError`. A test that constructs the payload
         differently from the endpoint is how the two drift.
         """
-        from app.schemas.dataset import (
-            DatasetColumnResponse, DatasetDataColumnResponse,
-        )
+        from app.schemas.dataset import DatasetColumnResponse, data_column_response
         base = DatasetColumnResponse(
             id=1, column_text="Q1", column_type="numeric", sequence_order=0,
             missing_values=[{"value": "99", "label": "Refused"}],
         )
-        out = DatasetDataColumnResponse(**base.model_dump())
+        # The SAME projection the router runs (#855, 2026-09-04).
+        out = data_column_response(base)
         assert out.missing_values == [{"value": "99", "label": "Refused"}]
         assert "missing_values" in out.model_dump()
 

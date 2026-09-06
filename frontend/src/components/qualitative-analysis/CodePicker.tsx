@@ -255,10 +255,14 @@ export default function CodePicker({
             )}
             <span className="text-sm flex-1 truncate">{cat.name}</span>
             <span className="text-xs text-mm-text-faint tabular-nums">{cat.code_count}</span>
+            {/* #891: the category name is a SIBLING span, not a child of this button,
+                so without it in the label six of these announce the bare word "Expand"
+                (measured in Chrome's tree). The siblings elsewhere already name theirs
+                — `CodebookSlideOut` the category, `crosswalk/Bracket` the bracket. */}
             <button
               className="p-0.5 hover:bg-mm-bg rounded"
               onClick={e => { e.stopPropagation(); toggleExpand(cat.id) }}
-              aria-label={expanded ? 'Collapse' : 'Expand'}
+              aria-label={`${expanded ? 'Collapse' : 'Expand'} ${cat.name}`}
             >
               {expanded
                 ? <ChevronDown className="w-3 h-3 text-mm-text-faint" />
@@ -301,10 +305,11 @@ export default function CodePicker({
             <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color }} />
           )}
           <span className="text-xs font-semibold text-mm-text-muted uppercase tracking-wide flex-1 truncate">{cat.name}</span>
+          {/* #891, the sibling of the block above — same defect, same fix. */}
           <button
             className="p-0.5 hover:bg-mm-bg rounded"
             onClick={e => { e.stopPropagation(); toggleExpand(cat.id) }}
-            aria-label={expanded ? 'Collapse' : 'Expand'}
+            aria-label={`${expanded ? 'Collapse' : 'Expand'} ${cat.name}`}
           >
             {expanded
               ? <ChevronDown className="w-3 h-3 text-mm-text-faint" />

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from ..models import Code, CodeCategory, Project
+from ..services import magnitude
 from ..services.backup import APP_VERSION
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,18 @@ def export_codebook_native(db: Session, project_id: int) -> dict:
             "is_active": code.is_active if hasattr(code, "is_active") else True,
             "category_name_path": cat_path,
             "category_order": code.category_order,
+            # #869 (d): the declared rating INSTRUMENT travels with the code, in
+            # the same shape the API speaks (`magnitude.read_scale`). A codebook
+            # export that dropped it was the v4 silent-wrongness shape for the
+            # one format whose job is to move codebooks. ⚠️ No format-version
+            # bump: `.mmcodebook` shares `CURRENT_FORMAT_VERSION` with
+            # `.mmproject`, which is already 6 and already a refusal boundary
+            # for every build before 1.5.0 — so there is no older build that
+            # could read this file and drop the field. The `.qdc` export has
+            # NO slot for it (REFI-QDA models a code's name, colour and
+            # description only); that format is lossy for scales, stated here
+            # rather than hidden.
+            "magnitude_scale": magnitude.read_scale(code),
         })
 
     return {
@@ -390,6 +403,7 @@ def import_codebook_native(db: Session, project_id: int, data: dict) -> dict:
         "codes_created": 0,
         "codes_skipped": 0,
         "codes_uncategorized": 0,
+        "scales_imported": 0,
     }
 
     # Import categories from tree
@@ -470,6 +484,22 @@ def import_codebook_native(db: Session, project_id: int, data: dict) -> dict:
             category_id=category_id,
             category_order=code_data.get("category_order", 0),
         )
+        # #869 (d): the declared scale, validated through the ONE declaration
+        # gate (`normalize_scale`, #589 — this path reaches the columns without a
+        # router). A malformed one imports the code WITHOUT a scale and says so
+        # in the log rather than refusing the whole codebook over one field.
+        # ⚠️ A code SKIPPED as a duplicate above never adopts the file's scale:
+        # this import creates, it does not edit.
+        raw_scale = code_data.get("magnitude_scale")
+        if raw_scale is not None:
+            try:
+                magnitude.write_scale(code, magnitude.normalize_scale(raw_scale))
+                counts["scales_imported"] += 1
+            except magnitude.MagnitudeError as exc:
+                logger.warning(
+                    "Code '%s' carries a rating scale the tool refuses (%s); imported without it",
+                    name, exc,
+                )
         db.add(code)
         existing_code_paths.add(key)
         counts["codes_created"] += 1

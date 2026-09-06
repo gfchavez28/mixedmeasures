@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { describeScaleCrossing, scaleRange, scalesDiffer } from './magnitude'
 import {
   anchorLabelFor,
   describeMagnitude,
@@ -154,5 +155,49 @@ describe('anchorLabelFor', () => {
   it('finds a label at an exact value and returns null otherwise', () => {
     expect(anchorLabelFor(0, BIPOLAR)).toBe('neither')
     expect(anchorLabelFor(0.5, BIPOLAR)).toBeNull()
+  })
+})
+
+// ── #869 — ratings crossing scales (a merge, a collapse) ──────────────────────
+
+describe('scalesDiffer / describeScaleCrossing (#869 b/c)', () => {
+  const ten = { min: 0, max: 10, step: 1, anchors: [] }
+  const tenCoarse = { min: 0, max: 10, step: 2, anchors: [{ value: 10, label: 'lots' }] }
+  const bipolar = { min: -1, max: 1, step: 0.5, anchors: [] }
+
+  it('formats a range with an en dash and a Unicode minus', () => {
+    expect(scaleRange(ten)).toBe('0–10')
+    expect(scaleRange(bipolar)).toBe('−1–1')
+  })
+
+  it('a difference is about the RANGE, never step or anchors', () => {
+    expect(scalesDiffer(ten, tenCoarse)).toBe(false)
+    expect(scalesDiffer(ten, bipolar)).toBe(true)
+    expect(scalesDiffer(null, null)).toBe(false)
+    expect(scalesDiffer(ten, null)).toBe(true)
+    expect(scalesDiffer(undefined, bipolar)).toBe(true)
+  })
+
+  it('says nothing when the scales agree', () => {
+    expect(describeScaleCrossing({ name: 'A', scale: ten }, { name: 'B', scale: tenCoarse })).toBeNull()
+    expect(describeScaleCrossing({ name: 'A', scale: null }, { name: 'B', scale: null })).toBeNull()
+  })
+
+  it('names both ranges when they differ, and what happens to ratings outside the target', () => {
+    const note = describeScaleCrossing({ name: 'Joy', scale: ten }, { name: 'Mood', scale: bipolar })!
+    expect(note).toContain('“Joy” is rated 0–10')
+    expect(note).toContain('“Mood” −1–1')
+    expect(note).toContain('outside it are not moved as ratings')
+  })
+
+  it('says a scale-less target keeps ratings it cannot show', () => {
+    const note = describeScaleCrossing({ name: 'Joy', scale: ten }, { name: 'Mood', scale: null })!
+    expect(note).toContain('“Mood” has none')
+    expect(note).toContain('cannot be shown until “Mood” declares a scale')
+  })
+
+  it('says nothing crosses when only the target is scaled', () => {
+    const note = describeScaleCrossing({ name: 'Joy', scale: null }, { name: 'Mood', scale: bipolar })!
+    expect(note).toContain('nothing on “Joy” is rated')
   })
 })

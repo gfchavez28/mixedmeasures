@@ -10,6 +10,31 @@ class TextCodeRequest(BaseModel):
     dataset_value_id: int
     code_id: int
     attribution: str | None = None
+    # #35 / #868 (d) — rate at the moment of applying, exactly as the segment
+    # sibling (`schemas/coding.py::ApplyCodeRequest`) does.
+    #
+    # ⚠️ OMITTED and `null` mean different things and the endpoint tells them
+    # apart with `model_fields_set`: omitted leaves any existing rating alone,
+    # explicit `null` clears it. The undo of a REMOVAL re-applies through this
+    # field with the rating captured when the entry was built (#868 f), so a
+    # surface that could not send one would re-create that defect here.
+    magnitude: float | None = None
+
+
+class TextMagnitudeUpdate(BaseModel):
+    """Set or clear one coder's rating on one already-applied code on a dataset
+    cell (#35, #868 d).
+
+    The target rides the BODY, like `TextCodeRequest`, because this router keys
+    its coding endpoints on `dataset_value_id` + `code_id` rather than a path —
+    the segment sibling is `PATCH /segments/{id}/codes/{id}/magnitude`.
+
+    `magnitude: null` is an explicit *unrate* — the value an Esc-skip stores, and
+    never the same as a rating of zero.
+    """
+    dataset_value_id: int
+    code_id: int
+    magnitude: float | None = None
 
 
 class BulkCodeRequest(BaseModel):
@@ -237,6 +262,9 @@ class TextCodeResponse(BaseModel):
     code_id: int
     applied: bool
     created_at: UTCTimestamp | None = None
+    # #35 — this coder's rating, or None for UNRATED. Never coerce a None here
+    # to 0 for the wire: the client renders the two differently on purpose.
+    magnitude: float | None = None
 
 
 class BulkCodeResponse(BaseModel):

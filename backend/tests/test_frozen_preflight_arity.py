@@ -33,6 +33,8 @@ import sys
 
 import pytest
 
+from tests.guard_support import app_files
+
 BACKEND = pathlib.Path(__file__).resolve().parent.parent
 APP_DIR = BACKEND / "app"
 
@@ -50,7 +52,9 @@ _NOT_THIRD_PARTY = set(sys.stdlib_module_names) | {"app", "lazy_native_imports"}
 def _function_local_third_party_imports() -> dict[str, set[str]]:
     """Map top-level package -> the app files that import it from inside a function."""
     found: dict[str, set[str]] = {}
-    for path in sorted(APP_DIR.rglob("*.py")):
+    # The walk and its floor live in `tests/guard_support.py` (#729/#730); the
+    # domain-level floor on what the walk FINDS is asserted below.
+    for path in app_files(floor=100):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):

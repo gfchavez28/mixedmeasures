@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { stripComments } from './strip-comments'
 import { join } from 'node:path'
 import { dataViewPath, variableViewPath } from './dataset-routes'
+import { SOURCE_SCAN_TIMEOUT_MS, sourceFiles } from '@/test-support/source-tree'
 
 describe('dataset route helpers', () => {
   it('builds the Data view path', () => {
@@ -60,16 +61,6 @@ describe('dataset route helpers', () => {
 
 const SRC = join(__dirname, '..')
 
-function sourceFiles(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
-    if (entry === 'node_modules' || entry.startsWith('.')) continue
-    const full = join(dir, entry)
-    if (statSync(full).isDirectory()) sourceFiles(full, out)
-    else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) out.push(full)
-  }
-  return out
-}
-
 describe('nobody hand-rolls the Variables view path', () => {
   /**
    * The Variables view was reachable as `…/recode?column=N` from FIVE call
@@ -81,7 +72,7 @@ describe('nobody hand-rolls the Variables view path', () => {
    * passes just as happily when the walk finds nothing at all, so the count of
    * files actually scanned is asserted too.
    */
-  const files = sourceFiles(SRC)
+  const files = sourceFiles({ ext: 'both', floor: 200 })
 
   it('scanned a real population of source files', () => {
     expect(files.length).toBeGreaterThan(200)
@@ -91,7 +82,7 @@ describe('nobody hand-rolls the Variables view path', () => {
   // #838 that is a TypeScript parse per file — ~1.8 s cold, 3.9 s under
   // full-suite contention, past vitest's 5 s default. Same budget and same
   // reason as `strip-comments.test.ts`, which pays the identical cost.
-  it('has no hand-rolled dataset sub-view path outside the helper module', { timeout: 60_000 }, () => {
+  it('has no hand-rolled dataset sub-view path outside the helper module', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
     // A path literal ending in `/variables` or `/recode` built by interpolation.
     const HAND_ROLLED = /\$\{[^}]*\}\/(variables|recode)\b/
     const offenders = files

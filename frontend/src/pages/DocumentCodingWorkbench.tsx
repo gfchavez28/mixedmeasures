@@ -12,6 +12,7 @@ import { useTextSplitSelection } from '@/hooks/useTextSplitSelection'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
+import { ratableCodes } from '@/lib/rating-targets'
 import MagnitudeStrip from '@/components/MagnitudeStrip'
 import { codeKeyHint } from '@/lib/codeShortcuts'
 import SplitToolbar from '@/components/SplitToolbar'
@@ -522,16 +523,37 @@ export default function DocumentCodingWorkbench() {
     [queryClient, projectId, documentId, selfId],
   )
 
+  /**
+   * Optimistic rating + one server call, bracketed by a CANCEL before and a
+   * SETTLE of the document query after (2026-09-03, found while driving the
+   * observation twin with the query cache instrumented).
+   *
+   * This page never paints an apply optimistically — the apply's
+   * `invalidateAfterCodeChange` refetches the document and the new application
+   * arrives with it. `useHistory` serialises actions, so a rating committed
+   * while that refetch is still out (the strip opens the instant the apply is
+   * requested, and a digit is one keypress) runs against a cache that does not
+   * hold the application yet: the optimistic paint finds nothing to patch, the
+   * refetch then lands the application UNRATED, the PATCH succeeds, and nothing
+   * ever repaints — "not rated" over a rating the server has, until the next
+   * unrelated refetch. Cancelling the in-flight refetch stops a stale response
+   * overwriting the paint; refetching the document once after the write is
+   * what makes the truth land last. It is one document refetch per rating —
+   * the cost every apply here already pays — and still not the full
+   * `invalidateAfterCodeChange`, which also touches the counts a rating
+   * cannot change.
+   */
   const runOptimisticMagnitude = useCallback(
     async (segmentId: number, codeId: number, value: number | null) => {
-      const snapshot = queryClient.getQueryData(['document', projectId, documentId])
+      const key = ['document', projectId, documentId]
+      await queryClient.cancelQueries({ queryKey: key })
+      const snapshot = queryClient.getQueryData(key)
       patchDocumentMagnitude(segmentId, codeId, value)
       try {
         await codingApi.setMagnitude(segmentId, codeId, value)
-        // Deliberately NO invalidation: a rating changes no coded COUNT, and
-        // this page's refetch-everything settle would be work for nothing.
+        queryClient.invalidateQueries({ queryKey: key })
       } catch (e) {
-        queryClient.setQueryData(['document', projectId, documentId], snapshot)
+        queryClient.setQueryData(key, snapshot)
         throw e  // `useHistory` toasts the server's own reason (a refused rating names why)
       }
     },
@@ -574,6 +596,78 @@ export default function DocumentCodingWorkbench() {
 
   // ── Code toggle (with history) ──
 
+  /**
+   * Open the rating strip for an application that ALREADY exists (#868 e/f).
+   *
+   * The only door to the strip used to be a fresh single-segment apply, so a
+   * mis-keyed rating could never be corrected and no other apply door rated at
+   * all. Both the `r` verb and the context menu land here.
+   */
+  const openRatingFor = useCallback((segmentId: number, code: Code) => {
+    if (!code.magnitude_scale) return
+    setSelectedSegments([segmentId])
+    setRatingTarget({ segmentId, code })
+  }, [setSelectedSegments, setRatingTarget])
+
+  /** The codes the ACTIVE coder may rate on one segment, in chip order. */
+  const ratableCodesForSegment = useCallback((segmentId: number): Code[] => {
+    const seg = segmentMap.get(segmentId)
+    if (!seg) return []
+    return ratableCodes(seg.codes.map(c => ({ code_id: c.id, user_id: c.user_id })), codeMap, selfId)
+  }, [segmentMap, codeMap, selfId])
+
+  /** The same question for the keyboard, which acts on a SINGLE selected segment. */
+  const ratableForSelection = useCallback((): { segmentId: number; codes: Code[] } | null => {
+    const selected = selectedSegmentsRef.current
+    if (selected.length !== 1) return null
+    return { segmentId: selected[0], codes: ratableCodesForSegment(selected[0]) }
+  }, [ratableCodesForSegment])
+
+  /**
+   * The single-segment apply/remove pair, extracted so the chord toggle, the
+   * context menu and the chip's own controls (#875) share ONE implementation —
+   * including the #868 (f) rating capture. A second copy is how the capture came
+   * to exist on five of six arms in the first place.
+   */
+  const removeSingle = useCallback((segmentId: number, codeId: number, codeName: string) => {
+    // The rating is captured NOW, while the application still exists, and the
+    // inverse re-applies WITH it. `previous` may legitimately be 0.
+    const previous = currentMagnitude(segmentId, codeId)
+    history.execute({
+      type: 'code_remove',
+      description: `Remove code "${codeName}"`,
+      redo: async () => { await codingApi.removeCode(segmentId, codeId); invalidateAfterCodeChange() },
+      undo: async () => { await codingApi.applyCode(segmentId, codeId, undefined, previous); invalidateAfterCodeChange() },
+    })
+  }, [currentMagnitude, history, invalidateAfterCodeChange])
+
+  const applySingle = useCallback((segmentId: number, code: Code) => {
+    history.execute({
+      type: 'code_apply',
+      description: `Apply code "${code.name}"`,
+      redo: async () => { await codingApi.applyCode(segmentId, code.id); invalidateAfterCodeChange() },
+      undo: async () => { await codingApi.removeCode(segmentId, code.id); invalidateAfterCodeChange() },
+    })
+    // #35 variant A — a scaled code opens its strip straight after applying, so
+    // the judgement is made with the anchors on screen. Now true of EVERY
+    // single-segment apply door, not only the chord (#868 e).
+    if (code.magnitude_scale) setRatingTarget({ segmentId, code })
+  }, [history, invalidateAfterCodeChange, setRatingTarget])
+
+  /**
+   * The chip's own controls (#875). They act on the row that owns the chip,
+   * which need not be the selected one — a mouse user clicks any row directly.
+   */
+  const handleChipRemove = useCallback((segmentId: number, codeId: number) => {
+    const code = codeMap.get(codeId)
+    removeSingle(segmentId, codeId, code?.name ?? 'code')
+  }, [codeMap, removeSingle])
+
+  const handleChipApply = useCallback((segmentId: number, codeId: number) => {
+    const code = codeMap.get(codeId)
+    if (code) applySingle(segmentId, code)
+  }, [codeMap, applySingle])
+
   const handleCodeToggle = useCallback((code: Code) => {
     if (selectedSegments.length === 0) return
 
@@ -587,33 +681,13 @@ export default function DocumentCodingWorkbench() {
     const codeName = code.name
 
     if (selectedSegments.length === 1) {
-      const segmentId = selectedSegments[0]
-      if (allHaveCode) {
-        // #868 (f): the rating is captured NOW, while the application still
-        // exists, and the inverse re-applies WITH it — an undo that re-applied
-        // bare silently unrated. `previous` may legitimately be 0.
-        const previous = currentMagnitude(segmentId, codeId)
-        history.execute({
-          type: 'code_remove',
-          description: `Remove code "${codeName}"`,
-          redo: async () => { await codingApi.removeCode(segmentId, codeId); invalidateAfterCodeChange() },
-          undo: async () => { await codingApi.applyCode(segmentId, codeId, undefined, previous); invalidateAfterCodeChange() },
-        })
-      } else {
-        history.execute({
-          type: 'code_apply',
-          description: `Apply code "${codeName}"`,
-          redo: async () => { await codingApi.applyCode(segmentId, codeId); invalidateAfterCodeChange() },
-          undo: async () => { await codingApi.removeCode(segmentId, codeId); invalidateAfterCodeChange() },
-        })
-        // #35 variant A — a code that declares a scale opens its rating strip
-        // straight after applying, so the judgement is made with the anchors on
-        // screen. ⚠️ Only on the APPLY branch and only for a single segment —
-        // the same two gates as the conversation workbench: removing has
-        // nothing to rate, and one rating standing in for several judgements
-        // is not a rating.
-        if (code.magnitude_scale) setRatingTarget({ segmentId, code })
-      }
+      // ⚠️ Both arms delegate to the shared pair above — the rating capture and
+      // the strip-on-apply live in ONE place, so the chip's controls and the
+      // context menu cannot drift from the chord (#875). Removing still has
+      // nothing to rate, and a multi-segment apply still opens no strip: one
+      // rating standing in for several judgements is not a rating.
+      if (allHaveCode) removeSingle(selectedSegments[0], codeId, codeName)
+      else applySingle(selectedSegments[0], code)
     } else {
       const action = allHaveCode ? 'remove' : 'apply'
       // #868 (f), the multi-segment arm: one captured rating per segment; the
@@ -639,7 +713,7 @@ export default function DocumentCodingWorkbench() {
       })
     }
     showSaved()
-  }, [selectedSegments, segmentMap, history, invalidateAfterCodeChange, reportBulkOutcome, showSaved, selfId, currentMagnitude])
+  }, [selectedSegments, segmentMap, history, invalidateAfterCodeChange, reportBulkOutcome, showSaved, selfId, currentMagnitude, applySingle, removeSingle])
 
   const handleMultiCodeToggle = useCallback((codesToToggle: Code[]) => {
     if (selectedSegments.length === 0 || codesToToggle.length === 0) return
@@ -955,6 +1029,23 @@ export default function DocumentCodingWorkbench() {
       else if (selected.length === 0) startEditingTitle()
       // 2+ selected → no-op
     },
+    extraKeys: {
+      // #868 (e/f) — `r` re-opens the rating strip for an application that already
+      // exists, so a mis-keyed rating can be corrected and a code applied by any
+      // other door can still be rated. Chosen over a per-chip button because the
+      // chip row is packed and its targets are already under the 24px floor
+      // (#647); the status-bar hint carries the discovery.
+      // ⚠️ Returns FALSE when there is nothing to rate, so the key is not claimed
+      // and falls through rather than being silently swallowed.
+      // ⚠️ Opens the FIRST ratable code; the context menu names each one, which is
+      // how a segment carrying two scaled codes is disambiguated.
+      r: () => {
+        const target = ratableForSelection()
+        if (!target || target.codes.length === 0) return false
+        openRatingFor(target.segmentId, target.codes[0])
+        return true
+      },
+    },
     onArrowNav: handleArrowNav,
     onArrowHorizontal: (dir) => {
       if (dir === 'right' && focusedPanel === 'document') {
@@ -1187,16 +1278,23 @@ export default function DocumentCodingWorkbench() {
               size="icon"
               disabled={!prevDocument}
               onClick={() => prevDocument && navigate(`/projects/${projectId}/documents/${prevDocument.id}`)}
+              // #888: the STABLE name is the aria-label; `title` carries only the
+              // transient target. A conditional title alone (what these three
+              // carried) leaves the control nameless in exactly the edge state —
+              // measured in Chrome's tree, the chevron at each end of the list
+              // announced as a bare "button". #559's rule, and the conversation
+              // twin at `CodingWorkbench.tsx:1581` has had it right all along.
+              aria-label="Previous document"
               title={prevDocument ? `Previous: ${prevDocument.name}` : undefined}
             >
-              <ChevronLeft className="w-4 h-4" />
+              <ChevronLeft className="w-4 h-4" aria-hidden />
             </Button>
 
             <Select
               value={String(documentId)}
               onValueChange={v => navigate(`/projects/${projectId}/documents/${v}`)}
             >
-              <SelectTrigger className="h-8 w-44 text-sm overflow-hidden">
+              <SelectTrigger className="h-8 w-44 text-sm overflow-hidden" aria-label="Select document">
                 <span className="truncate block text-left">{document?.name ?? 'Select'}</span>
               </SelectTrigger>
               <SelectContent>
@@ -1213,9 +1311,10 @@ export default function DocumentCodingWorkbench() {
               size="icon"
               disabled={!nextDocument}
               onClick={() => nextDocument && navigate(`/projects/${projectId}/documents/${nextDocument.id}`)}
+              aria-label="Next document"
               title={nextDocument ? `Next: ${nextDocument.name}` : undefined}
             >
-              <ChevronRight className="w-4 h-4" />
+              <ChevronRight className="w-4 h-4" aria-hidden />
             </Button>
 
             <span className="text-xs text-muted-foreground font-mono tabular-nums">
@@ -1636,6 +1735,10 @@ export default function DocumentCodingWorkbench() {
                     activeCoderId={selfId}
                     onToggleQuote={handleToggleQuote}
                     onContextCodeApply={handleContextCodeApply}
+                    onChipRemove={handleChipRemove}
+                    onChipApply={handleChipApply}
+                    onRateCode={openRatingFor}
+                    ratableCodesFor={ratableCodesForSegment}
                     onContextCreateCode={(coords) => {
                       setCreateCodeDialog({ position: coords, segmentIds: [...selectedSegments], initialName: selectionPrefill() })
                     }}
@@ -1803,7 +1906,7 @@ export default function DocumentCodingWorkbench() {
         <span>Document</span>
         {selectedSegments.length > 0 && <span>{selectedSegments.length} selected</span>}
         <div className="flex-1" />
-        <span className="opacity-60">{codeKeyHint(codes)} · s: quote · c: create code · n: note · j: next uncoded · Ctrl+Z/Y: undo/redo</span>
+        <span className="opacity-60">{codeKeyHint(codes)} · s: quote · c: create code · n: note · r: rate · j: next uncoded · Ctrl+Z/Y: undo/redo</span>
       </div>
 
       {/* Floating create code dialog */}
@@ -1912,6 +2015,10 @@ export function DocumentSegmentRow({
   activeCoderId,
   onToggleQuote,
   onContextCodeApply,
+  onChipRemove,
+  onChipApply,
+  onRateCode,
+  ratableCodesFor,
   onContextCreateCode,
   onContextCreateNote,
   onRightClickSelect,
@@ -1958,6 +2065,10 @@ export function DocumentSegmentRow({
   activeCoderId?: number | null
   onToggleQuote: (segmentId: number) => void
   onContextCodeApply: (segmentId: number, codeId: number) => void
+  onChipRemove: (segmentId: number, codeId: number) => void
+  onChipApply: (segmentId: number, codeId: number) => void
+  onRateCode: (segmentId: number, code: Code) => void
+  ratableCodesFor: (segmentId: number) => Code[]
   onContextCreateCode?: (coords: FloatingCoords) => void
   onContextCreateNote?: (segmentId: number, coords: FloatingCoords) => void
   onRightClickSelect?: () => void
@@ -2161,6 +2272,11 @@ export function DocumentSegmentRow({
                     magnitude: c.magnitude, magnitude_conflict: c.magnitude_conflict,
                   }))}
                   hiddenCoderIds={hiddenCoderIds}
+                  // #875 — the host owns both gestures, so the `×` captures the
+                  // rating and is undoable with Ctrl+Z like every sibling door,
+                  // and the `+ Add code` apply opens the rating strip (#868 e).
+                  onRemoveCode={codeId => onChipRemove(segment.id, codeId)}
+                  onApplyCode={codeId => onChipApply(segment.id, codeId)}
                 />
               )}
             </div>
@@ -2229,6 +2345,16 @@ export function DocumentSegmentRow({
             Add Note
           </ContextMenuItem>
         )}
+        {/* #868 (e/f) — the pointer route to re-rating. One item per code THIS
+            coder has applied that declares a scale; `ratableCodes` already
+            excludes a colleague's application and an inactive code, both of
+            which the server would refuse. Absent entirely when there is nothing
+            to rate, rather than a permanently dead item. */}
+        {ratableCodesFor(segment.id).map(code => (
+          <ContextMenuItem key={`rate-${code.id}`} onClick={() => onRateCode(segment.id, code)}>
+            Rate &ldquo;{code.name}&rdquo;… <span className="text-xs text-mm-text-faint ml-2 font-mono">r</span>
+          </ContextMenuItem>
+        ))}
         <ContextMenuItem onClick={() => onToggleQuote(segment.id)}>
           {hasExcerpt ? 'Unquote' : 'Quote'}
         </ContextMenuItem>

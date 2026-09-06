@@ -772,6 +772,11 @@ function CodeItem({
             autoFocus
             onClick={(e) => e.stopPropagation()}
           />
+          {/* #888: both are icon-only, so `aria-label` is their ONLY naming route —
+              a lucide icon is `aria-hidden` by default and contributes nothing.
+              Measured in Chrome's tree: this editor announced `textbox`, `button`,
+              `button`, with no way to tell the one that SAVES from the one that
+              DISCARDS. Named after the object so they stand alone out of context. */}
           <Button
             size="icon"
             variant="ghost"
@@ -781,8 +786,9 @@ function CodeItem({
               handleSaveDescription()
             }}
             disabled={updateMutation.isPending}
+            aria-label="Save description"
           >
-            <Check className="w-4 h-4 text-green-600" />
+            <Check className="w-4 h-4 text-green-600" aria-hidden />
           </Button>
           <Button
             size="icon"
@@ -792,8 +798,9 @@ function CodeItem({
               e.stopPropagation()
               handleCancelEdit()
             }}
+            aria-label="Cancel editing description"
           >
-            <X className="w-4 h-4 text-mm-text-muted" />
+            <X className="w-4 h-4 text-mm-text-muted" aria-hidden />
           </Button>
         </div>
       </div>

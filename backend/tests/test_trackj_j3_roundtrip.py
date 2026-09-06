@@ -1340,3 +1340,110 @@ class TestMergeDefensiveHardening:
         # Empty list → loop never runs; this asserts the kwarg exists and is accepted.
         _import_recodes_topological(db, [], {}, import_mode="new")
         _import_recodes_topological(db, [], {}, import_mode="merge")
+
+
+# ───────────── #869 (c): the .mmproject merge validates ratings against the LANDING code ──────
+class TestMergeImportRatingRange:
+    """The `.mmproject` merge inserted ratings by reflection, unvalidated (#869 c).
+    Decided 2026-09-04: a NEW application whose rating falls outside the landing
+    code's scale imports UNRATED with the number kept as its `magnitude_conflict`
+    (never lose the number, never store a value the instrument cannot hold) and is
+    counted in the report; a non-finite value is dropped. A MATCHED application's
+    differing rating is still the flag whatever its range — the flag holds a fact to
+    adjudicate, not a value any statistic reads."""
+
+    _project = TestMergeRatingConflict()._project
+
+    def _bob(self, db, seg_id):
+        return (
+            db.query(CodeApplication)
+            .filter(CodeApplication.segment_id == seg_id, CodeApplication.user_id == 2)
+            .one()
+        )
+
+    def test_an_out_of_range_rating_on_a_new_application_imports_unrated_with_the_number_kept(self, db_session, tmp_path):
+        db = db_session
+        # Bob's copy rated 5.0 — legal on the wider scale HIS copy declared; the
+        # target's code is −1…+1 and a merge keeps the target's scale.
+        p, seg, code, f = self._project(db, tmp_path, file_rating=1.0, target_rating=1.0, bob_rating=5.0)
+        report: dict = {}
+        import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge",
+                       target_project_id=p.id, report=report)
+        db.flush()
+        bob = self._bob(db, seg.id)
+        assert bob.magnitude is None, "an out-of-range rating never becomes a rating on this scale"
+        assert bob.magnitude_conflict == 5.0, "…but the number is kept where the grid can show it"
+        assert report["ratings_out_of_range"] == 1
+        assert report["magnitude_conflicts"] == 0, "Alice's copy agreed with her local rating"
+
+    def test_an_in_range_rating_still_imports_as_a_rating(self, db_session, tmp_path):
+        db = db_session
+        p, seg, code, f = self._project(db, tmp_path, file_rating=1.0, target_rating=1.0, bob_rating=0.0)
+        report: dict = {}
+        import_project(db, f, tmp_path / "docs", user_id=1, import_mode="merge",
+                       target_project_id=p.id, report=report)
+        db.flush()
+        bob = self._bob(db, seg.id)
+        assert bob.magnitude == 0.0 and bob.magnitude_conflict is None, "a ZERO rating is a rating"
+        assert report["ratings_out_of_range"] == 0
+
+    def test_a_non_finite_rating_in_the_file_is_dropped_not_stored(self, db_session, tmp_path):
+        db = db_session
+        p, seg, code, f = self._project(db, tmp_path, file_rating=1.0, target_rating=1.0, bob_rating=0.5)
+
+        def poison(data):
+            for app in data["code_applications"]:
+                if app.get("user_id") == 2:
+                    app["magnitude"] = float("inf")
+                    app["magnitude_conflict"] = float("nan")
+            return data
+        # The module's own rewrite helper (also the pre-spine and self-ref fixtures'):
+        # Python's `json.dumps` emits a bare `Infinity`/`NaN`, which `json.loads`
+        # accepts back — the #625 door, written rather than argued.
+        poisoned = _rewrite_project_json(f, tmp_path / "poison.mmproject", poison)
+
+        report: dict = {}
+        import_project(db, poisoned, tmp_path / "docs", user_id=1, import_mode="merge",
+                       target_project_id=p.id, report=report)
+        db.flush()
+        bob = self._bob(db, seg.id)
+        assert bob.magnitude is None and bob.magnitude_conflict is None
+        assert report["ratings_out_of_range"] == 0, "a value that is not a number is not out of range"
+
+    def test_the_report_field_reaches_the_wire(self):
+        """The forbid/wire pair: the service writes it, the schema declares it."""
+        from app.schemas.project_portability import MergeReport
+        assert "ratings_out_of_range" in MergeReport.model_fields
+
+
+class TestMergeCodePreviewScales:
+    """#869: the reconcile step SAYS when the two codes' scales differ, so it needs both."""
+
+    def test_preview_carries_the_file_codes_scale_and_each_candidates(self, db_session, tmp_path):
+        db = db_session
+        p, conv, seg = _seed_coded(db, "Scaled preview")
+        twin = Code(project_id=p.id, numeric_id=1, name="Empathy", is_active=True,
+                    magnitude_min=-1.0, magnitude_max=1.0, magnitude_step=0.5)
+        db.add(twin)
+        db.flush()
+        diverge = Code(project_id=p.id, numeric_id=2, name="Empathy ", is_active=True,
+                       magnitude_min=0.0, magnitude_max=10.0, magnitude_step=1.0,
+                       magnitude_labels='[{"value": 10.0, "label": "strong"}]')
+        db.add(diverge)
+        db.flush()
+        f = _export_to_file(db, p.id, tmp_path / "docs", tmp_path / "sp.mmproject")
+        db.delete(diverge)
+        db.flush()
+
+        previews = build_merge_code_preview(db, f, target_project_id=p.id)
+        assert len(previews) == 1
+        pv = previews[0]
+        MergeCodePreview.model_validate(pv)
+        assert pv["magnitude_scale"] == {
+            "min": 0.0, "max": 10.0, "step": 1.0, "anchors": [{"value": 10.0, "label": "strong"}],
+        }
+        by_id = {c["code_id"]: c for c in pv["candidates"]}
+        assert by_id[twin.id]["magnitude_scale"] == {"min": -1.0, "max": 1.0, "step": 0.5, "anchors": []}
+        # The seed's plain "Alpha" code states it has none.
+        alpha = next(c for c in pv["candidates"] if c["name"] == "Alpha")
+        assert alpha["magnitude_scale"] is None

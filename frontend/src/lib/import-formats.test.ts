@@ -14,9 +14,9 @@
  * conversation sibling entirely).
  */
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { stripComments } from './strip-comments'
+import { sourceFiles } from '@/test-support/source-tree'
 
 import {
   DATASET_ACCEPT,
@@ -147,9 +147,6 @@ describe('observation formats (the Observations import — two gates, not one)',
 
 // ── The fail-closed guard ───────────────────────────────────────────────────
 
-const PAGES_DIR = join(__dirname, '..', 'pages')
-const COMPONENTS_DIR = join(__dirname, '..', 'components')
-
 /** Extension literals that must only ever appear inside the format modules. */
 const OWNED_EXTENSIONS = [
   'csv', 'xlsx', 'sav',                       // dataset-import-formats.ts
@@ -160,25 +157,6 @@ const OWNED_EXTENSIONS = [
 ]
 
 /**
- * Every .tsx under a directory, recursively.
- *
- * #571: this scan used to read `pages/` ONLY, so every upload surface in
- * `components/` could drift freely — and one already had
- * (`CodebookToolbar.tsx` inlined `accept=".mmcodebook,.qdc"` while
- * `lib/mm-formats.ts` existed to own exactly that list; they agreed at the time,
- * which is precisely the pre-drift state #552 describes). The Observations
- * dropzone lands in `components/`, so a pages-only guard would have gone blind
- * exactly where it was being extended to help.
- */
-function tsxFilesUnder(dir: string, base = dir): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
-    const full = join(dir, entry.name)
-    if (entry.isDirectory()) return tsxFilesUnder(full, base)
-    return entry.name.endsWith('.tsx') && !entry.name.endsWith('.test.tsx') ? [full] : []
-  })
-}
-
-/**
  * Strip comments before scanning. A comment EXPLAINING the old inlined check
  * (`// was .endsWith('.csv') — it silently refused VTT…`) is documentation, not
  * a re-inlined gate; without this the guard flags the very comment that records
@@ -187,7 +165,19 @@ function tsxFilesUnder(dir: string, base = dir): string[] {
 const code = stripComments
 
 describe('no page or component re-inlines an upload-format list (fail-closed)', () => {
-  const files = [...tsxFilesUnder(PAGES_DIR), ...tsxFilesUnder(COMPONENTS_DIR)]
+  /**
+   * Every .tsx under pages/ AND components/ — `.tsx` only, an `accept=` is JSX.
+   *
+   * #571: this scan used to read `pages/` ONLY, so every upload surface in
+   * `components/` could drift freely — and one already had
+   * (`CodebookToolbar.tsx` inlined `accept=".mmcodebook,.qdc"` while
+   * `lib/mm-formats.ts` existed to own exactly that list; they agreed at the time,
+   * which is precisely the pre-drift state #552 describes). The Observations
+   * dropzone lands in `components/`, so a pages-only guard would have gone blind
+   * exactly where it was being extended to help. The walk and its floor live in
+   * `sourceFiles()` (#729).
+   */
+  const files = sourceFiles({ root: ['pages', 'components'], ext: 'tsx', floor: 60 })
   const rel = (f: string) => f.slice(f.indexOf('/src/') + 5)
 
   it('scans a real, non-trivial set of pages AND components', () => {

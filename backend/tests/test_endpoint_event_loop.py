@@ -43,8 +43,17 @@ from app.routers.export_r import export_r_data
 from app.routers.metrics import get_row_matrix, get_row_matrix_csv
 from app.routers.recode import apply_value_labels_endpoint, bulk_set_missing_values
 
+from tests.guard_support import app_files
+
 
 ROUTERS = pathlib.Path(__file__).resolve().parents[1] / "app" / "routers"
+
+
+def _router_files() -> list[pathlib.Path]:
+    """Every router module, walked through `guard_support` (#729) so the walk
+    carries a population floor; the endpoint-count floor stays in the scan's own
+    self-check below."""
+    return app_files("routers", floor=30, recursive=False)
 
 # Endpoints converted under #804 and #837, with the measurement that justified
 # each. Every wall time below is the FREEZE it imposed: an `async def` body with
@@ -144,7 +153,7 @@ _HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 def _endpoint_names() -> set[str]:
     """Every function in app/routers decorated with a router HTTP method."""
     names: set[str] = set()
-    for path in sorted(ROUTERS.glob("*.py")):
+    for path in _router_files():
         for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -183,7 +192,7 @@ def test_no_endpoint_awaits_another_endpoint():
     """
     endpoints = _endpoint_names()
     offenders = []
-    for path in sorted(ROUTERS.glob("*.py")):
+    for path in _router_files():
         tree = ast.parse(path.read_text(), filename=str(path))
         for lineno, name in _awaited_endpoint_calls(tree, endpoints):
             offenders.append(f"{path.name}:{lineno} awaits endpoint {name}()")

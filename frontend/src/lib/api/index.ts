@@ -2,7 +2,7 @@
 export { default as api } from './client'
 export { default } from './client'
 export { setCsrfToken, ApiError } from './client'
-export { extractApiError, serverDetailMessage } from './error-utils'
+export { extractApiError, serverDetailMessage, isServerRefusal } from './error-utils'
 
 // Downloads — the canonical blob→anchor helpers. Exported here because they
 // were not reachable from the barrel, and six components hand-rolled their own

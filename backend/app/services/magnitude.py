@@ -271,6 +271,38 @@ def validate_value(code: Any, value: float | None) -> float | None:
     return out
 
 
+def finite_rating(value: Any) -> float | None:
+    """A rating as it arrives from a FILE: a finite number, or None.
+
+    The `.mmproject` round trip copies `magnitude` / `magnitude_conflict` by
+    reflection, and Python's `json` accepts a bare `Infinity`/`NaN` on the way in
+    (verified by execution — the #625 door), so a file can carry what the API
+    refuses. Booleans are excluded explicitly: `True` is an `int` to `isinstance`.
+    This is the ONE coercion both import paths use (#869 c).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def value_outside_scale(code: Any, value: float | None) -> bool:
+    """True when `value` is a rating the code's DECLARED scale cannot hold.
+
+    The range question the two MERGE paths ask (#869 b/c), and deliberately NOT
+    `validate_value`: a rating arriving with a merge is a judgement somebody
+    already made, not a new one, so an INACTIVE or scale-less target is no reason
+    to refuse it. A scale-less code keeps the value uninterpretable-until-a-scale-
+    returns, exactly as clearing a scale does (§5); only a declared range that the
+    number falls outside is a fact the merge has to act on — `merge_codes` refuses
+    by count, the `.mmproject` merge records the number as the row's conflict.
+    """
+    if value is None or not has_scale(code):
+        return False
+    return value < code.magnitude_min or value > code.magnitude_max
+
+
 def scale_change_would_strand(applications_values: list[float], scale: dict | None) -> int:
     """How many existing ratings a proposed scale would put out of range.
 

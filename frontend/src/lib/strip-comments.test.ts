@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import * as ts from 'typescript'
 import { stripComments } from './strip-comments'
+import { SOURCE_SCAN_TIMEOUT_MS, sourceFiles } from '@/test-support/source-tree'
 
 /**
  * The guard for the one text transform every source scan in this codebase runs
@@ -21,17 +22,11 @@ import { stripComments } from './strip-comments'
 const SRC = join(__dirname, '..')
 const SELF = ['lib/strip-comments.ts', 'lib/strip-comments.test.ts']
 
-function walk(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
-    const abs = join(dir, entry)
-    if (statSync(abs).isDirectory()) walk(abs, out)
-    else if (/\.tsx?$/.test(abs)) out.push(abs)
-  }
-  return out
-}
-
 function corpus(): { rel: string; abs: string; text: string }[] {
-  const files = walk(SRC).map(abs => ({
+  // EVERY file, tests and test-support included: the single-implementation
+  // guard below must see a stripper wherever one is defined. The walk and its
+  // floor live in `sourceFiles()` (#729/#730).
+  const files = sourceFiles({ ext: 'both', floor: 150, includeTests: true }).map(abs => ({
     abs,
     rel: abs.slice(SRC.length + 1),
     text: readFileSync(abs, 'utf8'),
@@ -170,7 +165,7 @@ describe('stripComments — scored against the whole source tree', () => {
   // ⚠️ Explicit timeouts: these two parse all 650 files twice over (the module
   // under test, then this file's independent token walk) and run ~8 s together,
   // past vitest's 5 s default.
-  it('never blanks a single character of real code, in any file', { timeout: 60_000 }, () => {
+  it('never blanks a single character of real code, in any file', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
     const offenders: string[] = []
     for (const { rel, abs, text } of corpus()) {
       const out = stripComments(text, abs)
@@ -190,7 +185,7 @@ describe('stripComments — scored against the whole source tree', () => {
    * reads as if it were code (#772: a prose mention of `role="grid"` reported as
    * a violation that did not exist).
    */
-  it('leaves no comment behind, in any file', { timeout: 60_000 }, () => {
+  it('leaves no comment behind, in any file', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
     const offenders: string[] = []
     for (const { rel, abs, text } of corpus()) {
       const out = stripComments(text, abs)

@@ -1912,6 +1912,64 @@ class TestCodebookExport:
         leadership = [c for c in result["codes"] if c["name"] == "Leadership"][0]
         assert leadership["category_name_path"] == "Theme A > Sub A"
 
+    # ── #869 (d): the declared rating scale travels with the code ─────────────
+
+    def _scale_leadership(self, db, pid):
+        from app.services import magnitude
+        code = db.query(Code).filter(Code.project_id == pid, Code.name == "Leadership").one()
+        magnitude.write_scale(code, magnitude.normalize_scale(
+            {"min": 0, "max": 10, "step": 2, "anchors": [{"value": 10, "label": "strong"}]}
+        ))
+        db.flush()
+        return code
+
+    def test_native_export_carries_the_rating_scale(self, db_session, populated_project):
+        """A codebook export that dropped the instrument was the v4 silent-wrongness
+        shape for the one format whose job is to move codebooks (#869 d)."""
+        pid = populated_project["project"].id
+        self._scale_leadership(db_session, pid)
+        result = export_codebook_native(db_session, pid)
+        by_name = {c["name"]: c for c in result["codes"]}
+        assert by_name["Leadership"]["magnitude_scale"] == {
+            "min": 0.0, "max": 10.0, "step": 2.0, "anchors": [{"value": 10.0, "label": "strong"}],
+        }
+        # Every other code states it has none — the key is PRESENT, never omitted.
+        others = [c for n, c in by_name.items() if n != "Leadership"]
+        assert others and all("magnitude_scale" in c and c["magnitude_scale"] is None for c in others)
+
+    def test_native_import_round_trips_the_scale_and_counts_it(self, db_session, populated_project):
+        from app.services import magnitude
+        pid = populated_project["project"].id
+        self._scale_leadership(db_session, pid)
+        data = export_codebook_native(db_session, pid)
+        fresh = Project(name="Fresh", user_id=1)
+        db_session.add(fresh)
+        db_session.flush()
+        counts = import_codebook_native(db_session, fresh.id, data)
+        assert counts["scales_imported"] == 1
+        landed = db_session.query(Code).filter(Code.project_id == fresh.id, Code.name == "Leadership").one()
+        assert magnitude.read_scale(landed) == {
+            "min": 0.0, "max": 10.0, "step": 2.0, "anchors": [{"value": 10.0, "label": "strong"}],
+        }
+
+    def test_native_import_skips_a_malformed_scale_without_refusing_the_code(self, db_session, populated_project):
+        """One bad field must not cost the whole codebook: the code lands, the scale
+        does not, and the count says so (the log carries the reason)."""
+        from app.services import magnitude
+        pid = populated_project["project"].id
+        data = export_codebook_native(db_session, pid)
+        for c in data["codes"]:
+            if c["name"] == "Leadership":
+                c["magnitude_scale"] = {"min": 5, "max": 1}   # max < min — refused by normalize_scale
+        fresh = Project(name="Fresh", user_id=1)
+        db_session.add(fresh)
+        db_session.flush()
+        counts = import_codebook_native(db_session, fresh.id, data)
+        assert counts["scales_imported"] == 0
+        landed = db_session.query(Code).filter(Code.project_id == fresh.id, Code.name == "Leadership").one()
+        assert magnitude.read_scale(landed) is None
+        assert counts["codes_created"] >= 1
+
     def test_qdc_export(self, db_session, populated_project):
         pid = populated_project["project"].id
         xml_str = export_codebook_qdc(db_session, pid)

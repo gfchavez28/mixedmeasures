@@ -25,24 +25,12 @@
  * (#772). This catches the shape that has actually shipped.
  */
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stripComments } from './strip-comments'
+import { SOURCE_SCAN_TIMEOUT_MS, sourceFiles } from '@/test-support/source-tree'
 
 const SRC = join(__dirname, '..')
-
-function sourceFiles(dir: string): string[] {
-  const out: string[] = []
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry)
-    if (statSync(full).isDirectory()) {
-      out.push(...sourceFiles(full))
-    } else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) {
-      out.push(full)
-    }
-  }
-  return out
-}
 
 /** Split a bracketed array literal's body into top-level elements. */
 function elements(body: string): string[] {
@@ -120,7 +108,7 @@ export function offendersIn(src: string): string[] {
 }
 
 describe('#800 — an exact-match cache accessor is never handed a prefix key', () => {
-  const files = sourceFiles(SRC)
+  const files = sourceFiles({ ext: 'both', floor: 200 })
 
   // ⚠️ Explicit timeout (#841): this walks and strips the whole source tree, and
   // since #838 that means a TypeScript parse per file — comfortably under 5 s
@@ -128,7 +116,7 @@ describe('#800 — an exact-match cache accessor is never handed a prefix key', 
   // `strip-comments.test.ts`. `stripComments` caches on source text and the
   // cache is per-FILE (vitest gives each test file its own process), so the
   // first scan in this file pays and the rest are nearly free.
-  it('reads a real population (the scan is not blind)', { timeout: 60_000 }, () => {
+  it('reads a real population (the scan is not blind)', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
     // POPULATION self-check (#730): `expect(offenders).toEqual([])` passes by
     // finding nothing, including when the walk or the matcher has rotted.
     let accessors = 0
@@ -160,7 +148,7 @@ describe('#800 — an exact-match cache accessor is never handed a prefix key', 
     expect(offendersIn(good)).toEqual([])
   })
 
-  it('no source file reads or writes a truncated key', { timeout: 60_000 }, () => {
+  it('no source file reads or writes a truncated key', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
     const offenders: string[] = []
     for (const f of files) {
       const src = stripComments(readFileSync(f, 'utf8'), f)

@@ -194,7 +194,9 @@ export default function DocumentsListPage() {
               }
             }}
           >
-            <SelectTrigger className="w-[120px] h-8 text-sm">
+            {/* #892: see the conversations twin — the visible "Date ↓" is this
+                trigger's VALUE, and `combobox` takes no name from its contents. */}
+            <SelectTrigger className="w-[120px] h-8 text-sm" aria-label="Sort documents">
               <ArrowUpDown className="w-3.5 h-3.5 mr-1.5 shrink-0 text-mm-text-faint" />
               <SelectValue />
               <span className="ml-1 text-mm-text-faint text-[11px]">{sortDir === 'asc' ? '\u2191' : '\u2193'}</span>

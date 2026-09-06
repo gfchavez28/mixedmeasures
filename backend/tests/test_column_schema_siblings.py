@@ -30,34 +30,21 @@ update, and the allowlist entry is where the deliberate omission gets argued.
 
 import pytest
 
-from app.schemas.dataset import DatasetColumnResponse, DatasetDataColumnResponse
+from app.schemas.dataset import (
+    DATA_PAYLOAD_OMITS,
+    DatasetColumnResponse,
+    DatasetDataColumnResponse,
+)
 
 
-#: Fields on the full column response the `/data` sibling deliberately omits.
-#: An entry here is a CLAIM that no `/data` consumer needs the field — add one
-#: only with the reason, and only after checking the frontend.
-DELIBERATELY_NOT_ON_DATA = {
-    # The grid renders columns in the order `/data` already sorts them, so the
-    # raw ordinal has no consumer there; `DatasetView` reorders through the
-    # dedicated PATCH, which reads the full response.
-    "display_order",
-    # `/data` consumers pick the active definition out of `recode_definitions`
-    # themselves, so the summary would be a second way to say the same thing on
-    # the one payload that does not need it.
-    #
-    # ⚠️ **This entry's REASON changed on 2026-08-31 (#830f) even though the
-    # entry did not.** It used to read "the SUMMARY built for surfaces that do
-    # NOT get the full list" — true only while `recode_definitions` rode `/data`
-    # alone. Every column payload carries the full list now, so the surfaces are
-    # no longer the distinction; the consumer's need is. The field still earns
-    # its place on `DatasetColumnResponse` because it carries `remaps_codes`,
-    # which is COMPUTED (`_mapping_remaps_codes`) and cannot be read off a
-    # summary without re-implementing the shape test client-side.
-    "primary_recode",
-    # A participant-profile opt-out is edited and read on the participant
-    # surfaces, never in the data grid.
-    "show_in_participant_profile",
-}
+#: The deliberate omissions live BESIDE the schema now (`schemas/dataset.py::
+#: DATA_PAYLOAD_OMITS`, with each entry's reason), because the router passes the
+#: same set as `model_dump(exclude=…)`: one set, read by the construction and by
+#: this guard, so the two cannot drift. It moved out of this file on 2026-09-04
+#: when the test session started running every schema under `extra='forbid'`
+#: (#855) — the silent drop this allowlist used to describe is a ValidationError
+#: now, and the narrowing has to be stated where it happens.
+DELIBERATELY_NOT_ON_DATA = set(DATA_PAYLOAD_OMITS)
 
 
 def test_every_column_field_reaches_the_data_payload_unless_excused():

@@ -10,7 +10,7 @@ import {
 } from '@/components/ui/context-menu'
 import { cn, getCodeColor } from '@/lib/utils'
 import { isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
-import type { TextCodingResponse } from '@/lib/api'
+import type { Code, TextCodingResponse } from '@/lib/api'
 import type { FloatingCoords } from '@/lib/floating-utils'
 
 interface TextCodingContextMenuProps {
@@ -24,6 +24,15 @@ interface TextCodingContextMenuProps {
   lastCoordsRef: React.RefObject<FloatingCoords | null>
   /** Track J · J1: active coder, so the "applied" check is per-me (#446). */
   activeCoderId?: number | null
+  /**
+   * #868 (d) — re-open the rating strip for an application that already exists.
+   * The pointer route to the `r` verb, and the one that NAMES each code, which
+   * is how a response carrying two scaled codes is disambiguated. What is
+   * ratable comes from the host's `ratableCodes` derivation (`lib/rating-targets.ts`)
+   * so this menu and the verb cannot disagree.
+   */
+  onRateCode?: (dvId: number, code: Code) => void
+  ratableCodesFor?: (dvId: number) => Code[]
 }
 
 export default function TextCodingContextMenu({
@@ -36,6 +45,8 @@ export default function TextCodingContextMenu({
   onContextCreateNote,
   lastCoordsRef,
   activeCoderId,
+  onRateCode,
+  ratableCodesFor,
 }: TextCodingContextMenuProps) {
   const recordLabel = comment.row_identifier || comment.participant_name || `R${comment.dataset_row_id}`
 
@@ -84,6 +95,14 @@ export default function TextCodingContextMenu({
           Add Note
         </ContextMenuItem>
       )}
+      {/* #868 (d) — one item per code THIS coder has applied that declares a
+          scale (the document row's exact shape). Absent, not disabled, when
+          there is nothing to rate: the menu is already long. */}
+      {onRateCode && ratableCodesFor && ratableCodesFor(comment.dataset_value_id).map(code => (
+        <ContextMenuItem key={`rate-${code.id}`} onClick={() => onRateCode(comment.dataset_value_id, code)}>
+          Rate &ldquo;{code.name}&rdquo;… <span className="text-xs text-mm-text-faint ml-2 font-mono">r</span>
+        </ContextMenuItem>
+      ))}
       <ContextMenuItem onClick={() => onQuoteToggle(comment.dataset_value_id)}>
         {comment.is_quoted ? 'Unquote' : 'Quote'}
       </ContextMenuItem>

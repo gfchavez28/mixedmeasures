@@ -27,7 +27,16 @@ import pathlib
 
 import pytest
 
+from tests.guard_support import app_files
+
 ROUTERS_DIR = pathlib.Path(__file__).resolve().parent.parent / "app" / "routers"
+
+
+def _router_files() -> list[pathlib.Path]:
+    """Every router module — walked through `guard_support` (#729), which carries
+    the population floor a bare `glob` lacks; the endpoint-level floor is asserted
+    separately in `test_the_scan_actually_sees_endpoints`."""
+    return app_files("routers", floor=30, recursive=False)
 
 # Calling any of these reaches `_get_project_or_404`. The chaining helpers each
 # resolve their entity -> parent -> project -> user; the entity-scoped `_get_*`
@@ -61,7 +70,7 @@ ALLOWLIST: dict[str, str] = {
 
 def _iter_endpoints():
     """Yield (file, funcname, node) for every router function taking project_id."""
-    for path in sorted(ROUTERS_DIR.glob("*.py")):
+    for path in _router_files():
         if path.name == "__init__.py":
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -162,7 +171,7 @@ def test_the_scan_actually_sees_endpoints():
 def _router_function_defs() -> dict[str, list[tuple[str, ast.AST]]]:
     """Map function name -> [(file, node)] for every module-level def in routers/."""
     defs: dict[str, list[tuple[str, ast.AST]]] = {}
-    for path in sorted(ROUTERS_DIR.glob("*.py")):
+    for path in _router_files():
         if path.name == "__init__.py":
             continue
         tree = ast.parse(path.read_text(), filename=str(path))

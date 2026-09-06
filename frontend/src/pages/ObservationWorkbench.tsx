@@ -60,6 +60,8 @@ import {
 } from '@/lib/clip-timeline'
 import { playheadRowSuffix, findClipsAtTime, recordingEndsAtTimelineTime } from '@/lib/playback-utils'
 import ClipTimeline, { type BoundaryPreview } from '@/components/observations/ClipTimeline'
+import MagnitudeStrip from '@/components/MagnitudeStrip'
+import { ratableCodes } from '@/lib/rating-targets'
 import { useHistory } from '@/hooks/useHistory'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeChordShortcuts, type UseCodeChordShortcutsResult } from '@/hooks/useCodeChordShortcuts'
@@ -704,27 +706,35 @@ export default function ObservationWorkbench() {
   // between. `magnitude` is per call, not per clip: the observation apply paths
   // are single-clip or bulk-unrated.
   const patchClipCodes = useCallback(
-    (clipIds: number[], codeId: number, action: 'apply' | 'remove', magnitude: number | null = null) => {
+    (
+      clipIds: number[],
+      codeId: number,
+      action: 'apply' | 'remove',
+      // #876 — a per-CLIP resolver, not one value for the batch: a multi-clip
+      // removal captures each clip's own rating and they need not agree.
+      magnitude: number | null | ((clipId: number) => number | null) = null,
+    ) => {
       queryClient.setQueryData<ObservationSegment[]>(
         ['observation-segments', projectId, observationId],
         (old) => {
           if (!old) return old
           const targetIds = new Set(clipIds)
-          const detail = {
-            code_id: codeId,
-            user_id: selfId,
-            attribution: null,
-            is_universal: codeMap.get(codeId)?.is_universal ?? false,
-            magnitude,
-            magnitude_conflict: null,
-          }
+          const resolve = (clipId: number) =>
+            typeof magnitude === 'function' ? magnitude(clipId) : magnitude
           return old.map((c) => {
             if (!targetIds.has(c.id)) return c
             const hasMine = c.applied_code_details.some(d => d.code_id === codeId && d.user_id === selfId)
             if (action === 'apply' && !hasMine) return {
               ...c,
               applied_codes: [...c.applied_codes, codeId],
-              applied_code_details: [...c.applied_code_details, detail],
+              applied_code_details: [...c.applied_code_details, {
+                code_id: codeId,
+                user_id: selfId,
+                attribution: null,
+                is_universal: codeMap.get(codeId)?.is_universal ?? false,
+                magnitude: resolve(c.id),
+                magnitude_conflict: null,
+              }],
             }
             if (action === 'remove' && hasMine) {
               const idx = c.applied_codes.indexOf(codeId)
@@ -754,7 +764,7 @@ export default function ObservationWorkbench() {
       codeId: number,
       action: 'apply' | 'remove',
       serverCall: () => Promise<unknown>,
-      magnitude: number | null = null,
+      magnitude: number | null | ((clipId: number) => number | null) = null,
     ) => {
       const snapshot = queryClient.getQueryData(['observation-segments', projectId, observationId])
       patchClipCodes(clipIds, codeId, action, magnitude)
@@ -777,6 +787,157 @@ export default function ObservationWorkbench() {
     [queryClient, projectId, observationId, patchClipCodes, settleAfterCodeChange],
   )
 
+  // ── #35 magnitude: rate at apply (variant A) — the OBSERVATION strip (#868 c) ──
+  //
+  // Mirrors the document workbench against THIS page's cache: the clip list
+  // `['observation-segments', …]`, one `applied_code_details` entry per
+  // (code, coder), each carrying `magnitude`. No group fan-out to mirror
+  // (segment groups are conversation-scoped). ⚠️ A rating is ANNOTATION, not
+  // segmentation, so it stays legal on a FROZEN observation exactly like a
+  // label edit or a quote (D22/D29) — no `refuseFrozen()` anywhere below.
+  const [ratingTarget, setRatingTarget] = useState<{ clipId: number; code: Code } | null>(null)
+
+  // The rating THIS coder holds on this clip, read from the cache the chips
+  // render from. `?? null`, never `|| null` — a stored 0 is a real rating.
+  // ⚠️ ONE reader: the three inline copies of this lookup that #868 (f) and
+  // #876 left behind were a second implementation each.
+  const currentMagnitude = useCallback(
+    (clipId: number, codeId: number): number | null => {
+      const entry = clipMap.get(clipId)?.applied_code_details
+        .find(d => d.code_id === codeId && d.user_id === selfId)
+      return entry?.magnitude ?? null
+    },
+    [clipMap, selfId],
+  )
+
+  // Optimistically patch ONE coder's rating on ONE clip. Scoped to the active
+  // coder's own entry: a rating is that coder's judgement, and painting a
+  // colleague's would show agreement that does not exist. Rating again clears
+  // the merge flag server-side (rules §6d), so the paint clears it too.
+  const patchClipMagnitude = useCallback(
+    (clipId: number, codeId: number, value: number | null) => {
+      queryClient.setQueryData<ObservationSegment[]>(
+        ['observation-segments', projectId, observationId],
+        (old) => old?.map(c => c.id !== clipId ? c : {
+          ...c,
+          applied_code_details: c.applied_code_details.map(d =>
+            d.code_id === codeId && d.user_id === selfId
+              ? { ...d, magnitude: value, magnitude_conflict: null }
+              : d,
+          ),
+        }),
+      )
+    },
+    [queryClient, projectId, observationId, selfId],
+  )
+
+  /**
+   * Optimistic rating + one server call, bracketed by a CANCEL before and a
+   * SETTLE after — both measured necessary on this page (2026-09-03, cache
+   * events logged through the query cache while the sequence ran):
+   *
+   * 1. ⚠️ **Cancel the in-flight settle refetch first.** Every apply/remove
+   *    here ends in `settleAfterCodeChange()`, a refetch of this list. A rating
+   *    painted while that refetch is still out is OVERWRITTEN by a response
+   *    that left the server before the rating did — "not rated" over a rating
+   *    the server has.
+   * 2. ⚠️ **Settle after the write, even though a rating changes no count.**
+   *    Cancelling REVERTS the query to the state it held when that refetch
+   *    began, and that state can itself be stale: measured with two undos
+   *    queued back to back (remove, then un-rate — `useHistory` serialises
+   *    them, so the second starts while the first's refetch is out), the
+   *    revert re-listed a code the server had already deleted, and with no
+   *    refetch to follow it stayed listed until the next page load. One small
+   *    refetch per rating is what makes the truth land last in every ordering.
+   */
+  const runOptimisticMagnitude = useCallback(
+    async (clipId: number, codeId: number, value: number | null) => {
+      const key = ['observation-segments', projectId, observationId]
+      await queryClient.cancelQueries({ queryKey: key })
+      const snapshot = queryClient.getQueryData(key)
+      patchClipMagnitude(clipId, codeId, value)
+      try {
+        await codingApi.setMagnitude(clipId, codeId, value)
+        queryClient.invalidateQueries({ queryKey: key })
+      } catch (e) {
+        queryClient.setQueryData(key, snapshot)
+        throw e  // `useHistory` toasts the server's own reason (a refused rating names why)
+      }
+    },
+    [queryClient, projectId, observationId, patchClipMagnitude],
+  )
+
+  const commitMagnitude = useCallback((value: number) => {
+    const target = ratingTarget
+    if (!target) return
+    const previous = currentMagnitude(target.clipId, target.code.id)
+    setRatingTarget(null)
+    // Undoable like every other clip mutation here; the inverse restores the
+    // PREVIOUS value, which may legitimately be null (unrated) or 0.
+    void history.execute({
+      type: 'code_apply',
+      description: `Rate "${target.code.name}"`,
+      redo: () => runOptimisticMagnitude(target.clipId, target.code.id, value),
+      undo: () => runOptimisticMagnitude(target.clipId, target.code.id, previous),
+    })
+  }, [ratingTarget, currentMagnitude, history, runOptimisticMagnitude, setRatingTarget])
+
+  /** Open the strip for an application that ALREADY exists — the `r` verb and
+   *  the row menu's "Rate …" item both land here (#868 e/f, on this surface). */
+  const openRatingFor = useCallback((clipId: number, code: Code) => {
+    if (!code.magnitude_scale) return
+    setFollowOn(false) // a manual selection breaks Follow (D14)
+    setSelectedClips([clipId])
+    setRatingTarget({ clipId, code })
+  }, [setRatingTarget])
+
+  /** The codes the ACTIVE coder may rate on one clip, in chip order — derived
+   *  ONCE (`lib/rating-targets.ts`) so the verb and the menu cannot disagree. */
+  const ratableCodesForClip = useCallback((clipId: number): Code[] => {
+    return ratableCodes(clipMap.get(clipId)?.applied_code_details, codeMap, selfId)
+  }, [clipMap, codeMap, selfId])
+
+  /** The same question for the keyboard, which acts on a SINGLE selected clip. */
+  const ratableForSelection = useCallback((): { clipId: number; codes: Code[] } | null => {
+    if (selectedClips.length !== 1) return null
+    return { clipId: selectedClips[0], codes: ratableCodesForClip(selectedClips[0]) }
+  }, [selectedClips, ratableCodesForClip])
+
+  /**
+   * The single-clip apply/remove pair, extracted so the chord toggle, the row
+   * menu and the chip's own controls (#875) share ONE implementation — the
+   * #868 (f) rating capture on remove and the strip-on-apply. A second copy is
+   * how the capture came to exist on five of six arms in the first place.
+   */
+  const removeSingle = useCallback((clipId: number, code: Code) => {
+    // The rating is captured NOW, while the application still exists, and the
+    // inverse re-applies WITH it. `previous` may legitimately be 0.
+    const previous = currentMagnitude(clipId, code.id)
+    history.execute({
+      type: 'code_remove',
+      description: `Remove code "${code.name}"`,
+      redo: () => runOptimisticCode([clipId], code.id, 'remove', () => codingApi.removeCode(clipId, code.id)),
+      undo: () => runOptimisticCode(
+        [clipId], code.id, 'apply',
+        () => codingApi.applyCode(clipId, code.id, undefined, previous),
+        previous,
+      ),
+    })
+  }, [currentMagnitude, history, runOptimisticCode])
+
+  const applySingle = useCallback((clipId: number, code: Code) => {
+    history.execute({
+      type: 'code_apply',
+      description: `Apply code "${code.name}"`,
+      redo: () => runOptimisticCode([clipId], code.id, 'apply', () => codingApi.applyCode(clipId, code.id)),
+      undo: () => runOptimisticCode([clipId], code.id, 'remove', () => codingApi.removeCode(clipId, code.id)),
+    })
+    // #35 variant A — a scaled code opens its strip straight after applying, so
+    // the judgement is made with the anchors on screen. True of EVERY
+    // single-clip apply door: the chord, the row menu and the chip's `+`.
+    if (code.magnitude_scale) setRatingTarget({ clipId, code })
+  }, [history, runOptimisticCode, setRatingTarget])
+
   const handleCodeToggle = useCallback((code: Code) => {
     if (selectedClips.length === 0) return
     // INV-6 (#446): "do I have it?", not "does anyone?" — apply my own layer
@@ -791,44 +952,57 @@ export default function ObservationWorkbench() {
     const codeName = code.name
 
     if (clipIds.length === 1) {
-      const clipId = clipIds[0]
-      if (allHaveCode) {
-        // #868 (f): a clip cannot be RATED here yet (#868 c), but a rating can
-        // arrive by import or merge and the payload shows it — so the undo of a
-        // removal re-applies with the rating captured now, never bare.
-        // `?? null`, never `||`: a stored 0 is a rating.
-        const previous = clipMap.get(clipId)?.applied_code_details
-          .find(d => d.code_id === codeId && d.user_id === selfId)?.magnitude ?? null
-        history.execute({
-          type: 'code_remove',
-          description: `Remove code "${codeName}"`,
-          redo: () => runOptimisticCode([clipId], codeId, 'remove', () => codingApi.removeCode(clipId, codeId)),
-          undo: () => runOptimisticCode(
-            [clipId], codeId, 'apply',
-            () => codingApi.applyCode(clipId, codeId, undefined, previous),
-            previous,
-          ),
-        })
-      } else {
-        history.execute({
-          type: 'code_apply',
-          description: `Apply code "${codeName}"`,
-          redo: () => runOptimisticCode([clipId], codeId, 'apply', () => codingApi.applyCode(clipId, codeId)),
-          undo: () => runOptimisticCode([clipId], codeId, 'remove', () => codingApi.removeCode(clipId, codeId)),
-        })
-      }
+      // ⚠️ Both arms delegate to the shared pair above — the rating capture and
+      // the strip-on-apply live in ONE place, so the chip's controls and the
+      // row menu cannot drift from the chord. Removing still has nothing to
+      // rate, and a multi-clip apply still opens no strip: one rating standing
+      // in for several judgements is not a rating.
+      if (allHaveCode) removeSingle(clipIds[0], code)
+      else applySingle(clipIds[0], code)
     } else {
       // D23: the multi-clip commit is ONE bulk call (atomic, audit-logged).
       const action = allHaveCode ? 'remove' : 'apply'
       const inverse = action === 'apply' ? 'remove' : 'apply'
+      // #876 — the SIXTH arm of #868 (f), and the one it missed: this arm
+      // re-applied BARE, so undoing a multi-clip removal unrated every clip
+      // silently. One captured rating per clip; the inverse re-applies per
+      // clip whenever any was rated, because the bulk endpoint carries none.
+      const captured = allHaveCode
+        ? new Map(clipIds.map(id => [id, currentMagnitude(id, codeId)] as const))
+        : null
+      const anyRated = captured != null && [...captured.values()].some(v => v != null)
       history.execute({
         type: allHaveCode ? 'code_remove' : 'code_apply',
         description: `${action === 'apply' ? 'Apply' : 'Remove'} code "${codeName}" on ${clipIds.length} clips`,
         redo: () => runOptimisticCode(clipIds, codeId, action, () => codingApi.bulkCode(clipIds, codeId, action)),
-        undo: () => runOptimisticCode(clipIds, codeId, inverse, () => codingApi.bulkCode(clipIds, codeId, inverse)),
+        undo: () => runOptimisticCode(
+          clipIds, codeId, inverse,
+          // The bulk endpoint carries no rating, so a rated restore goes per clip.
+          inverse === 'apply' && anyRated
+            ? () => Promise.all(clipIds.map(id =>
+                codingApi.applyCode(id, codeId, undefined, captured!.get(id) ?? null)))
+            : () => codingApi.bulkCode(clipIds, codeId, inverse),
+          captured ? (id: number) => captured.get(id) ?? null : null,
+        ),
       })
     }
-  }, [selectedClips, clipMap, selfId, history, runOptimisticCode])
+  }, [selectedClips, clipMap, selfId, history, runOptimisticCode, currentMagnitude, applySingle, removeSingle])
+
+  /**
+   * The chip's own controls (#875) — they act on the clip that owns the chip,
+   * which need not be the selected one. Both route through the shared pair, so
+   * the `×` captures the rating, Ctrl+Z restores it, and the `+` opens the
+   * strip for a scaled code, matching the chord.
+   */
+  const handleChipRemove = useCallback((clipId: number, codeId: number) => {
+    const code = codeMap.get(codeId)
+    if (code) removeSingle(clipId, code)
+  }, [codeMap, removeSingle])
+
+  const handleChipApply = useCallback((clipId: number, codeId: number) => {
+    const code = codeMap.get(codeId)
+    if (code) applySingle(clipId, code)
+  }, [codeMap, applySingle])
 
   const handleMultiCodeToggle = useCallback((codesToToggle: Code[]) => {
     if (selectedClips.length === 0 || codesToToggle.length === 0) return
@@ -1347,6 +1521,17 @@ export default function ObservationWorkbench() {
       // shuttle (D4). The branch (gap seek vs next uncoded clip) lives with the
       // coverage derivation, below.
       u: () => coverageJumpRef.current?.() ?? false,
+      // `r` — #868 (c/e/f): re-open the rating strip for an application that
+      // already exists, the verb the three sibling workbenches carry. Returns
+      // FALSE when there is nothing to rate, so the key falls through rather
+      // than being swallowed; opens the FIRST ratable code, and the row menu
+      // names each one. Not list-gated: it acts on the selection, like `s`.
+      r: () => {
+        const target = ratableForSelection()
+        if (!target || target.codes.length === 0) return false
+        openRatingFor(target.clipId, target.codes[0])
+        return true
+      },
       // ── J-K-L transport (D4) ──
       j: () => {
         const p = playbackRef.current
@@ -2293,6 +2478,12 @@ export default function ObservationWorkbench() {
                           coderMap={chipCoderMap}
                           hiddenCoderIds={chipHidden}
                           tabbable={selected}
+                          // #875 — the host owns both gestures, so the `×`
+                          // captures the rating and is undoable with Ctrl+Z like
+                          // the chord beside it, and the `+` opens the rating
+                          // strip for a scaled code (#868 c).
+                          onRemoveCode={codeId => handleChipRemove(clip.id, codeId)}
+                          onApplyCode={codeId => handleChipApply(clip.id, codeId)}
                           /* #771: the chips and their remove buttons belong to
                              the SELECTED clip, exactly like the Delete button
                              below. Gating only Delete left 2N+1 stops per coded
@@ -2443,6 +2634,14 @@ export default function ObservationWorkbench() {
                     <ContextMenuItem onClick={() => openNoteDialog(clip.id)}>
                       Add Note
                     </ContextMenuItem>
+                    {/* #868 (c) — one item per code THIS coder has applied that
+                        declares a scale (the document row's shape). The pointer
+                        route to `r`, and the one that NAMES each code. */}
+                    {ratableCodesForClip(clip.id).map(code => (
+                      <ContextMenuItem key={`rate-${code.id}`} onClick={() => openRatingFor(clip.id, code)}>
+                        Rate &ldquo;{code.name}&rdquo;… <span className="text-xs text-mm-text-faint ml-2 font-mono">r</span>
+                      </ContextMenuItem>
+                    ))}
 
                     <ContextMenuSeparator />
 
@@ -2533,6 +2732,29 @@ export default function ObservationWorkbench() {
                   </ContextMenu>
                 )
               }}
+            />
+          </div>
+        )}
+        {/*
+          #35 / #868 (c) — the rating strip, mounted BELOW the clip list rather
+          than inside a row, for the two reasons the sibling workbenches record:
+          no room for a tick row in the Codes column at 640×360, and the rows
+          are virtualised — a conditional child inside a row risks the remount
+          that drops DOM focus to <body> (#826). Keyed on the target (#870 c) so
+          a second scaled apply remounts it with a fresh cursor and focus.
+        */}
+        {ratingTarget && ratingTarget.code.magnitude_scale && (
+          // py-1, not py-2: the vertical budget at 640×360 is 85px for the whole
+          // control on the document workbench, and this page stacks a video
+          // pane and a timeline above the list (measured after mounting).
+          <div className="border-t border-mm-border bg-mm-surface px-3 py-1 shrink-0">
+            <MagnitudeStrip
+              key={`${ratingTarget.clipId}-${ratingTarget.code.id}`}
+              codeName={ratingTarget.code.name}
+              scale={ratingTarget.code.magnitude_scale}
+              value={currentMagnitude(ratingTarget.clipId, ratingTarget.code.id)}
+              onCommit={commitMagnitude}
+              onSkip={() => setRatingTarget(null)}
             />
           </div>
         )}

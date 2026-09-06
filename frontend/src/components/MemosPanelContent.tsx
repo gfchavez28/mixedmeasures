@@ -391,7 +391,12 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
         ) : (
           <div className="space-y-2">
             <Select value={newEntityType} onValueChange={(v) => { setNewEntityType(v); setNewEntityId(null) }}>
-              <SelectTrigger className="h-8 text-xs">
+              {/* #892: MEASURED in Chrome's tree — a `SelectValue placeholder`
+                  names NOTHING. `combobox` takes no name from its contents, and
+                  the placeholder only renders while nothing is selected anyway.
+                  The three routes that DO name a trigger are `aria-label`,
+                  `aria-labelledby`, and an `id` paired with a <Label htmlFor>. */}
+              <SelectTrigger className="h-8 text-xs" aria-label="What this memo is about">
                 <SelectValue placeholder="Select type" />
               </SelectTrigger>
               <SelectContent>
@@ -408,7 +413,10 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
                 value={newEntityId != null ? String(newEntityId) : ''}
                 onValueChange={(v) => setNewEntityId(Number(v))}
               >
-                <SelectTrigger className="h-8 text-xs">
+                <SelectTrigger
+                  className="h-8 text-xs"
+                  aria-label={`Which ${ENTITY_TYPE_LABELS[newEntityType]?.toLowerCase() ?? 'entity'} this memo is about`}
+                >
                   <SelectValue placeholder={`Select ${ENTITY_TYPE_LABELS[newEntityType]?.toLowerCase() ?? 'entity'}...`} />
                 </SelectTrigger>
                 <SelectContent>

@@ -150,3 +150,46 @@ export function tickValues(scale: MagnitudeScale): number[] {
 export function anchorLabelFor(value: number, scale: MagnitudeScale): string | null {
   return scale.anchors.find(a => a.value === value)?.label ?? null
 }
+
+/** A scale's range for a sentence: `0–10`, `−1–1`. En dash, Unicode minus (#35 §10). */
+export function scaleRange(scale: MagnitudeScale): string {
+  return `${formatMagnitude(scale.min)}–${formatMagnitude(scale.max)}`
+}
+
+/**
+ * Whether two codes' declared scales DIFFER for the purpose of moving ratings
+ * from one onto the other (#869 b/c): a merge, a collapse, a link.
+ *
+ * "Differ" is a fact about the RANGE — min or max — because that is what decides
+ * whether a rating fits. Step and anchors are presentation. One side declaring a
+ * scale and the other not is also a difference: ratings crossing onto a scale-less
+ * code are kept but cannot be shown until it declares one.
+ */
+export function scalesDiffer(a: MagnitudeScale | null | undefined, b: MagnitudeScale | null | undefined): boolean {
+  if (!a && !b) return false
+  if (!a || !b) return true
+  return a.min !== b.min || a.max !== b.max
+}
+
+/**
+ * The sentence a merge or reconcile surface shows when ratings will cross scales,
+ * or null when nothing needs saying. `from` is the code whose ratings move,
+ * `onto` the code they land on.
+ */
+export function describeScaleCrossing(
+  from: { name: string; scale: MagnitudeScale | null | undefined },
+  onto: { name: string; scale: MagnitudeScale | null | undefined },
+): string | null {
+  if (!scalesDiffer(from.scale, onto.scale)) return null
+  if (from.scale && onto.scale) {
+    return `“${from.name}” is rated ${scaleRange(from.scale)} and “${onto.name}” ${scaleRange(onto.scale)}. `
+      + `Ratings inside ${scaleRange(onto.scale)} are re-read on that scale; `
+      + `ratings outside it are not moved as ratings.`
+  }
+  if (from.scale && !onto.scale) {
+    return `“${from.name}” has a rating scale (${scaleRange(from.scale)}) and “${onto.name}” has none. `
+      + `Its ratings are kept but cannot be shown until “${onto.name}” declares a scale.`
+  }
+  return `“${onto.name}” has a rating scale (${scaleRange(onto.scale!)}) and “${from.name}” has none — `
+    + `nothing on “${from.name}” is rated, so nothing crosses.`
+}

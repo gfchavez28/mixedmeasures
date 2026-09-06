@@ -7,12 +7,12 @@ import {
 } from './merge-code-mapping'
 
 function cand(over: Partial<MergeCodeCandidate> = {}): MergeCodeCandidate {
-  return { code_id: 1, name: 'Empathy', description: null, usage: 3, similarity: 0.88, confident: true, ...over }
+  return { code_id: 1, name: 'Empathy', description: null, usage: 3, similarity: 0.88, confident: true, magnitude_scale: null, ...over }
 }
 function preview(over: Partial<MergeCodePreview> = {}): MergeCodePreview {
   return {
     uuid: 'u-1', name: 'Empathic', description: 'def', color: '#7c3aed',
-    category_name: null, file_app_count: 12, candidates: [cand()], ...over,
+    category_name: null, file_app_count: 12, candidates: [cand()], magnitude_scale: null, ...over,
   }
 }
 function local(over: Partial<LocalCodeLite> = {}): LocalCodeLite {

@@ -1,4 +1,5 @@
 import api from './client'
+import type { MagnitudeScale } from '../magnitude'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,6 +18,9 @@ export interface CodebookCodeNode {
   // #501: typed source identities ("conv:1", "col:13", "doc:2") — lets the
   // peek multi-select UNION sources instead of double-counting shared ones.
   source_keys?: string[]
+  /** #869 (b): the code's declared rating scale, so the merge dialog can say
+   * before a merge when two codes' scales differ. Null when it has none. */
+  magnitude_scale?: MagnitudeScale | null
 }
 
 export interface CodebookCategoryNode {

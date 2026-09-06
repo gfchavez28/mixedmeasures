@@ -50,6 +50,35 @@ interface InlineCodeActionsProps {
    * would change what the control DOES, which is not the defect (#754's rule).
    */
   tabbable?: boolean
+  /**
+   * #875 — when supplied, the HOST owns this mutation and this component only
+   * reports the gesture.
+   *
+   * 🔴 **Why this exists.** The chip's `×` ran its own mutation with a toast-level
+   * Undo that re-applied BARE — measured at the database level: rate 7 → `×` →
+   * press *Undo* → `magnitude` is NULL. That is #868 (f)'s exact defect in the one
+   * removal door the fix did not enumerate, and it sits beside doors on the same
+   * row that ARE undoable, so which recovery you get depended on which pixel you
+   * clicked. A host with a `useHistory` stack takes both gestures now, captures the
+   * rating before removing, and (on apply) opens the rating strip — closing the
+   * `+ Add code` half of #868 (e) at the same time.
+   *
+   * ⚠️ **Opt-in, defaulting to today's behaviour**, exactly like `tabbable` above.
+   * Four of the seven call sites are analysis surfaces (quote cards, the two
+   * content lists, the reconciliation grid) with NO history stack; for them the
+   * toast action is the only recovery there is, so do not remove it and do not
+   * make these props required.
+   *
+   * ⚠️ **The host looks the rating up itself** (each workbench already owns a
+   * `currentMagnitude`), so only the code id crosses this boundary — one source of
+   * truth for "what was the rating", not two.
+   *
+   * ⚠️ **`createAndApplyMutation` deliberately still runs here.** It mints a NEW
+   * code, which by construction declares no scale, so no rating is at stake; its
+   * history gap is pre-existing and out of #875's scope.
+   */
+  onRemoveCode?: (codeId: number) => void
+  onApplyCode?: (codeId: number) => void
 }
 
 export default function InlineCodeActions({
@@ -68,6 +97,8 @@ export default function InlineCodeActions({
   hiddenCoderIds,
   keepOpenOnFocusOutside,
   tabbable = true,
+  onRemoveCode,
+  onApplyCode,
 }: InlineCodeActionsProps) {
   const queryClient = useQueryClient()
   const [addCodeOpen, setAddCodeOpen] = useState(false)
@@ -196,7 +227,11 @@ export default function InlineCodeActions({
             <button
               type="button"
               className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-mm-surface border border-mm-border-subtle flex items-center justify-center opacity-0 group-hover/chip:opacity-100 group-focus-within/chip:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity hover:bg-red-100 dark:hover:bg-red-900/30"
-              onClick={e => { e.stopPropagation(); removeCodeMutation.mutate(row.codeId) }}
+              onClick={e => {
+                e.stopPropagation()
+                if (onRemoveCode) onRemoveCode(row.codeId)
+                else removeCodeMutation.mutate(row.codeId)
+              }}
               tabIndex={tabbable ? undefined : -1}
               title={`Remove ${c.name}`}
               aria-label={`Remove code ${c.name}`}
@@ -249,7 +284,18 @@ export default function InlineCodeActions({
                 <button
                   key={c.id}
                   className={`w-full flex items-center gap-2 px-2 py-1 rounded text-xs text-left hover:bg-mm-surface-hover ${applied ? 'opacity-50 cursor-default' : ''}`}
-                  onClick={() => { if (!applied) addCodeMutation.mutate(c.id) }}
+                  onClick={() => {
+                    if (applied) return
+                    if (onApplyCode) {
+                      // The host records history and opens the rating strip; this
+                      // component still owns its own popover state.
+                      setAddCodeOpen(false)
+                      setCodeSearch('')
+                      onApplyCode(c.id)
+                    } else {
+                      addCodeMutation.mutate(c.id)
+                    }
+                  }}
                   disabled={applied}
                 >
                   <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: getCodeColor(c) }} />

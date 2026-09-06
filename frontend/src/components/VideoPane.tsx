@@ -43,6 +43,29 @@ function storageKey(ownerKind: MediaOwnerKind, ownerId: number) {
     : `mm-video-pane-${ownerId}`
 }
 
+/**
+ * #880 — below `md` the pane opens COLLAPSED, and only when nothing is stored.
+ *
+ * MEASURED at the 640×360 CSS viewport a 1280×720 window has at 200% zoom: the
+ * docked pane is **381 px** tall inside a **209 px** content column, so it alone
+ * exceeds the viewport and everything after it — the timeline, the clip list —
+ * is pushed below the fold. The clip list's virtualiser mounted ZERO rows.
+ *
+ * ⚠️ A stored preference always wins, so this changes nothing for anyone who has
+ * ever set a size; it only moves the FIRST-RUN default at a width where the old
+ * default could not be used. The collapsed bar keeps the transport and its own
+ * "Show video" control, so nothing becomes unreachable.
+ */
+function narrowViewport(): boolean {
+  // `md` in Tailwind's default scale. Guarded: jsdom has no matchMedia.
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+  try {
+    return window.matchMedia('(max-width: 767px)').matches
+  } catch {
+    return false
+  }
+}
+
 function readPersistedMode(ownerKind: MediaOwnerKind, ownerId: number): VideoPaneMode {
   try {
     const v = localStorage.getItem(storageKey(ownerKind, ownerId))
@@ -50,7 +73,7 @@ function readPersistedMode(ownerKind: MediaOwnerKind, ownerId: number): VideoPan
   } catch {
     // private mode — default below
   }
-  return 'm'
+  return narrowViewport() ? 'collapsed' : 'm'
 }
 
 export interface VideoPaneHandle {

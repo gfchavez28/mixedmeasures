@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { stripComments } from '@/lib/strip-comments'
 import { join } from 'node:path'
+import { sourceFiles } from '@/test-support/source-tree'
 
 /**
  * Every surface that offers to DELETE a variable spends the one gate (#812).
@@ -75,21 +76,8 @@ const ALLOWED = new Map<string, string>([
   ],
 ])
 
-function walk(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
-    const abs = join(dir, entry)
-    if (statSync(abs).isDirectory()) {
-      if (entry === 'node_modules' || entry === 'assets') continue
-      walk(abs, out)
-    } else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) {
-      out.push(abs)
-    }
-  }
-  return out
-}
-
 describe('deleting a variable is gated in exactly one place', () => {
-  const files = walk(SRC)
+  const files = sourceFiles({ ext: 'both', floor: 200 })
   const offering = files
     .map(abs => ({ rel: abs.slice(SRC.length + 1), src: stripComments(readFileSync(abs, 'utf8'), abs) }))
     .filter(f => DELETE_AFFORDANCE.test(f.src))

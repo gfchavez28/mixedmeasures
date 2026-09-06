@@ -35,6 +35,7 @@ import CoderCountBadge from '@/components/CoderCountBadge'
 import { useBlindMode } from '@/hooks/useBlindMode'
 import TranscriptPanel, { type PlaybackHandle } from '@/components/TranscriptPanel'
 import MagnitudeStrip from '@/components/MagnitudeStrip'
+import { ratableCodes } from '@/lib/rating-targets'
 import { useCollapsibleColumn } from '@/hooks/useCollapsibleColumn'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
@@ -801,6 +802,70 @@ export default function CodingWorkbench() {
     [ratingTarget, currentMagnitude, history, runOptimisticMagnitude],
   )
 
+  /**
+   * Open the rating strip for an application that ALREADY exists (#868 e/f).
+   * Both the `r` verb and the context menu land here.
+   */
+  const openRatingFor = useCallback((segmentId: number, code: Code) => {
+    if (!code.magnitude_scale) return
+    setSelectedSegments([segmentId])
+    setRatingTarget({ segmentId, code })
+  }, [setSelectedSegments, setRatingTarget])
+
+  /** The codes the ACTIVE coder may rate on one segment, in chip order. */
+  const ratableCodesForSegment = useCallback((segmentId: number): Code[] => {
+    const seg = segmentMap.get(segmentId)
+    if (!seg) return []
+    return ratableCodes(seg.applied_code_details, codeMap, user?.id ?? null)
+  }, [segmentMap, codeMap, user?.id])
+
+  /** The same question for the keyboard, which acts on a SINGLE selected segment. */
+  const ratableForSelection = useCallback((): { segmentId: number; codes: Code[] } | null => {
+    const selected = selectedSegmentsRef.current
+    if (selected.length !== 1) return null
+    return { segmentId: selected[0], codes: ratableCodesForSegment(selected[0]) }
+  }, [ratableCodesForSegment])
+
+  /**
+   * The single-segment apply/remove pair, extracted so the chord toggle, the
+   * context menu and the chip's own controls (#875) share ONE implementation —
+   * including the #868 (f) rating capture and the strip-on-apply.
+   */
+  const removeSingle = useCallback((segmentId: number, codeId: number, codeName: string) => {
+    const previous = currentMagnitude(segmentId, codeId)
+    history.execute({
+      type: 'code_remove',
+      description: `Remove code "${codeName}"`,
+      redo: () => runOptimisticCode([segmentId], codeId, 'remove', true, () => codingApi.removeCode(segmentId, codeId)),
+      undo: () => runOptimisticCode(
+        [segmentId], codeId, 'apply', true,
+        () => codingApi.applyCode(segmentId, codeId, undefined, previous),
+        () => previous,
+      ),
+    })
+  }, [currentMagnitude, history, runOptimisticCode])
+
+  const applySingle = useCallback((segmentId: number, code: Code) => {
+    history.execute({
+      type: 'code_apply',
+      description: `Apply code "${code.name}"`,
+      redo: () => runOptimisticCode([segmentId], code.id, 'apply', true, () => codingApi.applyCode(segmentId, code.id)),
+      undo: () => runOptimisticCode([segmentId], code.id, 'remove', true, () => codingApi.removeCode(segmentId, code.id)),
+    })
+    if (code.magnitude_scale) setRatingTarget({ segmentId, code })
+  }, [history, runOptimisticCode, setRatingTarget])
+
+  /** The chip's own controls (#875) — they act on the row that owns the chip. */
+  const handleChipRemove = useCallback((segmentId: number, codeId: number) => {
+    const code = codeMap.get(codeId)
+    removeSingle(segmentId, codeId, code?.name ?? 'code')
+  }, [codeMap, removeSingle])
+
+  const handleChipApply = useCallback((segmentId: number, codeId: number) => {
+    const code = codeMap.get(codeId)
+    if (code) applySingle(segmentId, code)
+  }, [codeMap, applySingle])
+
   // Toggle code on selected segments with history tracking
   const handleCodeToggle = useCallback(
     (code: Code) => {
@@ -820,36 +885,11 @@ export default function CodingWorkbench() {
       const codeName = code.name
 
       if (selectedSegments.length === 1) {
-        const segmentId = selectedSegments[0]
-        if (allHaveCode) {
-          // #868 (f): the rating is captured NOW, while the application still
-          // exists, and the inverse re-applies WITH it — undoing a removal used
-          // to re-apply bare, so Ctrl+Z silently unrated. `previous` may be 0.
-          const previous = currentMagnitude(segmentId, codeId)
-          history.execute({
-            type: 'code_remove',
-            description: `Remove code "${codeName}"`,
-            redo: () => runOptimisticCode([segmentId], codeId, 'remove', true, () => codingApi.removeCode(segmentId, codeId)),
-            undo: () => runOptimisticCode(
-              [segmentId], codeId, 'apply', true,
-              () => codingApi.applyCode(segmentId, codeId, undefined, previous),
-              () => previous,
-            ),
-          })
-        } else {
-          history.execute({
-            type: 'code_apply',
-            description: `Apply code "${codeName}"`,
-            redo: () => runOptimisticCode([segmentId], codeId, 'apply', true, () => codingApi.applyCode(segmentId, codeId)),
-            undo: () => runOptimisticCode([segmentId], codeId, 'remove', true, () => codingApi.removeCode(segmentId, codeId)),
-          })
-          // #35 variant A — a code that declares a scale opens its rating strip
-          // straight after applying, so the judgement is made with the anchors on
-          // screen. ⚠️ Only on the APPLY branch and only for a single segment:
-          // removing has nothing to rate, and a multi-segment apply would be one
-          // rating standing in for several separate judgements.
-          if (code.magnitude_scale) setRatingTarget({ segmentId, code })
-        }
+        // ⚠️ Both arms delegate to the shared pair above, so the chip's controls
+        // and the context menu cannot drift from the chord (#875). Removing has
+        // nothing to rate; a multi-segment apply still opens no strip.
+        if (allHaveCode) removeSingle(selectedSegments[0], codeId, codeName)
+        else applySingle(selectedSegments[0], code)
       } else {
         const action = allHaveCode ? 'remove' : 'apply'
         const inverse = action === 'apply' ? 'remove' : 'apply'
@@ -875,7 +915,7 @@ export default function CodingWorkbench() {
       }
       showSaved()
     },
-    [selectedSegments, segmentMap, history, runOptimisticCode, showSaved, user?.id, currentMagnitude]
+    [selectedSegments, segmentMap, history, runOptimisticCode, showSaved, user?.id, currentMagnitude, applySingle, removeSingle]
   )
 
   // Handle toggling multiple codes at once (Item 47)
@@ -1465,6 +1505,20 @@ export default function CodingWorkbench() {
         handleGroupHotkey()
         return true
       },
+      // #868 (e/f) — `r` re-opens the rating strip for an application that
+      // already exists, so a mis-keyed rating can be corrected and a code
+      // applied by any other door can still be rated. Chosen over a per-chip
+      // button because the chip row is packed and its targets are already under
+      // the 24px floor (#647); the status bar carries the discovery.
+      // ⚠️ Returns FALSE when there is nothing to rate, so the key falls through
+      // rather than being silently swallowed. Opens the FIRST ratable code; the
+      // context menu names each one when a segment carries two.
+      r: () => {
+        const target = ratableForSelection()
+        if (!target || target.codes.length === 0) return false
+        openRatingFor(target.segmentId, target.codes[0])
+        return true
+      },
     },
     clearSelection: () => setSelectedSegments([]),
     // Video theater/PiP exit — the overlay Escape layer (slab 4).
@@ -1927,6 +1981,10 @@ export default function CodingWorkbench() {
             codeMap={codeMap}
             onCodeChange={handleInlineCodeChange}
             onFocusCode={handleFocusCode}
+            onChipRemove={handleChipRemove}
+            onChipApply={handleChipApply}
+            onRateCode={openRatingFor}
+            ratableCodesFor={ratableCodesForSegment}
             coderMap={multiCoder ? coderMap : undefined}
             coders={coders}
             activeCoderId={user?.id ?? null}
@@ -2135,7 +2193,7 @@ export default function CodingWorkbench() {
         <span>Conversation</span>
         {selectedSegments.length > 0 && <span>{selectedSegments.length} selected</span>}
         <div className="flex-1" />
-        <span className="opacity-60">{codeKeyHint(codes)} · s: quote · c: create code · n: note · j: next uncoded · g: group · Ctrl+Z/Y: undo/redo</span>
+        <span className="opacity-60">{codeKeyHint(codes)} · s: quote · c: create code · n: note · r: rate · j: next uncoded · g: group · Ctrl+Z/Y: undo/redo</span>
       </div>
 
       {/* Floating create code dialog */}

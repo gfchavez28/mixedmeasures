@@ -49,14 +49,15 @@
  * paints — a change made for the guard's benefit rather than a user's.
  */
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   contrast, over, parseTailwindPalette, readToken,
   TAILWIND_REFERENCE_RATIOS, AA_NORMAL, type Rgb,
 } from './contrast'
+import { SRC_DIR, sourceFiles } from '@/test-support/source-tree'
 
-const SRC = join(__dirname, '..')
+const SRC = SRC_DIR
 const PALETTE = parseTailwindPalette(
   readFileSync(join(__dirname, '../../node_modules/tailwindcss/theme.css'), 'utf8'),
 )
@@ -86,15 +87,6 @@ const KNOWN_BELOW_AA: Array<[pair: string, floor: number, why: string]> = []
 
 interface Pair { theme: 'light' | 'dark'; fg: string; bg: string; alpha: number | null; count: number }
 
-function walk(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name)
-    if (statSync(p).isDirectory()) walk(p, out)
-    else if (/\.tsx?$/.test(name) && !name.includes('.test.')) out.push(p)
-  }
-  return out
-}
-
 const STRING_RE = /`([^`]*)`|"([^"\n]*)"|'([^'\n]*)'/g
 const INTERP_RE = /\$\{[\s\S]*?\}/g
 const QUOTED_RE = /'([^'\n]*)'|"([^"\n]*)"/g
@@ -123,7 +115,7 @@ function scan() {
   const pairs = new Map<string, Pair>()
   const unparseable = new Set<string>()
 
-  for (const file of walk(SRC)) {
+  for (const file of sourceFiles({ ext: 'both', floor: 250 })) {
     const src = readFileSync(file, 'utf8')
     for (const m of src.matchAll(STRING_RE)) {
       const raw = m[1] ?? m[2] ?? m[3] ?? ''

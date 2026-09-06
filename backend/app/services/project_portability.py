@@ -26,7 +26,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Session
 
-from . import media_storage
+from . import magnitude, media_storage
 from .archive_safety import assert_expanded_size_within_limit, assert_member_within
 from .text_offsets import has_astral, utf16_to_codepoint
 from .text_similarity import similarity_ratio
@@ -762,8 +762,9 @@ def export_project(
             # is reached through a response_model, which DROPS undeclared fields,
             # so this count never reached the import preview. A default satisfies
             # both (old manifests read 0; new ones carry the real count).
-            # `canvas_count`/`canvas_theme_count` below are still undeclared —
-            # nothing renders them today; declare them the same way if that changes.
+            # `canvas_count`/`canvas_theme_count` are declared the same way since
+            # 2026-09-04 — every key written here must be a field on
+            # `ProjectSummary`, or the test-time `extra='forbid'` detector fails.
             "observation_count": len(observations),
             "code_count": len(codes),
             "category_count": len(code_categories),
@@ -1697,6 +1698,8 @@ def build_merge_code_preview(
                 "usage": usage_map.get(lc.id, 0),
                 "similarity": round(sim, 4),
                 "confident": sim >= _MERGE_CODE_CONFIDENT_SIMILARITY,
+                # #869: so the reconcile step can say when the scales differ.
+                "magnitude_scale": magnitude.read_scale(lc),
             }
             for sim, lc in scored[:_MERGE_CODE_CANDIDATE_LIMIT]
         ]
@@ -1708,8 +1711,27 @@ def build_merge_code_preview(
             "category_name": file_cat_names.get(c.get("category_id")),
             "file_app_count": file_counts.get(c["_original_id"], 0),
             "candidates": candidates,
+            "magnitude_scale": _file_code_scale(c),
         })
     return previews
+
+
+def _file_code_scale(file_code: dict) -> dict | None:
+    """A FILE code's declared scale, read off its exported columns (#869).
+
+    The export copies `magnitude_min/max/step/labels` by reflection, so the dict
+    carries the model's column names; `read_scale` reads attributes, so wrap the
+    dict as an object rather than re-implementing the parse (and its shape
+    re-check) here. Absent columns — a pre-v6 file — read as no scale.
+    """
+    from types import SimpleNamespace
+
+    return magnitude.read_scale(SimpleNamespace(
+        magnitude_min=file_code.get("magnitude_min"),
+        magnitude_max=file_code.get("magnitude_max"),
+        magnitude_step=file_code.get("magnitude_step"),
+        magnitude_labels=file_code.get("magnitude_labels"),
+    ))
 
 
 def _repair_pre_v5_excerpt_offsets(
@@ -1872,6 +1894,7 @@ def import_project(
         report.setdefault("codes_created", 0)
         # #35 — matched applications whose copy carried a DIFFERENT rating.
         report.setdefault("magnitude_conflicts", 0)
+        report.setdefault("ratings_out_of_range", 0)
     with zipfile.ZipFile(str(file_path), "r") as zf:
         # Cheap pre-flight (matches validate_project_file). Per-member containment
         # is enforced inside `_extract_zip_member`; the expansion cap is #696.
@@ -2559,6 +2582,18 @@ def import_project(
         )
 
         # ── q. CodeApplications ────────────────────────────────────
+        # #869 (c): the target code per remapped id, for the rating range check.
+        # A merge can land a file code on a DIFFERENTLY-scaled local one (a
+        # uuid match whose scale was edited on one side, or a J3-2b collapse),
+        # and a hand-edited file can carry anything — so every rating is checked
+        # against the code it actually lands on, in every import mode.
+        _target_codes: dict[int, Code] = {}
+
+        def _target_code(cid: int) -> Code | None:
+            if cid not in _target_codes:
+                _target_codes[cid] = db.get(Code, cid)
+            return _target_codes[cid]
+
         for item in data.get("code_applications", []):
             seg_id = _remap_id(remap, "segments", item.get("segment_id"))
             dv_id = _remap_id(remap, "dataset_values", item.get("dataset_value_id"))
@@ -2597,22 +2632,39 @@ def import_project(
                     # colleague rides the flag. An equal rating, or a copy with
                     # no rating, has nothing to say and CLEARS a stale flag from
                     # an earlier merge rather than leaving it standing.
-                    incoming = item.get("magnitude")
-                    if not (isinstance(incoming, (int, float)) and not isinstance(incoming, bool)
-                            and math.isfinite(incoming)):
-                        incoming = None
+                    # An out-of-range incoming rating is STILL the other number
+                    # (#869 c) — the flag holds a fact to adjudicate, not a value
+                    # any statistic reads, so no range check applies to it.
+                    incoming = magnitude.finite_rating(item.get("magnitude"))
                     if incoming is not None and incoming != existing.magnitude:
-                        existing.magnitude_conflict = float(incoming)
+                        existing.magnitude_conflict = incoming
                         if report is not None:
                             report["magnitude_conflicts"] += 1
                     else:
                         existing.magnitude_conflict = None
                     continue
+            # #869 (c): a NEW row's rating must fit the scale of the code it lands
+            # on. One that does not is imported UNRATED with the number kept as the
+            # row's conflict — the §6d shape (never lose the number, never store a
+            # value the instrument cannot hold) — and counted for the report. A
+            # scale-less target keeps the rating as a rating (§5's clearing rule).
+            # Non-finite values (JSON's bare `Infinity`, the #625 door) drop to None
+            # in `finite_rating`, for both columns.
+            rating = magnitude.finite_rating(item.get("magnitude"))
+            conflict = magnitude.finite_rating(item.get("magnitude_conflict"))
+            landing = _target_code(code_id) if code_id is not None else None
+            if landing is not None and magnitude.value_outside_scale(landing, rating):
+                conflict = rating
+                rating = None
+                if report is not None:
+                    report["ratings_out_of_range"] += 1
             _add(CodeApplication, item, {
                 "segment_id": seg_id,
                 "dataset_value_id": dv_id,
                 "code_id": code_id,
                 "user_id": app_user_id,
+                "magnitude": rating,
+                "magnitude_conflict": conflict,
             })
             if import_mode == "merge" and report is not None:
                 report["applications_added"] += 1

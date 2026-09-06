@@ -189,10 +189,9 @@ across, leaving the original and its coding untouched.
 - **Rating scales on codes** — a code can declare a scale (minimum, maximum, step,
   anchor labels) and a coder rates each application on it: not just *is this
   present* but *how much*. Unrated is a real, distinct state, never a zero. Ratings
-  carry into the reliability figures, the consensus layer and the exports. *(In
-  this release the rating control is offered on conversation and document
-  transcripts; observation clips and text coding display ratings but cannot yet
-  record them.)*
+  carry into the reliability figures, the consensus layer and the exports, and can
+  be recorded on **every coding surface** — conversation and document transcripts,
+  observation clips, and open-text responses.
 - **Participants** and **speakers** form a shared cross-source identity spine, so a
   person links across their survey record and their interview. Datasets with an
   identifier column ("Participant ID", "Respondent", …) link their rows to
@@ -390,6 +389,10 @@ Common ones — see `backend/app/config.py` for the full list:
 | `MM_BACKUP_DIR` | `backups` | Backup storage |
 | `MM_INACTIVITY_TIMEOUT_MINUTES` | `0` (off) | Auto-logout on a shared machine (e.g. `30`) |
 | `MM_COOKIE_SECURE` | `false` | Set `true` when serving over HTTPS |
+| `MM_AUTO_BACKUP_INTERVAL_HOURS` | `4` | How often the periodic automatic backup runs |
+| `MM_AUTO_BACKUP_MAX_COUNT` | `5` | How many automatic backups are kept before the oldest is rotated out |
+| `MM_SESSION_EXPIRE_HOURS` | `24` | Session lifetime (multi-user mode) |
+| `MM_CSRF_ENABLED` | `true` | CSRF protection on state-changing requests; leave on |
 
 The bare names (`INACTIVITY_TIMEOUT_MINUTES`, `COOKIE_SECURE`) are still accepted as
 aliases, but the `MM_`-prefixed form takes precedence when both are set.

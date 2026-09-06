@@ -6,12 +6,72 @@ import os
 os.environ["MM_DATABASE_PATH"] = ":memory:"
 
 import csv
+import importlib
+import pkgutil
 import pytest
 from datetime import datetime, timezone
+from pydantic import BaseModel
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from starlette.requests import Request
 from app.database import Base
+
+
+# ── Every wire schema refuses a key it does not declare — IN TESTS (#855) ──────
+#
+# Pydantic's default is `extra='ignore'`: a dict carrying a key the model does not
+# declare validates cleanly and the key is DROPPED, silently. That default is how
+# a service could write `report["magnitude_conflicts"]`, the client could read it,
+# and the wire could carry nothing in between for a whole release cycle (#855's
+# fourteenth) — and how `scale_values`, `missing_values`, `derived_via`,
+# `observation_count` and `suggested_missing_values` each cost a defect first.
+# Every one was fixed by declaring the field and adding a comment saying the
+# schema had to declare it. This is the general form: under pytest EVERY class in
+# `app.schemas` runs with `extra='forbid'`, so a key the service emits that the
+# schema does not declare is a `ValidationError` in whichever test constructs it.
+#
+# ⚠️ TEST-TIME ONLY, deliberately. Production keeps `extra='ignore'`: a forbid at
+# response time would turn the same defect into a 500 for the researcher (the
+# #689 class — a request that computed fine and died serialising).
+#
+# ⚠️ What it sees: every construction of a schema from a dict inside the test
+# process — explicit `Model(**d)` / `Model(field=d)` in a router or a direct-call
+# test, and `response_model` validation under `TestClient`. What it does NOT see:
+# a router that RETURNS a bare dict under `response_model=` when the test calls
+# the function directly, because FastAPI's serialisation never runs there.
+#
+# MEASURED before wiring (2026-09-04, the whole suite under this flip): 13
+# failures — three real drops (`speaker_color` on the code-analysis segments,
+# `canvas_count`/`canvas_theme_count` on the export manifest, both now declared)
+# and one DELIBERATE projection (`DatasetDataColumnResponse`, which now excludes
+# `DATA_PAYLOAD_OMITS` explicitly instead of relying on the silent drop).
+# Population + falsifier: `tests/test_schema_extra_forbid.py`.
+
+def _forbid_undeclared_keys_on_every_schema() -> frozenset[type[BaseModel]]:
+    import app.schemas as _schemas_pkg
+
+    classes: set[type[BaseModel]] = set()
+    for info in pkgutil.walk_packages(_schemas_pkg.__path__, _schemas_pkg.__name__ + "."):
+        module = importlib.import_module(info.name)
+        for obj in vars(module).values():
+            if (
+                isinstance(obj, type)
+                and issubclass(obj, BaseModel)
+                and obj is not BaseModel
+                and obj.__module__.startswith("app.schemas")
+            ):
+                classes.add(obj)
+    for cls in classes:
+        cls.model_config["extra"] = "forbid"
+    # Rebuild twice: a parent's core schema embeds its children's, so the second
+    # pass picks up children rebuilt after the parent in the first.
+    for _ in range(2):
+        for cls in classes:
+            cls.model_rebuild(force=True)
+    return frozenset(classes)
+
+
+SCHEMA_CLASSES_UNDER_FORBID = _forbid_undeclared_keys_on_every_schema()
 
 
 # ── Rate-limited router test helper ──────────────────────────────────────────

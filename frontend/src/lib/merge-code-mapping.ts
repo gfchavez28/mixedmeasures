@@ -4,6 +4,7 @@
 // is unit-testable. Decisions are keyed by the file code's stable `uuid`.
 
 import type { MergeCodePreview, MergeCodeCandidate, CodeMapping, CodeMappingDecision } from './api'
+import type { MagnitudeScale } from './magnitude'
 
 // Name-similarity bars (0–1, matching the backend `similarity` scale). Link is offered at
 // a "close" name match; bulk Collapse uses a STRICTER "near-exact" bar because collapse is
@@ -16,6 +17,9 @@ export interface LocalCodeLite {
   id: number
   name: string
   color: string | null
+  /** #869: the code's declared rating scale, so a reconcile target chosen from
+   * "all your codes" can be compared with the file code's too. */
+  magnitude_scale?: MagnitudeScale | null
 }
 
 /**

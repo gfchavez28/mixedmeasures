@@ -25,6 +25,14 @@ class ProjectSummary(BaseModel):
     # instead. Old manifests parse and read 0; new ones carry the real count.
     # Any future additive summary field belongs here on the same terms.
     observation_count: int = 0
+    # Written by every exporter since the canvas shipped and dropped at the
+    # wire until 2026-09-04 — the exporter's own comment said "declare them the
+    # same way if that changes". The test-time `extra='forbid'` detector
+    # (#855, `tests/test_schema_extra_forbid.py`) is what changed it: a key the
+    # service writes and the schema does not declare is a failure now, not a
+    # comment.
+    canvas_count: int = 0
+    canvas_theme_count: int = 0
 
 
 class ProjectExportManifest(BaseModel):
@@ -74,6 +82,11 @@ class MergeCodeCandidate(BaseModel):
     usage: int
     similarity: float
     confident: bool
+    # #869: the local code's declared rating scale (`magnitude.read_scale` shape),
+    # so the reconcile step can SAY when it differs from the file code's before
+    # the merge runs — a collapse across scales flags out-of-range ratings rather
+    # than importing them.
+    magnitude_scale: dict | None = None
 
 
 class MergeCodePreview(BaseModel):
@@ -89,6 +102,8 @@ class MergeCodePreview(BaseModel):
     category_name: str | None = None
     file_app_count: int
     candidates: list[MergeCodeCandidate] = []
+    # #869: the FILE code's declared rating scale, read off its exported columns.
+    magnitude_scale: dict | None = None
 
 
 class ImportValidationResult(BaseModel):
@@ -127,6 +142,10 @@ class MergeReport(BaseModel):
     # on the SERVICE dict. `test_trackj_j3_roundtrip.py::TestMergeReport` now pins
     # that every key the service writes is a field here.
     magnitude_conflicts: int = 0
+    # #869 (c): NEW (unmatched) applications whose incoming rating fell outside
+    # the target code's declared scale — imported UNRATED with the number kept as
+    # the row's `magnitude_conflict`, so nothing is lost and the grid can show it.
+    ratings_out_of_range: int = 0
 
 
 class ProjectImportResult(BaseModel):
@@ -142,3 +161,5 @@ class CodebookImportResult(BaseModel):
     codes_created: int
     codes_skipped: int
     codes_uncategorized: int
+    # #869 (d): codes created WITH their declared rating scale.
+    scales_imported: int = 0

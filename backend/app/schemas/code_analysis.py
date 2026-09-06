@@ -54,6 +54,12 @@ class ContextSegment(BaseModel):
     sequence_order: int
     speaker_name: str | None
     speaker_color_index: int
+    # The speaker's CUSTOM colour, when one is set. The service has always
+    # emitted it; the schema never declared it, so Pydantic dropped it at the
+    # wire and the analysis surfaces could only ever paint the index palette
+    # (#855's class, found by the test-time `extra='forbid'` detector,
+    # 2026-09-04). Defaulted, so an older payload still parses.
+    speaker_color: str | None = None
     is_facilitator: bool
     text: str
     start_time: float | None
@@ -70,6 +76,9 @@ class CodedSegmentWithContext(BaseModel):
     sequence_order: int
     speaker_name: str | None
     speaker_color_index: int
+    # See `ContextSegment.speaker_color` — emitted by the service, dropped by
+    # the schema until 2026-09-04.
+    speaker_color: str | None = None
     is_facilitator: bool
     text: str
     start_time: float | None

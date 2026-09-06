@@ -132,8 +132,22 @@ export function ValueLabelRows({
   })
 
   const errId = `${idPrefix}-labels-error`
+  /**
+   * 🔴 #890: the MARKER and the MESSAGE are ONE decision, and they were made twice.
+   *
+   * `rowAria` used to key on `validation.badRow` alone while the `<p id={errId}>`
+   * below keyed on `showError` — so in the retro dialog, which deliberately stays
+   * silent until a label is typed, a pristine empty row was announced
+   * `aria-invalid` with `aria-describedby` pointing at an element THAT WAS NEVER
+   * RENDERED. Measured live on the Variables view: two inputs invalid, target
+   * absent, and no `role="alert"` anywhere on the page — the researcher is told
+   * something is wrong, sighted or not, and given no reason.
+   *
+   * One boolean now drives both, so a dangling reference is unrepresentable.
+   */
+  const errorShown = !validation.ok && (showError ?? rows.some(r => r.code || r.label))
   const rowAria = (i: number) =>
-    validation.badRow === i
+    errorShown && validation.badRow === i
       ? { 'aria-invalid': true as const, 'aria-describedby': errId }
       : {}
 
@@ -210,7 +224,7 @@ export function ValueLabelRows({
         </Button>
       </div>
 
-      {!validation.ok && (showError ?? rows.some(r => r.code || r.label)) && (
+      {errorShown && (
         <p id={errId} role="alert" className="text-xs text-amber-600 dark:text-amber-400">
           {validation.msg}
         </p>

@@ -190,9 +190,13 @@ export default function AppendImport() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
+                  {/* #892: the Label carries no `htmlFor` and a <label> cannot
+                      name a button anyway, so this trigger announced as an
+                      unnamed combobox despite the visible text above it. The
+                      name REPEATS that text verbatim (WCAG 2.5.3). */}
                   <Label className="text-sm">File Encoding</Label>
                   <Select value={encoding} onValueChange={setEncoding}>
-                    <SelectTrigger className="w-48">
+                    <SelectTrigger className="w-48" aria-label="File Encoding">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>

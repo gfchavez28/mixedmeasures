@@ -26,6 +26,8 @@ from ..models.speaker import Speaker
 from ..models.conversation import Conversation
 from ..models.participant import Participant
 from ..auth import get_current_user
+from ..services import magnitude
+from ..services.audit import log_action
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
 from ..services.coding_layers import non_consensus_filter
@@ -33,7 +35,7 @@ from ..services.text_analysis import substantive_text_clause
 from .helpers import _get_project_or_404, parse_int_list, sanitize_csv_filename, TEXT_TYPES
 from .export_helpers import csv_safe
 from ..schemas.text_coding import (
-    TextCodeRequest, BulkCodeRequest, BulkRemoveCodeRequest,
+    TextCodeRequest, TextMagnitudeUpdate, BulkCodeRequest, BulkRemoveCodeRequest,
     TextNoteCreate, TextNoteUpdate,
     TextCodingConfigUpdate,
     TextsListResponse, TextResponse, RecordsListResponse, RecordResponse,
@@ -852,12 +854,40 @@ async def apply_code(
         CodeApplication.code_id == data.code_id,
         CodeApplication.user_id == user.id,
     ).first()
+
+    # #35 / #868 (d) — a rating supplied here is validated against the code's
+    # declared scale BEFORE anything is written, so a bad value cannot half-apply
+    # a code. Omitted and explicit-null are different instructions (see
+    # `TextCodeRequest`). Same shape as `routers/coding.py::apply_code`; the
+    # three questions themselves live in `services/magnitude.py`, so this door
+    # cannot answer them differently from the segment one.
+    rating_supplied = "magnitude" in data.model_fields_set
+    rating = None
+    if rating_supplied:
+        try:
+            rating = magnitude.validate_value(code, data.magnitude)
+        except magnitude.MagnitudeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     if existing:
+        # Already applied by this coder. Re-applying is a no-op EXCEPT for a
+        # rating: silently discarding the value would make the strip appear to
+        # save. No group fan-out here — a dataset cell has no segment group.
+        if rating_supplied and (
+            existing.magnitude != rating or existing.magnitude_conflict is not None
+        ):
+            existing.magnitude = rating
+            # Rating it again IS the adjudication of a merge conflict (§6d).
+            existing.magnitude_conflict = None
+            if consensus_enabled(db):
+                mark_consensus_stale(db, project_id, dataset_value_ids=[data.dataset_value_id])
+            db.commit()
         return TextCodeResponse(
             dataset_value_id=data.dataset_value_id,
             code_id=data.code_id,
             applied=True,
             created_at=existing.created_at,
+            magnitude=existing.magnitude,
         )
 
     ca = CodeApplication(
@@ -866,6 +896,7 @@ async def apply_code(
         code_id=data.code_id,
         user_id=user.id,
         attribution=data.attribution,
+        magnitude=rating,
     )
     db.add(ca)
     if consensus_enabled(db):
@@ -878,6 +909,86 @@ async def apply_code(
         code_id=data.code_id,
         applied=True,
         created_at=ca.created_at,
+        magnitude=ca.magnitude,
+    )
+
+
+# ── 5b. PATCH /code/magnitude ────────────────────────────────────────────────
+
+@router.patch("/code/magnitude", response_model=TextCodeResponse)
+def set_text_code_magnitude(
+    project_id: int,
+    data: TextMagnitudeUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Set or clear THIS coder's rating on an already-applied code on a dataset
+    cell (#35, #868 d) — the fourth coding surface's rating door.
+
+    The segment sibling is `routers/coding.py::set_code_magnitude`, and the two
+    must answer the three questions (may this code carry a scale · is the value
+    legal · whose application is this) identically — which they do by asking
+    `services/magnitude.py` and scoping to `user.id`, not by sharing code paths
+    that differ only in the target column.
+
+    ⚠️ Rates the CALLER's application only, never a colleague's (the per-coder
+    layer rule; a rating is one coder's judgement).
+
+    ⚠️ `magnitude: null` UNRATES. It does not write 0.
+
+    Plain `def`, like its sibling (§10b): the body awaits nothing.
+    """
+    _get_project_or_404(db, project_id, user.id)
+    _get_text_value_or_404(db, project_id, data.dataset_value_id, user.id)
+
+    code = db.query(Code).filter(
+        Code.id == data.code_id,
+        Code.project_id == project_id,
+    ).first()
+    if not code:
+        raise HTTPException(status_code=404, detail="Code not found")
+
+    application = db.query(CodeApplication).filter(
+        CodeApplication.dataset_value_id == data.dataset_value_id,
+        CodeApplication.code_id == data.code_id,
+        CodeApplication.user_id == user.id,
+    ).first()
+    if not application:
+        raise HTTPException(
+            status_code=404,
+            detail="You have not applied this code to this response, so there is nothing to rate.",
+        )
+
+    try:
+        rating = magnitude.validate_value(code, data.magnitude)
+    except magnitude.MagnitudeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    application.magnitude = rating
+    # Re-rating (or unrating) IS the adjudication of a merge conflict (§6d).
+    application.magnitude_conflict = None
+
+    log_action(
+        db,
+        action="code_magnitude_set" if rating is not None else "code_magnitude_cleared",
+        entity_type="code_application",
+        entity_id=application.id,
+        user_id=user.id,
+        project_id=project_id,
+        details={"dataset_value_id": data.dataset_value_id, "code_id": data.code_id, "magnitude": rating},
+    )
+    # A rating change moves what a consensus over this target would say, so it
+    # staleizes exactly like an apply/remove does (the every-mutation-site rule).
+    if consensus_enabled(db):
+        mark_consensus_stale(db, project_id, dataset_value_ids=[data.dataset_value_id])
+    db.commit()
+
+    return TextCodeResponse(
+        dataset_value_id=data.dataset_value_id,
+        code_id=data.code_id,
+        applied=True,
+        created_at=application.created_at,
+        magnitude=rating,
     )
 
 
@@ -894,9 +1005,16 @@ async def remove_code(
     _get_project_or_404(db, project_id, user.id)
     _get_text_value_or_404(db, project_id, dataset_value_id, user.id)
 
+    # THIS coder's application only (per-coder layer; #J2-1b). 🔴 #879: this
+    # filter had no `user_id` from the day the per-coder layer shipped, so with
+    # two coders on one response `.first()` returned the LOWEST id's row — a
+    # colleague's — and deleted it, while the caller's own application stayed.
+    # The bulk sibling below was scoped; the single door, the one every chord
+    # and every chip `×` on this surface goes through, was not.
     ca = db.query(CodeApplication).filter(
         CodeApplication.dataset_value_id == dataset_value_id,
         CodeApplication.code_id == code_id,
+        CodeApplication.user_id == user.id,
     ).first()
     if not ca:
         raise HTTPException(status_code=404, detail="Code application not found")

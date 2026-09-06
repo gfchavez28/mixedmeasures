@@ -23,27 +23,15 @@
  * heard of provenance — is caught.
  */
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { sourceFiles } from '@/test-support/source-tree'
 
 const SRC = join(__dirname, '..')
 
-function walk(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry)
-    if (statSync(full).isDirectory()) {
-      if (entry === 'node_modules' || entry === '__snapshots__') continue
-      walk(full, out)
-    } else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) {
-      out.push(full)
-    }
-  }
-  return out
-}
-
 /** Files that call `recodeApi.create`, with their text. */
 function createCallers(): { path: string; text: string }[] {
-  return walk(SRC)
+  return sourceFiles({ ext: 'both', floor: 250 })
     .map(path => ({ path, text: readFileSync(path, 'utf8') }))
     .filter(f => f.text.includes('recodeApi.create('))
 }

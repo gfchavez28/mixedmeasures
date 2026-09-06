@@ -27,14 +27,17 @@
  * stated*, satisfied either way.
  */
 import { describe, it, expect } from 'vitest'
-import { readdirSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { stripComments } from '../strip-comments'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
+import { sourceFiles } from '@/test-support/source-tree'
 
 const API_DIR = __dirname
 
-const SOURCES = readdirSync(API_DIR)
-  .filter(f => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+// The api directory, one level, `.ts` only. The walk and its floor live in
+// `sourceFiles()` (#729/#730).
+const SOURCES = sourceFiles({ root: 'lib/api', ext: 'ts', floor: 10, recursive: false })
+  .map(f => basename(f))
   // `download.ts` DEFINES the budget and is where the one legitimate
   // `responseType: 'blob'` without a literal timeout lives (it passes
   // `config?.timeout ?? EXPORT_TIMEOUT_MS`).

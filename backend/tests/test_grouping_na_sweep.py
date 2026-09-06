@@ -22,6 +22,8 @@ import asyncio
 import re
 from pathlib import Path
 
+from tests.guard_support import APP_DIR, app_files
+
 from app.models.user import User
 from app.models.project import Project
 from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
@@ -115,8 +117,6 @@ def test_code_density_excludes_recognized_na(db_session):
 
 # ── Source sweep ─────────────────────────────────────────────────────────────
 
-APP_DIR = Path(__file__).resolve().parents[1] / "app"
-
 # The grouping-map select shapes. The `,?\s*\)` terminator excludes the
 # four-column (…, value_text, value_numeric) VALUE loads, which are cell reads,
 # not grouping maps.
@@ -180,8 +180,10 @@ IS_NA_ALLOWLIST: dict[str, int] = {
 #
 # The population is therefore asserted INSIDE `_scan`, not in a test beside it:
 # the protection travels with every caller, present and future, instead of
-# depending on whoever adds the fourth arm remembering that it needs one.
-_MIN_APP_FILES = 100  # 163 as of 2026-08-09 — a floor for a BAD ROOT, not a growth pin
+# depending on whoever adds the fourth arm remembering that it needs one. Since
+# #729's substrate the walk and both self-checks live in `tests/guard_support.py`;
+# this module names only its floor and the modules it exists to police.
+_MIN_APP_FILES = 100  # 177 as of 2026-09-04 — a floor for a BAD ROOT, not a growth pin
 _POPULATION_SENTINELS = (
     "services/missing_values.py",  # the predicate owner (excluded from the _is_na arm)
     "services/grouping.py",        # THE loader, and an allowlisted three-column site
@@ -190,23 +192,7 @@ _POPULATION_SENTINELS = (
 
 def _app_files() -> list[Path]:
     """Every `app/` module, with the walk proven non-vacuous before it is used."""
-    files = sorted(APP_DIR.rglob("*.py"))
-    assert len(files) >= _MIN_APP_FILES, (
-        f"This sweep's population is {len(files)} file(s) under {APP_DIR} — "
-        f"expected at least {_MIN_APP_FILES}. The scan is looking at the wrong "
-        "tree, and because rglob returns [] for a bad path instead of raising, "
-        "every assertion in this file would otherwise pass VACUOUSLY (#730). "
-        "Fix APP_DIR — do NOT lower this floor."
-    )
-    rels = {p.relative_to(APP_DIR).as_posix() for p in files}
-    missing = [s for s in _POPULATION_SENTINELS if s not in rels]
-    assert not missing, (
-        f"This sweep cannot see {missing} under {APP_DIR}. A file COUNT alone "
-        "cannot tell this tree from some other tree that also contains .py "
-        "files; these are the modules the sweep exists to police, so their "
-        "absence means the root is wrong even though the count looked fine."
-    )
-    return files
+    return app_files(floor=_MIN_APP_FILES, sentinels=_POPULATION_SENTINELS)
 
 
 def test_the_sweep_can_see_the_app_tree():

@@ -14,9 +14,9 @@
  * sentence that gets corrected in one place and left wrong in another.
  */
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { stripComments } from './strip-comments'
+import { SOURCE_SCAN_TIMEOUT_MS, sourceFiles } from '@/test-support/source-tree'
 
 import {
   LOAD_BEARING_PHRASES,
@@ -28,25 +28,14 @@ import {
   RELIABILITY_EXPLAINER_OPEN,
 } from './source-kind-copy'
 
-const SRC = join(__dirname, '..')
 const OWNER = 'lib/source-kind-copy.ts'
-
-function tsFilesUnder(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
-    const full = join(dir, entry.name)
-    if (entry.isDirectory()) return tsFilesUnder(full)
-    if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) return []
-    return [full]
-  })
-}
 
 /** Comments explaining the rule are documentation, not a re-typed gate. */
 const code = stripComments
 
 describe('source-kind copy is single-sourced (fail-closed)', () => {
-  const files = tsFilesUnder(join(SRC, 'pages'))
-    .concat(tsFilesUnder(join(SRC, 'components')))
-    .concat(tsFilesUnder(join(SRC, 'lib')).filter(f => !f.endsWith('source-kind-copy.ts')))
+  const files = sourceFiles({ root: ['pages', 'components', 'lib'], ext: 'both', floor: 80 })
+    .filter(f => !f.endsWith('source-kind-copy.ts'))
 
   it('scans a real, non-trivial set of files', () => {
     expect(files.length).toBeGreaterThan(80)
@@ -59,7 +48,7 @@ describe('source-kind copy is single-sourced (fail-closed)', () => {
   // remaining seven run in ~30 ms each off the source-text cache. The budget
   // applies per generated case, which is why it goes here and not on one of
   // them; same value and same reason as `strip-comments.test.ts`.
-  it.each(LOAD_BEARING_PHRASES)('the phrase %p appears nowhere but the copy module', { timeout: 60_000 }, (phrase) => {
+  it.each(LOAD_BEARING_PHRASES)('the phrase %p appears nowhere but the copy module', { timeout: SOURCE_SCAN_TIMEOUT_MS }, (phrase) => {
     const offenders = files
       .filter(f => code(readFileSync(f, 'utf8')).toLowerCase().includes(phrase.toLowerCase()))
       .map(f => f.slice(f.indexOf('/src/') + 5))

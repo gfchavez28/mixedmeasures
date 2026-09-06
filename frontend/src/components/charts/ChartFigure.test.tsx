@@ -1,10 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import '@testing-library/jest-dom/vitest'
 import { render, screen } from '@testing-library/react'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ChartFigure } from './ChartFigure'
 import { stripComments } from '@/lib/strip-comments'
+import { SOURCE_SCAN_TIMEOUT_MS, sourceFiles } from '@/test-support/source-tree'
 
 /**
  * #698 — the charts were wrapped in `role="img"`, which makes children
@@ -143,41 +144,25 @@ describe('fail-closed: no chart may reintroduce role="img"', () => {
     return stripComments(raw).split('\n')
   }
 
-  function walk(dir: string, out: string[] = []): string[] {
-    for (const entry of readdirSync(dir)) {
-      const p = join(dir, entry)
-      if (statSync(p).isDirectory()) walk(p, out)
-      else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) out.push(p)
-    }
-    return out
-  }
-
   /**
    * The scanned population, proven non-trivial before use (#730).
    *
    * Both uses below assert an EMPTY set, which a walk that found nothing
-   * satisfies just as well. `readdirSync` throws on a missing path, so the risk
-   * is not a blind walk but a VALID-but-narrower one — and this guard has
-   * already been burned by scope once: it read `components/charts/` only, and
-   * five offenders sat one folder over. The floor detects the walk collapsing;
-   * it is NOT a growth pin (394 `.ts`/`.tsx` files today).
+   * satisfies just as well — and this guard has already been burned by scope
+   * once: it read `components/charts/` only, and five offenders sat one folder
+   * over. The walk and its floor live in `sourceFiles()` (#729); a
+   * valid-but-narrower root fails there. NOT a growth pin (394 `.ts`/`.tsx`
+   * files today).
    */
   function scannedFiles(): string[] {
-    const files = walk(SRC)
-    expect(
-      files.length,
-      `the scan walked ${files.length} files under ${SRC} — far fewer than expected, `
-        + 'so it is reading the wrong subtree and both assertions would pass '
-        + 'vacuously. Fix the root; do NOT lower this floor.',
-    ).toBeGreaterThan(250)
-    return files
+    return sourceFiles({ ext: 'both', floor: 250 })
   }
 
   // ⚠️ Explicit timeout (#841): `code()` strips every file this walks, and
   // since #838 that is a TypeScript parse per file — ~1.8 s cold, 4.0 s under
   // full-suite contention (the slowest of the four consumer scans), past
   // vitest's 5 s default. Same budget and reason as `strip-comments.test.ts`.
-  it('scans the WHOLE tree, not just components/charts', { timeout: 60_000 }, () => {
+  it('scans the WHOLE tree, not just components/charts', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
     const offenders: string[] = []
     for (const file of scannedFiles()) {
       const rel = file.replace(SRC + '/', '')
@@ -194,7 +179,8 @@ describe('fail-closed: no chart may reintroduce role="img"', () => {
         'value inside is suppressed, and recharts 3.8.1\'s accessibilityLayer (on by ' +
         'default) is buried with them (#698). Use <ChartFigure>. If this really is a ' +
         'single opaque graphic with nothing inside worth reading, add it to ALLOWED ' +
-        'with a reason.',
+        'with a reason. (A structural proxy for the accessibility tree — confirm the ' +
+        'children are announced in a live browser snapshot, not by re-running this test.)',
     ).toEqual([])
   })
 

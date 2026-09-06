@@ -139,6 +139,14 @@ class MergeCodesResponse(BaseModel):
     merged: int
     skipped: int
     source_action: str
+    # #869 (b): what the merge did with RATINGS. `ratings_carried` = re-pointed
+    # applications that carry a rating; `rating_conflicts` = duplicates whose
+    # DIFFERING rating was recorded as the kept row's `magnitude_conflict` (the
+    # §6d-bis shape, never discarded); `target_has_scale` lets the client say
+    # when carried ratings land on a code that cannot show them yet.
+    ratings_carried: int = 0
+    rating_conflicts: int = 0
+    target_has_scale: bool = False
 
 
 class CategoryMergeRequest(BaseModel):

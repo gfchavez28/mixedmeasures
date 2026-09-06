@@ -45,6 +45,7 @@ from ..schemas.dataset import (
     DatasetDataRow,
     DatasetDataResponse,
     DatasetDataColumnResponse,
+    data_column_response,
     RecodeDefinitionSummary,
     LinkParticipantRequest,
     LinkParticipantResponse,
@@ -1244,11 +1245,13 @@ async def get_dataset_data(
     # ⚠️ Passing `recode_definitions=` again here would be a DUPLICATE keyword
     # argument, i.e. a `TypeError` on every `/data` request. The field crossing
     # from the base schema is exactly what `test_column_schema_siblings.py`
-    # requires (#586), so the splat is the whole construction.
-    data_columns = [
-        DatasetDataColumnResponse(**_column_to_response(q).model_dump())
-        for q in columns
-    ]
+    # requires (#586), so the projection is the whole construction — and it is
+    # ONE function, `schemas/dataset.py::data_column_response`, which excludes
+    # the three fields the data payload deliberately drops (`DATA_PAYLOAD_OMITS`)
+    # by name. Under the test session's `extra='forbid'` (#855) a key the sibling
+    # does not declare is a ValidationError, not a silent drop, and the tests
+    # that pin the crossing call the same function rather than re-splatting.
+    data_columns = [data_column_response(_column_to_response(q)) for q in columns]
 
     return DatasetDataResponse(
         dataset=dataset_resp,

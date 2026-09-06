@@ -5,7 +5,8 @@ import { useNavigate } from 'react-router'
 import { ExternalLink, MapPin, Quote } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
-import { textCodingApi, type TextCodingResponse, type RecordContext, type Coder } from '@/lib/api'
+import { textCodingApi, type Code, type TextCodingResponse, type RecordContext, type Coder } from '@/lib/api'
+import type { MagnitudeScale } from '@/lib/magnitude'
 import TextCodingContextMenu from '@/components/TextCodingContextMenu'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import type { FloatingCoords } from '@/lib/floating-utils'
@@ -19,13 +20,19 @@ interface ByRecordPanelProps {
   comments: TextCodingResponse[]
   focalColumnIds: number[]
   selectedRecordId: number | null
-  codes: Array<{ id: number; name: string; color: string | null; category_color?: string | null; category_name?: string | null; is_active?: boolean; category_id?: number | null; is_universal?: boolean; numeric_id?: number | null }>
+  // `magnitude_scale` rides along so the chip can render a rating against its
+  // instrument (#868 d) — the payload already carried the rating; the chip was
+  // handed neither it nor the scale, so this surface showed nothing.
+  codes: Array<{ id: number; name: string; color: string | null; category_color?: string | null; category_name?: string | null; is_active?: boolean; category_id?: number | null; is_universal?: boolean; numeric_id?: number | null; magnitude_scale?: MagnitudeScale | null }>
   selectedValueIds?: number[]
   onSelectComment?: (dvId: number) => void
   onQuoteToggle?: (dvId: number) => void
   onContextCodeApply?: (dvId: number, codeId: number) => void
   onContextCreateCode?: (coords: FloatingCoords) => void
   onContextCreateNote?: (dvId: number, coords: FloatingCoords) => void
+  /** #868 (d) — the re-rate route; see `TextCodingContextMenu`. */
+  onRateCode?: (dvId: number, code: Code) => void
+  ratableCodesFor?: (dvId: number) => Code[]
   hiddenCoderIds?: Set<number>  // Track J · J1 visibility filter
   activeCoderId?: number | null  // Track J · J1 active coder (#446 context-menu check)
   extraCoders?: Coder[]  // #451 archived-who-coded — folded into the chip map
@@ -44,6 +51,8 @@ export default function ByRecordPanel({
   onContextCodeApply,
   onContextCreateCode,
   onContextCreateNote,
+  onRateCode,
+  ratableCodesFor,
   hiddenCoderIds,
   activeCoderId,
   extraCoders,
@@ -178,7 +187,15 @@ export default function ByRecordPanel({
                         <button
                           className={`shrink-0 ${comment.is_quoted ? '' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'} transition-opacity`}
                           onClick={e => { e.stopPropagation(); onQuoteToggle(comment.dataset_value_id) }}
-                          aria-label={comment.is_quoted ? 'Unquote' : 'Quote'}
+                          /* #892: this panel groups ONE record's answers, so the
+                             column is what tells its quote controls apart — the
+                             mirror of ByTextTable, which pages one column and
+                             names the record. */
+                          aria-label={
+                            comment.is_quoted
+                              ? `Unquote ${comment.column_name || comment.column_text}`
+                              : `Quote ${comment.column_name || comment.column_text}`
+                          }
                         >
                           <Quote className={`w-3.5 h-3.5 ${comment.is_quoted ? 'fill-amber-400 text-amber-400' : 'text-mm-text-faint'}`} />
                         </button>
@@ -195,7 +212,20 @@ export default function ByRecordPanel({
                           const code = codeMap[row.codeId]
                           if (!code) return null
                           const coder = (multiCoder && row.userId != null) ? effectiveCoderMap.get(row.userId) ?? null : null
-                          return <CodeChip key={row.key} code={code} size="xs" coder={coder} />
+                          return (
+                            <CodeChip
+                              key={row.key}
+                              code={code}
+                              size="xs"
+                              coder={coder}
+                              // #868 (d): the rating and its instrument reach the
+                              // chip through the same chokepoint row the other
+                              // three surfaces use (#441's grain, one field over).
+                              magnitude={row.magnitude}
+                              magnitudeConflict={row.magnitudeConflict}
+                              scale={code.magnitude_scale ?? null}
+                            />
+                          )
                         })}
                       </div>
                     )}
@@ -218,6 +248,8 @@ export default function ByRecordPanel({
                     onContextCreateNote={onContextCreateNote}
                     lastCoordsRef={lastCoordsRef}
                     activeCoderId={activeCoderId}
+                    onRateCode={onRateCode}
+                    ratableCodesFor={ratableCodesFor}
                   />
                 )}
               </ContextMenu>

@@ -20,6 +20,7 @@ from ..models.speaker import Speaker
 from ..models.excerpt import Excerpt, segment_has_any_quote_filter
 from ..models.participant import Participant
 from ..services.code_analysis import get_code_frequencies, get_code_cooccurrence
+from ..services.magnitude import read_scale as _read_magnitude_scale
 from ..services.coding_layers import (
     CONSENSUS_ORIGIN,
     code_usage_count_expr,
@@ -214,6 +215,8 @@ async def export_codebook(
             "category_id": code.category_id,
             "category_name": code.category.name if code.category else None,
             "category_path": parent_chain_map.get(code.category_id, []) if code.category_id else [],
+            # #869 (d): the declared rating instrument travels with the code.
+            "magnitude_scale": _read_magnitude_scale(code),
         }
         codebook["codes"].append(entry)
 

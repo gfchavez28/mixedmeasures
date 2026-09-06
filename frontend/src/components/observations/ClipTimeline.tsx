@@ -515,13 +515,21 @@ export default function ClipTimeline({
           </PopoverContent>
         </Popover>
         <span className="ml-auto tabular-nums">
-          <kbd className="px-1 border border-mm-border-medium rounded text-[10px]">I</kbd>/
-          <kbd className="px-1 border border-mm-border-medium rounded text-[10px]">O</kbd> mark ·{' '}
-          <kbd className="px-1 border border-mm-border-medium rounded text-[10px]">P</kbd> point ·{' '}
-          <kbd className="px-1 border border-mm-border-medium rounded text-[10px]">U</kbd> next gap
+          {/* #880 — the key hints collapse below `md`, the "all keys" BUTTON does not.
+            * MEASURED at 640×360: this row wraps to 72 px there, and dropping the
+            * hints takes it to 28 px — 44 px handed back to the clip list, which
+            * had none. `sr-only` (never `hidden`) keeps them in the accessibility
+            * tree, per #717; they are pure redundancy anyway — the same keys are
+            * listed in the shortcuts dialog the sibling button opens. */}
+          <span className="sr-only md:not-sr-only">
+            <kbd className="px-1 border border-mm-border-medium rounded text-[10px]">I</kbd>/
+            <kbd className="px-1 border border-mm-border-medium rounded text-[10px]">O</kbd> mark ·{' '}
+            <kbd className="px-1 border border-mm-border-medium rounded text-[10px]">P</kbd> point ·{' '}
+            <kbd className="px-1 border border-mm-border-medium rounded text-[10px]">U</kbd> next gap
+            {onShowShortcuts && ' · '}
+          </span>
           {onShowShortcuts && (
             <>
-              {' · '}
               <button
                 type="button"
                 onClick={onShowShortcuts}
@@ -567,9 +575,21 @@ export default function ClipTimeline({
         </div>
       )}
 
+      {/* #880 — below `md` the lane stack is HEIGHT-BOUNDED and scrolls instead of
+        * pushing the clip list off the viewport. MEASURED at 640×360: the lanes are
+        * 68 px and the content column is 209 px, of which the fixed chrome above
+        * already claimed all of it. Bounding this to 40 px is what first mounts a
+        * clip row at that viewport.
+        *
+        * ⚠️ `overflow-y-auto` below `md`, never `hidden` — a bounded lane stack that
+        * CLIPS would silently hide clips in the lower categories, which is the defect
+        * this is fixing, one level down. Above `md` nothing changes: the stack keeps
+        * its natural height and `overflow-y-hidden`, so the horizontal-only scroll the
+        * drag-to-mark gesture was built against is untouched at the stated minimum
+        * window. */}
       <div
         ref={scrollRef}
-        className="overflow-x-auto overflow-y-hidden"
+        className="overflow-x-auto max-h-10 overflow-y-auto md:max-h-none md:overflow-y-hidden"
         onScroll={e => setScrollLeft((e.target as HTMLDivElement).scrollLeft)}
       >
         {/* The visual layer: pointer-first, aria-hidden — the clip LIST is the

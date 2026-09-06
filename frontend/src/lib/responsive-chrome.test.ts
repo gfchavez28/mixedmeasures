@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stripComments } from './strip-comments'
+import { sourceFiles, srcRel } from '@/test-support/source-tree'
 
 /**
  * #718 / #717 — the two ways this app's chrome assumed a wide window.
@@ -44,19 +45,17 @@ function code(rel: string): string[] {
   return stripComments(read(rel)).split('\n')
 }
 
-/** Every source file under src/ that mentions `needle` (tests excluded). */
+/**
+ * Every source file under src/ that mentions `needle` (tests excluded).
+ *
+ * The walk carries its population floor (#730) through `sourceFiles()` — this
+ * scan had none of its own until #729's substrate landed, so a narrower root
+ * would have made the not-sr-only sweep quietly cover two named files only.
+ */
 function srcFilesContaining(needle: string): string[] {
-  const hits: string[] = []
-  const walk = (dir: string) => {
-    for (const entry of readdirSync(join(SRC, dir), { withFileTypes: true })) {
-      const rel = dir ? `${dir}/${entry.name}` : entry.name
-      if (entry.isDirectory()) { walk(rel); continue }
-      if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue
-      if (read(rel).includes(needle)) hits.push(rel)
-    }
-  }
-  walk('')
-  return hits
+  return sourceFiles({ ext: 'both', floor: 250 })
+    .map(srcRel)
+    .filter(rel => read(rel).includes(needle))
 }
 
 /**
@@ -452,5 +451,90 @@ describe("the scanner's own parser", () => {
     // stripper regresses, this names the symptom rather than a lost assertion.
     const lines = code('components/TopRail.tsx')
     expect(lines.some(l => l.includes('Coder menu'))).toBe(true)
+  })
+})
+
+/**
+ * #880 — the two coding surfaces that had NO content area at 640×360.
+ *
+ * MEASURED, at the CSS viewport a 1280×720 window has at 200% zoom, before and
+ * after. This is the third instance of #830(a)'s shape: #718's "designate ONE
+ * flexible child" was already SATISFIED on both pages — the observation clip list
+ * is `flex-1 min-h-0` and was starved to zero anyway — so auditing for that rule's
+ * absence returns a false negative here. **With the flexible child doing its job,
+ * the only lever left is to shrink FIXED content.**
+ *
+ *   Text Coding      tabpanel  9px -> 25px   (status-bar hint collapsed)
+ *   Observation      clip list 0px -> 23px, and the virtualiser mounts a row for
+ *                    the first time (it had `findAllByRole('option') === 0`)
+ *                    video pane 381px -> 43px, timeline block 153px -> 81px
+ *
+ * ⚠️ PARTIAL, deliberately. Both toolbars still wrap to three lines at that
+ * viewport, and freeing a wrapped line needs ~500px of content moved behind a
+ * disclosure — controls, not redundancy. Nothing here hides a control: the key
+ * hints are duplicated in the shortcuts dialog, and the video pane keeps its own
+ * "Show video" bar. See the #880 entry for the measured candidate ladder.
+ */
+describe('#880 — chrome that collapses below `md` on the two starved coding surfaces', () => {
+  const SITES: Array<{ rel: string; needle: string; what: string }> = [
+    { rel: 'pages/TextCodingView.tsx', needle: 'next uncoded', what: "the status bar's shortcut hint" },
+    { rel: 'components/observations/ClipTimeline.tsx', needle: 'next gap', what: "the timeline's key hints" },
+  ]
+
+  it('collapses each hint with `sr-only`, never `hidden`', () => {
+    for (const { rel, needle, what } of SITES) {
+      const line = code(rel).find(l => l.includes(needle))
+      expect(line, `${rel}: the line carrying ${what} is gone — re-point this scan`).toBeTruthy()
+
+      // The whole point of #717: `hidden` drops it out of the accessibility tree.
+      expect(
+        HIDDEN_AT_BREAKPOINT.test(line!),
+        `${rel}: ${what} collapses with \`hidden\`, which removes it from the accessibility `
+          + 'tree. Use `sr-only md:not-sr-only` (#717).',
+      ).toBe(false)
+    }
+  })
+
+  it('the collapse is breakpoint-scoped, so the stated minimum window is untouched', () => {
+    // Both sites must RESTORE above the breakpoint — a bare `sr-only` would hide
+    // the hint at every width, which is a different (and worse) change than the
+    // one that was measured.
+    const textCoding = code('pages/TextCodingView.tsx').find(l => l.includes('next uncoded'))!
+    expect(textCoding).toMatch(/\bsr-only\b/)
+    expect(textCoding).toMatch(/\bmd:not-sr-only\b/)
+
+    const timelineHints = code('components/observations/ClipTimeline.tsx')
+      .find(l => l.includes('sr-only') && l.includes('md:not-sr-only'))
+    expect(
+      timelineHints,
+      'ClipTimeline no longer wraps its key hints in a breakpoint-scoped `sr-only` span',
+    ).toBeTruthy()
+  })
+
+  it('the timeline lane stack is bounded below `md` and SCROLLS rather than clipping', () => {
+    // ⚠️ `overflow-y-auto`, never `hidden`: a bounded stack that clips would hide
+    // clips in the lower lanes — the very defect being fixed, one level down.
+    const track = code('components/observations/ClipTimeline.tsx').find(l => l.includes('overflow-x-auto'))
+    expect(track, 'the ClipTimeline scroll container moved — re-point this scan').toBeTruthy()
+    expect(track).toMatch(/max-h-\d+/)
+    expect(track).toMatch(/overflow-y-auto/)
+    expect(track).toMatch(/md:overflow-y-hidden/)
+    expect(track).toMatch(/md:max-h-none/)
+  })
+
+  it('the VideoPane opens collapsed below `md` only when nothing is stored', () => {
+    const src = stripComments(read('components/VideoPane.tsx'))
+    // A stored preference must still win, so the narrow default belongs AFTER the
+    // localStorage read, in the fallback — not in place of it.
+    expect(src).toMatch(/narrowViewport\(\)\s*\?\s*'collapsed'\s*:\s*'m'/)
+    const readIdx = src.indexOf('localStorage.getItem(storageKey')
+    const defaultIdx = src.indexOf('narrowViewport() ?')
+    expect(readIdx, 'VideoPane no longer reads a stored mode').toBeGreaterThan(-1)
+    expect(
+      defaultIdx > readIdx,
+      'the narrow-viewport default must be the FALLBACK, so a stored preference wins',
+    ).toBe(true)
+    // jsdom has no matchMedia; the guard must not throw the pane's initializer.
+    expect(src).toMatch(/typeof window\.matchMedia !== 'function'/)
   })
 })

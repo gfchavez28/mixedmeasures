@@ -22,25 +22,13 @@
  * finds nothing (#772). This catches the shape that has actually shipped.
  */
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stripComments } from './strip-comments'
+import { sourceFiles } from '@/test-support/source-tree'
 
 const SRC = join(__dirname, '..')
 const CALL = 'textCodingApi.list('
-
-function sourceFiles(dir: string): string[] {
-  const out: string[] = []
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry)
-    if (statSync(full).isDirectory()) {
-      out.push(...sourceFiles(full))
-    } else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) {
-      out.push(full)
-    }
-  }
-  return out
-}
 
 /** The argument object of a `textCodingApi.list(...)` call, brace-matched. */
 function callArgs(src: string, at: number): string {
@@ -58,7 +46,7 @@ function callArgs(src: string, at: number): string {
 
 function scanCallSites(): { file: string; args: string }[] {
   const found: { file: string; args: string }[] = []
-  for (const file of sourceFiles(SRC)) {
+  for (const file of sourceFiles({ ext: 'both', floor: 250 })) {
     // The API module DECLARES the function; it does not call it.
     if (file.endsWith(join('lib', 'api', 'text-coding.ts'))) continue
     const src = stripComments(readFileSync(file, 'utf8'))

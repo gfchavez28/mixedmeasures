@@ -81,7 +81,16 @@ export default function CodeChip({
 
   return (
     <Tag
-      className={`${sizeClasses} rounded-full inline-flex items-center gap-1 leading-tight ${
+      // 🔴 `relative` is LOAD-BEARING (#878): the rating track below is
+      // `absolute`, and this element must be its containing block. Without it
+      // the track resolves against whatever positioned ancestor happens to be
+      // above — `InlineCodeActions` wraps every chip in a `relative` span, so it
+      // looked correct there, while `ReconciliationGrid` renders CodeChip
+      // directly inside a NON-positioned wrapper and the same 3px meter measured
+      // **1253px wide, spanning the page**. A component that owns an absolutely
+      // positioned child must establish its own containing block rather than
+      // borrow one from a caller.
+      className={`${sizeClasses} relative rounded-full inline-flex items-center gap-1 leading-tight ${
         truncate ? 'max-w-full min-w-0' : 'whitespace-nowrap'
       } ${onClick ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}
       style={{ backgroundColor: bgColor, color: textColor }}

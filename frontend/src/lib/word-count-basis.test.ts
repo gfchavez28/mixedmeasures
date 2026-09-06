@@ -7,9 +7,10 @@
  * the number means "segments" for a third of the world's writing systems.
  */
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { WORD_COUNT_NOTE, WORD_COUNT_UNIT } from './word-count-basis'
+import { sourceFiles, srcRel } from '@/test-support/source-tree'
 
 const SRC = join(__dirname, '..')
 const read = (rel: string) => readFileSync(join(SRC, rel), 'utf8')
@@ -44,20 +45,17 @@ describe('#703 — the word count states its unit', () => {
    */
   it('no unlisted component renders a word figure without the caveat', () => {
     const offenders: string[] = []
-    const walk = (dir: string) => {
-      for (const e of readdirSync(join(SRC, dir), { withFileTypes: true })) {
-        const rel = `${dir}/${e.name}`
-        if (e.isDirectory()) { walk(rel); continue }
-        if (!e.name.endsWith('.tsx') || e.name.includes('.test.')) continue
-        const src = read(rel)
-        // A user-facing word LABEL, not an arithmetic use of the field.
-        const showsWordLabel = /\bword\{|avg words|Avg Words|% Words/.test(src)
-        if (!showsWordLabel) continue
-        const listed = (WORD_SURFACES as readonly string[]).includes(rel.replace(/^\.\//, ''))
-        if (!listed && !src.includes('word-count-basis')) offenders.push(rel)
-      }
+    // The walk carries its population floor (#730) through `sourceFiles()`;
+    // this scan had none until #729's substrate landed.
+    for (const abs of sourceFiles({ root: 'components', ext: 'tsx', floor: 100 })) {
+      const rel = srcRel(abs)
+      const src = read(rel)
+      // A user-facing word LABEL, not an arithmetic use of the field.
+      const showsWordLabel = /\bword\{|avg words|Avg Words|% Words/.test(src)
+      if (!showsWordLabel) continue
+      const listed = (WORD_SURFACES as readonly string[]).includes(rel)
+      if (!listed && !src.includes('word-count-basis')) offenders.push(rel)
     }
-    walk('components')
     expect(offenders).toEqual([])
   })
 })

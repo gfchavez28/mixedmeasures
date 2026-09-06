@@ -613,22 +613,40 @@ export default function CodebookView() {
 
     try {
       const succeededIds: number[] = []
+      // #869 (b): the server REFUSES a merge whose ratings would fall outside the
+      // target's scale, and says how many and what to do. A bare `catch` here
+      // turned that guidance into "Failed to merge codes" (#842/#871's class),
+      // so the last reason is kept and shown.
+      let lastReason = ''
+      let ratingsCarried = 0
+      let ratingConflicts = 0
+      let targetHasScale = true
       for (const sourceId of sourceIds) {
         try {
           const result = await codesApi.merge(projectId, sourceId, targetId, false)
           skippedTotal += result.skipped
+          ratingsCarried += result.ratings_carried
+          ratingConflicts += result.rating_conflicts
+          targetHasScale = result.target_has_scale
           succeededIds.push(sourceId)
-        } catch {
+        } catch (err) {
           failed++
+          lastReason = extractApiError(err, 'Merge failed')
         }
       }
 
       if (failed > 0 && failed < sourceIds.length) {
-        toast.warning(`Merged ${succeededIds.length} of ${sourceIds.length} codes into "${targetName}" (${failed} failed)`)
+        toast.warning(`Merged ${succeededIds.length} of ${sourceIds.length} codes into "${targetName}" (${failed} failed): ${lastReason}`)
       } else if (failed === sourceIds.length) {
-        toast.error('Failed to merge codes')
+        toast.error(lastReason || 'Failed to merge codes')
       } else {
-        const detail = skippedTotal > 0 ? ` (${skippedTotal} duplicate${skippedTotal !== 1 ? 's' : ''} skipped)` : ''
+        const details: string[] = []
+        if (skippedTotal > 0) details.push(`${skippedTotal} duplicate${skippedTotal !== 1 ? 's' : ''} skipped`)
+        if (ratingConflicts > 0) details.push(`${ratingConflicts} rating difference${ratingConflicts !== 1 ? 's' : ''} flagged for reconciliation`)
+        if (ratingsCarried > 0 && !targetHasScale) {
+          details.push(`${ratingsCarried} rating${ratingsCarried !== 1 ? 's' : ''} kept but not shown until "${targetName}" has a rating scale`)
+        }
+        const detail = details.length > 0 ? ` (${details.join(' · ')})` : ''
         toast.success(`Merged ${sourceIds.length} code${sourceIds.length !== 1 ? 's' : ''} into "${targetName}"${detail}`)
       }
 
@@ -950,6 +968,7 @@ export default function CodebookView() {
       const counts = await projectPortabilityApi.importCodebook(projectId, file)
       const parts: string[] = []
       if (counts.codes_created > 0) parts.push(`${counts.codes_created} codes created`)
+      if (counts.scales_imported > 0) parts.push(`${counts.scales_imported} with a rating scale`)
       if (counts.categories_created > 0) parts.push(`${counts.categories_created} categories created`)
       if (counts.codes_skipped > 0) parts.push(`${counts.codes_skipped} codes skipped`)
       if (counts.codes_uncategorized > 0) parts.push(`${counts.codes_uncategorized} codes left uncategorized`)

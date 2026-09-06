@@ -21,6 +21,9 @@ class CodebookCodeNode(BaseModel):
     # source_counts double-counts shared sources (it exceeded the project's
     # source universe on the audit corpus).
     source_keys: list[str] = []
+    # #869 (b): the code's declared rating scale (`magnitude.read_scale` shape),
+    # None when it has none — the merge dialog compares source and target.
+    magnitude_scale: dict | None = None
 
 
 class CodebookCategoryNode(BaseModel):

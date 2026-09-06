@@ -25,6 +25,7 @@ from ..schemas.codebook import (
     CodebookTreeResponse,
 )
 from ..services.coding_layers import layer_origin_filter
+from ..services import magnitude
 
 router = APIRouter(prefix="/api/projects/{project_id}/codebook", tags=["codebook"])
 
@@ -317,6 +318,9 @@ async def get_codebook_tree(
             category_id=code.category_id,
             # #501: typed identities for client-side source UNIONs.
             source_keys=sorted(f"{t}:{i}" for t, i in sources),
+            # #869 (b): the declared scale rides the tree so the merge dialog can
+            # say BEFORE the merge when two codes' scales differ.
+            magnitude_scale=magnitude.read_scale(code),
         )
 
     # Combined source sets per code (for category aggregation)

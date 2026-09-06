@@ -496,6 +496,63 @@ async def merge_codes(
     if source.is_universal or target.is_universal:
         raise HTTPException(status_code=400, detail="Cannot merge universal codes")
 
+    # Get all applications on the source code
+    source_apps = db.query(CodeApplication).filter(
+        CodeApplication.code_id == source_code_id
+    ).all()
+
+    # Existing target applications by (target unit, CODER) — the dedup key.
+    # Per-coder layers (#J2-1b): a source app is only a duplicate when the SAME
+    # coder already holds the target code on that segment/value. Without user_id
+    # in the key, the merge would delete a DIFFERENT coder's application as a
+    # phantom "duplicate". The VALUE is the kept row, not a bare membership flag,
+    # because a duplicate's differing rating is recorded on it (#869 b, below).
+    target_by_key: dict[tuple[str, int, int | None], CodeApplication] = {}
+    for app in db.query(CodeApplication).filter(
+        CodeApplication.code_id == target_code_id
+    ).all():
+        if app.segment_id is not None:
+            target_by_key[("seg", app.segment_id, app.user_id)] = app
+        if app.dataset_value_id is not None:
+            target_by_key[("dv", app.dataset_value_id, app.user_id)] = app
+
+    def _kept_for(app: CodeApplication) -> CodeApplication | None:
+        if app.segment_id is not None:
+            return target_by_key.get(("seg", app.segment_id, app.user_id))
+        if app.dataset_value_id is not None:
+            return target_by_key.get(("dv", app.dataset_value_id, app.user_id))
+        return None
+
+    # #869 (b) — ratings cross onto the TARGET's scale, and a merge has no undo,
+    # so it is REFUSED by count when any re-pointed rating would fall outside that
+    # scale: the `scale_change_would_strand` shape ("N ratings would fall outside
+    # the range"), because narrowing a scale and merging onto a narrower one are
+    # the same act from the rating's point of view. Duplicates are exempt — their
+    # rating is recorded as the kept row's conflict, whatever its range, since
+    # that field holds "the other number" and is adjudicated, never analysed. A
+    # target with NO scale keeps every rating uninterpretable-until-a-scale-
+    # returns, exactly as clearing a scale does (§5). Decided BEFORE any write.
+    out_of_range = sum(
+        1 for app in source_apps
+        if _kept_for(app) is None and magnitude.value_outside_scale(target, app.magnitude)
+    )
+    if out_of_range:
+        target_scale = magnitude.read_scale(target)
+        source_scale = magnitude.read_scale(source)
+        lo, hi = target_scale["min"], target_scale["max"]
+        on_source = (
+            f" (they were given on “{source.name}”'s {source_scale['min']:g} to {source_scale['max']:g} scale)"
+            if source_scale else ""
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{out_of_range} rating{'s' if out_of_range != 1 else ''} on “{source.name}” would fall "
+                f"outside “{target.name}”'s scale ({lo:g} to {hi:g}){on_source}. Widen or clear "
+                f"“{target.name}”'s scale first — ratings are not adjusted automatically."
+            ),
+        )
+
     # Consensus on any target carrying the source OR target code can change once
     # the codes merge — mark those targets stale BEFORE reassignment (while the
     # source applications still carry code_id=source). Drained by the background
@@ -503,41 +560,28 @@ async def merge_codes(
     if consensus_enabled(db):
         mark_consensus_stale(db, project_id, code_ids=[source_code_id, target_code_id])
 
-    # Get all applications on the source code
-    source_apps = db.query(CodeApplication).filter(
-        CodeApplication.code_id == source_code_id
-    ).all()
-
-    # Build sets of existing target applications for fast dedup lookup.
-    # Per-coder layers (#J2-1b): key by (target, CODER) so a source app is only
-    # a duplicate when the SAME coder already holds the target code on that
-    # segment/value. Without user_id in the key, the merge would delete a
-    # DIFFERENT coder's application as a phantom "duplicate".
-    target_seg_keys = set()
-    target_dv_keys = set()
-    for app in db.query(CodeApplication).filter(
-        CodeApplication.code_id == target_code_id
-    ).all():
-        if app.segment_id is not None:
-            target_seg_keys.add((app.segment_id, app.user_id))
-        if app.dataset_value_id is not None:
-            target_dv_keys.add((app.dataset_value_id, app.user_id))
-
     merged = 0
     skipped = 0
+    ratings_carried = 0
+    rating_conflicts = 0
 
     for app in source_apps:
-        is_duplicate = False
-        if app.segment_id is not None and (app.segment_id, app.user_id) in target_seg_keys:
-            is_duplicate = True
-        if app.dataset_value_id is not None and (app.dataset_value_id, app.user_id) in target_dv_keys:
-            is_duplicate = True
-
-        if is_duplicate:
+        kept = _kept_for(app)
+        if kept is not None:
+            # A duplicate's DIFFERING rating is the kept row's `magnitude_conflict`
+            # — the §6d-bis rule the segment merge already follows: keep ours,
+            # record the other number, never block. An equal or absent rating
+            # leaves the kept row's own flag alone (`is not None`: a duplicate
+            # rated ZERO against a rated target is a real disagreement).
+            if app.magnitude is not None and app.magnitude != kept.magnitude:
+                kept.magnitude_conflict = app.magnitude
+                rating_conflicts += 1
             db.delete(app)
             skipped += 1
         else:
             app.code_id = target_code_id
+            if app.magnitude is not None:
+                ratings_carried += 1
             merged += 1
 
     # Flush the reassignment (and dup deletes) BEFORE deleting the source code.
@@ -570,11 +614,20 @@ async def merge_codes(
             "merged": merged,
             "skipped": skipped,
             "source_action": source_action,
+            "ratings_carried": ratings_carried,
+            "rating_conflicts": rating_conflicts,
         }
     )
     db.commit()
 
-    return MergeCodesResponse(merged=merged, skipped=skipped, source_action=source_action)
+    return MergeCodesResponse(
+        merged=merged,
+        skipped=skipped,
+        source_action=source_action,
+        ratings_carried=ratings_carried,
+        rating_conflicts=rating_conflicts,
+        target_has_scale=magnitude.has_scale(target),
+    )
 
 
 # Category routes

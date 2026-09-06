@@ -27,6 +27,11 @@ const SHORTCUT_GROUPS = [
       { keys: ['c'], label: 'Create code' },
       { keys: ['n'], label: 'Create note' },
       { keys: ['s'], label: 'Toggle quote' },
+      // #35 / #868: an `extraKeys` entry on all FOUR coding surfaces since
+      // 2026-09-03 (conversations, documents, then observations and
+      // text coding the same day). Self-gated: it falls through when the selected unit
+      // carries no code of yours that declares a scale.
+      { keys: ['r'], label: 'Rate the selected code (when it has a scale)' },
       // #644: `j` is claimed by useCodeChordShortcuts ONLY when the surface
       // passes onJumpUncoded. The observation workbench deliberately omits it
       // so `J` can shuttle backward (D4) — so "all views" was false here, and

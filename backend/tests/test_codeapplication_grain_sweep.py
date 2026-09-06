@@ -31,6 +31,8 @@ import asyncio
 import re
 from pathlib import Path
 
+from tests.guard_support import APP_DIR as _APP_DIR, app_files
+
 from app.models.project import Project
 from app.models.conversation import Conversation
 from app.models.segment import Segment
@@ -51,8 +53,6 @@ def _run(coro):
 
 # ── 1a. Source-scan guard ────────────────────────────────────────────────────
 
-_APP_DIR = Path(__file__).resolve().parent.parent / "app"
-
 # The retired-grain tell: counting application ROWS (`CodeApplication.id`) as a
 # code count. `\s*` spans newlines, so a wrapped `func.count(\n  CodeApplication.id\n)`
 # is caught too. Distinct-target / distinct-code forms (`func.count(func.distinct(...))`)
@@ -61,24 +61,13 @@ _RAW_ROW_COUNT_RE = re.compile(r"func\.count\(\s*CodeApplication\.id\s*\)")
 
 # #730: this scan asserts an EMPTY violation list, which passes just as happily
 # when it reads nothing at all — and `rglob` on a mistyped root yields `[]`
-# rather than raising. So prove the population first (163 files today; the floor
-# detects a BAD ROOT, not growth).
-_MIN_APP_FILES = 100
+# rather than raising. The walk and its floor live in `tests/guard_support.py`
+# (#729); the sentinel names the module this sweep exists to police.
+_MIN_APP_FILES = 100  # 177 today — a floor for a BAD ROOT, not a growth pin
 
 
 def _app_files() -> list[Path]:
-    files = sorted(_APP_DIR.rglob("*.py"))
-    assert len(files) >= _MIN_APP_FILES, (
-        f"This sweep's population is {len(files)} file(s) under {_APP_DIR} — "
-        f"expected at least {_MIN_APP_FILES}. rglob returns [] for a bad path "
-        "instead of raising, so the violation assertion below would pass "
-        "VACUOUSLY. Fix _APP_DIR — do NOT lower this floor."
-    )
-    assert (_APP_DIR / "routers" / "coding.py").is_file(), (
-        f"the sweep cannot see routers/coding.py under {_APP_DIR}: a file COUNT "
-        "alone cannot tell this tree from another that also has .py files"
-    )
-    return files
+    return app_files(floor=_MIN_APP_FILES, sentinels=("routers/coding.py",))
 
 
 def test_no_unmarked_raw_codeapplication_row_count():

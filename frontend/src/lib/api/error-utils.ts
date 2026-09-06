@@ -44,6 +44,46 @@ export function serverDetailMessage(err: unknown): string | null {
 }
 
 /**
+ * Statuses that are a 4xx and still worth retrying, so they are NOT refusals.
+ *
+ * - **401** — the session lapsed; `client.ts` clears the CSRF token and reloads,
+ *   so the page (and any history stack on it) is about to go anyway.
+ * - **403** — in this app that is almost always a stale CSRF token, which the
+ *   same reload refreshes.
+ * - **408 / 425 / 429** — timeout, too-early, throttled. All transient by
+ *   definition.
+ */
+const RETRYABLE_4XX = new Set([401, 403, 408, 425, 429])
+
+/**
+ * Did the SERVER receive this request and refuse it in a way that will not
+ * change on a retry? (#874)
+ *
+ * The distinction a caller needs is *transient vs settled*, and only the status
+ * carries it: a network drop or a timeout never reaches the server at all
+ * (`fetch` rejects with a `TypeError`/`DOMException`, no `status`), a 5xx is a
+ * server fault that may pass next time, and a 4xx outside the set above means
+ * the request itself is no longer valid — the row is gone, the type now has a
+ * rule on it, the code was never applied.
+ *
+ * ⚠️ **Duck-typed on `status`, deliberately, exactly like `serverDetailMessage`
+ * above.** Production always throws `ApiError` (`client.ts:118`), which sets
+ * `status`; gating on `instanceof` would force every test that needs this to
+ * construct one, and the property we care about is the number.
+ *
+ * ⚠️ **An error with no `status` is NOT a refusal**, which is the safe
+ * direction: the caller keeps whatever it would have kept, and a retry stays
+ * available. Widening this to "any thrown error" would make a flaky network
+ * look like a settled decision.
+ */
+export function isServerRefusal(err: unknown): boolean {
+  const status = (err as { status?: unknown } | null)?.status
+  if (typeof status !== 'number') return false
+  if (status < 400 || status >= 500) return false
+  return !RETRYABLE_4XX.has(status)
+}
+
+/**
  * Extract a human-readable error message from an API error.
  *
  * The server's reason when it gave one, else the thrown Error's own message,

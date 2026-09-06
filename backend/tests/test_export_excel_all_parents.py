@@ -359,3 +359,51 @@ class TestRatingsSheetScope:
         _, rows = _rows(_sheets(db)["Ratings"])
         ratings = sorted(r["Rating"] for r in rows)
         assert ratings == [0, 7], f"a hidden or consensus rating leaked: {ratings}"
+
+    def test_a_dataset_cell_rating_gets_a_row_naming_its_record_and_no_segment_columns(self, three_parent_project):
+        """#868 (d) — the sheet was SEGMENT-keyed (`.join(Segment)`), so a rating on
+        a text-coding unit exported nowhere. The second arm names the cell the
+        way the Notes sheet does ("dataset value" · "Dataset · Column") and puts
+        the response's record identifier in the appended `Record` column.
+
+        ⚠️ Rated ZERO: a builder that dropped the value would give None/blank,
+        and a positive fixture could not tell that from a real value.
+        """
+        from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, ColumnType
+        db = three_parent_project
+        code = db.get(Code, PID)
+        code.magnitude_min, code.magnitude_max, code.magnitude_step = -1.0, 1.0, 0.5
+        db.add(Dataset(id=PID, project_id=PID, name="Survey D"))
+        db.flush()
+        db.add_all([
+            DatasetColumn(id=8610, dataset_id=PID, column_code="Q7", column_name="Q7",
+                          column_text="Anything else?", column_type=ColumnType.OPEN_TEXT,
+                          sequence_order=0, display_order=0),
+            DatasetRow(id=8611, dataset_id=PID, row_identifier="R042"),
+        ])
+        db.flush()
+        db.add(DatasetValue(id=86110, row_id=8611, column_id=8610, value_text="a response"))
+        db.flush()
+        db.add(CodeApplication(code_id=PID, user_id=1, dataset_value_id=86110, magnitude=0.0))
+        # One rated SEGMENT application too, so both arms are on the sheet at once
+        # and the Record column's blank-on-a-segment-row half is observable.
+        db.query(CodeApplication).filter_by(segment_id=8601, code_id=PID).one().magnitude = 0.5
+        # A consensus row on the SAME cell must not export beside it (J2-B).
+        db.add(CodeApplication(code_id=PID, user_id=None, dataset_value_id=86110,
+                               origin="consensus", magnitude=0.5))
+        db.flush()
+
+        header, rows = _rows(_sheets(db)["Ratings"])
+        assert header[-1] == "Record", "the Record column is APPENDED, so nothing else moves"
+        cell_rows = [r for r in rows if r["Source Type"] == "dataset value"]
+        assert len(cell_rows) == 1, f"expected exactly the human rating: {cell_rows}"
+        row = cell_rows[0]
+        assert row["Source"] == "Survey D · Q7"
+        assert row["Record"] == "R042"
+        assert row["Rating"] == 0 and row["Rating"] is not None
+        assert row["Rating Scale"] == "-1 to 1"
+        # The segment columns are BLANK on a cell row — not a fabricated id.
+        assert (row["Segment ID"], row["Sequence"], row["Speaker"]) in {(None, None, None), ("", "", "")}
+        # And a segment row's Record is blank in the other direction.
+        seg_rows = [r for r in rows if r["Source Type"] != "dataset value"]
+        assert seg_rows and all(r["Record"] in (None, "") for r in seg_rows)

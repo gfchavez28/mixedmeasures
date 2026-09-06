@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useParams, useSearchParams } from 'react-router'
-import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData, type InfiniteData } from '@tanstack/react-query'
 import {
   BookOpen, Shuffle, Eye, EyeOff, Quote, Search, Download, BarChart3, Undo2, Redo2,
   ChevronLeft, ChevronRight, Check, Pencil,
@@ -18,9 +18,11 @@ import {
 import {
   textCodingApi, codesApi, categoriesApi, excerptsApi, datasetsApi, extractApiError,
   TEXT_PAGE_SIZE,
-  type TextCodingViewConfig, type TextCodingColumn,
+  type TextCodingViewConfig, type TextCodingColumn, type Code, type TextCodingListResponse,
 } from '@/lib/api'
 import { invalidateTextEmptinessReaders } from '@/lib/text-coding-cache'
+import { ratableCodes } from '@/lib/rating-targets'
+import MagnitudeStrip from '@/components/MagnitudeStrip'
 import { useHistory } from '@/hooks/useHistory'
 import TextCodingColumnPicker from '@/components/TextColumnPicker'
 import ByTextTable, { type ByTextTableHandle } from '@/components/ByTextTable'
@@ -433,11 +435,134 @@ export default function TextCodingView() {
     },
   })
 
+  // ── #35 magnitude: rate at apply (variant A) — the TEXT-CODING strip (#868 d) ──
+  //
+  // The fourth and last coding surface to rate. Mirrors the three workbenches
+  // against THIS page's cache shape: `['text-data', …]` is an INFINITE query
+  // whose entry is `{ pages: [{ texts: [...] }] }` (#844), and its key carries
+  // eight filter params — so the patch is PREFIX-matched (`setQueriesData`) and
+  // walks every page. The exact-match `setQueryData` form would write where
+  // nothing reads (#800's rule, the query-key half).
+  const codeMap = useMemo(() => {
+    const map = new Map<number, Code>()
+    codes.forEach(c => map.set(c.id, c))
+    return map
+  }, [codes])
+
+  const [ratingTarget, setRatingTarget] = useState<{ valueId: number; code: Code } | null>(null)
+
+  // The rating THIS coder holds on this response, read from the cache the chips
+  // render from. `?? null`, never `|| null` — a stored 0 is a real rating.
+  const currentMagnitude = useCallback(
+    (valueId: number, codeId: number): number | null => {
+      const c = comments.find(cm => cm.dataset_value_id === valueId)
+      const entry = c?.applied_code_details.find(d => d.code_id === codeId && d.user_id === self)
+      return entry?.magnitude ?? null
+    },
+    [comments, self],
+  )
+
+  const patchTextMagnitude = useCallback(
+    (valueId: number, codeId: number, value: number | null) => {
+      queryClient.setQueriesData<InfiniteData<TextCodingListResponse>>(
+        { queryKey: ['text-data', projectId] },
+        (old) => {
+          if (!old?.pages) return old
+          return {
+            ...old,
+            pages: old.pages.map(page => ({
+              ...page,
+              texts: page.texts.map(t => t.dataset_value_id !== valueId ? t : {
+                ...t,
+                applied_code_details: t.applied_code_details.map(d =>
+                  d.code_id === codeId && d.user_id === self
+                    ? { ...d, magnitude: value, magnitude_conflict: null }
+                    : d,
+                ),
+              }),
+            })),
+          }
+        },
+      )
+    },
+    [queryClient, projectId, self],
+  )
+
+  /**
+   * Optimistic rating + one server call, with two steps the sibling workbenches
+   * do not need and this surface does:
+   *
+   * 1. ⚠️ **Cancel the in-flight settle first.** The APPLY path here does not
+   *    paint optimistically — it invalidates `text-data` and lets the refetch
+   *    bring the new application in. A rating committed while that refetch is
+   *    still in flight would be painted, then OVERWRITTEN by a response that
+   *    left the server before the rating did: the chip reads "not rated" over
+   *    a rating the server has. `cancelQueries` closes the window.
+   * 2. ⚠️ **Settle AFTER the write.** For the same reason the optimistic patch
+   *    may find no entry to patch yet (the refetch it cancelled was carrying
+   *    it), so the truth is refetched once the rating is stored. The document
+   *    workbench skips this because its cache always holds the application
+   *    (its apply paints); here one page refetch per rating is the cost the
+   *    apply path already pays per apply.
+   */
+  const runOptimisticMagnitude = useCallback(
+    async (valueId: number, codeId: number, value: number | null) => {
+      await queryClient.cancelQueries({ queryKey: ['text-data', projectId] })
+      const snapshots = queryClient.getQueriesData<InfiniteData<TextCodingListResponse>>({ queryKey: ['text-data', projectId] })
+      patchTextMagnitude(valueId, codeId, value)
+      try {
+        await textCodingApi.setMagnitude(projectId, { dataset_value_id: valueId, code_id: codeId, magnitude: value })
+        queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
+      } catch (e) {
+        for (const [key, data] of snapshots) queryClient.setQueryData(key, data)
+        throw e  // `useHistory` toasts the server's own reason (a refused rating names why)
+      }
+    },
+    [queryClient, projectId, patchTextMagnitude],
+  )
+
+  const commitMagnitude = useCallback((value: number) => {
+    const target = ratingTarget
+    if (!target) return
+    const previous = currentMagnitude(target.valueId, target.code.id)
+    setRatingTarget(null)
+    // Undoable like every other coding mutation here; the inverse restores the
+    // PREVIOUS value, which may legitimately be null (unrated) or 0.
+    void history.execute({
+      type: 'text_code_apply',
+      description: `Rate "${target.code.name}"`,
+      redo: () => runOptimisticMagnitude(target.valueId, target.code.id, value),
+      undo: () => runOptimisticMagnitude(target.valueId, target.code.id, previous),
+    })
+  }, [ratingTarget, currentMagnitude, history, runOptimisticMagnitude])
+
+  /** Open the strip for an application that ALREADY exists — the `r` verb and
+   *  the row menu's "Rate …" item both land here (#868 e/f, on this surface). */
+  const openRatingFor = useCallback((valueId: number, code: Code) => {
+    if (!code.magnitude_scale) return
+    setSelectedValueIds([valueId])
+    setRatingTarget({ valueId, code })
+  }, [])
+
+  /** The codes the ACTIVE coder may rate on one response, in chip order —
+   *  derived ONCE (`lib/rating-targets.ts`) so the verb and the menu agree. */
+  const ratableCodesForValue = useCallback((valueId: number): Code[] => {
+    const c = comments.find(cm => cm.dataset_value_id === valueId)
+    return ratableCodes(c?.applied_code_details, codeMap, self)
+  }, [comments, codeMap, self])
+
+  /** The same question for the keyboard, which acts on a SINGLE selected response. */
+  const ratableForSelection = useCallback((): { valueId: number; codes: Code[] } | null => {
+    if (selectedValueIds.length !== 1) return null
+    return { valueId: selectedValueIds[0], codes: ratableCodesForValue(selectedValueIds[0]) }
+  }, [selectedValueIds, ratableCodesForValue])
+
   // ── Code toggle handler ───────────────────────────────────────────────
 
   const handleCodeToggle = useCallback(async (codeId: number) => {
     if (selectedValueIds.length === 0) return
     const targets = selectedValueIds
+    const code = codeMap.get(codeId)
 
     // Check if the ACTIVE coder already applied the code to all selected (INV-6/#446):
     // toggling a code only a colleague applied must apply mine, not take remove.
@@ -446,8 +571,19 @@ export default function TextCodingView() {
       return isCodeAppliedByActiveCoder(c?.applied_code_details, c?.applied_code_ids ?? [], codeId, self)
     })
 
+    const settle = () => {
+      queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['text-progress', projectId] })
+      invalidateDerivedCounts(queryClient, projectId, { metrics: true })  // #450: cross-surface + text-coding metrics
+    }
+
     if (allHave) {
-      // Remove from all
+      // #868 (f) on this surface: the rating is captured NOW, per response,
+      // while the applications still exist, and the inverse re-applies WITH
+      // it — per response whenever any was rated, because the bulk endpoint
+      // carries no rating. `?? null`, never `||`: a stored 0 is a rating.
+      const captured = new Map(targets.map(id => [id, currentMagnitude(id, codeId)] as const))
+      const anyRated = [...captured.values()].some(v => v != null)
       await history.execute({
         type: 'text_code_remove',
         description: `Remove code from ${targets.length} text(s)`,
@@ -457,24 +593,22 @@ export default function TextCodingView() {
           } else {
             await textCodingApi.bulkRemoveCode(projectId, { dataset_value_ids: targets, code_id: codeId })
           }
-          queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
-          queryClient.invalidateQueries({ queryKey: ['text-progress', projectId] })
-          invalidateDerivedCounts(queryClient, projectId, { metrics: true })  // #450: cross-surface + text-coding metrics
+          settle()
         },
         undo: async () => {
-          if (targets.length === 1) {
-            await textCodingApi.applyCode(projectId, { dataset_value_id: targets[0], code_id: codeId })
+          if (targets.length === 1 || anyRated) {
+            await Promise.all(targets.map(id => textCodingApi.applyCode(
+              projectId, { dataset_value_id: id, code_id: codeId, magnitude: captured.get(id) ?? null },
+            )))
           } else {
             reportBulkOutcome(await textCodingApi.bulkCode(projectId, { dataset_value_ids: targets, code_id: codeId }))
           }
-          queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
-          queryClient.invalidateQueries({ queryKey: ['text-progress', projectId] })
-          invalidateDerivedCounts(queryClient, projectId, { metrics: true })  // #450: cross-surface + text-coding metrics
+          settle()
         },
       })
     } else {
       // Apply to all (bulk)
-      await history.execute({
+      const run = history.execute({
         type: 'text_code_apply',
         description: `Apply code to ${targets.length} text(s)`,
         redo: async () => {
@@ -483,9 +617,7 @@ export default function TextCodingView() {
           } else {
             reportBulkOutcome(await textCodingApi.bulkCode(projectId, { dataset_value_ids: targets, code_id: codeId }))
           }
-          queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
-          queryClient.invalidateQueries({ queryKey: ['text-progress', projectId] })
-          invalidateDerivedCounts(queryClient, projectId, { metrics: true })  // #450: cross-surface + text-coding metrics
+          settle()
         },
         undo: async () => {
           if (targets.length === 1) {
@@ -493,17 +625,22 @@ export default function TextCodingView() {
           } else {
             await textCodingApi.bulkRemoveCode(projectId, { dataset_value_ids: targets, code_id: codeId })
           }
-          queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
-          queryClient.invalidateQueries({ queryKey: ['text-progress', projectId] })
-          invalidateDerivedCounts(queryClient, projectId, { metrics: true })  // #450: cross-surface + text-coding metrics
+          settle()
         },
       })
+      // #35 variant A — a scaled code applied to ONE response opens its strip
+      // straight away (not after the round trip), so the judgement is made with
+      // the anchors on screen. `useHistory` serialises, so a rating committed
+      // before the apply resolves waits for it. A multi-response apply opens no
+      // strip: one rating standing in for several judgements is not a rating.
+      if (targets.length === 1 && code?.magnitude_scale) setRatingTarget({ valueId: targets[0], code })
+      await run
     }
 
     setAnnouncement(allHave ? 'Code removed' : 'Code applied')
     setSavedIndicator(true)
     setTimeout(() => setSavedIndicator(false), 1500)
-  }, [selectedValueIds, comments, projectId, history, queryClient, self])
+  }, [selectedValueIds, comments, projectId, history, queryClient, self, codeMap, currentMagnitude])
 
   // ── Quote toggle ───────────────────────────────────────────────────────
 
@@ -747,6 +884,17 @@ export default function TextCodingView() {
         if (viewMode === 'by_text') { goToColumn(1); return true }
         if (viewMode === 'by_record') { goToRecord(1); return true }
         return false
+      },
+      // #868 (d/e/f) — `r` re-opens the rating strip for an application that
+      // already exists, the same verb the three workbenches carry. Returns
+      // FALSE when there is nothing to rate, so the key falls through rather
+      // than being swallowed; opens the FIRST ratable code, and the row menu
+      // names each one.
+      r: () => {
+        const target = ratableForSelection()
+        if (!target || target.codes.length === 0) return false
+        openRatingFor(target.valueId, target.codes[0])
+        return true
       },
     },
     onUndo: () => history.undo(),
@@ -1385,7 +1533,8 @@ export default function TextCodingView() {
         ) : (
           <>
             {/* Content */}
-            <div className="flex-1 overflow-hidden" role="tabpanel" id="cv-panel-coding" aria-labelledby="cv-tab-coding">
+            <div className="flex-1 overflow-hidden flex flex-col" role="tabpanel" id="cv-panel-coding" aria-labelledby="cv-tab-coding">
+              <div className="flex-1 min-h-0">
               {focalColumnIds.length === 0 ? (
                 <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
                   Select one or more text columns to begin coding.
@@ -1416,6 +1565,8 @@ export default function TextCodingView() {
                       onContextCreateNote={(dvId, coords) => {
                         setCreateNoteDialog({ position: coords, valueId: dvId })
                       }}
+                      onRateCode={openRatingFor}
+                      ratableCodesFor={ratableCodesForValue}
                       contextVisible={contextVisible}
                       focalColumnIds={activeColumnId ? [activeColumnId] : focalColumnIds}
                       projectId={projectId}
@@ -1462,7 +1613,32 @@ export default function TextCodingView() {
                   onContextCreateNote={(dvId, coords) => {
                     setCreateNoteDialog({ position: coords, valueId: dvId })
                   }}
+                  onRateCode={openRatingFor}
+                  ratableCodesFor={ratableCodesForValue}
                 />
+              )}
+              </div>
+              {/*
+                #35 / #868 (d) — the rating strip, mounted BELOW whichever view is
+                showing and OUTSIDE both scrollers (#826: a conditional child
+                inside a virtualised row risks the remount that drops focus to
+                <body>). One mount serves By Text and By Record, keyed on the
+                target (#870 c) so a second scaled apply remounts it with a fresh
+                cursor and focus.
+              */}
+              {ratingTarget && ratingTarget.code.magnitude_scale && (
+                // py-1, not py-2: the vertical budget at 640×360 is measured on
+                // the document workbench at 85px for the whole control.
+                <div className="border-t border-mm-border bg-mm-surface px-3 py-1 shrink-0">
+                  <MagnitudeStrip
+                    key={`${ratingTarget.valueId}-${ratingTarget.code.id}`}
+                    codeName={ratingTarget.code.name}
+                    scale={ratingTarget.code.magnitude_scale}
+                    value={currentMagnitude(ratingTarget.valueId, ratingTarget.code.id)}
+                    onCommit={commitMagnitude}
+                    onSkip={() => setRatingTarget(null)}
+                  />
+                </div>
               )}
             </div>
 
@@ -1618,7 +1794,14 @@ export default function TextCodingView() {
         {activeTab === 'coding' && selectedValueIds.length > 0 && <span>{selectedValueIds.length} selected</span>}
         <div className="flex-1" />
         {activeTab === 'coding' && (
-          <span className="opacity-60">{codeKeyHint(codes)} · s: quote · c: create code · n: note · j: next uncoded · []: {viewMode === 'by_text' ? 'prev/next column' : 'prev/next record'} · Ctrl+Z/Y: undo/redo</span>
+          // #880 — the shortcut hint collapses below `md`. MEASURED at the 640×360
+          // CSS viewport a 1280×720 window has at 200% zoom: it wraps to TWO lines
+          // there and the status bar costs 45 px, while the coding tabpanel above it
+          // is 9 px tall. `sr-only`, never `hidden` (#717) — it stays in the
+          // accessibility tree, and it is redundant besides: every key it names is
+          // in the Keyboard Shortcuts dialog. ⚠️ The hint is STATE-DEPENDENT
+          // (`codeKeyHint`, #824) — do not replace it with a fixed string.
+          <span className="opacity-60 sr-only md:not-sr-only">{codeKeyHint(codes)} · s: quote · c: create code · n: note · r: rate · j: next uncoded · []: {viewMode === 'by_text' ? 'prev/next column' : 'prev/next record'} · Ctrl+Z/Y: undo/redo</span>
         )}
       </div>
     </div>

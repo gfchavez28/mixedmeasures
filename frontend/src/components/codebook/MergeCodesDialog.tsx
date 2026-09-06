@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import type { CodebookTreeResponse, CodebookCategoryNode, CodebookCodeNode } from '@/lib/api'
 import { COLOR_DEFAULT } from '@/lib/codebook-constants'
+import { describeScaleCrossing } from '@/lib/magnitude'
 import {
   AlertDialog,
   AlertDialogContent,
@@ -87,6 +88,20 @@ export default function MergeCodesDialog({
   const categoryNames = new Set(codes.map(c => c.categoryName ?? 'Uncategorized'))
   const crossCategory = categoryNames.size > 1
 
+  // #869 (b): ratings cross onto the TARGET's scale and a merge has no undo, so
+  // say so BEFORE it runs — one line per source whose scale differs from the
+  // target's. The server refuses a merge whose ratings would fall outside the
+  // target's range; this is the disclosure for the ones that fit and change
+  // meaning, and for a target with no scale at all.
+  const scaleNotes = target
+    ? sources
+        .map(s => describeScaleCrossing(
+          { name: s.code.name, scale: s.code.magnitude_scale },
+          { name: target.code.name, scale: target.code.magnitude_scale },
+        ))
+        .filter((n): n is string => n !== null)
+    : []
+
   if (codes.length < 2) return null
 
   return (
@@ -156,6 +171,22 @@ export default function MergeCodesDialog({
                   <p className="mt-1 text-mm-text-faint">
                     Duplicate applications will be skipped. Source code{sources.length !== 1 ? 's' : ''} will be deactivated.
                   </p>
+                  {/* 🔴 NO `aria-label` ON THIS LIST — it would REPLACE the notes in the
+                      announced description, which is the one place they have to land.
+                      MEASURED in Chrome's a11y tree (2026-09-04, driving the real dialog):
+                      with `aria-label="Rating scales"` the alertdialog's description AND the
+                      Merge button's (`aria-describedby="merge-summary"`, below) both ended
+                      "…Source code will be deactivated. Rating scales" — name-from-content
+                      takes a descendant's own accessible NAME over its text, so the sentence
+                      about what happens to the ratings was swallowed by its own label on the
+                      control that performs an act with no undo. Removing the attribute put
+                      the full sentence into both descriptions (re-measured the same way).
+                      A <ul> needs no accessible name; each item is already a whole sentence. */}
+                  {scaleNotes.length > 0 && (
+                    <ul className="mt-2 space-y-1 text-amber-700 dark:text-amber-400">
+                      {scaleNotes.map(n => <li key={n}>{n}</li>)}
+                    </ul>
+                  )}
                 </div>
               )}
             </div>

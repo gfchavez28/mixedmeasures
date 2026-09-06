@@ -26,7 +26,7 @@ from app.models.user import User
 from app.services import magnitude
 from app.schemas.code import MagnitudeScaleUpdate, MagnitudeScale, MagnitudeAnchor
 from app.schemas.coding import ApplyCodeRequest, MagnitudeValueUpdate
-from app.routers.codes import set_magnitude_scale
+from app.routers.codes import merge_codes, set_magnitude_scale
 from app.routers.coding import apply_code, set_code_magnitude
 
 
@@ -940,3 +940,345 @@ class TestTheDocumentPayloadCarriesTheRating:
         entry = next(c for c in seg.codes if c.id == 901)
         assert entry.magnitude == 0.0 and entry.magnitude is not None
         assert entry.magnitude_conflict == -0.5
+
+
+# ───────────────── 7. the FOURTH surface — text coding's rating door (#868 d) ─────────────
+
+import inspect  # noqa: E402
+
+from app.routers.text_coding import (  # noqa: E402
+    apply_code as text_apply_code,
+    remove_code as text_remove_code,
+    set_text_code_magnitude,
+    list_texts,
+)
+from app.schemas.text_coding import TextCodeRequest, TextMagnitudeUpdate  # noqa: E402
+
+
+CELL = 90210
+
+
+def _seed_cell(db) -> int:
+    """One open-text dataset cell in the fixture's own project. Returns its id."""
+    db.add(Dataset(id=901, project_id=900, name="Survey"))
+    db.flush()
+    db.add_all([
+        DatasetColumn(id=9020, dataset_id=901, column_code="Q1", column_name="Q1",
+                      column_text="Open", column_type=ColumnType.OPEN_TEXT,
+                      sequence_order=0, display_order=0),
+        DatasetRow(id=9021, dataset_id=901, row_identifier="R012"),
+    ])
+    db.flush()
+    db.add(DatasetValue(id=CELL, row_id=9021, column_id=9020, value_text="alpha"))
+    db.flush()
+    return CELL
+
+
+def _text_apply(db, uid=1, **fields):
+    return asyncio.run(text_apply_code(
+        900, TextCodeRequest(dataset_value_id=CELL, code_id=901, **fields),
+        user=_user(db, uid), db=db,
+    ))
+
+
+def _text_rate(db, value, uid=1, code_id=901):
+    return set_text_code_magnitude(
+        900, TextMagnitudeUpdate(dataset_value_id=CELL, code_id=code_id, magnitude=value),
+        user=_user(db, uid), db=db,
+    )
+
+
+def _cell_app(db, uid=1, code_id=901):
+    return db.query(CodeApplication).filter_by(
+        dataset_value_id=CELL, code_id=code_id, user_id=uid).one()
+
+
+class TestTextCodingRatingDoor:
+    """#868 (d) — text coding was the one surface with NO rating endpoint: the only
+    PATCH was segment-keyed. The three questions are still answered in
+    `services/magnitude.py`; these pin that the fourth door asks them, with the
+    same fixture axis the segment tests use (−1…+1, so zero is interior).
+    """
+
+    def test_both_rating_endpoints_are_plain_def(self):
+        """§10b — neither body awaits anything; `async def` would put the work on
+        the event loop (#837)."""
+        assert not inspect.iscoroutinefunction(set_text_code_magnitude)
+        assert not inspect.iscoroutinefunction(set_code_magnitude)
+
+    def test_a_rating_supplied_at_apply_time_is_stored_and_returned(self, project):
+        db = project
+        _seed_cell(db)
+        resp = _text_apply(db, magnitude=-0.5)
+        assert resp.magnitude == -0.5
+        assert _cell_app(db).magnitude == -0.5
+
+    def test_an_out_of_range_rating_refuses_BEFORE_the_code_is_applied(self, project):
+        db = project
+        _seed_cell(db)
+        with pytest.raises(HTTPException) as exc:
+            _text_apply(db, magnitude=2.0)
+        assert exc.value.status_code == 400
+        assert db.query(CodeApplication).filter_by(dataset_value_id=CELL).count() == 0
+
+    def test_omitting_the_field_leaves_an_existing_rating_ALONE(self, project):
+        """Omitted ≠ null: an ordinary re-apply must not unrate."""
+        db = project
+        _seed_cell(db)
+        _text_apply(db, magnitude=0.5)
+        _text_apply(db)
+        assert _cell_app(db).magnitude == 0.5
+
+    def test_re_applying_with_a_rating_re_rates_and_clears_the_conflict(self, project):
+        """The undo of a removal re-applies through this branch (#868 f); and
+        rating again IS the adjudication of a merge conflict (§6d)."""
+        db = project
+        _seed_cell(db)
+        _text_apply(db, magnitude=0.5)
+        app = _cell_app(db)
+        app.magnitude_conflict = -1.0
+        db.flush()
+        resp = _text_apply(db, magnitude=0.0)
+        assert resp.magnitude == 0.0 and resp.magnitude is not None
+        app = _cell_app(db)
+        assert app.magnitude == 0.0 and app.magnitude_conflict is None
+
+    def test_zero_survives_and_null_unrates(self, project):
+        db = project
+        _seed_cell(db)
+        _text_apply(db)
+        assert _text_rate(db, 0.0).magnitude == 0.0
+        app = _cell_app(db)
+        assert app.magnitude == 0.0 and app.magnitude is not None
+        _text_rate(db, None)
+        assert _cell_app(db).magnitude is None
+
+    def test_rating_a_code_you_have_not_applied_is_a_404_that_says_why(self, project):
+        db = project
+        _seed_cell(db)
+        with pytest.raises(HTTPException) as exc:
+            _text_rate(db, 0.5)
+        assert exc.value.status_code == 404
+        assert "nothing to rate" in exc.value.detail
+
+    def test_a_rating_NEVER_touches_a_COLLEAGUES_application(self, project):
+        """Caller = user 2, colleague = user 1 (the LOWER id) — the arrangement
+        the segment sibling's docstring shows to be the only one that can
+        catch a lost `user_id` filter."""
+        db = project
+        _seed_cell(db)
+        db.add(CodeApplication(dataset_value_id=CELL, code_id=901, user_id=1, magnitude=1.0))
+        db.flush()
+        _text_apply(db, uid=2)
+        _text_rate(db, -1.0, uid=2)
+        assert _cell_app(db, uid=1).magnitude == 1.0, "a colleague's rating was overwritten"
+        assert _cell_app(db, uid=2).magnitude == -1.0
+
+    def test_an_inactive_code_is_refused_a_NEW_rating_but_may_be_cleared(self, project):
+        """#869 (g), inherited through `validate_value` rather than re-implemented."""
+        db = project
+        _seed_cell(db)
+        _text_apply(db, magnitude=0.5)
+        db.get(Code, 901).is_active = False
+        db.flush()
+        with pytest.raises(HTTPException) as exc:
+            _text_rate(db, 1.0)
+        assert exc.value.status_code == 400
+        assert "inactive" in exc.value.detail
+        _text_rate(db, None)
+        assert _cell_app(db).magnitude is None
+
+    def test_a_rating_change_marks_consensus_stale(self, project, monkeypatch):
+        """The every-mutation-site rule, on the dataset-value target."""
+        import app.routers.text_coding as tc
+        called = []
+        monkeypatch.setattr(tc, "consensus_enabled", lambda db: True)
+        monkeypatch.setattr(
+            tc, "mark_consensus_stale",
+            lambda db, pid, **kw: called.append((pid, tuple(kw.get("dataset_value_ids") or ()))),
+        )
+        db = project
+        _seed_cell(db)
+        _text_apply(db)
+        called.clear()
+        _text_rate(db, 0.5)
+        assert called == [(900, (CELL,))]
+
+    def test_the_text_payload_carries_a_ZERO_rating(self, project):
+        """The wire arm for this surface — the projection is arity-guarded above,
+        this pins the value: a builder that dropped the field would give None."""
+        db = project
+        _seed_cell(db)
+        _text_apply(db, magnitude=0.0)
+        resp = list_texts(
+            project_id=900, column_ids="9020", dataset_ids=None, hide_empty=True,
+            record_id=None, search=None, sort_by="column_asc", random_seed=None,
+            quoted_only=False, limit=TEXT_PAGE_SIZE_FOR_TEST, offset=0,
+            user=_user(db), db=db,
+        )
+        detail = next(d for d in resp.texts[0].applied_code_details if d.code_id == 901)
+        assert detail.magnitude == 0.0 and detail.magnitude is not None
+
+
+TEXT_PAGE_SIZE_FOR_TEST = 200
+
+
+class TestTextRemoveIsPerCoder:
+    """#879 — `DELETE /text-coding/code` had no `user_id` filter.
+
+    Two coders apply one code to one response; coder 2 removes theirs. Before
+    the fix `.first()` returned the LOWEST id's row — coder 1's — and deleted it,
+    while coder 2's own application stayed. Silent loss of a colleague's coding
+    from the ordinary remove gesture, on the one surface whose single-remove
+    door was never scoped (the bulk sibling was, from J2-1b).
+    """
+
+    def _both_apply(self, db):
+        _seed_cell(db)
+        db.add_all([
+            CodeApplication(dataset_value_id=CELL, code_id=902, user_id=1),
+            CodeApplication(dataset_value_id=CELL, code_id=902, user_id=2),
+        ])
+        db.flush()
+
+    def test_removing_MY_application_leaves_a_COLLEAGUES_intact(self, project):
+        db = project
+        self._both_apply(db)
+        asyncio.run(text_remove_code(
+            900, dataset_value_id=CELL, code_id=902, user=_user(db, 2), db=db,
+        ))
+        remaining = {a.user_id for a in db.query(CodeApplication).filter_by(
+            dataset_value_id=CELL, code_id=902)}
+        assert remaining == {1}, f"the wrong coder's application was deleted: {remaining}"
+
+    def test_removing_a_code_only_a_colleague_applied_deletes_NOTHING(self, project):
+        db = project
+        _seed_cell(db)
+        db.add(CodeApplication(dataset_value_id=CELL, code_id=902, user_id=1))
+        db.flush()
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(text_remove_code(
+                900, dataset_value_id=CELL, code_id=902, user=_user(db, 2), db=db,
+            ))
+        assert exc.value.status_code == 404
+        assert db.query(CodeApplication).filter_by(dataset_value_id=CELL, code_id=902).count() == 1
+
+
+# ───────────────────── #869 (b): merging CODES moves ratings across scales ─────────────
+
+class TestMergeCodesAcrossScales:
+    """`merge_codes` re-points every source application onto the target code, so its
+    ratings land on the TARGET's scale. Decided 2026-09-04 (the #869 design call): a
+    rating that would fall outside that scale REFUSES the merge by count — the same
+    act, from the rating's point of view, as narrowing a scale — while a DUPLICATE's
+    differing rating becomes the kept row's `magnitude_conflict` (§6d-bis: keep ours,
+    record the other number, never block). A target with no scale keeps every rating,
+    uninterpretable until it declares one (§5's clearing rule).
+
+    🔴 Zero is interior on the −1…+1 target, so a ZERO rating crossing as a rating and
+    a ZERO duplicate flagged as a conflict are what a truthiness slip would drop.
+    """
+
+    def _ten(self, db):
+        db.add(Code(id=904, project_id=900, name="Intensity", numeric_id=4,
+                    is_active=True, is_universal=False,
+                    magnitude_min=0.0, magnitude_max=10.0, magnitude_step=1.0))
+        db.flush()
+
+    def _merge(self, db, source, target):
+        return asyncio.run(merge_codes(
+            project_id=900, source_code_id=source, target_code_id=target,
+            delete_source=False, user=_user(db), db=db,
+        ))
+
+    def _on(self, db, code_id):
+        return {
+            (a.segment_id, a.user_id): a
+            for a in db.query(CodeApplication).filter(CodeApplication.code_id == code_id).all()
+        }
+
+    def test_refuses_by_count_when_a_rating_would_fall_outside_the_targets_scale(self, project):
+        from fastapi import HTTPException
+        db = project
+        self._ten(db)
+        db.add_all([
+            CodeApplication(segment_id=9000, code_id=904, user_id=1, magnitude=7.0),
+            CodeApplication(segment_id=9001, code_id=904, user_id=1, magnitude=0.5),
+        ])
+        db.flush()
+        with pytest.raises(HTTPException) as exc:
+            self._merge(db, 904, 901)
+        assert exc.value.status_code == 400
+        assert "1 rating on “Intensity” would fall outside “District support”'s scale (-1 to 1)" in exc.value.detail
+        assert "0 to 10" in exc.value.detail, "names the scale the ratings were given on"
+        assert "Widen or clear" in exc.value.detail
+        # Nothing moved and nothing was deactivated: the refusal is decided before any write.
+        assert set(self._on(db, 904)) == {(9000, 1), (9001, 1)}
+        assert self._on(db, 901) == {}
+        assert db.get(Code, 904).is_active is True
+
+    def test_carries_in_range_ratings_and_says_how_many(self, project):
+        db = project
+        self._ten(db)
+        db.add_all([
+            CodeApplication(segment_id=9000, code_id=904, user_id=1, magnitude=0.0),
+            CodeApplication(segment_id=9001, code_id=904, user_id=2, magnitude=1.0),
+            CodeApplication(segment_id=9001, code_id=904, user_id=1),
+        ])
+        db.flush()
+        res = self._merge(db, 904, 901)
+        assert (res.merged, res.skipped) == (3, 0)
+        assert (res.ratings_carried, res.rating_conflicts, res.target_has_scale) == (2, 0, True)
+        moved = self._on(db, 901)
+        assert moved[(9000, 1)].magnitude == 0.0, "a ZERO rating crosses as a rating, never as unrated"
+        assert moved[(9001, 2)].magnitude == 1.0
+        assert moved[(9001, 1)].magnitude is None
+
+    def test_a_duplicates_differing_rating_becomes_the_kept_rows_conflict_even_out_of_range(self, project):
+        db = project
+        self._ten(db)
+        db.add_all([
+            # The target already holds coder 1 on both segments.
+            CodeApplication(segment_id=9000, code_id=901, user_id=1, magnitude=0.5),
+            CodeApplication(segment_id=9001, code_id=901, user_id=1, magnitude=1.0),
+            # Source duplicates: a ZERO (differs) and a 7 (outside −1…+1 — but a duplicate's
+            # rating is "the other number", adjudicated and never analysed, so it flags
+            # instead of refusing).
+            CodeApplication(segment_id=9000, code_id=904, user_id=1, magnitude=0.0),
+            CodeApplication(segment_id=9001, code_id=904, user_id=1, magnitude=7.0),
+        ])
+        db.flush()
+        res = self._merge(db, 904, 901)
+        assert (res.merged, res.skipped, res.rating_conflicts) == (0, 2, 2)
+        kept = self._on(db, 901)
+        assert kept[(9000, 1)].magnitude == 0.5 and kept[(9000, 1)].magnitude_conflict == 0.0
+        assert kept[(9001, 1)].magnitude == 1.0 and kept[(9001, 1)].magnitude_conflict == 7.0
+        assert self._on(db, 904) == {}
+
+    def test_an_equal_or_absent_duplicate_rating_leaves_the_kept_rows_flag_alone(self, project):
+        db = project
+        self._ten(db)
+        db.add_all([
+            CodeApplication(segment_id=9000, code_id=901, user_id=1, magnitude=0.5, magnitude_conflict=-1.0),
+            CodeApplication(segment_id=9001, code_id=901, user_id=1, magnitude=1.0),
+            CodeApplication(segment_id=9000, code_id=904, user_id=1, magnitude=0.5),  # equal
+            CodeApplication(segment_id=9001, code_id=904, user_id=1),                 # unrated
+        ])
+        db.flush()
+        res = self._merge(db, 904, 901)
+        assert res.rating_conflicts == 0
+        kept = self._on(db, 901)
+        assert kept[(9000, 1)].magnitude_conflict == -1.0, "a pre-existing flag names a different other copy"
+        assert kept[(9001, 1)].magnitude_conflict is None
+
+    def test_a_scale_less_target_keeps_the_ratings_it_cannot_show(self, project):
+        db = project
+        db.add_all([
+            CodeApplication(segment_id=9000, code_id=901, user_id=1, magnitude=0.0),
+            CodeApplication(segment_id=9001, code_id=901, user_id=2, magnitude=-1.0),
+        ])
+        db.flush()
+        res = self._merge(db, 901, 902)  # 902 declares no scale
+        assert (res.merged, res.ratings_carried, res.target_has_scale) == (2, 2, False)
+        moved = self._on(db, 902)
+        assert moved[(9000, 1)].magnitude == 0.0 and moved[(9001, 2)].magnitude == -1.0

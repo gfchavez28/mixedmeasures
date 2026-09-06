@@ -166,8 +166,31 @@ export const textCodingApi = {
     api.get<CodingProgress>(`/projects/${pid}/text-coding/coding-progress`, { params }).then(r => r.data),
 
   // Coding
-  applyCode: (pid: number, data: { dataset_value_id: number; code_id: number }) =>
-    api.post(`/projects/${pid}/text-coding/code`, data).then(r => r.data),
+  /**
+   * Apply a code; optionally with a rating (#35, #868 d).
+   *
+   * ⚠️ `magnitude` is sent ONLY when the caller passes it — `undefined` omits
+   * the key, and the server reads presence through `model_fields_set`: absent
+   * means "leave any existing rating alone", an explicit `null` means UNRATE.
+   * The undo of a REMOVAL re-applies through this argument with the rating
+   * captured when the entry was built (#868 f), so Ctrl+Z does not unrate.
+   */
+  applyCode: (pid: number, data: { dataset_value_id: number; code_id: number; magnitude?: number | null }) =>
+    api.post(
+      `/projects/${pid}/text-coding/code`,
+      data.magnitude === undefined
+        ? { dataset_value_id: data.dataset_value_id, code_id: data.code_id }
+        : data,
+    ).then(r => r.data),
+  /**
+   * #35 / #868 (d) — set or clear THIS coder's rating on an already-applied
+   * code on a dataset cell. The target rides the body, like `applyCode` here;
+   * the segment sibling is `codingApi.setMagnitude`.
+   *
+   * ⚠️ `null` is an explicit UNRATE and must be sent as `null`, never omitted.
+   */
+  setMagnitude: (pid: number, data: { dataset_value_id: number; code_id: number; magnitude: number | null }) =>
+    api.patch(`/projects/${pid}/text-coding/code/magnitude`, data).then(r => r.data),
   removeCode: (pid: number, params: { dataset_value_id: number; code_id: number }) =>
     api.delete(`/projects/${pid}/text-coding/code`, { params }).then(r => r.data),
   // #678: typed — a partial failure is a 200 body, not a throw. Route the result

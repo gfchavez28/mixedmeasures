@@ -461,6 +461,10 @@ export default function Dashboard() {
                       <span>{countLabel(importPreview.manifest.project_summary.code_count, 'code', 'codes')}</span>
                       <span>{countLabel(importPreview.manifest.project_summary.participant_count, 'participant', 'participants')}</span>
                       <span>{countLabel(importPreview.manifest.project_summary.memo_count, 'memo', 'memos')}</span>
+                      {/* The canvas is the write-up; a file that carries one should
+                          say so before it is imported. The count only reached the
+                          wire on 2026-09-04 (#855 — the schema never declared it). */}
+                      <span>{countLabel(importPreview.manifest.project_summary.canvas_count, 'canvas', 'canvases')}</span>
                     </div>
                   )}
                   {importPreview?.warnings && importPreview.warnings.length > 0 && (

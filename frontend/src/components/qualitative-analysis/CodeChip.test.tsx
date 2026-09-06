@@ -169,4 +169,23 @@ describe('CodeChip — magnitude (#35)', () => {
     render(<CodeChip code={code} magnitude={-1} scale={BIPOLAR} />)
     expect(screen.getByText('−1')).toBeInTheDocument()
   })
+
+  it('🔴 establishes its OWN containing block for the rating track (#878)', () => {
+    // The track is `absolute`. CodeChip did not carry `relative`, so it resolved
+    // against whatever positioned ancestor happened to be above it:
+    // `InlineCodeActions` wraps every chip in a `relative` span, which made it
+    // look correct there, while `ReconciliationGrid` renders CodeChip directly
+    // inside a NON-positioned wrapper. Measured in the browser at that call
+    // site's exact markup: the same 3px meter came out **1253px wide**, spanning
+    // the page, instead of 86px inside a 98px chip.
+    //
+    // ⚠️ jsdom computes no layout, so this pins the STRUCTURE that makes the
+    // geometry possible: the absolutely-positioned track's nearest positioned
+    // ancestor must be the chip itself — asserted with no `relative` wrapper in
+    // the tree, which is the reconciliation-grid shape.
+    const { container } = render(<CodeChip code={code} magnitude={0.5} scale={BIPOLAR} />)
+    const track = container.querySelector('.absolute')
+    expect(track, 'the rating track should render for a scaled chip').toBeTruthy()
+    expect(track!.closest('.relative')).toBe(container.firstElementChild)
+  })
 })
