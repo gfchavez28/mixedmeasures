@@ -139,6 +139,16 @@ def link_rows_by_identifier_column(
         auto_fill_role_from_linked_row(db, participant, row)
     db.flush()
 
+    # Row 45 step 4 — this is the bulk link path (import, append, and the retro
+    # link-by-column endpoint all reach it), so it is the highest-volume score
+    # input there is: every newly linked row makes that person's coded passages
+    # reachable. Imported here rather than at module scope to keep the import
+    # graph acyclic — `participant_scores` reads the rollup, which reads the
+    # resolver, which reads this module's neighbours.
+    if to_link or to_create:
+        from .participant_scores import mark_participant_scores_stale
+        mark_participant_scores_stale(db, project_id)
+
     return {
         "linked": len(to_link) + len(to_create),
         "created": len(to_create),

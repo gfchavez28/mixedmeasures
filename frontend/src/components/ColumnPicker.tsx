@@ -337,9 +337,16 @@ function ColumnsView({
               </a>
             </div>
 
-            {/* Column list — scrollable within constrained flex area */}
+            {/* Column list — bounded and self-scrolling (#894).
+                This used to rely on a flexible ANCESTOR to constrain it. When
+                that ancestor was squeezed to zero the list went to zero too,
+                and the ~143px of `shrink-0` chrome above it (the section
+                header, the Variables/Groups tabs, the search box) painted over
+                whatever followed. The cap lives here now — on the thing that
+                actually grows — so the list is bounded no matter what the
+                column does. */}
             {isExpanded && (
-              <div className="flex-1 min-h-0 overflow-y-auto">
+              <div className="max-h-[45vh] overflow-y-auto overscroll-contain">
                 <ColumnListbox
                   projectId={projectId}
                   columns={ds.columns}
@@ -592,7 +599,10 @@ function DomainsView({
   return (
     <div
       {...listProps}
-      className="flex-1 min-h-0 overflow-y-auto pb-2 outline-none"
+      // #894: capped here for the same reason as the columns list above — the
+      // Groups tab is the sibling of that list and must not keep depending on a
+      // flexible ancestor that no longer exists.
+      className="max-h-[45vh] overflow-y-auto overscroll-contain pb-2 outline-none"
       aria-label="Variable groups"
     >
       {domains.map((d, i) => {

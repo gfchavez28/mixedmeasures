@@ -163,6 +163,98 @@ def test_empty_db_skips_backup_and_still_migrates(tmp_path, monkeypatch):
     assert called["upgrade"] is True, "a fresh install must still migrate"
 
 
+# ── #920: the pre-migration backup runs only when a migration is PENDING ──────
+#
+# The bug: the block was commented "Check if migrations are actually pending" and
+# checked no such thing — it backed up whenever the DB was non-empty. `run_migrations`
+# is in the lifespan startup path, so EVERY launch copied the whole database (468.8 MB
+# on the dev corpus) and the 5-deep rotation meant five ordinary launches after a bad
+# migration destroyed the pre-migration copy of the good state. Under `uvicorn --reload`
+# the same write happened on every file save.
+#
+# These two tests are a PAIR and neither is sufficient alone: deleting the backup call
+# outright passes the "at head" arm, and reverting the fix passes the "behind head" arm.
+
+
+def _resolved_heads():
+    """The head set exactly as `run_migrations` resolves it.
+
+    Derived from the migration tree, never a literal: a hardcoded revision here
+    would silently stop being the head at the next migration, and the "at head"
+    test would then pass because its fixture had drifted rather than because the
+    product code is right (the 2026-09-10 `audit-boundaries.py --self-test`
+    lesson, in a different file).
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    base_dir = database.resource_base()
+    cfg = Config(str(base_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(base_dir / "alembic"))
+    heads = ScriptDirectory.from_config(cfg).get_heads()
+    # Self-check: an empty head set would make the "at head" fixture unbuildable
+    # and the containment assertion below vacuous.
+    assert heads, "resolved no migration heads — the script_location is wrong"
+    return heads
+
+
+def _spy_on_upgrade(monkeypatch):
+    import alembic.command
+    called = {"upgrade": False}
+    monkeypatch.setattr(
+        alembic.command, "upgrade",
+        lambda *a, **k: called.__setitem__("upgrade", True),
+    )
+    monkeypatch.setattr(database, "_probe_engine_readable", lambda: None)
+    return called
+
+
+def test_db_already_at_head_is_not_backed_up(tmp_path, monkeypatch):
+    """The #920 fix: nothing is about to happen, so nothing needs protecting.
+
+    Asserted on the FILESYSTEM rather than on a spy — "no 468 MB copy landed" is
+    the property that matters, and it is the one a future refactor could break
+    while still calling something named like a backup.
+    """
+    head = _resolved_heads()[0]
+    db = _readable_db_at_revision(tmp_path / "dev.db", rev=head)
+    backup_dir = tmp_path / "backups"
+    monkeypatch.setattr(database.settings, "mm_database_path", str(db), raising=False)
+    monkeypatch.setattr(database, "get_backup_dir", lambda: backup_dir)
+    called = _spy_on_upgrade(monkeypatch)
+
+    run_migrations()
+
+    assert list(backup_dir.glob("dev_*.db")) == [], (
+        "a database already at head must not be copied — this ran on every launch "
+        "of the packaged app and rotated away the real pre-migration recovery point"
+    )
+    assert called["upgrade"] is True, "upgrade must still be attempted (it is a no-op)"
+
+
+def test_db_behind_head_is_still_backed_up(tmp_path, monkeypatch):
+    """The other arm, without which the fix could be 'delete the backup'.
+
+    The revision is synthetic on purpose: the predicate is "not among the heads",
+    so any non-head value exercises it, and naming a real historical revision
+    would add a second literal to keep in step with the migration chain.
+    """
+    db = _readable_db_at_revision(tmp_path / "dev.db", rev="0000notahead0000")
+    backup_dir = tmp_path / "backups"
+    monkeypatch.setattr(database.settings, "mm_database_path", str(db), raising=False)
+    monkeypatch.setattr(database, "get_backup_dir", lambda: backup_dir)
+    called = _spy_on_upgrade(monkeypatch)
+
+    assert "0000notahead0000" not in _resolved_heads(), "fixture must be behind head"
+
+    run_migrations()
+
+    assert len(list(backup_dir.glob("dev_*.db"))) == 1, (
+        "a pending migration is the destructive path — it must be backed up first"
+    )
+    assert called["upgrade"] is True
+
+
 def test_backup_succeeds_even_if_pruning_old_backups_fails(tmp_path, monkeypatch):
     """A prune failure must NOT block the migration.
 

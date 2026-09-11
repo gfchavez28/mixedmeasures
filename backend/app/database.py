@@ -348,6 +348,7 @@ def run_migrations():
     """Run any pending Alembic migrations with automatic backup."""
     from alembic.config import Config
     from alembic import command
+    from alembic.script import ScriptDirectory
 
     # Resolve the alembic tree: the bundle's _MEIPASS when frozen, else backend/.
     base_dir = resource_base()
@@ -356,7 +357,7 @@ def run_migrations():
     # Script location must be absolute (CWD is unpredictable when packaged).
     alembic_cfg.set_main_option("script_location", str(base_dir / "alembic"))
 
-    # Check if migrations are actually pending
+    # Where the DB currently sits — the first half of the pendency check below.
     db_path = Path(settings.mm_database_path)
     try:
         current_rev = _get_current_revision(db_path)
@@ -371,7 +372,32 @@ def run_migrations():
         )
         raise
 
-    # Backup before migrating (skipped when the DB is empty/new — nothing at risk).
+    # Is a migration ACTUALLY pending? (#920)
+    #
+    # 🔴 This block used to be commented "Check if migrations are actually pending"
+    # while doing no such check: it backed up whenever `current_rev is not None`,
+    # i.e. on EVERY startup of any non-empty database. `run_migrations()` is in the
+    # lifespan's startup path, so every launch of the packaged app wrote a full copy
+    # of the researcher's database — 468.8 MB per launch on the dev corpus, and five
+    # ordinary launches after a bad migration rotated away (5-deep) the pre-migration
+    # copy of the good state. That is precisely the recovery this backup exists to
+    # provide, destroyed by normal use. In dev under `uvicorn --reload` the same
+    # write happened on every file save.
+    #
+    # `not in heads`, never `!= head`: if the head set cannot be resolved, or the DB
+    # sits on a revision the scripts no longer contain, or the chain has branched,
+    # the predicate is True and we back up. Every unknown resolves toward taking the
+    # backup — the only safe direction for the guard on the one destructive path.
+    try:
+        heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
+    except Exception as e:  # pragma: no cover - defensive; fails toward backing up
+        logger.warning(
+            "Could not resolve migration heads (%s); backing up as if pending.", e
+        )
+        heads = set()
+
+    # Backup before migrating (skipped when the DB is empty/new — nothing at risk —
+    # and, since #920, when it is already at head — nothing about to happen).
     # #692: a FAILED backup raises PreMigrationBackupError, which propagates past
     # command.upgrade() so the destructive step never runs; previously it was a
     # logger.warning that nobody saw and the migration proceeded anyway.
@@ -381,7 +407,7 @@ def run_migrations():
     # stderr, and the spawned-child dialog said only "the local engine exited
     # unexpectedly". It is true as of #716 because the error subclasses
     # FatalStartupError and the lifespan emits it with the MM-FATAL marker.
-    if current_rev is not None:
+    if current_rev is not None and current_rev not in heads:
         backup_path = _backup_database(db_path)
         if backup_path:
             logger.info(

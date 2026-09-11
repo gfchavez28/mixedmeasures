@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Plus, StickyNote, Trash2, ChevronDown, ChevronRight, Pencil,
-  Save, LoaderCircle
+  Save, LoaderCircle, Archive, ArchiveRestore, Focus
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -22,6 +22,7 @@ import {
   type Memo,
 } from '@/lib/api'
 import { getUnfocusedStyle } from '@/lib/utils'
+import { memoPreview } from '@/lib/memo-preview'
 import { toast } from 'sonner'
 import {
   type FilterType,
@@ -179,12 +180,23 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
   const createMutation = useMutation({
     mutationFn: (data: { entity_type: string; entity_id: number; content?: string }) =>
       memosApi.create(projectId, data),
-    onSuccess: () => {
+    onSuccess: (created) => {
       queryClient.invalidateQueries({ queryKey: ['memos', projectId] })
       setIsCreating(false)
       setNewContent('')
       setNewEntityType(effectiveDefaultType)
       setNewEntityId(effectiveDefaultId)
+      // 🔴 #944 — the "did it save?" moment, on the surface whose content is the
+      // researcher's own writing. Groups default COLLAPSED, so the form closed and
+      // the page showed a single collapsed row: the memo just written was not on
+      // screen anywhere, and create was the ONLY mutation here with no toast while
+      // archive, restore and delete all had one. Both halves are fixed: say it
+      // happened, and expand the group so the memo itself is visible.
+      // ⚠️ The key must be built the way `memoGroups` builds it, from the CREATED
+      // memo the server returned — deriving it from the form state would drift the
+      // day either side changes how a group is keyed.
+      if (created) setExpandedGroups(prev => new Set(prev).add(`${created.entity_type}-${created.entity_id}`))
+      toast.success('Memo created')
     },
     onError: () => toast.error('Failed to create memo'),
   })
@@ -249,6 +261,38 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
     setEditingMemoId(memo.id)
     setEditContent(memo.content)
   }, [])
+
+  /**
+   * The memo lifecycle actions — ONE home (#934).
+   *
+   * 🔴 **This block was rendered TWICE, byte-identically** (the read-only card and
+   * the edit form each carried a copy), so the icon fix below had two homes and a
+   * reader had no way to know the second existed. A copy propagates a defect
+   * verbatim (#733); collapsing it is what makes the fix single-sourced.
+   *
+   * 🔴 **THE ICON IS A CLAIM ABOUT THE ACT, exactly like the name (#912).** #912
+   * renamed this control to *Archive memo: ‹opening›* because it archives. The
+   * icon still said otherwise: `Trash2`, **the identical glyph on the permanent
+   * Delete button one branch above** — so the two controls, which do opposite
+   * things to the researcher's own writing, were drawn the same. `Archive` for
+   * archiving; `Trash2` and red stay on the permanent delete, which earns them.
+   */
+  const renderLifecycleActions = useCallback((memo: Memo) => (
+    memo.is_archived ? (
+      <div className="flex items-center gap-1">
+        <Button variant="ghost" size="sm" className="h-7 text-xs text-mm-text-muted hover:text-mm-text" aria-label={`Restore memo: ${memoPreview(memo.content)}`} onClick={() => restoreMutation.mutate(memo.id)}>
+          <ArchiveRestore aria-hidden className="h-3 w-3 mr-1" />Restore
+        </Button>
+        <Button variant="ghost" size="sm" className="h-7 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/20" aria-label={`Delete memo permanently: ${memoPreview(memo.content)}`} onClick={() => permanentDeleteMutation.mutate(memo.id)}>
+          <Trash2 aria-hidden className="h-3 w-3 mr-1" />Delete
+        </Button>
+      </div>
+    ) : (
+      <Button variant="ghost" size="sm" className="h-7 text-xs text-mm-text-muted hover:text-mm-text hover:bg-mm-bg" aria-label={`Archive memo: ${memoPreview(memo.content)}`} onClick={() => setDeleteTarget(memo)}>
+        <Archive aria-hidden className="h-3 w-3 mr-1" />Archive
+      </Button>
+    )
+  ), [restoreMutation, permanentDeleteMutation])
 
   const handleSaveEdit = useCallback((memoId: number) => {
     updateMutation.mutate({ memoId, content: editContent })
@@ -476,7 +520,10 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
           <div className="flex items-center justify-center py-12">
             <LoaderCircle className="h-5 w-5 animate-spin text-mm-text-muted" />
           </div>
-        ) : filteredMemos.length === 0 ? (
+        ) : filteredMemos.length === 0 && !isCreating ? (
+          /* #944(b) — `&& !isCreating`. The empty state used to render directly
+             beneath the open create form, telling the researcher there is nothing
+             here while they are in the middle of writing the first thing. */
           <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
             <StickyNote className="h-8 w-8 text-mm-text-muted/40 mb-2" />
             <p className="text-sm text-mm-text-muted">
@@ -492,53 +539,68 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
             const groupLabel = getGroupLabel(group.entityType, group.entityId)
             const isGroupExpanded = expandedGroups.has(group.key)
             const groupColor = entityTypeHexColor(group.entityType)
+            // The focus toggle's PRESSED state. `handleFocus` clears the focus when
+            // the same target is chosen again, so this control has two states and
+            // announced neither before #933.
+            const groupFocusId = group.entityType === 'project' ? null : group.entityId
+            const isGroupFocused = focusedType === group.entityType && focusedEntityId === groupFocusId
 
             return (
               <div key={group.key}>
-                {/* Collapsible group header */}
-                <button
-                  className="w-full flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-mm-text hover:bg-mm-surface-hover transition-colors"
-                  onClick={() => toggleGroup(group.key)}
-                  aria-expanded={isGroupExpanded}
-                >
-                  {isGroupExpanded
-                    ? <ChevronDown className="h-3.5 w-3.5 text-mm-text-muted flex-shrink-0" />
-                    : <ChevronRight className="h-3.5 w-3.5 text-mm-text-muted flex-shrink-0" />
-                  }
-                  <GroupIcon className="h-3.5 w-3.5 text-mm-text-muted flex-shrink-0" />
-                  <span
-                    className="truncate cursor-pointer hover:underline"
-                    role="button"
-                    tabIndex={0}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onFocus?.(
+                {/* Collapsible group header.
+                    🔴 **#933 — the disclosure and the focus toggle are SIBLINGS now.**
+                    The label used to be a `<span role="button" tabIndex={0}>` INSIDE
+                    the disclosure `<button>`: interactive content nested in a button,
+                    two overlapping hit areas in one row distinguished only by a hover
+                    underline, and an outer name that absorbed the inner one (measured:
+                    `button "Project 1 memo"` containing `button "Project"`).
+                    The whole row stays the disclosure, which is the common act; the
+                    focus toggle is an explicit control beside it. */}
+                <div className="group/memogroup w-full flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-mm-text hover:bg-mm-surface-hover transition-colors">
+                  <button
+                    className="flex items-center gap-2 flex-1 min-w-0 text-left"
+                    onClick={() => toggleGroup(group.key)}
+                    aria-expanded={isGroupExpanded}
+                  >
+                    {isGroupExpanded
+                      ? <ChevronDown className="h-3.5 w-3.5 text-mm-text-muted flex-shrink-0" />
+                      : <ChevronRight className="h-3.5 w-3.5 text-mm-text-muted flex-shrink-0" />
+                    }
+                    <GroupIcon aria-hidden className="h-3.5 w-3.5 text-mm-text-muted flex-shrink-0" />
+                    <span className="truncate">{groupLabel}</span>
+                    <span className="text-xs text-mm-text-muted ml-auto flex-shrink-0">
+                      {group.memos.length} memo{group.memos.length !== 1 ? 's' : ''}
+                    </span>
+                  </button>
+                  {/* 🔴 **RENDERED ONLY WHEN IT CAN ACT (#933, not filed).** `onFocus`
+                      is OPTIONAL and `MemosSlideOut` does not pass it — so on that
+                      surface the old span was a focusable tab stop whose Enter did
+                      nothing at all: no navigation, no filter, no message. A control
+                      that cannot act must not be a control.
+                      ⚠️ `handleFocus` TOGGLES (clicking the focused target clears it),
+                      so this is `aria-pressed`, not a plain button — the state was
+                      previously not announced anywhere. */}
+                  {onFocus && (
+                    <button
+                      /* ⚠️ `w-6 h-6` (24px), not the `p-1` a 14px icon suggests —
+                         measured live at 22×22, under WCAG 2.5.8's 24×24 floor.
+                         Same trap `ColorDotButton` exists for (#437): the visible
+                         mark is small, the target must not be. */
+                      className="flex-shrink-0 w-6 h-6 inline-flex items-center justify-center rounded text-mm-text-muted hover:text-mm-text hover:bg-mm-bg opacity-0 group-hover/memogroup:opacity-100 focus-visible:opacity-100 aria-pressed:opacity-100 aria-pressed:text-mm-blue-text focus-visible:ring-2 focus-visible:ring-ring outline-none"
+                      aria-pressed={isGroupFocused}
+                      aria-label={`Show only memos on ${groupLabel}`}
+                      title={`Show only memos on "${groupLabel}"`}
+                      onClick={() => onFocus(
                         group.entityType,
                         group.entityType === 'project' ? null : group.entityId,
                         groupLabel,
                         groupColor,
-                      )
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
-                        e.stopPropagation()
-                        onFocus?.(
-                          group.entityType,
-                          group.entityType === 'project' ? null : group.entityId,
-                          groupLabel,
-                          groupColor,
-                        )
-                      }
-                    }}
-                    title={`Focus on "${groupLabel}"`}
-                  >
-                    {groupLabel}
-                  </span>
-                  <span className="text-xs text-mm-text-muted ml-auto flex-shrink-0">
-                    {group.memos.length} memo{group.memos.length !== 1 ? 's' : ''}
-                  </span>
-                </button>
+                      )}
+                    >
+                      <Focus aria-hidden className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
 
                 {/* Memo cards within group */}
                 {isGroupExpanded && (
@@ -562,33 +624,41 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
                         >
                           {/* Meta row: type chip + ID + date */}
                           <div className="flex items-center gap-2 mb-1">
-                            <span
-                              role="button"
-                              tabIndex={0}
-                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${colors.bg} ${colors.text} hover:ring-1 hover:ring-current/30 transition-shadow cursor-pointer`}
+                            {/* #933's sibling instance, in the same file and not filed:
+                                a second hand-rolled `role="button"` with its own
+                                Enter/Space handling. It is not NESTED (its parent is a
+                                plain div), so it was valid — but it is the same control
+                                written the long way, and it inherited the same defect:
+                                with no `onFocus` it was a tab stop that did nothing.
+                                A real `<button>` needs no key handler and no role.
+                                ⚠️ Chip-shaped, so `type="button"` matters — inside the
+                                edit form a bare button would submit. */}
+                            {onFocus ? (
+                            <button
+                              type="button"
+                              aria-pressed={focusedType === memo.entity_type && focusedEntityId == null}
+                              aria-label={`Show only ${ENTITY_TYPE_LABELS[memo.entity_type] ?? memo.entity_type} memos`}
+                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${colors.bg} ${colors.text} hover:ring-1 hover:ring-current/30 focus-visible:ring-2 focus-visible:ring-ring outline-none transition-shadow cursor-pointer`}
                               onClick={() => {
-                                onFocus?.(
+                                onFocus(
                                   memo.entity_type,
                                   null,
                                   ENTITY_TYPE_LABELS[memo.entity_type] ?? memo.entity_type,
                                   entityTypeHexColor(memo.entity_type),
                                 )
                               }}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' || e.key === ' ') {
-                                  e.preventDefault()
-                                  onFocus?.(
-                                    memo.entity_type,
-                                    null,
-                                    ENTITY_TYPE_LABELS[memo.entity_type] ?? memo.entity_type,
-                                    entityTypeHexColor(memo.entity_type),
-                                  )
-                                }
-                              }}
-                              title={`Focus on ${ENTITY_TYPE_LABELS[memo.entity_type]} entries`}
+                              title={`Show only ${ENTITY_TYPE_LABELS[memo.entity_type]} memos`}
                             >
                               {ENTITY_TYPE_LABELS[memo.entity_type] ?? memo.entity_type}
-                            </span>
+                            </button>
+                            ) : (
+                              // No `onFocus` (the slide-out): a plain, non-focusable
+                              // badge. It still SAYS what the memo is about, which is
+                              // the half that carries information.
+                              <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${colors.bg} ${colors.text}`}>
+                                {ENTITY_TYPE_LABELS[memo.entity_type] ?? memo.entity_type}
+                              </span>
+                            )}
                             <span className="text-[10px] text-mm-text-muted">
                               M-{memo.numeric_id}
                             </span>
@@ -623,22 +693,16 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
                                 </p>
                               </button>
                               <div className="flex items-center justify-between mt-2">
-                                {memo.is_archived ? (
-                                  <div className="flex items-center gap-1">
-                                    <Button variant="ghost" size="sm" className="h-7 text-xs text-mm-text-muted hover:text-mm-text" onClick={() => restoreMutation.mutate(memo.id)}>Restore</Button>
-                                    <Button variant="ghost" size="sm" className="h-7 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/20" onClick={() => permanentDeleteMutation.mutate(memo.id)}>
-                                      <Trash2 className="h-3 w-3 mr-1" />Delete
-                                    </Button>
-                                  </div>
-                                ) : (
-                                  <Button variant="ghost" size="sm" className="h-7 text-xs text-mm-text-muted hover:text-mm-text hover:bg-mm-bg" onClick={() => setDeleteTarget(memo)}>
-                                    <Trash2 className="h-3 w-3 mr-1" />Archive
-                                  </Button>
-                                )}
+                                {/* #912(c): every action names ITS memo — a group of N
+                                    memos otherwise renders N identical "Archive" / "Edit"
+                                    buttons with nothing else naming which (#891(a)). The
+                                    visible word stays first so the name contains it. */}
+                                {renderLifecycleActions(memo)}
                                 <Button
                                   variant="ghost"
                                   size="sm"
                                   className="h-7 text-xs"
+                                  aria-label={`Edit memo: ${memoPreview(memo.content)}`}
                                   onClick={() => handleStartEdit(memo)}
                                 >
                                   <Pencil className="h-3 w-3 mr-1" />
@@ -660,18 +724,7 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
                                 autoFocus
                               />
                               <div className="flex items-center justify-between">
-                                {memo.is_archived ? (
-                                  <div className="flex items-center gap-1">
-                                    <Button variant="ghost" size="sm" className="h-7 text-xs text-mm-text-muted hover:text-mm-text" onClick={() => restoreMutation.mutate(memo.id)}>Restore</Button>
-                                    <Button variant="ghost" size="sm" className="h-7 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/20" onClick={() => permanentDeleteMutation.mutate(memo.id)}>
-                                      <Trash2 className="h-3 w-3 mr-1" />Delete
-                                    </Button>
-                                  </div>
-                                ) : (
-                                  <Button variant="ghost" size="sm" className="h-7 text-xs text-mm-text-muted hover:text-mm-text hover:bg-mm-bg" onClick={() => setDeleteTarget(memo)}>
-                                    <Trash2 className="h-3 w-3 mr-1" />Archive
-                                  </Button>
-                                )}
+                                {renderLifecycleActions(memo)}
                                 <div className="flex items-center gap-2">
                                   <Button
                                     variant="ghost"
@@ -710,12 +763,21 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
       </div>
 
       {/* Delete confirmation */}
+      {/* 🔴 **`destructive` DEFAULTS TO TRUE, so the red was inherited rather than
+          chosen (#934).** Nobody opted out here, and the result was a dialog whose
+          own copy says *"You can restore it later"* under a red irreversible-action
+          button. Two signals said permanent, one said reversible, and the two that
+          a sighted researcher reads first were the wrong ones. Archiving is
+          reversible — `Restore` is right there on the archived view — so it takes
+          the ordinary treatment. The permanent delete keeps red, and keeps it
+          meaningful. */}
       <ConfirmDialog
         open={deleteTarget != null}
         onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}
         title="Archive memo"
-        description={`Archive memo M-${deleteTarget?.numeric_id ?? ''}? You can restore it later.`}
+        description={`Archive memo M-${deleteTarget?.numeric_id ?? ''}? You can restore it later from the Archived view.`}
         confirmLabel="Archive"
+        destructive={false}
         onConfirm={() => deleteTarget && archiveMutation.mutate(deleteTarget.id)}
       />
     </>

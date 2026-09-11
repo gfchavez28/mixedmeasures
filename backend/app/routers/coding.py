@@ -26,6 +26,7 @@ from ..services.coding_counts import (
 )
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
+from ..services.participant_scores import mark_participant_scores_stale
 from ..services.coding_layers import project_scoped_segments
 from ..services import magnitude
 from .helpers import _get_project_or_404, _verify_segment_ownership, _verify_conversation_ownership
@@ -61,7 +62,16 @@ def _mark_segment_consensus_stale(db: Session, project_id: int, segment: Segment
     by ANY coder invalidates it. Grouped coding fans out to the group's visible
     siblings, so they invalidate too. Gated on multi-coder (no-op for single-coder
     projects) and drained by the background sweep (Track J · J2-3, Slab 5b).
+
+    🔴 **THE RATING-SCORE MARKER RUNS FIRST AND IS NOT GATED (row 45 step 4).**
+    The `consensus_enabled` early return below is correct for CONSENSUS, which is
+    meaningless with one voter — and wrong for anything derived from RATINGS,
+    which is not: the rollup has a sole-voter arm precisely so a single-coder
+    project (the default install) produces scores. Putting the call above the
+    gate is what stops those projects holding a score that is never marked out of
+    date. Do not "tidy" it below.
     """
+    mark_participant_scores_stale(db, project_id)
     if not consensus_enabled(db):
         return
     ids = [segment.id]
@@ -499,6 +509,11 @@ async def bulk_code(
             CodeApplication.user_id == user.id
         ).delete(synchronize_session=False)
 
+    # Ungated, and before the consensus gate for the reason
+    # `_mark_segment_consensus_stale` states: a bulk apply/remove moves every
+    # score those segments' participants hold, on single-coder projects too.
+    if affected_ids:
+        mark_participant_scores_stale(db, code.project_id)
     if consensus_enabled(db) and affected_ids:
         mark_consensus_stale(db, code.project_id, segment_ids=affected_ids)
 

@@ -7,6 +7,371 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-09-11
+
+### Added
+
+- **A document can now say who it is about.** Right-click a document in the
+  Documents list and choose *Set subject…* to link it to a participant — a
+  person, an organisation, a department, whatever the project's cases are. Once
+  linked, coding on that document can be compared by the subject's attributes,
+  exactly as conversations and survey responses already could; a document's
+  coding was previously invisible to those comparisons because a document has
+  no speaker to reach a participant through. The card shows who it is about,
+  the participant's own page lists the documents about them, and one
+  participant can have any number of documents (successive annual reports, an
+  interview plus the artefacts filed with it). Documents can be unlinked again
+  at any time. (Roadmap row 46)
+
+- **Withdrawal reports now include documents.** A participant's withdrawal
+  report counts the documents about them alongside their conversations and
+  survey responses. When a withdrawal is carried out, those documents are
+  **unlinked and listed for review** rather than deleted or blanked — a
+  document that is *about* someone may be their own work or may simply name
+  them, and only a person can tell which, so the tool removes the identifying
+  link and hands the list back.
+
+- **A participant table: rating scores become variables.** The Datasets page
+  offers *Add participant table* — a table the tool keeps in step with the
+  project's participants, one record per participant, keyed by their
+  identifier. For every code that declares a rating scale it maintains two
+  columns: *{code} (score)*, the mean of that person's per-passage ratings, and
+  *{code} (rated passages)*, how many passages that mean rests on — kept as a
+  variable of its own so that a score over eight passages and one over a single
+  passage are never the same evidence. Each passage's rating is the median of
+  the coders who rated it: a single-coder project scores from that coder's
+  judgement, and a multi-coder one from the passages the team agreed carry the
+  code. Because the scores are ordinary columns, the analysis pickers, group
+  comparisons, charts, the crosswalk and the R export pick them up with no
+  further step. The table is a snapshot: it states when it was computed, an
+  amber marker warns when something it depends on has changed since, and
+  *Refresh* recomputes every score and reports what it could not score and why
+  — a rating on a video clip, a facilitator's own turn, a speaker or document
+  not yet linked to a participant, a code the coders did not agree applies.
+  The rows belong to the tool (they cannot be deleted, appended to from a
+  file or re-linked), the columns are yours: add variables, edit the cells in
+  them, rename, export. (Roadmap row 45)
+
+- **A table you can build by hand.** *Blank table* on the Datasets page creates
+  a dataset with no file behind it, and *Add ▾ → Add record* on either tab of a
+  dataset adds one empty record; the variable menu adds the columns. The case
+  it serves is the small lookup table that exists nowhere as a file — ten
+  departments and three columns — which until now had to be built in a
+  spreadsheet and imported. A hand-authored table is an ordinary dataset with
+  every affordance. A new record takes the next identifier after the highest
+  one in the table, and lands after imported rows rather than ahead of them;
+  an empty table shows its headers and says what it still lacks instead of a
+  blank page. (Roadmap row 47)
+
+### Changed
+
+- **The Excel export's "Summaries" sheet is now "Sources", without the empty
+  Summary column.** That column could never hold anything: the panel that wrote
+  summaries was removed from both workbenches months before the first release,
+  and no version you could have installed was able to fill it in. An always
+  blank column in an exported workbook reads as data you forgot to enter. The
+  sheet keeps everything else it listed, one row per conversation and document
+  with its type, name, subject, date and status, and is named for that. The
+  summary field is also gone from the API and no longer searched. Nothing is
+  deleted from your projects: the underlying storage is untouched, so a summary
+  feature could return without any conversion. (#895)
+
+### Fixed
+
+- **Setting a document's subject no longer moves the card or loses your place.**
+  Choosing who a document is about sent its card to the top of the list and left
+  the keyboard at the top of the page, which is awkward on a job you do to
+  several documents in a row. The cause was an ordering one: documents imported
+  together share a creation time to the second, and the list fell back to the
+  order the server happened to send, which changes whenever a document is
+  touched. The list now has a settled order that does not move, and focus
+  returns to the card you opened the menu on. The Conversations list gets the
+  same settled order. (#932)
+
+- **The merge wizard tells you which step you are on.** Moving between steps kept
+  the previous step's scroll position, so the Review step could open with its
+  heading behind the toolbar, and the keyboard was dropped back to the top of the
+  page each time. Each step now announces itself and takes focus when it opens.
+  The review table's legend also explains the dash, which is what every row shows
+  when the two codebooks already agree — it means the file brings nothing new for
+  that code. (#935, #945)
+
+- **A brand-new table's two buttons are no longer cut off at high zoom.** At the
+  size a 1280 by 720 window has at 200% zoom, the *Add variable* and *Add record*
+  buttons on an empty table were partly behind the status bar with nothing able
+  to scroll to them. The panel scrolls within its own area now. The status bar on
+  that screen also stopped telling you to click a column header or a cell, on a
+  table that has neither. (#930)
+
+- **The participant table no longer shows two columns headed "Participant".**
+  One was the grid's own column showing each person's name, the other the
+  tool's column showing the identifier they are matched by. The second is
+  headed *Participant ID* now, so each says which it is. Tables made before
+  this are corrected the next time they refresh, unless you renamed the column
+  yourself, in which case your name is kept. (#928)
+
+- **A participant score column reads the same way all the way down.** Scores
+  were shown at their shortest, so one column ran `3.643 / 1.25 / 4.167 / 2`
+  with nothing lining up and a whole number looking like a different kind of
+  value. Scores now carry a fixed three decimal places and the count of rated
+  passages beside them stays a whole number. The stored figures are unchanged.
+  (#942)
+
+- **The Data view calls a row a record, everywhere.** Deleting one asked
+  *"Delete response?"* and promised to remove *"all their answers"*, which is
+  wrong for a table of departments or sites. The confirm, the message afterwards
+  and the Code Text tooltip all use the word the rest of the surface uses. The
+  *Add Variable* dialog follows too: its fields were labelled *Column label* and
+  *Column code* and its button said *Add Column*. (#940)
+
+- **A new variable no longer defaults to a rating scale on a table that has no
+  survey in it.** Adding the first variable to a hand-made table offered
+  Ordinal, with *Strongly Disagree … Strongly Agree* suggested underneath, on
+  exactly the reference tables the blank-table dialog describes as sites,
+  cohorts or departments. The default follows the table now: Categorical where
+  nothing was imported, Ordinal where a file was. (#941)
+
+- **The record counter no longer reads "1 records".** The caption below it had
+  been correct since an earlier fix; the toolbar had not. (#939)
+
+- **An imported project no longer forgets which code each rating score belongs
+  to.** A participant table keeps a hidden note on every score column saying
+  which code it scores. That note was not translated when a project was imported
+  or shared, so the columns arrived pointing at codes from the original copy. In
+  the ordinary case the next refresh quietly rebuilt them, taking any chart built
+  on them with it; on a colleague's machine, where the numbering can overlap, a
+  column could have been filled with a different code's scores while keeping the
+  first code's name. The note is translated on the way in now. A score column
+  whose code did not travel with the file is left out altogether rather than
+  imported as something nothing can repair, and the next refresh rebuilds it from
+  the codes the project actually has. The same gap is fixed for charts that break
+  a variable group into its individual variables. (#922, #948)
+
+- **Deleting a code no longer leaves a broken chart behind.** When a code is
+  deleted, the participant table drops the score columns that measured it —
+  there is nothing left to compute them from. Anything you had built on those
+  columns, a chart or a saved test, stayed behind pointing at a variable that no
+  longer existed and failed with an error the next time it was opened. Those are
+  now removed with the column, and the refresh tells you how many went, so a
+  chart disappearing is something you are told about rather than something you
+  discover. (#923)
+
+- **A dataset or a variable can no longer be saved with a blank name.** Typing
+  only spaces into a name was accepted and stored, leaving an unnamed table in
+  your dataset list or an unnamed variable in every picker and export. Names are
+  trimmed and a name that is only spaces is refused, on every path that sets one:
+  creating a table, renaming one, importing a file, and adding or renaming a
+  variable. The dialogs already prevented this; the gap was reachable by anything
+  driving the tool directly. (#925)
+
+- **A withdrawal report no longer counts a participant's own scores as answers
+  they gave.** The participant table holds one record per person, so it appeared
+  in the report beside their real surveys and its cells were counted as
+  responses — telling you someone had answered three questions when they had
+  answered none. Only cells in columns you added are counted now, and the row
+  says how many values the tool maintains instead of leaving an unexplained
+  empty count. The record is still reported and still removed on a withdrawal:
+  under-reporting is the failure that matters here. (#896)
+
+- **A data grid column header no longer reads its own name three times.** A
+  screen reader announced the reorder handle's label, then the variable's name
+  twice, then its type and, on a participant table, the whole sentence explaining
+  how its score is calculated — for every cell in that column. The header now
+  announces the variable, and the explanation stays available as a description.
+  (#915)
+
+- **Merging a colleague's copy no longer fails when you both have a participant
+  table.** The table is the tool's own, so when two people each created one in
+  their copy the merge treated them as two different tables and stopped with an
+  error that named nothing and offered no way forward. They are now recognised
+  as the same table: the rows are matched by person, and any variable your
+  colleague added to their copy comes across with its values. Nothing was ever
+  lost when this happened, the merge simply could not complete. (#921)
+
+- **The participant table's own score columns can no longer be retyped or given
+  rules.** Those columns are maintained by the tool, one for each code's score
+  and one for the number of passages behind it. It was possible to change their
+  type, declare value labels, declare missing values or attach a recode rule to
+  them — and a type change survived a refresh, which quietly removed the score
+  from every picker, comparison, chart and the R export while the tool carried on
+  writing numbers into it. All four are refused now, and the controls say why
+  rather than failing when you use them. Renaming the columns is still yours to
+  do. (#926)
+
+- **Text you typed into a table can be edited again.** In a table you author by
+  hand, clicking an open-text cell that already had something in it opened a
+  read-only viewer whose only button was Close, so a typo could be corrected only
+  by deleting the whole record. Clicking now opens the editor, as it does for
+  every other kind of value; the viewer stays for cells that come from an
+  imported file and cannot be edited. Pressing Enter or F2 on a selected cell
+  opens the editor too, which is what the rest of the app has always promised.
+  (#927)
+
+- **The variable editor is reachable at high zoom and from the keyboard.** At the
+  size a 1280 by 720 window has at 200% zoom, the editor that opens from a column
+  header ran off the bottom of the screen with its *Delete variable* item below
+  the fold and nothing able to scroll to it. It also could not be opened without
+  a mouse at all. The panel now fits and scrolls, the header carries a real
+  button you can Tab to and open with Enter, and closing it returns you to that
+  button. Each one names its own variable rather than saying "column options"
+  eleven times. The *Unlink* control on a linked participant row had the same
+  problem and now appears when it has keyboard focus. (#929, #931)
+
+- **The Memos list's group headers are one control, not two overlapping ones.** A
+  group header was a button with another button inside it: clicking the row
+  collapsed the group and clicking the label inside it did something else, with
+  only a hover underline to tell them apart. The row is now the collapse control
+  and filtering to one entity is its own button beside it. On the Memos slide-out
+  those inner controls did nothing at all when activated, which is why they are
+  gone from there entirely. (#933)
+
+- **Archiving a memo or a note no longer looks like deleting it.** The archive
+  button carried the same trash icon as the permanent delete beside it and opened
+  a red confirm, while the confirm's own words said the memo could be restored.
+  It now has an archive icon and an ordinary confirm, and the red treatment is
+  kept for the one control that earns it. The same correction was applied on all
+  three places these controls appear, and the notes version, which had never been
+  swept, also gained a proper name for screen readers. (#934)
+
+- **Dark mode now covers the parts of the window the browser draws.** Scrollbars,
+  drop-down popups and date, colour and number controls stayed in their light
+  appearance, so a scrollbar rendered as a bright band across a near-black panel.
+  Light mode is unchanged. (#936)
+
+- **At high zoom the breadcrumb no longer covers the toolbar buttons.** On any
+  project page with a three-level breadcrumb, the last part of the trail was
+  drawn on top of the Search and Participants buttons, leaving all three
+  unreadable. The trail now shortens with an ellipsis as it was meant to, and the
+  separators between its parts hold their place. (#937)
+
+- **Messages are readable in dark mode.** Every confirmation and error message
+  appeared as a white card over the dark interface. They now follow the theme you
+  chose in the app rather than the one your operating system is set to. (#938)
+
+- **Creating a memo tells you it saved, and shows it to you.** Memos are grouped
+  by what they are about and groups start collapsed, so a memo you had just
+  written disappeared into a closed row with no message. Creating one now
+  confirms it and opens the group it landed in. The "no memos yet" line also
+  stops appearing underneath the form you are typing in. (#944)
+
+- **Opening the app no longer overwrites your migration recovery points.**
+  Before a database upgrade the app copies your whole database, so that a
+  failed upgrade can be undone. That copy was in fact being made every time
+  the app started, whether an upgrade was due or not, and only the five most
+  recent are kept. So five ordinary launches after a bad upgrade would discard
+  the one copy taken before it, which is the situation the copy exists for. It
+  is now made only when an upgrade is actually pending. Startup is quicker and
+  quieter as a result, and on a large project noticeably so. (#920)
+
+- **The safety copy taken before a merge or an overwrite is now findable.**
+  Replacing a project with an imported file, or merging a colleague's coding
+  into one, has always saved a full copy of your project first. Nothing ever
+  told you what that copy was called: it is a project file rather than a
+  backup archive, so it does not appear in the Settings backup list, and the
+  only way to find it was to guess. The merge summary and the overwrite
+  confirmation now name the file and say how to go back to it, and the name is
+  recorded in the project's activity log, which is where you will be looking if
+  you need it days later. A merge's copy is also named for a merge now, rather
+  than describing itself as preceding an overwrite that never happened.
+
+- **A long coder name wrapped onto two lines in the top bar, and narrow
+  windows scrolled sideways.** The name beside the colour dot is meant to
+  shorten with an ellipsis when it does not fit; instead it wrapped, which grew
+  the button taller than the bar that holds it. Separately, at around 640 pixels
+  wide the name was shown when there was no room for it, so the whole page could
+  be scrolled a few pixels sideways. The name now appears only when the bar has
+  room to hold it at full width, which it decides from its own width rather than
+  the window's, so a scrollbar no longer tips it over. Below that width the name
+  is hidden from view but still announced to screen readers, as before. (#899)
+
+- **A record added after a variable existed could not be typed into.** In
+  three situations a row had no cell for a variable created before it — a
+  participant added to the participant table after a variable was added by
+  hand, a file appended to a dataset that has a hand-added variable the file
+  lacks, and rows arriving through a project merge — and the grid discarded
+  every edit to that cell with no message and no request. Every row now gets
+  its cells, and rows already in that state are repaired the next time the
+  dataset gains a row. (#897)
+
+- **Renaming or describing a dataset left no trace in the activity record.**
+  The entry was written after the change was saved and then discarded, so the
+  audit log a project export can include, and the last-activity time on the
+  project card, never saw a dataset rename. They do now. (#898)
+
+- **Seven font-size pickers under Chart Options had no name.** The *Label*,
+  *Ticks*, *Data* and *Title* size pickers on the Quantitative chart options,
+  and the three on the Qualitative ones, announced only their current size to
+  a screen reader. Each carries its caption now. (#900)
+
+- **Four selects on the analysis sidebar were named only by the caption above
+  them.** *Compare By*, *Secondary Grouping*, *Color Palette* and *Matrix
+  Colors* under Relationships & Comparisons announced no name. They do now.
+  (#901)
+
+- **Import wizards: nameless and misnamed controls.** On Dataset Import, the
+  column-type selects announced only their value, and the skip checkbox's
+  spoken name included the type select's current value and changed with it.
+  On Conversation Import, the four Map Columns selects had no name and the
+  required ones said nothing about being required; every speaker row's
+  controls shared one name (six *Facilitator* checkboxes, six colour buttons);
+  and the *Conversation Name* field announced its example text, as did Dataset
+  Import's name, description and source fields, while Document Import's name
+  field had no name at all. Every control names its column, speaker, file or
+  field now, and a required field says so. (#902, #903, #904, #905)
+
+- **The *Axis range* minimum and maximum inputs shared one label.** The
+  minimum's spoken name absorbed the maximum's value and the maximum fell back
+  to the word *Auto*. Each is named now. (#906)
+
+- **Memos & Notes: the hidden pane stayed in the keyboard's Tab order.** With
+  one view selected, the other pane's six filter buttons could still be
+  reached by Tab while a screen reader was told they did not exist. The
+  collapsed pane is inert now. (#910)
+
+- **The memo button on the coding workbenches said *Delete* but archived, and
+  hid from keyboard users.** It is named *Archive memo* followed by the memo's
+  opening words, and it stays visible while it has keyboard focus. The four
+  memo actions on the Memos page (archive, edit, restore, delete permanently)
+  each name their memo too. (#912)
+
+- **Editing a cell in the data grid announced nothing useful.** The drop-down,
+  number and text editors had no spoken name and the long-text editor said only
+  *Edit cell value*; each now names the variable being edited. (#914)
+
+- **Four smaller naming fixes from the same accessibility pass:** the *Add
+  participant table* button now announces its visible label (the explanation
+  is its description, #907); the *All …* filter tab on the Conversations,
+  Documents and Datasets lists no longer runs its count into its label
+  (#908); the data grid's caption pluralises correctly for one column or one
+  record (#909); and the merge wizard's eight coder-mapping drop-downs are
+  named *Bring in ‹coder› as* (#913). The *Add Variable* dialog also stops
+  pointing screen readers at a description that was never rendered (#911).
+
+- **The variable list in the analysis sidebar could be drawn on top of the
+  controls below it.** On Relationships & Comparisons, expanding a dataset
+  squeezed the variable list to nothing while its search box and tabs kept
+  drawing where they were — so the Correlations/Comparisons buttons and the
+  Data options were rendered over them and both became unreadable. It happened
+  at ordinary window sizes, and appeared to strike at random because expanding
+  a dataset is what triggered it. The sidebar now scrolls as a whole, each
+  section keeps its own height, and the variable and group lists scroll within
+  a bounded area. Section headings stay pinned while you scroll. (#894, #529)
+
+- **Comparing two canvases no longer offers to change them.** The comparison
+  view is a read-only diff, but each embedded chart, quote, memo, callout and
+  image still showed a working *Remove from canvas* button, an *Add tag*
+  button, and a *Remove from Theme* item in its right-click menu. Those are
+  gone while comparing. A tag that has already been applied stays visible —
+  it is part of what you are comparing. (#893)
+
+### Security
+
+- **Updated the YAML parser inside the desktop app's update checker** (js-yaml
+  4.3.2). The new version bounds the work a crafted update feed could make the
+  parser do. The feed comes from this project's own release page over TLS, so
+  the practical exposure was low; the fix is a dependency bump with no change
+  in behaviour. (#918)
+
 ## [1.5.1] - 2026-09-06
 
 ### Added
@@ -888,7 +1253,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.2...HEAD
+[1.5.2]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.3.2...v1.4.0

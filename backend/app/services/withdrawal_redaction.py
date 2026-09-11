@@ -28,6 +28,15 @@ go and the turn stays as an empty placeholder.
 | `CodeApplication` | KEPT | the researcher's analysis, not the participant's personal data — and deleting it would silently change every κ/α figure other coders' work feeds |
 | `Note` / `Memo` | KEPT and REPORTED | researcher-authored prose that may QUOTE the person; a machine cannot judge that, so it is surfaced for human review rather than guessed at |
 
+⚠️ **A linked DOCUMENT (row 46) is UNLINKED and REPORTED — a third treatment,
+and it needed one.** The dataset rule ("theirs alone, so it goes") does not
+transfer: `Document.participant_id` says the document is *about* this person,
+which is true both of a workplan they wrote and of a policy document that merely
+names them, and the two are indistinguishable to the tool. Deleting is
+unrecoverable and would destroy someone else's work in the second case; blanking
+leaves a shell that still counts in coverage. Removing the LINK removes the
+identifying association, and the count goes to the researcher to finish.
+
 ⚠️ **The speaker row survives, renamed.** Deleting it would orphan the turns and
 lose the turn-taking structure that makes a transcript readable. It is renamed to
 a numbered token so that two people withdrawing from the SAME conversation stay
@@ -50,6 +59,7 @@ from sqlalchemy.orm import Session
 from ..models.participant import Participant
 from ..models.speaker import Speaker
 from ..models.segment import Segment
+from ..models.document import Document
 from ..models.dataset import DatasetRow, DatasetValue
 from ..models.excerpt import Excerpt
 from ..models.note import Note
@@ -85,6 +95,11 @@ class RedactionOutcome:
     code_applications_kept: int
     notes_for_review: int
     memos_for_review: int
+    #: Row 46 — documents whose subject link was removed. The documents SURVIVE
+    #: intact; this is the count a researcher has to look at by hand, because
+    #: "this document is about them" and "this document is theirs" are not the
+    #: same claim and only a person can tell which one applied.
+    documents_unlinked: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -224,6 +239,43 @@ def apply_withdrawal(
             synchronize_session=False
         )
 
+    # ── The document side: UNLINKED and reported, never deleted (row 46) ──
+    #
+    # Decided with the developer 2026-09-07, and the reason is that the tool
+    # cannot tell the two cases apart. A workplan filed under this person is
+    # unambiguously theirs; a policy document that merely NAMES them is not, and
+    # both wear the same link. Deleting would be unrecoverable (there is no
+    # per-participant undo) and would destroy a non-withdrawing author's work in
+    # the second case; blanking would leave an empty shell whose coding and
+    # coverage figures still count. So the link goes — which is what carries the
+    # identity — and the document is surfaced for the human decision, the same
+    # treatment `Note` and `Memo` already get.
+    #
+    # ⚠️ **The loop is not what nulls the link — MEASURED, by deleting it.** The
+    # `Participant.documents` relationship de-associates its children on delete
+    # (SQLAlchemy's default for a relationship without a delete cascade), and the
+    # FK's `ondelete="SET NULL"` says the same thing at the database. Removing
+    # the loop leaves every assertion here green.
+    #
+    # It stays because the COUNT and the EFFECT must come from ONE list: with the
+    # loop, `documents_unlinked` reports exactly the rows this function touched,
+    # and the two cannot drift. Reporting a number derived from one query while a
+    # different mechanism does the work is how a withdrawal outcome ends up
+    # describing something that did not happen.
+    #
+    # ⚠️ What neither the loop nor the FK protects against is someone giving that
+    # relationship a `delete-orphan` cascade — the documents would then be
+    # DELETED while this still reported them unlinked. **No behavioural test here
+    # can see that** (measured: the cascade added, all four green, because this
+    # nulls the column rather than mutating the collection). It is pinned
+    # structurally instead, by
+    # `test_withdrawal_redaction.py::test_the_relationship_carries_no_delete_cascade`.
+    linked_documents = (
+        db.query(Document).filter(Document.participant_id == participant.id).all()
+    )
+    for doc in linked_documents:
+        doc.participant_id = None
+
     outcome = RedactionOutcome(
         participant_id=participant.id,
         identifier=report.identifier,
@@ -236,6 +288,7 @@ def apply_withdrawal(
         code_applications_kept=code_applications_kept,
         notes_for_review=notes_for_review,
         memos_for_review=memos_for_review,
+        documents_unlinked=len(linked_documents),
     )
 
     # ⚠️ Last, and after a flush: the participant row is what every lookup above

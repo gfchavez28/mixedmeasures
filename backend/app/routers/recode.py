@@ -83,6 +83,13 @@ from ..services.recode import (
 )
 from ..services.recode_ranges import RangeBandError, normalize_ranges, parse_ranges
 from ..services.audit import log_action
+from ..services.participant_dataset import (
+    ACTION_CHANGE_TYPE,
+    ACTION_MISSING_VALUES,
+    ACTION_RECODE,
+    ACTION_VALUE_LABELS,
+    managed_column_refusal,
+)
 
 from ..services.staleness import mark_metrics_stale
 from .helpers import _get_project_or_404
@@ -118,6 +125,27 @@ def _get_column_or_404(
     if not col:
         raise HTTPException(status_code=404, detail="Column not found")
     return col
+
+
+def _refuse_if_managed_column(column: DatasetColumn, action: str) -> None:
+    """409 when ``action`` is refused on a column the TOOL maintains (#926).
+
+    The one-line door, mirroring ``routers/dataset.py::_refuse_if_managed`` for
+    the row set. **409, not 403** — the caller is entitled and the request is
+    well formed; it conflicts with what the column IS.
+
+    🔴 **This lives at the ROUTER on purpose.** `apply_definition_to_column` is
+    on the STARTUP path via `repair_reverse_recode_mappings` (#794), so a raise
+    pushed down into the recode services fires during boot on existing data. The
+    counter-rule (#589 — "a router guard is not a guard on the operation") does
+    not bite here because nothing reaches these operations except through this
+    router: managed columns are created by `participant_scores.sync_score_columns`,
+    which declares no labels, no missing rules and no recode definitions. **If a
+    service-level caller ever appears, this moves down with it.**
+    """
+    refusal = managed_column_refusal(column, action)
+    if refusal:
+        raise HTTPException(status_code=409, detail=refusal)
 
 
 def _get_definition_or_404(
@@ -449,6 +477,9 @@ async def create_definition(
             status_code=403,
             detail="Recode definitions cannot be created for computed columns",
         )
+    # #926 — same reasoning one source over: a rule applied to a tool-maintained
+    # column is overwritten by the next refresh.
+    _refuse_if_managed_column(col, ACTION_RECODE)
 
     # Reject recode on open-ended and identifier column types (#414)
     if col.column_type in (ColumnType.OPEN_TEXT, ColumnType.IDENTIFIER):
@@ -960,6 +991,21 @@ async def copy_to(
             skipped_columns.append(target_col_id)
             continue
 
+        # #926 — the FIFTH door, and the one the filed entry missed. `copy_to`
+        # writes a definition onto its TARGETS and (when a target has no rule)
+        # applies it through `recompute_primary_value_numeric`, rewriting
+        # `value_numeric` — so an ungated copy reaches a managed column's cells
+        # by a route that never touches `create_definition`.
+        #
+        # ⚠️ SKIPPED, not refused: this endpoint's contract is already
+        # per-target (`skipped_columns` rides the response and the crosswalk's
+        # *Copy to Equivalents* names them), so one ineligible target must not
+        # discard the copy the researcher asked for onto the others.
+        if managed_column_refusal(target_col, ACTION_RECODE):
+            skipped += 1
+            skipped_columns.append(target_col_id)
+            continue
+
         # Check for same-name definition
         existing = (
             db.query(RecodeDefinition)
@@ -1123,6 +1169,9 @@ def apply_value_labels_endpoint(
         raise HTTPException(
             status_code=403, detail="Value labels cannot be applied to computed columns",
         )
+    # #926 — `computed` is not the only non-researcher source. A tool-maintained
+    # column's values are computed scores, not codes.
+    _refuse_if_managed_column(col, ACTION_VALUE_LABELS)
     # #589: the same set the SERVICE now enforces — this arm only makes the
     # refusal early and cheap for the human entry point. Do not delete it as
     # redundant: it answers before any work is done, and the service's copy is
@@ -1193,6 +1242,9 @@ async def set_missing_values(
             status_code=403,
             detail="Missing values cannot be declared on computed columns",
         )
+    # #926 — an absent cell on a managed column already MEANS "no usable
+    # rating", and the next refresh rewrites whatever is declared here.
+    _refuse_if_managed_column(col, ACTION_MISSING_VALUES)
     if col.column_type in (ColumnType.OPEN_TEXT, ColumnType.IDENTIFIER):
         raise HTTPException(
             status_code=400,
@@ -1427,6 +1479,44 @@ async def bulk_type_update(
                 "message": "Cannot change type: columns have recode definitions.",
                 "column_ids": sorted([cid for cid, _ in recode_rows]),
                 "recode_counts": recode_counts,
+            },
+        )
+
+    # #926 — the door with NO source check at all, and the one that shipped the
+    # measured defect: a participant score column retyped to `open_text` from the
+    # Data view's header popover, which persisted and survived a refresh.
+    #
+    # ⚠️ ALL-OR-NOTHING, unlike `bulk_set_missing_values`' per-column outcomes
+    # (#798). That endpoint's refusals are judgements about one column's own
+    # DATA, so discarding forty results over one would be wrong; this is a
+    # judgement about what a column IS, and a partial success would silently
+    # retype the rest of a selection the researcher made as one act.
+    # ⚠️ The membership test is `managed_column_refusal`, NOT a `source ==`
+    # filter in the query. Mutation-testing the first draft proved why: with the
+    # predicate mutated to the wrong (wider) rule, this endpoint kept passing,
+    # because a SQL copy of the rule is a SECOND implementation and answers on
+    # its own. The query narrows to the caller's targets; the predicate decides.
+    candidates = (
+        db.query(DatasetColumn)
+        .join(Dataset)
+        .filter(
+            DatasetColumn.id.in_(data.column_ids),
+            DatasetColumn.dataset_id == dataset_id,
+            Dataset.project_id == project_id,
+        )
+        .all()
+    )
+    refused = [
+        (c, managed_column_refusal(c, ACTION_CHANGE_TYPE)) for c in candidates
+    ]
+    refused = [(c, why) for c, why in refused if why]
+    if refused:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "managed_columns",
+                "message": refused[0][1],
+                "column_ids": sorted(c.id for c, _ in refused),
             },
         )
 

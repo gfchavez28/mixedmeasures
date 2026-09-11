@@ -112,6 +112,30 @@ describe('variableRulesRefusal', () => {
       .toBe('computed')
   })
 
+  it('🔴 #926 — refuses a MANAGED variable whatever its type', () => {
+    /**
+     * The third arm, and it arrived the same way the second one did. The tool's
+     * own columns (a participant table's rating score and its n) carry
+     * `source = "managed"`, and the design believed they were read-only for
+     * free because three OTHER endpoints refuse `source != "manual"`. The four
+     * recode doors refuse `source == "computed"` — so `managed` passed every
+     * one of them, and a missing-values rule was written to a score column from
+     * the Variables view (measured live, 2026-09-10).
+     */
+    for (const column_type of ['numeric', 'ordinal', 'nominal', 'identifier']) {
+      expect(variableRulesRefusal({ column_type, source: 'managed' }), column_type)
+        .toBe('managed')
+    }
+  })
+
+  it('does not refuse an IMPORTED or hand-made variable', () => {
+    /** The positive control that kills the over-wide `source !== "manual"`
+     *  mutant — the obvious fix, which would also refuse every imported
+     *  column in a real survey. */
+    expect(variableRulesRefusal({ column_type: 'ordinal', source: 'imported' })).toBeNull()
+    expect(variableRulesRefusal({ column_type: 'ordinal', source: 'manual' })).toBeNull()
+  })
+
   it('refuses the ineligible types on a collected variable', () => {
     expect(variableRulesRefusal({ column_type: 'open_text', source: 'imported' }))
       .toBe('ineligible_type')

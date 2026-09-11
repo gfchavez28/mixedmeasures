@@ -39,6 +39,17 @@ interface MaterialsTagInlineProps {
   onTagNoteChange: (note: string | null) => void
   /** When true, skip absolute positioning (parent wraps in its own positioned container) */
   inline?: boolean
+  /**
+   * #893 — the surface cannot be written to (the Canvas Compare diff).
+   *
+   * 🔴 **This is NOT "render nothing".** This one button is BOTH the *Add tag*
+   * affordance AND the only thing that DISPLAYS an existing tag, so hiding it
+   * wholesale would delete an authored annotation (`confirms` / `contradicts`)
+   * from the surface whose whole job is showing what differs between two
+   * canvases. That is #790's rule — a DISPLAY fact and a TOGGLE state must not
+   * share one variable. Read-only keeps the display and drops the affordance.
+   */
+  readOnly?: boolean
 }
 
 export default function MaterialsTagInline({
@@ -47,6 +58,7 @@ export default function MaterialsTagInline({
   onTagChange,
   onTagNoteChange,
   inline,
+  readOnly,
 }: MaterialsTagInlineProps) {
   const [open, setOpen] = useState(false)
   const [customValue, setCustomValue] = useState('')
@@ -96,6 +108,22 @@ export default function MaterialsTagInline({
   const tagClasses = tag
     ? getTagClasses(tag)
     : 'bg-mm-surface-hover text-mm-text-muted border border-dashed border-mm-border-medium'
+
+  // #893 — read-only: the tag is content, the picker is not. An UNTAGGED embed
+  // has nothing to show and nothing to add, so it renders nothing at all.
+  // ⚠️ `inline-block` is load-bearing on the span: `truncate` and `max-w-*` do
+  // not apply to an inline box, so a long custom tag would run past the card.
+  if (readOnly) {
+    if (!tag) return null
+    return (
+      <span
+        className={`material-tag-label inline-block text-[10px] font-medium px-1.5 py-0.5 rounded truncate max-w-[80px] ${getTagClasses(tag)}`}
+        title={tagNote ? `${tag} — ${tagNote}` : tag}
+      >
+        {tag}
+      </span>
+    )
+  }
 
   return (
     <div

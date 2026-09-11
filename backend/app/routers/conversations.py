@@ -141,7 +141,6 @@ def conversation_to_response(
         subject_id=conversation.subject_id,
         conversation_date=conversation.conversation_date,
         status=conversation.status,
-        summary=conversation.summary,
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
         segment_count=segment_count,

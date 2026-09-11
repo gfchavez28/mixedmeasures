@@ -14,7 +14,7 @@
  * against one addressed whatever rows in the other happened to share a number.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 
 import QualChartOptionsPanel from './QualChartOptionsPanel'
@@ -118,5 +118,36 @@ describe('#675 — Sort is offered only where it is consumed', () => {
     // so the dropdown was offered and moved nothing.
     renderPanel({ chartType })
     expect(screen.queryByText('Sort')).not.toBeInTheDocument()
+  })
+})
+
+describe('#900 — the Fonts group names each size picker', () => {
+  /**
+   * Measured in Chrome before the fix: three `combobox`es with NO name, values
+   * `12px / 12px / 16px`, visibly captioned *Label · Data · Title*. They sit in an
+   * `OptionRow fullWidth`, whose labelled `role="group"` names the SET and cannot
+   * name the members — so each caption is paired with its control by id.
+   *
+   * ⚠️ Their siblings (*Matrix Colors*, *Font Size* on the co-occurrence chart)
+   * were always named, by the wrapping `<label>` of `OptionRow`'s default branch.
+   * That asymmetry is the whole of #900.
+   */
+  it('each caption names its own control, and the group carries "Fonts"', () => {
+    renderPanel({ chartType: 'bar' })
+    fireEvent.click(screen.getByRole('button', { name: /appearance/i }))
+
+    const group = screen.getByRole('group', { name: 'Fonts' })
+    expect(group).toBeInTheDocument()
+
+    for (const caption of ['Label', 'Data', 'Title']) {
+      const control = screen.getByRole('combobox', { name: caption })
+      expect(group.contains(control)).toBe(true)
+    }
+
+    // ...and no combobox inside the group is left anonymous.
+    const anonymous = Array.from(group.querySelectorAll('[role="combobox"]')).filter(
+      el => !(el.getAttribute('aria-labelledby') || el.getAttribute('aria-label') || el.id),
+    )
+    expect(anonymous).toEqual([])
   })
 })

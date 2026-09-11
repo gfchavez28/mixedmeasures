@@ -25,6 +25,7 @@ from ..schemas.participant import (
     ParticipantDetailResponse,
     ParticipantListResponse,
     LinkedSpeakerInfo,
+    LinkedDocumentInfo,
     LinkedConversationRef,
     DatasetRowInfo,
     LinkedDemographicValue,
@@ -38,6 +39,7 @@ from ..services.backup import create_backup
 from ..config import get_documents_dir, get_media_dir, get_backup_dir, get_settings
 from ..auth import get_current_user
 from ..services.audit import log_action
+from ..services.participant_scores import mark_participant_scores_stale
 
 logger = logging.getLogger(__name__)
 from ..services.participant_linking import auto_fill_role_from_linked_row
@@ -100,6 +102,14 @@ def participant_to_response(
             )
         )
 
+    # Build linked documents (row 46). Unbounded per participant by design —
+    # `Document.participant_id` carries no unique index, unlike the dataset-row
+    # link above it, so successive workplans about one person all land here.
+    linked_documents = [
+        LinkedDocumentInfo(id=doc.id, name=doc.name, source_format=doc.source_format)
+        for doc in participant.documents
+    ]
+
     return ParticipantResponse(
         id=participant.id,
         project_id=participant.project_id,
@@ -112,6 +122,7 @@ def participant_to_response(
         updated_at=participant.updated_at,
         linked_speakers=linked_speakers,
         dataset_rows=dataset_rows,
+        linked_documents=linked_documents,
     )
 
 
@@ -215,7 +226,7 @@ def _participant_to_detail(
 def _load_participant_with_relations(
     db: Session, participant_id: int
 ) -> Participant | None:
-    """Load participant with eager-loaded speakers and dataset rows."""
+    """Load participant with eager-loaded speakers, dataset rows and documents."""
     return (
         db.query(Participant)
         .options(
@@ -223,6 +234,9 @@ def _load_participant_with_relations(
             joinedload(Participant.dataset_rows).joinedload(
                 DatasetRowModel.dataset
             ),
+            # Row 46 — `participant_to_response` iterates this; without the
+            # eager load the detail endpoint takes an extra query per read.
+            joinedload(Participant.documents),
         )
         .filter(Participant.id == participant_id)
         .first()
@@ -248,6 +262,10 @@ async def list_participants(
             joinedload(Participant.dataset_rows).joinedload(
                 DatasetRowModel.dataset
             ),
+            # Row 46 — must match `_load_participant_with_relations`: the SAME
+            # `participant_to_response` walks `.documents`, so a load list that
+            # covers only the detail endpoint leaves this one N+1 per row.
+            joinedload(Participant.documents),
         )
         .filter(Participant.project_id == project_id)
         .order_by(Participant.identifier)
@@ -481,6 +499,11 @@ async def link_dataset_row(
 
     row.participant_id = participant_id
     auto_fill_role_from_linked_row(db, participant, row)
+    # Row 45 step 4 — a link is a SCORE input: it decides which coded passages
+    # reach this person. This whole class is invisible to any rating-write
+    # trigger, which is why the freshness marker is a pair and the timestamp is
+    # the half that can be trusted.
+    mark_participant_scores_stale(db, project_id)
 
     log_action(
         db,
@@ -537,6 +560,11 @@ async def unlink_dataset_row(
         )
 
     row.participant_id = None
+    # Row 45 step 4 — a link is a SCORE input: it decides which coded passages
+    # reach this person. This whole class is invisible to any rating-write
+    # trigger, which is why the freshness marker is a pair and the timestamp is
+    # the half that can be trusted.
+    mark_participant_scores_stale(db, project_id)
 
     log_action(
         db,

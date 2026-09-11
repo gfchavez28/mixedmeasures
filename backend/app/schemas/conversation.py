@@ -16,7 +16,11 @@ class ConversationUpdate(BaseModel):
     subject_id: str | None = None
     conversation_date: datetime | None = None
     status: ConversationStatus | None = None
-    summary: str | None = None
+    # ⚠️ NO `summary` — retired from the wire 2026-09-09 (#895), together with the
+    # document half. The Summary panel shipped on both workbenches on 2026-03-22
+    # and was removed 42 minutes later to cut the sidebar from four panels to
+    # three, three months before v1.0.0 — so no released build ever wrote one and
+    # no project can hold one. The COLUMN is kept, per that commit's own note.
     media_offset_seconds: float | None = None
 
 
@@ -27,7 +31,6 @@ class ConversationResponse(BaseModel):
     subject_id: str | None
     conversation_date: datetime | None
     status: ConversationStatus
-    summary: str | None
     created_at: UTCTimestamp
     updated_at: UTCTimestamp
     segment_count: int = 0

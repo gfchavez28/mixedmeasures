@@ -108,7 +108,32 @@ const RAIL_LABEL = 'sr-only xl:not-sr-only'
  */
 const TAB_LABEL = 'sr-only lg:not-sr-only'
 /**
- * The coder name, which collapses LAST (#830a).
+ * The rail rows are CONTAINERS, so their labels measure the space they actually
+ * have (#899, 2026-09-09).
+ *
+ * 🔴 **A media query reads the VIEWPORT; a rail only ever has the CLIENT width.**
+ * A vertical scrollbar takes ~15px of client width and changes no media query, so
+ * at a 640px viewport `sm:` fired, the coder name un-collapsed, and the compact
+ * rail needed 635px inside 625 — 10px of horizontal document scroll. Measured on
+ * the Data view, 2026-09-09.
+ *
+ * Named (`/rail`) rather than bare: the coder button sits several levels down, and
+ * a bare container variant binds to the NEAREST container ancestor, so any
+ * `@container` added between the row and the button would silently re-point it.
+ *
+ * ⚠️ **Both rail rows carry it**, because `CODER_LABEL` is one constant used by
+ * one button rendered inside both. A container variant with no container ancestor
+ * NEVER matches, so putting it on the compact row alone would collapse the name
+ * permanently on every full-rail page.
+ *
+ * ⚠️ `container-type: inline-size` also applies layout containment, which makes
+ * the row a containing block for absolutely positioned descendants. The rail's
+ * menus are `absolute` inside their own `relative` wrappers, so they still anchor
+ * to those — verified live at 640 and 1280, both rails, menu open.
+ */
+const RAIL_CONTAINER = '@container/rail'
+/**
+ * The coder name, which collapses LAST (#830a) — but not until it FITS (#899).
  *
  * 🔴 Measured at the 625x345 CSS viewport a 1280x720 window has at 200% zoom:
  * `scrollWidth` 667 against `clientWidth` 610, so the page scrolled
@@ -122,16 +147,53 @@ const TAB_LABEL = 'sr-only lg:not-sr-only'
  * capped at 80px inside a 128px button, the single widest item in the group —
  * is the one that costs nothing to hide.
  *
- * ⚠️ It breaks at `sm`, LATER than the pills (`xl`) and the tabs (`lg`),
- * because knowing which coder you are attributing work to matters more at a
- * narrow width than a search label does. The identity survives regardless: the
- * colour dot stays, and the button's own `aria-label` names the coder.
+ * 🔴 **656px, not `sm` (640), and the number is the LABEL'S CAP rather than a
+ * screen size.** #830(a) picked 640 against a measurement taken with a SHORT
+ * username; the span is capped at `max-w-[80px]`, so a long name adds ~32px that
+ * nothing absorbs once the breadcrumb is at 0. Re-measured 2026-09-09 on the
+ * compact rail with the label at its cap: the row needs **673px of client width**,
+ * so at a 640px viewport it overflowed by 33px with NO scrollbar involved — the
+ * filed scrollbar case (10px) was simply the shortest name that could trigger it.
  *
- * ⚠️ The `not-sr-only` padding rider (#721) does not bite here — the span
- * carries `max-w`/`truncate` and no unprefixed `px-*`/`m-*` for it to zero —
- * but keep any future padding on the SAME variant if one is added.
+ * 🔴 **A container query measures the CONTENT box, so this number is 24px below
+ * the row widths quoted everywhere else in this file** — the row carries `px-3`,
+ * and 673 − 24 = 649 is the same requirement stated the way `@container` asks it.
+ * 656 is that plus a small margin. **Measured, not derived:** the first attempt
+ * used 688 against `clientWidth` and the label stayed collapsed at a 700px
+ * viewport, because the container was only 676 wide by the query's reckoning.
+ *
+ * ⚠️ **The container is what makes this exact rather than a platform guess.** A
+ * viewport breakpoint would have to assume a scrollbar width, and that is 15px
+ * here, 17 on Windows and 0 with macOS overlay scrollbars.
+ *
+ * ⚠️ It still collapses LATER than the pills (`xl`) and the tabs (`lg`), which is
+ * the #830(a) ordering decision: at a narrow width, which coder you are
+ * attributing work to matters more than a search label. The identity survives the
+ * collapse — the colour dot stays and the button's own `aria-label` names the
+ * coder.
+ *
+ * ⚠️ Those two constants stay VIEWPORT-keyed on purpose. Measured at 1280 with a
+ * forced scrollbar: `railOverflowPx` 0, i.e. they have slack where this one had
+ * none. Converting them would change behaviour at 1024/1280 for no defect — the
+ * negative is recorded so the inconsistency does not read as an oversight.
+ *
+ * 🔴 **THE #721 RIDER DOES BITE HERE, and this file said it did not.** That note
+ * checked for `px-*`/`m-*` and found none — but `not-sr-only` also declares
+ * `overflow: visible` and `white-space: normal`, which is exactly what `truncate`
+ * sets to `hidden`/`nowrap`. Same element, later block, so truncation LOSES in the
+ * visible state. **Measured 2026-09-09 at 1280 with the label at its 80px cap: the
+ * name wrapped to two lines (span 16px → 32px) and the button grew 24px → 40px,
+ * inside a row that is 38px tall.** Never observed because the dev corpus's coder
+ * name is short. So `truncate` is re-asserted on the SAME variant, and it lives in
+ * this constant rather than at the call site so the pair cannot be separated.
+ *
+ * ⚠️ **`RESET_BY_NOT_SR_ONLY` in the guard could not see this**: it matches
+ * `overflow-*` and `whitespace-*` by prefix, and `truncate` is a COMPOUND utility
+ * that sets both under a name that looks like neither. A guard scoped by token
+ * spelling misses a utility that spells the same mechanism differently.
  */
-const CODER_LABEL = 'sr-only sm:not-sr-only'
+const CODER_LABEL =
+  'sr-only @min-[656px]/rail:not-sr-only @min-[656px]/rail:truncate'
 /**
  * Counts are the first thing to go; they stay in the a11y tree regardless.
  *
@@ -193,12 +255,12 @@ export default function TopRail({
       <nav
         role="navigation"
         aria-label="Project workspaces"
-        className="bg-[hsl(var(--mm-chrome))] border-b border-white/[0.07] flex items-center h-11 px-3 gap-1 shrink-0"
+        className={`bg-[hsl(var(--mm-chrome))] border-b border-white/[0.07] flex items-center h-11 px-3 gap-1 shrink-0 ${RAIL_CONTAINER}`}
       >
         <Link to="/" className={`shrink-0 rounded ${FOCUS_RING}`}>
           <MMLogo size={22} />
         </Link>
-        <span className="text-white/20 mx-1">/</span>
+        <span className="text-white/20 mx-1 shrink-0">/</span>
 
         {/* Compact tabs */}
         <div className="flex items-center gap-0.5 shrink-0">
@@ -315,18 +377,34 @@ export default function TopRail({
       className="bg-[hsl(var(--mm-chrome))] shrink-0"
     >
       {/* Row 1: Breadcrumbs + utilities */}
-      <div className="flex items-center h-[38px] px-4 border-b border-white/[0.07]">
+      <div className={`flex items-center h-[38px] px-4 border-b border-white/[0.07] ${RAIL_CONTAINER}`}>
         <Link to="/" className={`shrink-0 rounded ${FOCUS_RING}`}>
           <MMLogo size={28} />
         </Link>
-        <span className="text-white/20 mx-2">/</span>
+        <span className="text-white/20 mx-2 shrink-0">/</span>
         {/* #718: ONE element absorbs the pressure. Without a designated flexible
             child every item is rigid, so the row cannot shrink and the DOCUMENT
             grows instead — measured at 653px against a 625px viewport even after
             the labels collapsed. The breadcrumb is the right one to give: it is
             already truncating, and losing characters from a path is cheaper than
             losing a control. */}
-        <div className="flex items-center min-w-0 flex-1">
+        {/* 🔴 **`overflow-hidden` IS HALF THE FIX AND `min-w-0` ON THE CRUMBS IS THE
+            OTHER (#937).** This container was already `min-w-0 flex-1` — #830(a)'s
+            designated flexible child, doing its job — but each crumb below sat in a
+            wrapper with flexbox's default `min-width: auto`, so the CONTENT refused to
+            shrink below its intrinsic width and spilled out of a parent that did not
+            clip. Measured at 640×360: the crumb *Documents* ran 274–347 while the
+            action cluster starts at 276, painting over *Search* and *Participants*.
+            🔴 **This is why #830(a)/#899's `scrollWidth` read ZERO here.** The row does
+            not overflow, because the two children OVERLAP — the crumb spills past its
+            own parent into a sibling that begins exactly where that parent ends. **An
+            overflow metric cannot see an overlap** (#894's lesson on the other axis),
+            so verify this one with element BOXES, never `scrollWidth`.
+            ⚠️ **Both halves are load-bearing, and #894 refuted each alone:** granting
+            the collapse without an overflow turns a spill into an overlap, which reads
+            as corrupted text rather than as clipped text; clipping without granting the
+            collapse just amputates the crumb instead of ellipsizing it. */}
+        <div className="flex items-center min-w-0 flex-1 overflow-hidden">
         <Link
           to="/"
           className={`shrink-0 text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] text-sm transition-colors rounded ${FOCUS_RING}`}
@@ -335,11 +413,15 @@ export default function TopRail({
         </Link>
 
         {breadcrumbs.filter(c => c.label).map((crumb) => (
-          <span key={crumb.to || crumb.label} className="flex items-center">
-            <span className="text-white/20 mx-2">/</span>
+          <span key={crumb.to || crumb.label} className="flex items-center min-w-0">
+            {/* `shrink-0` so the path structure survives the squeeze — the
+                CHARACTERS are what should be spent, not the separators that say
+                this is a path at all. */}
+            <span className="text-white/20 mx-2 shrink-0">/</span>
             {crumb.to ? (
               <Link
                 to={crumb.to}
+                title={crumb.label}
                 className={`text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] text-sm transition-colors truncate max-w-[110px] xl:max-w-[200px] rounded ${FOCUS_RING}`}
               >
                 {crumb.label}
@@ -1065,7 +1147,10 @@ function UserMenu() {
           * carries an `aria-label`, so it would survive `hidden` too — but
           * `hidden` is the habit that leaves the NEXT such control nameless,
           * which is exactly what #717 was. */}
-        <span className={`max-w-[80px] truncate ${CODER_LABEL}`}>{user.username}</span>
+        {/* `truncate` lives in CODER_LABEL, on the same variant as `not-sr-only`
+          * that would otherwise undo it (#899). `max-w-[80px]` stays here: it is a
+          * cap `not-sr-only` does not touch. */}
+        <span className={`max-w-[80px] ${CODER_LABEL}`}>{user.username}</span>
         <ChevronDown className="w-3 h-3" />
       </button>
       {open && (

@@ -1,10 +1,11 @@
 import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Search, Plus, Trash2, FileText } from 'lucide-react'
+import { Search, Plus, FileText, Archive } from 'lucide-react'
 import { memosApi, type Memo, type Code, type Conversation } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
+import { memoPreview } from '@/lib/memo-preview'
 
 export interface MemoPanelHandle {
   focus: () => void
@@ -556,7 +557,8 @@ const MemoPanel = forwardRef<MemoPanelHandle, MemoPanelProps>(function MemoPanel
 
 export default MemoPanel
 
-function MemoItem({
+// Exported solely for its test (the DocumentSegmentRow precedent).
+export function MemoItem({
   memo,
   codes,
   conversations,
@@ -649,8 +651,14 @@ function MemoItem({
         </div>
 
         {/* Actions */}
+        {/* #912: (a) the button ARCHIVES — `onArchive`, recoverable — and was
+            named "Delete memo", so its name promised the irreversible act;
+            (b) it revealed on hover only: focusable at opacity 0 (measured
+            in Chrome — #777's class), so `focus-within` reveals it too;
+            (c) the name carries the memo, because N memos give N identical
+            buttons with nothing else naming which (#891(a)'s class). */}
         {!isEditing && (
-          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
             <Button
               variant="ghost"
               size="icon"
@@ -659,9 +667,14 @@ function MemoItem({
                 e.stopPropagation()
                 onArchive()
               }}
-              title="Delete memo"
+              aria-label={`Archive memo: ${memoPreview(memo.content)}`}
+              title="Archive memo"
             >
-              <Trash2 className="w-3 h-3 text-mm-text-faint hover:text-red-500" />
+              {/* #934: the ICON is a claim about the act too. #912 renamed this
+                  control because it ARCHIVES; the glyph and the red hover still said
+                  delete. Archiving is recoverable — `Restore` is on the archived
+                  view — so it is drawn as archiving. */}
+              <Archive aria-hidden className="w-3 h-3 text-mm-text-faint" />
             </Button>
           </div>
         )}

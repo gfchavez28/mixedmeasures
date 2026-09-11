@@ -23,6 +23,12 @@ export interface DatasetRowInfo {
   submitted_at: string | null
 }
 
+export interface LinkedDocumentInfo {
+  id: number
+  name: string
+  source_format: string
+}
+
 export interface Participant {
   id: number
   project_id: number
@@ -35,6 +41,10 @@ export interface Participant {
   updated_at: string
   linked_speakers: LinkedSpeakerInfo[]
   dataset_rows: DatasetRowInfo[]
+  /** Row 46 — documents this participant is the SUBJECT of. Unbounded, unlike
+   *  `dataset_rows` (one row per participant per dataset): several workplans
+   *  about one person is the motivating case. */
+  linked_documents: LinkedDocumentInfo[]
 }
 
 export interface LinkedDemographicValue {

@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Search, Plus, Trash2, Link2, Link2Off, Paperclip, X } from 'lucide-react'
+import { Search, Plus, Link2, Link2Off, Paperclip, X, Archive } from 'lucide-react'
+import { memoPreview } from '@/lib/memo-preview'
 import { toast } from 'sonner'
 import { notesApi, type Note } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -562,9 +563,14 @@ function NoteItem({
               e.stopPropagation()
               onArchive()
             }}
+            /* #934's third instance, and #912's rule had never been swept here:
+               this control ARCHIVES and was drawn as a delete, AND it carried no
+               accessible name at all — only a `title`, the weakest route (#559),
+               naming no particular note among N identical buttons (#891(a)). */
+            aria-label={`Archive note: ${memoPreview(note.content, { empty: 'empty note' })}`}
             title="Archive note"
           >
-            <Trash2 className="w-3 h-3 text-mm-text-faint hover:text-red-500" />
+            <Archive aria-hidden className="w-3 h-3 text-mm-text-faint" />
           </Button>
         </div>
       </div>

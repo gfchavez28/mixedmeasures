@@ -30,6 +30,7 @@ from ..services import magnitude
 from ..services.audit import log_action
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
+from ..services.participant_scores import mark_participant_scores_stale
 from ..services.coding_layers import non_consensus_filter
 from ..services.text_analysis import substantive_text_clause
 from .helpers import _get_project_or_404, parse_int_list, sanitize_csv_filename, TEXT_TYPES
@@ -879,6 +880,7 @@ async def apply_code(
             existing.magnitude = rating
             # Rating it again IS the adjudication of a merge conflict (§6d).
             existing.magnitude_conflict = None
+            mark_participant_scores_stale(db, project_id)
             if consensus_enabled(db):
                 mark_consensus_stale(db, project_id, dataset_value_ids=[data.dataset_value_id])
             db.commit()
@@ -899,6 +901,7 @@ async def apply_code(
         magnitude=rating,
     )
     db.add(ca)
+    mark_participant_scores_stale(db, project_id)
     if consensus_enabled(db):
         mark_consensus_stale(db, project_id, dataset_value_ids=[data.dataset_value_id])
     db.commit()
@@ -979,6 +982,7 @@ def set_text_code_magnitude(
     )
     # A rating change moves what a consensus over this target would say, so it
     # staleizes exactly like an apply/remove does (the every-mutation-site rule).
+    mark_participant_scores_stale(db, project_id)
     if consensus_enabled(db):
         mark_consensus_stale(db, project_id, dataset_value_ids=[data.dataset_value_id])
     db.commit()
@@ -1020,6 +1024,7 @@ async def remove_code(
         raise HTTPException(status_code=404, detail="Code application not found")
 
     db.delete(ca)
+    mark_participant_scores_stale(db, project_id)
     if consensus_enabled(db):
         mark_consensus_stale(db, project_id, dataset_value_ids=[dataset_value_id])
     db.commit()
@@ -1111,6 +1116,8 @@ async def bulk_code(
         ))
         success_count += 1
 
+    if valid_ids:
+        mark_participant_scores_stale(db, project_id)
     if consensus_enabled(db) and valid_ids:
         mark_consensus_stale(db, project_id, dataset_value_ids=list(valid_ids))
     db.commit()
@@ -1166,6 +1173,8 @@ async def bulk_remove_code(
         .delete(synchronize_session=False)
     )
 
+    if valid_ids:
+        mark_participant_scores_stale(db, project_id)
     if consensus_enabled(db) and valid_ids:
         mark_consensus_stale(db, project_id, dataset_value_ids=list(valid_ids))
     db.commit()

@@ -86,10 +86,12 @@ const segment = (
 })
 
 const DOC: DocumentDetailResponse = {
-  id: 5, name: 'Field notes', description: null, summary: null,
+  id: 5, name: 'Field notes', description: null,
   source_format: 'docx', segmentation_mode: 'paragraph',
   segment_count: 2, coded_segment_count: 1, page_count: null,
   created_at: '2026-09-02T00:00:00+00:00', updated_at: '2026-09-02T00:00:00+00:00',
+  // Row 46 — unlinked, which is the common case for a document.
+  participant_id: null, participant_label: null,
   segments: [
     segment(51, 0, 'The first paragraph of the field notes.'),
     // 🔴 Rated ZERO: the falsy-zero fixture rule. An undo that re-applied bare

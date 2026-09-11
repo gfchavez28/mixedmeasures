@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, useId } from 'react'
 import { useParams, useNavigate, Link } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert, Tags } from 'lucide-react'
@@ -374,6 +374,11 @@ export default function DatasetImport() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const id = parseInt(projectId || '0')
+  // #905: the Dataset Details fields were named by their PLACEHOLDER — the
+  // *Dataset Name* box announced as "e.g., Board Assessment Survey" — because
+  // each visible <Label> beside them carried no htmlFor. Suffixed per file, since
+  // `renderConfigurePanel` runs once per selected file.
+  const detailsId = useId()
 
   const [step, setStep] = useState<Step>('upload')
   const [files, setFiles] = useState<File[]>([])
@@ -1130,26 +1135,41 @@ export default function DatasetImport() {
                     : []
                 return (
                   <div key={col.column_index}>
-                  <label
+                  {/* #902: the row is a <div>, and the <label> wraps the checkbox
+                      and the column name ONLY.
+                      It used to wrap the whole row — checkbox, name, type select
+                      and subtype select. A label binds to its FIRST labelable
+                      descendant, so the selects got no name at all, and the
+                      checkbox's name was computed from the label's whole subtree
+                      and therefore INCLUDED the select's selected option text
+                      (measured: `checkbox "Student_ID Identifier"`, changing
+                      whenever the type changed). The `e.stopPropagation()` calls
+                      on both selects existed only to stop a click inside the label
+                      toggling the checkbox; un-nesting makes them dead, so they
+                      are gone. */}
+                  <div
                     className={cn(
-                      'flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-mm-surface-hover transition-colors',
+                      'flex items-center gap-3 px-4 py-2.5 hover:bg-mm-surface-hover transition-colors',
                       isSkipped && 'bg-mm-bg',
                     )}
                   >
-                    <input
-                      type="checkbox"
-                      checked={isSkipped}
-                      onChange={() => toggleSkip(fileIndex, col.column_index)}
-                      className="rounded border-mm-border-medium text-primary"
-                    />
-                    <span className={cn('flex-1 text-sm truncate', isSkipped && 'text-mm-text-faint line-through')}>
-                      {col.suggested_column_text}
-                      {col.suggested_column_code && (
-                        <span className="text-mm-text-faint font-mono ml-2 text-xs">
-                          {col.suggested_column_code}
-                        </span>
-                      )}
-                    </span>
+                    <label className="flex items-center gap-3 flex-1 min-w-0 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={isSkipped}
+                        onChange={() => toggleSkip(fileIndex, col.column_index)}
+                        aria-label={`Skip ${col.suggested_column_text}`}
+                        className="rounded border-mm-border-medium text-primary"
+                      />
+                      <span className={cn('flex-1 text-sm truncate', isSkipped && 'text-mm-text-faint line-through')}>
+                        {col.suggested_column_text}
+                        {col.suggested_column_code && (
+                          <span className="text-mm-text-faint font-mono ml-2 text-xs">
+                            {col.suggested_column_code}
+                          </span>
+                        )}
+                      </span>
+                    </label>
                     {isSkipped ? (
                       <span className="text-xs px-2 py-0.5 rounded flex-shrink-0 bg-mm-bg text-mm-text-faint">
                         {isAutoSkip ? 'Platform metadata' : TYPE_LABELS[effectiveType] || effectiveType}
@@ -1157,11 +1177,8 @@ export default function DatasetImport() {
                     ) : (
                       <select
                         value={effectiveType}
-                        onChange={(e) => {
-                          e.stopPropagation()
-                          setColumnType(fileIndex, col.column_index, e.target.value)
-                        }}
-                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => setColumnType(fileIndex, col.column_index, e.target.value)}
+                        aria-label={`Column type for ${col.suggested_column_text}`}
                         className={cn(
                           'text-xs px-1.5 py-0.5 rounded font-medium border-none cursor-pointer flex-shrink-0',
                           typeBadgeClass,
@@ -1178,11 +1195,8 @@ export default function DatasetImport() {
                     {effectiveType === 'demographic' && !isSkipped && (
                       <select
                         value={config.subtypeOverrides[col.column_index] || ''}
-                        onChange={(e) => {
-                          e.stopPropagation()
-                          setSubtype(fileIndex, col.column_index, e.target.value)
-                        }}
-                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => setSubtype(fileIndex, col.column_index, e.target.value)}
+                        aria-label={`Demographic subtype for ${col.suggested_column_text}`}
                         className="text-xs border border-mm-border-subtle rounded px-1.5 py-0.5 bg-mm-surface text-mm-text-secondary flex-shrink-0"
                       >
                         <option value="">Subtype...</option>
@@ -1193,7 +1207,7 @@ export default function DatasetImport() {
                         <option value="other">Other</option>
                       </select>
                     )}
-                  </label>
+                  </div>
                   {/* #575: value-labels authoring for a numbers-only scale column. */}
                   {col.all_numeric && !isSkipped && (
                     <ColumnValueLabelsControl
@@ -1289,8 +1303,10 @@ export default function DatasetImport() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <Label className="text-sm">Dataset Name *</Label>
+              <Label htmlFor={`${detailsId}-name-${fileIndex}`} className="text-sm">Dataset Name<span aria-hidden="true"> *</span></Label>
               <Input
+                id={`${detailsId}-name-${fileIndex}`}
+                aria-required="true"
                 value={config.datasetName}
                 onChange={(e) => updateFileConfig(fileIndex, 'datasetName', e.target.value)}
                 placeholder="e.g., Board Assessment Survey"
@@ -1305,8 +1321,9 @@ export default function DatasetImport() {
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label className="text-sm">Description</Label>
+                <Label htmlFor={`${detailsId}-desc-${fileIndex}`} className="text-sm">Description</Label>
                 <Textarea
+                  id={`${detailsId}-desc-${fileIndex}`}
                   value={config.datasetDescription}
                   onChange={(e) => updateFileConfig(fileIndex, 'datasetDescription', e.target.value)}
                   placeholder="Optional description..."
@@ -1314,8 +1331,9 @@ export default function DatasetImport() {
                 />
               </div>
               <div className="space-y-2">
-                <Label className="text-sm">Source</Label>
+                <Label htmlFor={`${detailsId}-source-${fileIndex}`} className="text-sm">Source</Label>
                 <Input
+                  id={`${detailsId}-source-${fileIndex}`}
                   value={config.datasetSource}
                   onChange={(e) => updateFileConfig(fileIndex, 'datasetSource', e.target.value)}
                   placeholder="e.g., LimeSurvey"

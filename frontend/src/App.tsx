@@ -1,8 +1,8 @@
 import { lazy } from 'react'
 import { Routes, Route, Navigate, useParams, useLocation } from 'react-router'
-import { Toaster } from 'sonner'
 import { AuthProvider, useAuth } from '@/lib/auth-context'
 import { ThemeProvider } from '@/lib/theme-context'
+import { ThemedToaster } from '@/components/ThemedToaster'
 import { ZoomProvider } from '@/lib/zoom-context'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { variableViewPath } from '@/lib/dataset-routes'
@@ -184,12 +184,11 @@ export default function App() {
             <AppRoutes />
           </TooltipProvider>
         </ZoomProvider>
-        <Toaster
-          position="bottom-right"
-          toastOptions={{
-            className: 'bg-mm-surface text-mm-text border-mm-surface-border',
-          }}
-        />
+        {/* #938 — the toast's colour is decided in ONE place now. This used to
+            be a `<Toaster>` carrying a `toastOptions.className` of mm tokens
+            that could never apply (sonner's own two-attribute selector outranks
+            a class), so every toast rendered white in dark mode. */}
+        <ThemedToaster />
       </ThemeProvider>
     </AuthProvider>
   )

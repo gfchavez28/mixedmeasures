@@ -41,7 +41,9 @@ class ConversationSearchResult(BaseModel):
     subject_id: str | None
     conversation_date: datetime | None
     status: str  # ConversationStatus value (imported/in_progress/completed)
-    summary: str | None
+    # ⚠️ NO `summary` — retired 2026-09-09 (#895). Search no longer matches on it
+    # either: the column has never held a value in any released build, so the
+    # `ilike` arm scanned every conversation for text that cannot be there.
     segment_count: int
 
     model_config = ConfigDict(from_attributes=True)

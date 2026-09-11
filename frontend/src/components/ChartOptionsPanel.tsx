@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useId } from 'react'
 import {
   Hash,
   RotateCcw,
@@ -419,6 +419,14 @@ export default function ChartOptionsPanel({
   openDataSectionTrigger = 0,
 }: ChartOptionsPanelProps) {
   const { expanded: expandedSection, toggle: toggleSection } = useAccordionState('data', openDataSectionTrigger)
+
+  // #900/#906: `OptionRow`'s labelled `role="group"` names the SET; each control
+  // inside a fullWidth row still has to name itself. These ids pair the visible
+  // caption with its control via <label htmlFor>, so the accessible name IS the
+  // visible text (WCAG 2.5.3) and cannot drift from it the way a duplicated
+  // `aria-label` string can.
+  const fontId = useId()
+  const axisRangeId = useId()
 
   const vis = getVisibleOptions(chartType, metricType)
 
@@ -995,10 +1003,17 @@ export default function ChartOptionsPanel({
 
               {vis.axisRange && (
                 <OptionRow icon={MoveHorizontal} label="Axis range">
+                  {/* #906: this row holds TWO controls, and `OptionRow`'s <label>
+                      names only its first labelable descendant — so without these
+                      the maximum fell back to its placeholder ("Auto") and the
+                      minimum's computed name absorbed the maximum's value. Both
+                      names CONTAIN the visible "Axis range" text (WCAG 2.5.3). */}
                   <div className="flex items-center gap-1.5">
                     <Input
                       type="number"
                       step="1"
+                      id={`${axisRangeId}-min`}
+                      aria-label="Axis range minimum"
                       value={formatting.xAxisMin ?? ''}
                       onChange={e => {
                         const v = e.target.value
@@ -1007,10 +1022,12 @@ export default function ChartOptionsPanel({
                       placeholder="Auto"
                       className="h-7 text-xs w-16"
                     />
-                    <span className="text-mm-text-faint text-xs">to</span>
+                    <span className="text-mm-text-faint text-xs" aria-hidden="true">to</span>
                     <Input
                       type="number"
                       step="1"
+                      id={`${axisRangeId}-max`}
+                      aria-label="Axis range maximum"
                       value={formatting.xAxisMax ?? ''}
                       onChange={e => {
                         const v = e.target.value
@@ -1186,7 +1203,7 @@ export default function ChartOptionsPanel({
                     value={String(formatting.labelFontSize)}
                     onValueChange={v => onFormattingChange({ labelFontSize: Number(v) })}
                   >
-                    <SelectTrigger className="h-7 text-xs px-1.5">
+                    <SelectTrigger id={`${fontId}-label`} className="h-7 text-xs px-1.5">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -1195,14 +1212,14 @@ export default function ChartOptionsPanel({
                       ))}
                     </SelectContent>
                   </Select>
-                  <span className="text-[11px] text-mm-text-faint mt-0.5 block text-center">Label</span>
+                  <label htmlFor={`${fontId}-label`} className="text-[11px] text-mm-text-faint mt-0.5 block text-center cursor-pointer">Label</label>
                 </div>
                 <div>
                   <Select
                     value={String(formatting.axisFontSize)}
                     onValueChange={v => onFormattingChange({ axisFontSize: Number(v) })}
                   >
-                    <SelectTrigger className="h-7 text-xs px-1.5">
+                    <SelectTrigger id={`${fontId}-ticks`} className="h-7 text-xs px-1.5">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -1211,14 +1228,14 @@ export default function ChartOptionsPanel({
                       ))}
                     </SelectContent>
                   </Select>
-                  <span className="text-[11px] text-mm-text-faint mt-0.5 block text-center">Ticks</span>
+                  <label htmlFor={`${fontId}-ticks`} className="text-[11px] text-mm-text-faint mt-0.5 block text-center cursor-pointer">Ticks</label>
                 </div>
                 <div>
                   <Select
                     value={String(formatting.dataLabelFontSize)}
                     onValueChange={v => onFormattingChange({ dataLabelFontSize: Number(v) })}
                   >
-                    <SelectTrigger className="h-7 text-xs px-1.5">
+                    <SelectTrigger id={`${fontId}-data`} className="h-7 text-xs px-1.5">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -1227,14 +1244,14 @@ export default function ChartOptionsPanel({
                       ))}
                     </SelectContent>
                   </Select>
-                  <span className="text-[11px] text-mm-text-faint mt-0.5 block text-center">Data</span>
+                  <label htmlFor={`${fontId}-data`} className="text-[11px] text-mm-text-faint mt-0.5 block text-center cursor-pointer">Data</label>
                 </div>
                 <div>
                   <Select
                     value={String(formatting.titleFontSize)}
                     onValueChange={v => onFormattingChange({ titleFontSize: Number(v) })}
                   >
-                    <SelectTrigger className="h-7 text-xs px-1.5">
+                    <SelectTrigger id={`${fontId}-title`} className="h-7 text-xs px-1.5">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -1243,7 +1260,7 @@ export default function ChartOptionsPanel({
                       ))}
                     </SelectContent>
                   </Select>
-                  <span className="text-[11px] text-mm-text-faint mt-0.5 block text-center">Title</span>
+                  <label htmlFor={`${fontId}-title`} className="text-[11px] text-mm-text-faint mt-0.5 block text-center cursor-pointer">Title</label>
                 </div>
               </div>
             </OptionRow>

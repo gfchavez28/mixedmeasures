@@ -19,8 +19,10 @@ import DeriveVariableDialog from '@/components/DeriveVariableDialog'
 import AddVariableMenu from '@/components/AddVariableMenu'
 import PickRuleToDeriveDialog from '@/components/PickRuleToDeriveDialog'
 import ApplyRuleDialog from '@/components/ApplyRuleDialog'
-import { variableViewPath } from '@/lib/dataset-routes'
+import { dataViewPath, variableViewPath } from '@/lib/dataset-routes'
+import { managedDatasetRefusal } from '@/lib/managed-dataset'
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle, useDefaultLayout } from 'react-resizable-panels'
+import { useAddRecord } from '@/hooks/useAddRecord'
 import { useCreateVariable } from '@/hooks/useCreateVariable'
 import { useDeriveVariable } from '@/hooks/useDeriveVariable'
 import { useDeleteVariable } from '@/hooks/useDeleteVariable'
@@ -1266,6 +1268,17 @@ export default function RecodeWorkbench() {
   const allColumns: DatasetColumn[] = useMemo(() => columnsData ?? [], [columnsData])
 
   // Fetch dataset
+  /**
+   * Row 47 — this tab can CREATE a record and cannot DISPLAY one, so its
+   * `onAdded` navigates to the Data view deep-linked at the new row rather
+   * than leaving the researcher here with nothing to show for the click. The
+   * `?row=` machinery already exists for the universal-search hit (#834), so
+   * this is a reuse rather than a second landing path.
+   */
+  const { addRecord } = useAddRecord(pid, did, (created) => {
+    navigate(dataViewPath(pid, did, { rowId: created.row_id }))
+  })
+
   const { data: dataset } = useQuery({
     queryKey: ['dataset', pid, did],
     queryFn: () => datasetsApi.get(pid, did),
@@ -1950,11 +1963,20 @@ export default function RecodeWorkbench() {
             viewport a 1280×720 window has at 200% zoom before shipping; jsdom
             computes no layout, so `DatasetToolbar.test.ts` can only proxy this
             with a count. */}
+        {/* 🔴 `appendRefusal` was NOT passed here until row 47, and the omission
+            was a live defect: on the participant table the server 409s both
+            append endpoints, so this tab offered a control the request declines
+            while the Data view refused it correctly — two tabs of ONE workspace
+            disagreeing about a refusal (#806/#807/#812's shape). Found by
+            diffing this call site against its sibling, not by a report. */}
         <AddVariableMenu
           onAddVariable={() => createVariable.open('manual')}
           onAddComputed={() => createVariable.open('computed')}
           onAddRecoded={() => createVariable.open('recoded')}
           onAppendRecords={() => navigate(`/projects/${pid}/datasets/${did}/append`)}
+          appendRefusal={managedDatasetRefusal(dataset, 'append')}
+          onAddRecord={addRecord}
+          addRecordRefusal={managedDatasetRefusal(dataset, 'addRow')}
         />
 
         {/* "Variable Groups" left BOTH views' toolbars together (Decision F).
@@ -2265,7 +2287,18 @@ export default function RecodeWorkbench() {
                         advanceColumn(e.shiftKey ? -1 : 1, 'type')
                       }
                     }}
-                    className={`px-1.5 py-0.5 rounded text-[11px] font-medium border-none cursor-pointer focus:ring-1 focus:ring-ring focus:outline-none ${
+                    /* #926 — the type of a tool-maintained variable is part of
+                       what it IS, and `bulk_type_update` refuses to change it.
+                       NATIVE `disabled`, not `aria-disabled`: on a `<select>`
+                       the aria form changes what the control announces and
+                       nothing about what it does, so the researcher could still
+                       pick an option and watch it 409. The reason is rendered
+                       beside it rather than hidden in a tooltip — that is the
+                       discoverability half `lib/mode-disabled.ts` exists for. */
+                    disabled={selectedColumn.source === 'managed'}
+                    className={`px-1.5 py-0.5 rounded text-[11px] font-medium border-none focus:ring-1 focus:ring-ring focus:outline-none ${
+                      selectedColumn.source === 'managed' ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'
+                    } ${
                       TYPE_BADGE_CLASSES[selectedColumn.column_type] || 'bg-mm-bg text-mm-text-muted'
                     }`}
                   >
@@ -2273,6 +2306,11 @@ export default function RecodeWorkbench() {
                       <option key={t} value={t}>{t}</option>
                     ))}
                   </select>
+                  {selectedColumn.source === 'managed' && (
+                    <span className="text-xs text-mm-text-faint">
+                      maintained by the tool
+                    </span>
+                  )}
                   {selectedColumn.scale_labels && (
                     <span className="text-xs text-mm-text-faint">
                       {selectedColumn.scale_points}-point

@@ -41,6 +41,7 @@ from ..services.coding_layers import (
 )
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
+from ..services.participant_scores import mark_participant_scores_stale
 from ..services import magnitude
 from .helpers import _get_project_or_404
 
@@ -377,6 +378,11 @@ def set_magnitude_scale(
         )
 
     magnitude.write_scale(code, scale)
+    # Row 45 step 4 — declaring, widening, narrowing or CLEARING a scale changes
+    # which codes are scored at all and what their columns' axes are, so it is a
+    # score input in its own right. Ungated: a single-coder project's scores come
+    # from the sole coder's ratings.
+    mark_participant_scores_stale(db, code.project_id)
 
     log_action(
         db,
@@ -557,6 +563,9 @@ async def merge_codes(
     # the codes merge — mark those targets stale BEFORE reassignment (while the
     # source applications still carry code_id=source). Drained by the background
     # sweep (Track J · J2-3, Slab 5b).
+    # Ungated and first: a merge moves applications (and their ratings) onto the
+    # target's scale, which moves every score either code contributed to.
+    mark_participant_scores_stale(db, project_id)
     if consensus_enabled(db):
         mark_consensus_stale(db, project_id, code_ids=[source_code_id, target_code_id])
 

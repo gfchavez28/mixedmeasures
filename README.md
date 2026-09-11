@@ -85,7 +85,9 @@ mean anything is wrong:
   percentage, binary, categorical), scale-pattern recognition, and N/A / refusal-label
   handling. SPSS files bring their own value labels, scale order, and user-missing
   codes, so an ordinal variable arrives with the order and codes it was recorded
-  with rather than a guess. Append additional rows from another file.
+  with rather than a guess. Append additional rows from another file — or start
+  from a **blank table** and type records in by hand, for the case attributes and
+  small matrices that never existed as a file.
 - **Documents** — import **`.docx`, `.pdf`, and `.txt`** files; they're
   auto-segmented (with page numbers and headings) for coding.
 - **Conversations** — import transcripts as **CSV** (speaker- and timestamp-aware,
@@ -193,9 +195,11 @@ across, leaving the original and its coding untouched.
   be recorded on **every coding surface** — conversation and document transcripts,
   observation clips, and open-text responses.
 - **Participants** and **speakers** form a shared cross-source identity spine, so a
-  person links across their survey record and their interview. Datasets with an
+  person links across their survey record, their interview, and the **documents
+  that are about them** — a report, a workplan, a case file. Datasets with an
   identifier column ("Participant ID", "Respondent", …) link their rows to
-  participants automatically at import, append, or retroactively.
+  participants automatically at import, append, or retroactively; a document is
+  linked by naming its subject, and one person can have any number of them.
 - Qualitative analysis: code frequencies, **co-occurrence**, a **thematic
   saturation curve**, group comparisons of code frequency, and a **codebook
   treemap** overview.
@@ -224,6 +228,16 @@ across, leaving the original and its coding untouched.
   multi-instrument survey work.
 
 ### Integrate
+- **A participant table turns code ratings into variables.** Where a code carries a
+  rating scale, the tool maintains a table whose rows are the project's
+  participants and whose columns are each person's average rating for a rated code,
+  alongside the number of passages it rests on — because an average over one
+  passage and over eight are the same number and not the same evidence. Those
+  columns are ordinary variables, so they compare, chart, cross-tabulate and export
+  like any survey item. The rows are the tool's and the columns are yours: you can
+  add your own variables beside the scores and type in case attributes, but a row
+  follows the participant list rather than being edited away. Each refresh records
+  when it ran, and says who was coded but not yet rated.
 - The **Canvas** is a theme-based integration workspace with **Writing** and
   **Spatial** modes, rich-text prose (Tiptap), inline embeds of excerpts /
   materials / memos, typed relationships between themes, versioned snapshots, and a
@@ -275,8 +289,11 @@ Being honest about scope:
   dataset rows and responses), renames their speaker to a numbered token, and
   **blanks** their conversation turns rather than deleting them — a turn removed
   outright damages the records of participants who did *not* withdraw, and moves
-  every coverage and reliability figure in the project. Quotes pointing into
-  blanked text are removed with it; the researcher's own codes, notes and memos
+  every coverage and reliability figure in the project. A **document** about them
+  is a third case: it is **unlinked and reported, never deleted**, because "about
+  this person" is true both of a workplan they wrote and of a policy document that
+  merely names them, and only someone who knows the project can tell those apart.
+  Quotes pointing into blanked text are removed with it; the researcher's own codes, notes and memos
   are kept and reported for review, because deciding whether a memo quotes the
   person is reading, not matching. **That is the limit that matters: it cannot
   find the person's name inside *other* people's turns, or inside free-text

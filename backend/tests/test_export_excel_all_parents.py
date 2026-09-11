@@ -247,15 +247,39 @@ class TestMemoLinkNames:
         assert link == "Dataset 77"
 
 
-class TestSummariesSheet:
-    def test_a_document_summary_is_exported(self, three_parent_project):
+class TestSourcesSheet:
+    """#620's claim survives #895's removal, and the fixture now proves both.
+
+    #620 fixed this sheet being conversation-only, and pinned it by asserting a
+    document's `summary` reached a `Summary` column. That column is gone (#895):
+    the panel that wrote it shipped for 42 minutes on 2026-03-22, three months
+    before v1.0.0, so no released build could populate it and every export
+    carried an always-blank column. The sheet is named `Sources` for what it
+    actually lists.
+
+    ⚠️ The fixture still sets `Document.summary` on purpose — the MODEL COLUMN is
+    kept — so the negative assertion below is not vacuous: it proves the value
+    exists and that the export no longer carries it anywhere.
+    """
+
+    def test_a_document_gets_a_row(self, three_parent_project):
         wb = _sheets(three_parent_project)
-        header, rows = _rows(wb["Summaries"])
+        assert "Summaries" not in wb.sheetnames, "the sheet was renamed to 'Sources' (#895)"
+        header, rows = _rows(wb["Sources"])
         assert header[0] == "Source Type"
         doc_rows = [r for r in rows if r["Source Type"] == "document"]
         assert len(doc_rows) == 1
         assert doc_rows[0]["Source"] == "Field Notes B"
-        assert doc_rows[0]["Summary"] == "A doc summary"
+
+    def test_the_retired_summary_column_is_gone_and_its_value_does_not_leak(
+        self, three_parent_project,
+    ):
+        wb = _sheets(three_parent_project)
+        header, rows = _rows(wb["Sources"])
+        assert "Summary" not in header
+        # The fixture's document really does carry this text in the database.
+        leaked = [r for r in rows if any(v == "A doc summary" for v in r.values())]
+        assert leaked == [], "the retired summary must not reappear in another column"
 
 
 class TestCodeSourceMatrixSheet:

@@ -38,8 +38,6 @@ from ..schemas.metric import (
     CrossTabCell,
     CrossTabResponse,
     ChiSquareResult,
-    RowScoreItem,
-    RowScoresResponse,
     MatrixColumnInfo,
     MatrixRowItem,
     RowMatrixResponse,
@@ -1275,37 +1273,6 @@ async def get_metric_results(
     ]
 
 
-@router.get("/{metric_id}/row-scores", response_model=RowScoresResponse)
-async def get_row_scores(
-    project_id: int,
-    metric_id: int,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Get per-row scores for a metric."""
-    from ..models.row_score import RowScore
-    from ..models.dataset import DatasetRow
-
-    _get_project_or_404(db, project_id, user.id)
-    metric = _get_metric_or_404(db, project_id, metric_id)
-
-    scores = (
-        db.query(RowScore, DatasetRow.row_identifier)
-        .join(DatasetRow, RowScore.dataset_row_id == DatasetRow.id)
-        .filter(RowScore.metric_definition_id == metric_id)
-        .order_by(DatasetRow.row_identifier, DatasetRow.id)
-        .all()
-    )
-
-    return RowScoresResponse(
-        metric_id=metric.id,
-        metric_name=metric.name,
-        scores=[
-            RowScoreItem(
-                dataset_row_id=s.dataset_row_id,
-                row_identifier=resp_id,
-                score=s.score,
-            )
-            for s, resp_id in scores
-        ],
-    )
+# `GET /{metric_id}/row-scores` was DELETED 2026-09-06 (#882). It had no client
+# method at all — the R and Excel exports read `RowScore` server-side, so the
+# per-row scores a researcher actually sees never came through here.

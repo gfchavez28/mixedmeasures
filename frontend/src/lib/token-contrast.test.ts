@@ -472,3 +472,48 @@ describe('#852 — a blue tint is painted with the TEXT token, not the fill hue'
       + 'source — the scan is looking at the wrong thing').toBeGreaterThan(25)
   })
 })
+
+describe('#936 — each theme declares the scheme the BROWSER paints in', () => {
+  /**
+   * `color-scheme` is the one declaration that reaches UI this stylesheet
+   * cannot: scrollbars, the popup a native `<select>` opens, number-input
+   * spinners, checkbox and radio glyphs, the caret, `<dialog>`'s backdrop. It
+   * was declared nowhere, so all of it stayed light in dark mode — most
+   * visibly a near-white scrollbar band across a near-black pane, on every
+   * scroll container in the app.
+   *
+   * 🔴 **The ORDER is the assertion that matters.** `.dark` is applied to
+   * `<html>`, so both blocks match the same element at equal specificity — a
+   * class and `:root` are each (0,1,0) — and `.dark` wins ONLY because it is
+   * later in the file. That is the same cascade every token override already
+   * depends on, which is why this is safe; it is also why a reorder or a
+   * `@layer` move would silently revert dark mode's native UI while every
+   * colour on screen stayed correct.
+   */
+  const declarations = [...CSS.matchAll(/color-scheme:\s*([a-z ]+);/g)]
+
+  it('declares light on :root and dark on .dark, in that order', () => {
+    expect(declarations.map(m => m[1].trim())).toEqual(['light', 'dark'])
+  })
+
+  it('🔴 the .dark declaration comes AFTER the :root one', () => {
+    const rootAt = CSS.indexOf(':root {')
+    const darkAt = CSS.indexOf('.dark {')
+    expect(rootAt).toBeGreaterThan(-1)
+    expect(darkAt).toBeGreaterThan(rootAt)
+    // …and each declaration sits inside its own block, not merely somewhere later.
+    expect(declarations[0].index!).toBeGreaterThan(rootAt)
+    expect(declarations[0].index!).toBeLessThan(darkAt)
+    expect(declarations[1].index!).toBeGreaterThan(darkAt)
+  })
+
+  it('does not hand the OS a veto with `light dark`', () => {
+    /**
+     * The theme is an explicit app choice stored in `mm-theme`, and `system` is
+     * already resolved to the `.dark` class by ThemeProvider. Declaring both
+     * schemes would let `prefers-color-scheme` drive the native UI alone, so an
+     * app in explicit light mode on a dark OS would show dark scrollbars.
+     */
+    expect(CSS).not.toMatch(/color-scheme:\s*(light dark|dark light)/)
+  })
+})

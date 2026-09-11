@@ -8,7 +8,7 @@ export interface Conversation {
   subject_id: string | null
   conversation_date: string | null
   status: 'imported' | 'in_progress' | 'completed'
-  summary: string | null
+  // #895: no `summary` — retired from the wire with the document half.
   created_at: string
   updated_at: string
   segment_count: number

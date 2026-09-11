@@ -80,7 +80,7 @@ export function CopyToDialog({
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="max-w-lg max-h-[80vh] flex flex-col">
+      <DialogContent aria-describedby={undefined} className="max-w-lg max-h-[80vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Copy "{definitionName}" to other columns</DialogTitle>
         </DialogHeader>

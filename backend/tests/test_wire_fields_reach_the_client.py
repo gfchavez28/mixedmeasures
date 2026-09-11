@@ -21,9 +21,12 @@ class never had.
 reachability check. A generic name (`id`, `name`, `count`, `label`) passes on coincidence
 wherever it appears, so an unconsumed field with a common name is invisible here — and so is
 a whole ENDPOINT with no client caller whose fields all have common names (#882 is that
-residue: `row-scores` and the code-equivalence CRUD have no client caller at all, and only
-their distinctively-named fields showed up here). It catches the distinctive names, which
-every one of the twelve had.
+residue: four endpoints had no live client caller, and only their distinctively-named fields
+showed up here). It catches the distinctive names, which every one of the twelve had.
+
+**#882 was decided 2026-09-06**: `row-scores` and the dataset rows summary were DELETED
+(routes + schemas + their exemptions here); the code-equivalence CRUD is kept as substrate
+and the conversation `coding-progress` was already kept by design, so both keep an exemption.
 
 ⚠️ **"Response-shaped" is a NAME heuristic** (the suffix list below), because nothing in the
 code marks a schema as a response versus a request. The population self-check asserts the
@@ -62,16 +65,16 @@ EXEMPT: dict[str, str] = {
     # its common ones (`total_segments`, `coded_segments`) pass on coincidence — see #882.
     "participant_segments": "conversation coding-progress endpoint — caller-less by design (J1-3c)",
     "progress_percent": "conversation coding-progress endpoint — caller-less by design (J1-3c)",
-    # `GET …/metrics/{id}/row-scores` has no client caller at all (2026-09-04); the R and
-    # Excel exports read `RowScore` server-side. Endpoint-grain finding → #882.
-    "metric_name": "row-scores endpoint — no client caller (#882)",
     # The code-equivalence group CRUD (`routers/code_equivalence.py`) has no client module;
     # groups are created server-side by the merge reconcile's `link` action. → #882.
-    "canonical_code_id": "code-equivalence CRUD — no client module (#882)",
-    # `GET …/datasets/{id}/rows` has a client METHOD (`datasetsApi.listRows`) that nothing
-    # calls (2026-09-04) — the #816 shape one level up: declared on the client, reached from
-    # no surface. Endpoint-grain finding → #882.
-    "value_count": "rows summary — `datasetsApi.listRows` is declared and called by nothing (#882)",
+    # KEPT as substrate on the 2026-09-06 decision, like the multi-user auth endpoints
+    # behind `MM_MULTIUSER_AUTH_ENABLED`.
+    "canonical_code_id": "code-equivalence CRUD — no client module, kept as substrate (#882)",
+    # `metric_name` (row-scores) and `value_count` (the dataset rows summary) were exempt
+    # here until 2026-09-06, when #882 was decided and BOTH ENDPOINTS WERE DELETED along
+    # with their schemas. ⚠️ Deleting a route is only half of it: `test_exemptions_are_not_stale`
+    # fails on an exemption whose field no response schema declares any more, so the schema
+    # and the entry have to go in the same commit as the route.
 }
 
 # Population floors. Well below the 2026-09-04 measurement (270 classes, 745 fields, 461

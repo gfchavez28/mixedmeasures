@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, useId } from 'react'
 import { useParams, useNavigate, Link } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, Video, Volume2, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert } from 'lucide-react'
@@ -72,6 +72,13 @@ export default function ConversationImport() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const id = parseInt(projectId || '0')
+  // #903/#905: every <Label> on this page was an orphan — no htmlFor, wrapping no
+  // control — so the four Map Columns triggers announced as unnamed comboboxes and
+  // the conversation-name field took its name from its PLACEHOLDER ("e.g.,
+  // Participant 001"). The required marker rides `aria-required` now; the visible
+  // asterisk is aria-hidden so it is not read as "star".
+  const mapId = useId()
+  const nameId = useId()
 
   const [step, setStep] = useState<Step>('upload')
   const [files, setFiles] = useState<File[]>([])
@@ -868,6 +875,7 @@ export default function ConversationImport() {
                   {mapping.is_facilitator ? 'Facilitator:' : 'Participant:'}
                 </span>
                 <Input
+                  aria-label={`${mapping.is_facilitator ? 'Facilitator' : 'Participant'} name \u2014 ${mapping.original_label}`}
                   value={mapping.normalized_name}
                   onChange={(e) => {
                     const updated = [...mappings]
@@ -886,7 +894,7 @@ export default function ConversationImport() {
                     color={mapping.color || 'transparent'}
                     dotClassName="w-5 h-5 rounded-full border-2 border-mm-border-medium"
                     title="Set speaker color"
-                    aria-label="Set speaker color"
+                    aria-label={`Set color for ${mapping.original_label}`}
                   />
                 </PopoverTrigger>
                 <PopoverContent className="w-auto p-3" align="end" aria-label="Speaker color">
@@ -916,6 +924,7 @@ export default function ConversationImport() {
               </Popover>
               <Checkbox
                 id={`facilitator-${fileIndex}-${i}`}
+                aria-label={`Facilitator \u2014 ${mapping.original_label}`}
                 checked={mapping.is_facilitator}
                 onCheckedChange={(checked) => {
                   if (onFacilitatorToggle) {
@@ -1316,16 +1325,16 @@ export default function ConversationImport() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label className="flex items-center gap-2">
+                  <Label htmlFor={`${mapId}-speaker`} className="flex items-center gap-2 cursor-pointer">
                     <span className={cn('px-2 py-0.5 rounded text-xs font-medium', COLUMN_COLORS.speaker.bg, COLUMN_COLORS.speaker.text)}>
-                      Speaker Column *
+                      Speaker Column<span aria-hidden="true"> *</span>
                     </span>
                   </Label>
                   <Select
                     value={columnMapping.speaker || '__none__'}
                     onValueChange={(v) => handleColumnMappingChange('speaker', v)}
                   >
-                    <SelectTrigger className={cn(columnMapping.speaker && COLUMN_COLORS.speaker.bg)}>
+                    <SelectTrigger id={`${mapId}-speaker`} aria-required="true" className={cn(columnMapping.speaker && COLUMN_COLORS.speaker.bg)}>
                       <SelectValue placeholder="Select column" />
                     </SelectTrigger>
                     <SelectContent>
@@ -1338,16 +1347,16 @@ export default function ConversationImport() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label className="flex items-center gap-2">
+                  <Label htmlFor={`${mapId}-text`} className="flex items-center gap-2 cursor-pointer">
                     <span className={cn('px-2 py-0.5 rounded text-xs font-medium', COLUMN_COLORS.text.bg, COLUMN_COLORS.text.text)}>
-                      Text Column *
+                      Text Column<span aria-hidden="true"> *</span>
                     </span>
                   </Label>
                   <Select
                     value={columnMapping.text || '__none__'}
                     onValueChange={(v) => handleColumnMappingChange('text', v)}
                   >
-                    <SelectTrigger className={cn(columnMapping.text && COLUMN_COLORS.text.bg)}>
+                    <SelectTrigger id={`${mapId}-text`} aria-required="true" className={cn(columnMapping.text && COLUMN_COLORS.text.bg)}>
                       <SelectValue placeholder="Select column" />
                     </SelectTrigger>
                     <SelectContent>
@@ -1360,7 +1369,7 @@ export default function ConversationImport() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label className="flex items-center gap-2">
+                  <Label htmlFor={`${mapId}-start-time`} className="flex items-center gap-2 cursor-pointer">
                     <span className={cn('px-2 py-0.5 rounded text-xs font-medium', COLUMN_COLORS.start_time.bg, COLUMN_COLORS.start_time.text)}>
                       Start Time
                     </span>
@@ -1369,7 +1378,7 @@ export default function ConversationImport() {
                     value={columnMapping.start_time || '__none__'}
                     onValueChange={(v) => handleColumnMappingChange('start_time', v)}
                   >
-                    <SelectTrigger className={cn(columnMapping.start_time && COLUMN_COLORS.start_time.bg)}>
+                    <SelectTrigger id={`${mapId}-start-time`} className={cn(columnMapping.start_time && COLUMN_COLORS.start_time.bg)}>
                       <SelectValue placeholder="Select column (optional)" />
                     </SelectTrigger>
                     <SelectContent>
@@ -1382,7 +1391,7 @@ export default function ConversationImport() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label className="flex items-center gap-2">
+                  <Label htmlFor={`${mapId}-end-time`} className="flex items-center gap-2 cursor-pointer">
                     <span className={cn('px-2 py-0.5 rounded text-xs font-medium', COLUMN_COLORS.end_time.bg, COLUMN_COLORS.end_time.text)}>
                       End Time
                     </span>
@@ -1391,7 +1400,7 @@ export default function ConversationImport() {
                     value={columnMapping.end_time || '__none__'}
                     onValueChange={(v) => handleColumnMappingChange('end_time', v)}
                   >
-                    <SelectTrigger className={cn(columnMapping.end_time && COLUMN_COLORS.end_time.bg)}>
+                    <SelectTrigger id={`${mapId}-end-time`} className={cn(columnMapping.end_time && COLUMN_COLORS.end_time.bg)}>
                       <SelectValue placeholder="Select column (optional)" />
                     </SelectTrigger>
                     <SelectContent>
@@ -1559,8 +1568,10 @@ export default function ConversationImport() {
                 <>
                   {/* Conversation name */}
                   <div className="space-y-2">
-                    <Label>Conversation Name *</Label>
+                    <Label htmlFor={`${nameId}-0`}>Conversation Name<span aria-hidden="true"> *</span></Label>
                     <Input
+                      id={`${nameId}-0`}
+                      aria-required="true"
                       value={fileConversationNames[0] || ''}
                       onChange={(e) => {
                         userEditedNames.current.add(0)
@@ -1655,8 +1666,10 @@ export default function ConversationImport() {
 
                             {/* Conversation name */}
                             <div className="space-y-1">
-                              <Label className="text-sm">Conversation Name *</Label>
+                              <Label htmlFor={`${nameId}-${i}`} className="text-sm">Conversation Name<span aria-hidden="true"> *</span></Label>
                               <Input
+                                id={`${nameId}-${i}`}
+                                aria-required="true"
                                 value={fileConversationNames[i] || ''}
                                 onChange={(e) => {
                                   userEditedNames.current.add(i)

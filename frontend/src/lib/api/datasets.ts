@@ -2,6 +2,7 @@ import api from './client'
 import { datasetUploadTimeoutMs } from '../dataset-import-formats'
 import type { LinkableRow } from './participants'
 import type { RecodeRange } from '../recode-ranges'
+import type { ManagedSpec } from '../magnitude-rollup-basis'
 
 // Dataset types
 export interface DatasetColumnPreview {
@@ -123,6 +124,25 @@ export interface Dataset {
   column_count: number
   row_count: number
   open_ended_count: number
+  /** Row 45 (i) — the kind of spine a TOOL-MAINTAINED dataset projects
+   *  (`"participants"`), or null for an ordinary one.
+   *
+   *  🔴 **Every affordance that changes the ROW SET must gate on this.** The
+   *  server refuses seven endpoints on a managed dataset (delete dataset ·
+   *  delete record · two append doors · three link doors), so an ungated UI
+   *  offers six controls that 409 — the "offering a control that refuses" shape
+   *  fixed three times already (#806, #807, #812). `lib/managed-dataset.ts`
+   *  owns the predicate; never re-inline the check. */
+  managed_kind?: string | null
+  /** When the tool last recomputed this table's rows and derived columns.
+   *  ALWAYS displayed — it is the half of the freshness pair that can be
+   *  trusted. Null = never computed. */
+  managed_synced_at?: string | null
+  /** 🔴 A POSITIVE signal only: something a score depends on is known to have
+   *  changed. **`false` NEVER means "up to date"** — eight input classes move a
+   *  score and no trigger set covers them all, so the timestamp above is what
+   *  the UI leans on. See `lib/magnitude-rollup-basis.ts::describeFreshness`. */
+  managed_stale?: boolean | null
 }
 
 export interface DatasetList {
@@ -372,6 +392,9 @@ export interface DatasetColumn {
   numeric_max: number | null
   numeric_format: string | null
   source: string
+  /** Row 45 (i) step 4 — provenance for a column the TOOL maintains; absent on
+   *  every ordinary column. `lib/magnitude-rollup-basis.ts` reads it. */
+  managed_spec?: ManagedSpec | null
   expression?: string | null
   depends_on_column_ids?: number[] | null
   stale?: boolean | null
@@ -506,6 +529,15 @@ export interface DatasetDataRow {
 }
 
 /** Where a row sits in the grid's ordering, and which page holds it (#834). */
+/** A hand-added record, plus where the grid will find it (queue row 47).
+ *
+ * ⚠️ It carries its POSITION because a new record sorts LAST — on a 500-record
+ * dataset that is page 3 while the grid shows page 1, and "Record added" with
+ * nothing visible is the state that reads as broken. */
+export interface DatasetRowCreated extends DatasetRowPosition {
+  row_identifier: string | null
+}
+
 export interface DatasetRowPosition {
   row_id: number
   /** 0-based over the WHOLE dataset, not the page — display as `index + 1`. */
@@ -689,6 +721,35 @@ export interface ProjectColumnListResponse {
 }
 
 // API functions - Datasets
+/** What one refresh of the participant table changed — and what it could not
+ *  score, which is the half that matters.
+ *
+ *  🔴 `excluded_ratings` is the ROLLUP's own disclosure. Row 45's Decision 4
+ *  obliges it to SAY what it left out rather than drop it silently, and a
+ *  disclosure that reaches no surface discharges nothing. Rating-grained (one
+ *  coder judgement each), eight possible reasons, a reason ABSENT rather than
+ *  zero when it did not apply. */
+export interface ParticipantDatasetRefresh {
+  rows_added: number
+  rows_removed: number
+  columns_added: number
+  columns_removed: number
+  /** #923 — saved charts/tests deleted along with a reaped score column. A score
+   *  column is an ordinary variable, so the analysis view will build a metric on
+   *  it; when its code is deleted the column is reaped and the metric goes too.
+   *  The one thing a refresh destroys that the researcher authored deliberately. */
+  metrics_removed: number
+  cells_written: number
+  cells_cleared: number
+  participants_scored: number
+  /** Coded, and could still be rated — a THIRD state beside scored and absent.
+   *  In the table their cell is empty exactly like someone never coded; the
+   *  difference is only recoverable here. */
+  participants_coded_unrated: number
+  excluded_ratings: Record<string, number>
+  synced_at: string | null
+}
+
 export const datasetsApi = {
   preview: (projectId: number, file: File, encoding = 'utf-8', sheetName?: string) => {
     const formData = new FormData()
@@ -720,12 +781,47 @@ export const datasetsApi = {
     api.get<DatasetList>(`/projects/${projectId}/datasets/`).then(res => res.data),
   get: (projectId: number, datasetId: number) =>
     api.get<Dataset>(`/projects/${projectId}/datasets/${datasetId}`).then(res => res.data),
+  /** Create (or return) this project's participant table, filled and scored.
+   *  Idempotent — a second call returns the existing one, because the button
+   *  that calls it reads as "take me to my participant table" and a double
+   *  click is not an error. */
+  createParticipantsDataset: (projectId: number) =>
+    api.post<Dataset>(`/projects/${projectId}/datasets/participants`).then(res => res.data),
+  /** Recompute the participant table's rows AND every score column.
+   *
+   *  ⚠️ On the DATASET, not the column: the rollup is ONE project-wide scan
+   *  producing every score at once, so a per-column verb would re-run the whole
+   *  scan per rated code. The Data view's per-column Recompute item calls this. */
+  refreshParticipantsDataset: (projectId: number) =>
+    api.post<ParticipantDatasetRefresh>(
+      `/projects/${projectId}/datasets/participants/refresh`,
+    ).then(res => res.data),
+  /** Create a dataset by hand — no file (queue row 47).
+   *
+   *  ⚠️ Posts to the SLASH-LESS path, matching `@router.post("")`. The sibling
+   *  `list` above deliberately calls `/datasets/` WITH the slash: that GET root
+   *  is one of the two tolerated legacy `"/"` roots, and a POST to it would
+   *  307-redirect to the absolute backend origin and drop the credentialed body.
+   *
+   *  The dataset is ORDINARY — `managed_kind` is null — so it keeps every
+   *  affordance, unlike the participant table above it. */
+  create: (projectId: number, data: { name: string; description?: string | null }) =>
+    api.post<Dataset>(`/projects/${projectId}/datasets`, data).then(res => res.data),
+  /** Add one empty record to a dataset (queue row 47).
+   *
+   *  ⚠️ `limit` must be the page size the grid will then request, or the
+   *  returned `offset` addresses a boundary the grid does not use — the same
+   *  contract `rowPosition` carries, and for the same reason (#800). */
+  createRow: (projectId: number, datasetId: number, limit: number = DATASET_PAGE_SIZE) =>
+    api.post<DatasetRowCreated>(
+      `/projects/${projectId}/datasets/${datasetId}/rows`,
+      undefined,
+      { params: { limit } },
+    ).then(res => res.data),
   update: (projectId: number, datasetId: number, data: Partial<Pick<Dataset, 'name' | 'description' | 'color'>>) =>
     api.patch<Dataset>(`/projects/${projectId}/datasets/${datasetId}`, data).then(res => res.data),
   listColumns: (projectId: number, datasetId: number) =>
     api.get(`/projects/${projectId}/datasets/${datasetId}/columns`).then(res => res.data),
-  listRows: (projectId: number, datasetId: number) =>
-    api.get(`/projects/${projectId}/datasets/${datasetId}/rows`).then(res => res.data),
   getData: (projectId: number, datasetId: number, page?: { limit?: number; offset?: number }) =>
     api.get<DatasetDataResponse>(`/projects/${projectId}/datasets/${datasetId}/data`, {
       params: { limit: page?.limit ?? DATASET_PAGE_SIZE, offset: page?.offset ?? 0 },

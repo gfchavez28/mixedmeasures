@@ -38,6 +38,10 @@ import {
 
 type Step = 'loading' | 'upload' | 'confirm' | 'reconcile' | 'review' | 'merging' | 'report' | 'diverged'
 
+/** Steps that are a spinner rather than a place to be: moving focus onto one
+ *  only to move it again a moment later announces nothing (#935). */
+const TRANSIENT_STEPS: Step[] = ['loading', 'merging']
+
 const codings = (n: number) => `${n.toLocaleString()} coding${n === 1 ? '' : 's'}`
 
 // A dual-encoded coder chip (color + initials), mirroring CoderFilterPopover.
@@ -81,6 +85,8 @@ export default function MergeProject() {
   const [codesPreview, setCodesPreview] = useState<MergeCodePreview[]>([])
   const [codeDecisions, setCodeDecisions] = useState<Record<string, CodeMappingDecision>>({})
   const [report, setReport] = useState<MergeReport | null>(null)
+  // The recovery snapshot's filename, so the sentence promising one can NAME it.
+  const [safetyBackup, setSafetyBackup] = useState<string | null>(null)
   const [divergence, setDivergence] = useState<MergeDivergenceDetail | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const uploadRef = useRef<HTMLInputElement>(null)
@@ -186,6 +192,7 @@ export default function MergeProject() {
         predicate: q => Array.isArray(q.queryKey) && q.queryKey.includes(targetId),
       })
       setReport(result.merge_report)
+      setSafetyBackup(result.safety_backup_filename)
       setStep('report')
       toast.success(`Merge complete — ${codings(result.merge_report?.applications_added ?? 0)} added.`)
     } catch (err) {
@@ -220,6 +227,25 @@ export default function MergeProject() {
     report: 'Done', diverged: 'Review',
   }
   const stepIndex = Math.max(0, steps.indexOf(labelForStep[step]))
+
+  /**
+   * #935 — where focus goes when the step changes.
+   *
+   * Measured: clicking *Continue to review* kept the scroll offset of a step
+   * taller than the viewport, so the Review step opened with its heading behind
+   * the rail, and `Tab` landed on *Skip to main content* — focus had been on a
+   * button that unmounted, so it fell to `<body>`. A stepper that moves the
+   * researcher without telling them where they are is the same defect twice.
+   *
+   * ⚠️ Transient steps are deliberately excluded: `loading` and `merging` are
+   * spinners, and moving focus onto one only to move it again a second later
+   * announces nothing useful. The step AFTER them moves it.
+   */
+  const headingRef = useRef<HTMLHeadingElement>(null)
+  useEffect(() => {
+    if (TRANSIENT_STEPS.includes(step)) return
+    headingRef.current?.focus()
+  }, [step])
 
   const reviewPlan = useMemo(
     () => buildMergePlan(localCodes, codesPreview, codeDecisions),
@@ -260,6 +286,17 @@ export default function MergeProject() {
           <div className="flex items-center justify-center py-16 text-mm-text-muted">
             <LoaderCircle className="w-5 h-5 animate-spin" />
           </div>
+        )}
+
+        {/* #935 — the step's own heading, and the element focus lands on when the
+            step changes. Visually hidden because the progress nav above already
+            shows the step name on screen; what was missing was a HEADING to move
+            to, not a second copy of the label. `report` and `diverged` render
+            their own visible <h2> and take the same ref. */}
+        {!['loading', 'merging', 'report', 'diverged'].includes(step) && (
+          <h2 ref={headingRef} tabIndex={-1} className="sr-only scroll-mt-24">
+            {labelForStep[step]}
+          </h2>
         )}
 
         {step === 'upload' && (
@@ -337,11 +374,21 @@ export default function MergeProject() {
         )}
 
         {step === 'report' && report && (
-          <ReportStep report={report} targetId={targetId} navigate={navigate} />
+          <ReportStep
+            report={report}
+            safetyBackup={safetyBackup}
+            targetId={targetId}
+            navigate={navigate}
+            headingRef={headingRef}
+          />
         )}
 
         {step === 'diverged' && divergence && (
-          <DivergedStep divergence={divergence} onBack={() => navigate(`/projects/${targetId}/overview`)} />
+          <DivergedStep
+            divergence={divergence}
+            onBack={() => navigate(`/projects/${targetId}/overview`)}
+            headingRef={headingRef}
+          />
         )}
       </div>
     </div>
@@ -431,7 +478,12 @@ function ConfirmStep(p: ConfirmStepProps) {
                   </th>
                   <td className="px-3 py-3">
                     <Select value={d ? decisionToValue(d) : ''} onValueChange={v => p.onDecision(c.original_id, v)}>
-                      <SelectTrigger className="w-full max-w-xs">
+                      {/* #913: `combobox` is not a name-from-content role, so the
+                          trigger announced only its value — eight nameless
+                          "Map to …" comboboxes on the step that decides
+                          attribution. Named from the FILE coder (the row header's
+                          stable string), never from the chosen value. */}
+                      <SelectTrigger className="w-full max-w-xs" aria-label={`Bring in ${c.username} as`}>
                         <SelectValue placeholder="Choose…" />
                       </SelectTrigger>
                       <SelectContent>
@@ -740,6 +792,12 @@ function ReviewStep({ plan, incomingLabel, newCoderCount, onBack, onMerge }: {
 
       {/* How to read */}
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-mm-text-muted">
+        {/* #945 — "—" is EVERY row when the two codebooks agree, and it was the
+            one marker the legend did not define, so the busiest reading of the
+            table ("the file contains nothing") was the wrong one. It is correct:
+            `buildMergePlan` sets `incoming: null` for a code the file does not
+            change. */}
+        <span className="inline-flex items-center gap-1"><span className="font-medium">—</span> unchanged — the file brings nothing new for this code</span>
         <span className="inline-flex items-center gap-1"><Link2 className="w-3.5 h-3.5 text-mm-blue" /> linked — kept both, grouped (stats run on the group)</span>
         <span className="inline-flex items-center gap-1"><span className="text-primary font-semibold">✚ new</span> added</span>
         <span className="inline-flex items-center gap-1"><span className="line-through decoration-amber-600">folded in</span> = removed, merged into another code</span>
@@ -802,8 +860,12 @@ function ReviewStep({ plan, incomingLabel, newCoderCount, onBack, onMerge }: {
 
 // ── Report step ────────────────────────────────────────────────────────────
 
-function ReportStep({ report, targetId, navigate }: {
-  report: MergeReport; targetId: number; navigate: (to: string) => void
+function ReportStep({ report, safetyBackup, targetId, navigate, headingRef }: {
+  report: MergeReport
+  safetyBackup: string | null
+  targetId: number
+  navigate: (to: string) => void
+  headingRef?: React.Ref<HTMLHeadingElement>
 }) {
   const rows: [string, number][] = [
     ['Codings added', report.applications_added],
@@ -833,7 +895,9 @@ function ReportStep({ report, targetId, navigate }: {
           <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300">
             <Check className="w-4 h-4" />
           </span>
-          <h2 className="text-lg font-medium">Merge complete</h2>
+          {/* #935 — focus lands here when the step opens; it is already the
+              thing that says what happened. */}
+          <h2 ref={headingRef} tabIndex={-1} className="text-lg font-medium scroll-mt-24">Merge complete</h2>
         </div>
         <dl className="grid grid-cols-2 gap-x-6 gap-y-1 text-sm max-w-md">
           {rows.map(([label, n]) => (
@@ -843,7 +907,23 @@ function ReportStep({ report, targetId, navigate }: {
             </div>
           ))}
         </dl>
-        <p className="text-xs text-mm-text-faint">A safety backup of your project was saved before merging.</p>
+        {/* The snapshot has always been taken and was never NAMED — so a researcher
+            who wanted to go back had to guess at a file they had never been told
+            about. It is a `.mmproject`, so it comes back through Import — NOT through
+            the Settings backup list, which globs `*.mmbackup` and can never show it;
+            say so, or the obvious next step is the one that cannot work. */}
+        {safetyBackup ? (
+          <p className="text-xs text-mm-text-faint">
+            A safety copy of this project was saved with your backups before merging, as{' '}
+            {/* `break-all`: the name is one ~40-char token with no spaces, and this
+                paragraph has to survive the 640x360 viewport a 1280x720 window has at
+                200% zoom (#717/#718). */}
+            <span className="font-mono text-mm-text-muted break-all">{safetyBackup}</span>. To go
+            back to it, import that file and choose “Overwrite my copy”.
+          </p>
+        ) : (
+          <p className="text-xs text-mm-text-faint">A safety backup of your project was saved before merging.</p>
+        )}
         <div className="flex items-center gap-2 pt-1">
           <Button onClick={() => navigate(`/projects/${targetId}/analysis/qualitative`)}>
             <Users className="w-4 h-4 mr-1.5" /> Review coders &amp; agreement
@@ -873,13 +953,17 @@ const DIVERGENCE_TITLE = {
   segment_text: "Can't merge yet — the text was edited",
 } satisfies Record<MergeDivergenceKind, string>
 
-function DivergedStep({ divergence, onBack }: { divergence: MergeDivergenceDetail; onBack: () => void }) {
+function DivergedStep({ divergence, onBack, headingRef }: {
+  divergence: MergeDivergenceDetail
+  onBack: () => void
+  headingRef?: React.Ref<HTMLHeadingElement>
+}) {
   return (
     <Card>
       <CardContent className="py-6 space-y-4">
         <div className="flex items-center gap-2 text-mm-text">
           <TriangleAlert className="w-5 h-5 text-amber-600 dark:text-amber-400" />
-          <h2 className="text-lg font-medium">{DIVERGENCE_TITLE[divergence.kind]}</h2>
+          <h2 ref={headingRef} tabIndex={-1} className="text-lg font-medium scroll-mt-24">{DIVERGENCE_TITLE[divergence.kind]}</h2>
         </div>
 
         {divergence.kind === 'segment_text' ? (

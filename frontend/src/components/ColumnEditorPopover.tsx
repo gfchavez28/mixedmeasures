@@ -4,8 +4,8 @@ import { SELECTED_SEGMENT } from '@/lib/selection'
 import { Trash2, RefreshCw, Users } from 'lucide-react'
 import {
   Popover,
+  PopoverAnchor,
   PopoverContent,
-  PopoverTrigger,
 } from '@/components/ui/popover'
 import {
   type DatasetColumn,
@@ -87,6 +87,11 @@ export function ColumnEditorPopover({
   const isManual = column.source === 'manual'
   const isComputed = column.source === 'computed'
   const badgeClass = TYPE_BADGE_CLASSES[column.column_type] || 'bg-mm-bg text-mm-text-muted'
+  /** #926 — a column the TOOL maintains (a participant table's score and its
+   *  n). Its NAME and LABEL stay editable here on purpose: "locked spine, open
+   *  columns" puts renaming on the allowed side, and `managed_spec` is what
+   *  makes that safe — the refresh finds its column by spec, never by name. */
+  const isManaged = column.source === 'managed'
 
   // ── Commit logic ─────────────────────────────────────────────────────
   const commitEdit = useCallback(() => {
@@ -254,14 +259,43 @@ export function ColumnEditorPopover({
   // ── Render ───────────────────────────────────────────────────────────
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
-      <PopoverTrigger asChild>
+      {/* 🔴 **ANCHOR, not TRIGGER (#931).** Radix spreads `aria-haspopup` /
+          `aria-expanded` / `aria-controls` / `type="button"` onto whatever child
+          it is given — and the header it used to be given is a `<div>` holding
+          the dnd-kit drag handle, the equivalence-group link button and N domain
+          pills. So the attributes were illegal ARIA (Lighthouse `aria-allowed-attr`,
+          five instances in both themes) AND there was no keyboard opener.
+          **Promoting that wrapper to a `<button>` or `role="button"` is NOT the
+          fix** — it would nest 1+N interactive elements inside an interactive
+          element, which is the trap `frontend-a11y.md` records for the #560 drop
+          zones. The caller supplies a REAL button as `PopoverTrigger` inside this
+          subtree; the subtree stays the positioning anchor so the popover lands
+          exactly where it always did. */}
+      <PopoverAnchor asChild>
         {children}
-      </PopoverTrigger>
+      </PopoverAnchor>
       <PopoverContent
-        className="w-72 p-3"
+        // #929: at 640×360 this ran off the bottom with its delete button
+        // below the fold and nothing to scroll. `avoidCollisions` was already
+        // ON — Radix's default — and it does not help, because it FLIPS, and at
+        // 360px with a sticky header near the top neither side has room. The
+        // documented remedy is the available-height variable plus a scroller.
+        // ⚠️ The height is VARIABLE (0..N recode definitions, plus conditional
+        // delete / link-rows arms), so the filed 252px was one simple column,
+        // not the worst case.
+        className="w-72 p-3 max-h-[var(--radix-popover-content-available-height)] overflow-y-auto overscroll-contain"
         align="start"
+        collisionPadding={8}
         onKeyDown={handleKeyDown}
-        onOpenAutoFocus={(e) => e.preventDefault()}
+        // ⚠️ **Conditional on purpose (#931).** This was an unconditional
+        // `preventDefault`, which is why the popover's whole keyboard model was
+        // dead: `handleKeyDown` sits on the CONTENT, the content is PORTALLED to
+        // the end of `<body>`, and focus stayed on the header — so Escape,
+        // next/prev column and every click-to-edit field were unreachable
+        // without tabbing to the end of the document. When `activeField` is set
+        // the effect above calls `startEdit`, which focuses the field itself;
+        // letting Radix also autofocus would race it.
+        onOpenAutoFocus={(e) => { if (activeField) e.preventDefault() }}
         aria-roledescription="column editor"
         aria-label={`Column editor: ${announceLabel}`}
       >
@@ -344,12 +378,28 @@ export function ColumnEditorPopover({
               }
             }}
             aria-label="Column type"
-            className={`px-1.5 py-0.5 rounded text-[11px] font-medium border-none cursor-pointer ${badgeClass}`}
+            /* #926 — this control is where the defect was MEASURED: a
+               participant score column was retyped `numeric` → `open_text`
+               here, it persisted, it survived a refresh, and the toolbar's
+               *Code Text* button turned on. `bulk_type_update` refuses it now;
+               offering a control the server 409s is #806's shape. Native
+               `disabled` (see the sibling in the Variables view for why the
+               aria form is wrong on a `<select>`), with the reason on screen. */
+            disabled={isManaged}
+            className={`px-1.5 py-0.5 rounded text-[11px] font-medium border-none ${
+              isManaged ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'
+            } ${badgeClass}`}
           >
             {COLUMN_TYPES.map(t => (
               <option key={t} value={t}>{t}</option>
             ))}
           </select>
+          {isManaged && (
+            <p className="mt-1.5 text-[11px] text-mm-text-faint">
+              Maintained by the tool — its values are recomputed from your coding,
+              so its type is part of what it is.
+            </p>
+          )}
 
           {/* The demographic-subtype select moved to the Variables view
               (design note E — the popover thinning). It is a property of the

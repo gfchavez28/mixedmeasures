@@ -211,10 +211,21 @@ export default function Dashboard() {
         targetProjectId: mode === 'overwrite' ? targetProjectId : undefined,
       })
       queryClient.invalidateQueries({ queryKey: ['projects'] })
+      // The overwrite deleted a populated project. A snapshot of it was taken first
+      // and was never named to anyone — so the description carries the filename, and
+      // the audit log carries it durably (a toast is gone in seconds, and the person
+      // who needs this file is looking hours later).
       toast.success(
         mode === 'overwrite'
           ? `Updated "${result.project_name}" from the imported file`
           : `Imported "${result.project_name}"`,
+        result.safety_backup_filename
+          ? {
+              description:
+                `Your previous copy was saved with your backups as ` +
+                `${result.safety_backup_filename}. Import that file to go back to it.`,
+            }
+          : undefined,
       )
       setImportFile(null)
       setImportPreview(null)

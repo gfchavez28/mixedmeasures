@@ -117,6 +117,27 @@
 
 @layer base {
   :root {
+    /* 🔴 #936 — WHAT THE BROWSER PAINTS FOR ITSELF.
+       Every colour below is ours; `color-scheme` is the one declaration that
+       reaches the UI the BROWSER draws and CSS cannot: scrollbars, the popup a
+       native `<select>` opens, number-input spinners, checkbox and radio
+       glyphs, the caret, `<dialog>`'s backdrop and the canvas behind the body.
+       It was declared NOWHERE, so all of that stayed light in dark mode — most
+       visibly a near-white scrollbar band across a near-black pane, on every
+       scroll container in the app.
+
+       ⚠️ THE ORDERING IS LOAD-BEARING AND IS THE SAME ONE THE TOKENS RELY ON.
+       `.dark` is applied to `<html>`, so both blocks match the same element at
+       equal specificity — a class and `:root` are each (0,1,0). `.dark` wins
+       ONLY because it comes later in this file. Moving either block, or
+       hoisting one into a different `@layer`, silently reverts this.
+
+       ⚠️ Not `light dark`: the theme is an explicit app choice (`mm-theme` in
+       localStorage), and `system` is already resolved to the `.dark` class by
+       `ThemeProvider`. Declaring both would let the OS override the toggle for
+       native UI only, so the app and its scrollbars could disagree. */
+    color-scheme: light;
+
     /* ── shadcn core tokens ── */
     --background: 152 8% 92%;
     --foreground: 200 12% 16%;
@@ -236,6 +257,9 @@
   }
 
   .dark {
+    /* #936 — the other half. See `:root` above for why this must stay BELOW it. */
+    color-scheme: dark;
+
     --background: 230 14% 9%;
     --foreground: 40 12% 90%;
     --card: 230 10% 14%;

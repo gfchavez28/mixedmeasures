@@ -677,6 +677,118 @@ class TestMergeLoop:
         assert len(self._human_apps(db, seg.id)) == first
 
 
+class TestSafetySnapshotIsNamed:
+    """The recovery snapshot an in-place import takes must be FINDABLE (2026-09-09).
+
+    It has always been written and was never named to anyone: both call sites
+    discarded the path the writer returns, and `list_backups` globs `*.mmbackup`
+    so it never appears in the Settings list either. `ProjectImportResult
+    .safety_backup_filename` carries it now, and the file is named for the act it
+    precedes rather than always `pre-overwrite` (a merge's snapshot claiming to
+    precede an overwrite is a recovery instruction that contradicts what the
+    researcher just did).
+
+    ⚠️ The load-bearing assertion in each arm is that the reported name EQUALS a
+    file that is actually on disk. A name the researcher cannot follow to a file
+    is worse than no name — they would go looking, find nothing, and conclude the
+    snapshot was never taken.
+    """
+
+    def _backup_dir(self, tmp_path, monkeypatch):
+        d = tmp_path / "backups"
+        monkeypatch.setattr(
+            "app.services.project_portability.get_backup_dir", lambda: d
+        )
+        return d
+
+    def test_a_merge_names_its_snapshot_for_the_merge(
+        self, db_session, tmp_path, monkeypatch
+    ):
+        db = db_session
+        backup_dir = self._backup_dir(tmp_path, monkeypatch)
+        p, conv, seg = _seed_coded(db, "Team Study")
+        f = _export_to_file(db, p.id, tmp_path / "docs", tmp_path / "team.mmproject")
+
+        safety: dict = {}
+        import_project(
+            db, f, tmp_path / "docs", user_id=1, import_mode="merge",
+            target_project_id=p.id, safety_report=safety,
+        )
+        db.flush()
+
+        assert list(backup_dir.glob("pre-merge_*.mmproject"))
+        assert not list(backup_dir.glob("pre-overwrite_*.mmproject"))
+        assert (backup_dir / safety["filename"]).is_file()
+
+    def test_an_overwrite_names_its_snapshot_for_the_overwrite(
+        self, db_session, tmp_path, monkeypatch
+    ):
+        db = db_session
+        backup_dir = self._backup_dir(tmp_path, monkeypatch)
+        docs = tmp_path / "docs"
+        p = _make_project(db, "Laptop Copy")
+        _add_code(db, p.id, 0, "Alpha")
+        f = _export_to_file(db, p.id, docs, tmp_path / "rt.mmproject")
+
+        safety: dict = {}
+        import_project(
+            db, f, docs, media_dir=None, user_id=1,
+            import_mode="overwrite", target_project_id=p.id, safety_report=safety,
+        )
+        db.flush()
+
+        assert list(backup_dir.glob("pre-overwrite_*.mmproject"))
+        assert not list(backup_dir.glob("pre-merge_*.mmproject"))
+        assert (backup_dir / safety["filename"]).is_file()
+
+    def test_the_filename_reaches_the_wire(self, db_session, tmp_path, monkeypatch):
+        """Through the ENDPOINT, into the response model, and out of `model_dump`.
+
+        The three tests around this one assert on the service's out-param, which is
+        exactly the shape that let #855's fourteenth ship: a service wrote the key,
+        a client read it, and the schema in between declared nothing, so Pydantic
+        dropped it silently for a release cycle. A recovery filename that never
+        leaves the server is the same defect with worse consequences.
+        """
+        db = db_session
+        backup_dir = self._backup_dir(tmp_path, monkeypatch)
+        p, conv, seg = _seed_coded(db, "Team Study")
+        f = _export_to_file(db, p.id, tmp_path / "docs", tmp_path / "team.mmproject")
+
+        result = _run(import_project_endpoint(
+            file=_upload(f.read_bytes()), import_mode="merge", target_project_id=p.id,
+            coder_mapping=None, code_mapping=None, db=db, user=db.get(User, 1),
+        ))
+
+        name = result.safety_backup_filename
+        assert name is not None and name.startswith("pre-merge_")
+        assert result.model_dump()["safety_backup_filename"] == name
+        # The name is only useful if it leads somewhere.
+        assert (backup_dir / name).is_file()
+
+    def test_a_plain_import_takes_no_snapshot_and_reports_nothing(
+        self, db_session, tmp_path, monkeypatch
+    ):
+        """The negative arm, so `safety_backup_filename` means something when set.
+
+        Nothing is overwritten by an import-as-new, so there is nothing to snapshot
+        — and a field that were populated anyway would send a researcher looking for
+        a recovery file that protects them from nothing.
+        """
+        db = db_session
+        backup_dir = self._backup_dir(tmp_path, monkeypatch)
+        docs = tmp_path / "docs"
+        p = _make_project(db, "Solo")
+        f = _export_to_file(db, p.id, docs, tmp_path / "solo.mmproject")
+
+        safety: dict = {}
+        import_project(db, f, docs, user_id=1, safety_report=safety)
+        db.flush()
+
+        assert safety == {}
+        assert not backup_dir.exists() or not list(backup_dir.glob("*.mmproject"))
+
+
 class TestMergeRatingConflict:
     """#35 — the merge disagreement flag (decided by the developer 2026-09-01).
 
@@ -985,8 +1097,14 @@ class TestMergeReport:
         src = (
             Path(__file__).resolve().parents[1] / "app" / "services" / "project_portability.py"
         ).read_text(encoding="utf-8")
-        written = set(re.findall(r'report\[\s*"(\w+)"\s*\]', src)) | set(
-            re.findall(r'report\.setdefault\(\s*"(\w+)"', src)
+        # ⚠️ The lookbehind is load-bearing (2026-09-09). Unanchored, `report\[`
+        # matches the TAIL of any identifier ending in "report" — and this module
+        # gained a second out-param, `safety_report`, whose `["filename"]` key was
+        # then reported as a `MergeReport` field the schema drops. A real-looking
+        # finding about a key that has nothing to do with this schema: #772's
+        # phantom class, produced by the guard's own parser.
+        written = set(re.findall(r'(?<![\w.])report\[\s*"(\w+)"\s*\]', src)) | set(
+            re.findall(r'(?<![\w.])report\.setdefault\(\s*"(\w+)"', src)
         )
         # Population self-check: a regex that matches nothing passes `==` against
         # nothing only if the schema is empty too, but say it outright.

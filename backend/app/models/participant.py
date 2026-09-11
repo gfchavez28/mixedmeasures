@@ -26,6 +26,9 @@ class Participant(Base):
     project = relationship("Project", back_populates="participants")
     speakers = relationship("Speaker", back_populates="participant")
     dataset_rows = relationship("DatasetRow", back_populates="participant")
+    # Row 46. Unbounded on purpose — a participant may be the subject of many
+    # documents (successive workplans, an interview plus its artefacts).
+    documents = relationship("Document", back_populates="participant")
 
     __table_args__ = (
         Index("ix_participants_project_identifier", "project_id", "identifier", unique=True),

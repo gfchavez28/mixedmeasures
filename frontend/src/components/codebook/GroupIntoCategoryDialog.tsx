@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { CATEGORY_COLORS, ColorSwatchPicker } from '@/components/ColorSwatchPicker'
@@ -109,9 +109,14 @@ export default function GroupIntoCategoryDialog({
         </DialogHeader>
 
         <div className="space-y-3">
-          <p className="text-sm text-mm-text-muted">
+          {/* #911(b): this sentence IS the dialog's description, so it says so
+              rather than the dialog declaring it has none. `DialogDescription`
+              renders the same `text-sm text-mm-text-muted` paragraph, so nothing
+              moves visually — it gains the id Radix's `aria-describedby` already
+              points at, which is what was dangling. */}
+          <DialogDescription>
             Create a new category and move {summaryParts.join(' and ')} into it.
-          </p>
+          </DialogDescription>
 
           <div>
             <label className="text-xs text-mm-text-muted block mb-1">Name</label>

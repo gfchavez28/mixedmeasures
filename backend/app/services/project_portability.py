@@ -28,6 +28,9 @@ from sqlalchemy.orm import Session
 
 from . import magnitude, media_storage
 from .archive_safety import assert_expanded_size_within_limit, assert_member_within
+from .dataset_rows import materialise_manual_cells  # #897
+from .participant_dataset import MANAGED_COLUMN_SOURCE  # #921
+from .participant_scores import build_managed_spec, parse_managed_spec  # #922
 from .text_offsets import has_astral, utf16_to_codepoint
 from .text_similarity import similarity_ratio
 from .media_duration import MAX_MEDIA_OFFSET_SECONDS, sane_duration
@@ -1134,6 +1137,125 @@ def _remap_json_id_array(
     return json.dumps(remapped)
 
 
+#: `MetricDefinition.config` JSON keys that hold entity ids (#948).
+#: key → (remap_table_name, is_array), the same shape as `MATERIAL_CONFIG_REMAP`
+#: and deliberately NOT merged with it: the two entities have different key
+#: spaces, and one map covering both would remap a key on an entity that never
+#: carries it (silently, since a missing key is a no-op).
+#:
+#: **The whole key space was measured (2026-09-11), which is why this map has one
+#: entry rather than a guess.** `MetricDefinition.config` is read for
+#: `threshold_values` · `threshold_numeric` · `operator` · `mode` ·
+#: `exclude_values` · `child_metric_type` · `child_config` · `decompose_label` ·
+#: `decompose_column_ids` · `aggregation` · `metric_type`. Only the last-but-two
+#: holds ids. `column_ids` / `domain_ids` / `selected_columns` / `selected_domains`
+#: look like members of this set but are read by `canvas_export.py` off a MATERIAL
+#: config, which `MATERIAL_CONFIG_REMAP` already covers. `child_config` is a nested
+#: config for a `proportion`/`mean` child metric and carries no ids — checked,
+#: because a nested carrier would need recursion rather than this loop.
+METRIC_CONFIG_REMAP = {
+    "decompose_column_ids": ("dataset_columns", True),
+}
+
+
+def _remap_metric_config(config_json: str | None, remap: dict) -> str | None:
+    """Remap entity ids inside a `MetricDefinition.config` JSON string (#948).
+
+    `routers/metrics.py` merges `decompose_column_ids` — a list of
+    `DatasetColumn` ids — into the config of each metric a decomposed domain
+    expands into. The relational FK pass remaps `input_source_id` and the two
+    grouping columns and cannot see inside a JSON text column, so before this the
+    ids named columns of the SOURCE project. This is the #387 class (canvas embed
+    ids, `depends_on_column_ids`), and the third artifact to acquire it.
+
+    🔴 **An id that does not remap is KEPT, and that is the safe direction here —
+    the opposite of what it looks like.** `metrics.py::resolve_dataset_domain`
+    reads `if decompose_col_ids:`, so an EMPTY list is falsy and falls through to
+    the WHOLE domain: dropping unresolvable ids could silently turn a decomposed
+    metric into a whole-domain one, a different number under the same name. A
+    kept-but-stale id matches nothing, and that branch returns `{}` — an empty
+    result rather than a wrong one. Matches `_remap_json_id_array`'s policy, for a
+    reason rather than by imitation.
+
+    In practice every id resolves: the columns travel in the same file. The branch
+    is for a hand-edited or truncated archive.
+    """
+    if not config_json:
+        return config_json
+    try:
+        config = json.loads(config_json)
+    except (json.JSONDecodeError, TypeError):
+        return config_json
+    if not isinstance(config, dict):
+        return config_json
+
+    changed = False
+    for key, (table, is_array) in METRIC_CONFIG_REMAP.items():
+        if key not in config:
+            continue
+        table_remap = remap.get(table, {})
+        value = config[key]
+        if is_array and isinstance(value, list):
+            config[key] = [
+                table_remap.get(v, v) if isinstance(v, int) else v for v in value
+            ]
+            changed = True
+        elif not is_array and isinstance(value, int):
+            config[key] = table_remap.get(value, value)
+            changed = True
+    return json.dumps(config) if changed else config_json
+
+
+def _remap_managed_spec(
+    raw: str | None, remap: dict, *, source: str | None,
+) -> tuple[str | None, bool]:
+    """Remap `DatasetColumn.managed_spec`'s `code_id`. Returns `(spec, keep)` (#922).
+
+    A participant-table score column records which code it scores in a JSON blob,
+    for the reason the internal design notes gives: the column is
+    not identifiable by its name, because renaming it is allowed. The FK pass
+    cannot see into the blob, so the imported columns arrived naming codes of the
+    SOURCE project.
+
+    🔴 **`keep=False` means DO NOT IMPORT the column — not "import it with the key
+    dropped", which is what the filed entry proposed and which would strand it
+    permanently.** `sync_score_columns` skips any column whose spec does not parse
+    (`if spec is None: continue`), so it would never be reaped and never
+    recomputed, while `source="managed"` makes it read-only through five
+    `routers/recode.py` doors and `delete_manual_column`'s `!= "manual"` refusal:
+    a column the researcher can neither fix nor delete. The identifier column is
+    deliberately exactly that shape (managed, no spec), which is why the skip in
+    `sync_score_columns` exists and why this one must not create a second kind of
+    spec-less managed column.
+
+    Nothing is lost by skipping: the cells are DERIVED, and the next refresh
+    rebuilds the column set from this project's own scaled codes.
+
+    ⚠️ A spec that does not parse at all is kept verbatim. It was already
+    inert in the source, and refusing to import a column on the strength of
+    unreadable metadata would destroy the researcher's data over ours.
+
+    🔴 **`source` narrows the DESTRUCTIVE branch to the population the reasoning
+    covers.** Everything above is an argument about a `source="managed"` column:
+    derived cells, rebuilt by the next refresh, read-only until then. An ORDINARY
+    column carrying a stray spec — reachable only by a hand-edited database, but
+    reachable — holds the researcher's own data, and dropping it would be a real
+    loss to prevent a hypothetical one. Such a column keeps its cells and loses
+    only the unresolvable spec.
+    """
+    if not raw:
+        return raw, True
+    spec = parse_managed_spec(raw)
+    if spec is None:
+        return raw, True
+    new_code_id = remap.get("codes", {}).get(spec["code_id"])
+    if new_code_id is None:
+        # Drop the managed column; keep an ordinary one, minus the dead spec.
+        return None, source != MANAGED_COLUMN_SOURCE
+    # Through the one constructor, so the serialised shape has a single owner.
+    return build_managed_spec(spec["kind"], new_code_id, spec.get("basis")), True
+
+
 def _remap_quote_board_orders(
     json_str: str | None, remap: dict,
 ) -> str | None:
@@ -1205,21 +1327,41 @@ def _parse_datetime(val) -> datetime | None:
 
 def _safety_export_before_overwrite(
     db: Session, target: Project, docs_dir: Path, media_dir: Path | None,
+    *, prefix: str, safety_report: dict | None = None,
 ) -> Path:
-    """Write a recovery .mmproject of a project about to be overwritten (Track J · J3-1).
+    """Write a recovery .mmproject of a project about to change IN PLACE (Track J · J3-1).
 
-    Overwrite is the first IN-PLACE destructive import — it deletes an existing
-    populated project. Mirror the pre-restore safety-backup discipline: snapshot the
-    target to the backup dir BEFORE the delete. A failure here ABORTS the overwrite
-    (we refuse to destroy data we couldn't back up). Returns the backup file path.
+    Overwrite and merge are the two IN-PLACE destructive imports — overwrite deletes
+    an existing populated project, merge writes a colleague's codings into one.
+    Mirror the pre-restore safety-backup discipline: snapshot the target to the backup
+    dir BEFORE the write. A failure here ABORTS the import (we refuse to destroy data
+    we couldn't back up). Returns the backup file path.
+
+    🔴 **`prefix` names the file for the ACT it precedes and has NO DEFAULT**, so a
+    third caller has to decide rather than inherit. It was hardcoded `pre-overwrite`
+    for both modes — recorded as a harmless nit in `multicoder.md` and in the audit
+    overlay on the grounds that nobody reads the filename. **They do now:** the name
+    rides `ProjectImportResult.safety_backup_filename` to the researcher (2026-09-09),
+    and a recovery instruction that says "pre-overwrite" after a merge contradicts
+    what they just did.
+
+    ⚠️ **`safety_report` is written HERE rather than at the call sites** — the writer
+    names what it wrote, so a caller cannot save the file and forget to say where it
+    went. Set only after a successful write, and only when the caller passed a dict.
+    ⚠️ It is NOT called `report`: this module's other out-param owns that name, and
+    `test_trackj_j3_roundtrip.py` scans this file's `report[...]` keys against the
+    `MergeReport` schema. Two out-params one substring apart is how a scan starts
+    reporting one as the other.
     """
     try:
         buf = export_project(db, target.id, docs_dir, media_dir)
         backup_dir = get_backup_dir()
         backup_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        path = backup_dir / f"pre-overwrite_{target.id}_{ts}.mmproject"
+        path = backup_dir / f"{prefix}_{target.id}_{ts}.mmproject"
         path.write_bytes(buf.getvalue())
+        if safety_report is not None:
+            safety_report["filename"] = path.name
         return path
     except ProjectTooLargeError as e:
         # #842 — the abort is CORRECT (never destroy data we could not back up), but
@@ -1851,6 +1993,7 @@ def import_project(
     coder_mapping: dict | None = None,
     code_mapping: dict | None = None,
     report: dict | None = None,
+    safety_report: dict | None = None,
 ) -> tuple[int, str]:
     """Import an .mmproject ZIP.
 
@@ -1879,6 +2022,11 @@ def import_project(
     `report` (merge only): a dict the caller passes in; populated in-place with the merge
     counts (sources_matched / applications_added / duplicates_skipped / coders_created /
     coders_matched).
+    `safety_report` (merge + overwrite): a second caller-passed dict, populated in-place
+    with `{"filename": ...}` for the recovery snapshot taken before the in-place write.
+    Deliberately SEPARATE from `report`, which is merge-only and whose keys are the merge
+    counts — overwrite takes a snapshot too and has no merge report to carry it. Absent
+    key = no snapshot was taken (import_mode "new" / "copy_for_coding").
 
     Returns (new_project_id, project_name).
     Wraps everything in the caller's transaction — caller commits or rolls back.
@@ -2011,7 +2159,10 @@ def import_project(
             _assert_merge_compatible(
                 db, data, code_mapping=code_mapping, target_project_id=target.id,
             )
-            _safety_export_before_overwrite(db, target, docs_dir, media_dir)
+            _safety_export_before_overwrite(
+                db, target, docs_dir, media_dir,
+                prefix="pre-merge", safety_report=safety_report,
+            )
             new_project = target
             pid = target.id
             project_name = target.name
@@ -2039,7 +2190,10 @@ def import_project(
                     "Target project identity does not match the file. Re-validate the "
                     "import before overwriting."
                 )
-            _safety_export_before_overwrite(db, target, docs_dir, media_dir)
+            _safety_export_before_overwrite(
+                db, target, docs_dir, media_dir,
+                prefix="pre-overwrite", safety_report=safety_report,
+            )
             db.delete(target)
             db.flush()
             project_name = pdata["name"]
@@ -2144,7 +2298,16 @@ def import_project(
             _add(Conversation, item, {"project_id": pid}, "conversations")
 
         for item in data.get("documents", []):
-            _add(Document, item, {"project_id": pid}, "documents")
+            # Row 46 — `participant_id` is a REAL FK on a portable model, so it
+            # is remapped here like `Speaker`'s above, never in a post-pass.
+            # Leaving it unmapped would write the SOURCE instance's raw id into
+            # this database (`_build_entity` copies any column the import does
+            # not explicitly remap) — a cross-project attach, not a NULL.
+            # Participants are imported at (b) above, so the remap exists by now.
+            _add(Document, item, {
+                "project_id": pid,
+                "participant_id": _remap_id(remap, "participants", item.get("participant_id")),
+            }, "documents")
 
         # ── e2. Observations (the third Segment parent) ────────────
         # MUST precede segments (g), notes (r) and memos (s) — they all remap
@@ -2306,7 +2469,45 @@ def import_project(
             }, "codes")
 
         # ── j–k. Datasets & EquivalenceGroups ─────────────────────
+        #
+        # 🔴 **A MANAGED dataset matches on WHAT IT IS, never on its uuid (#921).**
+        # Two collaborators who each pressed *Add participant table* hold two tables
+        # that MEAN the same thing and carry different uuids. A merge does not blank
+        # `datasets` (dataset-value codings need them), so the incoming one used to be
+        # INSERTED — straight into `uq_datasets_project_managed_kind`, whose
+        # `IntegrityError` is neither `MergeDivergenceError` nor `ValueError` and so
+        # reached the researcher as a bare 500 naming nothing.
+        #
+        # `managed_kind` is the identity here BECAUSE the table is DERIVED: its rows
+        # come from `Participant` and its own columns are rebuilt by the refresh, so
+        # there is nothing in it a merge should be preserving from the file. That also
+        # makes this general — the predicate is "has a non-null `managed_kind`", not
+        # "is the participants table", so a future per-project-unique dataset inherits
+        # the fix rather than the bug.
+        #
+        # ⚠️ **The match is only half of it.** Matching the dataset moves the collision
+        # DOWN a level rather than removing it: measured, the next failure is
+        # `ix_dataset_columns_dataset_sequence_unique` and the one after that is
+        # `uq_dataset_rows_dataset_participant`. Both are handled below, keyed on
+        # `matched_managed_dataset_ids` — do not treat any of the three as separable.
+        matched_managed_dataset_ids: set[int] = set()
         for item in data.get("datasets", []):
+            managed_kind = item.get("managed_kind")
+            if import_mode == "merge" and managed_kind:
+                local = (
+                    db.query(Dataset)
+                    .filter(
+                        Dataset.project_id == pid,
+                        Dataset.managed_kind == managed_kind,
+                    )
+                    .first()
+                )
+                if local is not None:
+                    # Matched entities keep the TARGET's field values, exactly as
+                    # `_add`'s uuid branch does.
+                    remap["datasets"][item["_original_id"]] = local.id
+                    matched_managed_dataset_ids.add(local.id)
+                    continue
             _add(Dataset, item, {"project_id": pid}, "datasets")
 
         for item in data.get("equivalence_groups", []):
@@ -2346,13 +2547,111 @@ def import_project(
                 "re-export before importing."
             )
 
+        # #921, part 2 of 3 — the columns of a MATCHED managed dataset.
+        #
+        # 🔴 **The tool's own columns are SKIPPED, and their cells with them.** A
+        # `source="managed"` column is derived: `sync_score_columns` rebuilds the set
+        # from THIS project's scaled codes, and `sync_rows` rewrites the identifier
+        # cells. Importing the colleague's copies would leave the target holding TWO
+        # columns per rated code, both read-only through the #926 gates, with the
+        # reconcile keeping only the later one (`existing[(kind, code_id)]` is
+        # last-wins) and the earlier stranded permanently. Their `managed_spec` also
+        # names a code of the SOURCE project until #922 lands, so the duplicate would
+        # be wrong as well as redundant.
+        #
+        # ⚠️ **Scoped to a MATCHED managed dataset, deliberately.** When the target has
+        # no such table the dataset is INSERTED and its managed columns must come with
+        # it — `sync_rows` does NOT recreate the identifier column, only
+        # `create_participant_dataset` does, so skipping there would land a table
+        # nothing can ever label.
+        #
+        # ⚠️ Nothing hangs off the dropped cells: a `CodeApplication`, `Note` or
+        # `Excerpt` on a dataset value needs a codeable column, and the two managed
+        # kinds are `identifier` (a member of no eligibility set) and the numeric
+        # scores. If a managed column ever becomes text-codeable, this skip needs a
+        # remap onto the target's equivalent rather than a drop.
+        skipped_column_ids: set[int] = set()
+        next_sequence_order: dict[int, int] = {}
+        # A column `_add` will MATCH by uuid keeps the target's values and must not
+        # consume a sequence number. (Missing one costs only an unused number —
+        # `sequence_order` is unique, never contiguous — so this errs safely.)
+        _matched_managed_column_uuids: set[str] = set()
+        if import_mode == "merge" and matched_managed_dataset_ids:
+            _matched_managed_column_uuids = {
+                u
+                for (u,) in db.query(DatasetColumn.uuid).filter(
+                    DatasetColumn.dataset_id.in_(matched_managed_dataset_ids)
+                )
+                if u
+            }
+
+        def _appended_sequence_order(dataset_id: int) -> int:
+            """The next free `sequence_order` in a table this import did not build.
+
+            ⚠️ **`0` is a legitimate maximum** — the participant table's identifier
+            column is `sequence_order=0` — so the reduction is an explicit `is None`
+            test. `(max or -1) + 1` wraps back to 0 and collides on the unique index,
+            which is exactly the falsy-zero bug J3-2b hit on `Code.numeric_id`.
+            """
+            if dataset_id not in next_sequence_order:
+                current = (
+                    db.query(func.max(DatasetColumn.sequence_order))
+                    .filter(DatasetColumn.dataset_id == dataset_id)
+                    .scalar()
+                )
+                next_sequence_order[dataset_id] = 0 if current is None else current + 1
+            value = next_sequence_order[dataset_id]
+            next_sequence_order[dataset_id] = value + 1
+            return value
+
         _LEGACY_COLUMN_TYPE = {"open_short": "open_text", "open_long": "open_text"}
         for item in data.get("dataset_columns", []):
             ct = item.get("column_type")
             if ct in _LEGACY_COLUMN_TYPE:
                 item["column_type"] = _LEGACY_COLUMN_TYPE[ct]
+            _column_dataset_id = _remap_id(remap, "datasets", item.get("dataset_id"))
+            _sequence_overrides: dict = {}
+            if _column_dataset_id in matched_managed_dataset_ids:
+                if item.get("source") == MANAGED_COLUMN_SOURCE:
+                    skipped_column_ids.add(item["_original_id"])
+                    continue
+                # The researcher's OWN column, arriving in a table this import did not
+                # build. Its `sequence_order` is meaningful only in the file's copy, and
+                # the index is unique per dataset — so it is appended, not honoured.
+                if item.get("uuid") not in _matched_managed_column_uuids:
+                    _sequence_overrides["sequence_order"] = _appended_sequence_order(
+                        _column_dataset_id
+                    )
+                    if item.get("display_order") is not None:
+                        _sequence_overrides["display_order"] = (
+                            _sequence_overrides["sequence_order"]
+                        )
+            # #922 — the score column's `managed_spec.code_id` is an id inside a
+            # JSON blob, so the relational FK pass cannot reach it.
+            #
+            # 🔴 **Done HERE rather than in a post-pass, and the placement is what
+            # gives it the #714 scoping for free.** Codes are imported at section i
+            # and columns at section l, so `remap["codes"]` is already populated;
+            # and `_add` applies overrides only to entities it CONSTRUCTS — a
+            # merge-matched column returns before `_build_entity` — so an override
+            # can never rewrite a row that already existed locally. A post-pass
+            # would be a second walk over the same list and a second chance to
+            # write through `remap` instead of `inserted_ids`.
+            _managed_spec, _keep_column = _remap_managed_spec(
+                item.get("managed_spec"), remap, source=item.get("source"),
+            )
+            if not _keep_column:
+                # Its code did not come with the file. Skipping takes its cells
+                # with it (the `dataset_values` loops read `skipped_column_ids`),
+                # and the next refresh rebuilds the column from THIS project's
+                # scaled codes. See `_remap_managed_spec` for why importing it with
+                # the key dropped would be worse than not importing it.
+                skipped_column_ids.add(item["_original_id"])
+                continue
             _add(DatasetColumn, item, {
-                "dataset_id": _remap_id(remap, "datasets", item.get("dataset_id")),
+                **_sequence_overrides,
+                "managed_spec": _managed_spec,
+                "dataset_id": _column_dataset_id,
                 "equivalence_group_id": _remap_id(remap, "equivalence_groups", item.get("equivalence_group_id")),
                 "depends_on_column_ids": _remap_json_id_array(
                     item.get("depends_on_column_ids"), remap, "dataset_columns"
@@ -2446,16 +2745,50 @@ def import_project(
                     ).all()
                 )
 
+        # #921, part 3 of 3 — the rows of a MATCHED managed dataset match on their
+        # PARTICIPANT, which is the identity the table is derived from.
+        #
+        # The merge already matches `Participant` by uuid, so both copies' rows resolve
+        # to the same local person — and `uq_dataset_rows_dataset_participant` then
+        # refuses the second one. Matching here is also what keeps the colleague's
+        # cells reachable: `DatasetValue` has no uuid and transitive-matches on
+        # `(row_id, column_id)`, so a row that matches lets their hand-made column's
+        # values land on the right person instead of on a duplicate row.
+        managed_row_by_participant: dict[tuple[int, int], int] = {}
+        if import_mode == "merge" and matched_managed_dataset_ids:
+            managed_row_by_participant = {
+                (d, p): i
+                for i, d, p in db.execute(
+                    sa_select(DatasetRow.id, DatasetRow.dataset_id, DatasetRow.participant_id)
+                    .where(
+                        DatasetRow.dataset_id.in_(matched_managed_dataset_ids),
+                        DatasetRow.participant_id.isnot(None),
+                    )
+                ).all()
+            }
+
         for item in row_items:
             incoming_uuid = item.get("uuid")
+            new_dataset_id = _remap_id(remap, "datasets", item.get("dataset_id"))
+            new_participant_id = _remap_id(remap, "participants", item.get("participant_id"))
             if import_mode == "merge" and incoming_uuid in matched_row_ids:
                 # Matched entities keep the TARGET's field values — a merge never
                 # overwrites shared sources with the colleague's copy (`_add`'s rule).
                 remap["dataset_rows"][item["_original_id"]] = matched_row_ids[incoming_uuid]
                 continue
+            if new_dataset_id in matched_managed_dataset_ids and new_participant_id is not None:
+                existing_row_id = managed_row_by_participant.get(
+                    (new_dataset_id, new_participant_id)
+                )
+                if existing_row_id is not None:
+                    remap["dataset_rows"][item["_original_id"]] = existing_row_id
+                    continue
+                # A participant this merge INSERTED has no row here yet, so the file's
+                # row is inserted for them. It cannot collide: the file's own index
+                # allows one row per participant, so at most one reaches this branch.
             obj = _build_entity(DatasetRow, item, {
-                "dataset_id": _remap_id(remap, "datasets", item.get("dataset_id")),
-                "participant_id": _remap_id(remap, "participants", item.get("participant_id")),
+                "dataset_id": new_dataset_id,
+                "participant_id": new_participant_id,
             }, fresh_uuid=(import_mode == "new"))
             db.add(obj)
             pending_rows.append((item["_original_id"], obj))
@@ -2503,6 +2836,13 @@ def import_project(
                 pending_values.clear()
 
         for item in value_items:
+            if item.get("column_id") in skipped_column_ids:
+                # #921 — the column was not imported (a matched managed dataset owns
+                # its own), so its cells have nowhere to land. Dropping them is the
+                # POINT rather than a loss: `sync_rows` rewrites the identifier cells
+                # and the score refresh recomputes the rest from this project's data.
+                # Without this the value would insert with a NULL `column_id`.
+                continue
             row_id = _remap_id(remap, "dataset_rows", item.get("row_id"))
             column_id = _remap_id(remap, "dataset_columns", item.get("column_id"))
             if import_mode == "merge" and row_id is not None and column_id is not None:
@@ -2541,6 +2881,8 @@ def import_project(
                 original_id = item["_original_id"]
                 if original_id in value_remap:
                     continue  # merge-matched above; it already points at the target's row
+                if item.get("column_id") in skipped_column_ids:
+                    continue  # #921 — never inserted; keep the two passes in step
                 key = (
                     _remap_id(remap, "dataset_rows", item.get("row_id")),
                     _remap_id(remap, "dataset_columns", item.get("column_id")),
@@ -2549,6 +2891,26 @@ def import_project(
                 if new_id is not None:
                     value_remap[original_id] = new_id
             del key_to_id
+
+        # #897 — a row this import created needs a cell for every hand-editable
+        # column, and THIS PATH IS INVISIBLE to the AST scan that guards the
+        # other three: rows are built by REFLECTION here, so there is no
+        # `DatasetRow(` to find. The same blindness `participant_dataset`'s
+        # docstring records for `Participant(`.
+        #
+        # 🔴 **The reachable case is a MERGE.** A plain import carries its own
+        # `dataset_values`, so it is fed. A merge into a project whose dataset
+        # already holds a manual variable the incoming file knows nothing about
+        # inserts rows with no cell for it — and that cell can then never be
+        # created, because `PATCH …/values/{value_id}` is addressed by one that
+        # exists.
+        #
+        # Run for every mode rather than gated on `merge`: it is idempotent, it
+        # is one statement per dataset, and the merge path above has already
+        # loaded every value in these datasets, so it cannot be the expensive
+        # part of this function.
+        for _ds_id in new_dataset_ids:
+            materialise_manual_cells(db, _ds_id)
 
         # ⚠️ **`inserted_ids["dataset_values"]` is deliberately NOT populated, and this is a
         # DECISION rather than an omission (#714's class).** Nothing reads it — the three
@@ -2803,6 +3165,10 @@ def import_project(
                 "input_source_id": isid or 0,
                 "grouping_column_id": _remap_id(remap, "dataset_columns", item.get("grouping_column_id")),
                 "grouping_column_id_2": _remap_id(remap, "dataset_columns", item.get("grouping_column_id_2")),
+                # #948 — `decompose_column_ids` are `DatasetColumn` ids inside the
+                # config's JSON. Three FK-shaped fields were remapped above and the
+                # blob travelled verbatim.
+                "config": _remap_metric_config(item.get("config"), remap),
             }, "metric_definitions")
 
         # ── w. ComputedResults ─────────────────────────────────────

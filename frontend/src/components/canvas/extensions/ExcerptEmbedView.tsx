@@ -6,10 +6,12 @@ import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, C
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import MaterialsTagInline from '../MaterialsTagInline'
 
-export default function ExcerptEmbedView({ node, updateAttributes, deleteNode, selected }: NodeViewProps) {
+export default function ExcerptEmbedView({ node, updateAttributes, deleteNode, selected, editor }: NodeViewProps) {
   const { projectId } = useProjectLayout()
   const navigate = useNavigate()
   const { displayText, sourceContext, conversationId, observationId, materialTag, tagNote } = node.attrs
+  // #893 — see ChartEmbedView for why `editable: false` does not stop these.
+  const isEditable = editor?.isEditable ?? true
   // The embed is a static SNAPSHOT (like displayText/sourceContext), so the
   // source link is the only live part. A clip embed carries observationId.
   const sourceHref = conversationId
@@ -30,25 +32,28 @@ export default function ExcerptEmbedView({ node, updateAttributes, deleteNode, s
           <div className="bg-white dark:bg-mm-surface shadow-sm rounded-md px-4 py-3 border-l-4 border-l-emerald-500">
             {/* Action zone — trash + tag, no overlap */}
             <div className="absolute top-2 right-2 flex items-center gap-1" onMouseDown={e => e.stopPropagation()}>
-              <button
-                type="button"
-                onClick={deleteNode}
-                className="opacity-0 group-hover/material:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded text-mm-text-faint hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
-                aria-label="Remove from canvas"
-                title="Remove from canvas"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
+              {isEditable && (
+                <button
+                  type="button"
+                  onClick={deleteNode}
+                  className="opacity-0 group-hover/material:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded text-mm-text-faint hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
+                  aria-label="Remove from canvas"
+                  title="Remove from canvas"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
               <MaterialsTagInline
                 tag={materialTag ?? null}
                 tagNote={tagNote ?? null}
                 onTagChange={tag => updateAttributes({ materialTag: tag })}
                 onTagNoteChange={note => updateAttributes({ tagNote: note })}
                 inline
+                readOnly={!isEditable}
               />
             </div>
 
-            <p className="text-[13.5px] leading-[1.75] text-mm-text italic pr-20">
+            <p className={`text-[13.5px] leading-[1.75] text-mm-text italic ${isEditable || materialTag ? 'pr-20' : ''}`}>
               {displayText || 'Empty excerpt'}
             </p>
 
@@ -66,19 +71,26 @@ export default function ExcerptEmbedView({ node, updateAttributes, deleteNode, s
             )}
           </div>
         </ContextMenuTrigger>
+        {/* Only mount the menu when it has something in it — a read-only
+            excerpt with no source link would otherwise open an empty popup. */}
+        {(sourceHref || isEditable) && (
         <ContextMenuContent>
           {sourceHref && (
             <>
               <ContextMenuItem onSelect={() => navigate(sourceHref)}>
                 <ExternalLink className="w-4 h-4 mr-2" />View Source
               </ContextMenuItem>
-              <ContextMenuSeparator />
+              {isEditable && <ContextMenuSeparator />}
             </>
           )}
-          <ContextMenuItem onSelect={() => deleteNode()} className="text-red-600 dark:text-red-400">
-            <Trash2 className="w-4 h-4 mr-2" />Remove from Theme
-          </ContextMenuItem>
+          {/* #893 — the second door; see ChartEmbedView. */}
+          {isEditable && (
+            <ContextMenuItem onSelect={() => deleteNode()} className="text-red-600 dark:text-red-400">
+              <Trash2 className="w-4 h-4 mr-2" />Remove from Theme
+            </ContextMenuItem>
+          )}
         </ContextMenuContent>
+        )}
       </ContextMenu>
     </NodeViewWrapper>
   )

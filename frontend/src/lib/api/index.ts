@@ -104,6 +104,7 @@ export type {
   DatasetColumnConfig,
   DatasetImportConfig,
   DatasetImportResponse,
+  DatasetRowCreated,
   Dataset,
   DatasetList,
   RecodeDefinition,

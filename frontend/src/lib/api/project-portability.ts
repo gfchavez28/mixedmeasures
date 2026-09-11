@@ -193,6 +193,17 @@ export interface ProjectImportResult {
   project_name: string
   /** Track J · J3-2: populated only for import_mode='merge'. */
   merge_report: MergeReport | null
+  /**
+   * The recovery snapshot taken before an IN-PLACE import (merge / overwrite), by
+   * name. `null` for a plain import or a duplicate, which overwrite nothing and so
+   * take no snapshot — do NOT render a recovery line when it is null, or a
+   * researcher goes looking for a file that protects them from nothing.
+   *
+   * The file lives in the app's backup folder and is deliberately NOT in the
+   * Settings backup list, which lists only restorable `.mmbackup` archives. This
+   * is a `.mmproject`: it comes back through Import, not Restore.
+   */
+  safety_backup_filename: string | null
 }
 
 export interface CodebookImportResult {

@@ -1064,7 +1064,7 @@ export default function CanvasView() {
           </button>
           {/* Create canvas dialog */}
           <Dialog open={newCanvasDialogOpen} onOpenChange={(open) => { if (!open) { setNewCanvasDialogOpen(false); setNewCanvasName('') } }}>
-            <DialogContent className="sm:max-w-md">
+            <DialogContent aria-describedby={undefined} className="sm:max-w-md">
               <DialogHeader>
                 <DialogTitle>Create Canvas</DialogTitle>
               </DialogHeader>
@@ -1688,7 +1688,7 @@ export default function CanvasView() {
 
       {/* Create canvas dialog */}
       <Dialog open={newCanvasDialogOpen} onOpenChange={(open) => { if (!open) { setNewCanvasDialogOpen(false); setNewCanvasName('') } }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent aria-describedby={undefined} className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Create Canvas</DialogTitle>
           </DialogHeader>

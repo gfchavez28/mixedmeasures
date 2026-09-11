@@ -46,22 +46,27 @@ export default function CalloutStatView({ node, updateAttributes, deleteNode, se
       role="figure"
       aria-label={`Callout: ${value || ''} ${label || ''}${materialTag ? ` (${materialTag})` : ''}`}
     >
+      {/* #893 — this view already gated its inline EDITING on `isEditable`;
+          the delete control was outside that gate. See ChartEmbedView. */}
       <div className="absolute top-2 right-2 flex items-center gap-1" onMouseDown={e => e.stopPropagation()}>
-        <button
-          type="button"
-          onClick={deleteNode}
-          className="opacity-0 group-hover/material:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded text-mm-text-faint hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
-          aria-label="Remove from canvas"
-          title="Remove from canvas"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
+        {isEditable && (
+          <button
+            type="button"
+            onClick={deleteNode}
+            className="opacity-0 group-hover/material:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded text-mm-text-faint hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
+            aria-label="Remove from canvas"
+            title="Remove from canvas"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        )}
         <MaterialsTagInline
           tag={materialTag ?? null}
           tagNote={tagNote ?? null}
           onTagChange={tag => updateAttributes({ materialTag: tag })}
           onTagNoteChange={note => updateAttributes({ tagNote: note })}
           inline
+          readOnly={!isEditable}
         />
       </div>
 

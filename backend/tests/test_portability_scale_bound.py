@@ -370,6 +370,7 @@ def test_overwrite_safety_backup_reports_the_size_reason(db_session, tmp_path, m
     with pytest.raises(ProjectTooLargeError) as exc:
         pp._safety_export_before_overwrite(
             db_session, project, tmp_path / "docs", tmp_path / "media",
+            prefix="pre-overwrite",
         )
     message = str(exc.value)
     assert "too large" in message

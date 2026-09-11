@@ -82,24 +82,31 @@ export default function ImageEmbedView({ node, updateAttributes, deleteNode, sel
             className="bg-white dark:bg-mm-surface shadow-sm rounded-md overflow-hidden border-l-4 border-l-sky-500 relative"
             style={{ width: `${displayWidth}%` }}
           >
-            {/* Action zone */}
-            {isEditable && (
+            {/* Action zone.
+                #893 — this view gated the WHOLE zone, which also hid the tag.
+                The tag is CONTENT (it is the only thing that displays an
+                authored `confirms`/`contradicts` annotation), so it now stays
+                on a read-only surface while the delete control goes. */}
+            {(isEditable || materialTag) && (
               <div className="absolute top-2 right-2 flex items-center gap-1 z-10" onMouseDown={e => e.stopPropagation()}>
-                <button
-                  type="button"
-                  onClick={deleteNode}
-                  className="opacity-0 group-hover/material:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded text-mm-text-faint hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
-                  aria-label="Remove from canvas"
-                  title="Remove from canvas"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                {isEditable && (
+                  <button
+                    type="button"
+                    onClick={deleteNode}
+                    className="opacity-0 group-hover/material:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded text-mm-text-faint hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
+                    aria-label="Remove from canvas"
+                    title="Remove from canvas"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
                 <MaterialsTagInline
                   tag={materialTag ?? null}
                   tagNote={tagNote ?? null}
                   onTagChange={tag => updateAttributes({ materialTag: tag })}
                   onTagNoteChange={note => updateAttributes({ tagNote: note })}
                   inline
+                  readOnly={!isEditable}
                 />
               </div>
             )}
@@ -157,20 +164,20 @@ export default function ImageEmbedView({ node, updateAttributes, deleteNode, sel
             )}
           </div>
         </ContextMenuTrigger>
+        {/* Every item here mutates, so a read-only embed mounts no menu at all
+            rather than an empty popup (#893). */}
+        {isEditable && (
         <ContextMenuContent>
-          {isEditable && (
-            <ContextMenuItem onSelect={() => { setAltValue(String(alt ?? '')); setEditingAlt(true) }}>
-              Edit alt text
-            </ContextMenuItem>
-          )}
-          {isEditable && <ContextMenuSeparator />}
-          {isEditable && (
-            <ContextMenuItem onSelect={() => deleteNode()} className="text-red-600 dark:text-red-400">
-              <Trash2 className="w-3.5 h-3.5 mr-2" />
-              Remove from theme
-            </ContextMenuItem>
-          )}
+          <ContextMenuItem onSelect={() => { setAltValue(String(alt ?? '')); setEditingAlt(true) }}>
+            Edit alt text
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onSelect={() => deleteNode()} className="text-red-600 dark:text-red-400">
+            <Trash2 className="w-3.5 h-3.5 mr-2" />
+            Remove from theme
+          </ContextMenuItem>
         </ContextMenuContent>
+        )}
       </ContextMenu>
     </NodeViewWrapper>
   )

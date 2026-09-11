@@ -6,6 +6,7 @@ from slowapi.util import get_remote_address
 from ..database import get_db
 from ..models.user import User
 from ..models.audit import AuditEntry
+from ..services.participant_scores import mark_participant_scores_stale
 from ..schemas.auth import (
     SetupRequest,
     LoginRequest,
@@ -485,6 +486,12 @@ async def archive_coder(
         raise HTTPException(status_code=404, detail="Coder not found")
     if not target.archived:
         target.archived = True
+        # Row 45 step 4 — an archived coder does not vote
+        # (`gather_target_votes` filters `User.archived == False`), so this
+        # moves every rating score on the install. A `User` is instance-global,
+        # hence no project scope. The input class furthest from anything that
+        # looks like coding, and the reason the freshness marker is a pair.
+        mark_participant_scores_stale(db)
         db.commit()
         db.add(AuditEntry(
             user_id=user.id, action="coder_archived", entity_type="user", entity_id=target.id,

@@ -367,6 +367,10 @@ async def import_project_endpoint(
 
     tmp_path = await _stream_upload_to_temp(file)
     merge_report: dict | None = {} if import_mode == "merge" else None
+    # Passed for EVERY mode, unlike merge_report: the service records a filename only
+    # when it actually took a snapshot, so "was one taken?" stays the service's answer
+    # rather than a mode list this router would have to keep in step with it.
+    safety_report: dict = {}
     try:
         # 🔴 **OFF THE EVENT LOOP (#847).** `import_project` is minutes of synchronous
         # SQLite work, and this endpoint is `async def`, so it ran ON the loop — every
@@ -389,6 +393,7 @@ async def import_project_endpoint(
             db, tmp_path, docs_dir, media_dir, user_id=user.id,
             import_mode=import_mode, target_project_id=target_project_id,
             coder_mapping=parsed_mapping, code_mapping=parsed_code_mapping, report=merge_report,
+            safety_report=safety_report,
         )
 
         # Audit
@@ -405,6 +410,10 @@ async def import_project_endpoint(
                 "overwrote_project_id": target_project_id if import_mode == "overwrite" else None,
                 "merged_into_project_id": target_project_id if import_mode == "merge" else None,
                 "merge_report": merge_report,
+                # The durable half of naming the recovery snapshot: a toast is gone in
+                # seconds and the researcher who needs this file is looking hours later.
+                # The audit log is the one place that still says what happened.
+                "safety_backup_filename": safety_report.get("filename"),
             }),
         )
         db.add(audit)
@@ -426,6 +435,7 @@ async def import_project_endpoint(
             project_id=new_id,
             project_name=project_name,
             merge_report=merge_report,
+            safety_backup_filename=safety_report.get("filename"),
         )
     except MergeDivergenceError as e:
         # Track J · J3-2c: structured refusal (per-source / per-code diff) for the UI.

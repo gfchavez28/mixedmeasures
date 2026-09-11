@@ -15,6 +15,7 @@ from app.models.project import Project
 from app.models.participant import Participant
 from app.models.speaker import Speaker
 from app.models.conversation import Conversation
+from app.models.document import Document
 from app.models.segment import Segment
 from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from app.models.excerpt import Excerpt
@@ -83,6 +84,19 @@ def focus_group(db_session):
         DatasetValue(id=1, row_id=1, column_id=1, value_text="Maria's answer"),
         DatasetValue(id=2, row_id=2, column_id=1, value_text="Sam's answer"),
     ])
+    db.flush()
+
+    # The document side (row 46) — a third treatment, neither blanked nor
+    # deleted. The other participant's document is the control.
+    db.add_all([
+        Document(id=1, project_id=1, name="Maria's workplan", source_filename="m.txt",
+                 source_format="txt", participant_id=1),
+        Document(id=2, project_id=1, name="Sam's workplan", source_filename="s.txt",
+                 source_format="txt", participant_id=2),
+    ])
+    db.flush()
+    db.add(Segment(id=4, document_id=1, text="Maria's stated goal.", word_count=3,
+                   sequence_order=0))
     db.flush()
     return db
 
@@ -211,6 +225,77 @@ class TestCodeApplicationsAreKept:
         assert db.get(CodeApplication, 2) is not None
 
 
+class TestLinkedDocumentsAreUnlinkedNotDeleted:
+    """Row 46's treatment — the THIRD one, decided with the developer 2026-09-07.
+
+    The dataset rule ("theirs alone, so it goes") does not transfer:
+    `Document.participant_id` says the document is ABOUT this person, which is
+    true both of a workplan they wrote and of a document that merely names them.
+    The tool cannot tell those apart, deletion is unrecoverable, and blanking
+    would leave a shell that still counts in coverage. So the LINK goes and the
+    document is reported for the human decision.
+    """
+
+    def test_the_document_survives(self, focus_group):
+        db = focus_group
+        apply_withdrawal(db, db.get(Participant, 1))
+        db.flush()
+        doc = db.get(Document, 1)
+        assert doc is not None, "the document was deleted — it must only be unlinked"
+        assert doc.name == "Maria's workplan"
+
+    def test_its_text_is_untouched(self, focus_group):
+        """Deliberately NOT the conversation treatment either: a document has no
+        second author sharing the structure, so there is nothing to preserve by
+        blanking — and a blanked document still counts in every coverage figure
+        while saying nothing."""
+        db = focus_group
+        apply_withdrawal(db, db.get(Participant, 1))
+        db.flush()
+        assert db.get(Segment, 4).text == "Maria's stated goal."
+
+    def test_the_link_is_gone(self, focus_group):
+        db = focus_group
+        apply_withdrawal(db, db.get(Participant, 1))
+        db.flush()
+        assert db.get(Document, 1).participant_id is None
+
+    def test_someone_elses_document_keeps_its_link(self, focus_group):
+        """The control. An arm that dropped its `participant_id` filter would
+        unlink every document in the project and still report a plausible count."""
+        db = focus_group
+        apply_withdrawal(db, db.get(Participant, 1))
+        db.flush()
+        assert db.get(Document, 2).participant_id == 2
+
+    def test_the_relationship_carries_no_delete_cascade(self):
+        """🔴 The catastrophic case, pinned in the channel it lives in.
+
+        If `Participant.documents` were ever given `delete-orphan` (a plausible
+        edit — "surely a person's documents go with them"), the withdrawal would
+        DELETE those documents while still reporting them as merely unlinked:
+        irreversible data loss described in the outcome as something else.
+
+        ⚠️ **The behavioural tests above cannot see this — MEASURED.** Adding
+        `cascade="all, delete-orphan"` leaves all four of them green, because the
+        service nulls the FK column directly rather than mutating the collection,
+        so SQLAlchemy's orphan detection never fires on this path. An earlier
+        version of the comment in `withdrawal_redaction.py` claimed
+        `test_the_document_survives` covered it; it does not. Assert the mapper
+        configuration itself.
+        """
+        from sqlalchemy import inspect as sa_inspect
+
+        rel = sa_inspect(Participant).relationships["documents"]
+        assert not rel.cascade.delete, (
+            "Participant.documents must not cascade deletes: a withdrawal "
+            "UNLINKS documents and reports them for human review (row 46). A "
+            "delete cascade would destroy them and the outcome would still say "
+            "'unlinked'."
+        )
+        assert not rel.cascade.delete_orphan
+
+
 class TestTheOutcomeIsAnHonestRecord:
     def test_it_reports_what_it_did_and_what_needs_review(self, focus_group):
         db = focus_group
@@ -220,6 +305,8 @@ class TestTheOutcomeIsAnHonestRecord:
         assert out.responses_deleted == 1
         assert out.dataset_rows_deleted == 1
         assert out.identifier == "P07"
+        # Row 46 — the count a human has to finish, not a count of deletions.
+        assert out.documents_unlinked == 1
         # The counts a machine cannot judge are surfaced rather than guessed at.
         assert hasattr(out, "notes_for_review")
         assert hasattr(out, "memos_for_review")

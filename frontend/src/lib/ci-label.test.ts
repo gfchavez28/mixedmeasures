@@ -1,7 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { ciLabel, ciCaveat, ciQualifier, isItemLevelCi, ITEM_LEVEL_CI_METHOD } from './ci-label'
+import {
+  ciLabel,
+  ciCaveat,
+  ciQualifier,
+  ciUnavailableNote,
+  isItemLevelCi,
+  ITEM_LEVEL_CI_METHOD,
+} from './ci-label'
 import { sourceFiles } from '@/test-support/source-tree'
 
 /**
@@ -167,6 +174,34 @@ describe('ciLabel — per-category intervals', () => {
     // rest. Reusing `wilson` would have made them indistinguishable downstream.
     expect(ciLabel('wilson')).toBe('95% CI')
     expect(ciLabel('wilson_per_category')).not.toBe(ciLabel('wilson'))
+  })
+})
+
+/**
+ * Row 45 (iii) — a participant's rating score carries an interval over THAT
+ * PERSON's rated passages. The analysis view will compute an ordinary
+ * `t_interval` over participants from the same score column, so the two sit one
+ * screen apart; a bare "95% CI" on either would claim they are the same kind of
+ * statement.
+ */
+describe('ciLabel — a participant score’s interval over their own passages', () => {
+  it('qualifies it as within-person, distinct from the respondent-level kind', () => {
+    expect(ciLabel('passage_level_t')).toBe('95% CI across this person’s passages')
+    expect(ciLabel('passage_level_t')).not.toBe(ciLabel('t_interval'))
+    expect(ciQualifier('passage_level_t')).toBe(' across this person’s passages')
+  })
+
+  it('says what it is NOT — an interval across people', () => {
+    expect(ciCaveat('passage_level_t')).toMatch(/not across people/)
+    expect(ciCaveat('passage_level_t')).toMatch(/not the interval for the average score across participants/)
+  })
+
+  it('explains a missing interval by the passage count, and names the remedy', () => {
+    // Below three rated passages the server sends bounds of null with this reason
+    // beside the method. A silent blank next to a neighbour that HAS one reads as
+    // an oversight.
+    expect(ciUnavailableNote('insufficient_passages')).toMatch(/fewer than three rated passages/)
+    expect(ciUnavailableNote('insufficient_passages')).toMatch(/Rating more of their passages/)
   })
 })
 

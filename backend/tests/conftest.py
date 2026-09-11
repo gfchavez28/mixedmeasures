@@ -1,9 +1,43 @@
 import os
+import shutil
+import tempfile
 # SAFETY: Must be set BEFORE any app module is imported.
 # Importing app.database creates a module-level engine connected to
 # settings.mm_database_path. Without this, that engine points at the
 # real dev.db — the production database is live in the test process.
 os.environ["MM_DATABASE_PATH"] = ":memory:"
+
+# ── SAFETY, second half: the WRITABLE PATH settings (#916) ────────────────────
+#
+# The database was pinned; the directories were not. `mm_backup_dir` defaults to
+# "backups", resolved against the suite's CWD — i.e. the developer's REAL backup
+# folder. Four test files import a project in "merge"/"overwrite" mode, and every
+# such import writes a real `pre-*.mmproject` safety export there: **1,946 files /
+# 31 MB** had accumulated by 2026-09-08, invisible because the directory is
+# git-ignored. MEASURED 2026-09-09 on the four files alone: 8 more per run.
+#
+# 🔴 **Pin the SETTING, not the one writer.** `get_backup_dir()` has five app
+# callers — the safety export, the pre-migration backup, the periodic and the
+# shutdown auto-backup, and the startup mkdir — so patching
+# `project_portability.get_backup_dir` (as three test modules do locally, and
+# correctly, for their own assertions) would leave the other four aimed at the
+# repo. One setting covers every present and future caller.
+#
+# `mm_data_dir` is pinned for the same reason and is PREVENTION, not repair:
+# measured on the same run, no test writes into `backend/data/` — every one passes
+# its own `tmp_path` documents/media dirs. But nothing STOPS the next one, which is
+# exactly how the backups leak started, and the guard below is a cleaner rule when
+# it covers every writable path rather than the one that happened to leak.
+#
+# ⚠️ Both must be set BEFORE any app import, like the line above: `get_settings()`
+# is `lru_cache`d, so the first read of either freezes it for the whole process.
+# ⚠️ `setdefault`, not assignment — an explicit value from the environment wins, so
+# a harness can still aim the suite somewhere. A value that points INTO the repo
+# then fails `test_suite_writes_outside_the_repo.py` loudly rather than silently
+# filling the folder, which is the right direction for an override we did not set.
+_TEST_STATE_DIR = tempfile.mkdtemp(prefix="mm-test-state-")
+os.environ.setdefault("MM_BACKUP_DIR", os.path.join(_TEST_STATE_DIR, "backups"))
+os.environ.setdefault("MM_DATA_DIR", os.path.join(_TEST_STATE_DIR, "data"))
 
 import csv
 import importlib
@@ -404,6 +438,16 @@ def _populate_mtcars(session):
                 value_numeric=float(val),
             )
             session.add(dv)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Remove the temp state dir the pins above created (#916).
+
+    `ignore_errors=True` because a failure to clean up must never change a suite's
+    exit status — and because the directory legitimately may not exist at all (the
+    environment supplied its own `MM_BACKUP_DIR`/`MM_DATA_DIR`, or nothing wrote).
+    """
+    shutil.rmtree(_TEST_STATE_DIR, ignore_errors=True)
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────────

@@ -29,6 +29,7 @@ from .missing_values import (  # noqa: F401 — _NA_PREFIXES/_is_na re-export (#
     is_missing,
     matched_missing_label,
 )
+from .dataset_rows import materialise_manual_cells  # #897
 
 # #691: this module called logger.warning() at two sites with no `logger` in scope,
 # so a malformed .sav — the exact case the warnings exist to report — raised
@@ -2134,6 +2135,16 @@ def import_dataset_csv(
 
     _drain_values()
     db.flush()
+
+    # #897 — every row-creating path asks the same question, and this one is
+    # wired even though it is a NO-OP TODAY: an import builds its own dataset,
+    # so no `source="manual"` column can exist yet and the call returns at its
+    # first query. It is here because the fail-closed AST scan pins the
+    # RELATIONSHIP between "constructs a DatasetRow" and "materialises cells"
+    # rather than the sites that happen to need it today — and because row 47
+    # makes "a dataset that already has hand-made variables" a reachable state.
+    # Cost on the 75,699-row import: one SELECT returning nothing.
+    materialise_manual_cells(db, dataset.id)
 
     # -- 3b. Declared value labels (#575) --------------------------------------
     # For each cells-are-codes column, apply the authored code→label dictionary

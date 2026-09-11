@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { FileInput, ChevronRight, SlidersHorizontal, Pencil, Trash2, Palette, Package, MessageSquareText, Table2 } from 'lucide-react'
+import { FileInput, ChevronRight, SlidersHorizontal, Pencil, Trash2, Palette, Package, MessageSquareText, Table2, Users, TableProperties as TablePropertiesIcon } from 'lucide-react'
 import { datasetsApi, domainsApi, textCodingApi, extractApiError } from '@/lib/api'
 import { toast } from 'sonner'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
@@ -21,9 +21,19 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import { getDatasetAccent } from '@/components/crosswalk/dataset-color'
 import { variableViewPath } from '@/lib/dataset-routes'
+import { isManagedDataset, managedDatasetRefusal } from '@/lib/managed-dataset'
+import { MODE_DISABLED_CLASS, modeDisabledProps } from '@/lib/mode-disabled'
 
 export default function DatasetsListPage() {
   const { projectId } = useProjectLayout()
@@ -51,6 +61,49 @@ export default function DatasetsListPage() {
   const datasets = datasetsData?.datasets ?? []
   const domainCount = domainsData?.domains?.length ?? 0
   const hasTextColumns = (textColumnsData?.columns?.length ?? 0) > 0
+
+  // Row 45 (i) — the project's participant table, if it has one. `managed_kind`
+  // is the ONE property that names it; never match on the dataset's NAME, which
+  // the researcher may rename freely (renaming does not touch the row set, so it
+  // is on the allowed side of "locked spine, open columns").
+  const participantTable = datasets.find(d => isManagedDataset(d)) ?? null
+
+  /**
+   * Row 47 — author a dataset by hand.
+   *
+   * ⚠️ It lands on the new table's Data view, whose empty state names the two
+   * next steps. Creating a table and leaving the researcher on the list is the
+   * shape `useCreateVariable` records: the thing you just made, invisible.
+   */
+  const [blankName, setBlankName] = useState('')
+  const [blankOpen, setBlankOpen] = useState(false)
+  const blankTableMutation = useMutation({
+    mutationFn: (name: string) => datasetsApi.create(projectId, { name }),
+    onSuccess: (ds) => {
+      queryClient.invalidateQueries({ queryKey: ['datasets', projectId] })
+      setBlankOpen(false)
+      setBlankName('')
+      toast.success(`"${ds.name}" created`)
+      navigate(`/projects/${projectId}/datasets/${ds.id}`)
+    },
+    onError: (err: Error) => toast.error(
+      extractApiError(err, 'Could not create the table'),
+    ),
+  })
+
+  const participantTableMutation = useMutation({
+    mutationFn: () => datasetsApi.createParticipantsDataset(projectId),
+    onSuccess: (ds) => {
+      queryClient.invalidateQueries({ queryKey: ['datasets', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['project-summary', projectId] })
+      navigate(`/projects/${projectId}/datasets/${ds.id}`)
+    },
+    onError: (err: Error) => toast.error(
+      // The server's own sentence, never a generic one — a refusal the client
+      // paraphrases is the #842/#871 class.
+      extractApiError(err, 'Could not create the participant table'),
+    ),
+  })
 
   const deleteMutation = useMutation({
     mutationFn: (datasetId: number) => datasetsApi.delete(projectId, datasetId),
@@ -136,7 +189,9 @@ export default function DatasetsListPage() {
           >
             All Datasets
             {datasets.length > 0 && (
-              <span className="ml-1.5 opacity-60">{datasets.length}</span>
+              // #908: the leading space is a TEXT node, not margin — an inline
+              // span with only `ml-1.5` computes the name "All Datasets1".
+              <span className="ml-1.5 opacity-60">{' '}{datasets.length}</span>
             )}
           </button>
           <button
@@ -158,13 +213,53 @@ export default function DatasetsListPage() {
             </button>
           )}
         </div>
-        <button
-          onClick={() => navigate(`/projects/${projectId}/datasets/import`)}
-          className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-orange))] hover:opacity-90 transition-opacity"
-        >
-          <FileInput className="w-3.5 h-3.5" />
-          Import
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Row 45 (i) step 4 — THE CREATION AFFORDANCE. Until this existed
+              nothing in the product could make a participant table at all, so
+              the whole seam was unreachable.
+
+              🔴 It renders whether or not the table exists, and says which:
+              a capability not listed where its siblings are is, for discovery,
+              ABSENT (`feedback_entry_points_are_a_population`). When the table
+              exists this is a "take me there" link, which is also why the
+              endpoint is idempotent rather than 409ing a second call. */}
+          {/* #907: the explanation is a DESCRIPTION (`title`), never an
+              `aria-label` — that replaced the visible words entirely, so the
+              control announced "Create a table with one record per
+              participant…" while the screen said "Add participant table"
+              (WCAG 2.5.3, Label in Name: the name must CONTAIN the visible
+              label). Measured in Chrome's tree in both states. */}
+          <button
+            onClick={() => participantTableMutation.mutate()}
+            disabled={participantTableMutation.isPending}
+            title={
+              participantTable
+                ? `Open ${participantTable.name}, the table of per-participant variables`
+                : 'Create a table with one record per participant, to hold per-person variables'
+            }
+            className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-md text-sm font-medium text-mm-text-muted hover:text-mm-text transition-colors border border-mm-surface-border hover:border-mm-text-muted disabled:opacity-50"
+          >
+            <Users className="w-3.5 h-3.5" aria-hidden="true" />
+            {participantTable ? 'Participant table' : 'Add participant table'}
+          </button>
+          {/* Row 47. Labelled "Blank table" and not "New table": the two
+              controls beside it also produce tables, so the distinguishing fact
+              is that this one starts EMPTY. */}
+          <button
+            onClick={() => setBlankOpen(true)}
+            className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-md text-sm font-medium text-mm-text-muted hover:text-mm-text transition-colors border border-mm-surface-border hover:border-mm-text-muted"
+          >
+            <TablePropertiesIcon className="w-3.5 h-3.5" aria-hidden="true" />
+            Blank table
+          </button>
+          <button
+            onClick={() => navigate(`/projects/${projectId}/datasets/import`)}
+            className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-orange))] hover:opacity-90 transition-opacity"
+          >
+            <FileInput className="w-3.5 h-3.5" />
+            Import
+          </button>
+        </div>
       </div>
 
       {/* Content */}
@@ -188,15 +283,26 @@ export default function DatasetsListPage() {
             <>
               <h2 className="text-lg font-semibold text-mm-text mb-2">No datasets yet</h2>
               <p className="text-sm text-mm-text-muted mb-6">
-                Import a dataset CSV to add quantitative data, or drag and drop CSV files here.
+                Import a dataset CSV to add quantitative data, drag and drop CSV files here, or start a blank table and type it in.
               </p>
-              <button
-                onClick={() => navigate(`/projects/${projectId}/datasets/import`)}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-orange))] hover:opacity-90 transition-opacity"
-              >
-                <FileInput className="w-4 h-4" />
-                Import Dataset
-              </button>
+              {/* Row 47 — TWO ways to start now. A capability not listed where
+                  its sibling is is, for discovery, absent. */}
+              <div className="flex items-center justify-center gap-2">
+                <button
+                  onClick={() => navigate(`/projects/${projectId}/datasets/import`)}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-orange))] hover:opacity-90 transition-opacity"
+                >
+                  <FileInput className="w-4 h-4" />
+                  Import Dataset
+                </button>
+                <button
+                  onClick={() => setBlankOpen(true)}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-mm-text-muted hover:text-mm-text transition-colors border border-mm-surface-border hover:border-mm-text-muted"
+                >
+                  <TablePropertiesIcon className="w-4 h-4" aria-hidden="true" />
+                  Start a blank table
+                </button>
+              </div>
             </>
           )}
         </div>
@@ -212,7 +318,10 @@ export default function DatasetsListPage() {
                 <th className="px-4 py-3 text-right text-[13px] font-medium text-mm-text-muted">Records</th>
                 <th className="px-4 py-3 text-right text-[13px] font-medium text-mm-text-muted">Variables</th>
                 <th className="px-4 py-3 text-right text-[13px] font-medium text-mm-text-muted">Open-Ended</th>
-                <th className="px-4 py-3 text-right text-[13px] font-medium text-mm-text-muted">Imported</th>
+                {/* Row 47: this column is `created_at`, and "Imported" stopped being
+                    true for the participant table and is now false for a
+                    hand-authored one too. */}
+                <th className="px-4 py-3 text-right text-[13px] font-medium text-mm-text-muted">Created</th>
                 <th className="px-4 py-3 w-16"><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
@@ -329,9 +438,24 @@ export default function DatasetsListPage() {
                       <SlidersHorizontal className="w-4 h-4 mr-2" />
                       Variables
                     </ContextMenuItem>
+                    {/* Row 45 (i) — a tool-maintained table REFUSES this
+                        server-side (409), so an ungated item would open a
+                        confirm promising permanent deletion that the server then
+                        declines: #812's defect exactly, one seam over. It takes
+                        the PERSISTENT-MODE arm rather than vanishing — the
+                        researcher needs to learn the table is kept in step with
+                        their participants and where to remove one. The click
+                        guard inside `modeDisabledProps` is the load-bearing
+                        half; `aria-disabled` changes what a control announces
+                        and nothing about what it does. */}
                     <ContextMenuItem
-                      onClick={() => setDeleteDataset({ id: ds.id, name: ds.name })}
-                      className="text-red-600"
+                      {...modeDisabledProps<HTMLDivElement>({
+                        label: `Delete ${ds.name}`,
+                        blockedReason: managedDatasetRefusal(ds, 'deleteDataset'),
+                        onActivate: () => setDeleteDataset({ id: ds.id, name: ds.name }),
+                      })}
+                      title={managedDatasetRefusal(ds, 'deleteDataset') ?? undefined}
+                      className={`text-red-600 ${MODE_DISABLED_CLASS}`}
                     >
                       <Trash2 className="w-4 h-4 mr-2" />
                       Delete Dataset
@@ -346,6 +470,58 @@ export default function DatasetsListPage() {
       )}
 
       {/* Delete confirmation */}
+      {/* Row 47 — the blank-table dialog. Name only: an empty table guesses
+          nothing about its columns (see `DatasetCreate`), and asking for them
+          here would be asking before the researcher has the data in front of
+          them. */}
+      <Dialog open={blankOpen} onOpenChange={(o) => { if (!o) { setBlankOpen(false); setBlankName('') } }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>New blank table</DialogTitle>
+            <DialogDescription>
+              A table you fill in by hand — for the small reference tables that
+              exist nowhere as a file, like sites, cohorts or departments.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              const name = blankName.trim()
+              if (!name) return
+              blankTableMutation.mutate(name)
+            }}
+          >
+            <label htmlFor="blank-table-name" className="block text-sm font-medium text-mm-text mb-1.5">
+              Table name
+            </label>
+            <input
+              id="blank-table-name"
+              autoFocus
+              value={blankName}
+              onChange={(e) => setBlankName(e.target.value)}
+              maxLength={255}
+              placeholder="Departments"
+              className="w-full px-3 py-2 text-sm border border-mm-surface-border rounded-md bg-mm-bg focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+            <DialogFooter className="mt-4">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => { setBlankOpen(false); setBlankName('') }}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={blankName.trim() === '' || blankTableMutation.isPending}
+              >
+                {blankTableMutation.isPending ? 'Creating…' : 'Create table'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       <ConfirmDialog
         open={deleteDataset !== null}
         onOpenChange={(open) => { if (!open) setDeleteDataset(null) }}

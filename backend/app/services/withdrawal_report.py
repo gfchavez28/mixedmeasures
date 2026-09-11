@@ -20,15 +20,30 @@ compliance reviewer owns the conclusion.
 
 ## What is reachable, and how that set was derived
 
-Not hand-listed. Walked from the schema: two FKs name `participants.id`
-(`Speaker.participant_id`, `DatasetRow.participant_id`), and each hop below is
-every model that names the previous hop's table:
+Walked from the schema: **three** FKs name `participants.id`
+(`Speaker.participant_id`, `DatasetRow.participant_id`, and — since row 46 —
+`Document.participant_id`), and each hop below is every model that names the
+previous hop's table:
 
     Participant
       ├── Speaker ─── Segment (speaker_id) ─── CodeApplication · Excerpt · Note
-      └── DatasetRow ┬─ DatasetValue (row_id) ─ CodeApplication · Excerpt · Note
-                     ├─ RowScore (dataset_row_id)
-                     └─ Memo (entity_type='dataset_row')
+      ├── DatasetRow ┬─ DatasetValue (row_id) ─ CodeApplication · Excerpt · Note
+      │              ├─ RowScore (dataset_row_id)
+      │              └─ Memo (entity_type='dataset_row')
+      └── Document ── Segment (document_id) ─── CodeApplication · Excerpt · Note
+
+🔴 **That sentence used to say "two", and nothing would have caught it turning
+false.** The set was walked once, by hand, and the walk left no artifact — so
+the docstring was a COUNT maintained by memory, on a report whose whole job is
+completeness. `tests/test_withdrawal_report.py::TestEveryParticipantFkHasAnArm`
+now reflects over the SQLAlchemy metadata for every column pointing at
+`participants.id` and fails when one has no arm here. **A fourth FK is a failing
+test, not a silent under-report.**
+
+⚠️ **The document arm's grain differs from the other two:** `Speaker` and
+`DatasetRow` are per-turn and per-row children, so the participant reaches only
+PART of a conversation or dataset; `Document.participant_id` sits on the source
+itself, so the whole document is in scope.
 
 ⚠️ **`Speaker` is PROJECT-scoped, not conversation-scoped** — one speaker row
 spans every conversation the person appears in. So the conversation breakdown is
@@ -66,18 +81,21 @@ one more place.
 
 from dataclasses import dataclass, asdict, field
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..models.participant import Participant
 from ..models.speaker import Speaker
 from ..models.segment import Segment
 from ..models.conversation import Conversation
-from ..models.dataset import Dataset, DatasetRow, DatasetValue
+from ..models.document import Document
+from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from ..models.code_application import CodeApplication
 from ..models.excerpt import Excerpt
 from ..models.note import Note
 from ..models.memo import Memo
 from ..models.row_score import RowScore
+from .participant_dataset import MANAGED_COLUMN_SOURCE
 
 
 @dataclass
@@ -99,12 +117,43 @@ class DatasetTouchpoint:
     dataset_id: int
     name: str
     rows: int = 0
+    #: Cells this person ANSWERED. #896 — it excludes the tool's own columns,
+    #: because a derived rating score is not a response and a researcher reading
+    #: *"1 record, 3 responses"* on a participant table would be told this person
+    #: answered three questions they were never asked.
     responses: int = 0
+    #: Cells the TOOL maintains here (the identifier it wrote, the scores it
+    #: derived). Counted and reported separately rather than dropped: the row
+    #: genuinely traces back to this person and a withdrawal must account for it.
+    #: ⚠️ Excluding managed datasets from the report entirely was considered and
+    #: REFUSED — under-reporting is the failure that matters here.
+    tool_maintained_values: int = 0
+    #: The kind of spine this dataset projects (`Dataset.managed_kind`), or None
+    #: for an ordinary one — so the report can SAY what the record is instead of
+    #: showing a bare row count with no explanation.
+    managed_kind: str | None = None
     code_applications: int = 0
     excerpts: int = 0
     notes: int = 0
     memos: int = 0
     row_scores: int = 0
+
+
+@dataclass
+class DocumentTouchpoint:
+    """One document this participant is the subject of (row 46).
+
+    Unlike the two touchpoints above, the link is on the SOURCE itself rather
+    than on a per-turn or per-row child, so the whole document is in scope: a
+    workplan filed under this person is theirs end to end.
+    """
+
+    document_id: int
+    name: str
+    segments: int = 0
+    code_applications: int = 0
+    excerpts: int = 0
+    notes: int = 0
 
 
 @dataclass
@@ -120,6 +169,7 @@ class WithdrawalReport:
     speaker_names: list[str]
     conversations: list[ConversationTouchpoint]
     datasets: list[DatasetTouchpoint]
+    documents: list[DocumentTouchpoint] = field(default_factory=list)
 
     @property
     def total_items(self) -> int:
@@ -136,6 +186,9 @@ class WithdrawalReport:
             d.rows + d.responses + d.code_applications + d.excerpts
             + d.notes + d.memos + d.row_scores
             for d in self.datasets
+        ) + sum(
+            doc.segments + doc.code_applications + doc.excerpts + doc.notes
+            for doc in self.documents
         )
 
     def to_dict(self) -> dict:
@@ -226,7 +279,31 @@ def build_withdrawal_report(
             v[0] for v in
             db.query(DatasetValue.id).filter(DatasetValue.row_id.in_(row_ids)).all()
         ]
-        tp.responses = len(value_ids)
+        # #896 — split the cells by who wrote them. `source == "managed"` is
+        # the tool's own; everything else is the researcher's data, which is
+        # what "responses" has always meant on an ordinary dataset (where the
+        # managed set is empty and this is byte-identical to the old count).
+        tp.managed_kind = ds.managed_kind if ds else None
+        managed_column_ids = {
+            c[0] for c in
+            db.query(DatasetColumn.id).filter(
+                DatasetColumn.dataset_id == ds_id,
+                DatasetColumn.source == MANAGED_COLUMN_SOURCE,
+            ).all()
+        }
+        if managed_column_ids:
+            managed_values = (
+                db.query(func.count(DatasetValue.id))
+                .filter(
+                    DatasetValue.row_id.in_(row_ids),
+                    DatasetValue.column_id.in_(managed_column_ids),
+                )
+                .scalar()
+            ) or 0
+        else:
+            managed_values = 0
+        tp.tool_maintained_values = managed_values
+        tp.responses = len(value_ids) - managed_values
         tp.code_applications = _count(
             db, CodeApplication, CodeApplication.dataset_value_id, value_ids)
         tp.excerpts = _count(db, Excerpt, Excerpt.dataset_value_id, value_ids)
@@ -239,6 +316,32 @@ def build_withdrawal_report(
         )
         datasets[ds_id] = tp
 
+    # ── The document side, via Document.participant_id (row 46) ───────────
+    #
+    # The third FK naming `participants.id`, and the only one where the link
+    # sits on the SOURCE. No speaker hop and no row hop: the document's own
+    # segments are the unit, counted with the same unfiltered rule as the
+    # conversation arm (a merged/split-away segment still holds the words).
+    documents: list[DocumentTouchpoint] = []
+    linked_docs = (
+        db.query(Document)
+        .filter(Document.participant_id == participant.id)
+        .all()
+    )
+    for doc in linked_docs:
+        seg_ids = [
+            s[0] for s in
+            db.query(Segment.id).filter(Segment.document_id == doc.id).all()
+        ]
+        tp = DocumentTouchpoint(
+            document_id=doc.id, name=doc.name, segments=len(seg_ids),
+        )
+        tp.code_applications = _count(
+            db, CodeApplication, CodeApplication.segment_id, seg_ids)
+        tp.excerpts = _count(db, Excerpt, Excerpt.segment_id, seg_ids)
+        tp.notes = _count(db, Note, Note.segment_id, seg_ids)
+        documents.append(tp)
+
     return WithdrawalReport(
         participant_id=participant.id,
         identifier=participant.identifier,
@@ -248,4 +351,5 @@ def build_withdrawal_report(
         speaker_names=speaker_names,
         conversations=sorted(conversations.values(), key=lambda c: c.conversation_id),
         datasets=sorted(datasets.values(), key=lambda d: d.dataset_id),
+        documents=sorted(documents, key=lambda d: d.document_id),
     )

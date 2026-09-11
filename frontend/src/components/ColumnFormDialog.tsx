@@ -51,6 +51,29 @@ const COMPUTED_TYPE_OPTIONS = [
   { value: 'percentage', label: 'Percentage' },
 ]
 
+/**
+ * The type a form OPENS on.
+ *
+ * 🔴 **Extracted because it lived in two places and only one of them mattered
+ * (#941).** The `useState` initialiser and `resetForm` carried the same
+ * expression; `resetForm` runs when the dialog opens, so it is the one that
+ * decides — a mutation to the initialiser alone changes nothing on screen, which
+ * a guard aimed at the initialiser would have failed to notice.
+ *
+ * Order is load-bearing: an EXISTING variable's own type wins over any default,
+ * or opening the edit form would silently retype it.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function initialFormType(
+  initial: DatasetColumn | null | undefined,
+  mode: 'manual' | 'computed',
+  defaultColumnType: string | undefined,
+): string {
+  if (initial?.column_type) return initial.column_type
+  if (mode === 'computed') return 'numeric'
+  return defaultColumnType ?? 'ordinal'
+}
+
 // ── Add/Edit Column Dialog ───────────────────────────────────────────────────
 
 export function ColumnFormDialog({
@@ -65,6 +88,7 @@ export function ColumnFormDialog({
   projectId,
   datasetId,
   availableColumns,
+  defaultColumnType,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -77,9 +101,22 @@ export function ColumnFormDialog({
   projectId?: number
   datasetId?: number
   availableColumns?: DatasetColumn[]
+  /**
+   * #941 — the type a NEW manual variable starts on.
+   *
+   * Ordinal is right for a survey and wrong for the reference tables row 47
+   * built: the *New blank table* dialog describes them as "sites, cohorts or
+   * departments" and the very next dialog defaulted to Ordinal and offered
+   * *Strongly Disagree … Strongly Agree* as its value-labels placeholder.
+   *
+   * Passed in rather than derived here, because the signal is a property of the
+   * DATASET (has anything been imported into it?) and this component is given
+   * one column, never the table.
+   */
+  defaultColumnType?: string
 }) {
   const [formLabel, setFormLabel] = useState(initial?.column_text || '')
-  const [formType, setFormType] = useState(initial?.column_type || (mode === 'computed' ? 'numeric' : 'ordinal'))
+  const [formType, setFormType] = useState(initialFormType(initial, mode, defaultColumnType))
   const [formCode, setFormCode] = useState(initial?.column_code || '')
   const [formGroup, setFormGroup] = useState(initial?.group_code || '')
   const [formGroupLabel, setFormGroupLabel] = useState(initial?.group_label || '')
@@ -210,7 +247,7 @@ export function ColumnFormDialog({
 
   const resetForm = useCallback(() => {
     setFormLabel(initial?.column_text || '')
-    setFormType(initial?.column_type || (mode === 'computed' ? 'numeric' : 'ordinal'))
+    setFormType(initialFormType(initial, mode, defaultColumnType))
     setFormCode(initial?.column_code || '')
     setFormGroup(initial?.group_code || '')
     setFormGroupLabel(initial?.group_label || '')
@@ -221,7 +258,7 @@ export function ColumnFormDialog({
     setFormExpression(initial?.expression || '')
     setPreview(null)
     setPreviewLoading(false)
-  }, [initial, mode])
+  }, [initial, mode, defaultColumnType])
 
   // Sync form state when dialog opens (programmatic open doesn't fire Radix onOpenChange)
   useEffect(() => {
@@ -298,13 +335,17 @@ export function ColumnFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className={`${mode === 'computed' ? 'max-w-lg' : 'max-w-md'} max-h-[85vh] overflow-y-auto`}>
+      {/* #911: no `DialogDescription` here, so Radix would otherwise emit an
+          `aria-describedby` pointing at an id that never renders — measured in
+          Chrome as a MISSING target. The explicit `undefined` is Radix's own
+          documented way to say "this dialog has no description". */}
+      <DialogContent aria-describedby={undefined} className={`${mode === 'computed' ? 'max-w-lg' : 'max-w-md'} max-h-[85vh] overflow-y-auto`}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <Label htmlFor="col-name">Column label</Label>
+            <Label htmlFor="col-name">Variable label</Label>
             <Input
               id="col-name"
               value={formLabel}
@@ -436,7 +477,7 @@ export function ColumnFormDialog({
               <details className="text-xs text-mm-text-muted">
                 <summary className="cursor-pointer hover:text-mm-text select-none">Formula reference</summary>
                 <div className="mt-1 space-y-0.5 text-[10px] pl-2">
-                  <p><code className="bg-mm-bg px-0.5 rounded">[Column]</code> &mdash; column reference (by code or name)</p>
+                  <p><code className="bg-mm-bg px-0.5 rounded">[Variable]</code> &mdash; variable reference (by code or name)</p>
                   <p><code className="bg-mm-bg px-0.5 rounded">+ - * /</code> &mdash; arithmetic</p>
                   <p><code className="bg-mm-bg px-0.5 rounded">== != &lt; &gt; &lt;= &gt;=</code> &mdash; comparison</p>
                   <p><code className="bg-mm-bg px-0.5 rounded">AND OR NOT</code> &mdash; boolean logic</p>
@@ -478,7 +519,7 @@ export function ColumnFormDialog({
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label htmlFor="col-code-c">Column code</Label>
+                  <Label htmlFor="col-code-c">Variable code</Label>
                   <Input
                     id="col-code-c"
                     value={formCode}
@@ -520,7 +561,7 @@ export function ColumnFormDialog({
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label htmlFor="col-code">Column code</Label>
+                  <Label htmlFor="col-code">Variable code</Label>
                   <Input
                     id="col-code"
                     value={formCode}
@@ -617,7 +658,9 @@ export function ColumnFormDialog({
               Cancel
             </Button>
             <Button type="submit" disabled={isDisabled}>
-              {isSubmitting ? 'Saving...' : (initial ? 'Save Changes' : (mode === 'computed' ? 'Create Computed Column' : 'Add Column'))}
+              {/* #940 — Decision B settled on "variable" for the menu that
+                  opens this dialog; the dialog it opens had not followed. */}
+              {isSubmitting ? 'Saving...' : (initial ? 'Save Changes' : (mode === 'computed' ? 'Create Computed Variable' : 'Add Variable'))}
             </Button>
           </div>
         </form>

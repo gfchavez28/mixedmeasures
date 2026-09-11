@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useId } from 'react'
 import type { SetURLSearchParams } from 'react-router'
 import { SELECTED_ROW } from '@/lib/selection'
 import {
@@ -311,6 +311,12 @@ export interface AnalysisSidebarProps {
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function AnalysisSidebar(props: AnalysisSidebarProps) {
+  // #901: four chart-option triggers were captioned by a bare <div>, which names
+  // nothing — `combobox` is not a name-from-content role, so the visible value is
+  // never the name. Pairing caption and control by id is the same rule the
+  // *Metric type* trigger below already states in its own comment (#394); these
+  // four had drifted from it.
+  const selectId = useId()
   const {
     pid, activeTab, setUrlParam, setSearchParams,
     materials, activeMaterialId, onLoadMaterial, onDeleteMaterial, onRenameMaterial, onReorderMaterials,
@@ -506,11 +512,30 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
   // ── Render ──────────────────────────────────────────────────────────────
 
   return (
-    <div className="h-full bg-mm-surface border-r flex flex-col">
+    /* #894 — THE COLUMN SCROLLS; no section is elastic.
+        Before this, one section carried `flex-1 min-h-0` and every other was
+        `shrink-0`, so the single flexible child absorbed the whole vertical
+        deficit alone. On the R&C tab the options accordion is ~505px on its
+        own, which squeezed that child to ZERO — and it held ~143px of
+        `shrink-0` chrome (its header, the Variables/Groups tabs, the search
+        box) that cannot shrink and does not clip, so it painted straight over
+        the sections below it.
+        ⚠️ `overflow-hidden` alone was tested and REFUTED: it clips a 1px box,
+        which removes the overlap by deleting the whole section from view.
+        A height floor alone just moves the overflow to the sections below.
+        So: the column scrolls, every section takes its natural height, and the
+        lists that can grow are capped and scroll internally — which is the
+        shape the Materials section above has always used.
+        ⚠️ NO `tabIndex={0}` on this scroller, deliberately (#758/#772's rule of
+        recording the negative). A scrollable region needs to be focusable only
+        when it holds no focusable content; this column is nothing but controls,
+        so a keyboard user reaches everything by Tab and the browser scrolls it
+        into view. Adding one would buy nothing and cost a tab stop. */
+    <div className="h-full bg-mm-surface border-r flex flex-col overflow-y-auto">
       {/* Section 1: Palette */}
       <div className={`border-b shrink-0 ${materialsOpen ? 'max-h-[200px]' : ''}`}>
         <button
-          className="w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium text-mm-text transition-colors shrink-0"
+          className="w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium text-mm-text transition-colors shrink-0 sticky top-0 z-10"
           onClick={() => setMaterialsOpen(prev => !prev)}
           aria-expanded={materialsOpen}
         >
@@ -572,10 +597,13 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
         </Select>
       </div>}
 
-      {/* Section 3: Variables (collapsible) — flex-grows when a dataset is expanded */}
-      <div className={`flex flex-col border-b ${!questionsCollapsed && expandedDatasetId != null ? 'flex-1 min-h-0' : 'shrink-0'}`}>
+      {/* Section 3: Variables (collapsible) — natural height; the list inside
+          is what is capped (ColumnPicker). #894: this used to flip to
+          `flex-1 min-h-0` when a dataset was expanded, which is also why the
+          layout appeared to "resize itself" on a click. */}
+      <div className="flex flex-col border-b shrink-0">
         <button
-          className="w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium text-mm-text transition-colors shrink-0"
+          className="w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg hover:bg-mm-surface-hover border-b text-sm font-medium text-mm-text transition-colors shrink-0 sticky top-0 z-10"
           onClick={() => setQuestionsCollapsed(!questionsCollapsed)}
           aria-expanded={!questionsCollapsed}
         >
@@ -607,13 +635,17 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
       </div>
 
       {/* Section 4: Chart Options — Descriptives only */}
-      {activeTab === 'descriptives' && <div className={`flex flex-col ${!chartOptionsCollapsed && hasAnySelection && selectedMetrics.length > 0 ? 'flex-1 min-h-0' : 'shrink-0'}`}>
+      {/* #894: same treatment as Section 3. This one was less exposed — it is
+          the LAST child, so its chrome spilled past the bottom instead of over
+          a sibling — but it is the same elastic-child shape and is made
+          uniform rather than left as the one section that can still collapse. */}
+      {activeTab === 'descriptives' && <div className="flex flex-col shrink-0">
         <button
           // #394: a real `disabled` button when there's nothing to configure —
           // conveys the inactive state to AT and exempts the faint label from the
           // contrast check (WCAG 1.4.3 exempts inactive components).
           disabled={!(hasAnySelection && selectedMetrics.length > 0)}
-          className={`w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg border-b text-sm font-medium transition-colors shrink-0 ${
+          className={`w-full flex items-center gap-1.5 px-3 py-2 bg-mm-bg border-b text-sm font-medium transition-colors shrink-0 sticky top-0 z-10 ${
             hasAnySelection && selectedMetrics.length > 0
               ? 'text-mm-text hover:bg-mm-surface-hover cursor-pointer'
               : 'text-mm-text-faint cursor-default'
@@ -634,7 +666,10 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
           Chart Options
         </button>
         {!chartOptionsCollapsed && hasAnySelection && selectedMetrics.length > 0 ? (
-          <div className="flex-1 min-h-0 overflow-y-auto">
+          /* #894: bounded here rather than by a flexible parent, so it scrolls
+             instead of being squeezed to nothing. `overscroll-contain` keeps a
+             wheel gesture inside this list from chaining to the column. */
+          <div className="max-h-[45vh] overflow-y-auto overscroll-contain">
             <ChartOptionsPanel
               chartType={chartType}
               metricType={metricType}
@@ -918,12 +953,12 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
 
                 {/* Matrix Colors */}
                 <div className="space-y-1.5">
-                  <div className="text-[11px] text-mm-text-muted">Matrix Colors</div>
+                  <label htmlFor={`${selectId}-matrix-colors`} className="text-[11px] text-mm-text-muted cursor-pointer block">Matrix Colors</label>
                   <Select
                     value={corrColors}
                     onValueChange={(v) => setUrlParam('corrColors', v === 'diverging_blue_red' ? '' : v)}
                   >
-                    <SelectTrigger className="h-7 text-xs">
+                    <SelectTrigger id={`${selectId}-matrix-colors`} className="h-7 text-xs">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -982,12 +1017,12 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                     capability exists and why it does not apply here (the
                     `Code Text` decision / the identifier-guard precedent). */}
                 <div className="space-y-1.5">
-                  <div className="text-[11px] text-mm-text-muted">Compare By</div>
+                  <label htmlFor={`${selectId}-compare-by`} className="text-[11px] text-mm-text-muted cursor-pointer block">Compare By</label>
                   <Select
                     value={compareBy != null ? String(compareBy) : ''}
                     onValueChange={(v) => setUrlParam('compareBy', v)}
                   >
-                    <SelectTrigger className="h-7 text-xs border-2 border-[hsl(var(--mm-accent)/0.4)] bg-[hsl(var(--mm-accent)/0.05)]">
+                    <SelectTrigger id={`${selectId}-compare-by`} className="h-7 text-xs border-2 border-[hsl(var(--mm-accent)/0.4)] bg-[hsl(var(--mm-accent)/0.05)]">
                       <SelectValue placeholder="Select a column..." />
                     </SelectTrigger>
                     <SelectContent>
@@ -1009,12 +1044,12 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                 {/* Secondary grouping */}
                 {compareBy && (
                   <div className="space-y-1.5">
-                    <div className="text-[11px] text-mm-text-muted">Secondary Grouping</div>
+                    <label htmlFor={`${selectId}-secondary-grouping`} className="text-[11px] text-mm-text-muted cursor-pointer block">Secondary Grouping</label>
                     <Select
                       value={compareBy2 != null ? String(compareBy2) : '_none'}
                       onValueChange={(v) => setUrlParam('compareBy2', v === '_none' ? '' : v)}
                     >
-                      <SelectTrigger className="h-7 text-xs">
+                      <SelectTrigger id={`${selectId}-secondary-grouping`} className="h-7 text-xs">
                         <SelectValue placeholder="None" />
                       </SelectTrigger>
                       <SelectContent>
@@ -1134,12 +1169,12 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
               >
                 {/* Color Palette */}
                 <div className="space-y-1.5">
-                  <div className="text-[11px] text-mm-text-muted">Color Palette</div>
+                  <label htmlFor={`${selectId}-color-palette`} className="text-[11px] text-mm-text-muted cursor-pointer block">Color Palette</label>
                   <Select
                     value={rcPalette}
                     onValueChange={(v) => setUrlParam('rcPalette', v === 'default' ? '' : v)}
                   >
-                    <SelectTrigger className="h-7 text-xs">
+                    <SelectTrigger id={`${selectId}-color-palette`} className="h-7 text-xs">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>

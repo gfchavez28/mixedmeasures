@@ -1,11 +1,12 @@
-import { useState, useMemo, useRef, useCallback } from 'react'
+import { useState, useMemo, useRef, useCallback, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { FileInput, Trash2, Search, X, ArrowUpDown, FileText } from 'lucide-react'
+import { FileInput, Trash2, Search, X, ArrowUpDown, FileText, UserRound } from 'lucide-react'
 import { documentsApi, type DocumentListItem } from '@/lib/api'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
 import { isSupportedDocumentFile } from '@/lib/document-import-formats'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
+import { sortSources } from '@/lib/source-list-sort'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import InlineEditableText from '@/components/InlineEditableText'
 import { Input } from '@/components/ui/input'
@@ -22,6 +23,8 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
+import { toast } from 'sonner'
+import DocumentSubjectDialog from '@/components/DocumentSubjectDialog'
 
 const FORMAT_LABELS: Record<string, string> = {
   docx: 'DOCX',
@@ -52,6 +55,23 @@ export default function DocumentsListPage() {
   const [sortBy, setSortBy] = useState<'name' | 'date' | 'progress'>('date')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
   const [searchText, setSearchText] = useState('')
+  /**
+   * #932 — the card to hand focus back to once the list has re-rendered.
+   *
+   * Setting a subject closes a dialog that was opened from a context menu on a
+   * card, and focus landed on `<body>`: the first Tab afterwards hit *Skip to
+   * main content*, i.e. a keyboard user was returned to the top of the page on a
+   * flow whose whole point is labelling several documents in a row.
+   *
+   * Deferred rather than focused in `onSuccess`, because the mutation
+   * invalidates the list and the element that exists at that moment may not be
+   * the one React keeps. The effect below waits for the render.
+   *
+   * ⚠️ A REF, not state: this is not something the page renders, and holding it
+   * in state would mean a `setState` inside the effect — an extra render on
+   * every focus restore, and the advisory the lint gate tracks.
+   */
+  const refocusDocumentIdRef = useRef<number | null>(null)
 
   const filteredAndSorted = useMemo(() => {
     let result = documents
@@ -59,21 +79,42 @@ export default function DocumentsListPage() {
       const q = searchText.trim().toLowerCase()
       result = result.filter(d => d.name.toLowerCase().includes(q))
     }
-    const sorted = [...result].sort((a, b) => {
-      let cmp: number
-      if (sortBy === 'name') {
-        cmp = a.name.localeCompare(b.name)
-      } else if (sortBy === 'date') {
-        cmp = new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-      } else {
-        const progA = a.segment_count > 0 ? a.coded_segment_count / a.segment_count : 0
-        const progB = b.segment_count > 0 ? b.coded_segment_count / b.segment_count : 0
-        cmp = progA - progB
-      }
-      return sortDir === 'asc' ? cmp : -cmp
-    })
-    return sorted
+    // #932 — one comparator, with the `id` tie-break that keeps the rendered
+    // order independent of the server's. Documents are served
+    // `updated_at.desc()`, and a batch import gives every file ONE `created_at`,
+    // so without it any edit moved the card to the top of the list.
+    return sortSources(result, sortBy, sortDir, d => d.created_at)
   }, [documents, searchText, sortBy, sortDir])
+
+  /**
+   * #932 — return focus to the card a dialog was opened from.
+   *
+   * Keyed on the rendered list as well as the id: the mutation invalidates the
+   * query, so the element may not be in the DOM at the moment the mutation
+   * settles. Clearing the id only once the element is FOUND means a card that
+   * has been filtered out of view (or deleted) leaves the state harmlessly set
+   * rather than focusing something arbitrary.
+   */
+  useEffect(() => {
+    const id = refocusDocumentIdRef.current
+    if (id === null) return
+    const card = window.document.querySelector<HTMLElement>(
+      `[data-document-card="${id}"]`,
+    )
+    // Not rendered (filtered out of view, or deleted): leave the request
+    // pending rather than focusing something arbitrary.
+    if (!card) return
+    card.focus()
+    refocusDocumentIdRef.current = null
+    // 🔴 **No dependency array, deliberately.** The first version watched the
+    // sorted list, on the reasoning that the card re-renders after the refetch —
+    // and a test driving the real gesture showed focus still landing on `<body>`:
+    // React Query's structural sharing KEEPS the previous array reference when the
+    // refetched payload is deeply equal, so the memo never recomputed and the
+    // effect never ran. Restoring focus must not depend on the list changing
+    // identity. This runs after every render and does nothing unless a restore is
+    // pending, which is one null check.
+  })
 
   const deleteMutation = useMutation({
     mutationFn: (documentId: number) => documentsApi.remove(projectId, documentId),
@@ -87,6 +128,11 @@ export default function DocumentsListPage() {
 
   const [deleteDocumentId, setDeleteDocumentId] = useState<number | null>(null)
   const [editingDocumentId, setEditingDocumentId] = useState<number | null>(null)
+  // Row 46 — which document's subject is being edited, if any.
+  const [subjectDocumentId, setSubjectDocumentId] = useState<number | null>(null)
+  // Looked up from the LIVE list rather than stashed on open, so the dialog's
+  // tick follows the row after a change instead of showing the pre-edit value.
+  const subjectDocument = documents.find(d => d.id === subjectDocumentId) ?? null
 
   const updateMutation = useMutation({
     mutationFn: ({ id, name }: { id: number; name: string }) =>
@@ -96,6 +142,26 @@ export default function DocumentsListPage() {
       queryClient.invalidateQueries({ queryKey: ['document', projectId, variables.id] })
       queryClient.invalidateQueries({ queryKey: ['project-summary', projectId] })
     },
+  })
+
+  // Row 46 — the subject link. Kept separate from `updateMutation` because it
+  // invalidates a different set: a subject change moves what the qualitative
+  // analysis surfaces can group by, and it changes the PARTICIPANT's own
+  // document list, neither of which a rename touches.
+  const subjectMutation = useMutation({
+    mutationFn: ({ id, participantId }: { id: number; participantId: number | null }) =>
+      // ⚠️ `null` is sent deliberately — it is the unlink, not an omission.
+      documentsApi.update(projectId, id, { participant_id: participantId }),
+    onSuccess: (_result, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['documents', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['document', projectId, variables.id] })
+      queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
+      // The document is now groupable (or no longer is) on the qual surfaces.
+      queryClient.invalidateQueries({ queryKey: ['qual-source-frequencies', projectId] })
+      // #932 — hand focus back to the card this was about, once it re-renders.
+      refocusDocumentIdRef.current = variables.id
+    },
+    onError: () => toast.error('Could not change the subject of this document'),
   })
 
   // Drag-and-drop
@@ -150,7 +216,8 @@ export default function DocumentsListPage() {
           >
             All Documents
             {documents.length > 0 && (
-              <span className="ml-1.5 opacity-60">{documents.length}</span>
+              // #908: a text-node space keeps the count out of the label's name.
+              <span className="ml-1.5 opacity-60">{' '}{documents.length}</span>
             )}
           </button>
           <button
@@ -268,6 +335,7 @@ export default function DocumentsListPage() {
               onRename={() => setEditingDocumentId(doc.id)}
               onUpdate={(name) => updateMutation.mutate({ id: doc.id, name })}
               onEditEnd={() => setEditingDocumentId(null)}
+              onEditSubject={() => setSubjectDocumentId(doc.id)}
             />
           ))}
         </div>
@@ -289,6 +357,20 @@ export default function DocumentsListPage() {
           }
         }}
       />
+
+      {/* Row 46 — "this document is about…" */}
+      <DocumentSubjectDialog
+        open={subjectDocumentId !== null}
+        projectId={projectId}
+        documentName={subjectDocument?.name ?? ''}
+        participantId={subjectDocument?.participant_id ?? null}
+        onClose={() => setSubjectDocumentId(null)}
+        onChoose={(participantId) => {
+          if (subjectDocumentId !== null) {
+            subjectMutation.mutate({ id: subjectDocumentId, participantId })
+          }
+        }}
+      />
     </div>
   )
 }
@@ -302,6 +384,7 @@ function DocumentCard({
   onRename,
   onUpdate,
   onEditEnd,
+  onEditSubject,
 }: {
   document: DocumentListItem
   projectId: number
@@ -310,13 +393,21 @@ function DocumentCard({
   onRename: () => void
   onUpdate: (name: string) => void
   onEditEnd: () => void
+  /** Row 46 — opens the "who is this about?" dialog. */
+  onEditSubject: () => void
 }) {
   const progress = doc.segment_count > 0 ? doc.coded_segment_count / doc.segment_count : 0
 
   return (
     <ContextMenu>
       <ContextMenuTrigger>
-        <Link to={`/projects/${projectId}/documents/${doc.id}`}>
+        {/* #932 — the card is addressable by the document it shows, so focus
+            can be returned to it by IDENTITY after a dialog. A positional
+            restore lands on a different document the moment the list reorders. */}
+        <Link
+          to={`/projects/${projectId}/documents/${doc.id}`}
+          data-document-card={doc.id}
+        >
           <div className="rounded-lg border border-mm-surface-border bg-mm-surface p-4 cursor-pointer hover:border-purple-300 dark:hover:border-purple-700 transition-colors group">
           <div className="flex items-start justify-between gap-2 mb-2">
             <div className="min-w-0 flex-1">
@@ -341,6 +432,17 @@ function DocumentCard({
           <div className="text-xs text-mm-text-muted mb-2">
             {MODE_LABELS[doc.segmentation_mode] || doc.segmentation_mode}
           </div>
+
+          {/* Row 46 — the subject, shown only when set. An "About: —" placeholder
+            * on every unlinked document would be noise on the common case; the
+            * capability is discoverable from the context menu, which is where
+            * Rename and Delete already live. */}
+          {doc.participant_label && (
+            <div className="flex items-center gap-1 text-xs text-mm-text-secondary mb-2 min-w-0">
+              <UserRound className="w-3 h-3 shrink-0" aria-hidden="true" />
+              <span className="truncate">About {doc.participant_label}</span>
+            </div>
+          )}
 
           <div className="flex items-center justify-between text-xs text-mm-text-muted">
             {/* Documents have no facilitator concept — bare "coded" stays
@@ -370,6 +472,10 @@ function DocumentCard({
       </ContextMenuTrigger>
       <ContextMenuContent>
         <ContextMenuItem onClick={onRename}>Rename</ContextMenuItem>
+        <ContextMenuItem onClick={onEditSubject}>
+          <UserRound className="w-3.5 h-3.5 mr-2" aria-hidden="true" />
+          {doc.participant_id === null ? 'Set subject…' : 'Change subject…'}
+        </ContextMenuItem>
         <ContextMenuItem onClick={onDelete} className="text-red-600 dark:text-red-400">
           <Trash2 className="w-3.5 h-3.5 mr-2" />
           Delete

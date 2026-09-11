@@ -27,6 +27,50 @@ UTCTimestamp = Annotated[
 ]
 
 
+def strip_required_text(field: str):
+    """Build an after-validator that trims a required text field and refuses a
+    whitespace-only value (#556a, generalised for #925).
+
+    🔴 **The ordering trap this exists for: `min_length=1` is a CONSTRAINT,
+    evaluated on the RAW input BEFORE any after-validator runs** — so `"   "`
+    satisfies it and arrives here. The empty-after-strip check below is what
+    actually rejects it, and a field declared with `min_length=1` and no validator
+    stores whatever the constraint let through.
+
+    `field` is required rather than derived so the message names the field the way
+    `ParticipantCreate`'s did before this was shared; the field name is already in
+    Pydantic's `loc`, but the sentence is what a researcher sees.
+
+    Two live instances of the gap this closes, both reached by API or script
+    rather than by the UI (which trims and disables its submit button):
+    `DatasetCreate` stored `""` because the router stripped AFTER validation, and
+    `DatasetUpdate` stored the padding verbatim because nothing stripped at all.
+    """
+    def _strip(value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError(f"{field} cannot be blank or whitespace-only")
+        return stripped
+
+    return _strip
+
+
+def strip_optional_text(value: str | None) -> str | None:
+    """Trim a nullable text field; blank-after-strip normalizes to None.
+
+    A field whose absence and whose emptiness mean the same thing should not have
+    two representations — every reader then needs `or None` and one of them
+    forgets. Shared with `ParticipantCreate.display_name` / `.role`, where the
+    value also propagates into speaker names.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 class AppliedCodeDetail(BaseModel):
     """Per-application coder attribution for a coded segment/value (Track J · J1).
 

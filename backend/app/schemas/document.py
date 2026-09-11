@@ -9,7 +9,16 @@ from .segment import SegmentNoteInfo
 class DocumentUpdateRequest(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
-    summary: str | None = None
+    # ⚠️ NO `summary` — retired from the wire 2026-09-09 (#895). The COLUMN is
+    # kept (`models/document.py`), so nothing is dropped from an existing
+    # database or from a `.mmproject`, which serialises by reflection.
+    # Row 46 — "this document is about…". `None` is a MEANINGFUL value here
+    # (unlink), unlike the three fields above where it only ever means "not
+    # supplied". That distinction survives because `update_document` applies
+    # `model_dump(exclude_unset=True)`: an omitted key is absent from the dump,
+    # an explicit `null` is present with value None. Do NOT rewrite that loop
+    # to skip falsy values — unlinking would silently become a no-op.
+    participant_id: int | None = None
 
 
 class DocumentNoteCreateRequest(BaseModel):
@@ -30,6 +39,11 @@ class DocumentListItem(BaseModel):
     page_count: int | None = None
     created_at: UTCTimestamp
     updated_at: UTCTimestamp
+    # Row 46. Both halves travel together on purpose: the id is what an edit
+    # sends back, the label is the only half that can be rendered. A payload
+    # carrying one of them makes every consumer fetch or guess the other.
+    participant_id: int | None = None
+    participant_label: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -90,7 +104,9 @@ class DocumentDetailResponse(BaseModel):
     id: int
     name: str
     description: str | None = None
-    summary: str | None = None
+    # ⚠️ NO `summary` — see `DocumentUpdateRequest` (#895). This one was declared
+    # and never populated: `get_document` builds the response explicitly and
+    # never passed it, so it answered `null` on every request for five months.
     source_format: str
     segmentation_mode: str
     segment_count: int = 0
@@ -98,6 +114,9 @@ class DocumentDetailResponse(BaseModel):
     page_count: int | None = None
     created_at: UTCTimestamp
     updated_at: UTCTimestamp
+    # Row 46 — see `DocumentListItem`; the workbench needs both halves too.
+    participant_id: int | None = None
+    participant_label: str | None = None
     segments: list[DocumentSegmentResponse] = []
     image_positions: list[DocumentImagePosition] = []
 

@@ -88,3 +88,55 @@ export function invalidateColumnRemoved(
   qc.invalidateQueries({ queryKey: ['analysis-domains', projectId] })
   qc.invalidateQueries({ queryKey: ['equivalence-groups', projectId] })
 }
+
+/**
+ * Row 47 — a dataset's ROW SET changing, which is a different blast radius from
+ * a column's dictionary changing.
+ *
+ * 🔴 **Extracted because `deleteRow` was under-invalidating and add-record would
+ * have inherited it verbatim (#733: a copy does not only drift, it propagates
+ * the original's defect).** That mutation invalidated `['dataset-data']` and
+ * nothing else, so after deleting a record:
+ *
+ *  - the Datasets list went on showing the old **Records** count (`list_datasets`
+ *    returns `row_count`) for the 60s `staleTime`;
+ *  - the Text Coding focal-column picker went on showing the old
+ *    `N/M responded` rate — #830(d) made that denominator a `DatasetRow` count,
+ *    so it moves when a record appears or disappears, not only when a cell does;
+ *  - the Data Quality percentages kept their old base for the same reason.
+ *
+ * ⚠️ **A record with every cell empty still moves those numbers.** That is the
+ * non-obvious half: it is tempting to treat an empty row as invisible to
+ * analysis, and the row-counting denominators say otherwise.
+ *
+ * ⚠️ `['participants', …]` is here for the DELETE direction — a removed row can
+ * take a participant link with it, changing the dataset count shown on the
+ * Participants page. Adding a record never links anyone, so this key is
+ * redundant on that arm; it is kept because a blanket set that is right for both
+ * verbs is cheaper than two nearly-identical helpers, and invalidating an
+ * inactive query costs one cache mark and no request (the reasoning
+ * `invalidateColumnDictionary` above records).
+ */
+export function invalidateRowSetChanged(
+  qc: QueryClient,
+  projectId: number | string,
+  datasetId: number | string,
+): void {
+  const keys: (string | number)[][] = [
+    ['dataset-data', projectId, datasetId],
+    // The list page's "Records" column.
+    ['datasets', projectId],
+    // #830(d): a ROW-count denominator, not a cell-count one.
+    ['text-columns', projectId],
+    ['dq-summary', projectId],
+    ['dq-patterns', projectId],
+    // The server marks metrics stale on a row-set change; these read them.
+    ['metrics', projectId],
+    ['domain-scores', projectId],
+    // See the note above — the delete arm.
+    ['participants', projectId],
+  ]
+  for (const key of keys) {
+    qc.invalidateQueries({ queryKey: key })
+  }
+}

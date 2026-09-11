@@ -144,6 +144,55 @@ class Dataset(Base):
     # (crosswalk column headers, cell dots, Datasets list, page titles, etc.).
     # Null → use the auto-assigned palette color from `dataset-color.ts`.
     color = Column(String(7), nullable=True)
+    # ── Tool-maintained datasets (row 45 (i) step 3) ─────────────────────────
+    # NULL = an ordinary dataset the researcher imported. A value names the KIND
+    # of spine this table projects — today only "participants", one row per
+    # `Participant` in the project.
+    #
+    # 🔴 The decision this column encodes is "LOCKED SPINE, OPEN COLUMNS": the
+    # ROWS are the tool's (they are DERIVED from `Participant`, so deleting a
+    # record, appending a file, re-linking a row or deleting the dataset are
+    # refused) while the COLUMNS are the researcher's (they may add variables,
+    # edit their own cells, rename and export freely). The refusal set follows
+    # from that one property rather than a list, which is what stops the next
+    # affordance needing a new decision — `services/participant_dataset.py`
+    # owns the predicate and `routers/dataset.py` consumes it.
+    #
+    # ⚠️ A machine-made dataset RENDERS like a hand-made one and inherits every
+    # affordance it has (`feedback_entry_points_are_a_population`), so a new
+    # row-set-touching endpoint must ask the predicate — pinned by a fail-closed
+    # scan in `tests/test_participant_dataset.py`.
+    #
+    # ⚠️ `.mmproject` `CURRENT_FORMAT_VERSION` deliberately NOT bumped: an older
+    # build drops this column and imports an ORDINARY dataset holding exactly
+    # the same data, which is that build's own status quo — and re-importing
+    # into a newer build restores the marker, with the sync as the repair. The
+    # row-46 precedent (2026-09-07).
+    managed_kind = Column(String(32), nullable=True)
+
+    # Row 45 (i) step 4 — the freshness PAIR, and they divide the work by what
+    # each can honestly claim.
+    #
+    # `managed_synced_at` is the truth: when the tool last recomputed this
+    # table's derived columns. Always displayed, never wrong.
+    #
+    # `managed_stale` is a POSITIVE signal only — *we know something changed*.
+    # 🔴 **Its ABSENCE never means "up to date"**, and that is deliberate rather
+    # than a shortfall: MEASURED, a rating score moves when any of EIGHT input
+    # classes changes (a rating · a code application appearing or disappearing ·
+    # a code's declared scale · code equivalence grouping · any of three
+    # participant-link FKs · `Speaker.is_facilitator` · a segment merge/split ·
+    # ARCHIVING A CODER, since `gather_target_votes` filters
+    # `User.archived == False`). No enumeration of write sites covers that
+    # reliably, so a marker whose absence asserted freshness would be a lie the
+    # first time one was missed. With the timestamp beside it, a missed trigger
+    # degrades to "computed 3 days ago" rather than to a false claim.
+    #
+    # ⚠️ `services/staleness.py::mark_metrics_stale` CANNOT serve this — it keys
+    # on `expression` / `depends_on_column_ids`, and a score column has neither.
+    managed_synced_at = Column(DateTime, nullable=True)
+    managed_stale = Column(Boolean, nullable=True, default=False, server_default="0")
+
     # Track J · J3-2-0: stable cross-instance identity for merge matching
     uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
     created_at = Column(DateTime, default=func.now(), nullable=False)
@@ -171,6 +220,17 @@ class Dataset(Base):
     # `delete_dataset` alone would have left that path broken.
     columns = relationship("DatasetColumn", back_populates="dataset", cascade="all, delete-orphan", passive_deletes=True, order_by="DatasetColumn.display_order, DatasetColumn.sequence_order")
     rows = relationship("DatasetRow", back_populates="dataset", cascade="all, delete-orphan", passive_deletes=True)
+
+    __table_args__ = (
+        # Row 45 (i) step 3 — at most ONE managed dataset per kind per project,
+        # enforced by an index rather than by a service that remembers to check.
+        # Partial (managed_kind IS NOT NULL) so ordinary datasets are unaffected;
+        # same shape as `uq_dataset_rows_dataset_participant`.
+        Index(
+            "uq_datasets_project_managed_kind", "project_id", "managed_kind",
+            unique=True, sqlite_where=_sa_text("managed_kind IS NOT NULL"),
+        ),
+    )
 
 
 class DatasetColumn(Base):
@@ -228,6 +288,24 @@ class DatasetColumn(Base):
         index=True,
     )
     derived_via = Column(String(255), nullable=True)
+
+    # Row 45 (i) step 4 — what a TOOL-MAINTAINED column is, as JSON:
+    # `{"kind": ..., "code_id": N, "basis": ...}`. NULL for every ordinary
+    # column. Owned by `services/participant_scores.py`; never parsed inline.
+    #
+    # ⚠️ It exists because a score column is NOT identifiable by its name — the
+    # researcher may rename it, and a rename must not orphan the cells the
+    # refresh has to rewrite.
+    #
+    # ⚠️ `kind` distinguishes the SCORE from its `n`, which are two columns per
+    # rated code on purpose (#693: *the n is the dangerous half* — a mean of
+    # 3.64 over one passage and over eight are the same number and not the same
+    # evidence, and a `DatasetValue` holds only the number).
+    #
+    # ⚠️ `basis` is the stated-basis family's field, stored per column so a
+    # future variant takes a NEW value rather than changing what an unchanged
+    # heading means.
+    managed_spec = Column(Text, nullable=True)
 
     # Demographic subtype (role, race, gender, age, or custom)
     demographic_subtype = Column(String(40), nullable=True)

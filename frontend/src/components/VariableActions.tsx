@@ -225,13 +225,41 @@ export function ComputedVariablePanel({
 /**
  * The honest replacement for three editors that could not save.
  *
- * ⚠️ **The two refusals need different words.** A computed variable is defined
- * by its formula — labelling its output is meaningless, not merely disallowed.
- * An open-text or identifier column has no codes to label. Collapsing both into
- * "not available for this column" would teach the researcher nothing, and the
- * layer separation this whole arc is about is exactly what the first sentence
- * has to convey.
+ * ⚠️ **Each refusal needs its OWN words.** A computed variable is defined by its
+ * formula — labelling its output is meaningless, not merely disallowed. An
+ * open-text or identifier column has no codes to label. A MANAGED one is
+ * recomputed from the project's coding, so anything declared here is overwritten
+ * by the next refresh. Collapsing them into "not available for this column"
+ * teaches the researcher nothing, and the layer separation this whole arc is
+ * about is exactly what the first sentence has to convey.
+ *
+ * 🔴 **`satisfies Record<VariableRulesRefusal, …>` is load-bearing: a fourth
+ * refusal is a COMPILE error here rather than silently falling into whichever
+ * branch happens to be the `else`.** That is not hypothetical — adding
+ * `'managed'` to the predicate (#926) landed it in the TYPE branch, which told
+ * the researcher their participant score was ineligible *because it is numeric*
+ * and invited them to change a type the server also refuses.
  */
+const RULES_UNAVAILABLE = {
+  computed: () => ({
+    lead: 'Value labels, missing-value rules and recodes apply to collected variables.',
+    detail:
+      'This variable is derived from its formula, so its values are recomputed rather '
+      + 'than declared. Edit the formula above to change what it holds.',
+  }),
+  managed: () => ({
+    lead: 'Value labels, missing-value rules and recodes apply to variables you collected or entered.',
+    detail:
+      'This variable is maintained by the tool — its values are recomputed from your '
+      + 'coding — so anything declared here would be overwritten by the next refresh. '
+      + 'Derive a new variable from it if you need one you can recode.',
+  }),
+  ineligible_type: (columnType: string) => ({
+    lead: `Value labels, missing-value rules and recodes are not available for ${columnType} variables.`,
+    detail: 'Change the variable type above if this was misdetected.',
+  }),
+} satisfies Record<VariableRulesRefusal, (columnType: string) => { lead: string; detail: string }>
+
 export function VariableRulesUnavailable({
   refusal,
   columnType,
@@ -239,32 +267,14 @@ export function VariableRulesUnavailable({
   refusal: VariableRulesRefusal
   columnType: string
 }) {
+  const { lead, detail } = RULES_UNAVAILABLE[refusal](columnType)
   return (
     <div
       className="mb-4 p-4 rounded-lg border border-dashed border-mm-border-medium text-center"
       role="note"
     >
-      {refusal === 'computed' ? (
-        <>
-          <p className="text-sm text-mm-text-faint">
-            Value labels, missing-value rules and recodes apply to collected variables.
-          </p>
-          <p className="text-xs text-mm-text-faint mt-1">
-            This variable is derived from its formula, so its values are recomputed rather
-            than declared. Edit the formula above to change what it holds.
-          </p>
-        </>
-      ) : (
-        <>
-          <p className="text-sm text-mm-text-faint">
-            Value labels, missing-value rules and recodes are not available for {columnType}{' '}
-            variables.
-          </p>
-          <p className="text-xs text-mm-text-faint mt-1">
-            Change the variable type above if this was misdetected.
-          </p>
-        </>
-      )}
+      <p className="text-sm text-mm-text-faint">{lead}</p>
+      <p className="text-xs text-mm-text-faint mt-1">{detail}</p>
     </div>
   )
 }

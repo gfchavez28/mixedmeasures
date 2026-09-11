@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback, useId, useMemo } from 'react'
 import {
   GripVertical,
   ArrowUpDown,
@@ -149,6 +149,10 @@ export default function QualChartOptionsPanel({
   showChartN,
   onShowChartNChange,
 }: QualChartOptionsPanelProps) {
+  // #900: `OptionRow fullWidth` names the GROUP; each size picker still has to
+  // name itself. Pairing the visible caption via <label htmlFor> keeps the
+  // accessible name identical to the visible text (WCAG 2.5.3).
+  const fontId = useId()
   const showValueMode = chartType === 'heatmap' || chartType === 'bar' || chartType === 'stacked_bar'
   const showDenominator = showValueMode && valueMode === 'segment_proportion'
   // #675: the three charts whose shaping consumes `sortOrder`. It used to be
@@ -340,7 +344,7 @@ export default function QualChartOptionsPanel({
                     value={String(formatting.labelFontSize)}
                     onValueChange={v => onFormattingChange({ labelFontSize: Number(v) })}
                   >
-                    <SelectTrigger className="h-7 text-xs px-1.5">
+                    <SelectTrigger id={`${fontId}-label`} className="h-7 text-xs px-1.5">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -349,14 +353,14 @@ export default function QualChartOptionsPanel({
                       ))}
                     </SelectContent>
                   </Select>
-                  <span className="text-[11px] text-mm-text-faint mt-0.5 block text-center">Label</span>
+                  <label htmlFor={`${fontId}-label`} className="text-[11px] text-mm-text-faint mt-0.5 block text-center cursor-pointer">Label</label>
                 </div>
                 <div>
                   <Select
                     value={String(formatting.dataLabelFontSize)}
                     onValueChange={v => onFormattingChange({ dataLabelFontSize: Number(v) })}
                   >
-                    <SelectTrigger className="h-7 text-xs px-1.5">
+                    <SelectTrigger id={`${fontId}-data`} className="h-7 text-xs px-1.5">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -365,14 +369,14 @@ export default function QualChartOptionsPanel({
                       ))}
                     </SelectContent>
                   </Select>
-                  <span className="text-[11px] text-mm-text-faint mt-0.5 block text-center">Data</span>
+                  <label htmlFor={`${fontId}-data`} className="text-[11px] text-mm-text-faint mt-0.5 block text-center cursor-pointer">Data</label>
                 </div>
                 <div>
                   <Select
                     value={String(formatting.titleFontSize)}
                     onValueChange={v => onFormattingChange({ titleFontSize: Number(v) })}
                   >
-                    <SelectTrigger className="h-7 text-xs px-1.5">
+                    <SelectTrigger id={`${fontId}-title`} className="h-7 text-xs px-1.5">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -381,7 +385,7 @@ export default function QualChartOptionsPanel({
                       ))}
                     </SelectContent>
                   </Select>
-                  <span className="text-[11px] text-mm-text-faint mt-0.5 block text-center">Title</span>
+                  <label htmlFor={`${fontId}-title`} className="text-[11px] text-mm-text-faint mt-0.5 block text-center cursor-pointer">Title</label>
                 </div>
               </div>
             </OptionRow>

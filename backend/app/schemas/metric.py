@@ -416,18 +416,6 @@ class CrossTabResponse(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-class RowScoreItem(BaseModel):
-    dataset_row_id: int
-    row_identifier: str | None = None
-    score: float | None = None
-
-
-class RowScoresResponse(BaseModel):
-    metric_id: int
-    metric_name: str
-    scores: list[RowScoreItem]
-
-
 class MatrixColumnInfo(BaseModel):
     metric_id: int
     label: str

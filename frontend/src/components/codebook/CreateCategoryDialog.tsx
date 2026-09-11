@@ -73,7 +73,7 @@ export default function CreateCategoryDialog({
         onOpenChange(v)
       }}
     >
-      <DialogContent className="sm:max-w-md">
+      <DialogContent aria-describedby={undefined} className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Create Category</DialogTitle>
         </DialogHeader>

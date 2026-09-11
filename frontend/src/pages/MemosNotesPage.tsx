@@ -170,6 +170,11 @@ export default function MemosNotesPage() {
           id="panel-memos"
           aria-labelledby="mn-view-memos"
           aria-hidden={view === 'notes'}
+          // #910: `aria-hidden` hides the collapsed pane from a reader but its
+          // buttons stayed in the Tab order at zero width — measured: six
+          // focusable controls inside an aria-hidden, 0px-wide subtree. `inert`
+          // removes them from focus and hit-testing as well.
+          inert={view === 'notes'}
           tabIndex={-1}
           className={`flex flex-col overflow-hidden ${
             view === 'both' ? 'border-b md:border-b-0 md:border-r border-mm-border-medium' : ''
@@ -199,6 +204,7 @@ export default function MemosNotesPage() {
           id="panel-notes"
           aria-labelledby="mn-view-notes"
           aria-hidden={view === 'memos'}
+          inert={view === 'memos'}
           tabIndex={-1}
           className="flex flex-col overflow-hidden"
           style={{

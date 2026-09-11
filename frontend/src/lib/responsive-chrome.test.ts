@@ -379,7 +379,63 @@ describe('#830(a) — the coder name collapses at a breakpoint', () => {
   it('declares the collapse as a named constant, like RAIL_LABEL and TAB_LABEL', () => {
     // Not hand-rolled at the call site: the rule keeps the collapse and any
     // padding it needs inside ONE constant so the #721 pair cannot separate.
-    expect(railSource).toMatch(/const CODER_LABEL = 'sr-only sm:not-sr-only'/)
+    expect(railSource).toMatch(/const CODER_LABEL =\s*\n?\s*'sr-only @min-\[\d+px\]\/rail:not-sr-only/)
+  })
+
+  /**
+   * #899 — the three ways this collapse can go silently wrong.
+   *
+   * It is a CONTAINER query now, because a media query reads the viewport while
+   * the rail only ever has the client width: a 15px scrollbar changed no media
+   * query, so at a 640px viewport the name un-collapsed into a row that had 625px
+   * — 10px of horizontal document scroll. (And the filed 10px was the SHORTEST
+   * case: the span is capped at 80px, so a long username overflowed by 33px with
+   * no scrollbar at all.)
+   *
+   * 🔴 **Every failure mode of a container query is SILENT**, which is why these
+   * are pinned in source rather than left to a live pass. A variant naming a
+   * container that no ancestor declares simply never matches — the label stays
+   * hidden forever and nothing errors. jsdom resolves no Tailwind and computes no
+   * layout, so only the source agreement is checkable here; the widths themselves
+   * were measured live and are recorded in `TopRail.tsx`.
+   */
+  const containerName = () => railSource.match(/const RAIL_CONTAINER = '@container\/(\w+)'/)?.[1]
+
+  it('both rail rows declare the container the variant asks for', () => {
+    // A container variant with no container ancestor NEVER matches. The compact
+    // row and the full rail's row 1 each render the same coder button, so the one
+    // that forgot would collapse the name permanently on every page it serves.
+    const name = containerName()
+    expect(name, 'RAIL_CONTAINER must declare a NAMED container').toBeTruthy()
+    const rows = code('components/TopRail.tsx').filter(
+      l => l.includes('RAIL_CONTAINER') && !l.includes('const RAIL_CONTAINER'),
+    )
+    expect(rows.length, 'both rail rows must carry RAIL_CONTAINER').toBe(2)
+  })
+
+  it('the coder label queries the container by the name that is declared', () => {
+    // The pair that fails silently: `@container/rail` + `@min-[…]/toprail:` is
+    // valid CSS that matches nothing. Read both ends and compare.
+    const name = containerName()
+    const used = railSource.match(/@min-\[\d+px\]\/(\w+):not-sr-only/)?.[1]
+    expect(used, 'CODER_LABEL must use a NAMED container query').toBeTruthy()
+    expect(used).toBe(name)
+  })
+
+  it('re-asserts truncate on the same variant as not-sr-only', () => {
+    // #721's rider, one utility further than that guard can see: `not-sr-only`
+    // declares `overflow: visible; white-space: normal`, so it UNDOES `truncate`
+    // in the visible state. Measured at 1280 with the label at its 80px cap: the
+    // name wrapped to two lines and the button grew from 24px to 40px inside a
+    // 38px row. `RESET_BY_NOT_SR_ONLY` matches `overflow-*`/`whitespace-*` by
+    // prefix and cannot see a compound utility that spells them differently.
+    const label = railSource.match(/const CODER_LABEL =\s*\n?\s*'([^']+)'/)?.[1]
+    expect(label, 'CODER_LABEL must be a single-quoted class string').toBeTruthy()
+    const variant = label!.match(/(@min-\[\d+px\]\/\w+):not-sr-only/)?.[1]
+    expect(label).toContain(`${variant}:truncate`)
+    // And the call site must not re-add a bare one, which would lose again.
+    const callSite = code('components/TopRail.tsx').find(l => l.includes('max-w-[80px]'))
+    expect(callSite!).not.toMatch(/(^|\s)truncate(\s|`)/)
   })
 
   it('the coder name USES it', () => {
@@ -394,10 +450,20 @@ describe('#830(a) — the coder name collapses at a breakpoint', () => {
   it('collapses LATER than the pills and the tabs', () => {
     // Ordering is a decision, not an accident: at a narrow width, which coder
     // you are attributing work to matters more than a search label does.
+    //
+    // ⚠️ The two VIEWPORT constants stay viewport-keyed on purpose (#899).
+    // Measured at 1280 with a forced scrollbar: the rail overflowed by 0px, i.e.
+    // they have the slack this one did not. Converting them would change
+    // behaviour at 1024/1280 for no defect — the negative is recorded so the
+    // mixed mental model does not read as an oversight and get "fixed".
     const bp = (name: string) => railSource.match(new RegExp(`const ${name} = 'sr-only (\\w+):not-sr-only'`))?.[1]
     expect(bp('RAIL_LABEL')).toBe('xl')
     expect(bp('TAB_LABEL')).toBe('lg')
-    expect(bp('CODER_LABEL')).toBe('sm')
+    // The coder label's threshold is a CONTENT-box width, not a screen size, so
+    // it is not comparable to `lg`/`xl` — it is asserted by the #899 cases above.
+    // It must still be the one that survives longest, which at 656px it is.
+    const coderPx = Number(railSource.match(/@min-\[(\d+)px\]\/\w+:not-sr-only/)?.[1])
+    expect(coderPx, 'the coder label must collapse LAST of the three').toBeLessThan(1024)
   })
 
   it('the identity survives the collapse', () => {
@@ -536,5 +602,68 @@ describe('#880 — chrome that collapses below `md` on the two starved coding su
     ).toBe(true)
     // jsdom has no matchMedia; the guard must not throw the pane's initializer.
     expect(src).toMatch(/typeof window\.matchMedia !== 'function'/)
+  })
+})
+
+/**
+ * #937 — the breadcrumb painted OVER the action cluster, and no overflow metric
+ * could see it.
+ *
+ * 🔴 **THE MEASUREMENT THAT CLEARED THIS ROW IS THE ONE THAT MISSED IT.** #830(a)
+ * and #899 both read `scrollWidth` and both reported the rail clean at 640px —
+ * correctly, because the row did not overflow. It did not overflow because two
+ * SIBLINGS OVERLAPPED: measured at 640×360, the crumb *Documents* ran x=274–347
+ * while the action cluster begins at x=276, so *Search* (276–306) and
+ * *Participants* (310–340) were painted over. **An overflow metric cannot see an
+ * overlap** — #894's lesson on the other axis. Verify this one with element BOXES.
+ *
+ * 🔴 **The container was ALREADY the flexible child and was already doing its job.**
+ * Auditing for the absence of #718's remedy would have been a false negative here,
+ * exactly as it was in #830(a). What was missing sat one level DOWN: each crumb's
+ * wrapper carried flexbox's default `min-width: auto`, so the container shrank while
+ * its contents refused to, and nothing clipped the difference.
+ *
+ * ⚠️ jsdom computes no layout, so these pin the TECHNIQUE. **Re-drive at 640×360 and
+ * read the boxes** after touching the rail.
+ */
+describe('#937 — the breadcrumb yields and clips instead of overlapping', () => {
+  it('the breadcrumb container clips as well as flexes', () => {
+    // BOTH halves, and #894 refuted each alone: granting the collapse without an
+    // overflow turns a spill into an OVERLAP (which reads as corrupted text, worse
+    // than clipped text); clipping without granting the collapse amputates the crumb
+    // instead of ellipsizing it.
+    expect(read('components/TopRail.tsx'), 'the flexible breadcrumb child must also clip')
+      .toMatch(/min-w-0 flex-1 overflow-hidden/)
+  })
+
+  it('every crumb wrapper can shrink', () => {
+    // The defect: `<span className="flex items-center">` per crumb with no min-w-0,
+    // so the `truncate max-w-[110px]` inside it never got the chance to fire.
+    const wrappers = code('components/TopRail.tsx').filter(l => /<span key=\{crumb\./.test(l))
+    expect(wrappers.length, 'the crumb wrapper was not found — has the rail moved?')
+      .toBeGreaterThanOrEqual(1)
+    for (const line of wrappers) expect(line).toMatch(/min-w-0/)
+  })
+
+  it('the path separators stay rigid', () => {
+    // The characters are what should be spent under pressure, not the separators
+    // that say this is a path at all.
+    const seps = code('components/TopRail.tsx').filter(l => /text-white\/20/.test(l))
+    expect(seps.length).toBeGreaterThanOrEqual(1)
+    for (const line of seps) expect(line).toMatch(/shrink-0/)
+  })
+
+  it('both truncating crumb variants carry their full text in a title', () => {
+    // Both variants truncate and only the non-link one had a `title`, so a truncated
+    // project name could not be read at all.
+    // ⚠️ Counted over the WHOLE source, not per line: the first draft of this
+    // assertion filtered lines containing `max-w-[110px]` and demanded `title=` on
+    // the same line — which the `<Link>` variant fails purely because its attributes
+    // are formatted across several lines. A line is not an element.
+    const src = read('components/TopRail.tsx')
+    const truncating = src.match(/max-w-\[110px\]/g) ?? []
+    const titled = src.match(/title=\{crumb\.label\}/g) ?? []
+    expect(truncating.length, 'expected both crumb variants').toBe(2)
+    expect(titled.length, 'each truncating crumb needs its own title').toBe(2)
   })
 })

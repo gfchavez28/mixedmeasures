@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect, type CSSProperties } from 'react'
+import { toast } from 'sonner'
 import type { DatasetColumn, DatasetValueCell, RecodeDefinitionSummary } from '@/lib/api'
 import { useTheme } from '@/lib/theme-context'
 import { reflectReverseValue } from '@/lib/recode-utils'
 import { resolveRangeOutput } from '@/lib/recode-ranges'
+import { columnDisplayLabel } from '@/lib/dataset-column-label'
 
 // ── Ordinal color helper ─────────────────────────────────────────────────────
 
@@ -183,21 +185,55 @@ export default function EditableCell({
   }, [isEditing, answer?.value_text])
 
   const doSave = () => {
-    if (!answer) return
+    // 🔴 #897 — this used to `return` in silence, and that silence is the whole
+    // reason the defect lasted: a cell is addressed by its `DatasetValue.id`
+    // (`PATCH …/values/{value_id}`, no create), so a row that arrived without
+    // one swallowed every keystroke with no toast, no error and no request. The
+    // backend now materialises a cell on every row-creating path, so this branch
+    // should be UNREACHABLE — which is exactly why it must SAY something if it
+    // is ever reached again, rather than quietly losing the researcher's typing
+    // for another few months.
+    if (!answer) {
+      toast.error(
+        'This cell could not be saved because the record has no entry for this '
+        + 'variable yet. Reload the page; if it happens again, please report it.'
+      )
+      return
+    }
     const val = editValue.trim() || null
     onSave(answer.id, val)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // 🔴 **The editor CONSUMES its own keys — `stopPropagation`, not just
+    // `preventDefault` (#927).** `DatasetView` keeps a `window` keydown listener
+    // for Escape and (since #927) F2/Enter, and React 18 flushes a discrete
+    // event's state updates before the event finishes bubbling to `window` — so
+    // by the time that listener ran, `editingCell` was ALREADY null and its
+    // `!editingCell` guard was satisfied by the very keystroke that had just
+    // cleared it. Measured live, both directions:
+    //
+    //   * Escape cancelled the edit AND deselected the cell in one press, so
+    //     the selected-not-editing state was unreachable on a manual column —
+    //     which would have made F2 dead code on exactly the columns it is for.
+    //   * Enter on the LAST row leaves `editingCell` null (there is no cell
+    //     below), so the same keystroke would have re-opened the editor.
+    //
+    // ⚠️ Not `defaultPrevented` on the listener side: that is the right signal
+    // for a Radix overlay handling its own navigation (#784), but here the
+    // handler is OURS and the key never had any business leaving the editor.
     if (e.key === 'Enter' && !(e.shiftKey && qType === 'open_text')) {
       e.preventDefault()
+      e.stopPropagation()
       doSave()
       onEnterNav()
     } else if (e.key === 'Escape') {
       e.preventDefault()
+      e.stopPropagation()
       onCancel()
     } else if (e.key === 'Tab') {
       e.preventDefault()
+      e.stopPropagation()
       doSave()
       onTabNav(e.shiftKey ? 'prev' : 'next')
     }
@@ -205,9 +241,17 @@ export default function EditableCell({
 
   // ── Edit mode ──────────────────────────────────────────────────────────────
   if (isEditing && isManual) {
+    // #914: every editor names the VARIABLE it edits. Measured in Chrome's
+    // tree: the ordinal editor announced as a bare `combobox` with only its
+    // value, and the number and text inputs carried no name at all — a
+    // screen-reader user typing into a cell could not tell which column they
+    // were in. The row is already announced by its `<th scope="row">`, so the
+    // column is the half the editor must supply. One label, the shared
+    // `columnDisplayLabel`, so the name matches the header's.
     const commonProps = {
       onKeyDown: handleKeyDown,
       onBlur: () => doSave(),
+      'aria-label': `Edit ${columnDisplayLabel(column)}`,
     }
 
     if (qType === 'ordinal' || qType === 'binary') {
@@ -239,7 +283,6 @@ export default function EditableCell({
             ref={inputRef as React.RefObject<HTMLTextAreaElement>}
             value={editValue}
             onChange={(e) => setEditValue(e.target.value)}
-            aria-label="Edit cell value"
             className="w-full min-h-[60px] text-sm border rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring resize-y"
             {...commonProps}
           />
@@ -340,15 +383,39 @@ export default function EditableCell({
     )
   }
 
-  // Open text: always expandable on click (column is narrow, so even short text benefits)
+  // Open text — and the ONE branch where the click does something different
+  // depending on whether the cell is the researcher's to edit.
+  //
+  // 🔴 **#927: this branch used to send EVERY filled cell to the viewer**, so a
+  // manual open-text cell was editable exactly once. Click an empty one and the
+  // editor opened; type into it, and from then on the click opened a read-only
+  // dialog whose only control is Close — with no F2, no double-click, no
+  // context-menu item and no undo entry for a cell edit. A typo in a hand-typed
+  // note was permanent short of deleting the record.
+  //
+  // Invisible until row 47 because an `open_text` column could only arrive from
+  // a FILE, so it was `imported`, so it was never editable and "expand to read"
+  // was the only sensible click. A hand-authored one is the new case.
+  //
+  // ⚠️ The viewer is KEPT for cells that are not editable — that is where it
+  // earns its place (a 200px column of survey prose). For an editable cell the
+  // EDITOR is the full-text view: a resizable `min-h-[60px]` textarea holding
+  // the whole value, with Escape to cancel. Nothing is lost, and the `title`
+  // carries the untruncated text on hover exactly as the other branches do.
   if (qType === 'open_text') {
     const text = display || ''
     const hasContent = text.length > 0
     return (
       <td
-        className={`px-3 py-2 text-sm max-w-[200px]${selectionRing} ${hasContent ? 'cursor-pointer hover:bg-mm-surface-hover' : (isManual ? 'cursor-pointer hover:bg-mm-surface-hover' : '')}`}
-        onClick={() => handleClick(hasContent ? () => onOpenText(column.column_text, text) : (isManual ? onStartEdit : undefined))}
-        title={hasContent ? 'Click to expand' : undefined}
+        className={`px-3 py-2 text-sm max-w-[200px]${selectionRing} ${isManual || hasContent ? 'cursor-pointer hover:bg-mm-surface-hover' : ''}`}
+        onClick={() => handleClick(
+          isManual ? onStartEdit : (hasContent ? () => onOpenText(column.column_text, text) : undefined),
+        )}
+        // ⚠️ A title is a CLAIM about the act (#912's rule, one channel over):
+        // "Click to expand" on a cell whose click now opens the editor would be
+        // false. An editable cell shows its own value, which is what the
+        // researcher wants from hover on a truncated cell anyway.
+        title={isManual ? (text || undefined) : (hasContent ? 'Click to expand' : undefined)}
       >
         <span className="block truncate">{text}</span>
       </td>

@@ -30,6 +30,13 @@ class Document(Base):
     )
     page_count = Column(Integer, nullable=True)
     summary = Column(Text, nullable=True)
+    # Row 46: "this document is about <person / organisation / department>".
+    # DELIBERATELY NOT UNIQUE — the sibling link on ``DatasetRow`` carries a
+    # partial unique index (one row per participant per dataset) and copying
+    # that here would cap a participant at one document, which is the exact
+    # case this exists for: several years of workplans, or an interview plus
+    # the artefacts that go with it. Many documents → one participant.
+    participant_id = Column(Integer, ForeignKey("participants.id", ondelete="SET NULL"), nullable=True, index=True)
     # Track J · J3-2-0: stable cross-instance identity for merge matching
     uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
     created_at = Column(DateTime, default=func.now(), nullable=False)
@@ -37,6 +44,7 @@ class Document(Base):
 
     # Relationships
     project = relationship("Project", back_populates="documents")
+    participant = relationship("Participant", back_populates="documents")
     segments = relationship("Segment", back_populates="document",
                             cascade="all, delete-orphan",
                             order_by="Segment.sequence_order")

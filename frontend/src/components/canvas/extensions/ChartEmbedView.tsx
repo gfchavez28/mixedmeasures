@@ -19,9 +19,23 @@ import { extractComputeParams, staleComputedInputs } from '../inline-chart-param
 import { figureDrift, type FigureFingerprint } from '../figure-baseline'
 import { variableViewPath } from '@/lib/dataset-routes'
 
-export default function ChartEmbedView({ node, updateAttributes, deleteNode, selected }: NodeViewProps) {
+export default function ChartEmbedView({ node, updateAttributes, deleteNode, selected, editor }: NodeViewProps) {
   const { projectId } = useProjectLayout()
   const navigate = useNavigate()
+  /**
+   * #893 — a read-only surface must not offer to mutate what it is showing.
+   *
+   * `editable: false` gates ProseMirror's DOM editing and input handling; it
+   * does NOT gate a programmatic `deleteNode()`, so these controls really did
+   * apply their transaction on the Canvas Compare diff.
+   *
+   * ⚠️ Read at RENDER time. `ThemeEditor` carries a `setEditable` sync for a
+   * dynamic `editable` prop, but no caller passes one, so editability never
+   * flips under a mounted node view today. If one ever does, this needs to
+   * re-render on that flip — a node view is not re-rendered by `setEditable`
+   * alone.
+   */
+  const isEditable = editor?.isEditable ?? true
   const {
     materialId, config, title, materialTag, tagNote,
     figureHash, figureHeadline, figureStampedAt,
@@ -161,26 +175,32 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
         <ContextMenuTrigger asChild>
           <div className="bg-white dark:bg-mm-surface shadow-sm rounded-md px-4 py-3 border-l-4 border-l-mm-blue">
             <div className="absolute top-2 right-2 flex items-center gap-1" onMouseDown={e => e.stopPropagation()}>
-              <button
-                type="button"
-                onClick={deleteNode}
-                className="opacity-0 group-hover/material:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded text-mm-text-faint hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
-                aria-label="Remove from canvas"
-                title="Remove from canvas"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
+              {isEditable && (
+                <button
+                  type="button"
+                  onClick={deleteNode}
+                  className="opacity-0 group-hover/material:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded text-mm-text-faint hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
+                  aria-label="Remove from canvas"
+                  title="Remove from canvas"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
               <MaterialsTagInline
                 tag={materialTag ?? null}
                 tagNote={tagNote ?? null}
                 onTagChange={tag => updateAttributes({ materialTag: tag })}
                 onTagNoteChange={note => updateAttributes({ tagNote: note })}
                 inline
+                readOnly={!isEditable}
               />
             </div>
 
+            {/* #893: `pr-20` reserves the cluster's space. Read-only drops the
+                delete button but KEEPS an existing tag, so the reservation
+                follows what is actually rendered. */}
             {title && (
-              <p className="text-sm font-medium text-mm-text mb-2 pr-20">{title}</p>
+              <p className={`text-sm font-medium text-mm-text mb-2 ${isEditable || materialTag ? 'pr-20' : ''}`}>{title}</p>
             )}
 
             {missingRefs && missingRefs.length > 0 && (
@@ -280,19 +300,27 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
             )}
           </div>
         </ContextMenuTrigger>
+        {/* Only mount the menu when it has something in it — a read-only embed
+            with no source link would otherwise open an empty popup. */}
+        {(materialId || isEditable) && (
         <ContextMenuContent>
           {materialId && (
             <>
               <ContextMenuItem onSelect={() => navigate(analysisPath)}>
                 <ExternalLink className="w-4 h-4 mr-2" />View Source
               </ContextMenuItem>
-              <ContextMenuSeparator />
+              {isEditable && <ContextMenuSeparator />}
             </>
           )}
-          <ContextMenuItem onSelect={() => deleteNode()} className="text-red-600 dark:text-red-400">
-            <Trash2 className="w-4 h-4 mr-2" />Remove from Theme
-          </ContextMenuItem>
+          {/* #893 — the SECOND door. Gating only the hover cluster leaves the
+              same `deleteNode()` one right-click away on a read-only diff. */}
+          {isEditable && (
+            <ContextMenuItem onSelect={() => deleteNode()} className="text-red-600 dark:text-red-400">
+              <Trash2 className="w-4 h-4 mr-2" />Remove from Theme
+            </ContextMenuItem>
+          )}
         </ContextMenuContent>
+        )}
       </ContextMenu>
     </NodeViewWrapper>
   )

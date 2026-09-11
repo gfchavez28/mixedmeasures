@@ -3,7 +3,9 @@ import { useListKeyboardNav } from '@/hooks/useListKeyboardNav'
 import { useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Link2, X, Pencil, Trash2, Settings2, GripVertical, FunctionSquare, RefreshCw, Check, UserPlus, LoaderCircle, CornerDownRight } from 'lucide-react'
+import { Link2, X, Pencil, Trash2, Settings2, GripVertical, FunctionSquare, RefreshCw, Check, UserPlus, LoaderCircle, CornerDownRight, Gauge, Hash, ChevronDown } from 'lucide-react'
+import { MODE_DISABLED_CLASS, modeDisabledProps } from '@/lib/mode-disabled'
+import { MANAGED_SPEC_KIND_RATED_TARGETS, describeManagedColumn, isManagedColumn } from '@/lib/magnitude-rollup-basis'
 import { useSortable } from '@dnd-kit/sortable'
 import { columnDisplayLabel } from '@/lib/dataset-column-label'
 import {
@@ -23,6 +25,7 @@ import {
 } from '@/components/ui/context-menu'
 import {
   Popover,
+  PopoverAnchor,
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
@@ -199,6 +202,35 @@ export function ColumnHeaderContent({
             {column.stale && (
               <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" title="Stale — recompute" />
             )}
+          </span>
+        )}
+        {/* Row 45 (i) — a column the TOOL maintains. The marker is deliberately
+            NOT the computed column's amber "stale" dot: this column's freshness
+            is a property of the whole table (one rollup produces every score),
+            and `managed_stale=false` means "nothing told us otherwise", never
+            "up to date" — so a dot that appears only when stale would read as a
+            freshness guarantee the rest of the time. The dataset-level line in
+            the toolbar carries WHEN instead, which is the honest half.
+
+            ⚠️ The `sr-only` span is what NAMES this for a reader — a `title` is
+            not a name (#559), and the icon is decorative. */}
+        {isManagedColumn(column) && (
+          <span title={describeManagedColumn(column.managed_spec) ?? undefined}
+                className="flex items-center gap-0.5">
+            {/* 🔴 The icon DIFFERS BY KIND, and that is not decoration.
+                MEASURED live at 1280x800: the two columns a rated code produces
+                are named `{code} (score)` and `{code} (rated passages)`, the
+                distinguishing suffix is at the END, and the header truncates —
+                so both read "Professional de…" and were indistinguishable at the
+                default width. The sr-only text already differed; sighted users
+                had nothing. A gauge means "a measurement", a hash means "a
+                count". */}
+            {(column.managed_spec?.kind === MANAGED_SPEC_KIND_RATED_TARGETS
+              ? <Hash className="w-3 h-3 text-mm-text-faint" aria-hidden="true" />
+              : <Gauge className="w-3 h-3 text-mm-text-faint" aria-hidden="true" />)}
+            <span className="sr-only">
+              {' — '}{describeManagedColumn(column.managed_spec)}
+            </span>
           </span>
         )}
         {column.equivalence_group_id && (
@@ -423,6 +455,18 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
           // heads. Without `scope`, cell navigation across a 120×11 grid
           // announces values with nothing to attach them to.
           scope="col"
+          /* 🔴 **AN EXPLICIT NAME, AND #931 IS WHY IT LANDED HERE (#915).**
+             `columnheader` is a name-from-content role, so the header's name was
+             everything inside it concatenated — measured:
+             `"Reorder column Department Department ordinal — manual column"`,
+             read out for every cell in that column. The keyboard opener this
+             change adds is a FOURTH contributor, so shipping #931 without this
+             would have made a filed ⚪ defect measurably worse. An explicit
+             `aria-label` wins over content, which fixes the pre-existing noise
+             and makes the new button free at the same time.
+             ⚠️ The type and basis are not lost — they stay visible, and the
+             editor announces them. A column's NAME should be its name. */
+          aria-label={columnDisplayLabel(column)}
           /**
            * Double-click opens this variable in the Variables view — jamovi's
            * gesture for the same surface (design note §11), and it was free:
@@ -469,7 +513,22 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
             columnIndex={columnIndex}
             columnCount={columnCount}
           >
-            <div className="cursor-pointer">
+            <div
+              className="cursor-pointer"
+              /* Mouse convenience only — clicking anywhere on the header still
+                 opens the editor, as it always has. It carries NO role and NO
+                 tabIndex: the keyboard opener is the real button below, and
+                 giving this div a role would nest the drag handle, the
+                 equivalence link and the domain pills inside an interactive
+                 element (#560's trap). ⚠️ The guard is the same one the import
+                 drop zones need — ignore clicks that originate on an
+                 interactive descendant, or the pill's own button opens the
+                 popover as well as navigating. */
+              onClick={(e) => {
+                if ((e.target as HTMLElement).closest('button, a, input, textarea, select, [role="button"]')) return
+                onPopoverOpenChange(column.id, true)
+              }}
+            >
               {/* Drag handle — visible on hover */}
               {/* #776/#559: the handle is a real (keyboard-draggable) control,
                   so it needs a name that says WHAT it moves — "Drag to reorder"
@@ -493,6 +552,22 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
                 projectId={projectId}
                 onRemoveFromGroup={onRemoveFromGroup}
               />
+              {/* 🔴 THE KEYBOARD OPENER (#931). A real `<button>`, a sibling of
+                  the drag handle rather than its ancestor, so nothing is nested.
+                  ⚠️ Revealed on hover AND on focus — a focusable control at
+                  `opacity: 0` is WCAG 2.4.7, the #777 asymmetry. ⚠️ Named per
+                  COLUMN: eleven buttons all called "Column options" say nothing
+                  about which one you are on (#559/#891). */}
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  aria-label={`Edit variable ${columnDisplayLabel(column)}`}
+                  onClick={(e) => e.stopPropagation()}
+                  className="absolute right-0 top-0 bottom-0 w-4 flex items-center justify-center opacity-0 group-hover/col:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring rounded outline-none z-10"
+                >
+                  <ChevronDown aria-hidden className="w-3 h-3 text-mm-text-faint" />
+                </button>
+              </PopoverTrigger>
             </div>
           </ColumnEditorPopover>
           <ResizeHandle
@@ -512,11 +587,33 @@ export const SortableColumnHeader = memo(function SortableColumnHeader({
             since #575; this sibling was never swept. Both forms now have one
             home, reachable by "Edit in the Variables view" below, where the
             gate lives once. `Recompute` stays — see the popover's note. */}
-        {column.source === 'computed' && column.stale && onRecompute && (
-          <ContextMenuItem onClick={() => onRecompute(column)}>
-            <RefreshCw className="w-4 h-4 mr-2" />
-            Recompute
-          </ContextMenuItem>
+        {/* 🔴 TWO kinds of recomputable column, and this gate is the ONE line
+            the row-45 scope doc identified as the whole cost of giving score
+            columns their own `source` value instead of calling them
+            `"computed"` (which would have cost them value labels, missing rules
+            and recode definitions — #806 — so a researcher could never band a
+            score into high/medium/low).
+
+            The two differ in WHAT is stale: a computed column carries its own
+            `stale` flag, set by `mark_metrics_stale` when a column it depends on
+            changes. A score column depends on CODING, not on columns, so its
+            freshness lives on the DATASET — and it offers the verb whether or
+            not anything is known to have changed, because `managed_stale=false`
+            means "nothing told us otherwise", never "up to date". */}
+        {onRecompute && (
+          isManagedColumn(column)
+            ? (
+              <ContextMenuItem onClick={() => onRecompute(column)}>
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Refresh scores
+              </ContextMenuItem>
+            )
+            : column.source === 'computed' && column.stale && (
+              <ContextMenuItem onClick={() => onRecompute(column)}>
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Recompute
+              </ContextMenuItem>
+            )
         )}
         <ContextMenuSeparator />
         <ContextMenuItem onClick={() => navigate(variableViewPath(projectId, datasetId, column.id))}>
@@ -577,6 +674,7 @@ export function ParticipantCell({
   linkedParticipantMap,
   onLink,
   suggestedIdentifier = null,
+  linkRefusal = null,
 }: {
   row: DatasetDataRow
   projectId: number
@@ -585,6 +683,11 @@ export function ParticipantCell({
   /** #532: this row's identifier-column value (falling back to row_identifier),
    *  trimmed — drives the "New participant from this row" affordance. */
   suggestedIdentifier?: string | null
+  /** Row 45 (i) — the sentence refusing a re-link on a tool-maintained table.
+   *  Every record there ALREADY IS one participant, and re-pointing a row at a
+   *  different person would break the one-row-per-person invariant the whole
+   *  design rests on — which is why the server refuses it at THREE endpoints. */
+  linkRefusal?: string | null
 }) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -677,28 +780,72 @@ export function ParticipantCell({
 
   return (
     <td className="px-3 py-2 text-sm whitespace-nowrap sticky left-[96px] z-10 bg-mm-surface group-hover:bg-mm-surface-hover border-r w-[160px] min-w-[160px]">
+      {/* Row 45 (i) — on a tool-maintained table the link is NOT editable: the
+          record IS the participant. The cell renders as plain text with the
+          reason in its title, rather than as a control that opens a picker whose
+          every choice the server would 409. Not a "disabled control" either —
+          there is nothing here to disable, so showing one would invent an
+          affordance that never existed. */}
+      {linkRefusal ? (
+        <span className="text-sm font-medium text-mm-text" title={linkRefusal}>
+          {row.participant_display_name ?? '\u2014'}
+          <span className="sr-only"> — {linkRefusal}</span>
+        </span>
+      ) : (
       <Popover open={open} onOpenChange={(o) => { setOpen(o); if (!o) setSearch('') }}>
-        <PopoverTrigger asChild>
-          {isLinked ? (
-            <div className="relative group/cell cursor-pointer">
-              <span className="text-sm font-medium text-mm-text hover:text-mm-blue-text">
-                {row.participant_display_name}
-              </span>
+        {/* The linked shape needs an ANCHOR rather than a trigger-as-wrapper,
+            for #931's reason one cell over: the Unlink button must stay a
+            SIBLING of the opener, never nested inside it. The unlinked shape is
+            already a single real button and is left exactly as it was. */}
+        <PopoverAnchor asChild>
+          <div className="relative group/cell inline-flex items-center">
+            {isLinked ? (
+            /* 🔴 THE SAME DEFECT AS #931, AND IT WAS NOT FILED — because
+               Lighthouse ran on the PARTICIPANT table, where `linkRefusal` is
+               set and this Popover never mounts at all. On an ordinary dataset
+               every LINKED row rendered a bare `<div>` here, so Radix's
+               `aria-haspopup`/`aria-expanded`/`aria-controls` were just as
+               illegal and there was just as little keyboard opener — with an
+               interactive Unlink button nested inside for good measure.
+               ⚠️ *A measurement tool reports what was RENDERED.* Fixing only
+               the filed half would have left the next Lighthouse run on a
+               different corpus re-reporting the same rule. */
+            <>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  aria-label={`Change linked participant: ${row.participant_display_name}`}
+                  className="cursor-pointer text-left rounded focus-visible:ring-2 focus-visible:ring-ring outline-none"
+                >
+                  <span className="text-sm font-medium text-mm-text hover:text-mm-blue-text">
+                    {row.participant_display_name}
+                  </span>
+                </button>
+              </PopoverTrigger>
+              {/* ⚠️ Reveals on FOCUS as well as hover (#777) — it is focusable,
+                  and a focusable control at `opacity: 0` is WCAG 2.4.7. It was
+                  `hidden group-hover/cell:flex`, which cannot be focused into at
+                  all: `display: none` removes it from the tab order outright, so
+                  unlinking was mouse-only even before this. */}
               <button
+                type="button"
                 onClick={handleUnlink}
-                aria-label="Unlink participant"
-                className="absolute -right-1 top-1/2 -translate-y-1/2 hidden group-hover/cell:flex items-center justify-center w-4 h-4 rounded-full bg-muted hover:bg-red-100 text-mm-text-muted hover:text-red-700"
+                aria-label={`Unlink participant ${row.participant_display_name}`}
+                className="ml-1 opacity-0 group-hover/cell:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring outline-none inline-flex items-center justify-center w-4 h-4 rounded-full bg-muted hover:bg-red-100 text-mm-text-muted hover:text-red-700"
               >
-                <X className="w-3 h-3" />
+                <X aria-hidden className="w-3 h-3" />
               </button>
-            </div>
+            </>
           ) : (
-            <button className="flex items-center gap-1 text-sm text-mm-text-faint hover:text-mm-blue-text">
-              <Link2 className="w-3 h-3" />
-              <span>Link...</span>
-            </button>
+            <PopoverTrigger asChild>
+              <button className="flex items-center gap-1 text-sm text-mm-text-faint hover:text-mm-blue-text">
+                <Link2 aria-hidden className="w-3 h-3" />
+                <span>Link...</span>
+              </button>
+            </PopoverTrigger>
           )}
-        </PopoverTrigger>
+          </div>
+        </PopoverAnchor>
         <PopoverContent className="w-64 p-0" align="start" aria-label="Link a participant">
           <div className="p-2 border-b">
             <Input
@@ -793,6 +940,7 @@ export function ParticipantCell({
           )}
         </PopoverContent>
       </Popover>
+      )}
     </td>
   )
 }
@@ -817,6 +965,8 @@ export const DataRow = memo(function DataRow({
   onTabNav,
   onEnterNav,
   onDeleteRow,
+  deleteRowRefusal,
+  linkRefusal,
   domainScoreCols,
 }: {
   row: DatasetDataRow
@@ -836,6 +986,12 @@ export const DataRow = memo(function DataRow({
   onTabNav: (rowId: number, columnId: number, direction: 'next' | 'prev') => void
   onEnterNav: (rowId: number, columnId: number) => void
   onDeleteRow: (rowId: number, recordLabel: string) => void
+  /** The sentence refusing a row delete on a tool-maintained table, or null on
+   *  an ordinary one. Threaded rather than derived here: the ONE predicate lives
+   *  in `lib/managed-dataset.ts` and this component never sees the dataset. */
+  deleteRowRefusal?: string | null
+  /** Row 45 (i) — refuses re-linking a row on a tool-maintained table. */
+  linkRefusal?: string | null
   domainScoreCols?: DomainScoreColumn[]
 }) {
   // ⚠️ `rowIndex` is DATASET-scoped, not page-scoped — the caller adds the
@@ -891,6 +1047,7 @@ export const DataRow = memo(function DataRow({
             linkedParticipantMap={linkedParticipantMap}
             onLink={onLink}
             suggestedIdentifier={suggestedIdentifier}
+            linkRefusal={linkRefusal}
           />
           {columns.map((q) => {
             const activeDefId = activeDefinitions[q.id]
@@ -932,9 +1089,22 @@ export const DataRow = memo(function DataRow({
         </tr>
       </ContextMenuTrigger>
       <ContextMenuContent>
+        {/* Row 45 (i) — on a tool-maintained table the row set is DERIVED from
+            `Participant`, so the server 409s this. The item takes the
+            PERSISTENT-MODE arm (#754) rather than vanishing: a researcher who
+            simply cannot find Delete learns nothing, while one who reads "this
+            record is a participant" learns where it actually goes away. The
+            click guard inside `modeDisabledProps` is the load-bearing half —
+            `aria-disabled` changes what a control announces and nothing about
+            what it does. */}
         <ContextMenuItem
-          onClick={() => onDeleteRow(row.id, recordLabel)}
-          className="text-red-600"
+          {...modeDisabledProps<HTMLDivElement>({
+            label: `Delete Record (${recordLabel})`,
+            blockedReason: deleteRowRefusal ?? null,
+            onActivate: () => onDeleteRow(row.id, recordLabel),
+          })}
+          title={deleteRowRefusal ?? undefined}
+          className={`text-red-600 ${MODE_DISABLED_CLASS}`}
         >
           <Trash2 className="w-4 h-4 mr-2" />
           Delete Record ({recordLabel})
@@ -959,6 +1129,8 @@ export const DataRow = memo(function DataRow({
   if (prev.onTabNav !== next.onTabNav) return false
   if (prev.onEnterNav !== next.onEnterNav) return false
   if (prev.onDeleteRow !== next.onDeleteRow) return false
+  if (prev.deleteRowRefusal !== next.deleteRowRefusal) return false
+  if (prev.linkRefusal !== next.linkRefusal) return false
   if (prev.domainScoreCols !== next.domainScoreCols) return false
   // Only re-render if selectedCell/editingCell relevance to THIS row changed
   const prevHasSelected = prev.selectedCell?.rowId === prev.row.id

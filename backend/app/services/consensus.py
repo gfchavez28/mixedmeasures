@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import statistics
+from dataclasses import dataclass
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -379,20 +380,77 @@ def recompute_consensus_for_target(
     return len(decisions)
 
 
-def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
-    """Rebuild the consensus layer for one project. Returns a summary dict.
+@dataclass(frozen=True)
+class TargetVotes:
+    """One project's voter applications, bucketed per target — the input BOTH
+    the consensus materializer and row 45's rollup decide from (#35, 2026-09-08).
 
-    DELETE (project-scoped) + recompute. Idempotent: re-running yields the same
-    consensus set. See module docstring for the rule and the project-scoping
-    invariant. Flush-only; caller commits.
+    Extracted rather than copied: the eligibility of a vote is decided by SIX
+    filters that must agree wherever the question is asked — roster coders only
+    (`coder_type NOT IN SYSTEM_CODER_TYPES`), never archived (DEC-F), non-universal
+    codes, non-consensus rows, VISIBLE segments, and — for segments —
+    `consensus_scoped_segments` (D18 unit provenance). A second hand-rolled gather
+    would drift on any one of them silently, and #733's rule is that a copy
+    propagates a defect verbatim rather than merely rotting.
+
+    ``buckets`` map target id → coder id → the set of EFFECTIVE code ids that
+    coder applied. ``ratings`` map target id → coder id → RAW code id → the
+    rating, which is why `_rating_values` exists: a grouped sibling's rating was
+    given on the sibling's own scale and is never pooled with the canonical's.
     """
-    consensus_user = get_or_create_consensus_user(db)
+
+    seg_buckets: dict[int, dict[int, set[int]]]
+    seg_ratings: dict[int, dict[int, dict[int, float | None]]]
+    val_buckets: dict[int, dict[int, set[int]]]
+    val_ratings: dict[int, dict[int, dict[int, float | None]]]
+    scales: dict[int, dict]
+    effective_map: dict[int, int]
+
+
+#: The consensus WRITER's segment scope — D18 eligibility applied, so an
+#: UNFROZEN observation's clips are not gathered at all.
+SEGMENT_SCOPE_CONSENSUS_ELIGIBLE = "consensus_eligible"
+
+#: Every segment in the project, all three parents, no eligibility clause — the
+#: CLEANER's scope, and equally the DISCLOSER's.
+SEGMENT_SCOPE_PROJECT = "project"
+
+_SEGMENT_SCOPES = {
+    SEGMENT_SCOPE_CONSENSUS_ELIGIBLE: consensus_scoped_segments,
+    SEGMENT_SCOPE_PROJECT: project_scoped_segments,
+}
+
+
+def gather_target_votes(db: Session, project_id: int, *, segment_scope: str) -> TargetVotes:
+    """Read every voter application in one project, bucketed per target.
+
+    Two queries plus the scale lookup; nothing is materialised per row. See
+    `TargetVotes` for why this is shared rather than duplicated.
+
+    🔴 **`segment_scope` has NO DEFAULT, deliberately — the signature is what
+    stops a new caller from silently inheriting the writer's narrow scope.**
+    The rule from the other side of `project_scoped_segments`' docstring: a
+    consumer that must SAY what it left out needs the CLEANER's scope, not the
+    WRITER's. Sourcing row 45's rollup from `consensus_eligible` dropped an
+    unfrozen observation's rated clips before it could see them — an exclusion
+    with no disclosure, which is the one failure mode that design forbids
+    (caught by the corpus oracle, 2026-09-08). Anything that only WRITES
+    consensus wants `consensus_eligible`; anything that reports on coverage or
+    exclusions wants `project`.
+    """
+    try:
+        scope = _SEGMENT_SCOPES[segment_scope]
+    except KeyError:
+        raise ValueError(
+            f"unknown segment_scope {segment_scope!r}; expected one of "
+            f"{sorted(_SEGMENT_SCOPES)}"
+        ) from None
     effective_map = build_effective_code_map(db, project_id)
 
     # Voter applications (roster coders only, non-universal codes, non-consensus,
     # visible segments) — bucketed per target → per coder → effective-code set.
     seg_rows = (
-        consensus_scoped_segments(
+        scope(
             db.query(
                 CodeApplication.segment_id, CodeApplication.user_id, CodeApplication.code_id,
                 CodeApplication.magnitude,
@@ -443,6 +501,28 @@ def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
         val_ratings.setdefault(val_id, {}).setdefault(user_id, {})[code_id] = magnitude
     # #35 — the declared instruments, once per rebuild.
     scales = scales_for_project(db, project_id)
+
+    return TargetVotes(
+        seg_buckets=seg_buckets, seg_ratings=seg_ratings,
+        val_buckets=val_buckets, val_ratings=val_ratings,
+        scales=scales, effective_map=effective_map,
+    )
+
+
+def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
+    """Rebuild the consensus layer for one project. Returns a summary dict.
+
+    DELETE (project-scoped) + recompute. Idempotent: re-running yields the same
+    consensus set. See module docstring for the rule and the project-scoping
+    invariant. Flush-only; caller commits.
+    """
+    consensus_user = get_or_create_consensus_user(db)
+    votes = gather_target_votes(
+        db, project_id, segment_scope=SEGMENT_SCOPE_CONSENSUS_ELIGIBLE,
+    )
+    seg_buckets, seg_ratings = votes.seg_buckets, votes.seg_ratings
+    val_buckets, val_ratings = votes.val_buckets, votes.val_ratings
+    scales = votes.scales
 
     # Project-scoped DELETE of the prior consensus layer (ADJ-1).
     # The CLEANER's scope — deliberately BROADER than the writer's (which is

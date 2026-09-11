@@ -34,6 +34,7 @@ from ..schemas.code_equivalence import (
 from ..services.audit import log_action
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
+from ..services.participant_scores import mark_participant_scores_stale
 
 from .helpers import _get_project_or_404
 
@@ -142,6 +143,10 @@ def _mark_stale(db: Session, project_id: int, code_ids: list[int]) -> None:
     on ``consensus_enabled`` so single-coder projects do zero work. Pass the UNION
     of all members affected by an effective-code shift (C4)."""
     ids = sorted({cid for cid in code_ids if cid is not None})
+    # Row 45 step 4 — ungated: a group decides which CANONICAL code a rating
+    # scores under, so regrouping moves scores between columns.
+    if ids:
+        mark_participant_scores_stale(db, project_id)
     if ids and consensus_enabled(db):
         mark_consensus_stale(db, project_id, code_ids=ids)
 

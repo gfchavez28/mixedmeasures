@@ -400,7 +400,13 @@ export default function DocumentImport() {
                     )}>
                       {FORMAT_LABELS[getFormat(f.name)] || 'TXT'}
                     </span>
+                    {/* #905: this field had no label and no placeholder, so it
+                        announced as a bare `textbox` — one per file imported. The
+                        name comes from the SOURCE FILE, never from the field's own
+                        value: the value is what the researcher is editing, and a
+                        name that changes per keystroke is #770's class. */}
                     <Input
+                      aria-label={`Name for ${f.name}`}
                       value={documentNames[i] || ''}
                       onChange={(e) => setDocumentNames(prev => {
                         const next = [...prev]

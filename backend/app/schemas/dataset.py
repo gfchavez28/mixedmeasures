@@ -1,7 +1,7 @@
 """Pydantic schemas for the dataset import and read endpoints."""
 
 from datetime import datetime
-from .common import UTCTimestamp
+from .common import UTCTimestamp, strip_optional_text, strip_required_text
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -144,6 +144,12 @@ class DatasetImportRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
     source: str | None = Field(None, max_length=100)
+
+    # #925's third instance, found by asking what else STORES a dataset name
+    # rather than by the entry's list: this name goes straight into
+    # `Dataset(name=name)` in `dataset_import.py` with no strip on any path.
+    _trim_name = field_validator("name")(strip_required_text("name"))
+    _trim_description = field_validator("description")(strip_optional_text)
     column_configs: list[DatasetColumnConfig]
     # .xlsx uploads only (#523): which worksheet to import (None = first sheet).
     sheet_name: str | None = None
@@ -191,12 +197,45 @@ class DatasetImportResponse(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+class DatasetCreate(BaseModel):
+    """A dataset authored by hand — no file (queue row 47).
+
+    ⚠️ **No columns and no rows at creation, deliberately.** A seeded identifier
+    column would claim `ColumnType.IDENTIFIER`, which carries participant-linking
+    semantics (#414) a hand-kept lookup table (sites, cohorts, departments) does
+    not want and would then have to delete; a seeded blank column would be a
+    guess about data the researcher has not entered yet. The empty state names
+    the two next steps instead.
+
+    ⚠️ **`source` is NOT settable and stays NULL.** That column is IMPORT
+    PROVENANCE ("LimeSurvey", "Qualtrics") — the same reason
+    `create_participant_dataset` leaves it None. Nothing was imported.
+    """
+
+    name: str = Field(..., min_length=1, max_length=255)
+    description: str | None = None
+
+    # #925 — `min_length=1` is evaluated on the RAW input, so `"   "` satisfies it
+    # and the router's own `.strip()` then stored `""`. The trim belongs here, so
+    # the value that is validated is the value that is stored; the router's strip
+    # is gone, because two owners of one rule is how they disagree.
+    _trim_name = field_validator("name")(strip_required_text("name"))
+    _trim_description = field_validator("description")(strip_optional_text)
+
+
 class DatasetUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
     # User-customizable color (#RRGGBB hex). Null clears the override and
     # falls back to the auto-assigned palette color in `dataset-color.ts`.
     color: str | None = Field(None, pattern=r"^#[0-9a-fA-F]{6}$")
+
+    # #925's sibling, and the worse half: `update_dataset` `setattr`s straight
+    # from the schema with no strip at all, so a whitespace-only rename stored the
+    # PADDING. Found by asking what else takes a dataset name — the entry named
+    # only the create path.
+    _trim_name = field_validator("name")(strip_required_text("name"))
+    _trim_description = field_validator("description")(strip_optional_text)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -215,7 +254,57 @@ class DatasetResponse(BaseModel):
     row_count: int
     open_ended_count: int = 0
 
+    # Row 45 (i) — a TOOL-MAINTAINED dataset. NULL = an ordinary one.
+    #
+    # 🔴 **This rides the wire because the client is otherwise BLIND to step 3's
+    # seven refusals** and would offer Delete dataset / Delete record / Append
+    # from file / three link actions on a table the server 409s every one of —
+    # the "offering a control that refuses" shape this codebase has fixed three
+    # times (#806, #807, #812). The affordances gate on it.
+    managed_kind: str | None = None
+
+    # The freshness PAIR (see `Dataset.managed_synced_at`). ⚠️ The client
+    # displays `managed_synced_at` ALWAYS and treats `managed_stale=False` as
+    # "nothing has told us otherwise", NEVER as "up to date" — eight input
+    # classes move a score and no trigger set covers them all.
+    managed_synced_at: UTCTimestamp | None = None
+    managed_stale: bool | None = None
+
     model_config = ConfigDict(from_attributes=True)
+
+
+class ParticipantDatasetRefreshResponse(BaseModel):
+    """What one refresh of the participant dataset changed, and what it left out.
+
+    🔴 **The exclusion counts are not decoration.** Row 45's Decision 4 obliges
+    the rollup to SAY what it excluded rather than drop it silently, and a
+    disclosure that reaches no surface discharges nothing — so the rollup's own
+    rating-grained `excluded_ratings` rides straight through to the toast.
+
+    ⚠️ `participants_coded_unrated` is a THIRD state beside scored and absent:
+    these people were coded and could still be rated. In the table their cell is
+    empty, exactly like someone who was never coded — the difference is only
+    recoverable here, which is why it is reported rather than inferred.
+    """
+
+    rows_added: int
+    rows_removed: int
+    columns_added: int
+    columns_removed: int
+    #: Saved charts/tests deleted with a reaped score column (#923). A score
+    #: column is an ordinary `DatasetColumn`, so the analysis view will build a
+    #: metric on it; when its code is deleted the column is reaped and the metric
+    #: goes with it. Silently losing a chart a researcher built is the one part of
+    #: the reap they did not ask for, so the refresh says it happened.
+    metrics_removed: int = 0
+    cells_written: int
+    cells_cleared: int
+    participants_scored: int
+    participants_coded_unrated: int
+    #: `{reason: coder judgements not used}` — eight reasons, rating-grained.
+    #: A reason is ABSENT rather than zero when it did not apply.
+    excluded_ratings: dict[str, int] = {}
+    synced_at: UTCTimestamp | None = None
 
 
 class DatasetListResponse(BaseModel):
@@ -316,6 +405,15 @@ class DatasetColumnResponse(BaseModel):
     expression: str | None = None
     depends_on_column_ids: list[int] | None = None
     stale: bool | None = None
+    # Row 45 (i) step 4 — a column the TOOL maintains, and what it holds:
+    # `{"kind": "magnitude_score"|"magnitude_rated_targets", "code_id": N,
+    # "basis"?: str}`. NULL for every ordinary column.
+    #
+    # ⚠️ Parsed by `participant_scores.parse_managed_spec`, never inline — a
+    # malformed spec reads as "not managed" rather than raising, so a
+    # hand-edited database degrades to a read-only column instead of 500ing
+    # every dataset request.
+    managed_spec: dict | None = None
     demographic_subtype: str | None = None
     equivalence_group_id: int | None = None
     equivalence_group_label: str | None = None
@@ -354,16 +452,6 @@ class DatasetColumnResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class DatasetRowSummary(BaseModel):
-    id: int
-    participant_id: int | None = None
-    row_identifier: str | None = None
-    submitted_at: UTCTimestamp | None = None
-    value_count: int
-
-    model_config = ConfigDict(from_attributes=True)
-
-
 class DatasetValueResponse(BaseModel):
     id: int
     column_id: int
@@ -395,6 +483,22 @@ class DatasetRowPosition(BaseModel):
     offset: int
     limit: int
     total_rows: int
+
+
+class DatasetRowCreated(DatasetRowPosition):
+    """A hand-added record, and where the grid will find it (row 47).
+
+    🔴 **It carries its POSITION because the record does not land where the
+    researcher is looking.** Rows sort `submitted_at ASC NULLS LAST, id ASC`, so
+    a new one goes last — on a 500-record dataset that is page 3 while the grid
+    shows page 1, and "Record added" with nothing visible is the state that
+    reads as broken. Subclassing rather than re-deriving keeps the offset
+    arithmetic in `row_position()`, the same function `GET …/rows/{id}/position`
+    uses, so the create and the search deep link can never disagree about which
+    page holds a row.
+    """
+
+    row_identifier: str | None = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -459,6 +563,11 @@ class DatasetDataColumnResponse(BaseModel):
     expression: str | None = None
     depends_on_column_ids: list[int] | None = None
     stale: bool | None = None
+    # Row 45 (i) step 4 — the FOURTH instance of the #586 rule on this class.
+    # The Data view's grid is what renders the score column's "computed <when>"
+    # marker, and it reads THIS payload; without the re-declaration the splat
+    # drops it silently and the marker never appears.
+    managed_spec: dict | None = None
     demographic_subtype: str | None = None
     # Decision B provenance — the THIRD instance of the #586 rule on this class,
     # and it was caught by DRIVING rather than by any test. The Data view's grid
@@ -587,6 +696,11 @@ class ManualColumnCreate(BaseModel):
     group_label: str | None = Field(None, max_length=255)
     scale_labels: list[str] | None = None
     scale_values: list[int] | None = None
+    # #925 — same rule as a dataset name: `min_length=1` is checked on the raw
+    # input, so a whitespace-only label reached storage and left a nameless
+    # variable in every picker, chart and export.
+    _trim_column_text = field_validator("column_text")(
+        strip_required_text("column_text"))
     numeric_min: float | None = None
     numeric_max: float | None = None
     numeric_format: str | None = None
@@ -618,6 +732,11 @@ class ManualColumnUpdate(BaseModel):
     group_label: str | None = Field(None, max_length=255)
     scale_labels: list[str] | None = None
     scale_values: list[int] | None = None
+    # #925 — same rule as a dataset name: `min_length=1` is checked on the raw
+    # input, so a whitespace-only label reached storage and left a nameless
+    # variable in every picker, chart and export.
+    _trim_column_text = field_validator("column_text")(
+        strip_required_text("column_text"))
     numeric_min: float | None = None
     numeric_max: float | None = None
     numeric_format: str | None = None
@@ -638,6 +757,11 @@ class ComputedColumnCreate(BaseModel):
     column_code: str | None = Field(None, max_length=50)
     expression: str = Field(..., min_length=1)
     column_type: str = "numeric"
+    # #925 — same rule as a dataset name: `min_length=1` is checked on the raw
+    # input, so a whitespace-only label reached storage and left a nameless
+    # variable in every picker, chart and export.
+    _trim_column_text = field_validator("column_text")(
+        strip_required_text("column_text"))
 
     @model_validator(mode="after")
     def validate_type(self) -> "ComputedColumnCreate":
@@ -657,6 +781,11 @@ class ColumnHeaderUpdate(BaseModel):
     # #353: per-column opt-out for the participant detail panel. Optional —
     # null means "no change", true/false means update.
     show_in_participant_profile: bool | None = None
+    # #925 — same rule as a dataset name: `min_length=1` is checked on the raw
+    # input, so a whitespace-only label reached storage and left a nameless
+    # variable in every picker, chart and export.
+    _trim_column_text = field_validator("column_text")(
+        strip_required_text("column_text"))
 
 
 class ValueUpdate(BaseModel):

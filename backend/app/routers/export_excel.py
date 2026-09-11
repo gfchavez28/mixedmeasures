@@ -71,14 +71,14 @@ def export_study_excel(
     include_memos: bool = True,
     include_notes: bool = True,
     include_quotes: bool = True,
-    include_summaries: bool = True,
+    include_sources: bool = True,
     include_audit: bool = True,
     include_ratings: bool = True,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Export project data as Excel with up to 9 sheets: Coded Data, Code-Source Matrix,
-    Code Co-occurrence, Codebook, Memos, Notes, Quotes, Summaries, Audit Trail.
+    Code Co-occurrence, Codebook, Memos, Notes, Quotes, Sources, Audit Trail.
 
     #620: the Coded Data and Notes sheets span all THREE segment parents /
     FOUR note parents; before this they inner-joined Conversation and silently
@@ -696,16 +696,26 @@ def export_study_excel(
             excel_set_safe(ws_quotes.cell(row=row_num, column=11), resp.note.content if resp.note else "")
             ws_quotes.cell(row=row_num, column=12, value=local_wall_time(exc.created_at))
 
-    # ==================== Sheet 8: Summaries ====================
-    if include_summaries:
-        ws_summaries = wb.create_sheet("Summaries")
+    # ==================== Sheet 8: Sources ====================
+    if include_sources:
+        ws_summaries = wb.create_sheet("Sources")
         worksheets.append(ws_summaries)
 
-        # #620: Document carries its OWN `summary` column and was absent here.
+        # 🔴 RENAMED from "Summaries" and the `Summary` column DROPPED (#895,
+        # 2026-09-09). That column was this sheet's only substantive one and it
+        # was ALWAYS EMPTY: the Summary panel that wrote it shipped on 2026-03-22
+        # and was removed 42 minutes later, three months before v1.0.0, so no
+        # released build could ever populate it. An exported column that is
+        # always blank reads to a researcher as data they failed to enter.
+        #
+        # What remains is a source inventory, which is why the sheet is named for
+        # that instead. The model columns are kept, so if a summary feature ever
+        # returns this sheet is where it comes back.
+        #
+        # #620: Document was absent here and now has its own row.
         # Observations are deliberately NOT included: they have `description`,
-        # which is a different field with a different meaning — folding it into a
-        # sheet called "Summaries" would mislabel it.
-        summary_headers = ["Source Type", "Source", "Subject ID", "Date", "Status", "Summary"]
+        # which is a different field with a different meaning.
+        summary_headers = ["Source Type", "Source", "Subject ID", "Date", "Status"]
         for col, header in enumerate(summary_headers, 1):
             cell = ws_summaries.cell(row=1, column=col, value=header)
             cell.fill = header_fill
@@ -718,7 +728,6 @@ def export_study_excel(
             excel_set_safe(ws_summaries.cell(row=row_num, column=3), conversation.subject_id or "")
             ws_summaries.cell(row=row_num, column=4, value=conversation.conversation_date.strftime("%Y-%m-%d") if conversation.conversation_date else "")
             ws_summaries.cell(row=row_num, column=5, value=conversation.status.value if conversation.status else "")
-            excel_set_safe(ws_summaries.cell(row=row_num, column=6), conversation.summary or "")
             row_num += 1
 
         for document in documents:
@@ -726,7 +735,6 @@ def export_study_excel(
             # blank rather than being faked from something adjacent.
             ws_summaries.cell(row=row_num, column=1, value="document")
             excel_set_safe(ws_summaries.cell(row=row_num, column=2), document.name)
-            excel_set_safe(ws_summaries.cell(row=row_num, column=6), document.summary or "")
             row_num += 1
 
     # ==================== Sheet 8: Audit Trail ====================

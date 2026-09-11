@@ -69,7 +69,7 @@ export default function CreateCodeDialog({
         onOpenChange(v)
       }}
     >
-      <DialogContent className="sm:max-w-md">
+      <DialogContent aria-describedby={undefined} className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Create Code</DialogTitle>
         </DialogHeader>

@@ -8,8 +8,15 @@ multi-digit value so a string-sort regression actually fails.
 #498: `sources[].groups` was hard-coded None at every construction site while
 the qual UI's Group-By control sent `group_by_subtype` — a grouping request
 silently rendered ungrouped bars (and even the flat code_counts were nulled).
-Now populated per (source, group) via the participant spine; documents keep
-groups=None (no participant linkage); flat code_counts always populated.
+Now populated per (source, group) via the participant spine; flat code_counts
+always populated.
+
+⚠️ **This file used to say "documents keep groups=None (no participant
+linkage)" as a fact about documents. Row 46 made that false in general** — a
+document linked through `Document.participant_id` now groups like any other
+source. The assertion below survives because THIS fixture's document is
+unlinked, which is the narrower claim it was always really making. The linked
+case is covered in `test_document_participant_link.py`.
 """
 import pytest
 
@@ -120,7 +127,8 @@ def test_source_frequencies_groups_populated(demographic_project, db_session):
 
     # Flat counts stay populated under grouping (chart fallback).
     assert conv["code_counts"] is not None
-    # Documents have no participant spine → groups stays None.
+    # An UNLINKED document has no participant → groups stays None (row 46 made
+    # this a statement about the link, not about documents as a kind).
     assert by_type[("document", 750)]["groups"] is None
 
 

@@ -1990,18 +1990,28 @@ def _compute_source_groups(
     code_ids: list[int] | None,
     coder_ids: list[int] | None,
     layer_scope: str | None,
-) -> tuple[dict, dict]:
+    doc_ids_filter: set[int] | None = None,
+) -> tuple[dict, dict, dict]:
     """Per-(source, demographic group) breakdowns for the Compare-By grouped
     bar chart (#498 — `sources[].groups` was hard-coded None while the UI
     offered the control, so a grouping request silently rendered ungrouped).
 
     A unit joins a group through its participant (conversation segments via
-    Speaker.participant_id, text responses via DatasetRow.participant_id);
-    units without a mapped participant belong to no group, and documents have
-    no participant spine so document sources keep groups=None. Semantics
-    mirror the flat per-source queries: totals = visible (non-empty) units,
-    coded = distinct units with ≥1 non-universal application (human layer),
-    code_counts = distinct units per code (or per effective category).
+    Speaker.participant_id, text responses via DatasetRow.participant_id,
+    **document segments via Document.participant_id — row 46**); units without
+    a mapped participant belong to no group. Semantics mirror the flat
+    per-source queries: totals = visible (non-empty) units, coded = distinct
+    units with ≥1 non-universal application (human layer), code_counts =
+    distinct units per code (or per effective category).
+
+    🔴 **The document arm has a DIFFERENT GRAIN from the other two, and that is
+    the whole point of row 46.** A conversation's subject is per-SEGMENT (each
+    turn carries its own speaker), so one conversation can contribute to several
+    groups at once. A document has no speaker: its subject is a property of the
+    DOCUMENT, so every visible segment of a linked document lands in exactly one
+    group. `exclude_facilitator` is therefore not consulted on that arm — a
+    document has no facilitator to exclude, and applying the conversation's
+    filter there would drop every document segment whenever it was on.
     """
     pids = list(part_group_map.keys())
 
@@ -2015,6 +2025,7 @@ def _compute_source_groups(
 
     conv_groups: dict[int, dict[str, dict]] = defaultdict(lambda: defaultdict(_bucket))
     col_groups: dict[int, dict[str, dict]] = defaultdict(lambda: defaultdict(_bucket))
+    doc_groups: dict[int, dict[str, dict]] = defaultdict(lambda: defaultdict(_bucket))
 
     # ── conversation totals per (conversation, group) ──
     q = (
@@ -2089,6 +2100,74 @@ def _compute_source_groups(
         cc[1] += int(wc or 0)
         if not is_universal and (conv_id, group, seg_id) not in coded_seen:
             coded_seen.add((conv_id, group, seg_id))
+            b["coded_segments"] += 1
+
+    # ── document totals per (document, group) ── (row 46)
+    # No speaker join and no facilitator filter — see the docstring's grain note.
+    doc_q = (
+        db.query(
+            Segment.document_id,
+            Document.participant_id,
+            func.count(Segment.id),
+            func.coalesce(func.sum(Segment.word_count), 0),
+        )
+        .join(Document, Segment.document_id == Document.id)
+        .filter(
+            Document.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+            Document.participant_id.in_(pids),
+        )
+    )
+    if doc_ids_filter is not None:
+        doc_q = doc_q.filter(Segment.document_id.in_(doc_ids_filter))
+    if participant_ids:
+        doc_q = doc_q.filter(Document.participant_id.in_(participant_ids))
+    for doc_id, pid, cnt, wc in doc_q.group_by(
+        Segment.document_id, Document.participant_id
+    ).all():
+        b = doc_groups[doc_id][part_group_map[pid]]
+        b["total_segments"] += cnt
+        b["total_word_count"] += int(wc)
+
+    # ── document application rows (distinct) → code_counts + coded ──
+    doc_app_q = (
+        db.query(
+            Segment.document_id,
+            Document.participant_id,
+            effective_id_expr.label("eff_id"),
+            Segment.id,
+            Segment.word_count,
+            Code.is_universal,
+        )
+        .select_from(CodeApplication)
+        .filter(CodeApplication.segment_id.isnot(None))
+        .join(Segment, CodeApplication.segment_id == Segment.id)
+        .join(Code, Code.id == CodeApplication.code_id)
+        .join(Document, Segment.document_id == Document.id)
+        .filter(
+            Document.project_id == project_id,
+            Segment.merged_into_id == None,
+            Segment.split_into_id == None,
+            Document.participant_id.in_(pids),
+        )
+    )
+    if doc_ids_filter is not None:
+        doc_app_q = doc_app_q.filter(Segment.document_id.in_(doc_ids_filter))
+    if participant_ids:
+        doc_app_q = doc_app_q.filter(Document.participant_id.in_(participant_ids))
+    if code_ids is not None:
+        doc_app_q = doc_app_q.filter(CodeApplication.code_id.in_(code_ids))
+    doc_app_q = _coder_filter(doc_app_q, coder_ids, layer_scope)  # + J2-B consensus exclusion
+    doc_coded_seen: set[tuple] = set()
+    for doc_id, pid, eff_id, seg_id, wc, is_universal in doc_app_q.distinct().all():
+        group = part_group_map[pid]
+        b = doc_groups[doc_id][group]
+        cc = b["code_counts"][eff_id]
+        cc[0] += 1
+        cc[1] += int(wc or 0)
+        if not is_universal and (doc_id, group, seg_id) not in doc_coded_seen:
+            doc_coded_seen.add((doc_id, group, seg_id))
             b["coded_segments"] += 1
 
     # ── text-column totals per (column, group) ──
@@ -2169,7 +2248,7 @@ def _compute_source_groups(
             col_coded_seen.add((col_id, group, dv_id))
             b["coded_segments"] += 1
 
-    return conv_groups, col_groups
+    return conv_groups, col_groups, doc_groups
 
 
 def _shape_groups(group_data: dict[str, dict] | None) -> dict | None:
@@ -3018,6 +3097,7 @@ def get_source_frequencies(
     # ── Per-group breakdowns (#498) — only when a demographic mapping exists ──
     conv_groups: dict = {}
     col_groups: dict = {}
+    doc_groups: dict = {}
     if part_group_map:
         effective_id_expr = (
             sa_case(
@@ -3027,7 +3107,7 @@ def get_source_frequencies(
             if aggregation == "category"
             else Code.id
         )
-        conv_groups, col_groups = _compute_source_groups(
+        conv_groups, col_groups, doc_groups = _compute_source_groups(
             db,
             project_id,
             part_group_map,
@@ -3040,6 +3120,7 @@ def get_source_frequencies(
             code_ids,
             coder_ids,
             layer_scope,
+            doc_ids_filter,
         )
 
     sources = []
@@ -3117,8 +3198,11 @@ def get_source_frequencies(
             "coded_segments": coded,
             "import_order": import_order,
             "code_counts": cc,
-            # Documents have no participant spine — no demographic grouping.
-            "groups": None,
+            # Row 46 — documents joined the participant spine. A document's
+            # subject is per-DOCUMENT, so a linked one contributes to exactly
+            # one group; an unlinked one has no participant and `.get` yields
+            # None here, which is the pre-row-46 behaviour and stays correct.
+            "groups": _shape_groups(doc_groups.get(d_id)),
         })
         total_segs += t_segs
         total_wc += t_wc

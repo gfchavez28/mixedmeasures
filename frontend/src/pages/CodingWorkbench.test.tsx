@@ -77,7 +77,7 @@ import CodingWorkbench from './CodingWorkbench'
 
 const CONVERSATION: Conversation = {
   id: 9, project_id: 1, name: 'Interview 9', subject_id: null, conversation_date: null,
-  status: 'in_progress', summary: null,
+  status: 'in_progress',
   created_at: '2026-09-02T00:00:00+00:00', updated_at: '2026-09-02T00:00:00+00:00',
   segment_count: 2, coded_segment_count: 1, speaker_count: 1, code_count: 1,
   media_filename: null, media_format: null, media_type: null, media_duration_seconds: null,

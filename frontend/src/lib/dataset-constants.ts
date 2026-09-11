@@ -78,13 +78,30 @@ export function isCrosswalkEligible(columnType: string): boolean {
 // and a bare boolean cannot say "this variable is defined by its formula".
 export const VARIABLE_RULES_INELIGIBLE_TYPES: readonly string[] = ['open_text', 'identifier']
 
-/** Why this variable cannot carry labels / missing rules / recodes, or `null`. */
-export type VariableRulesRefusal = 'computed' | 'ineligible_type'
+/**
+ * Why this variable cannot carry labels / missing rules / recodes, or `null`.
+ *
+ * 🔴 **`managed` is the THIRD arm and it arrived the same way the second one
+ * did (#926).** The tool's own columns — a participant table's rating score and
+ * its *n* — carry `source = "managed"`, and the design believed they were
+ * read-only for free because three OTHER endpoints refuse `source != "manual"`.
+ * The four recode doors refuse `source == "computed"`, so `managed` sailed
+ * through all of them: measured live, a score column was retyped to `open_text`
+ * from the Data view and a missing-values rule was written to it from here.
+ *
+ * ⚠️ The arms need different words on screen, which is why this returns WHICH
+ * refusal applies rather than a boolean: a computed variable is *defined by its
+ * formula*, a managed one is *recomputed from your coding* and would have any
+ * declaration overwritten by the next refresh. Naming the wrong one sends the
+ * researcher to change something that is not the cause.
+ */
+export type VariableRulesRefusal = 'computed' | 'managed' | 'ineligible_type'
 
 export function variableRulesRefusal(
   column: { column_type: string; source?: string | null },
 ): VariableRulesRefusal | null {
   if (column.source === 'computed') return 'computed'
+  if (column.source === 'managed') return 'managed'
   if (VARIABLE_RULES_INELIGIBLE_TYPES.includes(column.column_type)) return 'ineligible_type'
   return null
 }

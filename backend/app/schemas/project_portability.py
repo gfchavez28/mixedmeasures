@@ -153,6 +153,13 @@ class ProjectImportResult(BaseModel):
     project_name: str
     # Track J · J3-2: populated only for import_mode='merge'.
     merge_report: MergeReport | None = None
+    # The recovery snapshot taken before an IN-PLACE import (merge / overwrite), by
+    # name. It has always been written and was never NAMED to anyone: the file sits in
+    # the backup folder, the Settings backup list only ever globs `*.mmbackup` so it
+    # does not appear there, and both call sites discarded the path the writer
+    # returned. A recovery net nobody can find is not one. None = no snapshot was
+    # taken, which is correct for a plain import and for a duplicate.
+    safety_backup_filename: str | None = None
 
 
 class CodebookImportResult(BaseModel):

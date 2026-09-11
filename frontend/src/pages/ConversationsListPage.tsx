@@ -11,6 +11,7 @@ import { routeDroppedFiles } from '@/lib/import-routing'
 import { DROPPED_RECORDING_TITLE, DROPPED_RECORDING_DETAIL } from '@/lib/source-kind-copy'
 import { formatBytes } from '@/lib/format'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
+import { sortSources } from '@/lib/source-list-sort'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import InlineEditableText from '@/components/InlineEditableText'
 import { Input } from '@/components/ui/input'
@@ -56,22 +57,10 @@ export default function ConversationsListPage() {
         (c.subject_id && c.subject_id.toLowerCase().includes(q))
       )
     }
-    const sorted = [...result].sort((a, b) => {
-      let cmp: number
-      if (sortBy === 'name') {
-        cmp = a.name.localeCompare(b.name)
-      } else if (sortBy === 'date') {
-        const dateA = new Date(a.conversation_date || a.created_at).getTime()
-        const dateB = new Date(b.conversation_date || b.created_at).getTime()
-        cmp = dateA - dateB
-      } else {
-        const progA = a.segment_count > 0 ? a.coded_segment_count / a.segment_count : 0
-        const progB = b.segment_count > 0 ? b.coded_segment_count / b.segment_count : 0
-        cmp = progA - progB
-      }
-      return sortDir === 'asc' ? cmp : -cmp
-    })
-    return sorted
+    // #932's sibling: the same comparator, so the two lists cannot drift. The
+    // date here prefers the researcher-entered `conversation_date`, which is why
+    // the accessor is the caller's.
+    return sortSources(result, sortBy, sortDir, c => c.conversation_date || c.created_at)
   }, [conversations, searchText, sortBy, sortDir])
 
   const deleteMutation = useMutation({
@@ -257,7 +246,8 @@ export default function ConversationsListPage() {
           >
             All Conversations
             {conversations.length > 0 && (
-              <span className="ml-1.5 opacity-60">{conversations.length}</span>
+              // #908: a text-node space keeps the count out of the label's name.
+              <span className="ml-1.5 opacity-60">{' '}{conversations.length}</span>
             )}
           </button>
           <button

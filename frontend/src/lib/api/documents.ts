@@ -11,6 +11,12 @@ export interface DocumentListItem {
   page_count: number | null
   created_at: string
   updated_at: string
+  /** Row 46 — the participant this document is ABOUT, or null. */
+  participant_id: number | null
+  /** The subject's display name. Travels WITH the id: the id is what an edit
+   *  sends back and the label is the only half that can be rendered, so a
+   *  consumer given one of them has to fetch or guess the other. */
+  participant_label: string | null
 }
 
 export interface SegmentCodeResponse {
@@ -61,7 +67,8 @@ export interface DocumentDetailResponse {
   id: number
   name: string
   description: string | null
-  summary: string | null
+  // #895: no `summary` — the field was declared here and never populated by
+  // the server, so it read `null` on every response for five months.
   source_format: string
   segmentation_mode: string
   segment_count: number
@@ -69,6 +76,9 @@ export interface DocumentDetailResponse {
   page_count: number | null
   created_at: string
   updated_at: string
+  /** Row 46 — see `DocumentListItem`. */
+  participant_id: number | null
+  participant_label: string | null
   segments: DocumentSegmentResponse[]
   image_positions: DocumentImagePosition[]
 }
@@ -136,7 +146,11 @@ export const documentsApi = {
     ).then(res => res.data)
   },
 
-  update: (projectId: number, documentId: number, data: { name?: string; description?: string; summary?: string }) =>
+  /** ⚠️ `participant_id: null` is a MEANINGFUL value — it unlinks. The backend
+   *  applies `model_dump(exclude_unset=True)`, so OMITTING the key leaves the
+   *  link alone while sending an explicit `null` clears it. Do not "clean" a
+   *  null out of this payload. */
+  update: (projectId: number, documentId: number, data: { name?: string; description?: string; participant_id?: number | null }) =>
     api.patch<DocumentListItem>(`/projects/${projectId}/documents/${documentId}`, data).then(res => res.data),
 
   remove: (projectId: number, documentId: number) =>

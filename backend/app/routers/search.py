@@ -329,9 +329,11 @@ async def search_study(
             .filter(
                 Conversation.project_id == project_id,
                 (
+                    # #895: the `summary` arm is gone. It scanned a column no
+                    # released build could write, so it could only ever cost a
+                    # LIKE per conversation and match nothing.
                     Conversation.name.ilike(search_pattern) |
-                    Conversation.subject_id.ilike(search_pattern) |
-                    Conversation.summary.ilike(search_pattern)
+                    Conversation.subject_id.ilike(search_pattern)
                 )
             )
             .order_by(Conversation.name)
@@ -365,7 +367,6 @@ async def search_study(
                     subject_id=c.subject_id,
                     conversation_date=c.conversation_date,
                     status=c.status.value if hasattr(c.status, 'value') else str(c.status),
-                    summary=c.summary,
                     segment_count=segment_counts.get(c.id, 0)
                 )
                 for c in conversations

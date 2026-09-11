@@ -31,15 +31,17 @@ from ..schemas.dataset import (
     PrimaryRecodeSummary,
     DatasetPreviewResponse,
     DatasetColumnPreview,
+    DatasetCreate,
     DatasetImportRequest,
     DatasetImportResponse,
     DatasetResponse,
     DatasetListResponse,
     DatasetUpdate,
+    ParticipantDatasetRefreshResponse,
     DatasetColumnResponse,
-    DatasetRowSummary,
     DatasetValueResponse,
     DatasetRowDetail,
+    DatasetRowCreated,
     DatasetRowPosition,
     DatasetValueCell,
     DatasetDataRow,
@@ -76,6 +78,7 @@ from ..schemas.dataset import (
 from ..models.recode import RecodeDefinition, RecodeType
 from ..services.dataset_import import (
     DatasetTooLargeError,
+    cell_count_error,
     preview_dataset_csv,
     import_dataset_csv,
     parse_header,
@@ -108,7 +111,29 @@ from ..models.metric import MetricDefinition
 from ..models.row_score import RowScore
 from ..models.statistical_test import StatisticalTest
 from ..services.staleness import mark_metrics_stale
+from ..services.dataset_rows import (  # #897 / row 47
+    create_manual_row,
+    format_record_identifier,
+    materialise_manual_cells,
+    next_record_number,
+    parse_record_identifier,
+)
+from ..services.participant_dataset import (
+    ACTION_ADD_ROW,
+    ACTION_APPEND,
+    ACTION_DELETE_DATASET,
+    ACTION_DELETE_ROW,
+    ACTION_LINK_PARTICIPANTS,
+    create_participant_dataset,
+    get_participant_dataset,
+    managed_dataset_refusal,
+)
+from ..services.participant_scores import (
+    parse_managed_spec,
+    refresh_participant_dataset,
+)
 from ..services.equivalence_validators import assert_domains_intact_for_domain_ids
+from ..services.column_cleanup import delete_column_references
 from ..services.computed_columns import (
     ExpressionError as ComputedExpressionError,
     parse as parse_expression,
@@ -235,6 +260,35 @@ def _recode_definition_summary(d, missing_values_json) -> RecodeDefinitionSummar
     )
 
 
+def _dataset_to_response(
+    ds: Dataset, *, column_count: int, row_count: int, open_ended_count: int = 0,
+) -> DatasetResponse:
+    """The ONE place a `Dataset` becomes a `DatasetResponse`.
+
+    ⚠️ It exists because there were FOUR hand-listed construction sites, and row
+    45 step 4 adds three fields to this schema. That is the #586 / #733 shape
+    exactly — a field declared on the schema, populated at three of four call
+    sites, and silently absent from the fourth payload with no type error. The
+    counts differ per caller (one has them pre-aggregated for a list, the others
+    query per dataset), so they stay parameters; everything read off the model
+    is read in one place.
+    """
+    return DatasetResponse(
+        id=ds.id,
+        name=ds.name,
+        description=ds.description,
+        source=ds.source,
+        color=ds.color,
+        created_at=ds.created_at,
+        column_count=column_count,
+        row_count=row_count,
+        open_ended_count=open_ended_count,
+        managed_kind=ds.managed_kind,
+        managed_synced_at=ds.managed_synced_at,
+        managed_stale=bool(ds.managed_stale),
+    )
+
+
 def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
     """Convert a DatasetColumn ORM object to response schema."""
     scale_labels = None
@@ -304,6 +358,10 @@ def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
         missing_values=parse_missing_rules(q.missing_values),  # #592
 
         source=q.source,
+        # Row 45 (i) step 4 — parsed through the service, never inline: a
+        # malformed spec must degrade to "not a managed column" rather than
+        # 500 every request that touches this dataset.
+        managed_spec=parse_managed_spec(q.managed_spec),
         expression=q.expression,
         depends_on_column_ids=_safe_json_loads(q.depends_on_column_ids) if q.depends_on_column_ids else None,
         stale=q.stale,
@@ -326,6 +384,26 @@ def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
 
 
 # ── Import endpoints ─────────────────────────────────────────────────────────
+
+
+
+def _refuse_if_managed(dataset, action: str) -> None:
+    """409 when `action` would change a tool-maintained dataset's ROW SET.
+
+    THE gate for "locked spine, open columns" (row 45 (i) step 3). Ordinary
+    datasets pass unconditionally, so a call site needs no branch of its own.
+    409 rather than 403: the request is well-formed and the caller is entitled —
+    it conflicts with what the table IS. The reason is the researcher's to read
+    (`participant_dataset._REFUSALS`), so it is passed through verbatim.
+
+    ⚠️ Every endpoint that deletes, appends or re-links a ROW must call this;
+    `tests/test_participant_dataset.py::TestEveryRowSetEndpointAsksTheGate`
+    fails the suite for one that does not.
+    """
+    refusal = managed_dataset_refusal(dataset, action)
+    if refusal is not None:
+        raise HTTPException(status_code=409, detail=refusal)
+
 
 
 @router.post("/preview", response_model=DatasetPreviewResponse)
@@ -563,13 +641,8 @@ async def list_datasets(
     )
 
     items = [
-        DatasetResponse(
-            id=ds.id,
-            name=ds.name,
-            description=ds.description,
-            source=ds.source,
-            color=ds.color,
-            created_at=ds.created_at,
+        _dataset_to_response(
+            ds,
             column_count=column_counts.get(ds.id, 0),
             row_count=row_counts.get(ds.id, 0),
             open_ended_count=open_ended_counts.get(ds.id, 0),
@@ -578,6 +651,165 @@ async def list_datasets(
     ]
 
     return DatasetListResponse(datasets=items, total=len(items))
+
+
+@router.post("", response_model=DatasetResponse, status_code=201)
+async def create_dataset(
+    project_id: int,
+    req: DatasetCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Author a dataset by hand — no file (queue row 47).
+
+    🔴 **Declared `@router.post("")`, never `"/"`.** The sibling GET root is one
+    of the two tolerated legacy `"/"` roots and the client calls it WITH the
+    slash; declaring `"/"` here would register `…/datasets/` and 307-redirect a
+    slash-less POST to the absolute backend origin, which is cross-origin in the
+    Vite dev setup and silently drops the credentialed body.
+
+    🔴 **The dataset is ORDINARY: `managed_kind` stays NULL**, so it keeps every
+    affordance — delete, delete a record, append a file, link a participant.
+    `managedDatasetRefusal` returns null for it by construction, which is the
+    whole point of keying that predicate on one property rather than on a list.
+    Do NOT reuse the participant table's refusals here.
+
+    Born with no columns and no rows; see `DatasetCreate` for why.
+    """
+    _get_project_or_404(db, project_id, user.id)
+
+    dataset = Dataset(
+        project_id=project_id,
+        # #925 — the trim is the SCHEMA's (`DatasetCreate._trim_name`). It was here,
+        # after validation, so `min_length=1` passed a whitespace-only name and this
+        # line stored `""`.
+        name=req.name,
+        description=req.description,
+        # Import PROVENANCE, and nothing was imported — the same call
+        # `create_participant_dataset` makes for the same reason.
+        source=None,
+    )
+    db.add(dataset)
+    db.flush()
+
+    log_action(
+        db,
+        action="dataset_created",
+        entity_type="dataset",
+        entity_id=dataset.id,
+        user_id=user.id,
+        project_id=project_id,
+        details={"name": dataset.name, "authored": True},
+    )
+    db.commit()
+    db.refresh(dataset)
+
+    return _dataset_to_response(dataset, column_count=0, row_count=0)
+
+
+# ── The participant dataset (row 45 (i) step 4) ──────────────────────────────
+#
+# ⚠️ Declared BEFORE `/{dataset_id}` on purpose: FastAPI matches in declaration
+# order, so a literal segment registered after the parameterised one is
+# unreachable — `participants` would be parsed as a dataset id and 422.
+
+
+@router.post("/participants", response_model=DatasetResponse, status_code=201)
+async def create_participants_dataset(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create (or return) this project's participant dataset, filled and scored.
+
+    🔴 **THE CREATION AFFORDANCE — until this endpoint existed, nothing in the
+    product could make a participant dataset at all**, so step 3's whole seam was
+    unreachable and auditing its absence was a false positive.
+
+    Idempotent by `uq_datasets_project_managed_kind`: a second call returns the
+    existing table rather than 409ing, because the button that calls it is a
+    "take me to my participant table" affordance and a double-click is not an
+    error.
+
+    It refreshes on creation so the table is never born empty — an empty table is
+    what makes a new capability read as broken.
+    """
+    _get_project_or_404(db, project_id, user.id)
+
+    existing = get_participant_dataset(db, project_id)
+    dataset = create_participant_dataset(db, project_id)
+    refresh_participant_dataset(db, project_id)
+
+    if existing is None:
+        log_action(
+            db,
+            action="participant_dataset_created",
+            entity_type="dataset",
+            entity_id=dataset.id,
+            user_id=user.id,
+            project_id=project_id,
+        )
+    db.commit()
+    db.refresh(dataset)
+
+    col_count = (
+        db.query(func.count(DatasetColumn.id))
+        .filter(DatasetColumn.dataset_id == dataset.id)
+        .scalar()
+    )
+    row_count = (
+        db.query(func.count(DatasetRow.id))
+        .filter(DatasetRow.dataset_id == dataset.id)
+        .scalar()
+    )
+    return _dataset_to_response(
+        dataset, column_count=col_count, row_count=row_count,
+    )
+
+
+@router.post("/participants/refresh", response_model=ParticipantDatasetRefreshResponse)
+async def refresh_participants_dataset(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Recompute the participant dataset's rows AND every score column.
+
+    🔴 **ON THE DATASET, NOT THE COLUMN, deliberately departing from
+    `POST …/columns/{id}/recompute`.** The rollup is ONE project-wide scan that
+    produces every participant's every score at once, so a per-column verb would
+    re-run that whole scan once per rated code to write numbers it already had.
+    The Data view's per-column Recompute item calls this and says so.
+
+    ⚠️ A GET may not do this (DEC-C, and `GET …/data` is the endpoint paginated
+    for scale). The snapshot moves when the researcher says so.
+    """
+    _get_project_or_404(db, project_id, user.id)
+
+    report = refresh_participant_dataset(db, project_id)
+    if report is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "This project has no participant table yet. Create one from the "
+                "Datasets page to hold per-person scores."
+            ),
+        )
+    db.commit()
+
+    return ParticipantDatasetRefreshResponse(
+        rows_added=report.rows_added,
+        rows_removed=report.rows_removed,
+        columns_added=report.columns_added,
+        columns_removed=report.columns_removed,
+        metrics_removed=report.metrics_removed,
+        cells_written=report.cells_written,
+        cells_cleared=report.cells_cleared,
+        participants_scored=report.participants_scored,
+        participants_coded_unrated=report.participants_coded_unrated,
+        excluded_ratings=report.excluded_ratings,
+        synced_at=report.synced_at,
+    )
 
 
 @router.get("/columns", response_model=ProjectColumnListResponse)
@@ -682,16 +914,7 @@ async def get_dataset(
         .scalar()
     )
 
-    return DatasetResponse(
-        id=ds.id,
-        name=ds.name,
-        description=ds.description,
-        source=ds.source,
-        color=ds.color,
-        created_at=ds.created_at,
-        column_count=col_count,
-        row_count=row_count,
-    )
+    return _dataset_to_response(ds, column_count=col_count, row_count=row_count)
 
 
 @router.patch("/{dataset_id}")
@@ -708,9 +931,10 @@ async def update_dataset(
     for field in data.model_fields_set:
         setattr(ds, field, getattr(data, field))
 
-    db.commit()
-    db.refresh(ds)
-
+    # #898 — BEFORE the commit, not after. `log_action` only `db.add`s the entry;
+    # it never commits. `get_db` only CLOSES the session, so an entry added after
+    # the commit is discarded and the rename is never audited — measured, and
+    # this was the ONLY site in any router with the two in this order.
     log_action(
         db,
         action="dataset_updated",
@@ -719,6 +943,9 @@ async def update_dataset(
         user_id=user.id,
         project_id=project_id,
     )
+
+    db.commit()
+    db.refresh(ds)
 
     col_count = (
         db.query(func.count(DatasetColumn.id))
@@ -731,16 +958,7 @@ async def update_dataset(
         .scalar()
     )
 
-    return DatasetResponse(
-        id=ds.id,
-        name=ds.name,
-        description=ds.description,
-        source=ds.source,
-        color=ds.color,
-        created_at=ds.created_at,
-        column_count=col_count,
-        row_count=row_count,
-    )
+    return _dataset_to_response(ds, column_count=col_count, row_count=row_count)
 
 
 @router.delete("/{dataset_id}")
@@ -752,6 +970,7 @@ async def delete_dataset(
 ):
     """Delete an entire dataset and all its columns, rows, and values."""
     dataset = _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    _refuse_if_managed(dataset, ACTION_DELETE_DATASET)
 
     # Unlink any equivalence group references before deletion
     db.query(DatasetColumn).filter(
@@ -894,7 +1113,8 @@ async def delete_row(
     db: Session = Depends(get_db),
 ):
     """Delete a single dataset row (case) and all its values."""
-    _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    dataset = _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    _refuse_if_managed(dataset, ACTION_DELETE_ROW)
     row = (
         db.query(DatasetRow)
         .filter(
@@ -963,49 +1183,12 @@ async def list_columns(
     return [_column_to_response(q) for q in columns]
 
 
-@router.get(
-    "/{dataset_id}/rows",
-    response_model=list[DatasetRowSummary],
-)
-async def list_rows(
-    project_id: int,
-    dataset_id: int,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """List rows for a dataset with value counts."""
-    _get_dataset_or_404(db, project_id, dataset_id, user.id)
-
-    rows = (
-        db.query(DatasetRow)
-        .filter(DatasetRow.dataset_id == dataset_id)
-        .order_by(DatasetRow.id)
-        .all()
-    )
-
-    if not rows:
-        return []
-
-    row_ids = [r.id for r in rows]
-
-    # Batch value counts
-    value_counts = dict(
-        db.query(DatasetValue.row_id, func.count(DatasetValue.id))
-        .filter(DatasetValue.row_id.in_(row_ids))
-        .group_by(DatasetValue.row_id)
-        .all()
-    )
-
-    return [
-        DatasetRowSummary(
-            id=r.id,
-            participant_id=r.participant_id,
-            row_identifier=r.row_identifier,
-            submitted_at=r.submitted_at,
-            value_count=value_counts.get(r.id, 0),
-        )
-        for r in rows
-    ]
+# `GET /{dataset_id}/rows` (a row summary with value counts) was DELETED
+# 2026-09-06 (#882). Its client method `datasetsApi.listRows` was declared and
+# called by nothing, and the grid reads `/data` — which is paginated (#800),
+# unlike this endpoint, which returned every row of the dataset. Removed rather
+# than kept as substrate because nothing has ever reached it and a paginated
+# replacement would not look like this.
 
 
 @router.get(
@@ -1202,13 +1385,8 @@ async def get_dataset_data(
     )
 
     # Build dataset response with counts from loaded collections
-    dataset_resp = DatasetResponse(
-        id=ds.id,
-        name=ds.name,
-        description=ds.description,
-        source=ds.source,
-        color=ds.color,
-        created_at=ds.created_at,
+    dataset_resp = _dataset_to_response(
+        ds,
         column_count=len(columns),
         # The DATASET's count, never the page's — this drives "N records".
         row_count=total_rows,
@@ -1308,6 +1486,21 @@ async def get_row_position(
         # 404 here, never a position in this one.
         raise HTTPException(status_code=404, detail="Row not found")
 
+    return row_position(db, dataset_id, row, limit)
+
+
+def row_position(
+    db: Session, dataset_id: int, row: DatasetRow, limit: int,
+) -> DatasetRowPosition:
+    """Where ``row`` sits in the grid's ordering, and which page holds it.
+
+    ⚠️ **Extracted because there are TWO callers now** — the search deep link
+    (`GET …/rows/{id}/position`) and the hand-added record (row 47), which must
+    tell the client where the record it just made will appear. Two copies of
+    this arithmetic would agree today and diverge the first time either is
+    touched, and the failure is silent: the jump lands on the wrong page, which
+    reads as "the record isn't there" (#834's own lesson, one caller later).
+    """
     index = (
         db.query(func.count(DatasetRow.id))
         .filter(DatasetRow.dataset_id == dataset_id, rows_before(dataset_id, row))
@@ -1329,6 +1522,89 @@ async def get_row_position(
     )
 
 
+@router.post(
+    "/{dataset_id}/rows",
+    response_model=DatasetRowCreated,
+    status_code=201,
+)
+async def create_row(
+    project_id: int,
+    dataset_id: int,
+    limit: Annotated[int, Query(ge=1, le=MAX_DATASET_PAGE_SIZE)] = DATASET_PAGE_SIZE,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Add one empty record to a dataset (queue row 47).
+
+    Until this existed a `DatasetRow` could only arrive from a FILE — the
+    importer or the append wizard — while a manual COLUMN could already be added
+    by hand. The asymmetry was the tell: the tool let a researcher add a
+    variable but not a record.
+
+    ⚠️ **`limit` must be the page size the caller will then request**, for the
+    same reason `GET …/rows/{id}/position` says so: the returned `offset`
+    addresses a page boundary, and the grid's React Query key carries it (#800).
+
+    🔴 **The refusal is REQUIRED here and the guard is what says so.** This path
+    matches `tests/test_participant_dataset.py`'s route scan on `/rows` + POST,
+    so shipping it without asking the predicate fails the suite with
+    instructions — which is exactly how the fifth managed action came to be
+    written rather than forgotten.
+    """
+    dataset = _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    _refuse_if_managed(dataset, ACTION_ADD_ROW)
+
+    col_count = (
+        db.query(func.count(DatasetColumn.id))
+        .filter(DatasetColumn.dataset_id == dataset_id)
+        .scalar()
+    ) or 0
+    row_count = (
+        db.query(func.count(DatasetRow.id))
+        .filter(DatasetRow.dataset_id == dataset_id)
+        .scalar()
+    ) or 0
+
+    # #803's cap, asked on the way IN rather than only at import. One record
+    # cannot plausibly breach 4,000,000 cells on its own, but nothing else
+    # bounds a hand-authored table at all, and the check is one comparison
+    # against counts this endpoint already has.
+    over = cell_count_error(row_count + 1, col_count)
+    if over:
+        raise HTTPException(status_code=400, detail=over)
+
+    row = create_manual_row(db, dataset_id)
+
+    # A record appearing changes denominators even while every cell is empty —
+    # data-quality percentages and the text-coding response rates count ROWS
+    # (#830d), not cells. `delete_row` marks the same set for the same reason.
+    col_ids = [
+        c[0] for c in db.query(DatasetColumn.id)
+        .filter(DatasetColumn.dataset_id == dataset_id)
+    ]
+    if col_ids:
+        mark_metrics_stale(db, project_id, column_ids=col_ids)
+
+    log_action(
+        db,
+        action="dataset_row_created",
+        entity_type="dataset_row",
+        entity_id=row.id,
+        user_id=user.id,
+        project_id=project_id,
+        details={"dataset_id": dataset_id, "record": row.row_identifier},
+    )
+    db.commit()
+    db.refresh(row)
+
+    position = row_position(db, dataset_id, row, limit)
+    return DatasetRowCreated(
+        **position.model_dump(), row_identifier=row.row_identifier,
+    )
+
+
+
+
 # ── Participant linking endpoints ────────────────────────────────────────────
 
 
@@ -1345,7 +1621,8 @@ async def link_participant(
     db: Session = Depends(get_db),
 ):
     """Link or unlink a dataset row to a participant."""
-    _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    dataset = _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    _refuse_if_managed(dataset, ACTION_LINK_PARTICIPANTS)
 
     row = (
         db.query(DatasetRow)
@@ -1436,7 +1713,8 @@ async def bulk_link_participants(
     db: Session = Depends(get_db),
 ):
     """Bulk link/unlink dataset rows to participants."""
-    _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    dataset = _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    _refuse_if_managed(dataset, ACTION_LINK_PARTICIPANTS)
 
     # Validate no duplicate row_ids
     row_ids = [item.row_id for item in req.links]
@@ -1570,7 +1848,8 @@ async def link_by_column(
     ``already_linked``). Same service, same semantics as import-time linking.
     """
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    dataset = _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    _refuse_if_managed(dataset, ACTION_LINK_PARTICIPANTS)
 
     try:
         report = link_rows_by_identifier_column(
@@ -2186,79 +2465,11 @@ async def delete_manual_column(
             detail=f"Cannot delete: computed column(s) depend on this column: {', '.join(dep_names)}",
         )
 
-    # #298 cascade subset: capture domain IDs that contain this column BEFORE
-    # the AnalysisDomainMember cleanup. Required because the column-driven
-    # validator can't find the affected domains after their member rows are gone.
-    affected_domain_ids = [
-        r[0] for r in
-        db.query(AnalysisDomainMember.domain_id)
-        .filter(
-            AnalysisDomainMember.member_type == "column",
-            AnalysisDomainMember.member_id == column_id,
-        )
-        .distinct()
-        .all()
-    ]
-
-    # Clean up analysis domain membership referencing this column
-    db.query(AnalysisDomainMember).filter(
-        AnalysisDomainMember.member_type == "column",
-        AnalysisDomainMember.member_id == column_id,
-    ).delete(synchronize_session="fetch")
-
-    # Orphan cleanup: delete statistical tests targeting metrics about to be deleted
-    manual_col_metric_ids = [
-        r[0] for r in db.query(MetricDefinition.id).filter(
-            MetricDefinition.input_source_type == "dataset_column",
-            MetricDefinition.input_source_id == column_id,
-        ).all()
-    ]
-    if manual_col_metric_ids:
-        db.query(StatisticalTest).filter(
-            StatisticalTest.target_type == "metric_definition",
-            StatisticalTest.target_id.in_(manual_col_metric_ids),
-        ).delete(synchronize_session="fetch")
-
-    # Clean up metric definitions referencing this column
-    db.query(MetricDefinition).filter(
-        MetricDefinition.input_source_type == "dataset_column",
-        MetricDefinition.input_source_id == column_id,
-    ).delete(synchronize_session="fetch")
-
-    # Clean up equivalence groups that now have 0 linked columns
-    empty_group_ids = [
-        g.id for g in
-        db.query(EquivalenceGroup)
-        .outerjoin(DatasetColumn, DatasetColumn.equivalence_group_id == EquivalenceGroup.id)
-        .filter(EquivalenceGroup.project_id == project_id)
-        .group_by(EquivalenceGroup.id)
-        .having(func.count(DatasetColumn.id) == 0)
-        .all()
-    ]
-    if empty_group_ids:
-        db.query(EquivalenceGroup).filter(
-            EquivalenceGroup.id.in_(empty_group_ids),
-        ).delete(synchronize_session="fetch")
-
-    # #298 cascade subset: validate post-cascade I2 pairing for surviving
-    # cross-dataset domains. Empty domains are skipped (cleaned up below).
-    db.flush()
-    assert_domains_intact_for_domain_ids(db, affected_domain_ids)
-
-    # Clean up analysis domains that now have 0 members
-    empty_domain_ids = [
-        d.id for d in
-        db.query(AnalysisDomain)
-        .outerjoin(AnalysisDomainMember)
-        .filter(AnalysisDomain.project_id == project_id)
-        .group_by(AnalysisDomain.id)
-        .having(func.count(AnalysisDomainMember.id) == 0)
-        .all()
-    ]
-    if empty_domain_ids:
-        db.query(AnalysisDomain).filter(
-            AnalysisDomain.id.in_(empty_domain_ids),
-        ).delete(synchronize_session="fetch")
+    # #923 — the ONE cleanup, shared with the computed-column path and with the
+    # participant table's reap. This block used to be a verbatim copy of
+    # `_cascade_delete_column_refs`; the third caller is what made the duplicate
+    # worth collapsing rather than extending.
+    _cascade_delete_column_refs(db, project_id, column_id)
 
     log_action(
         db,
@@ -2281,79 +2492,25 @@ async def delete_manual_column(
 
 
 def _cascade_delete_column_refs(db: Session, project_id: int, column_id: int):
-    """Shared cascade cleanup for deleting a column (manual or computed).
+    """Delete every reference to a column that is about to be deleted.
 
-    Includes the #298 cascade subset I2 validator: captures affected domain
-    IDs before deleting member rows, then validates surviving cross-dataset
-    domains after the cleanup but before empty-domain pruning. Failure
-    raises 409 cross_dataset_unpaired and rolls back the transaction.
+    🔴 **The body moved to `services/column_cleanup.py::delete_column_references`
+    (#923).** It lived here in TWO verbatim copies — this one and an inline block
+    in `delete_manual_column` — and the participant table's score-column reap
+    needed a third. A `MetricDefinition` names its column through the polymorphic
+    `input_source_id`, which carries no ForeignKey, so nothing in the database can
+    do this for us.
+
+    This wrapper stays for its two router callers and because the name is the one
+    the internal design notes documents. `validate_domains=True` is
+    the router's answer to the #298 question: a researcher deleting a column is
+    entitled to be told that a cross-dataset domain would be left unpaired (409
+    `cross_dataset_unpaired`, transaction rolled back). The reap answers it
+    differently and has to say so at its own call site.
     """
-    # #298 cascade subset: capture domain IDs before the member cleanup
-    # nukes them (column-driven validator wouldn't find them post-cleanup).
-    affected_domain_ids = [
-        r[0] for r in
-        db.query(AnalysisDomainMember.domain_id)
-        .filter(
-            AnalysisDomainMember.member_type == "column",
-            AnalysisDomainMember.member_id == column_id,
-        )
-        .distinct()
-        .all()
-    ]
-
-    db.query(AnalysisDomainMember).filter(
-        AnalysisDomainMember.member_type == "column",
-        AnalysisDomainMember.member_id == column_id,
-    ).delete(synchronize_session="fetch")
-
-    col_metric_ids = [
-        r[0] for r in db.query(MetricDefinition.id).filter(
-            MetricDefinition.input_source_type == "dataset_column",
-            MetricDefinition.input_source_id == column_id,
-        ).all()
-    ]
-    if col_metric_ids:
-        db.query(StatisticalTest).filter(
-            StatisticalTest.target_type == "metric_definition",
-            StatisticalTest.target_id.in_(col_metric_ids),
-        ).delete(synchronize_session="fetch")
-
-    db.query(MetricDefinition).filter(
-        MetricDefinition.input_source_type == "dataset_column",
-        MetricDefinition.input_source_id == column_id,
-    ).delete(synchronize_session="fetch")
-
-    empty_group_ids = [
-        g.id for g in
-        db.query(EquivalenceGroup)
-        .outerjoin(DatasetColumn, DatasetColumn.equivalence_group_id == EquivalenceGroup.id)
-        .filter(EquivalenceGroup.project_id == project_id)
-        .group_by(EquivalenceGroup.id)
-        .having(func.count(DatasetColumn.id) == 0)
-        .all()
-    ]
-    if empty_group_ids:
-        db.query(EquivalenceGroup).filter(
-            EquivalenceGroup.id.in_(empty_group_ids),
-        ).delete(synchronize_session="fetch")
-
-    # #298 cascade subset: validate surviving cross-dataset domains.
-    db.flush()
-    assert_domains_intact_for_domain_ids(db, affected_domain_ids)
-
-    empty_domain_ids = [
-        d.id for d in
-        db.query(AnalysisDomain)
-        .outerjoin(AnalysisDomainMember)
-        .filter(AnalysisDomain.project_id == project_id)
-        .group_by(AnalysisDomain.id)
-        .having(func.count(AnalysisDomainMember.id) == 0)
-        .all()
-    ]
-    if empty_domain_ids:
-        db.query(AnalysisDomain).filter(
-            AnalysisDomain.id.in_(empty_domain_ids),
-        ).delete(synchronize_session="fetch")
+    delete_column_references(
+        db, project_id, column_id, validate_domains=True,
+    )
 
 
 @router.get("/{dataset_id}/domain-scores")
@@ -3012,14 +3169,6 @@ def _decode_csv(content: bytes, encoding: str) -> str:
     return _strip_bom(text)
 
 
-def _parse_row_id(rid: str) -> tuple[int, int] | None:
-    """Parse 'R0001' format into (number, pad_width) or None."""
-    m = re.match(r"^R(\d+)$", rid or "")
-    if m:
-        return int(m.group(1)), len(m.group(1))
-    return None
-
-
 @router.post(
     "/{dataset_id}/append-preview",
     response_model=DatasetAppendPreviewResponse,
@@ -3036,6 +3185,7 @@ async def append_preview(
     """Preview a file (CSV or .xlsx, #523) for appending rows to an existing dataset."""
     _get_project_or_404(db, project_id, user.id)
     ds = _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    _refuse_if_managed(ds, ACTION_APPEND)
     validate_encoding(encoding)
 
     text, sheet_names, _sav_meta = await _upload_to_csv_text(file, encoding, sheet_name)
@@ -3187,7 +3337,7 @@ async def append_preview(
     max_num = 0
     pad_width = 4  # default
     for (rid,) in existing_rids:
-        parsed_rid = _parse_row_id(rid)
+        parsed_rid = parse_record_identifier(rid)
         if parsed_rid:
             num, pw = parsed_rid
             if num > max_num:
@@ -3237,6 +3387,7 @@ async def append_import(
     """Append CSV rows to an existing dataset."""
     _get_project_or_404(db, project_id, user.id)
     ds = _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    _refuse_if_managed(ds, ACTION_APPEND)
     validate_encoding(encoding)
 
     # Parse config
@@ -3299,31 +3450,19 @@ async def append_import(
         ))
         existing_fingerprints.add(fp)
 
-    # Determine record start ID
-    existing_rids = (
-        db.query(DatasetRow.row_identifier)
-        .filter(DatasetRow.dataset_id == dataset_id)
-        .all()
-    )
+    # Determine record start ID. #897/row 47: the scan is
+    # `services/dataset_rows.py::next_record_number` now — ONE derivation shared
+    # with the hand-added record, so the two cannot disagree about what the next
+    # identifier is (a second copy is #542b's shape, and here the disagreement
+    # would show up in the data as an `R121` among `R0001…R0120`).
+    next_num, pad_width = next_record_number(db, dataset_id)
 
-    max_num = 0
-    pad_width = 4
-    for (rid,) in existing_rids:
-        parsed_rid = _parse_row_id(rid)
-        if parsed_rid:
-            num, pw = parsed_rid
-            if num > max_num:
-                max_num = num
-                pad_width = pw
-
-    # Use provided start ID or auto-compute
-    next_num = max_num + 1
+    # An explicit start still wins, auto-adjusted when it collides.
     if config.row_start_id:
-        parsed_start = _parse_row_id(config.row_start_id)
+        parsed_start = parse_record_identifier(config.row_start_id)
         if parsed_start:
             req_num, req_pad = parsed_start
-            # Auto-adjust if conflict (requested start <= existing max)
-            next_num = max(req_num, max_num + 1)
+            next_num = max(req_num, next_num)
             pad_width = req_pad
 
     # Build column metadata for value_numeric computation. `scale_values` carries
@@ -3401,7 +3540,7 @@ async def append_import(
             continue
 
         # Create row
-        rid = f"R{str(next_num).zfill(pad_width)}"
+        rid = format_record_identifier(next_num, pad_width)
         next_num += 1
 
         new_row = DatasetRow(
@@ -3440,6 +3579,17 @@ async def append_import(
             values_created += 1
 
     db.flush()
+
+    # #897 — the appended rows need a cell for every hand-editable column. This
+    # loop only ever writes cells for columns the FILE was mapped to, so a
+    # manual variable the file knows nothing about got none — and without a
+    # `DatasetValue` row the grid cannot save an edit to it at all.
+    #
+    # ⚠️ Dataset-wide, NOT scoped to `new_row_ids`, and that is deliberate: an
+    # install that has already appended to a dataset with a manual variable
+    # carries permanently uneditable cells, and a scoped call would never
+    # revisit them. One `INSERT … SELECT`, so it REPAIRS as well as prevents.
+    materialise_manual_cells(db, dataset_id)
 
     # Re-apply each column's PRIMARY recode scoped to the new rows, mirroring
     # routers/recode.py::_recompute_primary_value_numeric's apply-vs-clear

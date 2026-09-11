@@ -3,8 +3,8 @@
  *
  * ## Why this exists
  *
- * The backend computes three kinds of interval and says which one it produced, in
- * `result_data.ci_method`:
+ * The backend computes several kinds of interval and says which one it produced,
+ * in `ci_method`. The first three set the pattern:
  *
  * - `t_interval`  — a t-interval over RESPONDENTS. The ordinary case.
  * - `wilson`      — a Wilson score interval for a proportion. Also over respondents.
@@ -16,6 +16,13 @@
  * questions, not the number of people who answered. Displayed as a bare "95% CI"
  * next to a scale score, it reads as a sampling interval for that score. It is not
  * one, and the difference is the kind a researcher could carry into a paper.
+ *
+ * The same shape recurs one qualitative layer over: a participant's RATING SCORE
+ * (row 45) is the mean of that person's per-passage ratings, and its interval
+ * (`passage_level_t`) is over THEIR passages — how consistently they were rated
+ * across what they said — not over people. The analysis view will compute the
+ * over-people interval from the same score column as an ordinary `t_interval`, so
+ * the two sit one screen apart and must never read alike.
  *
  * #690 fixed the backend so the honest label survives the computation (it used to be
  * overwritten one line later, so it only appeared when k < 3 — i.e. only when there
@@ -43,7 +50,9 @@ export function isItemLevelCi(method?: string | null): boolean {
 
 /**
  * Every `ci_method` the backend can send. Mirrors the `CI_METHOD_*` constants in
- * `services/metrics.py`.
+ * `services/metrics.py`, `services/reliability_intervals.py` and
+ * `services/magnitude_rollup.py` — three modules, one wire field, pinned by
+ * `test_ci_method_contract.py`.
  *
  * ⚠️ **This union is the point.** The previous shape was a ternary on
  * `isItemLevelCi`, so any method it did not know fell silently through to a bare
@@ -60,6 +69,7 @@ export type CiMethod =
   | 'wilson_per_category'
   | 'kappa_analytic_se'
   | 'alpha_bootstrap_units'
+  | 'passage_level_t'
 
 interface CiDescriptor {
   /** Qualifier appended after the level, e.g. "across items". Empty for the
@@ -92,6 +102,11 @@ const CI_DESCRIPTORS = {
     caveat:
       'Resampled from the coded UNITS, not from the coders — it answers "how much would α move if we had coded a different sample of this material?", not "…if different people had coded it". Adding coders will not narrow it.',
   },
+  passage_level_t: {
+    qualifier: 'across this person’s passages',
+    caveat:
+      'Computed across the rated passages of ONE participant, not across people — it says how consistently this person was rated across what they said, and it narrows with the number of their rated passages rather than with the sample size. It is not the interval for the average score across participants; that one comes from the scores themselves.',
+  },
 } satisfies Record<CiMethod, CiDescriptor>
 
 /**
@@ -104,14 +119,15 @@ const CI_DESCRIPTORS = {
  * computed, and why the server sends the reason instead of the client guessing
  * from which table it is rendering.
  *
- * Mirrors `reliability_intervals.CI_UNAVAILABLE_*`; pinned by
- * `test_ci_method_contract.py`.
+ * Mirrors `reliability_intervals.CI_UNAVAILABLE_*` and
+ * `magnitude_rollup.CI_UNAVAILABLE_*`; pinned by `test_ci_method_contract.py`.
  */
 export type CiUnavailableReason =
   | 'single_continuum'
   | 'autocorrelated_bins'
   | 'insufficient_units'
   | 'no_variance_in_resamples'
+  | 'insufficient_passages'
 
 const CI_UNAVAILABLE_NOTES = {
   single_continuum:
@@ -122,6 +138,8 @@ const CI_UNAVAILABLE_NOTES = {
     'No confidence interval: too few units were coded by two or more people for the range to settle.',
   no_variance_in_resamples:
     'No confidence interval: this code is rare enough here that most resamples contain no instance of it, leaving nothing to agree or disagree about. Coding more of the same material will not fix it — the interval needs more instances of this code, not more units.',
+  insufficient_passages:
+    'No confidence interval: this person has fewer than three rated passages, so the range cannot be estimated. Rating more of their passages is what would produce one.',
 } satisfies Record<CiUnavailableReason, string>
 
 /**

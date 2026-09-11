@@ -147,3 +147,78 @@ describe('caption placement', () => {
     expect(caption).toBeLessThan(colgroup)
   })
 })
+
+/**
+ * #931 — a `PopoverTrigger asChild` must receive a real control.
+ *
+ * Radix spreads `aria-haspopup` / `aria-expanded` / `aria-controls` /
+ * `type="button"` onto whatever child it is handed. Hand it a `<div>` and the
+ * attributes are illegal ARIA (Lighthouse `aria-allowed-attr` — measured at five
+ * instances per render of this grid, in both themes) AND there is no keyboard
+ * opener, because a `div` earns no tab stop and no activation.
+ *
+ * 🔴 **The remedy is NOT to promote the wrapper.** Both triggers in this file
+ * wrapped subtrees containing their own interactive elements — the column header
+ * holds the dnd-kit drag handle, the equivalence-group link and N domain pills;
+ * the participant cell held its Unlink button. A `<button>` or `role="button"`
+ * around any of those nests interactive content inside an interactive element,
+ * which is the trap `frontend-a11y.md` records for the #560 drop zones. The
+ * shape that works is an ANCHOR for position plus a real button as the trigger.
+ *
+ * ⚠️ Scoped to the grid sources deliberately. `PopoverTrigger asChild` around a
+ * `div` is legitimate elsewhere if that div is genuinely non-interactive inside;
+ * this scan pins the two sites whose subtrees are not.
+ */
+describe('#931: every PopoverTrigger in the dataset grid wraps a real control', () => {
+  /** The element name on the line after `<PopoverTrigger asChild>`. */
+  function triggerChildren(source: string): string[] {
+    const src = stripComments(source)
+    return [...src.matchAll(/<PopoverTrigger\s+asChild\s*>\s*(?:\{[^}]*\?\s*)?\s*<(\w+)/g)]
+      .map(m => m[1])
+  }
+
+  it('finds the triggers it is written to check', () => {
+    // POPULATION self-check (#729/#730). A scan whose walk resolves to nothing
+    // passes `toEqual([])` by finding nothing, which is indistinguishable from
+    // real success — so assert the population is non-empty first.
+    const found = GRID_SOURCES.flatMap(f => triggerChildren(read(f)))
+    expect(found.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('hands none of them a bare div', () => {
+    const offenders: string[] = []
+    for (const file of GRID_SOURCES) {
+      for (const el of triggerChildren(read(file))) {
+        if (el === 'div') offenders.push(`${file}: <PopoverTrigger asChild><${el}>`)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  it('the matcher fires on a bare div (predicate falsifier)', () => {
+    // Without this, a regex that matched nothing would pass the test above for
+    // the wrong reason — and the population check alone cannot tell a scan that
+    // reads every trigger from one that reads only the compliant ones.
+    expect(triggerChildren('<PopoverTrigger asChild>\n  <div className="x">')).toEqual(['div'])
+    expect(triggerChildren('<PopoverTrigger asChild>\n  <button type="button">')).toEqual(['button'])
+  })
+})
+
+/**
+ * #915 — the column header carries its own name.
+ *
+ * `columnheader` is a name-from-content role, so before this the header's name
+ * was every string inside it concatenated: measured as
+ * `"Reorder column Department Department ordinal — manual column"`, announced for
+ * every cell in that column. #931's keyboard opener would have been a fourth
+ * contributor, so the explicit name is what keeps that fix from making a filed
+ * defect worse.
+ */
+describe('#915: the sortable column header names itself', () => {
+  it('the <th> carries an explicit aria-label', () => {
+    const tags = headerTags(read('components/DatasetGridComponents.tsx'))
+    const sortable = tags.filter(t => /scope="col"/.test(t))
+    expect(sortable.length).toBeGreaterThanOrEqual(1)
+    for (const tag of sortable) expect(tag).toMatch(/aria-label=/)
+  })
+})

@@ -17,6 +17,7 @@ from ..models.document import Document, SegmentationMode
 from ..models.segment import Segment
 from ..models.code_application import CodeApplication
 from ..models.note import Note
+from ..models.participant import Participant
 from ..services.note_numbering import next_note_sequence
 from ..schemas.document import (
     DocumentListItem,
@@ -42,6 +43,7 @@ from ..schemas.segment import SegmentNoteInfo
 from ..schemas.common import utc_wire
 from ..auth import get_current_user
 from ..services.audit import log_action
+from ..services.participant_scores import mark_participant_scores_stale
 from ..services.document_import import (
     extract_document,
     segment_document,
@@ -84,6 +86,49 @@ def _get_document_or_404(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
+
+
+def _participant_labels(db: Session, documents: list[Document]) -> dict[int, str]:
+    """`{participant_id: display label}` for the linked subjects of `documents`.
+
+    Row 46. Batched rather than walked through `doc.participant`, which would be
+    one query per document on the list endpoint — the same reason the segment
+    and coded counts above it are batched.
+
+    Returns an empty dict when nothing is linked, so callers can `.get(None)`
+    freely: an unlinked document has `participant_id = None`, and `None` is
+    never a key here.
+    """
+    pids = {d.participant_id for d in documents if d.participant_id is not None}
+    if not pids:
+        return {}
+    rows = db.query(Participant.id, Participant.display_name, Participant.identifier).filter(
+        Participant.id.in_(pids)
+    ).all()
+    return {pid: (display or ident) for pid, display, ident in rows}
+
+
+def _resolve_linked_participant(
+    db: Session, project_id: int, participant_id: int | None,
+) -> None:
+    """Refuse a `participant_id` that is not this project's (row 46).
+
+    ⚠️ `update_document` applies the request with a bare `setattr` loop, so the
+    document's own ownership gate says NOTHING about this id — that is the
+    #782/#783 shape, where the project gate passes and the per-ENTITY id is
+    never checked, and `test_ownership_gate_sweep.py` is structurally blind to
+    it because the endpoint does reach a gate token.
+
+    `None` is the legitimate unlink and is accepted without a lookup.
+    """
+    if participant_id is None:
+        return
+    exists = db.query(Participant.id).filter(
+        Participant.id == participant_id,
+        Participant.project_id == project_id,
+    ).first()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Participant not found")
 
 
 def _document_dir(project_id: int, document_id: int) -> Path:
@@ -322,6 +367,8 @@ async def list_documents(
         db, Segment.document_id, doc_ids, participant_only=False
     )
 
+    labels = _participant_labels(db, documents)
+
     return [
         DocumentListItem(
             id=d.id,
@@ -334,6 +381,8 @@ async def list_documents(
             page_count=d.page_count,
             created_at=d.created_at,
             updated_at=d.updated_at,
+            participant_id=d.participant_id,
+            participant_label=labels.get(d.participant_id),
         )
         for d in documents
     ]
@@ -444,6 +493,8 @@ async def get_document(
         page_count=document.page_count,
         created_at=document.created_at,
         updated_at=document.updated_at,
+        participant_id=document.participant_id,
+        participant_label=_participant_labels(db, [document]).get(document.participant_id),
         segments=segment_responses,
         image_positions=image_positions,
     )
@@ -642,10 +693,18 @@ async def update_document(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update document name or description."""
+    """Update document name, description, or linked participant."""
     document = _get_document_or_404(db, project_id, document_id, user.id)
 
     update_fields = data.model_dump(exclude_unset=True)
+    # Row 46 — the loop below is a bare `setattr`, so the document's ownership
+    # gate does not vouch for anything the request NAMES. Check the participant
+    # against this project before any of it is applied.
+    if "participant_id" in update_fields:
+        _resolve_linked_participant(db, project_id, update_fields["participant_id"])
+        # Row 45 step 4 — row 46's link is a score input: it is what makes a
+        # document's coded passages belong to a person. Ungated.
+        mark_participant_scores_stale(db, project_id)
     for field_name, value in update_fields.items():
         setattr(document, field_name, value)
 
@@ -683,6 +742,8 @@ async def update_document(
         page_count=document.page_count,
         created_at=document.created_at,
         updated_at=document.updated_at,
+        participant_id=document.participant_id,
+        participant_label=_participant_labels(db, [document]).get(document.participant_id),
     )
 
 

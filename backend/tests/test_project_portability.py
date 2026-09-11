@@ -120,10 +120,13 @@ def populated_project(db_session: Session):
     db.add(conv)
     db.flush()
 
-    # Document
+    # Document — linked to p1 (row 46). `participant_id` is a real FK on a
+    # portable model, so an un-remapped one writes the SOURCE instance's raw id
+    # into this database rather than a harmless NULL.
     doc = Document(
         project_id=pid, name="Report.pdf", source_filename="report.pdf",
         source_format="pdf", segmentation_mode="paragraph",
+        participant_id=p1.id,
     )
     db.add(doc)
     db.flush()
@@ -1394,6 +1397,31 @@ class TestImportProject:
         seg1_new = [s for s in new_segs if s.text == "Hello world"][0]
         seg2_new = [s for s in new_segs if s.text == "Merged segment"][0]
         assert seg1_new.merged_into_id == seg2_new.id
+
+    def test_remaps_the_document_participant_link(self, db_session, populated_project):
+        """Row 46 — `Document.participant_id` must point at the IMPORTED
+        participant, never the source instance's raw id.
+
+        ⚠️ The failure this catches is not a crash. `_build_entity` copies any
+        column the import does not explicitly remap, so an unmapped FK writes a
+        number that is meaningful in the EXPORTING database and points at some
+        other person — or nobody — in this one. Asserting "not None" would pass
+        against exactly that bug; the assertion has to be identity.
+        """
+        pid = populated_project["project"].id
+        old_participant_id = populated_project["participant"].id
+        new_id = self._export_and_import(db_session, pid)
+
+        new_doc = db_session.query(Document).filter(
+            Document.project_id == new_id
+        ).first()
+        new_participant = db_session.query(Participant).filter(
+            Participant.project_id == new_id
+        ).first()
+
+        assert new_doc.participant_id == new_participant.id
+        # And the ids genuinely differ, or the assertion above is vacuous.
+        assert new_participant.id != old_participant_id
 
     def test_remaps_polymorphic_memo_ids(self, db_session, populated_project):
         """Memos have entity_ids correctly remapped for all entity types."""

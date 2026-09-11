@@ -2,7 +2,7 @@ import { useState, useMemo, useCallback, useRef, useEffect, memo } from 'react'
 import { useParams, Link, useNavigate, useSearchParams } from 'react-router'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { GripVertical, Undo2, Redo2, MessageSquareText } from 'lucide-react'
+import { GripVertical, Undo2, Redo2, MessageSquareText, RefreshCw, Plus, Table2 } from 'lucide-react'
 import { columnDisplayLabel, truncatedColumnLabel } from '@/lib/dataset-column-label'
 import AddVariableMenu from '@/components/AddVariableMenu'
 import PickRuleToDeriveDialog from '@/components/PickRuleToDeriveDialog'
@@ -10,8 +10,11 @@ import DeriveVariableDialog from '@/components/DeriveVariableDialog'
 import { useCreateVariable } from '@/hooks/useCreateVariable'
 import { useDeriveVariable } from '@/hooks/useDeriveVariable'
 import { variableViewPath } from '@/lib/dataset-routes'
+import { countLabel, plural } from '@/lib/format'
 import './dataset-view.css'
 import { revealRecordCell, offsetForRecordNumber } from '@/lib/dataset-record-focus'
+import { invalidateRowSetChanged } from '@/lib/dataset-cache'
+import { useAddRecord } from '@/hooks/useAddRecord'
 import {
   DndContext,
   DragOverlay,
@@ -52,7 +55,14 @@ import { modeDisabledProps, MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
 import { SortableColumnHeader, DataRow } from '@/components/DatasetGridComponents'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
+import {
+  describeFreshness,
+  describeRefresh,
+  isManagedColumn,
+} from '@/lib/magnitude-rollup-basis'
+import { isManagedDataset, managedDatasetRefusal } from '@/lib/managed-dataset'
 import { useHistory } from '@/hooks/useHistory'
+import { focusedElementOwnsKey } from '@/lib/keyboard-scope'
 import DatasetTabs from '@/components/DatasetTabs'
 
 const EMPTY_DOMAIN_SCORES: import('@/lib/api').DomainScoreColumn[] = []
@@ -63,7 +73,7 @@ const DataGridBody = memo(function DataGridBody({
   rows, rowOffset, columns, resolvedActiveDefinitions, handleOpenText, pid,
   linkedParticipantMap, handleLink, selectedCell, handleCellSelect,
   editingCell, handleStartEdit, handleCellSave, handleCellCancel,
-  handleTabNav, handleEnterNav, handleDeleteRow, domainScoreCols,
+  handleTabNav, handleEnterNav, handleDeleteRow, deleteRowRefusal, linkRefusal, domainScoreCols,
 }: {
   rows: import('@/lib/api').DatasetDataRow[]
   /**
@@ -89,6 +99,8 @@ const DataGridBody = memo(function DataGridBody({
   handleTabNav: (rowId: number, columnId: number, direction: 'next' | 'prev') => void
   handleEnterNav: (rowId: number, columnId: number) => void
   handleDeleteRow: (rowId: number, recordLabel: string) => void
+  deleteRowRefusal?: string | null
+  linkRefusal?: string | null
   domainScoreCols: import('@/lib/api').DomainScoreColumn[]
 }) {
   return (
@@ -113,6 +125,8 @@ const DataGridBody = memo(function DataGridBody({
           onTabNav={handleTabNav}
           onEnterNav={handleEnterNav}
           onDeleteRow={handleDeleteRow}
+          deleteRowRefusal={deleteRowRefusal}
+          linkRefusal={linkRefusal}
           domainScoreCols={domainScoreCols}
         />
       ))}
@@ -494,7 +508,20 @@ export default function DatasetView() {
     }
   }, [data, activeColumnId, closeColumnEditor])
 
-  // Keyboard shortcuts: Ctrl+Z/Y undo/redo, Escape clears selection
+  // Keyboard shortcuts: Ctrl+Z/Y undo/redo, F2/Enter to edit, Escape clears selection
+  //
+  // 🔴 **F2 and Enter are #927's second half.** The app-wide convention is
+  // "inline editing: F2 or double-click" — every other editable surface honours
+  // it and this grid implemented NEITHER, so entering edit mode was a mouse
+  // click and nothing else. That is what made the open-text branch's viewer a
+  // dead end rather than an inconvenience: once the click was spoken for, no
+  // key could get in.
+  //
+  // ⚠️ **This does NOT make the grid keyboard-navigable, and must not be read
+  // as doing so.** `selectedCell` is only ever set by a click — the cells carry
+  // no tab stop and there is no arrow navigation (unlike the crosswalk grid's
+  // roving tabindex, #701b). So this is a mouse-select-then-keyboard-edit path,
+  // which is a real improvement and not the whole gap; the gap is filed.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
@@ -506,10 +533,28 @@ export default function DatasetView() {
       if (e.key === 'Escape' && !editingCell && selectedCell) {
         setSelectedCell(null)
       }
+      if ((e.key === 'F2' || e.key === 'Enter') && !editingCell && selectedCell) {
+        // ⚠️ Enter must stand down for whatever owns it. `focusedElementOwnsKey`
+        // is the shared chokepoint (#784): a text field owns every key and a
+        // button owns Space/Enter, so this cannot swallow the activation of a
+        // focused toolbar control or steal a keystroke from the search box.
+        // F2 is claimed unconditionally — nothing else on this page wants it.
+        if (e.key === 'Enter' && focusedElementOwnsKey(e.key, document.activeElement)) return
+        // Only a cell the researcher may write is editable; the status bar
+        // beside this already says so for the other columns.
+        //
+        // ⚠️ Read off `data` rather than `manualColumnIds`, which is declared
+        // 250 lines below this effect — naming it in the dep array would be a
+        // temporal-dead-zone ReferenceError at render, not a lint nit.
+        const column = data?.columns.find(c => c.id === selectedCell.columnId)
+        if (column?.source !== 'manual') return
+        e.preventDefault()
+        setEditingCell(selectedCell)
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [canUndo, canRedo, historyUndo, historyRedo, editingCell, selectedCell])
+  }, [canUndo, canRedo, historyUndo, historyRedo, editingCell, selectedCell, data])
 
   // ── Column widths (localStorage persistence) ───────────────────────────
   const DEFAULT_COL_WIDTH = 120
@@ -890,6 +935,24 @@ export default function DatasetView() {
   // researcher is already looking at.
   const deleteVariable = useDeleteVariable(pid, iid)
 
+  const refreshParticipantsMut = useMutation({
+    mutationFn: () => datasetsApi.refreshParticipantsDataset(pid),
+    onSuccess: (report) => {
+      // Row 45's Decision 4 obliges the rollup to SAY what it excluded, and a
+      // disclosure that reaches no surface discharges nothing — so the counts
+      // ride the toast rather than being dropped on the floor.
+      // ⚠️ PREFIX-match, so this covers every page offset in the key (#800).
+      queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })
+      queryClient.invalidateQueries({ queryKey: ['dataset-columns', pid, iid] })
+      queryClient.invalidateQueries({ queryKey: ['datasets', pid] })
+      queryClient.invalidateQueries({ queryKey: ['project-columns', pid] })
+      toast.success(describeRefresh(report))
+    },
+    onError: (err: Error) => toast.error(
+      extractApiError(err, 'Could not refresh the participant table'),
+    ),
+  })
+
   const recomputeMut = useMutation({
     mutationFn: (columnId: number) => datasetsApi.recomputeColumn(pid, iid, columnId),
     onSuccess: () => {
@@ -931,18 +994,59 @@ export default function DatasetView() {
     [removeFromGroupMutation],
   )
 
+  /**
+   * Row 47 — add one empty record, through the shared hook.
+   *
+   * 🔴 **This surface's `onAdded` moves the PAGE and reveals the row**, because
+   * a new record sorts LAST: on a 500-record dataset it lands on page 3 while
+   * the grid is showing page 1, and "Record added" with nothing visible is the
+   * state that reads as broken.
+   *
+   * ⚠️ It reuses the SEARCH DEEP LINK's reveal machinery rather than a second
+   * scroll path — `setPageOffset` then `pendingRevealRef`, whose effect retries
+   * until the requested page has actually rendered (#825: the row must EXIST in
+   * the DOM before anything can scroll to it).
+   *
+   * ⚠️ No `rowPosition` round trip, unlike the deep link, which knows only a
+   * primary key: the create already returned the position from the same
+   * `row_position()` helper.
+   */
+  const { addRecord, isAdding } = useAddRecord(pid, iid, (created) => {
+    setPageOffset(created.offset)
+    pendingRevealRef.current = { rowId: created.row_id, columnId: null }
+  })
+
   const deleteResponseMutation = useMutation({
     mutationFn: (rowId: number) => datasetsApi.deleteRow(pid, iid, rowId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })
-      toast.success('Response deleted')
+      // Row 47 — the SHARED row-set helper. This invalidated `dataset-data`
+      // alone, so after deleting a record the Datasets list kept its old
+      // "Records" count and the Text Coding picker kept its old `N/M responded`
+      // rate for the 60s staleTime (#830(d) made that a ROW count). Extracting
+      // the helper for add-record is what surfaced it — #733's rule that a copy
+      // propagates the original's defect verbatim, caught on the way in.
+      invalidateRowSetChanged(queryClient, pid, iid)
+      // #940 — the surface says "record"; a hand-authored table of departments
+      // has no respondent and no answers.
+      toast.success('Record deleted')
     },
     onError: (err: Error) => toast.error(extractApiError(err, 'Failed to delete row')),
   })
 
+  // Row 45 (i) — on a tool-maintained table the row set is DERIVED, so the
+  // server 409s this. Refusing HERE, with the server's own words, is what stops
+  // the confirm dialog promising a deletion the request then declines (#812's
+  // defect). Not hidden: the sentence names the Participants page, which is
+  // where the record actually goes away.
+  const deleteRowRefusal = managedDatasetRefusal(data?.dataset, 'deleteRow')
+
   const handleDeleteRow = useCallback((rowId: number, recordLabel: string) => {
+    if (deleteRowRefusal) {
+      toast.info(deleteRowRefusal)
+      return
+    }
     setDeleteResponse({ id: rowId, label: recordLabel })
-  }, [])
+  }, [deleteRowRefusal])
 
   // Destructure data with safe defaults (hooks below must always run)
   const dataset = data?.dataset
@@ -950,6 +1054,20 @@ export default function DatasetView() {
   // — the three useMemos below depend on `columns` and would otherwise recompute
   // every render while data is undefined.
   const columns = useMemo(() => data?.columns ?? [], [data])
+  /**
+   * #941 — was anything IMPORTED into this table?
+   *
+   * The question a new variable's default TYPE turns on. A survey dataset is
+   * full of Likert items, so Ordinal is the right default there; a hand-authored
+   * reference table (row 47: "sites, cohorts or departments") and the participant
+   * table are nominal or open text, and neither ever holds an imported column.
+   * Reading the column set rather than `dataset.source` keeps it true for a table
+   * that was authored by hand and later appended to from a file.
+   */
+  const hasImportedColumns = useMemo(
+    () => columns.some(c => c.source === 'imported'),
+    [columns],
+  )
   const rows = data?.rows ?? []
   // #800: `rows` is ONE PAGE. Anything user-facing that counts records reads
   // this instead — they were the same number until the endpoint was paginated.
@@ -990,6 +1108,14 @@ export default function DatasetView() {
   // Stable sortable IDs for SortableContext (avoids new array each render)
   const sortableIds = useMemo(() => columns.map(q => q.id), [columns])
 
+  // Row 45 (i) — null on an ordinary dataset AND on a participant table that
+  // has never been computed; the two are different states and the second shows
+  // an empty table rather than a stale claim.
+  const freshness = useMemo(
+    () => (isManagedDataset(dataset) && dataset ? describeFreshness(dataset) : null),
+    [dataset],
+  )
+
   // Pre-compute open-text column IDs for toolbar "Code Text" link.
   // ⚠️ `columns` is the FULL column list even though `rows` is a page (#800),
   // so this is never a partial answer — the link cannot silently omit a text
@@ -1013,9 +1139,18 @@ export default function DatasetView() {
     deleteVariable.request(q)
   }, [closeColumnEditor, deleteVariable])
 
+  // Row 45 (i) step 4 — TWO kinds of stale column, TWO verbs, one handler.
+  //
+  // 🔴 A score column is refreshed at the DATASET, never per column: the rollup
+  // is ONE project-wide scan producing every participant's every score at once,
+  // so routing it through `recomputeColumn` would re-run that whole scan per
+  // rated code — and `recompute_column` 403s anything that is not
+  // `source="computed"` anyway, so an unrouted item would simply fail. Same
+  // shape as #812's delete: one control, two endpoints, ONE predicate deciding.
   const handleRecompute = useCallback((q: DatasetColumn) => {
-    recomputeMut.mutate(q.id)
-  }, [recomputeMut])
+    if (isManagedColumn(q)) refreshParticipantsMut.mutate()
+    else recomputeMut.mutate(q.id)
+  }, [recomputeMut, refreshParticipantsMut])
 
   const handlePopoverOpenChange = useCallback((columnId: number, open: boolean) => {
     if (open) openColumnEditor(columnId)
@@ -1085,7 +1220,65 @@ export default function DatasetView() {
           {/* The variable count rides the Variables tab now — repeating it here
               was the same number twice in one band. `total_rows` is the DATASET
               (#800): `rows` is only the page. */}
-          <span><strong className="font-mono tabular-nums">{totalRows.toLocaleString()}</strong> records</span>
+          {/* #939 — `plural` exists (`lib/format.ts`) and BOTH sites here
+              hand-rolled it: the caption below got it right, this one read
+              "1 records". Row 47 made a one-record table the routine state, so
+              it is the first thing a researcher sees after adding their first. */}
+          <span><strong className="font-mono tabular-nums">{totalRows.toLocaleString()}</strong> {plural(totalRows, 'record', 'records')}</span>
+          {/* 🔴 Row 45 (i) — THE HONEST HALF OF THE FRESHNESS PAIR. The table
+              states WHEN it was computed, always, and never that it is up to
+              date: MEASURED, eight input classes move a rating score and no
+              enumeration of write sites covers them all, so a "current" badge
+              would be a lie the first time a trigger was missed. `managed_stale`
+              only ever ADDS a warning; its absence adds nothing.
+
+              ⚠️ The refresh is a `<Button>` with a real name, not an icon — this
+              is the verb that makes the snapshot move, and #559's rule is that a
+              tooltip is not a name. */}
+          {freshness && (
+            <span className="flex items-center gap-1.5">
+              <span className="w-px h-3 bg-mm-border" aria-hidden="true" />
+              {/* ⚠️ The dot is DECORATIVE and the state is in the TEXT. Two
+                  reasons, and the second is the one that decided it: a bare
+                  `role="img"` badge trips the fail-closed scan in
+                  `ChartFigure.test.tsx` (role="img" makes children
+                  presentational), and colour-plus-a-dot is a WCAG 1.4.1
+                  use-of-colour problem regardless — so the words carry it for
+                  everyone rather than a shape carrying it for some. */}
+              {freshness.stale && (
+                <span
+                  aria-hidden="true"
+                  className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"
+                />
+              )}
+              <span className={freshness.stale ? 'text-amber-600 dark:text-amber-400' : undefined}>
+                {freshness.label}
+                {freshness.stale && ' · out of date'}
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                onClick={() => refreshParticipantsMut.mutate()}
+                disabled={refreshParticipantsMut.isPending}
+                aria-label="Refresh the participant scores from the current coding"
+              >
+                <RefreshCw
+                  className={`w-3 h-3 ${refreshParticipantsMut.isPending ? 'animate-spin' : ''}`}
+                  aria-hidden="true"
+                />
+                {/* #830a's pattern, and it is REQUIRED here rather than tidy:
+                    MEASURED at the 640x360 CSS viewport a 1280x720 window has
+                    at 200% zoom, the full-width button put this row at 663px
+                    against a 625px container whose ancestor is
+                    `overflow-hidden` — i.e. CLIPPED, not scrollable (WCAG
+                    1.4.4). Collapsing the word to `sr-only` brings it to 617px.
+                    The button keeps its own `aria-label`, so nothing is lost to
+                    a reader. */}
+                <span className="sr-only lg:not-sr-only lg:ml-1">Refresh</span>
+              </Button>
+            </span>
+          )}
         </div>
         {(canUndo || canRedo) && (
           <>
@@ -1130,6 +1323,9 @@ export default function DatasetView() {
           onAddComputed={() => createVariable.open('computed')}
           onAddRecoded={() => createVariable.open('recoded')}
           onAppendRecords={() => navigate(`/projects/${pid}/datasets/${iid}/append`)}
+          appendRefusal={managedDatasetRefusal(dataset, 'append')}
+          onAddRecord={addRecord}
+          addRecordRefusal={managedDatasetRefusal(dataset, 'addRow')}
         />
 
         {/* "Variable Groups" LEFT this toolbar: its route carries no
@@ -1183,7 +1379,7 @@ export default function DatasetView() {
             variant="outline"
             size="sm"
             className={`text-sm ${MODE_DISABLED_CLASS}`}
-            title="No open-text variables in this dataset. Set a variable's type to open text in the Variables view to code its responses."
+            title="No open-text variables in this dataset. Set a variable's type to open text in the Variables view to code its text."
             {...modeDisabledProps<HTMLButtonElement>({
               label: 'Code text',
               blockedReason:
@@ -1198,9 +1394,56 @@ export default function DatasetView() {
         )}
       </div>
 
-      <div className="flex-1 min-h-0 p-4 flex flex-col">
-        {rows.length === 0 ? (
-          <div className="text-center py-12 text-mm-text-muted">No rows for this dataset.</div>
+      {/* #930(a) — `min-h-0` GRANTS the collapse; an overflow on the SAME child
+          is what makes it safe (#894's pairing rule, on the vertical axis).
+          MEASURED at 640×360 before the fix: this region is 238px tall and its
+          content 294px, `overflow-y: visible`, and the ancestor clips — so the
+          empty-state panel ran to y=387 in a 360px viewport with the *Add record*
+          button's last 7px behind the status bar and NOTHING scrolling.
+          ⚠️ `overflow-hidden` is refuted for this (#894): it would delete the
+          buttons from view and an overflow metric would call that fixed. */}
+      <div className="flex-1 min-h-0 p-4 flex flex-col overflow-y-auto">
+        {/* 🔴 Row 47 — THE GRID RENDERS WHETHER OR NOT THERE ARE ROWS.
+            This was `rows.length === 0 ? "No rows for this dataset." : <grid>`,
+            with the headers, the colgroup, the caption AND the pager all inside
+            the else. So a table you had just created showed one grey sentence:
+            you could add a variable and not SEE it, and there was nowhere to
+            type. That made "author a dataset by hand" land on a dead end, which
+            is why this is a prerequisite for the feature rather than polish.
+
+            Two states now, and they answer different questions. With no
+            variables AND no records there is nothing to render a grid OF, so
+            the panel below names the two next steps — the empty state IS the
+            feature for a brand-new table, exactly as `PickRuleToDeriveDialog`'s
+            is. With at least one of the two, the grid renders and says what it
+            is missing IN the table, where the answer will appear.
+
+            ⚠️ The pager needs no guard: it already gates on
+            `hasPaging = totalRows > pageSize`. */}
+        {columns.length === 0 && totalRows === 0 ? (
+          <div className="rounded-lg border border-mm-surface-border bg-mm-surface p-12 text-center">
+            <Table2 className="w-8 h-8 mx-auto mb-4 text-mm-text-faint" aria-hidden="true" />
+            <h2 className="text-lg font-semibold text-mm-text mb-2">This table is empty</h2>
+            <p className="text-sm text-mm-text-muted mb-6 max-w-md mx-auto">
+              Add a variable for each thing you want to record, then add a record
+              for each case. Both live in the <strong>Add</strong> menu above.
+            </p>
+            <div className="flex items-center justify-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => createVariable.open('manual')}>
+                <Plus className="w-4 h-4 mr-1" aria-hidden="true" />
+                Add variable
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={addRecord}
+                disabled={isAdding}
+              >
+                <Plus className="w-4 h-4 mr-1" aria-hidden="true" />
+                Add record
+              </Button>
+            </div>
+          </div>
         ) : (
           <DndContext
             sensors={dndSensors}
@@ -1217,7 +1460,9 @@ export default function DatasetView() {
                   sat after `<colgroup>`, the only one of the app's caption
                   sites that did. Browsers recover, and a screen reader read it
                   fine, but the spec order is what other consumers rely on. */}
-              <caption className="sr-only">{dataset.name} — {columns.length} columns{domainScoreCols.length > 0 ? `, ${domainScoreCols.length} domain scores` : ''}, {totalRows} records</caption>
+              {/* #909: pluralised — a hand-authored table is the first with one
+                  column or one record, and the caption read "1 columns, 1 records". */}
+              <caption className="sr-only">{dataset.name} — {countLabel(columns.length, 'column', 'columns')}{domainScoreCols.length > 0 ? `, ${countLabel(domainScoreCols.length, 'domain score', 'domain scores')}` : ''}, {countLabel(totalRows, 'record', 'records')}</caption>
               <colgroup>
                 <col style={{ width: 96 }} />
                 <col style={{ width: 160 }} />
@@ -1304,6 +1549,22 @@ export default function DatasetView() {
                   ))}
                 </tr>
               </thead>
+              {/* An empty table still shows its headers — the researcher needs
+                  to see the variables they have made. A second `<tbody>` is
+                  valid HTML and keeps `DataGridBody` a pure row renderer. */}
+              {rows.length === 0 && (
+                <tbody>
+                  <tr>
+                    <td
+                      colSpan={2 + columns.length + domainScoreCols.length}
+                      className="px-3 py-10 text-center text-sm text-mm-text-muted"
+                    >
+                      No records yet — use <strong>Add ▾ → Add record</strong> to
+                      create the first one.
+                    </td>
+                  </tr>
+                </tbody>
+              )}
               <DataGridBody
                 rowOffset={shownOffset}
                 rows={rows}
@@ -1322,6 +1583,8 @@ export default function DatasetView() {
                 handleTabNav={handleTabNav}
                 handleEnterNav={handleEnterNav}
                 handleDeleteRow={handleDeleteRow}
+                deleteRowRefusal={deleteRowRefusal}
+                linkRefusal={managedDatasetRefusal(dataset, 'linkParticipants')}
                 domainScoreCols={domainScoreCols}
               />
             </table>
@@ -1442,18 +1705,31 @@ export default function DatasetView() {
               <span className={`px-1 py-0.5 rounded text-[10px] font-medium ${TYPE_BADGE_CLASSES[col.column_type] || 'bg-mm-bg text-mm-text-muted'}`}>
                 {col.column_type}
               </span>
-              {col.source === 'manual' && <span>Tab to next cell · Enter to move down · Esc to deselect</span>}
+              {/* ⚠️ These hints describe the SELECTED-not-editing state, and the
+                  manual one used to describe edit mode instead: `Tab to next
+                  cell · Enter to move down` are `EditableCell`'s own editor
+                  keys, so with a cell merely selected neither did anything.
+                  Since #927 `Enter`/`F2` open the editor from here, which is
+                  what this now says; the editor's own hints are unchanged. */}
+              {col.source === 'manual' && <span>Enter or F2 to edit · Esc to deselect</span>}
               {col.source !== 'manual' && <span>Esc to deselect</span>}
             </>
           ) : <span>? for shortcuts</span>
         })() : (
+          /* #930(b) — the hint follows the state, as the empty panel's own copy
+             already does. On a brand-new table there is no column header and no
+             cell, so this named two things that are not on screen. */
+          columns.length === 0 && totalRows === 0 ? (
+            <span>Add a variable and a record to start · ? for shortcuts</span>
+          ) : (
           <span>Click a column header or cell to edit · ? for shortcuts</span>
+          )
         )}
       </div>
 
       {/* Expanded text dialog */}
       <Dialog open={!!expandedText} onOpenChange={() => setExpandedText(null)}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+        <DialogContent aria-describedby={undefined} className="max-w-2xl max-h-[80vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{expandedText?.title}</DialogTitle>
           </DialogHeader>
@@ -1488,7 +1764,16 @@ export default function DatasetView() {
           Variables view with their entry points (design note E). The ADD
           dialogs stay on both views: creating a variable is a dataset-level
           act, and both tabs of the workspace offer it (#830f). */}
-      <ColumnFormDialog {...createVariable.manualDialogProps} title="Add Variable" />
+      {/* #941 — Ordinal is right for a survey and wrong for the reference tables
+          row 47 built ("sites, cohorts or departments", says the dialog one step
+          earlier). The signal is whether anything was IMPORTED here: a
+          hand-authored table never has an imported column, and neither does the
+          participant table. */}
+      <ColumnFormDialog
+        {...createVariable.manualDialogProps}
+        title="Add Variable"
+        defaultColumnType={hasImportedColumns ? 'ordinal' : 'nominal'}
+      />
       <ColumnFormDialog
         {...createVariable.computedDialogProps}
         title="Add Computed Variable"
@@ -1506,8 +1791,8 @@ export default function DatasetView() {
       <ConfirmDialog
         open={deleteResponse !== null}
         onOpenChange={(open) => { if (!open) setDeleteResponse(null) }}
-        title="Delete response?"
-        description={`Delete response "${deleteResponse?.label}"? This will remove all their answers. This cannot be undone.`}
+        title="Delete record?"
+        description={`Delete record "${deleteResponse?.label}"? Every value in it is deleted with it. This cannot be undone.`}
         confirmLabel="Delete"
         onConfirm={() => {
           if (deleteResponse) {

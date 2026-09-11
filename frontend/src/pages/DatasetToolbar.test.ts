@@ -48,7 +48,7 @@ describe('the shared Add menu', () => {
     expect(menu).toContain('DropdownMenuTrigger')
   })
 
-  it('offers ALL THREE variable kinds and the records action inside ONE menu', () => {
+  it('offers ALL THREE variable kinds and BOTH records actions inside ONE menu', () => {
     // ⚠️ This assertion's TITLE said "both variable kinds" until Decision B
     // Stage 3 added the third — a count rotting inside a test name, which is
     // the class the internal design notes warns about: the wrong number reads as a complete
@@ -57,7 +57,13 @@ describe('the shared Add menu', () => {
     // The three are jamovi's `Add` → Data / Computed / Transformed. MM had
     // BUILT the third kind (Decision B) and listed only two, so a researcher
     // looking where jamovi taught them to look found nothing (design note §11).
-    for (const item of ['Variable', 'Computed variable', 'Recoded variable...', 'Append from file...']) {
+    // ⚠️ Row 47 added the second RECORDS action, so the title moved from "the
+    // records action" to "both". Same class as the "both variable kinds" slip
+    // above: the number in a test's name is a count, and it rots.
+    for (const item of [
+      'Variable', 'Computed variable', 'Recoded variable...',
+      'Add record', 'Append from file...',
+    ]) {
       expect(menu, `the Add menu must offer "${item}"`).toContain(item)
     }
   })
@@ -96,6 +102,56 @@ describe('the shared Add menu', () => {
     }
   })
 
+  it('🔴 row 47 — BOTH record actions live in the Records group', () => {
+    // The hand-authored half of the RECORDS axis. A manual COLUMN could always
+    // be added by hand while a record could only arrive from a file, and the
+    // asymmetry sat inside this very menu, one group apart.
+    const recordsGroup = menu.slice(menu.indexOf('aria-labelledby="add-menu-records"'))
+    expect(recordsGroup.length, 'the Records group should be real source')
+      .toBeGreaterThan(200)
+    for (const item of ['Add record', 'Append from file...']) {
+      expect(recordsGroup, `"${item}" belongs in the Records group`).toContain(item)
+    }
+  })
+
+  it('🔴 row 47 — each records action can be REFUSED with a reason', () => {
+    // A managed table's rows are its participants, so the server 409s both.
+    // The persistent-mode arm keeps them focusable and says why, rather than
+    // hiding a control the researcher would then not know exists (#754).
+    for (const prop of ['addRecordRefusal', 'appendRefusal']) {
+      expect(menu, `${prop} must gate its item`).toContain(prop)
+    }
+    expect(
+      (menu.match(/modeDisabledProps/g) ?? []).length,
+      'both records actions take the persistent-mode arm',
+    ).toBeGreaterThanOrEqual(2)
+  })
+
+  it('🔴 an item is activated ONCE — never by onSelect AND onClick together', () => {
+    // FOUND BY DRIVING, and it had already shipped. `modeDisabledProps` RETURNS
+    // an `onClick` (its click guard is the load-bearing half of #754), so an
+    // item that also wires `onSelect` to the same callback fires it TWICE per
+    // activation — Radix dispatches a click for keyboard activation too, so
+    // both routes double.
+    //
+    // On `Append from file` this was invisible: navigating twice to the same
+    // route is idempotent. `Add record` is not, and ONE click created TWO
+    // records (measured live: 1 → 3 across two clicks). The rule is therefore
+    // about the COMBINATION, not about either half.
+    const recordsGroup = menu.slice(menu.indexOf('aria-labelledby="add-menu-records"'))
+    expect(recordsGroup.length, 'the Records group should be real source')
+      .toBeGreaterThan(200)
+    expect(
+      recordsGroup.includes('modeDisabledProps'),
+      'precondition: these items take the mode-disabled arm, which brings onClick',
+    ).toBe(true)
+    expect(
+      recordsGroup,
+      'a modeDisabledProps item must NOT also wire onSelect — it fires the '
+      + 'action twice, and for a non-idempotent action that means two records',
+    ).not.toContain('onSelect')
+  })
+
   it('drops the non-semantic orange tint and keeps the meaningful violet', () => {
     // §10.4: `mm-orange` appears nowhere else in this grid, so on "Add Column"
     // it was decoration that made two same-kind actions read as different
@@ -117,6 +173,14 @@ describe('both tabs of the dataset workspace render it', () => {
     expect(src.length, `${rel} should be real source`).toBeGreaterThan(20_000)
     expect(src, `${rel} must render <AddVariableMenu>`).toContain('<AddVariableMenu')
     expect(src, `${rel} must wire all four actions`).toContain('onAddRecoded')
+    // 🔴 Row 47. `onAddRecord` is a REQUIRED prop, so this is belt-and-braces
+    // over tsc — but `appendRefusal` is OPTIONAL and was passed on the Data
+    // view only, so on the participant table the Variables tab offered an
+    // append the server 409s. Two tabs of one workspace disagreeing about a
+    // refusal; a population assertion is what stops it recurring on a third.
+    expect(src, `${rel} must wire onAddRecord`).toContain('onAddRecord')
+    expect(src, `${rel} must pass appendRefusal`).toContain('appendRefusal')
+    expect(src, `${rel} must pass addRecordRefusal`).toContain('addRecordRefusal')
   })
 
   it.each(TOOLBAR_PAGES)('%s does not re-inline the menu', (rel) => {
@@ -192,8 +256,26 @@ describe('the Data view toolbar stays short', () => {
     const addMenus = (toolbar.match(/<AddVariableMenu\b/g) ?? []).length
     const simultaneous = tags - (codeTextArms - 1) + addMenus
     // Add ▾, Undo, Redo, Code Text — four, and the undo pair is conditional.
+    //
+    // 🔴 **RAISED TO 5 ON 2026-09-08 (row 45 step 4), and ONLY after measuring —
+    // the first attempt FAILED this check for a real reason.** The participant
+    // table's `Refresh` verb is the fifth. Driven live at the 640x360 CSS
+    // viewport a 1280x720 window has at 200% zoom:
+    //
+    //   full-width button   →  scrollWidth 663 vs clientWidth 625  → CLIPPED
+    //   label collapsed     →  scrollWidth 625 vs clientWidth 625  → fits
+    //
+    // So the label is `sr-only lg:not-sr-only` (#830a's `CODER_LABEL` pattern)
+    // and the button keeps its own `aria-label`, costing a reader nothing. The
+    // budget moved because the row was RE-MEASURED, which is what this
+    // assertion's message asks for — never because a new control needed room.
+    //
+    // ⚠️ It is also CONDITIONAL: `Refresh` renders only on a tool-maintained
+    // dataset (`managed_kind` non-null), so an ordinary dataset's row is
+    // unchanged at four. Verified live on the HR extract: 625 vs 625, no
+    // freshness line.
     expect(simultaneous, 'the toolbar grew a control; check it at 640x360 first')
-      .toBeLessThanOrEqual(4)
+      .toBeLessThanOrEqual(5)
   })
 
   it('keeps Code Text, separated from the dataset\'s own actions', () => {
