@@ -18,7 +18,6 @@ the shape is pinned by scan. The scan is deliberately best-effort (it catches
 the exact two-/three-column select shapes, not every conceivable regrouping
 query); the behavioral tests are the ground truth.
 """
-import asyncio
 import re
 from pathlib import Path
 
@@ -37,10 +36,6 @@ PID = 972
 TEXT_COL = 9720
 CROSS_COL = 9721
 CODE_A = 9725
-
-
-def _run(coro):
-    return asyncio.run(coro)
 
 
 def _setup(db):
@@ -85,13 +80,13 @@ def test_cross_tabulation_excludes_recognized_na(db_session):
     ref = load_grouping_values(db_session, CROSS_COL, None)
     assert "Decline to state" not in set(ref.values())  # the reference path
 
-    resp = _run(cross_tabulation(
+    resp = cross_tabulation(
         project_id=PID,
         body=CrossTabulationRequest(
             text_column_ids=[TEXT_COL], cross_column_id=CROSS_COL,
         ),
         db=db_session, user=user,
-    ))
+    )
     assert resp.response_values == ["Female", "Male"]
     assert "Decline to state" not in resp.column_totals
     # The declined respondent's coded comment counts toward NO column.
@@ -103,12 +98,12 @@ def test_code_density_excludes_recognized_na(db_session):
     _setup(db_session)
     user = db_session.get(User, 1)
 
-    resp = _run(code_density(
+    resp = code_density(
         project_id=PID, column_ids=str(TEXT_COL),
         group_by_column_id=CROSS_COL,
         coder_ids=None, layer_scope=None,
         db=db_session, user=user,
-    ))
+    )
     assert [g.group_value for g in resp.groups] == ["Female", "Male"]
     # Overall keeps ALL substantive comments — the #519 denominator is about
     # text substance, not the grouping column.
@@ -142,6 +137,12 @@ THREE_COL_ALLOWLIST = {
     # 2) get_demographic_filter_options — filter OPTIONS are subsetting, not
     #    grouping; offering "Decline to state" as a selectable filter value is
     #    deliberate.
+    "services/text_analysis.py": 1,
+    # get_non_empty_comment_values — the #519 "which texts count" set, NOT a
+    # grouping map: the value_text is the TEXT being counted, judged by
+    # `is_empty_text` against the project's treat-as-empty list, and never used
+    # as a group key. It selected whole ORM `DatasetValue`s (which this regex
+    # cannot see) until #956 narrowed it to four columns for memory.
 }
 
 # ── Bare `_is_na(` call sites (#592 §I.9, the second half) ───────────────────

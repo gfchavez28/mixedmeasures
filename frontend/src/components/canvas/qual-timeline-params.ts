@@ -128,17 +128,21 @@ export interface TimelineCoderLens {
  * Fail-closed on a missing self id: an empty include set hides everything, which
  * is the right direction for a privacy control.
  *
+ * #964 — the second argument is `useBlindMode`'s `withholding`, NOT `blind`:
+ * it is true while the coder roster is unanswered, when `blind` reads false
+ * because an empty roster looks like a one-person one.
+ *
  * No React Query hazard here — the clip queries are unfiltered and the lens is
  * applied in pure compute downstream, so the #454 "key on the effective scope"
  * rule has nothing to bite on. Do not add a redundant key for it.
  */
 export function resolveTimelineCoderLens(
   savedCoderIds: readonly number[] | null,
-  blind: boolean,
+  withholding: boolean,
   self: number | null,
   rosterMultiCoder: boolean,
 ): TimelineCoderLens {
-  if (blind) {
+  if (withholding) {
     return {
       include: new Set(self != null ? [self] : []),
       multiCoder: false,

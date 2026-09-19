@@ -10,7 +10,7 @@
  * workbench but 2/14 everywhere else). Route every client-side "is this coded?"
  * derivation (gauge count, progress gradient, jump-to-uncoded) through this.
  */
-import { isCoderVisible } from './coder-color'
+import { isCoderVisible, type CoderLens } from './coder-color'
 
 export interface CodeLike {
   is_universal: boolean
@@ -36,7 +36,7 @@ export interface CodeDetailLike {
  * visible (see `isCoderVisible`), so hiding a colleague reveals segments only
  * they coded as uncoded-for-you — which is exactly what `j` should jump to.
  */
-export function isSegmentCodedVisible(details: readonly CodeDetailLike[], hidden?: Set<number>): boolean {
+export function isSegmentCodedVisible(details: readonly CodeDetailLike[], hidden?: CoderLens): boolean {
   return details.some(d => !d.is_universal && isCoderVisible(d.user_id, hidden))
 }
 
@@ -52,7 +52,7 @@ export interface Coverage {
 export function computeCoverage<T>(
   items: readonly T[],
   getDetails: (item: T) => readonly CodeDetailLike[],
-  hidden?: Set<number>,
+  hidden?: CoderLens,
 ): Coverage {
   let codedAny = 0
   let codedVisible = 0
@@ -130,7 +130,7 @@ export interface CodeChipRow {
  */
 export function visibleCodeChipRows(
   details: readonly AppliedCodeDetailLike[],
-  hidden?: Set<number>,
+  hidden?: CoderLens,
 ): CodeChipRow[] {
   const rows: CodeChipRow[] = []
   details.forEach((d, i) => {
@@ -155,7 +155,7 @@ export function visibleCodeChipRows(
  */
 export function distinctVisibleCodeIds(
   details: readonly CodeApplicationIdentity[],
-  hidden?: Set<number>,
+  hidden?: CoderLens,
 ): number[] {
   const seen = new Set<number>()
   const out: number[] = []

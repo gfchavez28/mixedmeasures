@@ -21,18 +21,24 @@ import {
   type Code,
   type CodeFrequencyItem,
   type CodeAnalysisFilterParams,
+  type CodeSegmentsWithContextResponse,
   type ObservationSegmentGroup,
 } from '@/lib/api'
+import { LoadState } from '@/components/LoadStatus'
+import { useListLoad } from '@/hooks/useListLoad'
+import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { getSpeakerInitials } from '@/lib/conversation-import-utils'
 import { formatTimecode, getCodeColor, getUnfocusedStyle } from '@/lib/utils'
 import CodeChip from './CodeChip'
 import InlineCodeActions from './InlineCodeActions'
+import type { ListStatus } from '@/lib/list-status'
 import { highlightText } from './highlight-text'
 
 interface ContentByCodeProps {
   projectId: number
   codes: Code[]
   allCodes?: Code[]
+  codesStatus: ListStatus
   frequencies?: CodeFrequencyItem[]
   selectedContentCodeId: number | null
   onCodeSelect: (codeId: number) => void
@@ -60,6 +66,7 @@ export default function ContentByCode({
   projectId,
   codes,
   allCodes,
+  codesStatus,
   frequencies,
   selectedContentCodeId,
   onCodeSelect,
@@ -79,6 +86,74 @@ export default function ContentByCode({
   // eslint-disable-next-line react-hooks/set-state-in-effect -- reset search when selected code changes
   useEffect(() => { setSearch('') }, [selectedContentCodeId])
   const activeCodes = useMemo(() => codes.filter(c => c.is_active), [codes])
+
+  /**
+   * #963 Tier 3 — ONE query for the THREE sections drawn from it.
+   *
+   * Conversation segments, document segments and observation clips all come out
+   * of `…/codes/{id}/segments`; each section used to declare the same key
+   * itself, which React Query deduplicated into one request — so a failure hit
+   * all three at once, and a per-section fix would have put three `role="alert"`
+   * notices and three Retry buttons on screen for it. Tier 2's one-region rule
+   * says to check what the neighbour renders; here the neighbours are three
+   * peers of equal standing, so the load is hoisted to the one place that knows
+   * which of them are showing. `CodebookHidePanel` is the precedent: the owner
+   * of the query owns the claim.
+   *
+   * ⚠️ The Coded Texts section keeps its OWN query — a different endpoint, so a
+   * failure in one must not blank the other.
+   *
+   * ⚠️ `loadedLimit` rides the key, so a *Load more* is a new query and the
+   * sections show this notice while it runs. That is today's behaviour widened
+   * from one section to three, not a new defect — the underlying paging shape
+   * (an offset in the key rather than `useInfiniteQuery`, which the sibling
+   * `ContentBySource` uses) is filed separately as #968.
+   *
+   * 🔴 **`needsSegments` is the `enabled` flag, not only a render gate, and it
+   * has to be derived HERE rather than beside the other `show*` flags below.**
+   * Hoisting the query moved it above the early return, so without this it
+   * would fire on the Text source view — where none of the three sections
+   * mounts and nothing reads the payload — which the per-section version never
+   * did, because an unmounted section runs no query. Found by re-reading this
+   * round's own diff, not by a test: a wasted request breaks nothing visible.
+   * ⚠️ It is also the DISABLED-query answer: with it false the query is off
+   * with nothing cached, so `segmentsLoad.status` is `loading` forever — which
+   * is harmless only because the notice below is gated on the same flag.
+   */
+  const needsSegments =
+    (source !== 'text' && hasConversations) ||
+    (source !== 'text' && hasDocuments) ||
+    (source !== 'text' && hasObservations)
+
+  const [loadedLimit, setLoadedLimit] = useState(200)
+  /* eslint-disable react-hooks/set-state-in-effect -- reset pagination on code change */
+  useEffect(() => { setLoadedLimit(200) }, [selectedContentCodeId])
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const segmentsQuery = useQuery({
+    queryKey: [
+      'code-segments-context', projectId, selectedContentCodeId,
+      filterParams.exclude_facilitator,
+      filterParams.conversation_ids,
+      filterParams.participant_ids,
+      filterParams.text_column_ids,
+      filterParams.document_ids,
+      filterParams.observation_ids,
+      filterParams.coder_ids,
+      filterParams.layer_scope,
+      loadedLimit, 0,
+    ],
+    queryFn: () => codeAnalysisApi.segmentsWithContext(projectId, selectedContentCodeId!, {
+      ...filterParams,
+      context_size: 1,
+      limit: loadedLimit,
+      offset: 0,
+    }),
+    enabled: !!selectedContentCodeId && needsSegments,
+  })
+  const segmentsData = segmentsQuery.data
+  const segmentsLoad = useListLoad(segmentsQuery)
+  const landingRef = useMainContentLanding()
 
   // Build a code map for rendering code chips (uses allCodes so co-applied chips always render)
   const chipCodes = allCodes ?? codes
@@ -180,6 +255,9 @@ export default function ContentByCode({
   const showComments = source !== 'conversations' && hasCommentColumns
   const showDocuments = source !== 'text' && hasDocuments
   const showObservations = source !== 'text' && hasObservations
+  // ⚠️ `needsSegments` is derived ABOVE, beside the query it gates — deriving
+  // it twice would be two answers to one question the moment either moves.
+  // Pinned: it must equal the disjunction of the three flags here.
 
   // Build count summary for header
   const countParts: string[] = []
@@ -249,8 +327,20 @@ export default function ContentByCode({
         counts (codebook, search) include every coder.
       </BlindScopeNotice>
 
+      {/* #963 Tier 3 — ONE notice for the three sections drawn from one
+          request, placed where the first of them would be. The Coded Texts
+          section below has its own query and renders either way. */}
+      {needsSegments && segmentsLoad.status !== 'ready' && (
+        <LoadState
+          load={segmentsLoad}
+          loadingLabel="Loading coded passages…"
+          failedTitle="The coded passages for this code could not be loaded."
+          landingRef={landingRef}
+        />
+      )}
+
       {/* Conversation Segments section */}
-      {showSegments && (
+      {showSegments && segmentsLoad.status === 'ready' && segmentsData && (
         <div>
           {source === 'all' && showComments && (
             <div className="flex items-center gap-3 mb-3">
@@ -259,11 +349,14 @@ export default function ContentByCode({
             </div>
           )}
           <SegmentsSection
+            data={segmentsData}
             projectId={projectId}
+            loadedLimit={loadedLimit}
+            onLoadMore={() => setLoadedLimit(l => l + 200)}
             codeId={selectedContentCodeId}
             codeMap={codeMap}
             allCodes={chipCodes}
-            filterParams={filterParams}
+            codesStatus={codesStatus}
             search={search}
             focusedCodeId={focusedCodeId}
             onFocusCode={onFocusCode}
@@ -286,6 +379,7 @@ export default function ContentByCode({
             codeId={selectedContentCodeId}
             codeMap={codeMap}
             allCodes={chipCodes}
+            codesStatus={codesStatus}
             participantIds={filterParams.participant_ids}
             textColumnIds={filterParams.text_column_ids}
             coderIds={filterParams.coder_ids}
@@ -299,7 +393,7 @@ export default function ContentByCode({
       )}
 
       {/* Document Segments section */}
-      {showDocuments && (
+      {showDocuments && segmentsLoad.status === 'ready' && segmentsData && (
         <div>
           {(showSegments || showComments) && (
             <div className="flex items-center gap-3 mb-3 mt-2">
@@ -308,11 +402,12 @@ export default function ContentByCode({
             </div>
           )}
           <DocumentSegmentsSection
+            data={segmentsData}
             projectId={projectId}
             codeId={selectedContentCodeId}
             codeMap={codeMap}
             allCodes={chipCodes}
-            filterParams={filterParams}
+            codesStatus={codesStatus}
             search={search}
             focusedCodeId={focusedCodeId}
             onFocusCode={onFocusCode}
@@ -322,7 +417,7 @@ export default function ContentByCode({
       )}
 
       {/* Observation Clips section (D25 — minimal rows; rich cards are slab 5) */}
-      {showObservations && (
+      {showObservations && segmentsLoad.status === 'ready' && segmentsData && (
         <div>
           {(showSegments || showComments || showDocuments) && (
             <div className="flex items-center gap-3 mb-3 mt-2">
@@ -331,11 +426,12 @@ export default function ContentByCode({
             </div>
           )}
           <ObservationClipsSection
+            data={segmentsData}
             projectId={projectId}
             codeId={selectedContentCodeId}
             codeMap={codeMap}
             allCodes={chipCodes}
-            filterParams={filterParams}
+            codesStatus={codesStatus}
             search={search}
             focusedCodeId={focusedCodeId}
             onFocusCode={onFocusCode}
@@ -398,57 +494,40 @@ function CodeListItem({
 // ── Segments Section ─────────────────────────────────────────────────────
 
 function SegmentsSection({
+  data,
+  loadedLimit,
+  onLoadMore,
   projectId,
   codeId,
   codeMap,
   allCodes,
-  filterParams,
+  codesStatus,
   search,
   focusedCodeId,
   onFocusCode,
   onCodeChange,
 }: {
+  /** #963 Tier 3 — the ANSWERED payload, owned by the parent (see its comment). */
+  data: CodeSegmentsWithContextResponse
+  loadedLimit: number
+  onLoadMore: () => void
+  /** Only for the workbench deep links — the query lives in the parent now. */
   projectId: number
   codeId: number
   codeMap: Map<number, Code>
   allCodes: Code[]
-  filterParams: CodeAnalysisFilterParams
+  codesStatus: ListStatus
   search?: string
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
 }) {
   const [collapsedConvs, setCollapsedConvs] = useState<Set<number>>(new Set())
-  const [loadedLimit, setLoadedLimit] = useState(200)
 
-  /* eslint-disable react-hooks/set-state-in-effect -- reset pagination on code change */
   useEffect(() => {
-    setLoadedLimit(200)
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset collapsed state on code change
     setCollapsedConvs(new Set())
   }, [codeId])
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  const { data, isLoading } = useQuery({
-    queryKey: [
-      'code-segments-context', projectId, codeId,
-      filterParams.exclude_facilitator,
-      filterParams.conversation_ids,
-      filterParams.participant_ids,
-      filterParams.text_column_ids,
-      filterParams.document_ids,
-      filterParams.observation_ids,
-      filterParams.coder_ids,
-      filterParams.layer_scope,
-      loadedLimit, 0,
-    ],
-    queryFn: () => codeAnalysisApi.segmentsWithContext(projectId, codeId, {
-      ...filterParams,
-      context_size: 1,
-      limit: loadedLimit,
-      offset: 0,
-    }),
-    enabled: !!codeId,
-  })
 
   const toggleConv = useCallback((convId: number) => {
     setCollapsedConvs(prev => {
@@ -461,7 +540,6 @@ function SegmentsSection({
 
   const searchLower = (search ?? '').toLowerCase()
   const filteredConversations = useMemo(() => {
-    if (!data) return []
     if (!searchLower) return data.conversations
     return data.conversations.map(conv => ({
       ...conv,
@@ -469,8 +547,10 @@ function SegmentsSection({
     })).filter(conv => conv.segments.length > 0)
   }, [data, searchLower])
 
-  if (isLoading) return <div className="text-center py-8 text-mm-text-muted">Loading segments...</div>
-  if (!data) return <div className="text-center py-8 text-mm-text-muted">No data available.</div>
+  // #963 Tier 3 — the "Loading segments..." / "No data available." pair is
+  // GONE from here: this component is not rendered until the payload is in
+  // hand, so every claim below is about an answer. The two non-ready states are
+  // one notice in the parent, for all three sections that read this request.
 
   const sortedConversations = [...filteredConversations].sort(
     (a, b) => b.segments.length - a.segments.length,
@@ -553,6 +633,7 @@ function SegmentsSection({
                               appliedCodeIds={seg.applied_code_ids}
                               codeMap={codeMap}
                               allCodes={allCodes}
+                              codesStatus={codesStatus}
                               onCodeChange={onCodeChange}
                               excludeCodeId={codeId}
                               onFocusCode={onFocusCode}
@@ -599,7 +680,7 @@ function SegmentsSection({
 
       {data.has_more && (
         <div className="text-center py-3">
-          <Button variant="outline" size="sm" onClick={() => setLoadedLimit(l => l + 200)}>
+          <Button variant="outline" size="sm" onClick={onLoadMore}>
             Load more ({Math.max(0, data.total_segments - loadedLimit)} remaining)
           </Button>
         </div>
@@ -651,6 +732,7 @@ function CommentsSection({
   codeId,
   codeMap,
   allCodes,
+  codesStatus,
   participantIds,
   textColumnIds,
   coderIds,
@@ -664,6 +746,7 @@ function CommentsSection({
   codeId: number
   codeMap: Map<number, Code>
   allCodes: Code[]
+  codesStatus: ListStatus
   participantIds?: string
   textColumnIds?: string
   coderIds?: string
@@ -683,7 +766,7 @@ function CommentsSection({
   }, [codeId])
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const { data, isLoading } = useQuery({
+  const textsQuery = useQuery({
     queryKey: ['code-texts-context', projectId, codeId, participantIds, textColumnIds, coderIds, layerScope, loadedLimit, 0],
     queryFn: () => codeAnalysisApi.textsWithContext(projectId, codeId, {
       participant_ids: participantIds,
@@ -695,6 +778,15 @@ function CommentsSection({
     }),
     enabled: !!codeId,
   })
+  const data = textsQuery.data
+  /**
+   * #963 Tier 3 — this section keeps its OWN load, deliberately: a DIFFERENT
+   * endpoint from the three beside it, so a failure in one must not blank the
+   * other. The claim it made on a settled failure was the bare "No data
+   * available.", which says nothing at all about what went wrong.
+   */
+  const textsLoad = useListLoad(textsQuery)
+  const landingRef = useMainContentLanding()
 
   const toggleDataset = useCallback((dsId: number) => {
     setCollapsedDatasets(prev => {
@@ -715,8 +807,17 @@ function CommentsSection({
     })).filter(ds => ds.texts.length > 0)
   }, [data, searchLower])
 
-  if (isLoading) return <div className="text-center py-8 text-mm-text-muted">Loading texts...</div>
-  if (!data) return <div className="text-center py-8 text-mm-text-muted">No data available.</div>
+  if (textsLoad.status !== 'ready' || !data) {
+    return (
+      <LoadState
+        load={textsLoad}
+        loadingLabel="Loading coded texts…"
+        failedTitle="The coded texts for this code could not be loaded."
+        size="panel"
+        landingRef={landingRef}
+      />
+    )
+  }
 
   const sortedDatasets = [...filteredDatasets].sort(
     (a, b) => b.texts.length - a.texts.length,
@@ -786,6 +887,7 @@ function CommentsSection({
                               appliedCodeIds={comment.applied_code_ids}
                               codeMap={codeMap}
                               allCodes={allCodes}
+                              codesStatus={codesStatus}
                               onCodeChange={onCodeChange}
                               excludeCodeId={codeId}
                               onFocusCode={onFocusCode}
@@ -838,21 +940,25 @@ function CommentsSection({
 // ── Document Segments Section ────────────────────────────────────────────
 
 function DocumentSegmentsSection({
+  data,
   projectId,
   codeId,
   codeMap,
   allCodes,
-  filterParams,
+  codesStatus,
   search,
   focusedCodeId,
   onFocusCode,
   onCodeChange,
 }: {
+  /** #963 Tier 3 — the ANSWERED payload, shared with the two sibling sections. */
+  data: CodeSegmentsWithContextResponse
+  /** Only for the workbench deep links — the query lives in the parent now. */
   projectId: number
   codeId: number
   codeMap: Map<number, Code>
   allCodes: Code[]
-  filterParams: CodeAnalysisFilterParams
+  codesStatus: ListStatus
   search?: string
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
@@ -865,29 +971,6 @@ function DocumentSegmentsSection({
     setCollapsedDocs(new Set())
   }, [codeId])
 
-  // Reuse the same segments query — the backend returns documents alongside conversations
-  const { data, isLoading } = useQuery({
-    queryKey: [
-      'code-segments-context', projectId, codeId,
-      filterParams.exclude_facilitator,
-      filterParams.conversation_ids,
-      filterParams.participant_ids,
-      filterParams.text_column_ids,
-      filterParams.document_ids,
-      filterParams.observation_ids,
-      filterParams.coder_ids,
-      filterParams.layer_scope,
-      200, 0,
-    ],
-    queryFn: () => codeAnalysisApi.segmentsWithContext(projectId, codeId, {
-      ...filterParams,
-      context_size: 1,
-      limit: 200,
-      offset: 0,
-    }),
-    enabled: !!codeId,
-  })
-
   const toggleDoc = useCallback((docId: number) => {
     setCollapsedDocs(prev => {
       const next = new Set(prev)
@@ -899,7 +982,7 @@ function DocumentSegmentsSection({
 
   const searchLower = (search ?? '').toLowerCase()
   const filteredDocuments = useMemo(() => {
-    if (!data?.documents) return []
+    if (!data.documents) return []
     if (!searchLower) return data.documents
     return data.documents.map(doc => ({
       ...doc,
@@ -907,8 +990,10 @@ function DocumentSegmentsSection({
     })).filter(doc => doc.segments.length > 0)
   }, [data, searchLower])
 
-  if (isLoading) return <div className="text-center py-8 text-mm-text-muted">Loading document segments...</div>
-  if (!data?.documents || data.documents.length === 0) {
+  // #963 Tier 3 — this claim used to be reached on a settled FAILURE, and it is
+  // the worse wording of the two: it blames the researcher's FILTERS for a
+  // request that never arrived. The payload is in hand by the time this renders.
+  if (!data.documents || data.documents.length === 0) {
     return <div className="text-center py-8 text-mm-text-muted">
       {searchLower ? 'No document segments match your search.' : 'No document segments found for this code with current filters.'}
     </div>
@@ -971,6 +1056,7 @@ function DocumentSegmentsSection({
                                 appliedCodeIds={seg.applied_code_ids}
                                 codeMap={codeMap}
                                 allCodes={allCodes}
+                                codesStatus={codesStatus}
                                 onCodeChange={onCodeChange}
                                 excludeCodeId={codeId}
                                 onFocusCode={onFocusCode}
@@ -1128,21 +1214,32 @@ function OccurrenceStrip({ observation, color }: { observation: ObservationSegme
 }
 
 function ObservationClipsSection({
+  data,
   projectId,
   codeId,
   codeMap,
   allCodes,
-  filterParams,
+  codesStatus,
   search,
   focusedCodeId,
   onFocusCode,
   onCodeChange,
 }: {
+  /**
+   * #963 Tier 3 — the ANSWERED payload, owned by the parent.
+   *
+   * ⚠️ Three sections read this ONE request; before the hoist each declared
+   * the same key itself and React Query deduplicated them, so a failure hit
+   * all three and a per-section notice would have been three alerts and three
+   * Retry buttons for it.
+   */
+  data: CodeSegmentsWithContextResponse
+  /** Only for the workbench deep links — the query lives in the parent now. */
   projectId: number
   codeId: number
   codeMap: Map<number, Code>
   allCodes: Code[]
-  filterParams: CodeAnalysisFilterParams
+  codesStatus: ListStatus
   search?: string
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
@@ -1155,30 +1252,6 @@ function ObservationClipsSection({
     setCollapsedObs(new Set())
   }, [codeId])
 
-  // Reuse the same segments query — the backend returns observations alongside
-  // conversations/documents (4c), so this shares the cache entry with them.
-  const { data, isLoading } = useQuery({
-    queryKey: [
-      'code-segments-context', projectId, codeId,
-      filterParams.exclude_facilitator,
-      filterParams.conversation_ids,
-      filterParams.participant_ids,
-      filterParams.text_column_ids,
-      filterParams.document_ids,
-      filterParams.observation_ids,
-      filterParams.coder_ids,
-      filterParams.layer_scope,
-      200, 0,
-    ],
-    queryFn: () => codeAnalysisApi.segmentsWithContext(projectId, codeId, {
-      ...filterParams,
-      context_size: 1,
-      limit: 200,
-      offset: 0,
-    }),
-    enabled: !!codeId,
-  })
-
   const toggleObs = useCallback((obsId: number) => {
     setCollapsedObs(prev => {
       const next = new Set(prev)
@@ -1190,7 +1263,7 @@ function ObservationClipsSection({
 
   const searchLower = (search ?? '').toLowerCase()
   const filteredObservations = useMemo(() => {
-    if (!data?.observations) return []
+    if (!data.observations) return []
     if (!searchLower) return data.observations
     return data.observations.map(obs => ({
       ...obs,
@@ -1198,8 +1271,9 @@ function ObservationClipsSection({
     })).filter(obs => obs.segments.length > 0)
   }, [data, searchLower])
 
-  if (isLoading) return <div className="text-center py-8 text-mm-text-muted">Loading observation clips...</div>
-  if (!data?.observations || data.observations.length === 0) {
+  // #963 Tier 3 — as with documents above: reached on a settled failure, and
+  // blaming the filters for it. The payload is in hand by the time this renders.
+  if (!data.observations || data.observations.length === 0) {
     return <div className="text-center py-8 text-mm-text-muted">
       {searchLower ? 'No clips match your search.' : 'No coded clips found for this code with current filters.'}
     </div>
@@ -1302,6 +1376,7 @@ function ObservationClipsSection({
                                 appliedCodeIds={seg.applied_code_ids}
                                 codeMap={codeMap}
                                 allCodes={allCodes}
+                                codesStatus={codesStatus}
                                 onCodeChange={onCodeChange}
                                 excludeCodeId={codeId}
                                 onFocusCode={onFocusCode}

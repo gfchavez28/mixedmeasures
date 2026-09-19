@@ -40,6 +40,10 @@ const OBS = { id: 7, name: 'Playground', media_duration_seconds: null, segmentat
 const CODES = [{ id: 10, name: 'Off-task', color: '#e05d5d', category_id: null, category_color: null }]
 const CODERS = new Map([[1, { id: 1, username: 'Ada' }], [2, { id: 2, username: 'Blake' }]])
 
+
+/** #963 — an ANSWERED list, for fixtures whose subject is not the load state. */
+const READY_LOAD = { status: 'ready' as const, error: null, retry: () => {}, retrying: false }
+
 function renderTimed(over: Partial<React.ComponentProps<typeof TimedAnalytics>> = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -47,6 +51,7 @@ function renderTimed(over: Partial<React.ComponentProps<typeof TimedAnalytics>> 
       <TimedAnalytics
         projectId={1}
         observations={[OBS]}
+        observationsLoad={READY_LOAD}
         codes={CODES}
         categories={[]}
         include={null}
@@ -200,5 +205,98 @@ describe('#685 — the table mode is controlled, and multiCoder-derived', () => 
     expect(onTableModeChange).toHaveBeenCalledWith('coder')
     // Controlled: it did NOT flip itself.
     expect(screen.queryByRole('row', { name: /Ada/ })).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * #963 Tier 2 — the empty branch here is an INSTRUCTION, not just a sentence.
+ *
+ * *"No observations selected — pick one under Sources."* over an unanswered
+ * list sends the researcher back to a selection they may already have made; over
+ * a FAILED one it says so for good. The canvas mount answers these states itself
+ * (its copy names controls a canvas does not have), which is why the prop is
+ * required rather than defaulted — both mounts decide.
+ */
+describe('#963 — the timeline waits for the observations list', () => {
+  const LOADING = { status: 'loading' as const, error: null, retry: () => {}, retrying: false }
+  const FAILED = { status: 'failed' as const, error: null, retry: () => {}, retrying: false }
+
+  it('READY and empty: the instruction is right, and is given (positive control)', () => {
+    renderTimed({ observations: [], observationsLoad: READY_LOAD })
+    expect(screen.getByText('No observations selected — pick one under Sources.')).toBeInTheDocument()
+  })
+
+  it('LOADING: says it is loading, and gives no instruction', () => {
+    renderTimed({ observations: [], observationsLoad: LOADING })
+    expect(screen.getByText('Loading observations…')).toBeInTheDocument()
+    expect(screen.queryByText(/pick one under Sources/)).not.toBeInTheDocument()
+  })
+
+  it('FAILED: says the LOAD failed and offers a Retry', () => {
+    renderTimed({ observations: [], observationsLoad: FAILED })
+    expect(screen.getByText('Your observations could not be loaded')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByText(/pick one under Sources/)).not.toBeInTheDocument()
+  })
+
+  it('the consensus refusal still outranks the load state', () => {
+    // Order matters: under the consensus layer there is nothing to draw whatever
+    // the observations list says, and the clip queries are disabled there.
+    renderTimed({ observations: [], observationsLoad: LOADING, consensusScope: true })
+    expect(screen.getByText(/Switch the layer back to Coders/)).toBeInTheDocument()
+    expect(screen.queryByText('Loading observations…')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * #963 Tier 3 — MEASURED 2026-09-18 in Chrome, on project 3's three
+ * observations (4, 6 and 13 clips), with `/observations/{id}/segments` failing.
+ *
+ *   t = 2.5 s   "Loading clips…" × 3
+ *   t = 10 s    the observation's name, its real recording length, and
+ *               "No clips in this observation yet." × 3
+ *
+ * The duration beside the sentence is what makes it convincing: the figure
+ * plainly knows about the recording, so the claim reads as a finding rather
+ * than as a fault. `isLoading` is `isPending && isFetching`, so it went false
+ * the moment the failure settled.
+ */
+describe('#963 Tier 3 — a clip list that failed is not an observation with no clips', () => {
+  const answered500 = () => Object.assign(new Error('boom'), { status: 500 })
+
+  it('READY and genuinely empty: the sentence is true, and is said (positive control)', async () => {
+    listSegments.mockResolvedValue([])
+    renderTimed()
+    expect(await screen.findByText('No clips in this observation yet.')).toBeInTheDocument()
+  })
+
+  it('LOADING: says it is loading, and claims nothing about the clips', async () => {
+    listSegments.mockReturnValue(new Promise(() => {}))
+    renderTimed()
+    expect(await screen.findByText('Loading clips…')).toBeInTheDocument()
+    expect(screen.queryByText('No clips in this observation yet.')).toBeNull()
+  })
+
+  it('FAILED: names the observation whose clips could not be loaded, with a Retry', async () => {
+    listSegments.mockRejectedValue(answered500())
+    renderTimed()
+    expect(await screen.findByText('The clips for “Playground” could not be loaded.')).toBeInTheDocument()
+    expect(screen.queryByText('No clips in this observation yet.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
+
+  it('one failure does not blank the observation beside it', async () => {
+    // ⚠️ One load PER observation, never one over all of them: these are
+    // separate requests, and the Materials drawer's Tier 2 decision applies —
+    // a block that answered must keep its figure.
+    const OTHER = { ...OBS, id: 8, name: 'Assembly' }
+    listSegments.mockImplementation((_pid: number, obsId: number) =>
+      obsId === 7 ? Promise.reject(answered500()) : Promise.resolve(CLIPS))
+    renderTimed({ observations: [OBS, OTHER] })
+
+    expect(await screen.findByText('The clips for “Playground” could not be loaded.')).toBeInTheDocument()
+    // Assembly still draws its table.
+    await waitFor(() => expect(screen.getByText('Assembly')).toBeInTheDocument())
+    expect(screen.queryByText('The clips for “Assembly” could not be loaded.')).toBeNull()
   })
 })

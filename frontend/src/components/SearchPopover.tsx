@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
+import { LoadState } from '@/components/LoadStatus'
+import { useListLoad } from '@/hooks/useListLoad'
 import { Search, FileText, Tag, Users, StickyNote, MessageSquare, MessageCircle, Layers, Video, X, LoaderCircle, ChevronDown, Quote, ArrowUpRight } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -242,7 +244,7 @@ export default function SearchPopover({
   }, [parsedSearchTerm, effectiveBackendTypes])
 
   // Search query
-  const { data: searchResults, isLoading, isFetching } = useQuery({
+  const searchQuery = useQuery({
     queryKey: ['search', projectId, debouncedQuery, debouncedBackendTypes.join(','), expandedType, quotedOnly],
     queryFn: () => {
       const quoted = quotedOnly ? true : undefined
@@ -254,6 +256,19 @@ export default function SearchPopover({
     enabled: open && debouncedQuery.length >= 2 && debouncedBackendTypes.length > 0,
     staleTime: 30000,
   })
+  const { data: searchResults, isLoading, isFetching } = searchQuery
+  /**
+   * #963 Tier 3 — a settled failure fell through to *"No results for '…'"*,
+   * which is a claim about the PROJECT: it says the researcher's own material
+   * does not contain what they searched for. `isLoading` is
+   * `isPending && isFetching`, so it went false as soon as the failure settled
+   * and the sentence stood until the term was changed.
+   *
+   * ⚠️ The DISABLED case is decided by `showResults` below — the query is off
+   * under two characters, and the popover says nothing at all then, which is
+   * why the status is only consulted inside that gate.
+   */
+  const searchLoad = useListLoad(searchQuery)
 
   const toggleFilter = (filter: FilterCategory) => {
     setSelectedFilters(prev => {
@@ -999,17 +1014,20 @@ export default function SearchPopover({
           className="max-h-[400px] overflow-y-auto"
           role="listbox"
           aria-label="Search results"
-          aria-busy={isLoading}
+          aria-busy={searchLoad.status === 'loading'}
         >
-          {showResults && !hasResults && !isLoading && (
-            <div className="p-6 text-center text-muted-foreground text-sm">
-              No results for &ldquo;{debouncedQuery}&rdquo;
-            </div>
+          {showResults && searchLoad.status !== 'ready' && (
+            <LoadState
+              load={searchLoad}
+              loadingLabel="Searching…"
+              failedTitle="The search could not be run."
+              size="panel"
+            />
           )}
 
-          {showResults && isLoading && (
+          {showResults && searchLoad.status === 'ready' && !hasResults && (
             <div className="p-6 text-center text-muted-foreground text-sm">
-              Searching...
+              No results for &ldquo;{debouncedQuery}&rdquo;
             </div>
           )}
 

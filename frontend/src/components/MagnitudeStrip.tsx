@@ -69,10 +69,32 @@ export interface MagnitudeStripProps {
   onSkip: () => void
   /** Take focus on mount. Default true: variant A opens this as the active surface. */
   autoFocus?: boolean
+  /**
+   * Park the arrow cursor mid-scale when the value is unrated. Default TRUE,
+   * which is variant A's behaviour and stays that way.
+   *
+   * 🔴 **The sweep (variant B) passes `false`, and the reason is the feature's
+   * founding rule.** With a cursor parked mid-scale, `Enter` commits the
+   * midpoint — right on the workbench, where the coder has just deliberately
+   * applied this code to this passage and is answering "how much?". In a
+   * SWEEP of many unrated applications the same keystroke becomes a one-key
+   * path to stamping the midpoint on everything, which is MAXQDA's
+   * default-stamping mistake arriving through the interface instead of through
+   * a column default — the exact failure `null`-is-not-zero exists to prevent,
+   * and the reason variant C was rejected.
+   *
+   * With it off there is no cursor until an arrow or a digit places one, and
+   * `Enter` says so rather than committing.
+   */
+  preselectMidpoint?: boolean
 }
+
+/** No tick is under the cursor. Not an index — never pass it to `ticks[]`. */
+const NO_CURSOR = -1
 
 export default function MagnitudeStrip({
   codeName, scale, value, onCommit, onSkip, autoFocus = true,
+  preselectMidpoint = true,
 }: MagnitudeStripProps) {
   const ticks = useMemo(() => tickValues(scale), [scale])
   const tickable = ticks.length > 0
@@ -82,10 +104,14 @@ export default function MagnitudeStrip({
   // The cursor is where the user is LOOKING; the committed value is what is saved.
   // They part while arrowing, which is why this is not derived from `value`.
   const initialIndex = useMemo(() => {
-    if (isUnrated(value)) return Math.floor(ticks.length / 2)
-    const found = ticks.indexOf(value as number)
-    return found >= 0 ? found : Math.floor(ticks.length / 2)
-  }, [value, ticks])
+    // An EXISTING rating always takes the cursor, whichever mode: re-rating
+    // starts from what is there, and there is nothing to stamp accidentally.
+    if (!isUnrated(value)) {
+      const found = ticks.indexOf(value as number)
+      if (found >= 0) return found
+    }
+    return preselectMidpoint ? Math.floor(ticks.length / 2) : NO_CURSOR
+  }, [value, ticks, preselectMidpoint])
   const [cursor, setCursor] = useState(initialIndex)
   // Stable per-mount ids for `aria-activedescendant` (#870 b) and the input hint.
   const domId = useId()
@@ -108,6 +134,13 @@ export default function MagnitudeStrip({
     if (v !== undefined) onCommit(v)
   }, [ticks, onCommit])
 
+  // Any cursor movement answers the "choose a value first" hint, so it must
+  // not linger over a state it no longer describes.
+  const setCursorAt = useCallback((next: number | ((c: number) => number)) => {
+    setHint(null)
+    setCursor(next)
+  }, [])
+
   const onKeyDown = useCallback((e: React.KeyboardEvent) => {
     // 🔴 Escape first, and always prevented — see the header note.
     if (e.key === 'Escape') {
@@ -120,18 +153,30 @@ export default function MagnitudeStrip({
 
     if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
       e.preventDefault()
-      setCursor(c => Math.min(ticks.length - 1, c + 1))
+      // From NO_CURSOR the first forward arrow lands on the FIRST tick, which
+      // is what a radiogroup with nothing selected does. `-1 + 1 === 0` gets
+      // that for free; the clamp is what keeps it honest at the far end.
+      setCursorAt(c => Math.min(ticks.length - 1, c + 1))
       return
     }
     if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
       e.preventDefault()
-      setCursor(c => Math.max(0, c - 1))
+      // ...and the first backward arrow lands on the LAST tick, rather than
+      // being swallowed by a clamp to zero that would silently select the
+      // minimum — a rating nobody chose, which is this mode's whole point.
+      setCursorAt(c => (c === NO_CURSOR ? ticks.length - 1 : Math.max(0, c - 1)))
       return
     }
-    if (e.key === 'Home') { e.preventDefault(); setCursor(0); return }
-    if (e.key === 'End') { e.preventDefault(); setCursor(ticks.length - 1); return }
+    if (e.key === 'Home') { e.preventDefault(); setCursorAt(0); return }
+    if (e.key === 'End') { e.preventDefault(); setCursorAt(ticks.length - 1); return }
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
+      if (cursor === NO_CURSOR) {
+        // Say why nothing happened. A silent no-op on Enter reads as a broken
+        // save — the same reason the number arm explains an out-of-range value.
+        setHint(`Choose a value first, or press Esc to leave “${codeName}” unrated.`)
+        return
+      }
       commitAt(cursor)
       return
     }
@@ -147,7 +192,7 @@ export default function MagnitudeStrip({
       const idx = ticks.indexOf(asValue)
       if (idx >= 0) {
         e.preventDefault()
-        setCursor(idx)
+        setCursorAt(idx)
         commitAt(idx)
         return
       }
@@ -158,8 +203,14 @@ export default function MagnitudeStrip({
     // the window-level chord layer stands down on `defaultPrevented`. Without
     // this, `7` on a 0–5 scale armed chord 7 and `n` opened a note. Modifier
     // chords pass through on purpose — Ctrl+Z is still undo.
+    //
+    // ⚠️ **This is why a host surface cannot navigate with a letter.** Any
+    // single-character verb (`n` for next, `j`/`k`) is swallowed while the
+    // strip has focus, and the arrows are the tick cursor. The sweep advances
+    // on commit and on Esc, and offers Tab-reachable buttons for the pointer —
+    // it does NOT add a letter the strip would eat.
     if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) e.preventDefault()
-  }, [tickable, ticks, cursor, commitAt, onSkip])
+  }, [tickable, ticks, cursor, commitAt, onSkip, codeName, setCursorAt])
 
   const rangeLabel = `${formatMagnitude(scale.min)}–${formatMagnitude(scale.max)}`
   const lowAnchor = anchorLabelFor(scale.min, scale)
@@ -205,7 +256,12 @@ export default function MagnitudeStrip({
           // The cursor tick is the active descendant: a reader following the
           // group hears each tick as the arrows move (#870 b). No setsize /
           // posinset — the DOM holds the whole set.
-          aria-activedescendant={tickDomId(cursor)}
+          //
+          // ⚠️ OMITTED entirely while there is no cursor. Pointing it at a
+          // non-existent id is an ARIA dangling reference: the group claims an
+          // active descendant a reader cannot resolve, which is worse than
+          // claiming none.
+          aria-activedescendant={cursor === NO_CURSOR ? undefined : tickDomId(cursor)}
           onKeyDown={onKeyDown}
           className="flex gap-0.5 outline-none focus-visible:ring-2 focus-visible:ring-mm-green rounded"
         >
@@ -224,7 +280,7 @@ export default function MagnitudeStrip({
                 // are reached with arrows (#701b's roving pattern).
                 tabIndex={-1}
                 aria-label={anchor ? `${formatMagnitude(tick)}, ${anchor}` : formatMagnitude(tick)}
-                onClick={() => { setCursor(i); onCommit(tick) }}
+                onClick={() => { setCursorAt(i); onCommit(tick) }}
                 className={`flex-1 h-[18px] rounded-[3px] font-mono text-[9px] leading-[18px] text-center transition-colors ${
                   selected
                     ? 'bg-mm-blue text-white'

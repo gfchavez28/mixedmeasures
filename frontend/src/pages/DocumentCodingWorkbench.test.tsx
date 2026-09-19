@@ -19,7 +19,7 @@
  * every row under `VirtuosoMockContext`.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -258,5 +258,68 @@ describe('the document switcher is named at both ends of the list (#888)', () =>
     const prev = await screen.findByRole('button', { name: 'Previous document' })
     expect(prev.getAttribute('aria-label')).toBe('Previous document')
     expect(prev.getAttribute('title')).toBeNull()     // no previous document exists
+  })
+})
+
+/** #964 — an unanswered coder roster read as a one-person roster: blind mode off. */
+describe('#964 — an unanswered coder roster keeps colleagues hidden', () => {
+  // Paragraph 51 carries ONLY a colleague's code; 52 carries mine.
+  const WITH_COLLEAGUE: DocumentDetailResponse = {
+    ...DOC,
+    segments: [
+      segment(51, 0, 'The first paragraph of the field notes.', {
+        codes: [{ id: 8, name: 'Disruption', color: null, is_universal: false, user_id: 2,
+                  magnitude: null, magnitude_conflict: null }],
+      }),
+      DOC.segments[1],
+    ],
+  }
+
+  it.each([
+    ['loading', () => listCoders.mockReturnValue(new Promise(() => {}))],
+    ['failed', () => listCoders.mockRejectedValue(new Error('network'))],
+  ] as const)('roster %s: my chip renders, the colleague\'s does not, and the gauge counts only mine', async (_s, arrange) => {
+    arrange()
+    getDetail.mockResolvedValue(WITH_COLLEAGUE)
+    renderWorkbench()
+
+    const rows = await screen.findAllByRole('option')
+    await waitFor(() => expect(within(rows[1]).getByText('Engagement')).toBeInTheDocument())
+    expect(within(rows[0]).queryByText('Disruption')).not.toBeInTheDocument()
+    const gauge = screen.getByRole('progressbar', { name: 'Coding progress' })
+    expect(gauge.getAttribute('aria-valuetext')).toMatch(/^1 of 2 segments coded by visible coders/)
+    expect(screen.queryByRole('button', { name: /Colleagues/ })).not.toBeInTheDocument()
+  })
+
+  // Found by #964's review: "View all — N archived" outlived re-blinding.
+  it('re-blinding hides an archived colleague\'s chips even after "View all" was switched on', async () => {
+    listCoders.mockResolvedValue([
+      { id: 1, username: 'Alice', display_color: null, archived: false },
+      { id: 2, username: 'Bob', display_color: null, archived: false },
+    ])
+    coderCoverage.mockResolvedValue({
+      coders: [{ user_id: 3, username: 'Carla', display_color: null, archived: true, coding_count: 1 }],
+      count: 1,
+    })
+    getDetail.mockResolvedValue({
+      ...DOC,
+      segments: [
+        segment(51, 0, 'The first paragraph of the field notes.', {
+          codes: [{ id: 8, name: 'Disruption', color: null, is_universal: false, user_id: 3,
+                    magnitude: null, magnitude_conflict: null }],
+        }),
+        DOC.segments[1],
+      ],
+    })
+    localStorage.setItem('mm-blind-revealed-1-1', '1')
+    renderWorkbench()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Filter codes by coder' }))
+    fireEvent.click(await screen.findByRole('button', { name: /View all — 1 archived/ }))
+    expect(await screen.findByText(/coded by Carla/)).toBeInTheDocument() // positive control
+
+    fireEvent.click(screen.getByRole('button', { name: 'Colleagues shown' }))
+    expect(await screen.findByRole('button', { name: 'Colleagues hidden' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText(/coded by Carla/)).not.toBeInTheDocument())
   })
 })

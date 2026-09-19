@@ -21,6 +21,9 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { sortableKeyboardCoordinates } from '@dnd-kit/sortable'
+import { LoadState } from '@/components/LoadStatus'
+import { useListLoad } from '@/hooks/useListLoad'
+import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import {
   excerptsApi,
   quoteBoardApi,
@@ -30,6 +33,7 @@ import {
   type QuotedExcerptsParams,
   type QuotedExcerptsResponse,
 } from '@/lib/api'
+import type { ListStatus } from '@/lib/list-status'
 import type { QuoteGroupBy, QuoteSort, QuoteDensity, QuoteLayout } from '@/lib/qual-analysis-types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -42,6 +46,8 @@ import FocusPill from '@/components/qualitative-analysis/FocusPill'
 interface QuoteBoardViewProps {
   projectId: number
   codes: Code[]
+  /** #961 — whether `codes` is an answer; the cards' add-code popover reads it. */
+  codesStatus: ListStatus
   filterParams: QuotedExcerptsParams
   quoteData?: QuotedExcerptsResponse
   groupBy: QuoteGroupBy
@@ -315,6 +321,7 @@ const SortableCard = memo(function SortableCard({
   onUnquote,
   onCopy,
   allCodes,
+  codesStatus,
   onCodeChange,
   onFocusCode,
   isDraggable,
@@ -332,6 +339,7 @@ const SortableCard = memo(function SortableCard({
   onUnquote: (id: number) => void
   onCopy: (e: QuotedExcerptItem) => void
   allCodes: Code[]
+  codesStatus: ListStatus
   onCodeChange?: () => void
   onFocusCode?: (codeId: number) => void
   isDraggable: boolean
@@ -369,6 +377,7 @@ const SortableCard = memo(function SortableCard({
         onUnquote={onUnquote}
         onCopy={onCopy}
         allCodes={allCodes}
+        codesStatus={codesStatus}
         onCodeChange={onCodeChange}
         onFocusCode={onFocusCode}
         onSendToCanvas={onSendToCanvas}
@@ -387,6 +396,7 @@ const SortableCard = memo(function SortableCard({
 export default function QuoteBoardView({
   projectId,
   codes,
+  codesStatus,
   filterParams,
   quoteData: quoteDataProp,
   groupBy,
@@ -457,14 +467,29 @@ export default function QuoteBoardView({
   // ── Data fetching ───────────────────────────────────────────────────
   // Fallback query when quoteData is not provided from parent
   const queryKey = ['excerpts-quoted', projectId, ...Object.values(filterParams).filter(Boolean)]
-  const { data: queryData, isLoading: queryLoading } = useQuery({
+  const quotesQuery = useQuery({
     queryKey,
     queryFn: () => excerptsApi.listQuoted(projectId, filterParams),
     enabled: !!projectId && !quoteDataProp,
   })
 
-  const data = quoteDataProp ?? queryData
-  const isLoading = !quoteDataProp && queryLoading
+  const data = quoteDataProp ?? quotesQuery.data
+  /**
+   * #963 Tier 3 — a settled failure fell through to `totalCount === 0` and the
+   * board said *"No quoted excerpts yet. Use the quote button (s) in the Coding
+   * Workbench…"* — an instruction to start curating quotes, given to a
+   * researcher who may have hundreds.
+   *
+   * ⚠️ **The disabled-query case is decided FIRST, and it is the trap this rule
+   * warns about.** When the parent supplies `quoteData` this query is
+   * `enabled: false` with nothing cached, which `listStatus` reports as
+   * `loading` FOREVER — so the status is only asked when the child is the one
+   * fetching. (The two share a query key, so while the parent's request is in
+   * flight `quoteDataProp` is undefined and this query is live: one request,
+   * and this load describes it.)
+   */
+  const quotesLoad = useListLoad(quotesQuery)
+  const landingRef = useMainContentLanding()
   const allExcerpts = useMemo(() => data?.excerpts ?? [], [data?.excerpts])
   const totalCount = data?.total_excerpts ?? 0
 
@@ -708,11 +733,14 @@ export default function QuoteBoardView({
   )
 
   // Determine empty state
-  if (isLoading) {
+  if (!quoteDataProp && quotesLoad.status !== 'ready') {
     return (
-      <div className="text-center py-16 text-mm-text-muted">
-        <p>Loading quoted excerpts…</p>
-      </div>
+      <LoadState
+        load={quotesLoad}
+        loadingLabel="Loading quoted excerpts…"
+        failedTitle="Your quoted excerpts could not be loaded."
+        landingRef={landingRef}
+      />
     )
   }
 
@@ -894,6 +922,7 @@ export default function QuoteBoardView({
                       onUnquote={handleUnquote}
                       onCopy={handleCopy}
                       allCodes={codes}
+                      codesStatus={codesStatus}
                       onCodeChange={onCodeChange}
                       onFocusCode={onFocusCodeProp}
                       isDraggable={isDragEnabled}

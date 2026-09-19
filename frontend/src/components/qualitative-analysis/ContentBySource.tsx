@@ -30,12 +30,25 @@ import { getSpeakerInitials } from '@/lib/conversation-import-utils'
 import { getUnfocusedStyle } from '@/lib/utils'
 import CodeChip from './CodeChip'
 import InlineCodeActions from './InlineCodeActions'
+import type { ListLoad, ListStatus } from '@/lib/list-status'
+import { LoadState } from '@/components/LoadStatus'
+import { useListLoad } from '@/hooks/useListLoad'
+import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { highlightText } from './highlight-text'
 
 interface ContentBySourceProps {
   projectId: number
   codes: Code[]
   allCodes?: Code[]
+  codesStatus: ListStatus
+  /**
+   * #963 Tier 2 — whether the four source lists are an answer. REQUIRED, for
+   * the same reason as `SourceSelector`'s: the page gate covers conversations
+   * and not the other three, so this list said *"No sources available with
+   * current filters."* — naming the FILTERS as the cause — while the lists it
+   * filters were still loading.
+   */
+  sourcesLoad: ListLoad
   conversations: ConversationOption[]
   textColumns: TextColumnInfo[]
   documents?: DocumentListItem[]
@@ -63,6 +76,8 @@ export default function ContentBySource({
   projectId,
   codes,
   allCodes,
+  codesStatus,
+  sourcesLoad,
   conversations,
   textColumns,
   documents = [],
@@ -193,8 +208,17 @@ export default function ContentBySource({
             </div>
           )}
 
-          {/* Empty state */}
-          {((source === 'conversations' && conversations.length === 0 && documents.length === 0) ||
+          {/* Empty state — #963: an unanswered list is not a filtered-out one,
+              and this copy blames the filters. */}
+          {sourcesLoad.status !== 'ready' ? (
+            <LoadState
+              load={sourcesLoad}
+              loadingLabel="Loading sources…"
+              failedTitle="Your sources could not be loaded"
+            />
+          ) : null}
+          {sourcesLoad.status === 'ready' &&
+           ((source === 'conversations' && conversations.length === 0 && documents.length === 0) ||
             (source === 'text' && textColumns.length === 0) ||
             (source === 'all' && conversations.length === 0 && textColumns.length === 0 && documents.length === 0)) && (
             <div className="px-3 py-8 text-center text-mm-text-muted text-sm">
@@ -245,6 +269,7 @@ export default function ContentBySource({
           conversationName={conversations.find(c => c.id === parsedSource.id)?.name ?? 'Conversation'}
           codeMap={codeMap}
           allCodes={allCodes ?? codes}
+          codesStatus={codesStatus}
           onCodeClick={onCodeClick}
           excludeFacilitator={excludeFacilitator}
           search={search}
@@ -259,6 +284,7 @@ export default function ContentBySource({
           documentName={documents.find(d => d.id === parsedSource.id)?.name ?? 'Document'}
           codeMap={codeMap}
           allCodes={allCodes ?? codes}
+          codesStatus={codesStatus}
           onCodeClick={onCodeClick}
           search={search}
           focusedCodeId={focusedCodeId}
@@ -272,6 +298,7 @@ export default function ContentBySource({
           observationName={observations.find(o => o.id === parsedSource.id)?.name ?? 'Observation'}
           codeMap={codeMap}
           allCodes={allCodes ?? codes}
+          codesStatus={codesStatus}
           onCodeClick={onCodeClick}
           search={search}
           focusedCodeId={focusedCodeId}
@@ -285,6 +312,7 @@ export default function ContentBySource({
           columnInfo={textColumns.find(c => c.column_id === parsedSource.id)}
           codeMap={codeMap}
           allCodes={allCodes ?? codes}
+          codesStatus={codesStatus}
           onCodeClick={onCodeClick}
           search={search}
           focusedCodeId={focusedCodeId}
@@ -305,6 +333,7 @@ function ConversationReader({
   conversationName,
   codeMap,
   allCodes,
+  codesStatus,
   onCodeClick,
   excludeFacilitator,
   search,
@@ -317,6 +346,7 @@ function ConversationReader({
   conversationName: string
   codeMap: Map<number, Code>
   allCodes: Code[]
+  codesStatus: ListStatus
   onCodeClick?: (codeId: number) => void
   excludeFacilitator?: boolean
   search?: string
@@ -324,14 +354,33 @@ function ConversationReader({
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
 }) {
-  const { data, isLoading } = useQuery({
+  const segmentsQuery = useQuery({
     queryKey: ['conversation-segments-readonly', projectId, conversationId],
     queryFn: () => segmentsApi.list(conversationId),
     enabled: !!conversationId,
   })
+  const data = segmentsQuery.data
+  /**
+   * #963 Tier 3 — the four readers on this tab each WAITED for their request
+   * and each answered a settled failure with the bare *"No data available."*,
+   * which says nothing about what went wrong and reads as a fact about the
+   * source. One load per reader: they are four different requests, and only
+   * one reader is on screen at a time (a source is selected), so there is no
+   * duplicate-notice question here.
+   */
+  const segmentsLoad = useListLoad(segmentsQuery)
+  const landingRef = useMainContentLanding()
 
-  if (isLoading) return <div className="text-center py-8 text-mm-text-muted">Loading conversation...</div>
-  if (!data) return <div className="text-center py-8 text-mm-text-muted">No data available.</div>
+  if (segmentsLoad.status !== 'ready' || !data) {
+    return (
+      <LoadState
+        load={segmentsLoad}
+        loadingLabel="Loading conversation…"
+        failedTitle="This conversation could not be loaded."
+        landingRef={landingRef}
+      />
+    )
+  }
 
   const searchLower = (search ?? '').toLowerCase()
   let segments = excludeFacilitator ? data.segments.filter(s => !s.is_facilitator) : data.segments
@@ -406,6 +455,7 @@ function ConversationReader({
                       appliedCodeIds={seg.applied_codes}
                       codeMap={codeMap}
                       allCodes={allCodes}
+                      codesStatus={codesStatus}
                       onCodeChange={onCodeChange}
                       onFocusCode={onFocusCode ?? onCodeClick}
                     />
@@ -452,6 +502,7 @@ function DocumentReader({
   documentName,
   codeMap,
   allCodes,
+  codesStatus,
   onCodeClick,
   search,
   focusedCodeId,
@@ -463,20 +514,33 @@ function DocumentReader({
   documentName: string
   codeMap: Map<number, Code>
   allCodes: Code[]
+  codesStatus: ListStatus
   onCodeClick?: (codeId: number) => void
   search?: string
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
 }) {
-  const { data, isLoading } = useQuery({
+  const documentQuery = useQuery({
     queryKey: ['document-segments-readonly', projectId, documentId],
     queryFn: () => documentsApi.getDetail(projectId, documentId),
     enabled: !!documentId,
   })
+  const data = documentQuery.data
 
-  if (isLoading) return <div className="text-center py-8 text-mm-text-muted">Loading document...</div>
-  if (!data) return <div className="text-center py-8 text-mm-text-muted">No data available.</div>
+  const documentLoad = useListLoad(documentQuery)
+  const landingRef = useMainContentLanding()
+
+  if (documentLoad.status !== 'ready' || !data) {
+    return (
+      <LoadState
+        load={documentLoad}
+        loadingLabel="Loading document…"
+        failedTitle="This document could not be loaded."
+        landingRef={landingRef}
+      />
+    )
+  }
 
   const searchLower = (search ?? '').toLowerCase()
   const allSegments = data.segments.filter(s => !s.merged_into_id && !s.split_into_id)
@@ -529,6 +593,7 @@ function DocumentReader({
                         appliedCodeIds={appliedCodeIds}
                         codeMap={codeMap}
                         allCodes={allCodes}
+                        codesStatus={codesStatus}
                         onCodeChange={onCodeChange}
                         onFocusCode={onFocusCode ?? onCodeClick}
                       />
@@ -573,6 +638,7 @@ function CommentColumnReader({
   columnInfo,
   codeMap,
   allCodes,
+  codesStatus,
   onCodeClick,
   search,
   focusedCodeId,
@@ -584,6 +650,7 @@ function CommentColumnReader({
   columnInfo?: TextColumnInfo
   codeMap: Map<number, Code>
   allCodes: Code[]
+  codesStatus: ListStatus
   onCodeClick?: (codeId: number) => void
   search?: string
   focusedCodeId?: number | null
@@ -604,9 +671,7 @@ function CommentColumnReader({
    * ⚠️ `search` therefore belongs in the QUERY KEY. Leaving it out serves the
    * previous term's results for the new term.
    */
-  const {
-    data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage,
-  } = useInfiniteQuery({
+  const textsQuery = useInfiniteQuery({
     queryKey: ['text-column-readonly', projectId, columnId, search ?? ''],
     queryFn: ({ pageParam }) => textCodingApi.list(projectId, {
       column_ids: String(columnId),
@@ -620,8 +685,27 @@ function CommentColumnReader({
     enabled: !!columnId,
   })
 
-  if (isLoading) return <div className="text-center py-8 text-mm-text-muted">Loading texts...</div>
-  if (!data) return <div className="text-center py-8 text-mm-text-muted">No data available.</div>
+  /**
+   * ⚠️ An INFINITE query: `data` is `{pages: [...]}`, so `listStatus`'s
+   * `data !== undefined` test reads it exactly as it reads a flat one — and a
+   * failed `fetchNextPage` leaves the earlier pages in hand, which is why this
+   * reader never claimed "No data available." after a Load more. Only the FIRST
+   * page's failure reaches here.
+   */
+  const { data, fetchNextPage, hasNextPage, isFetchingNextPage } = textsQuery
+  const textsLoad = useListLoad(textsQuery)
+  const landingRef = useMainContentLanding()
+
+  if (textsLoad.status !== 'ready' || !data) {
+    return (
+      <LoadState
+        load={textsLoad}
+        loadingLabel="Loading texts…"
+        failedTitle="These texts could not be loaded."
+        landingRef={landingRef}
+      />
+    )
+  }
 
   const columnLabel = columnInfo
     ? (columnInfo.column_name || columnInfo.column_text.slice(0, 60))
@@ -689,6 +773,7 @@ function CommentColumnReader({
                           appliedCodeIds={comment.applied_code_ids ?? []}
                           codeMap={codeMap}
                           allCodes={allCodes}
+                          codesStatus={codesStatus}
                           onCodeChange={onCodeChange}
                           onFocusCode={onFocusCode ?? onCodeClick}
                         />
@@ -753,6 +838,7 @@ function ObservationReader({
   observationName,
   codeMap,
   allCodes,
+  codesStatus,
   onCodeClick,
   search,
   focusedCodeId,
@@ -764,20 +850,33 @@ function ObservationReader({
   observationName: string
   codeMap: Map<number, Code>
   allCodes: Code[]
+  codesStatus: ListStatus
   onCodeClick?: (codeId: number) => void
   search?: string
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
 }) {
-  const { data, isLoading } = useQuery({
+  const clipsQuery = useQuery({
     queryKey: ['observation-segments', projectId, observationId],
     queryFn: () => observationsApi.listSegments(projectId, observationId),
     enabled: !!observationId,
   })
+  const data = clipsQuery.data
 
-  if (isLoading) return <div className="text-center py-8 text-mm-text-muted">Loading observation...</div>
-  if (!data) return <div className="text-center py-8 text-mm-text-muted">No data available.</div>
+  const clipsLoad = useListLoad(clipsQuery)
+  const landingRef = useMainContentLanding()
+
+  if (clipsLoad.status !== 'ready' || !data) {
+    return (
+      <LoadState
+        load={clipsLoad}
+        loadingLabel="Loading observation…"
+        failedTitle="This observation could not be loaded."
+        landingRef={landingRef}
+      />
+    )
+  }
 
   const searchLower = (search ?? '').toLowerCase()
   const clips = searchLower ? data.filter(c => c.text.toLowerCase().includes(searchLower)) : data
@@ -832,6 +931,7 @@ function ObservationReader({
                         appliedCodeIds={appliedCodeIds}
                         codeMap={codeMap}
                         allCodes={allCodes}
+                        codesStatus={codesStatus}
                         onCodeChange={onCodeChange}
                         onFocusCode={onFocusCode ?? onCodeClick}
                       />

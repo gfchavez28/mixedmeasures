@@ -1,4 +1,7 @@
-import { memo, useCallback, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import {
+  memo, useCallback, useMemo, useRef, useState,
+  type KeyboardEvent as ReactKeyboardEvent, type RefObject,
+} from 'react'
 import { useNavigate } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { TriangleAlert, Check, RotateCw, Clock, Loader2 } from 'lucide-react'
@@ -13,9 +16,15 @@ import {
   sourceParams, sourceQueryKey, type ReconciliationSource,
 } from '@/lib/reconciliation-source'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
-import { codeAnalysisApi, type Code, type ReconciliationUnit, type ReconciliationCodeInfo } from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
+import {
+  codeAnalysisApi, retryUnanswered,
+  type Code, type ReconciliationUnit, type ReconciliationCodeInfo,
+} from '@/lib/api'
 import { cn, formatTimecode } from '@/lib/utils'
 import { formatMagnitude } from '@/lib/magnitude'
+import type { ListStatus } from '@/lib/list-status'
 
 const RENDER_CAP = 200 // matches the backend limit; disagreements-first keeps the set small
 
@@ -32,15 +41,25 @@ interface ReconciliationGridProps {
   projectId: number
   /** Full code list — InlineCodeActions needs whole Code objects for the own cell. */
   codes: Code[]
+  /** #961 — whether `codes` is an answer; the own cell's add-code popover reads it. */
+  codesStatus: ListStatus
   /** Active coder id (the only editable column). */
   currentUserId: number | null
   /** Pending staleness markers (drives the "saved layer is behind" note). */
   staleCount: number
   setSrAnnouncement: (s: string) => void
+  /**
+   * #963 Tier 3 — where focus goes when a Retry on the grid's own request
+   * SUCCEEDS: the notice and its focused button unmount together. REQUIRED
+   * rather than optional, so the one mount has to name a destination instead of
+   * inheriting `<body>` (#933's class — an optional callback nobody passes).
+   * The page hands down its active tab, a real control (#961 §2).
+   */
+  landingRef: RefObject<HTMLElement | null>
 }
 
 export default function ReconciliationGrid({
-  projectId, codes, currentUserId, staleCount, setSrAnnouncement,
+  projectId, codes, codesStatus, currentUserId, staleCount, setSrAnnouncement, landingRef,
 }: ReconciliationGridProps) {
   const queryClient = useQueryClient()
   const [disagreementsOnly, setDisagreementsOnly] = useState(true)
@@ -51,7 +70,7 @@ export default function ReconciliationGrid({
   // Key and params come from ONE pure pair so they cannot drift: the slot held a
   // literal `null` while the endpoint had accepted source_type/source_id all
   // along, so narrowing would have served the previous source's page from cache.
-  const { data, isLoading } = useQuery({
+  const reconciliationQuery = useQuery({
     queryKey: ['reconciliation', projectId, sourceQueryKey(source), disagreementsOnly],
     queryFn: () => codeAnalysisApi.reconciliation(projectId, {
       disagreements_only: disagreementsOnly,
@@ -61,7 +80,27 @@ export default function ReconciliationGrid({
     enabled: !!projectId,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
+    // #963 Tier 3 — this is the heaviest read on its tab (the Option-B gather
+    // plus a live consensus decision per target), and a deterministic refusal
+    // repeated only doubles a wait the server already answered. Same reasoning
+    // as `IrrMatrix` beside it (#957); `retryUnanswered` still retries a
+    // network-level failure once, which is the case a second ask can fix.
+    retry: retryUnanswered,
   })
+  const data = reconciliationQuery.data
+  /**
+   * #963 Tier 3 — the grid already WAITED for this request and did not
+   * distinguish a FAILURE: `isLoading` is `isPending && isFetching`, so it goes
+   * false once a failure has settled and the code below fell through to
+   * *"Reconciliation is unavailable for this project."* — a claim about the
+   * PROJECT, made when the client had simply not been answered. `IrrMatrix`'s
+   * #957 fix is the worked example; this is the same shape on the same tab.
+   *
+   * ⚠️ The `enabled` guard above never reaches the disabled arm in practice:
+   * the one mount is `QualitativeAnalysisView`, which has already resolved its
+   * project id (and returns its own load state before rendering this tab).
+   */
+  const reconciliationLoad = useListLoad(reconciliationQuery)
 
   const recomputeMutation = useMutation({
     mutationFn: () => codeAnalysisApi.recomputeConsensus(projectId),
@@ -186,19 +225,37 @@ export default function ReconciliationGrid({
   // to ~1000px of whitespace (#442).
   const cols = `minmax(240px, 2fr) repeat(${coders.length}, minmax(150px, 1fr)) minmax(160px, 1fr)`
 
-  if (isLoading) {
+  // ⚠️ `|| !data` is not a second condition — it is the FIRST one, said in a
+  // form the compiler can read. `ready` means `data !== undefined` by
+  // construction (`listStatus` decides on exactly that), but the test is on a
+  // derived object, so without this clause every use of `data` below stays
+  // possibly-undefined and the file goes back to optional chaining — which is
+  // how the claim got made in the first place.
+  //
+  // ⚠️ MEASURED: mutating the FIRST clause to `reconciliationQuery.isLoading`
+  // leaves the suite green, because the second one is what returns. The two are
+  // one predicate, so that is expected — the status form is kept as the primary
+  // because `!data` alone would teach the truthiness test this rule forbids
+  // (`0` and `''` are answers, #963 §1), on a payload where it happens to be
+  // safe. The mutant that MATTERS — the pre-fix `isLoading` gate with optional
+  // chaining below — is killed by four cases in this file's suite.
+  if (reconciliationLoad.status !== 'ready' || !data) {
     return (
-      <div className="flex items-center gap-2 text-mm-text-muted py-16 justify-center">
-        <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
-        <span>Loading reconciliation…</span>
-      </div>
+      <LoadState
+        load={reconciliationLoad}
+        loadingLabel="Loading reconciliation…"
+        failedTitle="Reconciliation could not be loaded."
+        landingRef={landingRef}
+      />
     )
   }
 
-  if (!data?.available) {
+  // A `reason` here is the SERVER's verdict on an answered request — fewer than
+  // two coders, nothing double-coded — never "we did not hear back".
+  if (!data.available) {
     return (
       <div className="text-center py-16">
-        <p className="text-mm-text-muted">{data?.reason || 'Reconciliation is unavailable for this project.'}</p>
+        <p className="text-mm-text-muted">{data.reason || 'Reconciliation is unavailable for this project.'}</p>
       </div>
     )
   }
@@ -309,6 +366,7 @@ export default function ReconciliationGrid({
                   legendMap={legendMap}
                   codeMap={codeMap}
                   allCodes={codes}
+                  codesStatus={codesStatus}
                   projectId={projectId}
                   onCodeChange={onCodeChange}
                   onFocusCell={focusCell}
@@ -357,6 +415,7 @@ interface ReconciliationRowProps {
   legendMap: Map<number, ReconciliationCodeInfo>
   codeMap: Map<number, Code>
   allCodes: Code[]
+  codesStatus: ListStatus
   projectId: number
   onCodeChange: () => void
   onFocusCell: (r: number, c: number) => void
@@ -365,7 +424,7 @@ interface ReconciliationRowProps {
 }
 
 const ReconciliationRow = memo(function ReconciliationRow({
-  unit, rowIndex, coders, currentUserId, focusedCol, legendMap, codeMap, allCodes, projectId, onCodeChange, onFocusCell, onJumpToUnit, onFixColleague,
+  unit, rowIndex, coders, currentUserId, focusedCol, legendMap, codeMap, allCodes, codesStatus, projectId, onCodeChange, onFocusCell, onJumpToUnit, onFixColleague,
 }: ReconciliationRowProps) {
   const consensusSet = useMemo(() => new Set(unit.consensus), [unit.consensus])
   const engaged = useMemo(() => new Set(unit.engaged), [unit.engaged])
@@ -466,6 +525,7 @@ const ReconciliationRow = memo(function ReconciliationRow({
             unit={unit}
             codeMap={codeMap}
             allCodes={allCodes}
+            codesStatus={codesStatus}
             onCodeChange={onCodeChange}
             // #471(b) colleague-cell chip → switch + jump:
             onFixColleague={onFixColleague}
@@ -516,6 +576,7 @@ interface ReconciliationCellProps {
   unit?: ReconciliationUnit
   codeMap?: Map<number, Code>
   allCodes?: Code[]
+  codesStatus?: ListStatus
   onCodeChange?: () => void
   // #471(b) chip navigation:
   onJumpToUnit?: (unit: ReconciliationUnit) => void
@@ -595,7 +656,7 @@ const ReconciliationCell = memo(function ReconciliationCell(props: Reconciliatio
         ),
       )}
     >
-      {kind === 'own' && props.projectId != null && props.unit && props.codeMap && props.allCodes && props.onCodeChange ? (
+      {kind === 'own' && props.projectId != null && props.unit && props.codeMap && props.allCodes && props.codesStatus && props.onCodeChange ? (
         <InlineCodeActions
           projectId={props.projectId}
           itemType={props.unit.unit_type === 'segment' ? 'segment' : 'text'}
@@ -611,6 +672,7 @@ const ReconciliationCell = memo(function ReconciliationCell(props: Reconciliatio
           }))}
           codeMap={props.codeMap}
           allCodes={props.allCodes}
+          codesStatus={props.codesStatus}
           onCodeChange={props.onCodeChange}
           // #475: the grid's roving-tabindex focus churn would otherwise dismiss the
           // add-code popover the instant it opens (open→focus-outside→close loop).

@@ -1,0 +1,235 @@
+/**
+ * #919 — Settings › Backup & Data: the safety copies taken before a merge or an
+ * overwrite, with their sizes, a way to get each one back, and a way to delete it.
+ *
+ * Before this, every in-place import wrote a full copy of the project into the
+ * backup folder and nothing listed, rotated or even located them: the recovery
+ * instruction said "import that file" about a file in a folder the app never shows
+ * (on the desktop build it is under the OS's per-user application data).
+ *
+ * ⚠️ **Download is the recovery path, not an extra.** A copy is a `.mmproject`, so
+ * it comes back through Import Project, which needs the file on disk somewhere the
+ * researcher can pick it. Without Download this list could only offer deletion.
+ *
+ * ⚠️ **Nothing here deletes on its own** — rotation is undecided (#919), because
+ * five copies may be five different projects. The researcher sees each one and
+ * chooses, and the confirmation says when a copy may be a project's only one.
+ */
+import { useId, useRef, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { ChevronDown, ChevronUp, Download, LoaderCircle, Trash2 } from 'lucide-react'
+import { toast } from 'sonner'
+import { backupApi, type SafetyCopyInfo } from '@/lib/api'
+import { ApiError } from '@/lib/api/client'
+import { formatBytes, plural } from '@/lib/format'
+import {
+  SAFETY_COPIES_QUERY_KEY,
+  SAFETY_COPY_ACT_LABEL,
+  formatTakenAt,
+  safetyCopyDeleteWarnings,
+  safetyCopyTitle,
+  totalSafetyCopyBytes,
+} from '@/lib/safety-copies'
+import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
+
+export default function SafetyCopiesSection() {
+  const queryClient = useQueryClient()
+  const listId = useId()
+  const toggleRef = useRef<HTMLButtonElement>(null)
+  const [open, setOpen] = useState(false)
+  // The copy being confirmed outlives `confirmOpen`, so the dialog keeps its
+  // words while it animates closed instead of flashing an empty description.
+  const [deleteTarget, setDeleteTarget] = useState<SafetyCopyInfo | null>(null)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [downloading, setDownloading] = useState<string | null>(null)
+  // Set when a confirmation actually deleted something: the Delete button that
+  // opened the dialog is gone with its row, so focus must land somewhere real.
+  const returnFocusToToggle = useRef(false)
+
+  const { data: copies, isError } = useQuery({
+    queryKey: SAFETY_COPIES_QUERY_KEY,
+    queryFn: backupApi.listSafetyCopies,
+    staleTime: 60_000,
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (copy: SafetyCopyInfo) => backupApi.deleteSafetyCopy(copy.filename),
+    onSuccess: (_data, copy) => {
+      returnFocusToToggle.current = true
+      toast.success(`Deleted the safety copy of ${safetyCopyTitle(copy)}`)
+    },
+    onError: (err: Error) => {
+      // The server's sentence says WHY (gone already, or held open by another
+      // program on Windows); a generic one would hide which.
+      toast.error(err instanceof ApiError ? err.message : 'The safety copy could not be deleted.')
+    },
+    onSettled: () => {
+      setConfirmOpen(false)
+      // Either way the folder may have changed (a 404 means it was already gone).
+      queryClient.invalidateQueries({ queryKey: SAFETY_COPIES_QUERY_KEY })
+    },
+  })
+
+  const handleDownload = async (copy: SafetyCopyInfo) => {
+    setDownloading(copy.filename)
+    try {
+      await backupApi.downloadSafetyCopy(copy.filename)
+    } finally {
+      setDownloading(null)
+    }
+  }
+
+  // Silence would read as "there are none", which is the claim this list exists
+  // to stop the app making.
+  if (isError) {
+    return (
+      <p className="mt-3 text-xs text-amber-700 dark:text-amber-400">
+        Safety copies from merges and overwrites could not be listed.
+      </p>
+    )
+  }
+  // Nothing to show until a merge or overwrite has written a copy. Once the list
+  // is OPEN it stays mounted when its last copy is deleted, so the toggle survives
+  // as the place focus returns to.
+  if (!copies || (copies.length === 0 && !open)) return null
+
+  // Locale-grouped: the sweep read "1954 copies" off a real folder.
+  const summary =
+    `${copies.length.toLocaleString()} ${plural(copies.length, 'copy', 'copies')}, ` +
+    formatBytes(totalSafetyCopyBytes(copies))
+
+  return (
+    <div className="mt-3">
+      <button
+        ref={toggleRef}
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        aria-expanded={open}
+        aria-controls={listId}
+        className="flex items-center gap-1 text-left text-xs text-mm-text-muted hover:text-mm-text transition-colors"
+      >
+        {open ? (
+          <ChevronUp className="w-3 h-3 shrink-0" aria-hidden="true" />
+        ) : (
+          <ChevronDown className="w-3 h-3 shrink-0" aria-hidden="true" />
+        )}
+        {/* ONE text node: a space inside a child span is trimmed out of the
+            computed name (#954). */}
+        {`Safety copies from merges and overwrites (${summary})`}
+      </button>
+
+      {open && (
+        <div id={listId} className="mt-2 space-y-2">
+          <p className="text-xs text-mm-text-secondary leading-relaxed">
+            Before a merge or an overwrite changes a project, Mixed Measures saves a full copy
+            of it. These copies are never deleted automatically. To go back to one, download
+            it and open it with Import Project on the Projects page.
+          </p>
+          {copies.length === 0 ? (
+            <p className="text-xs text-mm-text-faint">No safety copies remain.</p>
+          ) : (
+            <ul aria-label="Safety copies" className="space-y-1.5 max-h-80 overflow-y-auto pr-1">
+              {copies.map(copy => {
+                const title = safetyCopyTitle(copy)
+                const takenAt = formatTakenAt(copy.taken_at)
+                const isDownloading = downloading === copy.filename
+                return (
+                  <li
+                    key={copy.filename}
+                    className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-mm-border-subtle bg-mm-bg px-2.5 py-2 text-xs"
+                  >
+                    <div className="min-w-0 flex-1 basis-56">
+                      <p className="font-medium text-mm-text break-words">{title}</p>
+                      <p className="text-mm-text-muted">
+                        {SAFETY_COPY_ACT_LABEL[copy.act]} · {takenAt} ·{' '}
+                        <span className="tabular-nums">{formatBytes(copy.size_bytes)}</span>
+                      </p>
+                      {copy.project_in_app === false && (
+                        <p className="text-amber-700 dark:text-amber-400">No longer in Mixed Measures</p>
+                      )}
+                      {!copy.readable && (
+                        <p className="text-amber-700 dark:text-amber-400">This file could not be read</p>
+                      )}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => handleDownload(copy)}
+                        disabled={isDownloading}
+                        aria-busy={isDownloading}
+                        aria-label={`Download safety copy of ${title}, ${takenAt}`}
+                      >
+                        {isDownloading ? (
+                          <LoaderCircle className="w-3.5 h-3.5 mr-1 animate-spin" aria-hidden="true" />
+                        ) : (
+                          <Download className="w-3.5 h-3.5 mr-1" aria-hidden="true" />
+                        )}
+                        Download
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+                        onClick={() => {
+                          setDeleteTarget(copy)
+                          setConfirmOpen(true)
+                        }}
+                        aria-label={`Delete safety copy of ${title}, ${takenAt}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5 mr-1" aria-hidden="true" />
+                        Delete
+                      </Button>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title="Delete this safety copy?"
+        description={
+          deleteTarget
+            ? `${safetyCopyTitle(deleteTarget)}, taken ${SAFETY_COPY_ACT_LABEL[deleteTarget.act].toLowerCase()} on ` +
+              `${formatTakenAt(deleteTarget.taken_at)} (${formatBytes(deleteTarget.size_bytes)}). ` +
+              'The file is removed from this computer and cannot be brought back.'
+            : ''
+        }
+        confirmLabel="Delete copy"
+        loadingLabel="Deleting…"
+        loading={deleteMutation.isPending}
+        onConfirm={() => { if (deleteTarget) deleteMutation.mutate(deleteTarget) }}
+        onCloseAutoFocus={(event) => {
+          if (!returnFocusToToggle.current) return
+          returnFocusToToggle.current = false
+          event.preventDefault()
+          toggleRef.current?.focus()
+        }}
+        // 🔴 `details`, never `children`: the warning must be part of the dialog's
+        // accessible DESCRIPTION. As children it was on screen and silent — Chrome
+        // computed the description without "may be the only copy of it anywhere"
+        // (a11y-name-sweep run 6, #886's class), on the one control here whose act
+        // cannot be undone.
+        details={deleteTarget && safetyCopyDeleteWarnings(deleteTarget).length > 0 ? (
+          <div
+            data-testid="safety-copy-delete-warnings"
+            className="rounded border border-amber-300 dark:border-amber-600 bg-amber-50 dark:bg-amber-900/20 p-2 space-y-1"
+          >
+            {safetyCopyDeleteWarnings(deleteTarget).map(w => (
+              <p key={w} className="text-xs text-amber-800 dark:text-amber-300">{w}</p>
+            ))}
+          </div>
+        ) : undefined}
+      />
+    </div>
+  )
+}

@@ -27,8 +27,9 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { describeRecoveredUnmapped, describeMissingValueChanges, describeStaledDefinitions, describeUnmatchedRules, bulkMissingOutcome } from '@/lib/missing-values-copy'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Loader2 } from 'lucide-react'
 import { recodeApi, datasetsApi, type DatasetColumn } from '@/lib/api'
+import { LoadState } from '@/components/LoadStatus'
+import { useListLoad } from '@/hooks/useListLoad'
 import { valueLabelBlocker } from '@/lib/value-labels-guard'
 import { invalidateColumnDictionary } from '@/lib/dataset-cache'
 import { VALUE_LABEL_SEED_MAX_CODES } from '@/lib/dataset-constants'
@@ -127,10 +128,29 @@ export default function ColumnDictionaryEditor({
   // SAME key family as RecodeWorkbench/SubgroupFilterPanel — they call the
   // same endpoint, and a private `['frequencies', …]` copy meant invalidating
   // one cache left the other stale (#608).
-  const { data: freqData, isLoading } = useQuery({
+  const freqQuery = useQuery({
     queryKey: ['column-frequencies', projectId, datasetId, column.id],
     queryFn: () => recodeApi.getFrequencies(projectId, datasetId, column.id),
   })
+  const freqData = freqQuery.data
+  /**
+   * #963 Tier 3 — NOT in the filed entry; found by asking what every
+   * `isLoading` gate in `src/` does with a SETTLED failure.
+   *
+   * The editor below is seeded from these frequencies (`seedPhase` waits for
+   * them) and the missing-values picker's chips ARE them (`observedValues`). On
+   * a failure `isLoading` goes false, the editor renders with no responses to
+   * label and no chips to pick, and nothing says why — so the researcher reads
+   * it as a column with no responses, and the one control that exists to stop
+   * them TYPING a sentinel by hand offers nothing to pick instead. That is
+   * #823(a)'s trap reached from the other side: the picker is forgiving about
+   * whitespace exactly because the rule is exact, and typing is what fails
+   * silently.
+   *
+   * ⚠️ The old arm was a bare spinner with no role and no text — Tier 2's
+   * finding on the notes panels, here as well.
+   */
+  const dictionaryLoad = useListLoad(freqQuery)
 
   const existing = useMemo(() => {
     const labels = column.scale_labels || []
@@ -364,10 +384,13 @@ export default function ColumnDictionaryEditor({
         skip anything you declare missing.
       </p>
 
-        {isLoading ? (
-          <div className="py-8 flex justify-center text-mm-text-muted">
-            <Loader2 className="w-5 h-5 animate-spin" aria-hidden="true" />
-          </div>
+        {dictionaryLoad.status !== 'ready' ? (
+          <LoadState
+            load={dictionaryLoad}
+            loadingLabel="Loading this variable’s responses…"
+            failedTitle="This variable’s responses could not be loaded."
+            size="panel"
+          />
         ) : (
           <div className="flex flex-col gap-4">
             <section aria-labelledby="vl-heading" data-testid="value-labels-section">

@@ -4,6 +4,7 @@ import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { GripVertical, Undo2, Redo2, MessageSquareText, RefreshCw, Plus, Table2 } from 'lucide-react'
 import { columnDisplayLabel, truncatedColumnLabel } from '@/lib/dataset-column-label'
+import { listStatus } from '@/lib/list-status'
 import AddVariableMenu from '@/components/AddVariableMenu'
 import PickRuleToDeriveDialog from '@/components/PickRuleToDeriveDialog'
 import DeriveVariableDialog from '@/components/DeriveVariableDialog'
@@ -12,7 +13,8 @@ import { useDeriveVariable } from '@/hooks/useDeriveVariable'
 import { variableViewPath } from '@/lib/dataset-routes'
 import { countLabel, plural } from '@/lib/format'
 import './dataset-view.css'
-import { revealRecordCell, offsetForRecordNumber } from '@/lib/dataset-record-focus'
+import { findRecordCell, revealRecordCell, offsetForRecordNumber } from '@/lib/dataset-record-focus'
+import { nextGridCoord, rovingStop } from '@/lib/dataset-grid-nav'
 import { invalidateRowSetChanged } from '@/lib/dataset-cache'
 import { useAddRecord } from '@/hooks/useAddRecord'
 import {
@@ -35,6 +37,7 @@ import {
   domainsApi,
   crosswalkApi,
   extractApiError,
+  isRequestTimeout,
   type DatasetColumn,
   type DatasetDataResponse,
   type RecodeDefinitionSummary,
@@ -62,7 +65,7 @@ import {
 } from '@/lib/magnitude-rollup-basis'
 import { isManagedDataset, managedDatasetRefusal } from '@/lib/managed-dataset'
 import { useHistory } from '@/hooks/useHistory'
-import { focusedElementOwnsKey } from '@/lib/keyboard-scope'
+import { focusedElementOwnsKey, focusIsOnAnotherControl } from '@/lib/keyboard-scope'
 import DatasetTabs from '@/components/DatasetTabs'
 
 const EMPTY_DOMAIN_SCORES: import('@/lib/api').DomainScoreColumn[] = []
@@ -71,7 +74,7 @@ const EMPTY_DOMAIN_SCORES: import('@/lib/api').DomainScoreColumn[] = []
 
 const DataGridBody = memo(function DataGridBody({
   rows, rowOffset, columns, resolvedActiveDefinitions, handleOpenText, pid,
-  linkedParticipantMap, handleLink, selectedCell, handleCellSelect,
+  linkedParticipantMap, handleLink, selectedCell, rovingCell, handleCellSelect,
   editingCell, handleStartEdit, handleCellSave, handleCellCancel,
   handleTabNav, handleEnterNav, handleDeleteRow, deleteRowRefusal, linkRefusal, domainScoreCols,
 }: {
@@ -91,6 +94,7 @@ const DataGridBody = memo(function DataGridBody({
   linkedParticipantMap: Map<number, string>
   handleLink: (rowId: number, participantId: number | null, participantName: string | null) => void
   selectedCell: { rowId: number; columnId: number } | null
+  rovingCell: { rowId: number; columnId: number } | null
   handleCellSelect: (rowId: number, columnId: number) => void
   editingCell: { rowId: number; columnId: number } | null
   handleStartEdit: (rowId: number, columnId: number) => void
@@ -117,6 +121,7 @@ const DataGridBody = memo(function DataGridBody({
           linkedParticipantMap={linkedParticipantMap}
           onLink={handleLink}
           selectedCell={selectedCell}
+          rovingCell={rovingCell}
           onCellSelect={handleCellSelect}
           editingCell={editingCell}
           onStartEdit={handleStartEdit}
@@ -251,12 +256,25 @@ export default function DatasetView() {
     [pid, iid, pageOffset],
   )
 
-  const { data, isLoading, error, isFetching } = useQuery({
+  const dataQuery = useQuery({
     queryKey: ['dataset-data', pid, iid, pageOffset],
     queryFn: () => datasetsApi.getData(pid, iid, { offset: pageOffset }),
     placeholderData: (prev: DatasetDataResponse | undefined) => prev,
     enabled: !!pid && !!iid,
   })
+  const { data, isLoading, error, isFetching } = dataQuery
+  /**
+   * #963 Tier 2 — the nav strip's *"Variables N"* badge, which both dataset
+   * views render. `DatasetTabs` documented `variableCount` as *"omitted while
+   * the columns query is loading"* and NEITHER caller omitted it, so the strip
+   * read "Variables 0" over a payload still in flight.
+   *
+   * ⚠️ `placeholderData` keeps the previous PAGE's payload, so paging reads
+   * `ready` throughout — which is right: the variables do not change per page,
+   * and blanking the badge on every page turn would be a flicker, not honesty.
+   * Only the first load is unanswered.
+   */
+  const columnsKnown = listStatus(dataQuery) === 'ready'
 
   /**
    * #834 — deep link to one RECORD: `?row=<rowId>&column=<columnId>`.
@@ -869,6 +887,24 @@ export default function DatasetView() {
     },
   })
 
+  /**
+   * 🔴 **Moving the editor moves the SELECTION with it (#946).**
+   *
+   * `handleTabNav` and `handleEnterNav` used to set `editingCell` alone, so the
+   * two drifted apart: click a cell, F2, Tab twice, Escape — and the ring was
+   * back on the first cell while the researcher had been typing in the third,
+   * with F2 re-opening the one they had left. Latent while the grid was
+   * mouse-only; once the cells hold FOCUS it is three places at once (focus,
+   * ring, editor), which is why it is fixed here rather than filed.
+   *
+   * ⚠️ Passing `null` closes the editor and LEAVES the selection where it is —
+   * that is the whole point of the selected-not-editing state F2 acts on.
+   */
+  const moveEditor = useCallback((next: { rowId: number; columnId: number } | null) => {
+    if (next) setSelectedCell(next)
+    setEditingCell(next)
+  }, [])
+
   const handleCellSave = useCallback((answerId: number, value: string | null) => {
     answerMutation.mutate({ answerId, valueText: value })
     setEditingCell(null)
@@ -899,22 +935,22 @@ export default function DatasetView() {
 
     if (direction === 'next') {
       if (currentManualIdx < manualColumnIds.length - 1) {
-        setEditingCell({ rowId, columnId: manualColumnIds[currentManualIdx + 1] })
+        moveEditor({ rowId, columnId: manualColumnIds[currentManualIdx + 1] })
       } else if (currentRowIdx < rowIds.length - 1) {
-        setEditingCell({ rowId: rowIds[currentRowIdx + 1], columnId: manualColumnIds[0] })
+        moveEditor({ rowId: rowIds[currentRowIdx + 1], columnId: manualColumnIds[0] })
       } else {
-        setEditingCell(null)
+        moveEditor(null)
       }
     } else {
       if (currentManualIdx > 0) {
-        setEditingCell({ rowId, columnId: manualColumnIds[currentManualIdx - 1] })
+        moveEditor({ rowId, columnId: manualColumnIds[currentManualIdx - 1] })
       } else if (currentRowIdx > 0) {
-        setEditingCell({ rowId: rowIds[currentRowIdx - 1], columnId: manualColumnIds[manualColumnIds.length - 1] })
+        moveEditor({ rowId: rowIds[currentRowIdx - 1], columnId: manualColumnIds[manualColumnIds.length - 1] })
       } else {
-        setEditingCell(null)
+        moveEditor(null)
       }
     }
-  }, [data, manualColumnIds])
+  }, [data, manualColumnIds, moveEditor])
 
   // Enter navigation: move to cell below (same column, next response)
   const handleEnterNav = useCallback((rowId: number, columnId: number) => {
@@ -922,11 +958,84 @@ export default function DatasetView() {
     const rowIds = data.rows.map(r => r.id)
     const currentRowIdx = rowIds.indexOf(rowId)
     if (currentRowIdx === -1 || currentRowIdx >= rowIds.length - 1) {
-      setEditingCell(null)
+      moveEditor(null)
       return
     }
-    setEditingCell({ rowId: rowIds[currentRowIdx + 1], columnId })
-  }, [data])
+    moveEditor({ rowId: rowIds[currentRowIdx + 1], columnId })
+  }, [data, moveEditor])
+
+  // ── #946 — the grid's keyboard cursor ──────────────────────────────────────
+  //
+  // 🔴 **The handler is on the TABLE, never on `window`.** A window listener
+  // would see every arrow press on a page that also holds a search box, the
+  // pager's jump input, a dozen popovers and two menus, and would have to stand
+  // down for all of them — the enumeration trap `useCodeChordShortcuts` exists
+  // to manage (#784/#789). On the table it fires only while focus is inside the
+  // grid, which is exactly the scope, and `focusIsOnAnotherControl` is the one
+  // remaining refusal: the cell EDITORS are inputs inside these same cells, and
+  // an arrow typed into one belongs to the text caret.
+  //
+  // ⚠️ **Roving tabindex, not `aria-activedescendant`.** the internal design notes's rule
+  // against roving is scoped to VIRTUALISED lists, where the focused row is
+  // recycled out of the DOM and focus falls to `<body>`. This grid paginates
+  // (#800) and renders every row of the page, so real focus survives — and the
+  // cells need it, for the editor, the context menu's Menu key and the ring.
+  //
+  // ⚠️ Both read off `data`, NOT off `rows`/`columns` — those are declared ~180
+  // lines BELOW this block, and naming either in a dep array is a
+  // temporal-dead-zone ReferenceError at render rather than a lint nit. The F2
+  // effect above carries the same warning for the same reason.
+  const navRowIds = useMemo(() => (data?.rows ?? []).map(r => r.id), [data])
+  const navColumnIds = useMemo(() => (data?.columns ?? []).map(c => c.id), [data])
+  const rovingCell = useMemo(
+    () => rovingStop(selectedCell, navRowIds, navColumnIds),
+    [selectedCell, navRowIds, navColumnIds],
+  )
+
+  /**
+   * Put DOM focus on a cell by coordinate.
+   *
+   * ⚠️ Goes through `findRecordCell`, which is the deep link's tested bridge
+   * from `(rowId, columnId)` to the `<td>` — via the `<colgroup>` index, because
+   * `EditableCell` returns ten `<td>` branches and none of them carries a column
+   * id. Re-deriving that here would be a second reader of the same DOM contract.
+   */
+  const focusCell = useCallback((coord: { rowId: number; columnId: number }) => {
+    const table = tableRef.current
+    if (!table) return
+    findRecordCell(table, coord.rowId, coord.columnId)?.cell?.focus()
+  }, [])
+
+  const handleGridKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // The editors are inputs inside these cells; an arrow there is the caret's.
+    if (focusIsOnAnotherControl(document.activeElement)) return
+    if (editingCell) return
+    const next = nextGridCoord(selectedCell, navRowIds, navColumnIds, e)
+    if (!next) return
+    e.preventDefault()
+    setSelectedCell(next)
+    focusCell(next)
+  }, [selectedCell, navRowIds, navColumnIds, editingCell, focusCell])
+
+  /**
+   * 🔴 **Closing the editor returns focus to its cell.**
+   *
+   * The editor is an `<input>` INSIDE the `<td>`; when `editingCell` clears, that
+   * input unmounts and focus falls to `<body>` — so on a keyboard the researcher
+   * pressed Escape and lost the grid entirely, having to Tab back in from the
+   * top of the page. Invisible while the cells were not focusable, which is why
+   * it arrives with this change rather than before it.
+   *
+   * ⚠️ Keyed on the TRANSITION, not on `editingCell == null`: the latter is true
+   * on every render of an idle grid, and refocusing then would fight the
+   * researcher for focus every time anything else re-rendered the page.
+   */
+  const wasEditingRef = useRef<{ rowId: number; columnId: number } | null>(null)
+  useEffect(() => {
+    const was = wasEditingRef.current
+    wasEditingRef.current = editingCell
+    if (was && !editingCell) focusCell(was)
+  }, [editingCell, focusCell])
 
   // Create column mutation
   // Deleting a variable: the confirm, the endpoint choice and the invalidation
@@ -1186,10 +1295,7 @@ export default function DatasetView() {
      * re-measuring; the page size is bounded and no longer scales with the
      * dataset.
      */
-    const aborted =
-      error != null &&
-      (((error as { name?: string }).name === 'TimeoutError') ||
-       ((error as { name?: string }).name === 'AbortError'))
+    const aborted = isRequestTimeout(error)
     return (
       <div className="p-8 text-center max-w-xl mx-auto">
         <p className="text-red-600 mb-3">
@@ -1213,7 +1319,7 @@ export default function DatasetView() {
     <div className="h-full flex flex-col overflow-hidden">
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-4 py-2 border-b bg-mm-surface flex-shrink-0">
-        <DatasetTabs projectId={pid} datasetId={iid} variableCount={columns.length} />
+        <DatasetTabs projectId={pid} datasetId={iid} variableCount={columnsKnown ? columns.length : undefined} />
         <div className="w-px h-4 bg-mm-border" aria-hidden="true" />
         <div className="flex items-center gap-2 text-sm text-mm-text-secondary mr-auto">
           {dataset.source && <span>Source: {dataset.source}</span>}
@@ -1455,6 +1561,10 @@ export default function DatasetView() {
               ref={tableRef}
               className="border-collapse"
               style={{ tableLayout: 'fixed', width: totalTableWidth }}
+              // #946 — the grid's arrow keys. Scoped to the table rather than
+              // `window`, so it never has to stand down for the search box, the
+              // pager input or a popover. See `handleGridKeyDown`.
+              onKeyDown={handleGridKeyDown}
             >
               {/* HTML requires `<caption>` to be the table's FIRST child — it
                   sat after `<colgroup>`, the only one of the app's caption
@@ -1575,6 +1685,7 @@ export default function DatasetView() {
                 linkedParticipantMap={linkedParticipantMap}
                 handleLink={handleLink}
                 selectedCell={selectedCell}
+                rovingCell={rovingCell}
                 handleCellSelect={handleCellSelect}
                 editingCell={editingCell}
                 handleStartEdit={handleStartEdit}

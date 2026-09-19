@@ -12,7 +12,7 @@
  * WALKING the fixture — add a group to `RESPONSE` and the expected total moves
  * on its own, with no assertion to remember to update.
  */
-import { it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -205,4 +205,79 @@ it('groups are exposed as list items, not bare divs', async () => {
   renderPanel()
   await screen.findByRole('button', { name: /Session 1/ })
   expect(screen.getAllByRole('listitem')).toHaveLength(4)
+})
+
+/**
+ * #963 Tier 2 — the count, the empty state and the search announcement are all
+ * claims about an ANSWERED list.
+ *
+ * The entry filed this as loading-only because the panel HAD an `isLoading`
+ * arm. Two things were wrong with that reading: the arm was a bare spinner with
+ * no accessible text, and `isLoading` is `isPending && isFetching`, so it is
+ * FALSE once a failure has settled — "No notes yet" then stood permanently with
+ * nothing on screen saying the request had failed. The header count sat outside
+ * the arm entirely and read 0 throughout.
+ */
+describe('#963 — the notes panel waits for its list', () => {
+  const NOTHING = { conversations: [], texts: [], documents: [], observations: [] }
+
+  it('READY and empty: the claim is true, and the count is 0 (positive control)', async () => {
+    list.mockResolvedValue(NOTHING)
+    renderPanel()
+
+    expect(await screen.findByText('No notes yet')).toBeInTheDocument()
+    expect(screen.getByText('0')).toBeInTheDocument()
+  })
+
+  it('LOADING: says so in text, and shows no count', async () => {
+    list.mockReturnValue(new Promise(() => {}))
+    renderPanel()
+
+    const notice = await screen.findByText('Loading notes…')
+    // A bare spinner is not an accessible loading state; the old arm had one.
+    expect(notice.closest('[role="status"]')).not.toBeNull()
+    expect(screen.queryByText('No notes yet')).not.toBeInTheDocument()
+    expect(screen.queryByText('0')).not.toBeInTheDocument()
+  })
+
+  function renderWithSearch(search: string) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    return render(
+      <QueryClientProvider client={qc}>
+        <AllNotesPanel projectId={1} search={search} />
+      </QueryClientProvider>,
+    )
+  }
+
+  it('does NOT announce a count for a search that is still running', async () => {
+    // A live region is heard. "0 notes found" while the request is in flight is
+    // a wrong answer said out loud, which is worse than silence: the reader
+    // hears it and stops waiting. (Found by a surviving mutant — the first
+    // version of these cases did not reach the announcement at all.)
+    list.mockReturnValue(new Promise(() => {}))
+    const { container } = renderWithSearch('rubric')
+
+    await screen.findByText('Loading notes…')
+    await new Promise(r => setTimeout(r, 450)) // the 300 ms search debounce, plus the effect
+    expect(container.querySelector('[aria-live="polite"]')!.textContent).toBe('')
+  })
+
+  it('announces the count once the search has ANSWERED (positive control)', async () => {
+    list.mockResolvedValue(NOTHING)
+    const { container } = renderWithSearch('rubric')
+
+    await waitFor(
+      () => expect(container.querySelector('[aria-live="polite"]')!.textContent).toBe('0 notes found'),
+      { timeout: 2000 },
+    )
+  })
+
+  it('FAILED: says the LOAD failed, not that there are no notes', async () => {
+    list.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }))
+    renderPanel()
+
+    expect(await screen.findByText('Your notes could not be loaded')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByText('No notes yet')).not.toBeInTheDocument()
+  })
 })

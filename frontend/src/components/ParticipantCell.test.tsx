@@ -17,6 +17,10 @@ vi.mock('@/lib/api', () => ({
     list: (...a: unknown[]) => list(...a),
     create: (...a: unknown[]) => create(...a),
   },
+  // #963 — the component passes this as its `retry` policy; without it here the
+  // mock hands React Query `undefined` and the test is measuring the client
+  // default rather than the component's own choice.
+  retryUnanswered: () => false,
 }))
 
 const toastError = vi.fn()
@@ -126,4 +130,57 @@ it('renders no create affordance without a suggested identifier', async () => {
   renderCell({ suggestedIdentifier: null })
   await openPopover()
   expect(screen.queryByRole('button', { name: /new participant/i })).toBeNull()
+})
+
+/**
+ * #963 — what this picker may CLAIM and OFFER before the participant list
+ * answers. Its query is `enabled: open`, so EVERY cold open is an unanswered
+ * one: driven on the running app against a project with 30 participants, the
+ * popover read "No participants found" beside an enabled
+ * *New participant "R00001"*.
+ *
+ * ⚠️ Unlike the code and category pickers, the SERVER refuses a duplicate
+ * identifier (409), so no twin can be created. What the unanswered list breaks
+ * is the RECOVERY: `handleCreateFromRow` resolves that 409 by finding the
+ * existing participant and linking to it, and over an empty list it falls to
+ * the last arm — "already exists — pick it from the list" — pointing at a list
+ * with nothing in it. These cases pin the words and the wasted round trip.
+ */
+it('#963 while loading: says so, claims no absence, and offers no create', async () => {
+  list.mockReturnValue(new Promise(() => {}))
+  renderCell()
+  await openPopover()
+  expect(await screen.findByText(/Loading participants…/)).toBeInTheDocument()
+  expect(screen.queryByText('No participants found')).not.toBeInTheDocument()
+  const createBtn = screen.getByRole('button', { name: /new participant/i })
+  expect(createBtn).toBeDisabled()
+  expect(createBtn).toHaveAttribute('title', expect.stringMatching(/Still loading/i))
+  fireEvent.click(createBtn)
+  expect(create).not.toHaveBeenCalled()
+})
+
+it('#963 after a failure: says the load failed, offers Retry, and creates nothing', async () => {
+  list.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }))
+  renderCell()
+  await openPopover()
+  expect(await screen.findByText(/participants could not be loaded/i)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  expect(screen.queryByText('No participants found')).not.toBeInTheDocument()
+  const createBtn = screen.getByRole('button', { name: /new participant/i })
+  expect(createBtn).toBeDisabled()
+  fireEvent.click(createBtn)
+  expect(create).not.toHaveBeenCalled()
+})
+
+it('#963 POSITIVE CONTROL: an answered EMPTY list says so and still creates', async () => {
+  list.mockResolvedValue({ participants: [], total: 0 })
+  create.mockResolvedValue({ id: 42, identifier: 'P-07', display_name: null, role: null, linked_speakers: [] })
+  renderCell()
+  await openPopover()
+  expect(await screen.findByText('No participants found')).toBeInTheDocument()
+  expect(screen.queryByText(/Loading participants/)).not.toBeInTheDocument()
+  const createBtn = screen.getByRole('button', { name: /new participant .P-07./i })
+  expect(createBtn).toBeEnabled()
+  fireEvent.click(createBtn)
+  await waitFor(() => expect(create).toHaveBeenCalledWith(1, { identifier: 'P-07' }))
 })

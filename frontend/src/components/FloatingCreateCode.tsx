@@ -1,8 +1,11 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { X } from 'lucide-react'
-import { codesApi, categoriesApi, type Code, type CodeCategory } from '@/lib/api'
+import { codesApi, categoriesApi, serverDetailMessage, type Code, type CodeCategory } from '@/lib/api'
+import { useProjectCodeNames } from '@/hooks/useProjectCodeNames'
+import type { ListLoad } from '@/lib/list-status'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { computeFloatingPosition, type FloatingCoords } from '@/lib/floating-utils'
@@ -16,6 +19,15 @@ interface FloatingCreateCodeProps {
   position: FloatingCoords
   projectId: number
   categories: CodeCategory[]
+  /**
+   * #963 — whether `categories` is an ANSWER. REQUIRED, so each of the four
+   * coding workbenches that mount this has to decide; every one of them passed
+   * `categoriesData?.categories ?? []`, which is `[]` before the list answers,
+   * and `create_category` refuses no duplicate name — so the picker offered
+   * *New category "X"* for a category that already existed, under the words
+   * "No categories yet".
+   */
+  categoriesLoad: ListLoad
   onCreated: (code: Code) => void
   onClose: () => void
   /** Prefill the name (in-vivo coding, #526) — selected on focus so typing replaces it. */
@@ -26,6 +38,7 @@ export default function FloatingCreateCode({
   position,
   projectId,
   categories,
+  categoriesLoad,
   onCreated,
   onClose,
   initialName,
@@ -41,6 +54,14 @@ export default function FloatingCreateCode({
   const onCloseRef = useRef(onClose)
   useEffect(() => { onCloseRef.current = onClose }, [onClose])
 
+  /**
+   * #963 — this dialog refused no duplicate name. It reaches all FOUR coding
+   * workbenches (the `c` verb and the context menus), which is why it is the
+   * highest-traffic of the three surfaces that had no check.
+   */
+  const { duplicateOf } = useProjectCodeNames(projectId)
+  const duplicate = duplicateOf(name)
+
   const createMutation = useMutation({
     mutationFn: () =>
       codesApi.create(projectId, {
@@ -52,6 +73,16 @@ export default function FloatingCreateCode({
       queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
       queryClient.invalidateQueries({ queryKey: ['categories', projectId] })
       onCreated(code)
+    },
+    /**
+     * ⚠️ **This had NO error arm at all** — a failed create closed nothing, said
+     * nothing and left the coder looking at a dialog that appeared to do nothing.
+     * It matters more now that the server refuses a duplicate: the refusal is the
+     * one this dialog's own check may not have made (the hint is advisory and says
+     * nothing while the code list is unanswered), so its words have to arrive.
+     */
+    onError: (err) => {
+      toast.error(serverDetailMessage(err) ?? 'Failed to create code')
     },
   })
 
@@ -110,7 +141,7 @@ export default function FloatingCreateCode({
   }, [])
 
   const handleSubmit = () => {
-    if (!name.trim() || createMutation.isPending) return
+    if (!name.trim() || duplicate || createMutation.isPending) return
     createMutation.mutate()
   }
 
@@ -155,7 +186,14 @@ export default function FloatingCreateCode({
             placeholder="Code name"
             className="h-8 text-sm"
             autoComplete="off"
+            aria-invalid={duplicate ? true : undefined}
+            aria-describedby={duplicate ? 'floating-create-code-duplicate' : undefined}
           />
+          {duplicate && (
+            <p id="floating-create-code-duplicate" className="text-xs text-mm-text-muted mt-1">
+              A code named “{duplicate.name}” already exists.
+            </p>
+          )}
         </div>
 
         <div>
@@ -174,6 +212,8 @@ export default function FloatingCreateCode({
           <label className="text-xs text-mm-text-secondary mb-1 block">Category</label>
           <CreatableCombobox
             options={categoryOptions}
+            optionsLoad={categoriesLoad}
+            optionsNoun="categories"
             value={categoryId}
             onSelect={setCategoryId}
             onCreate={(label) => createCategoryMutation.mutate(label)}
@@ -191,7 +231,7 @@ export default function FloatingCreateCode({
           <Button
             size="sm"
             className="flex-1"
-            disabled={!name.trim() || createMutation.isPending}
+            disabled={!name.trim() || !!duplicate || createMutation.isPending}
             onClick={handleSubmit}
           >
             {createMutation.isPending ? 'Creating...' : 'Create'}

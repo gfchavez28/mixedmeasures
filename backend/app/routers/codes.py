@@ -82,6 +82,58 @@ def code_to_response(code: Code, db: Session, usage_count: int | None = None) ->
     )
 
 
+def _refuse_duplicate_code_name(
+    db: Session,
+    project_id: int,
+    name: str,
+    *,
+    exclude_code_id: int | None = None,
+) -> None:
+    """Refuse a code name another code in this project already carries (#963).
+
+    🔴 **THIS LIVES AT THE ROUTER, NOT IN A SERVICE, AND THAT IS THE DESIGN.**
+    `services/codebook_exchange.py` identifies an incoming code by
+    **`(name, category_path)`** — the same name under two different categories is
+    two codes to it — and `ensure_universal_codes` seeds by `numeric_id`. Both
+    construct `Code(...)` directly, so a refusal placed in a service would refuse
+    imports the exchange format deliberately permits. Every INTERACTIVE door goes
+    through this router: nine client call sites, measured 2026-09-18. That is what
+    makes the router the one place covering all of them, and it is why the
+    `.mmproject` / `.mmcodebook` / `.qdc` paths are untouched by this.
+
+    **Case- and whitespace-insensitive, and INACTIVE codes count.** Deactivating a
+    code does not release its name; reactivating it later beside a twin gives two
+    codes a chip cannot tell apart.
+
+    ⚠️ **`.lower()`, deliberately NOT `.casefold()`.** The client surfaces hint
+    this before submitting using JavaScript's `toLowerCase()`, and a server answer
+    STRICTER than the hint the researcher was given is worse than one that matches
+    it — `casefold` folds `ß` to `ss` and `toLowerCase` does not, so the two would
+    disagree on exactly the names no surface warned about.
+
+    ⚠️ **Compared in PYTHON, not by SQL `lower()`**, which SQLite implements for
+    ASCII only: `ÉCOLE` and `école` are the same name to every client check and
+    would slip past a `func.lower()` filter.
+    """
+    needle = name.strip().lower()
+    if not needle:
+        return
+
+    query = db.query(Code.name).filter(Code.project_id == project_id)
+    if exclude_code_id is not None:
+        query = query.filter(Code.id != exclude_code_id)
+
+    for (existing,) in query.all():
+        if (existing or "").strip().lower() == needle:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f'A code named "{existing}" already exists in this project. '
+                    "Apply that code instead, or give this one a different name."
+                ),
+            )
+
+
 @router.get("", response_model=CodeListResponse)
 async def list_codes(
     project_id: int,
@@ -163,6 +215,11 @@ async def create_code(
         ).first()
         if not cat:
             raise HTTPException(status_code=404, detail="Category not found")
+
+    # #963 — the client check was the only one there was, and three of the nine
+    # interactive create surfaces did not have it. Placed AFTER the category
+    # lookup so a bad category_id keeps its 404.
+    _refuse_duplicate_code_name(db, project_id, data.name)
 
     # B3: Retry on IntegrityError (race condition on numeric_id unique constraint)
     for attempt in range(3):
@@ -260,6 +317,14 @@ async def update_code(
         raise HTTPException(status_code=404, detail="Code not found")
 
     update_data = data.model_dump(exclude_unset=True)
+
+    # #963 — RENAMING is the second door into the same state, and the filed entry
+    # named only the first. `exclude_code_id` is what lets a no-op rename (or a
+    # case/whitespace tidy of a code's own name) still succeed.
+    if update_data.get("name") is not None:
+        _refuse_duplicate_code_name(
+            db, project_id, update_data["name"], exclude_code_id=code.id
+        )
 
     # Handle category change
     if "category_id" in update_data:

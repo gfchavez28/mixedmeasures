@@ -1,4 +1,5 @@
 import api from './client'
+import { downloadFromApi } from './download'
 
 export interface ProjectBackupSummary {
   name: string
@@ -50,6 +51,28 @@ export interface RestorePreview {
   warnings: string[]
 }
 
+/** Which in-place import a safety copy precedes. `merge_or_overwrite` is a copy
+ * written before 1.5.2, when a merge's copy was also named for an overwrite. */
+export type SafetyCopyAct = 'merge' | 'overwrite' | 'merge_or_overwrite'
+
+/** #919: a full copy of a project, taken before a merge or an overwrite. A
+ * `.mmproject`, so it comes back through Import — never through Restore. */
+export interface SafetyCopyInfo {
+  filename: string
+  act: SafetyCopyAct
+  /** ISO 8601 with an explicit UTC offset. */
+  taken_at: string
+  size_bytes: number
+  /** From the copy's own manifest; null when the file cannot be read. */
+  project_name: string | null
+  /** Whether a project with this copy's identity is in the app now. `false` is
+   * the case to warn about: the file may be that project's only copy. `null`
+   * when the copy's identity cannot be read. */
+  project_in_app: boolean | null
+  /** False when the archive cannot be read — it may be damaged. */
+  readable: boolean
+}
+
 export const backupApi = {
   status: () =>
     api.get<BackupStatus>('/backup/status').then(r => r.data),
@@ -94,4 +117,21 @@ export const backupApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     }).then(r => r.data)
   },
+
+  /** #919: every safety copy in the backup folder, newest first. */
+  listSafetyCopies: () =>
+    api.get<SafetyCopyInfo[]>('/backup/safety-copies').then(r => r.data),
+
+  /** Save a safety copy to the researcher's downloads so it can be imported.
+   * Goes through `downloadFromApi` — it carries the export budget, uses the
+   * server's filename, and reports its own failure (it never rejects). */
+  downloadSafetyCopy: (filename: string) =>
+    downloadFromApi(
+      `/backup/safety-copies/${encodeURIComponent(filename)}`,
+      filename,
+      { label: 'The safety copy download' },
+    ),
+
+  deleteSafetyCopy: (filename: string) =>
+    api.delete(`/backup/safety-copies/${encodeURIComponent(filename)}`).then(() => undefined),
 }

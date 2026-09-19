@@ -24,10 +24,11 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from ..models.code import Code
-from ..models.conversation import Conversation
-from ..models.dataset import Dataset, DatasetColumn, DatasetValue
-from ..models.document import Document
-from ..models.observation import Observation
+# ⚠️ Conversation / Document / Observation / Dataset / DatasetColumn are no
+# longer imported here: naming a source is `source_labels.label_sources`' job
+# now, and leaving the imports behind would make this module look like it still
+# queries those tables.
+from ..models.dataset import DatasetValue
 from ..models.segment import Segment
 from ..models.user import User
 from .coding_layers import build_effective_code_map, resolve_effective_code
@@ -41,6 +42,7 @@ from .consensus import (
 )
 from .irr import gather_coder_applications
 from .magnitude import read_scale
+from .source_labels import label_sources
 
 # Frontend source_type ←→ the gather's source-key tag. All four maps move together:
 # an "obs" tag missing from _SOURCE_TYPE raised KeyError → 500, while the same
@@ -251,37 +253,15 @@ def build_reconciliation(
     seg_times = {sid: (start, end) for sid, _t, start, end in seg_rows}
     val_text = dict(db.query(DatasetValue.id, DatasetValue.value_text).filter(DatasetValue.id.in_(page_val)).all()) if page_val else {}
 
-    page_convs = [sid for r in page for (t, sid) in [r["src"]] if t == "conv"]
-    page_docs = [sid for r in page for (t, sid) in [r["src"]] if t == "doc"]
-    page_obs = [sid for r in page for (t, sid) in [r["src"]] if t == "obs"]
-    page_cols = [sid for r in page for (t, sid) in [r["src"]] if t == "col"]
-    conv_names = dict(db.query(Conversation.id, Conversation.name).filter(Conversation.id.in_(page_convs)).all()) if page_convs else {}
-    doc_names = dict(db.query(Document.id, Document.name).filter(Document.id.in_(page_docs)).all()) if page_docs else {}
-    obs_names = dict(db.query(Observation.id, Observation.name).filter(Observation.id.in_(page_obs)).all()) if page_obs else {}
-    col_labels: dict[int, str] = {}
-    if page_cols:
-        for col_id, col_name, col_text, ds_name in (
-            db.query(DatasetColumn.id, DatasetColumn.column_name, DatasetColumn.column_text, Dataset.name)
-            .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
-            .filter(DatasetColumn.id.in_(page_cols)).all()
-        ):
-            label = col_name or (col_text[:60] if col_text else "")
-            col_labels[col_id] = f"{ds_name} › {label}" if label else ds_name
-
-    def _source_label(src) -> str:
-        # Every kind gets an EXPLICIT branch. `col` used to be the fall-through
-        # default, so a tag nobody had handled yet rendered a silently blank
-        # source name instead of failing.
-        t, sid = src
-        if t == "conv":
-            return conv_names.get(sid, "")
-        if t == "doc":
-            return doc_names.get(sid, "")
-        if t == "obs":
-            return obs_names.get(sid, "")
-        if t == "col":
-            return col_labels.get(sid, "")
-        raise KeyError(f"unhandled source tag: {t!r}")
+    # 🔴 ONE implementation of "what is this source called", shared with the
+    # rating sweep's queue (#35 variant B). It was inline here, four `IN`
+    # queries and an explicit-branch resolver, and the sweep needed the same
+    # four — which is where a copy stops being a copy and becomes the substrate
+    # debt the arch-debt synthesis names. `label_sources` keeps the property
+    # this version was careful about: every tag has a branch and an unknown one
+    # RAISES, because `col` as a fall-through default once rendered a silently
+    # blank source name for a tag nobody had handled.
+    source_labels = label_sources(db, {r["src"] for r in page})
 
     # Code legend: the EFFECTIVE codes referenced on the page. Effective ids are real
     # canonical Code ids, so naming them directly gives the group's canonical label.
@@ -312,7 +292,7 @@ def build_reconciliation(
             "unit_id": uid,
             "source_type": _SOURCE_TYPE[src_t],
             "source_id": src_id,
-            "source_label": _source_label(r["src"]),
+            "source_label": source_labels[r["src"]],
             "text": text or "",
             "start_time": start_time,
             "end_time": end_time,

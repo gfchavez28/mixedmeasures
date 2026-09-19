@@ -28,6 +28,7 @@ from ..services.text_analysis import (
     treat_as_empty_for_project,
 )
 from ..services.coding_layers import LAYER_CONSENSUS, layer_origin_filter
+from ..services.id_set import in_id_set
 from ..auth import get_current_user
 from .helpers import _get_project_or_404, parse_int_list, sanitize_content_disposition, TEXT_TYPES
 from .export_helpers import csv_safe
@@ -229,6 +230,24 @@ def _resolve_filter_rows(db: Session, filt, col: DatasetColumn) -> set[int]:
         raise HTTPException(status_code=400, detail=f"Unknown operator: {filt.operator}")
 
 
+def _word_totals_by_code(
+    value_ids: list[int], value_codes: dict[int, set[int]], word_counts: dict[int, int],
+) -> tuple[dict[int, int], dict[int, int]]:
+    """Per code: the summed word count and the number of texts carrying it.
+
+    One pass over the texts, shared by the response-length endpoint and the
+    cross-analysis export — both used to rescan every text once per code (#956).
+    Integer sums, divided once by the caller, so the averages are unchanged.
+    """
+    word_sum: dict[int, int] = defaultdict(int)
+    text_count: dict[int, int] = defaultdict(int)
+    for vid in value_ids:
+        for code_id in value_codes.get(vid, ()):
+            word_sum[code_id] += word_counts[vid]
+            text_count[code_id] += 1
+    return word_sum, text_count
+
+
 def _to_frequency_set(result: dict) -> FrequencySet:
     """Adapt a `compute_comment_frequencies` result dict to the `FrequencySet` schema.
 
@@ -248,7 +267,7 @@ def _to_frequency_set(result: dict) -> FrequencySet:
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.post("/filtered-frequencies", response_model=FilteredFrequenciesResponse)
-async def filtered_frequencies(
+def filtered_frequencies(
     project_id: int,
     body: FilteredFrequenciesRequest,
     db: Session = Depends(get_db),
@@ -287,7 +306,7 @@ async def filtered_frequencies(
 
 
 @router.post("/cross-tabulation", response_model=CrossTabulationResponse)
-async def cross_tabulation(
+def cross_tabulation(
     project_id: int,
     body: CrossTabulationRequest,
     db: Session = Depends(get_db),
@@ -397,9 +416,10 @@ async def cross_tabulation(
             total_coded_texts=0,
         )
 
+    # #956: every substantive value of the selected columns — rows × columns.
     code_apps_q = (
         db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
-        .filter(CodeApplication.dataset_value_id.in_(value_ids), layer_origin_filter(body.layer_scope))
+        .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_origin_filter(body.layer_scope))
     )
     if body.coder_ids and body.layer_scope != LAYER_CONSENSUS:
         code_apps_q = code_apps_q.filter(CodeApplication.user_id.in_(body.coder_ids))
@@ -427,7 +447,7 @@ async def cross_tabulation(
     if cross_dataset_row_ids:
         rows = (
             db.query(DatasetRow.id, DatasetRow.participant_id)
-            .filter(DatasetRow.id.in_(cross_dataset_row_ids))
+            .filter(in_id_set(DatasetRow.id, cross_dataset_row_ids))
             .all()
         )
         row_participant_map = {r.id: r.participant_id for r in rows}
@@ -440,7 +460,7 @@ async def cross_tabulation(
             db.query(DatasetRow.id, DatasetRow.participant_id)
             .filter(
                 DatasetRow.dataset_id == cross_dataset_id,
-                DatasetRow.participant_id.in_(linked_participant_ids),
+                in_id_set(DatasetRow.participant_id, linked_participant_ids),
             )
             .all()
         )
@@ -503,7 +523,7 @@ async def cross_tabulation(
 
 
 @router.get("/code-density", response_model=CodeDensityResponse)
-async def code_density(
+def code_density(
     project_id: int,
     column_ids: str = Query(..., description="Comma-separated focal column IDs"),
     group_by_column_id: int | None = Query(None, description="Column to group by"),
@@ -533,7 +553,7 @@ async def code_density(
     if value_ids:
         code_counts_query = (
             db.query(CodeApplication.dataset_value_id, func.count(func.distinct(CodeApplication.code_id)))
-            .filter(CodeApplication.dataset_value_id.in_(value_ids), layer_origin_filter(layer_scope))
+            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_origin_filter(layer_scope))
         )
         if parsed_coder_ids and layer_scope != LAYER_CONSENSUS:
             code_counts_query = code_counts_query.filter(CodeApplication.user_id.in_(parsed_coder_ids))
@@ -592,7 +612,7 @@ async def code_density(
 
 
 @router.get("/response-length-by-code", response_model=ResponseLengthResponse)
-async def response_length_by_code(
+def response_length_by_code(
     project_id: int,
     column_ids: str = Query(..., description="Comma-separated focal column IDs"),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
@@ -625,7 +645,7 @@ async def response_length_by_code(
     if value_ids:
         code_apps_query = (
             db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
-            .filter(CodeApplication.dataset_value_id.in_(value_ids), layer_origin_filter(layer_scope))
+            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_origin_filter(layer_scope))
         )
         if parsed_coder_ids and layer_scope != LAYER_CONSENSUS:
             code_apps_query = code_apps_query.filter(CodeApplication.user_id.in_(parsed_coder_ids))
@@ -646,21 +666,20 @@ async def response_length_by_code(
         .all()
     )
 
-    # Per-code: avg word count of values with that code
+    # Per-code: avg word count of values with that code — ONE pass over the texts.
+    # This rescanned every text once PER CODE, which on BES's 843,525 texts was
+    # most of a 34 s request once #956 let it finish.
+    code_word_sum, code_text_count = _word_totals_by_code(value_ids, value_codes, word_counts)
     code_results = []
     for code in codes:
-        coded_value_ids = [vid for vid in value_ids if code.id in value_codes.get(vid, set())]
-        if coded_value_ids:
-            wc_sum = sum(word_counts[vid] for vid in coded_value_ids)
-            avg = round(wc_sum / len(coded_value_ids), 1)
-        else:
-            avg = 0.0
+        n = code_text_count.get(code.id, 0)
+        avg = round(code_word_sum[code.id] / n, 1) if n else 0.0
         code_results.append(ResponseLengthCode(
             code_id=code.id,
             code_name=code.name,
             code_color=code.color,
             avg_words=avg,
-            text_count=len(coded_value_ids),
+            text_count=n,
         ))
 
     # Uncoded: values with no code applications
@@ -678,7 +697,7 @@ async def response_length_by_code(
 
 
 @router.get("/export")
-async def export_cross_analysis(
+def export_cross_analysis(
     project_id: int,
     column_ids: str = Query(..., description="Comma-separated focal column IDs"),
     filters_json: str = Query("[]", description="JSON-encoded filters"),
@@ -776,7 +795,7 @@ async def export_cross_analysis(
     if value_ids:
         code_apps_all_q = (
             db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
-            .filter(CodeApplication.dataset_value_id.in_(value_ids), layer_origin_filter(layer_scope))
+            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_origin_filter(layer_scope))
         )
         if parsed_coder_ids and layer_scope != LAYER_CONSENSUS:
             code_apps_all_q = code_apps_all_q.filter(CodeApplication.user_id.in_(parsed_coder_ids))
@@ -787,13 +806,11 @@ async def export_cross_analysis(
     for ca in code_apps_all:
         val_codes[ca.dataset_value_id].add(ca.code_id)
 
+    code_word_sum, code_text_count = _word_totals_by_code(value_ids, val_codes, word_counts_map)
     for code in codes:
-        coded_vids = [vid for vid in value_ids if code.id in val_codes.get(vid, set())]
-        if coded_vids:
-            avg_wc = round(sum(word_counts_map[vid] for vid in coded_vids) / len(coded_vids), 1)
-        else:
-            avg_wc = 0.0
-        writer.writerow([csv_safe(code.name), avg_wc, len(coded_vids)])
+        n = code_text_count.get(code.id, 0)
+        avg_wc = round(code_word_sum[code.id] / n, 1) if n else 0.0
+        writer.writerow([csv_safe(code.name), avg_wc, n])
 
     uncoded_vids = [vid for vid in value_ids if vid not in val_codes]
     uncoded_avg = round(sum(word_counts_map[vid] for vid in uncoded_vids) / len(uncoded_vids), 1) if uncoded_vids else 0.0

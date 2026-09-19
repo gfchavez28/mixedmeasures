@@ -245,17 +245,11 @@ def test_single_row_value(db_session):
 # which builds its own matrix inline — distinct from the service-layer
 # compute_cross_tabulation tested above. (Recreated here — original lived in /tmp.)
 
-import asyncio
-
 from app.models.user import User
 from app.models.code import Code
 from app.models.code_application import CodeApplication
 from app.routers.text_analysis import cross_tabulation as router_cross_tabulation
 from app.schemas.text_analysis import CrossTabulationRequest
-
-
-def _run(coro):
-    return asyncio.run(coro)
 
 
 @pytest.fixture
@@ -312,12 +306,12 @@ def test_R3_cross_tab_with_recoded_cross_column_does_not_500(db_session, recoded
     """The presence of a primary recode on the cross column no longer raises,
     and the cross-tab columns are ordered by the recode's numeric mapping."""
     user = recoded_crosstab_fixture
-    result = _run(router_cross_tabulation(
+    result = router_cross_tabulation(
         project_id=200,
         body=CrossTabulationRequest(text_column_ids=[2001], cross_column_id=2002),
         db=db_session,
         user=user,
-    ))
+    )
 
     # Ordered by recode value (Standard=1 < Plus=2 < Premium=3), NOT alphabetical
     # (which would be ["Plus", "Premium", "Standard"]).
@@ -341,11 +335,11 @@ def test_R3_cross_tab_unmapped_value_still_appears(db_session, recoded_crosstab_
     db.add(CodeApplication(dataset_value_id=cv.id, code_id=2001))
     db.flush()
 
-    result = _run(router_cross_tabulation(
+    result = router_cross_tabulation(
         project_id=200,
         body=CrossTabulationRequest(text_column_ids=[2001], cross_column_id=2002),
         db=db, user=recoded_crosstab_fixture,
-    ))
+    )
     # Mapped values first (numeric order), the unmapped typo last.
     assert result.response_values == ["Standard", "Plus", "Premium", "Premum"]
 

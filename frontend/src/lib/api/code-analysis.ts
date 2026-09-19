@@ -1,4 +1,5 @@
 import api from './client'
+import { EXPORT_TIMEOUT_MS } from './download'
 import type { ReliabilityInterval } from '../reliability-interval'
 import type { MagnitudeScale } from '../magnitude'
 
@@ -792,8 +793,15 @@ export const codeAnalysisApi = {
     api.post<RecomputeConsensusResponse>(`/projects/${projectId}/code-analysis/recompute-consensus`, {}).then(r => r.data),
 
   // Track J · J2-4/J2-5 — inter-rater reliability (κ / α / % agreement) over the human roster.
+  // #957 — the EXPORT budget, not the client's 30 s default. Pooled reliability
+  // measured 46.4 s on a 1.2M-application project, so the default aborted a
+  // computation that was going to succeed. Flat for #820's reason: the cost is
+  // the project's coding volume, which the client cannot know before asking.
+  // The budget is APPLIED, not re-derived — the R export already builds these
+  // same pooled matrices under it. Pinned by `irr-budget.test.ts`.
   irr: (projectId: number, params?: IrrParams) =>
-    api.get<IrrResponse>(`/projects/${projectId}/code-analysis/irr`, { params }).then(r => r.data),
+    api.get<IrrResponse>(`/projects/${projectId}/code-analysis/irr`, { params, timeout: EXPORT_TIMEOUT_MS })
+      .then(r => r.data),
 
   /** Unitizing agreement for ONE observation with open cuts (slab 6b-A). */
   unitizingAlpha: (projectId: number, observationId: number, params?: { coder_ids?: string }) =>

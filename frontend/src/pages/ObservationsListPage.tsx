@@ -4,7 +4,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Video, Volume2, FileInput, Trash2, Film, Lock } from 'lucide-react'
 
-import { observationsApi } from '@/lib/api'
+import { observationsApi, retryUnanswered} from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { useMainContentLanding } from '@/hooks/useMainContentLanding'
+import { LoadState } from '@/components/LoadStatus'
 import type { Observation } from '@/lib/api'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { Button } from '@/components/ui/button'
@@ -26,10 +29,16 @@ export default function ObservationsListPage() {
   const [searchText, setSearchText] = useState('')
   const [deleteId, setDeleteId] = useState<number | null>(null)
 
-  const { data: observations = [], isLoading } = useQuery({
+  const observationsQuery = useQuery({
     queryKey: ['observations', projectId],
     queryFn: () => observationsApi.list(projectId),
+    retry: retryUnanswered,
   })
+  const observations = useMemo(() => observationsQuery.data ?? [], [observationsQuery.data])
+  /** #963 — `EmptyState` below tells a researcher how to import their FIRST
+   *  recording; after a failed load it told that to someone who has several. */
+  const observationsLoad = useListLoad(observationsQuery)
+  const mainLanding = useMainContentLanding()
 
   const filtered = useMemo(() => {
     const q = searchText.trim().toLowerCase()
@@ -82,8 +91,13 @@ export default function ObservationsListPage() {
         />
       )}
 
-      {isLoading ? (
-        <p className="text-sm text-mm-text-muted">Loading…</p>
+      {observationsLoad.status !== 'ready' ? (
+        <LoadState
+          load={observationsLoad}
+          loadingLabel="Loading observations…"
+          failedTitle="Your observations could not be loaded."
+          landingRef={mainLanding}
+        />
       ) : observations.length === 0 ? (
         <EmptyState projectId={projectId} />
       ) : (

@@ -21,6 +21,7 @@ import TimedAnalytics, {
   type TimedCodeLite, type TimedCoderLite, type TimedObservationLite,
 } from '@/components/qualitative-analysis/TimedAnalytics'
 import type { CoderInclude } from '@/lib/timed-analytics'
+import type { ListLoad } from '@/lib/list-status'
 import type { QualValueMode, QualDenominatorMode } from '@/lib/qual-analysis-types'
 
 function getMetricDescription(
@@ -137,6 +138,8 @@ export interface DescriptivesContentProps {
   // ── Timeline chart type (slab 6c, §8q) ──
   projectId: number
   timedObservations: TimedObservationLite[]
+  /** #963 — whether `timedObservations` rests on an ANSWERED list. */
+  observationsLoad: ListLoad
   timedCodes: TimedCodeLite[]
   timedCategories: { id: number; name: string }[]
   coderInclude: CoderInclude
@@ -152,7 +155,7 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
     sourceFreqData, sourceFreqLoading,
     saturationData, saturationLoading,
     onChartTypeChange,
-    projectId, timedObservations, timedCodes, timedCategories,
+    projectId, timedObservations, observationsLoad, timedCodes, timedCategories,
     coderInclude, multiCoder, coderMap,
   } = props
 
@@ -207,6 +210,7 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
           <TimedAnalytics
             projectId={projectId}
             observations={timedObservations}
+            observationsLoad={observationsLoad}
             codes={timedCodes}
             categories={timedCategories}
             include={coderInclude}

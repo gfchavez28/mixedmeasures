@@ -5,9 +5,12 @@ import { toast } from 'sonner'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import CodeChip from './CodeChip'
+import { findCodeByName } from '@/lib/code-name'
 import { codingApi, textCodingApi, codesApi, type Code, type Coder } from '@/lib/api'
 import { getCodeColor } from '@/lib/utils'
 import { visibleCodeChipRows, distinctVisibleCodeIds, type AppliedCodeDetailLike, type CodeChipRow } from '@/lib/coding-progress'
+import type { CoderLens } from '@/lib/coder-color'
+import type { ListStatus } from '@/lib/list-status'
 
 interface InlineCodeActionsProps {
   projectId: number
@@ -16,6 +19,15 @@ interface InlineCodeActionsProps {
   appliedCodeIds: number[]
   codeMap: Map<number, Code>
   allCodes: Code[]
+  /**
+   * #961 — whether `allCodes` is an ANSWER. REQUIRED, so every mount has to
+   * decide. The popover's "Create “X”" row is offered when no code matches the
+   * typed name — and against a list that has not answered, nothing matches, so
+   * it offered to create a second code with an existing name (the server does
+   * not refuse duplicate names). The analysis surfaces render below
+   * `QualitativeAnalysisView`'s codes gate and pass what that gate read.
+   */
+  codesStatus: ListStatus
   onCodeChange: () => void
   excludeCodeId?: number
   onFocusCode?: (codeId: number) => void
@@ -26,7 +38,7 @@ interface InlineCodeActionsProps {
   codeCoderIds?: Map<number, number | null>
   coderMap?: Map<number, Coder>
   /** Track J · J1 visibility filter — coder ids whose chips are hidden (empty = show all). */
-  hiddenCoderIds?: Set<number>
+  hiddenCoderIds?: CoderLens
   /**
    * #475: keep the add-code popover open when focus leaves it. Needed inside the
    * reconciliation grid, whose roving-tabindex focus churn otherwise triggers a
@@ -88,6 +100,7 @@ export default function InlineCodeActions({
   appliedCodeIds,
   codeMap,
   allCodes,
+  codesStatus,
   onCodeChange,
   excludeCodeId,
   onFocusCode,
@@ -171,9 +184,16 @@ export default function InlineCodeActions({
   const filteredCodes = allCodes.filter(c =>
     c.is_active && c.name.toLowerCase().includes(searchLower)
   )
-  const exactMatch = searchTrimmed.length > 0 && allCodes.some(c =>
-    c.is_active && c.name.toLowerCase() === searchLower
+  // #963 — shared comparison (`lib/code-name.ts`). ⚠️ The ACTIVE-only scope is
+  // this surface's own and is kept: it lists active codes, so an inactive twin is
+  // one it could not offer. The server checks every code, so the worst case here
+  // is a 409 naming the inactive code rather than an inline hint.
+  const exactMatch = !!findCodeByName(
+    allCodes.filter(c => c.is_active),
+    searchTrimmed,
   )
+  // #961 — `exactMatch` is only a check once the list has answered.
+  const canCreateTyped = codesStatus === 'ready' && searchTrimmed.length > 0 && !exactMatch
 
   // Render one chip per (code, coder) via the single INV-3 chokepoint (#441) when
   // we have per-application details. Otherwise (no attribution to show) collapse
@@ -268,7 +288,7 @@ export default function InlineCodeActions({
             value={codeSearch}
             onChange={e => setCodeSearch(e.target.value)}
             onKeyDown={e => {
-              if (e.key === 'Enter' && searchTrimmed && !exactMatch) {
+              if (e.key === 'Enter' && canCreateTyped) {
                 e.preventDefault()
                 createAndApplyMutation.mutate(searchTrimmed)
               }
@@ -304,7 +324,7 @@ export default function InlineCodeActions({
                 </button>
               )
             })}
-            {searchTrimmed && !exactMatch && (
+            {canCreateTyped && (
               <button
                 className="w-full flex items-center gap-2 px-2 py-1 rounded text-xs text-left hover:bg-mm-surface-hover text-mm-accent font-medium"
                 onClick={() => createAndApplyMutation.mutate(searchTrimmed)}
@@ -314,7 +334,13 @@ export default function InlineCodeActions({
                 <span className="truncate flex-1">Create &ldquo;{searchTrimmed}&rdquo;</span>
               </button>
             )}
-            {filteredCodes.length === 0 && !searchTrimmed && (
+            {codesStatus !== 'ready' ? (
+              // A plain line, not `LoadState`: the popover has no Retry of its
+              // own to offer, and the code panel beside it does.
+              <p role="status" className="text-xs text-mm-text-muted py-2 text-center">
+                {codesStatus === 'failed' ? 'Codes could not be loaded.' : 'Loading codes…'}
+              </p>
+            ) : filteredCodes.length === 0 && !searchTrimmed && (
               <p className="text-xs text-mm-text-muted py-2 text-center">No codes found</p>
             )}
           </div>

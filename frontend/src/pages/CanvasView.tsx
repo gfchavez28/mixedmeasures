@@ -2,7 +2,9 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { DndContext, useDroppable, type DragEndEvent } from '@dnd-kit/core'
-import { canvasApi, excerptsApi, materialsApi, memosApi, type CanvasListItem, type CanvasDetail, type CanvasTheme, type CanvasSnapshot, type PendingItem } from '@/lib/api'
+import { canvasApi, excerptsApi, materialsApi, memosApi, retryUnanswered, type CanvasListItem, type CanvasDetail, type CanvasTheme, type CanvasSnapshot, type PendingItem } from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useHistory } from '@/hooks/useHistory'
 import { useBlindMode } from '@/hooks/useBlindMode'
@@ -309,7 +311,8 @@ function OutlineSidebar({
 
 export default function CanvasView() {
   const { projectId, setBreadcrumbLabel } = useProjectLayout()
-  const { blind } = useBlindMode(projectId)
+  // #964: `withholding` fails closed while the coder roster is unanswered.
+  const { withholding } = useBlindMode(projectId)
   const { user } = useAuth()
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -321,6 +324,16 @@ export default function CanvasView() {
   const [deleteThemeTarget, setDeleteThemeTarget] = useState<{ id: number; name: string; materialCount: number; childCount: number } | null>(null)
   const [announcement, setAnnouncement] = useState('')
   const [newCanvasDialogOpen, setNewCanvasDialogOpen] = useState(false)
+  /**
+   * #963 — the Retry landing while the canvas list is unanswered.
+   *
+   * A `tabIndex={-1}` container is normally the wrong choice on a page with a
+   * `window` keydown layer (it takes focus on every whitespace click). It is
+   * safe here because this container exists ONLY in the non-ready state and
+   * unmounts the moment the list answers, so it is never on screen while the
+   * canvas keyboard layer is doing anything.
+   */
+  const canvasLoadLandingRef = useRef<HTMLDivElement>(null)
   const [newCanvasName, setNewCanvasName] = useState('')
   const [outlineOpen, setOutlineOpen] = useState(true)
   const history = useHistory()
@@ -330,6 +343,8 @@ export default function CanvasView() {
   const themeInsertNodeRefs = useRef(new Map<number, { current: InsertNodeHandle | null }>())
 
   // Materials drawer state
+  /** #963 — where focus lands when the materials pane goes `inert` on close. */
+  const drawerToggleRef = useRef<HTMLButtonElement>(null)
   const [drawerOpen, setDrawerOpen] = useState(() =>
     localStorage.getItem(`mm-canvas-drawer-${projectId}`) === 'true',
   )
@@ -373,12 +388,26 @@ export default function CanvasView() {
   }, [projectId])
 
   // Canvas list (always fetch all including archived, filter client-side)
-  const { data: allCanvases = [] } = useQuery({
+  const canvasesQuery = useQuery({
     queryKey: ['canvases', projectId],
     queryFn: () => canvasApi.list(projectId, true),
     enabled: !isNaN(projectId),
     staleTime: 30_000,
+    retry: retryUnanswered,
   })
+  const allCanvases = useMemo(() => canvasesQuery.data ?? [], [canvasesQuery.data])
+  /**
+   * #963 — whether the canvas list is an ANSWER.
+   *
+   * The no-canvases screen below gated on `!canvasLoading`, which is the canvas
+   * DETAIL query — and that one is DISABLED with no `?canvas=` in the URL, so
+   * React Query reports `isLoading: false` and the gate was open throughout the
+   * LIST's own load. Driven on the running app with the request held back 14 s
+   * on a project that HAS a canvas: "Create your first canvas" with a working
+   * New Canvas button for the whole window, then the list answered and the
+   * auto-select effect navigated to the canvas that had been there all along.
+   */
+  const canvasesLoad = useListLoad(canvasesQuery)
   const activeCanvases = useMemo(() => allCanvases.filter(c => !c.is_archived), [allCanvases])
   const archivedCanvases = useMemo(() => allCanvases.filter(c => c.is_archived), [allCanvases])
   const isCurrentArchived = canvasId != null && allCanvases.some(c => c.id === canvasId && c.is_archived)
@@ -399,12 +428,22 @@ export default function CanvasView() {
   })
 
   // Snapshots
-  const { data: snapshots = [] } = useQuery({
+  const snapshotsQuery = useQuery({
     queryKey: ['snapshots', projectId, canvasId],
     queryFn: () => canvasApi.listSnapshots(projectId, canvasId!),
     enabled: canvasId != null && !isNaN(projectId),
     staleTime: 30_000,
+    retry: retryUnanswered,
   })
+  const snapshots = useMemo(() => snapshotsQuery.data ?? [], [snapshotsQuery.data])
+  /**
+   * #963 — the snapshot list's own load state. Folded in here rather than left
+   * for a later pass: it is the same mechanism in the same file, and fixing only
+   * the instance in front of you is how this rule has shipped partially before
+   * (#771/#785). "No snapshots yet" is a claim about a 10-deep rotation a
+   * researcher may be relying on.
+   */
+  const snapshotsLoad = useListLoad(snapshotsQuery)
 
   // Set breadcrumb
   useEffect(() => {
@@ -589,8 +628,8 @@ export default function CanvasView() {
   // to be read here and handed down. Without it a blind researcher's exported
   // document would carry all-coder numbers into a shareable file.
   const timelineLens = useMemo(
-    () => ({ blind, self: user?.id ?? null }),
-    [blind, user?.id],
+    () => ({ blind: withholding, self: user?.id ?? null }),
+    [withholding, user?.id],
   )
 
   const handleExportMarkdown = useCallback(async () => {
@@ -1046,6 +1085,21 @@ export default function CanvasView() {
 
   // ── No canvases state ──────────────────────────────────────────────────
 
+  // #963 — and only once the LIST has answered. `canvasLoading` is the detail
+  // query and cannot speak for this one.
+  if (canvasesLoad.status !== 'ready') {
+    return (
+      <div ref={canvasLoadLandingRef} tabIndex={-1} className="h-full flex items-center justify-center outline-none">
+        <LoadState
+          load={canvasesLoad}
+          loadingLabel="Loading your canvases…"
+          failedTitle="Your canvases could not be loaded."
+          landingRef={canvasLoadLandingRef}
+        />
+      </div>
+    )
+  }
+
   if (activeCanvases.length === 0 && archivedCanvases.length === 0 && !canvasLoading) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -1257,6 +1311,7 @@ export default function CanvasView() {
             </button>
             {/* Materials drawer toggle */}
             <button
+              ref={drawerToggleRef}
               type="button"
               onClick={() => toggleDrawer()}
               className={cn(
@@ -1431,6 +1486,13 @@ export default function CanvasView() {
                       </div>
                     ))}
                   </div>
+                ) : snapshotsLoad.status !== 'ready' ? (
+                  <LoadState
+                    load={snapshotsLoad}
+                    size="panel"
+                    loadingLabel="Loading snapshots…"
+                    failedTitle="The snapshots could not be loaded."
+                  />
                 ) : (
                   <div className="px-2 py-3 text-xs text-mm-text-faint text-center">
                     No snapshots yet
@@ -1543,6 +1605,7 @@ export default function CanvasView() {
             onInsertMaterial={handleInsertMaterial}
             onInsertMemo={handleInsertMemo}
             insertingId={insertingId}
+            closeReturnRef={drawerToggleRef}
           />
         )}
       </div>

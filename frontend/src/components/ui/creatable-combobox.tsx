@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronsUpDown, Plus } from 'lucide-react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Input } from '@/components/ui/input'
+import { LoadState } from '@/components/LoadStatus'
+import type { ListLoad } from '@/lib/list-status'
 import { cn } from '@/lib/utils'
 
 /**
@@ -26,6 +28,26 @@ type Row =
 
 export interface CreatableComboListProps {
   options: ComboOption[]
+  /**
+   * #963 — whether `options` is an ANSWER. REQUIRED, so a new call site has to
+   * decide, and required on the PRIMITIVE because both of today's call sites
+   * are the same act: creating a code category from a typed name. Neither
+   * `create_category` nor `create_code` refuses a duplicate NAME (unlike
+   * participants, where the server 409s), so this list is the only duplicate
+   * guard there is — the #961 finding, one component over.
+   *
+   * Measured shape: both pickers fetch on OPEN, so *every* cold open renders
+   * `emptyText` ("No categories yet") beside a *New category "X"* row, and
+   * pressing it makes a second category of a name that already exists.
+   */
+  optionsLoad: ListLoad
+  /**
+   * What the options ARE, lower-case and plural ("categories"), for the
+   * loading and failure sentences. Required rather than defaulted: a generic
+   * "Loading…" is exactly the drift `LoadStatus` exists to prevent, and only
+   * the caller knows the noun.
+   */
+  optionsNoun: string
   value: number | null
   onSelect: (value: number | null) => void
   /** When provided, typing a non-matching name offers a "create" row. */
@@ -44,6 +66,8 @@ export interface CreatableComboListProps {
 
 export function CreatableComboList({
   options,
+  optionsLoad,
+  optionsNoun,
   value,
   onSelect,
   onCreate,
@@ -67,7 +91,10 @@ export function CreatableComboList({
     [options, qLower],
   )
   const exact = q.length > 0 && options.some(o => o.label.toLowerCase() === qLower)
-  const showCreate = !!onCreate && q.length > 0 && !exact
+  // #963 — `exact` is only a duplicate check once the list has answered, so the
+  // create row is withheld until then: an unanswered list matches nothing.
+  const optionsKnown = optionsLoad.status === 'ready'
+  const showCreate = !!onCreate && optionsKnown && q.length > 0 && !exact
 
   const rows: Row[] = useMemo(() => {
     const r: Row[] = []
@@ -116,8 +143,18 @@ export function CreatableComboList({
         autoFocus={autoFocus}
         aria-label={searchPlaceholder}
       />
+      {/* #963 — the load state sits OUTSIDE the listbox: it is not an option,
+          and `emptyText` (which is) may only be said of an answered list. */}
+      {!optionsKnown && (
+        <LoadState
+          load={optionsLoad}
+          size="panel"
+          loadingLabel={`Loading ${optionsNoun}…`}
+          failedTitle={`The ${optionsNoun} could not be loaded.`}
+        />
+      )}
       <div ref={listRef} className="max-h-48 overflow-y-auto" role="listbox">
-        {rows.length === 0 && (
+        {optionsKnown && rows.length === 0 && (
           <p className="text-xs text-mm-text-muted py-2 text-center">{emptyText}</p>
         )}
         {rows.map((row, i) => {
@@ -203,6 +240,8 @@ export interface CreatableComboboxProps extends Omit<CreatableComboListProps, 'a
 
 export function CreatableCombobox({
   options,
+  optionsLoad,
+  optionsNoun,
   value,
   onSelect,
   onCreate,
@@ -253,6 +292,8 @@ export function CreatableCombobox({
       <PopoverContent className="w-[260px] p-1" align="start" aria-label={searchPlaceholder}>
         <CreatableComboList
           options={options}
+          optionsLoad={optionsLoad}
+          optionsNoun={optionsNoun}
           value={value}
           onSelect={onSelect}
           onCreate={onCreate}

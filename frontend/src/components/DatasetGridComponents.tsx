@@ -15,7 +15,10 @@ import {
   type RecodeDefinitionSummary,
   type Participant,
   type DomainScoreColumn,
+  retryUnanswered,
 } from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -694,13 +697,36 @@ export function ParticipantCell({
   const [creating, setCreating] = useState(false)
   const queryClient = useQueryClient()
 
-  const { data: participantsData } = useQuery({
+  const participantsQuery = useQuery({
     queryKey: ['participants', projectId],
     queryFn: () => participantsApi.list(projectId),
     enabled: open,
+    retry: retryUnanswered,
   })
 
-  const participants = useMemo(() => participantsData?.participants ?? [], [participantsData?.participants])
+  const participants = useMemo(() => participantsQuery.data?.participants ?? [], [participantsQuery.data?.participants])
+  /**
+   * #963 — whether the participant list is an ANSWER.
+   *
+   * Fetched on OPEN, so EVERY cold open of this picker showed "No participants
+   * found" beside an enabled *New participant "R00001"* — driven on the running
+   * app against a project with 30 participants.
+   *
+   * ⚠️ Unlike the code/category pickers, the SERVER refuses a duplicate
+   * identifier (409, `routers/participants.py`), so no twin can be created.
+   * What the unanswered list breaks is the RECOVERY below: `handleCreateFromRow`
+   * resolves that 409 by finding the existing participant and linking to it,
+   * and over an empty list it falls to the last arm — "already exists — pick it
+   * from the list" — pointing at a list with nothing in it. Hence this is about
+   * the words and the wasted round trip, not about data.
+   *
+   * ⚠️ Asking `listStatus` of a DISABLED query would read `loading` forever
+   * (§1 of the internal design notes); safe here because the popover
+   * CONTENT that reads it mounts only while `open`, the same condition that
+   * enables the query.
+   */
+  const participantsLoad = useListLoad(participantsQuery)
+  const participantsKnown = participantsLoad.status === 'ready'
 
   const filtered = useMemo(() => {
     if (!search.trim()) return participants
@@ -727,7 +753,10 @@ export function ParticipantCell({
   // existing participant instead" — unless it is already linked to another row
   // in this dataset (one row per participant per dataset).
   const handleCreateFromRow = async () => {
-    if (!suggestedIdentifier || creating) return
+    // #963 — `participantsKnown` is checked here as well as on the button
+    // because the 409 recovery reads `participants`, and this is the one place
+    // that can state WHY it is refusing rather than silently doing nothing.
+    if (!suggestedIdentifier || creating || !participantsKnown) return
     setCreating(true)
     try {
       const created = await participantsApi.create(projectId, { identifier: suggestedIdentifier })
@@ -874,8 +903,18 @@ export function ParticipantCell({
             </div>
           )}
 
+          {/* #963 — the load state is not a participant, so it sits outside the
+              scroller the keyboard nav owns. */}
+          {!participantsKnown && (
+            <LoadState
+              load={participantsLoad}
+              size="panel"
+              loadingLabel="Loading participants…"
+              failedTitle="The participants could not be loaded."
+            />
+          )}
           <div ref={listProps.ref} className="max-h-[240px] overflow-y-auto">
-            {filtered.length === 0 ? (
+            {!participantsKnown ? null : filtered.length === 0 ? (
               <div className="px-3 py-4 text-center text-xs text-mm-text-faint">No participants found</div>
             ) : (
               filtered.map((p, i) => {
@@ -924,7 +963,17 @@ export function ParticipantCell({
             <div className="p-1.5 border-t">
               <button
                 onClick={() => void handleCreateFromRow()}
-                disabled={creating}
+                // #963 — a transient precondition, so native `disabled`
+                // (`lib/mode-disabled.ts`): the 409 recovery this button relies
+                // on cannot work against an unanswered list.
+                disabled={creating || !participantsKnown}
+                title={
+                  !participantsKnown
+                    ? (participantsLoad.status === 'failed'
+                      ? 'The participants could not be loaded'
+                      : 'Still loading the participants')
+                    : undefined
+                }
                 className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-sm text-mm-green-text hover:bg-mm-surface-hover disabled:opacity-50"
               >
                 {creating ? (
@@ -957,6 +1006,7 @@ export const DataRow = memo(function DataRow({
   linkedParticipantMap,
   onLink,
   selectedCell,
+  rovingCell,
   onCellSelect,
   editingCell,
   onStartEdit,
@@ -978,6 +1028,10 @@ export const DataRow = memo(function DataRow({
   linkedParticipantMap: Map<number, string>
   onLink: (rowId: number, participantId: number | null, participantName: string | null) => void
   selectedCell: { rowId: number; columnId: number } | null
+  /** The grid's single tab stop (#946). Usually the selection; the FIRST cell
+   *  when nothing is selected, because a grid with no tab stop cannot be
+   *  reached at all — see `lib/dataset-grid-nav.ts::rovingStop`. */
+  rovingCell?: { rowId: number; columnId: number } | null
   onCellSelect: (rowId: number, columnId: number) => void
   editingCell: { rowId: number; columnId: number } | null
   onStartEdit: (rowId: number, columnId: number) => void
@@ -1056,6 +1110,7 @@ export const DataRow = memo(function DataRow({
               : null
             const isEditing = editingCell?.rowId === row.id && editingCell?.columnId === q.id
             const isSelected = selectedCell?.rowId === row.id && selectedCell?.columnId === q.id
+            const isRovingStop = rovingCell?.rowId === row.id && rovingCell?.columnId === q.id
             return (
               <EditableCell
                 key={q.id}
@@ -1063,6 +1118,7 @@ export const DataRow = memo(function DataRow({
                 column={q}
                 activeDef={activeDef}
                 isSelected={isSelected}
+                isRovingStop={isRovingStop}
                 isEditing={isEditing}
                 onSelect={() => onCellSelect(row.id, q.id)}
                 onStartEdit={() => onStartEdit(row.id, q.id)}
@@ -1137,6 +1193,14 @@ export const DataRow = memo(function DataRow({
   const nextHasSelected = next.selectedCell?.rowId === next.row.id
   if (prevHasSelected !== nextHasSelected) return false
   if (prevHasSelected && nextHasSelected && prev.selectedCell!.columnId !== next.selectedCell!.columnId) return false
+  // #946 — the roving tab stop is compared per-row for the same reason the
+  // selection is: an arrow press moves it between two rows, and re-rendering
+  // every row of a 200-row page for that would undo this comparator's whole
+  // purpose.
+  const prevHasRoving = prev.rovingCell?.rowId === prev.row.id
+  const nextHasRoving = next.rovingCell?.rowId === next.row.id
+  if (prevHasRoving !== nextHasRoving) return false
+  if (prevHasRoving && nextHasRoving && prev.rovingCell!.columnId !== next.rovingCell!.columnId) return false
   const prevHasEditing = prev.editingCell?.rowId === prev.row.id
   const nextHasEditing = next.editingCell?.rowId === next.row.id
   if (prevHasEditing !== nextHasEditing) return false

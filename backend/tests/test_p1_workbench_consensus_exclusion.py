@@ -182,6 +182,6 @@ def test_text_coding_progress_excludes_consensus(db_session):
                         origin=CONSENSUS_ORIGIN),
     ])
     db.flush()
-    resp = _run(coding_progress(project_id=72, column_ids=None, user=db.get(User, 1), db=db))
+    resp = coding_progress(project_id=72, column_ids=None, user=db.get(User, 1), db=db)
     assert resp.overall_texts == {"coded": 1, "total": 2}, "only V1 is coded; consensus-only V2 is not"
     assert consensus.id not in [c.user_id for c in resp.by_coder], "consensus is not a phantom coder"

@@ -2,13 +2,15 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router'
 import { Plus, FolderOpen, Archive, Trash2, Pencil, Moon, Sun, Settings, FileInput, Package, ChevronDown, Copy, UserPlus } from 'lucide-react'
-import { projectsApi, projectPortabilityApi, type Project } from '@/lib/api'
+import { projectsApi, projectPortabilityApi, type Project, retryUnanswered} from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 import type { ImportValidationResult, ProjectImportMode } from '@/lib/api'
 import { setPendingMerge } from '@/lib/pending-merge'
 import { toast } from 'sonner'
 import { useAuth } from '@/lib/auth-context'
 import { useTheme } from '@/lib/theme-context'
-import { useCoders } from '@/hooks/useCoders'
+import { useCoders, resetCoderRoster } from '@/hooks/useCoders'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
 import { useCreateCoder } from '@/hooks/useCreateCoder'
 import { coderColor } from '@/lib/coder-color'
@@ -49,6 +51,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { toastProjectExportError } from '@/lib/project-export-error'
+import { SAFETY_COPIES_QUERY_KEY } from '@/lib/safety-copies'
 
 /**
  * #459 — Dashboard coder switcher. The TopRail only lives inside a project, so the
@@ -211,6 +214,12 @@ export default function Dashboard() {
         targetProjectId: mode === 'overwrite' ? targetProjectId : undefined,
       })
       queryClient.invalidateQueries({ queryKey: ['projects'] })
+      // #964: an import creates the file's coders on this install, and a stale
+      // one-coder roster turns blind mode off in the project just imported.
+      void resetCoderRoster(queryClient)
+      if (result.safety_backup_filename) {
+        queryClient.invalidateQueries({ queryKey: SAFETY_COPIES_QUERY_KEY })
+      }
       // The overwrite deleted a populated project. A snapshot of it was taken first
       // and was never named to anyone — so the description carries the filename, and
       // the audit log carries it durably (a toast is gone in seconds, and the person
@@ -221,9 +230,11 @@ export default function Dashboard() {
           : `Imported "${result.project_name}"`,
         result.safety_backup_filename
           ? {
+              // #919: say WHERE — the backup folder is not reachable from the app,
+              // so the copy is listed, with a Download, in Settings.
               description:
-                `Your previous copy was saved with your backups as ` +
-                `${result.safety_backup_filename}. Import that file to go back to it.`,
+                `Your previous copy was saved as ${result.safety_backup_filename}. ` +
+                `To go back to it, download it from Settings › Backup & Data and import it.`,
             }
           : undefined,
       )
@@ -255,10 +266,20 @@ export default function Dashboard() {
     if (importFileRef.current) importFileRef.current.value = ''
   }, [])
 
-  const { data, isLoading } = useQuery({
+  const projectsQuery = useQuery({
     queryKey: ['projects'],
     queryFn: projectsApi.list,
+    retry: retryUnanswered,
   })
+  const data = projectsQuery.data
+  /**
+   * #963 — the project list is the FIRST thing a researcher sees, and "No
+   * projects yet" is the worst possible false claim: it is the screen for
+   * someone who has never used the tool, shown to someone whose work simply
+   * failed to load. The old gate was `isLoading`, which React Query v5 reports
+   * `false` once a failure has settled.
+   */
+  const projectsLoad = useListLoad(projectsQuery)
 
   const createMutation = useMutation({
     mutationFn: projectsApi.create,
@@ -521,8 +542,12 @@ export default function Dashboard() {
           </AlertDialogContent>
         </AlertDialog>
 
-        {isLoading ? (
-          <div className="text-center py-12 text-mm-text-muted">Loading projects...</div>
+        {projectsLoad.status !== 'ready' ? (
+          <LoadState
+            load={projectsLoad}
+            loadingLabel="Loading your projects…"
+            failedTitle="Your projects could not be loaded."
+          />
         ) : activeProjects.length === 0 && archivedProjects.length === 0 ? (
           <div className="rounded-lg border border-mm-surface-border bg-mm-surface shadow-mm-card text-center py-12 px-6">
             <FolderOpen className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />

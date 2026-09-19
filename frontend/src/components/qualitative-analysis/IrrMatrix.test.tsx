@@ -4,18 +4,27 @@
  * not color-only), the per-row aria-label, and the unavailable state.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, cleanup, within } from '@testing-library/react'
+import { render, screen, cleanup, within, act, fireEvent, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { ApiError } from '@/lib/api/client'
 
 const irr = vi.fn()
-vi.mock('@/lib/api', () => ({
-  codeAnalysisApi: { irr: (...a: unknown[]) => irr(...a) },
-}))
+vi.mock('@/lib/api', async () => {
+  // The REAL failure predicates and budget (#957) — only the network is faked.
+  const errors = await vi.importActual<typeof import('@/lib/api/error-utils')>('@/lib/api/error-utils')
+  const download = await vi.importActual<typeof import('@/lib/api/download')>('@/lib/api/download')
+  return {
+    ...errors,
+    EXPORT_TIMEOUT_MS: download.EXPORT_TIMEOUT_MS,
+    codeAnalysisApi: { irr: (...a: unknown[]) => irr(...a) },
+  }
+})
 
 import IrrMatrix from './IrrMatrix'
+import { SLOW_HINT_MS } from '@/components/LoadStatus'
 import { isIrrTabVisible } from '@/lib/qual-analysis-types'
 
 afterEach(cleanup)
@@ -132,6 +141,149 @@ describe('IrrMatrix', () => {
     })
     renderMatrix()
     expect(await screen.findByText(/needs at least 2 coders/)).toBeInTheDocument()
+  })
+})
+
+/**
+ * #957 — a failed REQUEST is not an unavailable STATISTIC.
+ *
+ * Measured on a 1.2M-application project: pooled reliability takes 46 s, the
+ * client gave up at 30 s, and with `data` undefined the `!data?.available`
+ * branch told the researcher *"Reliability is unavailable for this project."*
+ * — a claim about their data, made because the client stopped waiting.
+ */
+describe('#957 — a failed request is not an unavailable statistic', () => {
+  // ⚠️ A BLOCK, not `() => irr.mockReset()`: a `beforeEach` that RETURNS a
+  // function has it called as the test's teardown, and `mockReset` returns the
+  // mock — so the expression form calls `irr()` after every test. Harmless while
+  // the mock resolves; with a rejection or a never-settling promise it fails the
+  // test with that rejection, or hangs the hook.
+  beforeEach(() => { irr.mockReset() })
+  afterEach(() => vi.useRealTimers())
+
+  it('a timeout says it timed out, offers no retry, and is not asked again', async () => {
+    irr.mockRejectedValue(new DOMException('signal timed out', 'TimeoutError'))
+    renderMatrix()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Reliability took longer than 15 minutes to compute.')
+    expect(alert).toHaveTextContent(/may still be running/)
+    // A retry gets the same budget and stops in the same place (#820).
+    expect(alert).not.toHaveTextContent(/try again/i)
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument()
+    expect(screen.queryByText(/unavailable for this project/)).not.toBeInTheDocument()
+    expect(irr).toHaveBeenCalledTimes(1)
+  })
+
+  it('a server error says the calculation failed — without its raw body — and offers Retry', async () => {
+    irr.mockRejectedValue(new ApiError(500, { detail: 'Internal Server Error' }, {}))
+    renderMatrix()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Reliability could not be computed.')
+    expect(alert).not.toHaveTextContent('Internal Server Error')
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByText(/unavailable for this project/)).not.toBeInTheDocument()
+    // Not re-asked on its own: the server answered, and would answer the same.
+    expect(irr).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refusal carries the server’s own reason', async () => {
+    irr.mockRejectedValue(new ApiError(404, { detail: 'Project not found' }, {}))
+    renderMatrix()
+    expect(await screen.findByRole('alert')).toHaveTextContent('Project not found')
+  })
+
+  it('a dropped connection IS retried once on its own', async () => {
+    // Pins the query's `retry` wiring: this harness's client default is
+    // `retry: false`, so only the component's own option can produce call 2.
+    irr.mockRejectedValueOnce(new TypeError('Failed to fetch')).mockResolvedValueOnce(TWO_CODER)
+    renderMatrix()
+    // React Query waits 1 s before its first retry.
+    expect(await screen.findByText('Empathy', {}, { timeout: 4000 })).toBeInTheDocument()
+    expect(irr).toHaveBeenCalledTimes(2)
+  })
+
+  it('Retry never leaves focus on <body>: the loading line while it runs, then the headline', async () => {
+    let settleRetry!: (v: unknown) => void
+    irr
+      .mockRejectedValueOnce(new ApiError(500, { detail: 'Internal Server Error' }, {}))
+      .mockReturnValueOnce(new Promise(resolve => { settleRetry = resolve }))
+    renderMatrix()
+
+    const retry = await screen.findByRole('button', { name: 'Retry' })
+    retry.focus()  // a real click focuses the button; fireEvent does not
+    fireEvent.click(retry)
+
+    // MEASURED, and the reason this test exists: with no data cached, React
+    // Query v5 resets the errored query to `pending`, so the press unmounts the
+    // button it was made on. The loading line is where the keyboard user is.
+    const status = await screen.findByRole('status')
+    expect(retry).not.toBeInTheDocument()
+    await waitFor(() => expect(document.activeElement).toBe(status))
+
+    await act(async () => { settleRetry(TWO_CODER) })
+    expect(await screen.findByText('Empathy')).toBeInTheDocument()
+    await waitFor(() => expect(document.activeElement).toHaveTextContent(/Overall α/))
+    expect(irr).toHaveBeenCalledTimes(2)
+  })
+
+  it('a Retry that fails again lands on the new failure message, not <body>', async () => {
+    irr.mockRejectedValue(new ApiError(500, { detail: 'Internal Server Error' }, {}))
+    renderMatrix()
+
+    const retry = await screen.findByRole('button', { name: 'Retry' })
+    retry.focus()
+    fireEvent.click(retry)
+
+    await waitFor(() => expect(irr).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('alert')))
+    expect(screen.getByRole('alert')).toHaveTextContent('Reliability could not be computed.')
+  })
+
+  it('a researcher who moved on during the retry keeps their place', async () => {
+    let settleRetry!: (v: unknown) => void
+    irr
+      .mockRejectedValueOnce(new ApiError(500, { detail: 'Internal Server Error' }, {}))
+      .mockReturnValueOnce(new Promise(resolve => { settleRetry = resolve }))
+    const elsewhere = document.createElement('button')
+    document.body.appendChild(elsewhere)
+    try {
+      renderMatrix()
+      const retry = await screen.findByRole('button', { name: 'Retry' })
+      retry.focus()
+      fireEvent.click(retry)
+      await screen.findByRole('status')
+
+      elsewhere.focus()
+      await act(async () => { settleRetry(TWO_CODER) })
+      await screen.findByText('Empathy')
+      await act(async () => {})
+      expect(document.activeElement).toBe(elsewhere)
+    } finally {
+      elsewhere.remove()
+    }
+  })
+
+  it('a first load never pulls focus into the table', async () => {
+    irr.mockResolvedValue(TWO_CODER)
+    renderMatrix()
+    await screen.findByText('Empathy')
+    await act(async () => {})
+    expect(document.activeElement).toBe(document.body)
+  })
+
+  it('the loading line says a long wait is expected, once the wait is long', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    irr.mockReturnValue(new Promise(() => {}))
+    renderMatrix()
+
+    const status = await screen.findByRole('status')
+    expect(status).toHaveTextContent('Computing reliability…')
+    expect(status).not.toHaveTextContent(/minute or more/)
+
+    act(() => { vi.advanceTimersByTime(SLOW_HINT_MS) })
+    expect(screen.getByRole('status')).toHaveTextContent(/minute or more/)
   })
 })
 

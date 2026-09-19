@@ -69,10 +69,10 @@ def test_code_density_denominator_matches_gauge(db_session):
     _setup(db)
     user = db.get(User, 1)
 
-    gauge = _run(coding_progress(project_id=PID, column_ids=str(TEXT_COL), user=user, db=db))
-    density = _run(code_density(project_id=PID, column_ids=str(TEXT_COL),
+    gauge = coding_progress(project_id=PID, column_ids=str(TEXT_COL), user=user, db=db)
+    density = code_density(project_id=PID, column_ids=str(TEXT_COL),
                                 group_by_column_id=None, coder_ids=None, layer_scope=None,
-                                db=db, user=user))
+                                db=db, user=user)
 
     # 2 substantive texts — "N/A" and the blank are out of BOTH denominators.
     assert gauge.overall_texts["total"] == 2
@@ -103,9 +103,9 @@ def test_custom_treat_as_empty_config_is_honored_read_only(db_session):
     db.add(TextCodingConfig(project_id=PID, treat_as_empty=json.dumps(["skip me"])))
     db.flush()
 
-    density = _run(code_density(project_id=PID, column_ids=str(TEXT_COL),
+    density = code_density(project_id=PID, column_ids=str(TEXT_COL),
                                 group_by_column_id=None, coder_ids=None, layer_scope=None,
-                                db=db, user=user))
+                                db=db, user=user)
 
     # "N/A" now counts (blank never does): coded + plain + "N/A" = 3.
     assert density.overall.text_count == 3
@@ -237,7 +237,7 @@ class TestSourceFrequenciesTextDenominator:
         user = db.get(User, 1)
 
         source, _ = self._text_source(db)
-        gauge = _run(coding_progress(project_id=PID, column_ids=str(TEXT_COL), user=user, db=db))
+        gauge = coding_progress(project_id=PID, column_ids=str(TEXT_COL), user=user, db=db)
 
         assert source["total_segments"] == gauge.overall_texts["total"]
         assert source["coded_segments"] == gauge.overall_texts["coded"]
@@ -345,7 +345,7 @@ class TestTextColumnPickerUsesTheSharedClause:
 
         listing = _run(text_columns(project_id=PID, user=user, db=db))
         col = {c.column_id: c for c in listing.columns}[TEXT_COL]
-        gauge = _run(coding_progress(project_id=PID, column_ids=str(TEXT_COL), user=user, db=db))
+        gauge = coding_progress(project_id=PID, column_ids=str(TEXT_COL), user=user, db=db)
 
         assert is_empty_text("  N/A  ", DEFAULT_TREAT_AS_EMPTY), "fixture value is not the trap"
         assert col.non_empty_rows == 2, "the padded sentinel was counted as a response"

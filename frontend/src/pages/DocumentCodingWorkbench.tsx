@@ -27,6 +27,7 @@ import {
   type Coder,
   type DocumentDetailResponse,
   type DocumentSegmentResponse,
+  retryUnanswered,
 } from '@/lib/api'
 import { useHistory } from '@/hooks/useHistory'
 import { PageErrorBoundary } from '@/components/PageErrorBoundary'
@@ -53,13 +54,15 @@ import {
 } from '@/components/ui/select'
 import CollapsiblePanel from '@/components/CollapsiblePanel'
 import CodePanel, { type CodePanelHandle } from '@/components/CodePanel'
+import { useListLoad } from '@/hooks/useListLoad'
+import type { ListStatus } from '@/lib/list-status'
 import MemoPanel, { type MemoPanelHandle } from '@/components/MemoPanel'
 import InlineCodeActions from '@/components/qualitative-analysis/InlineCodeActions'
 import { useCoders } from '@/hooks/useCoders'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { useAuth } from '@/lib/auth-context'
 import CoderFilterPopover from '@/components/CoderFilterPopover'
-import { mergeArchivedIntoCoderMap, chipHiddenWithArchived } from '@/lib/coder-color'
+import { mergeArchivedIntoCoderMap, chipHiddenWithArchived, lensHidesAnyCoder, type CoderLens } from '@/lib/coder-color'
 import { sliceByCodePoints, codePointLength } from '@/lib/text-offsets'
 import {
   ContextMenu,
@@ -149,8 +152,10 @@ export default function DocumentCodingWorkbench() {
   // #451: archived coders' chips hidden by default; "view all coders" reveals them.
   const [showArchivedCoders, setShowArchivedCoders] = useState(false)
   // Blind mode (Track J · J2-5, DEC-G): effectiveHidden = all-but-self while blind.
-  const { blind, blindHiddenSet, toggleReveal } = useBlindMode(projectId)
-  const effectiveHidden = blind ? blindHiddenSet : hiddenCoders
+  // #964: the lens keys on `withholding` (fail-closed while the roster is
+  // unanswered); the wording keys on `blind` (only once it is known).
+  const { blind, withholding, blindLens, toggleReveal } = useBlindMode(projectId)
+  const effectiveHidden = withholding ? blindLens : hiddenCoders
   // Group A (#457): who coded THIS document — drives the picklist "active here" markers.
   const coderCoverage = useCoderCoverage(
     projectId, { documentId }, { enabled: multiCoder, rosterCoderIds: coders.map(c => c.id) },
@@ -162,9 +167,11 @@ export default function DocumentCodingWorkbench() {
     () => (multiCoder && coderMap ? mergeArchivedIntoCoderMap(coderMap, coderCoverage.extraCoders) : undefined),
     [multiCoder, coderMap, coderCoverage.extraCoders],
   )
+  // #964: "View all — N archived" is a coder-filter choice; it must not bring an
+  // archived colleague's chips back after re-blinding.
   const chipHidden = useMemo(
-    () => chipHiddenWithArchived(effectiveHidden, archivedCoderIds, showArchivedCoders),
-    [effectiveHidden, archivedCoderIds, showArchivedCoders],
+    () => chipHiddenWithArchived(effectiveHidden, archivedCoderIds, showArchivedCoders && !withholding),
+    [effectiveHidden, archivedCoderIds, showArchivedCoders, withholding],
   )
 
   // ── Data queries ──
@@ -197,11 +204,15 @@ export default function DocumentCodingWorkbench() {
     if (document?.name) setBreadcrumbLabel(document.name)
   }, [document?.name, setBreadcrumbLabel])
 
-  const { data: codesData } = useQuery({
+  const codesQuery = useQuery({
     queryKey: ['codes', projectId],
     queryFn: () => codesApi.list(projectId),
     enabled: !isNaN(projectId),
   })
+  const codesData = codesQuery.data
+  /** #961 — `codes` is `[]` before the list answers; the code panel's empty
+   * state and its duplicate-name check must not read that as "no codes". */
+  const codesLoad = useListLoad(codesQuery)
 
   const codes = useMemo(() => codesData?.codes ?? [], [codesData?.codes])
   const chordCategories = useMemo(() => {
@@ -214,12 +225,20 @@ export default function DocumentCodingWorkbench() {
     return Array.from(catMap.values())
   }, [codes])
 
-  const { data: categoriesData } = useQuery({
+  const categoriesQuery = useQuery({
     queryKey: ['categories', projectId],
     queryFn: () => categoriesApi.list(projectId),
     enabled: !isNaN(projectId),
+    retry: retryUnanswered,
   })
+  const categoriesData = categoriesQuery.data
   const categories = categoriesData?.categories ?? []
+  /**
+   * #963 — whether the category list is an ANSWER. `FloatingCreateCode`'s
+   * picker creates a category from a typed name, and `create_category` refuses
+   * no duplicate, so the list is the only duplicate guard there is.
+   */
+  const categoriesLoad = useListLoad(categoriesQuery)
 
   // ── Segment processing ──
 
@@ -1457,7 +1476,7 @@ export default function DocumentCodingWorkbench() {
               // #503: not "by you" — archived colleagues' codings still count
               // in gauges under blind (#451 CHIPS-ONLY rule).
               ? `${codedCount} of ${visibleSegments.length} segments coded (colleagues hidden) (${progressPercent}%)`
-              : effectiveHidden.size > 0
+              : lensHidesAnyCoder(effectiveHidden)
                 ? `${codedCount} of ${visibleSegments.length} segments coded by visible coders (${progressPercent}%)`
                 : `${codedCount} of ${visibleSegments.length} segments coded (${progressPercent}%)`
           }
@@ -1727,6 +1746,7 @@ export default function DocumentCodingWorkbench() {
                     segmentationMode={document.segmentation_mode}
                     codeMap={codeMap}
                     allCodes={codes}
+                    codesStatus={codesLoad.status}
                     projectId={projectId}
                     onCodeChange={invalidateAfterCodeChange}
                     onFocusCode={handleFocusCode}
@@ -1822,6 +1842,7 @@ export default function DocumentCodingWorkbench() {
               <CodePanel
                 ref={codePanelRef}
                 codes={codes}
+                codesLoad={codesLoad}
                 projectId={projectId}
                 selectedCodesMap={selectedCodesMap}
                 onCodeToggle={handleCodeToggle}
@@ -1912,6 +1933,7 @@ export default function DocumentCodingWorkbench() {
       {/* Floating create code dialog */}
       {createCodeDialog && (
         <FloatingCreateCode
+          categoriesLoad={categoriesLoad}
           position={createCodeDialog.position}
           projectId={projectId}
           initialName={createCodeDialog.initialName}
@@ -2007,6 +2029,7 @@ export function DocumentSegmentRow({
   segmentationMode,
   codeMap,
   allCodes,
+  codesStatus,
   projectId,
   onCodeChange,
   onFocusCode,
@@ -2057,11 +2080,13 @@ export function DocumentSegmentRow({
   segmentationMode: string
   codeMap: Map<number, Code>
   allCodes: Code[]
+  /** #961 — whether `allCodes` is an answer; see `InlineCodeActions`. */
+  codesStatus: ListStatus
   projectId: number
   onCodeChange: () => void
   onFocusCode?: (codeId: number) => void
   coderMap?: Map<number, Coder>
-  hiddenCoderIds?: Set<number>
+  hiddenCoderIds?: CoderLens
   activeCoderId?: number | null
   onToggleQuote: (segmentId: number) => void
   onContextCodeApply: (segmentId: number, codeId: number) => void
@@ -2259,6 +2284,7 @@ export function DocumentSegmentRow({
                   appliedCodeIds={segment.codes.map(c => c.id)}
                   codeMap={codeMap}
                   allCodes={allCodes}
+                  codesStatus={codesStatus}
                   onCodeChange={onCodeChange}
                   onFocusCode={onFocusCode}
                   coderMap={coderMap}

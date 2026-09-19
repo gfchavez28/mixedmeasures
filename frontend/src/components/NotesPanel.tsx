@@ -4,6 +4,8 @@ import { Search, Plus, Link2, Link2Off, Paperclip, X, Archive } from 'lucide-rea
 import { memoPreview } from '@/lib/memo-preview'
 import { toast } from 'sonner'
 import { notesApi, type Note } from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
@@ -55,11 +57,15 @@ const NotesPanel = forwardRef<NotesPanelHandle, NotesPanelProps>(function NotesP
   const shiftAnchorRef = useRef<number | null>(null)
   const skipFocusResetRef = useRef(false) // Prevents onFocus from resetting after focusLastItem
 
-  const { data: notesData, refetch: refetchNotes } = useQuery({
+  const notesQuery = useQuery({
     queryKey: ['notes', conversationId],
     queryFn: () => notesApi.listForConversation(conversationId),
     enabled: !!conversationId,
   })
+  const notesData = notesQuery.data
+  const refetchNotes = notesQuery.refetch
+  /** #963 — see `MemoPanel`: one shape across four panels, fixed together. */
+  const notesLoad = useListLoad(notesQuery)
 
   const notes = useMemo(() => notesData?.notes ?? [], [notesData?.notes])
 
@@ -443,7 +449,14 @@ const NotesPanel = forwardRef<NotesPanelHandle, NotesPanelProps>(function NotesP
 
       {/* Notes List */}
       <div ref={listRef} className="flex-1 overflow-y-auto">
-        {filteredNotes.length === 0 ? (
+        {notesLoad.status !== 'ready' ? (
+          <LoadState
+            load={notesLoad}
+            loadingLabel="Loading notes…"
+            failedTitle="Your notes could not be loaded"
+            size="panel"
+          />
+        ) : filteredNotes.length === 0 ? (
           <div className="p-4 text-sm text-mm-text-muted text-center">
             {searchQuery ? 'No matching notes' : 'No notes yet. Add one above.'}
           </div>

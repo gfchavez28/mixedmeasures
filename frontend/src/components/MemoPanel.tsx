@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import { memoPreview } from '@/lib/memo-preview'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 
 export interface MemoPanelHandle {
   focus: () => void
@@ -92,7 +94,7 @@ const MemoPanel = forwardRef<MemoPanelHandle, MemoPanelProps>(function MemoPanel
   // Auto-save debounce
   const saveTimeoutRef = useRef<NodeJS.Timeout>(undefined)
 
-  const { data: memosData } = useQuery({
+  const memosQuery = useQuery({
     queryKey: ['memos', projectId, filterMode, filterMode === 'conversation' ? entityId : null],
     queryFn: () => {
       if (filterMode === 'conversation' && hasEntityContext) {
@@ -111,6 +113,12 @@ const MemoPanel = forwardRef<MemoPanelHandle, MemoPanelProps>(function MemoPanel
     },
     enabled: !!projectId,
   })
+  const memosData = memosQuery.data
+  /** #963 — "No memos yet. Add one above." is a claim about a list, so it waits
+   *  for one. Filed under the low-harm adds; folded in here because the four
+   *  notes/memos panels are one shape and fixing three of four is how this
+   *  class keeps shipping partially (#771's record). */
+  const memosLoad = useListLoad(memosQuery)
 
   const memos = useMemo(() => memosData?.memos ?? [], [memosData?.memos])
 
@@ -515,7 +523,14 @@ const MemoPanel = forwardRef<MemoPanelHandle, MemoPanelProps>(function MemoPanel
           />
         )}
 
-        {filteredMemos.length === 0 && !isCreatingForCode ? (
+        {memosLoad.status !== 'ready' ? (
+          <LoadState
+            load={memosLoad}
+            loadingLabel="Loading memos…"
+            failedTitle="Your memos could not be loaded"
+            size="panel"
+          />
+        ) : filteredMemos.length === 0 && !isCreatingForCode ? (
           <div className="p-4 text-sm text-mm-text-muted text-center">
             {searchQuery ? 'No matching memos' : 'No memos yet. Add one above.'}
           </div>

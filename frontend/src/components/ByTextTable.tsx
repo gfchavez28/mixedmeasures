@@ -12,9 +12,11 @@ import { textCodingApi, type Code, type TextCodingResponse, type RecordContext, 
 import type { MagnitudeScale } from '@/lib/magnitude'
 import CodeChip from '@/components/qualitative-analysis/CodeChip'
 import { useCoders } from '@/hooks/useCoders'
-import { mergeArchivedIntoCoderMap, chipHiddenWithArchived } from '@/lib/coder-color'
+import { mergeArchivedIntoCoderMap, chipHiddenWithArchived, type CoderLens } from '@/lib/coder-color'
 import { visibleCodeChipRows } from '@/lib/coding-progress'
 import TextCodingContextMenu from '@/components/TextCodingContextMenu'
+import { LoadState } from '@/components/LoadStatus'
+import type { ListLoad } from '@/lib/list-status'
 import type { FloatingCoords } from '@/lib/floating-utils'
 import {
   ContextMenu,
@@ -23,7 +25,12 @@ import {
 
 interface ByTextTableProps {
   comments: TextCodingResponse[]
-  loading: boolean
+  /** #961 — whether `comments` is an ANSWER. It replaced a `loading` boolean
+   * that could not say "failed", so a failed page rendered "No texts found. Try
+   * adjusting your filters." — advice about the filters, for a request error. */
+  textsLoad: ListLoad
+  /** #961 — where focus lands when a Retry succeeds (see `LoadFailedNotice`). */
+  retryLandingRef?: RefObject<HTMLElement | null>
   selectedValueIds: number[]
   onSelectionChange: (ids: number[]) => void
   onQuoteToggle: (dvId: number) => void
@@ -42,7 +49,7 @@ interface ByTextTableProps {
   codes: Array<{ id: number; name: string; color: string | null; description?: string | null; is_active?: boolean; category_id?: number | null; category_color?: string | null; is_universal?: boolean; numeric_id?: number | null; magnitude_scale?: MagnitudeScale | null }>
   searchText?: string
   onClearSearch?: () => void
-  hiddenCoderIds?: Set<number>  // Track J · J1 visibility filter
+  hiddenCoderIds?: CoderLens  // Track J · J1 visibility filter (#964: or blind mode's allow-list)
   activeCoderId?: number | null  // Track J · J1 active coder (#446 context-menu check)
   extraCoders?: Coder[]  // #451 archived-who-coded — folded into the chip map
   showArchived?: boolean  // #451 "view all coders" — reveal archived chips
@@ -225,7 +232,8 @@ export interface ByTextTableHandle {
 
 function ByTextTable({
   comments,
-  loading,
+  textsLoad,
+  retryLandingRef,
   selectedValueIds,
   onSelectionChange,
   onQuoteToggle,
@@ -400,11 +408,14 @@ function ByTextTable({
     onContextCreateCode, onContextCreateNote, activeCoderId, onRateCode, ratableCodesFor,
   ])
 
-  if (loading) {
+  if (textsLoad.status !== 'ready') {
     return (
-      <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-        Loading texts...
-      </div>
+      <LoadState
+        load={textsLoad}
+        loadingLabel="Loading texts…"
+        failedTitle="The texts could not be loaded."
+        landingRef={retryLandingRef}
+      />
     )
   }
 

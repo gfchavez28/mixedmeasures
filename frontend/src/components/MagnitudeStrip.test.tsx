@@ -277,3 +277,111 @@ describe('MagnitudeStrip — the number input says why Enter did nothing', () =>
     expect(input).not.toHaveAttribute('aria-invalid')
   })
 })
+
+/**
+ * 🔴 The sweep's mode (#35 variant B). Variant A parks the cursor mid-scale so
+ * one keypress finishes the judgement the coder has just started; a SWEEP over
+ * many unrated applications turns that same keypress into a way to stamp the
+ * midpoint on everything, which is the default-stamping mistake this feature
+ * exists to avoid.
+ *
+ * ⚠️ Every test here has a VARIANT-A twin above or beside it. The default must
+ * not move: the pair is what proves the new mode is a mode rather than a
+ * change of behaviour.
+ */
+function setupNoPreselect(scale: MagnitudeScale = BIPOLAR, value: number | null = null) {
+  const onCommit = vi.fn()
+  const onSkip = vi.fn()
+  render(
+    <MagnitudeStrip
+      codeName="District support"
+      scale={scale}
+      value={value}
+      onCommit={onCommit}
+      onSkip={onSkip}
+      preselectMidpoint={false}
+    />,
+  )
+  return { onCommit, onSkip }
+}
+
+describe('MagnitudeStrip — the sweep starts with no cursor (#35 variant B)', () => {
+  it('🔴 Enter commits NOTHING when nothing has been chosen', () => {
+    const { onCommit } = setupNoPreselect()
+    press('Enter')
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('🔴 and the DEFAULT still commits the midpoint — variant A is unchanged', () => {
+    const { onCommit } = setup()
+    press('Enter')
+    expect(onCommit).toHaveBeenCalledWith(0)
+  })
+
+  it('says why Enter did nothing, rather than refusing in silence', () => {
+    setupNoPreselect()
+    press('Enter')
+    expect(screen.getByRole('alert')).toHaveTextContent(/choose a value first/i)
+    expect(screen.getByRole('alert')).toHaveTextContent(/Esc/)
+  })
+
+  it('declares NO active descendant while there is no cursor', () => {
+    setupNoPreselect()
+    // A dangling `aria-activedescendant` claims an active item a reader cannot
+    // resolve, which is worse than claiming none.
+    expect(screen.getByRole('radiogroup')).not.toHaveAttribute('aria-activedescendant')
+  })
+
+  it('the first forward arrow lands on the FIRST tick, and then Enter commits it', () => {
+    const { onCommit } = setupNoPreselect()
+    press('ArrowRight')
+    expect(screen.getByRole('radiogroup')).toHaveAttribute('aria-activedescendant')
+    press('Enter')
+    expect(onCommit).toHaveBeenCalledWith(-1)
+  })
+
+  it('🔴 the first BACKWARD arrow lands on the LAST tick, not on the minimum', () => {
+    // A clamp to zero would silently select the scale's floor — a rating
+    // nobody chose, which is the exact failure this mode prevents.
+    const { onCommit } = setupNoPreselect()
+    press('ArrowLeft')
+    press('Enter')
+    expect(onCommit).toHaveBeenCalledWith(1)
+  })
+
+  it('a digit still commits in one press — the fast path is untouched', () => {
+    const { onCommit } = setupNoPreselect(ZERO_TEN)
+    press('7')
+    expect(onCommit).toHaveBeenCalledWith(7)
+  })
+
+  it('moving the cursor clears the hint it no longer describes', () => {
+    setupNoPreselect()
+    press('Enter')
+    expect(screen.queryByRole('alert')).toBeInTheDocument()
+    press('ArrowRight')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('Escape still skips — the honest way out does not depend on the mode', () => {
+    const { onSkip, onCommit } = setupNoPreselect()
+    press('Escape')
+    expect(onSkip).toHaveBeenCalled()
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('an EXISTING rating still takes the cursor, so re-rating starts where it is', () => {
+    // Nothing can be stamped accidentally here: the value is already there,
+    // and Enter re-commits what the coder already chose.
+    const { onCommit } = setupNoPreselect(BIPOLAR, 0.5)
+    expect(screen.getByRole('radiogroup')).toHaveAttribute('aria-activedescendant')
+    press('Enter')
+    expect(onCommit).toHaveBeenCalledWith(0.5)
+  })
+
+  it('🔴 a rating of ZERO takes the cursor too — zero is a rating, not an absence', () => {
+    const { onCommit } = setupNoPreselect(BIPOLAR, 0)
+    press('Enter')
+    expect(onCommit).toHaveBeenCalledWith(0)
+  })
+})

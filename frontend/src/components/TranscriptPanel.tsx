@@ -1,11 +1,14 @@
 import { useCallback, useRef, useState, useEffect, useMemo, forwardRef, type ReactNode, type RefObject, type CSSProperties } from 'react'
-import { mergeArchivedIntoCoderMap, chipHiddenWithArchived } from '@/lib/coder-color'
+import { mergeArchivedIntoCoderMap, chipHiddenWithArchived, isAllowList, type CoderLens } from '@/lib/coder-color'
 import { createPortal } from 'react-dom'
 import { Virtuoso, VirtuosoHandle, type Components } from 'react-virtuoso'
 import { Search, X, Filter, Merge, Play, Pause, Quote, Users } from 'lucide-react'
 import { Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { type Segment, type Code, type Coder, type Speaker, type Conversation, mediaApi } from '@/lib/api'
+import type { ListLoad, ListStatus } from '@/lib/list-status'
+import { LoadState } from '@/components/LoadStatus'
+import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import type { FloatingCoords } from '@/lib/floating-utils'
 import { getSpeakerInitials } from '@/lib/conversation-import-utils'
 import { useTextSplitSelection } from '@/hooks/useTextSplitSelection'
@@ -169,6 +172,25 @@ interface TranscriptPanelProps {
   showCodes?: boolean
   projectId?: number
   allCodes?: Code[]
+  /** #961 — whether `allCodes` is an answer; each row's add-code popover reads it. */
+  codesStatus: ListStatus
+  /**
+   * #963 Tier 2 — whether `segments`/`allSegments` are an ANSWER.
+   *
+   * REQUIRED, so a second mount cannot inherit the old behaviour by omission.
+   * Measured before the fix (dev corpus, conversation 9, `/segments` held back
+   * by an in-page wrapper): this panel read *"No segments found"* while the
+   * transcript was loading, and — after the request had failed twice — said the
+   * same thing PERMANENTLY, with nothing anywhere on the page reporting a
+   * failure. A researcher's only available reading of that is that their
+   * transcript is gone.
+   *
+   * This panel is also the workbench's `role="status"` neighbour: the toolbar
+   * gauge stays SILENT while loading because the notice rendered here says it
+   * once (`ObservationWorkbench`'s arrangement, and the reason its own comment
+   * gives for staying quiet).
+   */
+  segmentsLoad: ListLoad
   codeMap?: Map<number, Code>
   onCodeChange?: () => void
   /** Clicking an applied-code chip pivots to that code in the codes panel (#422a). */
@@ -183,7 +205,9 @@ interface TranscriptPanelProps {
   /** Track J · J1 visibility filter (only wired in multi-coder mode). */
   coders?: Coder[]
   activeCoderId?: number | null
-  coderFilterHidden?: Set<number>
+  /** The lens the chips apply. #964: an allow-list while blind mode cannot yet
+   *  name the colleagues — the filter popover only ever edits a hide SET. */
+  coderFilterHidden?: CoderLens
   onCoderFilterChange?: (next: Set<number>) => void
   /** Group A (#457): coder ids with codings on THIS conversation + archived-who-coded
    *  extras — drive the picklist "active here" markers (undefined = no markers). */
@@ -245,6 +269,8 @@ export default function TranscriptPanel({
   showCodes = true,
   projectId,
   allCodes,
+  codesStatus,
+  segmentsLoad,
   codeMap,
   onCodeChange,
   onFocusCode,
@@ -268,6 +294,13 @@ export default function TranscriptPanel({
 }: TranscriptPanelProps) {
   const listRef = useRef<VirtuosoHandle>(null)
   const gutter = useScrollbarGutter()
+  /**
+   * #963 — where focus goes when a successful Retry unmounts the button that
+   * was pressed. The layout's `<main id="main-content">`, NOT a `tabIndex={-1}`
+   * wrapper inside this panel: a focusable container here would take focus on
+   * every whitespace click in the transcript, beside the chord layer.
+   */
+  const retryLanding = useMainContentLanding()
   const containerRef = useRef<HTMLDivElement>(null)
   const [containerHeight, setContainerHeight] = useState(600)
 
@@ -665,6 +698,7 @@ export default function TranscriptPanel({
                 showCodes={showCodes}
                 projectId={projectId}
                 allCodes={allCodes}
+                codesStatus={codesStatus}
                 codeMap={codeMap}
                 onCodeChange={onCodeChange}
                 onFocusCode={onFocusCode}
@@ -679,7 +713,7 @@ export default function TranscriptPanel({
         </div>
       )
     },
-    [segments, selectedSegments, handleSegmentClick, conversationId, codes, areSelectedAdjacent, onMergeSegments, onUnmergeSegment, onUnsplitSegment, onNoteClick, editingSegmentId, editField, onStartEdit, onCancelEdit, onSaveEdit, onToggleQuote, onSaveExcerpt, onDeleteExcerpt, onAddNoteToExcerpt, speakers, textFilter, canGroupSelected, noneSelectedGrouped, onGroupSegments, onUngroupSegments, groupMembersMap, onContextCodeApply, onContextCreateCode, onContextCreateNote, splitSelection, handleSplit, onSplitSegment, showTimestamps, showNotes, showCodes, projectId, allCodes, codeMap, onCodeChange, onFocusCode, onChipRemove, onChipApply, onRateCode, ratableCodesFor, chipCoderMap, chipHidden, onSelectionChange, getTextSelectionForSegment, activeCoderId]
+    [segments, selectedSegments, handleSegmentClick, conversationId, codes, areSelectedAdjacent, onMergeSegments, onUnmergeSegment, onUnsplitSegment, onNoteClick, editingSegmentId, editField, onStartEdit, onCancelEdit, onSaveEdit, onToggleQuote, onSaveExcerpt, onDeleteExcerpt, onAddNoteToExcerpt, speakers, textFilter, canGroupSelected, noneSelectedGrouped, onGroupSegments, onUngroupSegments, groupMembersMap, onContextCodeApply, onContextCreateCode, onContextCreateNote, splitSelection, handleSplit, onSplitSegment, showTimestamps, showNotes, showCodes, projectId, allCodes, codesStatus, codeMap, onCodeChange, onFocusCode, onChipRemove, onChipApply, onRateCode, ratableCodesFor, chipCoderMap, chipHidden, onSelectionChange, getTextSelectionForSegment, activeCoderId]
   )
 
   // Handle scrubber position change (for live scroll during drag)
@@ -1025,7 +1059,7 @@ export default function TranscriptPanel({
         {showCodes && (
           <div data-col="codes" className="w-[160px] flex-shrink-0 flex items-center gap-1.5">
             <span className="bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 rounded-full px-2.5 py-0.5 text-xs font-medium">Codes</span>
-            {coders && coders.length > 1 && coderFilterHidden && onCoderFilterChange && !hideCoderFilter && (
+            {coders && coders.length > 1 && coderFilterHidden && !isAllowList(coderFilterHidden) && onCoderFilterChange && !hideCoderFilter && (
               <CoderFilterPopover
                 coders={coders}
                 activeCoderId={activeCoderId ?? null}
@@ -1112,7 +1146,20 @@ export default function TranscriptPanel({
           </div>
         )}
 
-        {segments.length === 0 ? (
+        {segmentsLoad.status !== 'ready' ? (
+          /* #963 Tier 2 — "there are none" is a claim only an ANSWERED list may
+             make. ⚠️ The gate is `!== 'ready'` and NOT `|| load.retrying`:
+             `LoadState` already keeps the failure notice mounted through a retry
+             (status is 'loading' then, with nothing cached), and adding the
+             disjunct here would hold that notice for a render AFTER a retry
+             SUCCEEDED — `inFlight` outlives `data` arriving by one tick. */
+          <LoadState
+            load={segmentsLoad}
+            loadingLabel="Loading segments…"
+            failedTitle="This transcript could not be loaded"
+            landingRef={retryLanding}
+          />
+        ) : segments.length === 0 ? (
           <div className="p-8 text-center text-mm-text-muted">
             {hasActiveFilters ? (
               <div>

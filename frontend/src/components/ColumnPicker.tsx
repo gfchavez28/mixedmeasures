@@ -2,6 +2,9 @@ import { useState, useMemo } from 'react'
 import { useListKeyboardNav } from '@/hooks/useListKeyboardNav'
 import { SELECTED_ROW } from '@/lib/selection'
 import { useQuery } from '@tanstack/react-query'
+import { LoadState } from '@/components/LoadStatus'
+import { useListLoad } from '@/hooks/useListLoad'
+import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { ChevronDown, ChevronRight, Search, Link2, Layers, Table2 } from 'lucide-react'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -13,6 +16,7 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import {
   metricsApi,
+  retryUnanswered,
   AnalysisColumnItem,
   AnalysisDatasetGroup,
   AnalysisDomainItem,
@@ -66,11 +70,31 @@ export function ColumnPicker({
 }: ColumnPickerProps) {
   const [search, setSearch] = useState('')
 
-  const { data, isLoading } = useQuery({
+  const columnsQuery = useQuery({
     queryKey: ['analysis-columns', projectId],
     queryFn: () => metricsApi.analysisColumns(projectId),
     staleTime: 60_000,
+    retry: retryUnanswered,
+    // #963 Tier 3 — MEASURED: the client default asked TWICE for one settled
+    // 500 (two requests in the network log). This is the analysis sidebar's
+    // whole inventory on a project that may hold tens of thousands of rows;
+    // repeating an answered refusal buys nothing.
+
   })
+  const data = columnsQuery.data
+  /**
+   * #963 Tier 3 — 🔴 MEASURED in Chrome on 2026-09-18, on a project with FOUR
+   * datasets and 100 columns, with `/metrics/analysis-columns` failing:
+   *
+   *   t = 2 s   "Variables — Loading variables..."
+   *   t = 9 s   "Variables / Groups / **No variables found**"
+   *
+   * — permanently, with nothing naming a failure and no way back but a reload.
+   * `isLoading` is `isPending && isFetching`, so it went false the moment the
+   * failure settled and the picker fell through to its empty state.
+   */
+  const columnsLoad = useListLoad(columnsQuery)
+  const landingRef = useMainContentLanding()
 
   // Build equivalence info: highlight set + sibling dataset names map + view-across eligibility
   const equivInfo = useMemo(() => {
@@ -160,9 +184,15 @@ export function ColumnPicker({
     return data.domains.filter(d => d.name.toLowerCase().includes(term))
   }, [data, search])
 
-  if (isLoading) {
+  if (columnsLoad.status !== 'ready') {
     return (
-      <div className="p-3 text-sm text-mm-text-muted">Loading variables...</div>
+      <LoadState
+        load={columnsLoad}
+        loadingLabel="Loading variables…"
+        failedTitle="Your variables could not be loaded."
+        size="panel"
+        landingRef={landingRef}
+      />
     )
   }
 

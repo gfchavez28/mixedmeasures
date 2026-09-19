@@ -9,9 +9,20 @@
  *
  * A POPULATION scan, because the strip is mounted on more than one workbench
  * now (#868 b added the document one; #868 c/d the observation and text-coding
- * ones) and the next mount must inherit the rule without anyone remembering it.
- * Self-checks: the mount count is asserted non-empty, and the file list is
- * derived, not typed.
+ * ones, #35 variant B the rating sweep) and the next mount must inherit the
+ * rule without anyone remembering it. Self-checks: the mount count is asserted
+ * non-empty, and the file list is derived, not typed.
+ *
+ * ⚠️ **A mount may key through `entryKey(...)` instead of a literal template**,
+ * and that is a WIDENING made deliberately rather than a hole. The sweep's
+ * target is a `(kind, id, code)` triple it must not re-derive at the mount —
+ * `lib/rating-commit.ts` owns that identity, and a literal key there would be
+ * a second derivation of the thing that module exists to single-source. The
+ * contract the widening rests on is pinned separately, in
+ * `lib/rating-commit.test.ts`: `entryKey` names the unit AND the code, a
+ * segment and a dataset cell sharing an id do not collide, and one target
+ * under two codes gives two keys. **Do not widen this further without a
+ * contract test of the same shape.**
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -33,20 +44,32 @@ function mounts(): { file: string; tag: string }[] {
 }
 
 describe('MagnitudeStrip mounts (#870 c)', () => {
-  it('finds the mounts it exists to check — all four coding surfaces', () => {
+  it('finds the mounts it exists to check — four workbenches and the sweep', () => {
     const files = new Set(mounts().map(m => m.file))
     expect([...files].sort()).toEqual([
-      'CodingWorkbench.tsx', 'DocumentCodingWorkbench.tsx', 'ObservationWorkbench.tsx', 'TextCodingView.tsx',
+      'CodingWorkbench.tsx', 'DocumentCodingWorkbench.tsx', 'ObservationWorkbench.tsx',
+      'RatingSweep.tsx', 'TextCodingView.tsx',
     ])
   })
 
   it('every mount carries a key built from the target unit AND the code', () => {
     for (const { file, tag } of mounts()) {
       expect(tag, `${file}: the strip must be keyed on its target`).toMatch(/\bkey=\{/)
-      // The unit is a segment on three surfaces and a dataset cell on the
-      // fourth; either name satisfies the rule, a bare code key does not.
+      // A key through the shared derivation satisfies the rule on its own —
+      // see the header note and `lib/rating-commit.test.ts`.
+      if (/key=\{entryKey\(/.test(tag)) continue
+      // Otherwise it must name both halves literally. The unit is a segment on
+      // three surfaces and a dataset cell on the fourth; either name satisfies
+      // the rule, a bare code key does not.
       expect(tag, `${file}: the key must name the unit`).toMatch(/segmentId|clipId|valueId/)
       expect(tag, `${file}: the key must name the code`).toMatch(/code\.id/)
     }
+  })
+
+  it('the entryKey escape hatch is NARROW — only that call satisfies it', () => {
+    // Falsifier: without this, widening the branch to any helper call would
+    // pass silently and the rule would be gone rather than widened.
+    const tag = '<MagnitudeStrip key={somethingElse(x)} />'
+    expect(/key=\{entryKey\(/.test(tag)).toBe(false)
   })
 })

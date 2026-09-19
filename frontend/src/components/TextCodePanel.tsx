@@ -7,13 +7,24 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import { ColorDotButton } from '@/components/ColorDotButton'
 
+import { findCodeByName } from '@/lib/code-name'
 import { type Code, type CodeCategory, codesApi } from '@/lib/api'
 import { getCodeColor } from '@/lib/utils'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import { categoryShortcutPrefixes } from '@/lib/codeShortcuts'
+import { LoadState } from '@/components/LoadStatus'
+import type { ListLoad } from '@/lib/list-status'
 
 interface TextCodePanelProps {
   codes: Code[]
+  /**
+   * #961 — whether `codes` is an ANSWER. REQUIRED, so a new mount has to decide.
+   * `codes` is `[]` before the list answers, which rendered "No codes yet" AND
+   * emptied the duplicate-name check below — typing an existing code's name and
+   * pressing Enter created a second code of that name (the server does not
+   * refuse duplicate names).
+   */
+  codesLoad: ListLoad
   categories: CodeCategory[]
   projectId: number
   appliedCodeIds: number[]
@@ -27,6 +38,7 @@ interface TextCodePanelProps {
 
 export default function TextCodePanel({
   codes,
+  codesLoad,
   categories,
   projectId,
   appliedCodeIds,
@@ -105,19 +117,24 @@ export default function TextCodePanel({
     return map
   }, [flatList])
 
-  // Check if search query exactly matches an existing code name
+  // Check if search query exactly matches an existing code name.
+  // #963 — shared comparison (`lib/code-name.ts`); the empty-query arm is this
+  // panel's own can't-create rule and stays here.
   const exactMatchExists = useMemo(() => {
     if (!searchQuery.trim()) return true
-    const query = searchQuery.trim().toLowerCase()
-    return codes.some(code => code.name.toLowerCase() === query)
+    return !!findCodeByName(codes, searchQuery)
   }, [codes, searchQuery])
 
+  // #961 — the check above is only a check once the list has answered.
+  const codesKnown = codesLoad.status === 'ready'
+  const canCreateTyped = codesKnown && !!searchQuery.trim() && !exactMatchExists && !!onCreateCode
+
   const handleCreateCode = useCallback(() => {
-    if (searchQuery.trim() && !exactMatchExists && onCreateCode) {
+    if (canCreateTyped && onCreateCode) {
       onCreateCode(searchQuery.trim())
       setSearchQuery('')
     }
-  }, [searchQuery, exactMatchExists, onCreateCode])
+  }, [canCreateTyped, searchQuery, onCreateCode])
 
   // Clamp focusedIndex when list shrinks (e.g., from search filtering)
   useEffect(() => {
@@ -255,7 +272,9 @@ export default function TextCodePanel({
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               onKeyDown={e => {
-                if ((e.key === 'Tab' || e.key === 'Enter') && searchQuery.trim() && !exactMatchExists) {
+                // Tab is claimed ONLY when it creates — while the list is still
+                // loading it must stay ordinary focus movement.
+                if ((e.key === 'Tab' || e.key === 'Enter') && canCreateTyped) {
                   e.preventDefault()
                   handleCreateCode()
                 }
@@ -269,21 +288,30 @@ export default function TextCodePanel({
               size="sm"
               variant="ghost"
               className="h-7 w-7 p-0"
-              disabled={exactMatchExists || !searchQuery.trim()}
+              disabled={!canCreateTyped}
               onClick={handleCreateCode}
               aria-label="Add code"
               // #518: empty query reads as a prompt, not "Code already exists".
-              title={!searchQuery.trim() ? 'Type a name to add a code' : exactMatchExists ? 'Code already exists' : 'Add new code (Tab or Enter)'}
+              title={
+                !codesKnown ? (codesLoad.status === 'failed' ? 'Codes could not be loaded' : 'Codes are still loading')
+                  : !searchQuery.trim() ? 'Type a name to add a code'
+                    : exactMatchExists ? 'Code already exists' : 'Add new code (Tab or Enter)'
+              }
             >
-              <Plus className={`w-3.5 h-3.5 ${!exactMatchExists && searchQuery.trim() ? 'text-green-600' : ''}`} />
+              <Plus className={`w-3.5 h-3.5 ${canCreateTyped ? 'text-green-600' : ''}`} />
             </Button>
           )}
         </div>
-        {searchQuery.trim() && !exactMatchExists && onCreateCode && (
+        {canCreateTyped && (
           <p className="text-[11px] text-green-600 mt-1 px-1"><kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Tab</kbd>{' or '}<kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Enter</kbd>{' to create "'}{searchQuery.trim()}{'"'}</p>
         )}
       </div>
 
+      {/* #961 — the loading/failure notice sits OUTSIDE the listbox: a listbox
+          may own options, and the failure notice carries a Retry button. */}
+      {!codesKnown ? (
+        <LoadState load={codesLoad} size="panel" loadingLabel="Loading codes…" failedTitle="Codes could not be loaded." />
+      ) : (
       <div ref={listRef} className="flex-1 overflow-y-auto px-1 pb-2 max-h-[50vh]" role="listbox" aria-label="Available codes">
         {/* Universals */}
         {groupedCodes.universals.length > 0 && (
@@ -340,6 +368,7 @@ export default function TextCodePanel({
           </div>
         )}
       </div>
+      )}
     </div>
   )
 }

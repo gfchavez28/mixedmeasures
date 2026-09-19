@@ -8,11 +8,15 @@ import { Star, WandSparkles, Copy, Plus, Trash2, ArrowUpDown, ChevronDown, Chevr
 import {
   datasetsApi,
   recodeApi,
+  retryUnanswered,
   type DatasetColumn,
   type RecodeDefinition,
   type ValueFrequency,
   type RederivePlanItem,
 } from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
+import { listStatus, type ListLoad } from '@/lib/list-status'
 import { columnDisplayLabel, swapNameLabelValues } from '@/lib/dataset-column-label'
 import RederiveDependentsDialog from '@/components/RederiveDependentsDialog'
 import DeriveVariableDialog from '@/components/DeriveVariableDialog'
@@ -920,12 +924,17 @@ export function DefinitionCard({
 
 // ── New Definition Form ──────────────────────────────────────────────────────
 
-function NewDefinitionForm({
+/** Exported solely for `RecodeWorkbench.new-rule-load-state.test.tsx` (#963) —
+ *  jsdom cannot mount this page (`react-resizable-panels` + the grid), and the
+ *  contract worth pinning is this form's: what it CLAIMS and what it OFFERS
+ *  before its two lists answer. */
+export function NewDefinitionForm({
   existingDefinitions,
   onCreate,
   isCreating,
   selectedColumn,
   frequenciesData,
+  seedLoad,
 }: {
   existingDefinitions: RecodeDefinition[]
   onCreate: (data: {
@@ -939,8 +948,27 @@ function NewDefinitionForm({
   isCreating: boolean
   selectedColumn: DatasetColumn | undefined
   frequenciesData: { column_id: number; frequencies: ValueFrequency[]; total: number } | undefined
+  /**
+   * #963 — whether this variable's rules AND its response values are ANSWERS.
+   * REQUIRED, so a new mount has to decide.
+   *
+   * Both seed the draft (`seedLabels`' ladder reads the rules first and the
+   * frequencies third), and `[]`/`undefined` is what each looks like before its
+   * query answers. Driven on the running app, both arms:
+   *
+   *  - with the rules outstanding the editor rendered from the FREQUENCY seed
+   *    and the rebuild effect below re-ran the moment they landed, so a value
+   *    typed into it was silently reverted (measured: 99 → 1 at the instant the
+   *    list answered);
+   *  - with the frequencies outstanding the form said *"No response values
+   *    found. Use the input below to add labels manually"* while rendering NO
+   *    input, and left **Create enabled**, which saves a rule whose `mapping`
+   *    is `{}` — the server has no minimum.
+   */
+  seedLoad: ListLoad
 }) {
   const [name, setName] = useState('')
+  const nameRef = useRef<HTMLInputElement>(null)
   const [type, setType] = useState<'scale_map' | 'category_group' | 'reverse'>('scale_map')
   const [sourceDefId, setSourceDefId] = useState<number | null>(null)
   const [draftMapping, setDraftMapping] = useState<Record<string, number | string>>({})
@@ -970,6 +998,27 @@ function NewDefinitionForm({
   // creating a rule can no longer make true — so left here it would have become
   // copy that never renders. It belongs where the clearing actually happens,
   // which is now the explicit apply confirm.
+
+  /**
+   * #963 — the seed is only a seed once both lists have answered.
+   *
+   * ⚠️ **The rebuild effect below is deliberately NOT gated on this, and that
+   * was settled by mutation-testing rather than by reasoning.** Gating it was
+   * the first fix written here; planting a mutant that removed the gate left
+   * all 17 guards green, because the RENDER gate is what closes the defect —
+   * with no editor on screen there is nothing to type and so nothing for a
+   * re-seed to overwrite. Two mechanisms for one invariant, only one of them
+   * load-bearing: per #941, the redundant one goes.
+   *
+   * ⚠️ **`handleCreate` carries no seed check either, for the same measured
+   * reason.** The Create button is its only caller and takes a native
+   * `disabled` (the seed is a TRANSIENT precondition — `lib/mode-disabled.ts`),
+   * which blocks pointer AND keyboard activation, so a mutant removing a guard
+   * there was likewise unkillable. This is the opposite of the `aria-disabled`
+   * case, where the click guard is the load-bearing half (#754): that attribute
+   * changes what a control announces and nothing about what it does.
+   */
+  const seedKnown = seedLoad.status === 'ready'
 
   // Rebuild draft mapping when type, source, or label inputs change
   /* eslint-disable react-hooks/set-state-in-effect -- rebuild draft mapping from recode type/source */
@@ -1040,6 +1089,13 @@ function NewDefinitionForm({
           // screen in step.
           aria-label="Definition name"
           className="h-8 text-sm bg-mm-surface"
+          // #963 — where focus lands when a Retry succeeds and the failure
+          // notice below (with the button that was pressed) unmounts. A real
+          // control that is mounted in every state, per the rule in
+          // the internal design notes; this page's keyboard layer
+          // lives on the variables listbox, not on `window`, but a focusable
+          // wrapper div would still take focus on any click inside the form.
+          ref={nameRef}
         />
         <div role="radiogroup" aria-label="Recode type" className="flex gap-2 flex-wrap">
           {(['scale_map', 'category_group', 'reverse'] as const).map(t => (
@@ -1057,7 +1113,7 @@ function NewDefinitionForm({
             </button>
           ))}
         </div>
-        {type === 'reverse' && scaleMapDefs.length > 0 && (
+        {seedKnown && type === 'reverse' && scaleMapDefs.length > 0 && (
           <select
             aria-label="Source definition to reverse"
             value={sourceDefId || ''}
@@ -1072,8 +1128,19 @@ function NewDefinitionForm({
         )}
 
 
-        {/* Live draft preview */}
-        {type === 'reverse' && scaleMapDefs.length === 0 ? (
+        {/* Live draft preview — #963: every branch below is a claim about this
+            variable's rules or its responses ("no scale maps exist to
+            reverse", "no response values found"), so none of them may be made
+            until both lists have answered. */}
+        {!seedKnown ? (
+          <LoadState
+            load={seedLoad}
+            size="panel"
+            loadingLabel="Loading this variable's rules and responses…"
+            failedTitle="This variable's rules and responses could not be loaded."
+            landingRef={nameRef}
+          />
+        ) : type === 'reverse' && scaleMapDefs.length === 0 ? (
           <div className="text-xs text-mm-text-faint bg-mm-surface rounded p-3 border border-dashed">
             No scale map definitions exist to reverse.
           </div>
@@ -1162,9 +1229,20 @@ function NewDefinitionForm({
           size="sm"
           onClick={handleCreate}
           disabled={
-            !name.trim() || isCreating
+            !seedKnown || !name.trim() || isCreating
             || (type === 'reverse' && !sourceDefId)
             || !draftRangeCheck.ok
+          }
+          // #963 — a disabled control says why. The seed arm is a TRANSIENT
+          // precondition, so it keeps native `disabled` (`lib/mode-disabled.ts`'s
+          // rule): it resolves itself, and a tab stop for it would cost one on
+          // every variable a researcher clicks through.
+          title={
+            !seedKnown
+              ? (seedLoad.status === 'failed'
+                ? 'This variable’s rules and responses could not be loaded'
+                : 'Loading this variable’s rules and responses')
+              : undefined
           }
           className="h-7 text-xs"
         >
@@ -1260,12 +1338,17 @@ export default function RecodeWorkbench() {
   const isAdvancing = useRef(false)
 
   // Fetch columns
-  const { data: columnsData } = useQuery({
+  const columnsQuery = useQuery({
     queryKey: ['dataset-columns', pid, did],
     queryFn: () => datasetsApi.listColumns(pid, did),
     enabled: !!pid && !!did,
   })
+  const columnsData = columnsQuery.data
   const allColumns: DatasetColumn[] = useMemo(() => columnsData ?? [], [columnsData])
+  /** #963 Tier 2 — the nav strip's *"Variables N"* badge. This was the ONE
+   *  Tier 2 row left in this file after Tier 1, and it reads `dataset-columns`,
+   *  a different query from the two that round gated. */
+  const columnsKnown = listStatus(columnsQuery) === 'ready'
 
   // Fetch dataset
   /**
@@ -1290,18 +1373,42 @@ export default function RecodeWorkbench() {
   }, [dataset?.name, setBreadcrumbLabel])
 
   // Fetch definitions for selected column
-  const { data: definitions = [], isLoading: defsLoading } = useQuery({
+  const definitionsQuery = useQuery({
     queryKey: ['recode-definitions', pid, did, selectedColumnId],
     queryFn: () => recodeApi.list(pid, did, selectedColumnId!),
     enabled: !!pid && !!did && !!selectedColumnId,
+    retry: retryUnanswered,
   })
+  const definitions = useMemo(() => definitionsQuery.data ?? [], [definitionsQuery.data])
 
   // Fetch frequencies for selected column
-  const { data: frequenciesData } = useQuery({
+  const frequenciesQuery = useQuery({
     queryKey: ['column-frequencies', pid, did, selectedColumnId],
     queryFn: () => recodeApi.getFrequencies(pid, did, selectedColumnId!),
     enabled: !!pid && !!did && !!selectedColumnId,
+    retry: retryUnanswered,
   })
+  const frequenciesData = frequenciesQuery.data
+
+  /**
+   * #963 — two claims, two load states, deliberately not one.
+   *
+   * `defsLoad` is what the RULES LIST may say: its heading counted
+   * `definitions.length` with a `[]` fallback, so it read *"Recode rules (0)"*
+   * for the whole load (measured on the running app) and a FAILED load rendered
+   * an empty list under that zero, because `isLoading` can say neither "failed"
+   * nor anything at all afterwards.
+   *
+   * `seedLoad` is what the NEW-RULE FORM may say, and it rests on BOTH lists —
+   * `seedLabels`' ladder reads the rules first and the frequencies third, so
+   * either one outstanding makes the draft a guess. See `NewDefinitionForm`.
+   *
+   * ⚠️ `definitions` is a `useMemo` now, not a destructuring default: `[]` in a
+   * default is a NEW array on every render of this page, which re-ran the
+   * form's rebuild effect (its dep) each time.
+   */
+  const defsLoad = useListLoad(definitionsQuery)
+  const seedLoad = useListLoad(definitionsQuery, frequenciesQuery)
 
   /**
    * #584's death arm — which of this column's recodes the relabel killed.
@@ -1702,6 +1809,8 @@ export default function RecodeWorkbench() {
    * visible beside it.
    */
   const dictionaryRef = useRef<HTMLDivElement>(null)
+  /** #963 — the Retry landing for the rules list; see the heading it sits on. */
+  const rulesHeadingRef = useRef<HTMLHeadingElement>(null)
   const revealDictionary = useCallback(() => {
     // After the selection commits, so the ref points at the right variable's
     // region rather than the previous one's.
@@ -1932,7 +2041,7 @@ export default function RecodeWorkbench() {
     <div className="h-full flex flex-col overflow-hidden">
       {/* Toolbar */}
       <div className="flex items-center gap-3 px-4 py-2 border-b bg-mm-surface flex-shrink-0">
-        <DatasetTabs projectId={pid} datasetId={did} variableCount={allColumns.length} />
+        <DatasetTabs projectId={pid} datasetId={did} variableCount={columnsKnown ? allColumns.length : undefined} />
         <div className="w-px h-4 bg-mm-border" aria-hidden="true" />
         {dataset && <span className="text-sm text-mm-text-secondary">{dataset.name}</span>}
         <div className="flex-grow" />
@@ -2509,12 +2618,31 @@ export default function RecodeWorkbench() {
                         open design-note question with a documentation blast
                         radius, and it is the developer's call to make
                         deliberately, not a rename to fold into a layout pass. */}
-                    <h3 className="text-sm font-semibold text-mm-text mb-2">
-                      Recode rules ({definitions.length})
+                    {/* #963 — the count is said only of an ANSWERED list. It
+                        used to read "Recode rules (0)" throughout the load and
+                        after a failure, which is the claim this variable has no
+                        rules. */}
+                    {/* `tabIndex={-1}`: where focus lands when the Retry below
+                        succeeds and takes the focused button with it. The
+                        section's own heading is mounted in every state and,
+                        unlike a wrapper div, is not something a researcher
+                        clicks through on the way to a control. */}
+                    <h3
+                      ref={rulesHeadingRef}
+                      tabIndex={-1}
+                      className="text-sm font-semibold text-mm-text mb-2 outline-none"
+                    >
+                      Recode rules{defsLoad.status === 'ready' ? ` (${definitions.length})` : ''}
                     </h3>
                     <div className="space-y-2">
-                      {defsLoading ? (
-                        <div className="text-sm text-mm-text-faint">Loading definitions...</div>
+                      {defsLoad.status !== 'ready' ? (
+                        <LoadState
+                          load={defsLoad}
+                          size="panel"
+                          loadingLabel="Loading this variable's rules…"
+                          failedTitle="This variable's rules could not be loaded."
+                          landingRef={rulesHeadingRef}
+                        />
                       ) : (
                         definitions.map(def => (
                           <DefinitionCard
@@ -2543,6 +2671,7 @@ export default function RecodeWorkbench() {
                     isCreating={createMutation.isPending}
                     selectedColumn={selectedColumn}
                     frequenciesData={frequenciesData}
+                    seedLoad={seedLoad}
                   />
                 </>
               )}

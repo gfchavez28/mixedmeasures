@@ -51,7 +51,7 @@ def _seed(db):
 def test_coding_progress_all_coders_default(db_session):
     db = db_session
     _seed(db)
-    res = _run(coding_progress(project_id=960, column_ids=None, coder_id=None, user=db.get(User, 1), db=db))
+    res = coding_progress(project_id=960, column_ids=None, coder_id=None, user=db.get(User, 1), db=db)
     assert res.overall_texts == {"coded": 2, "total": 2}
     assert {b.user_id for b in res.by_coder} == {1, 2}
 
@@ -61,7 +61,7 @@ def test_coding_progress_scoped_to_coder_is_self_only(db_session):
     NO colleague counts reach the wire (by_coder is scoped too)."""
     db = db_session
     _seed(db)
-    res = _run(coding_progress(project_id=960, column_ids=None, coder_id=1, user=db.get(User, 1), db=db))
+    res = coding_progress(project_id=960, column_ids=None, coder_id=1, user=db.get(User, 1), db=db)
     assert res.overall_texts == {"coded": 1, "total": 2}, "self-only coverage"
     assert {b.user_id for b in res.by_coder} == {1}, "colleague counts absent from the payload"
 

@@ -23,8 +23,10 @@ import {
   metricsApi,
   recodeApi,
   type ProjectColumnInfo,
-  type DomainMemberInput,
-} from '@/lib/api'
+  type DomainMemberInput, retryUnanswered} from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { useMainContentLanding } from '@/hooks/useMainContentLanding'
+import { LoadFailedNotice } from '@/components/LoadStatus'
 import { CrosswalkHeader } from '@/components/crosswalk/CrosswalkHeader'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { downloadBlob } from '@/lib/api/download'
@@ -82,25 +84,42 @@ export default function CrosswalkView() {
   const { project } = useProjectLayout()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const mainLanding = useMainContentLanding()
 
   // ── Server state ─────────────────────────────────────────────────────────
-  const { data: allColumnsData, isLoading: columnsLoading } = useQuery({
+  const allColumnsQuery = useQuery({
     queryKey: ['project-columns', pid],
     queryFn: () => datasetsApi.allColumns(pid),
     enabled: !!pid,
+    retry: retryUnanswered,
   })
+  const allColumnsData = allColumnsQuery.data
 
-  const { data: domainsData, isLoading: domainsLoading } = useQuery({
+  const domainsQuery = useQuery({
     queryKey: ['analysis-domains', pid],
     queryFn: () => domainsApi.list(pid),
     enabled: !!pid,
+    retry: retryUnanswered,
   })
+  const domainsData = domainsQuery.data
 
-  const { data: equivalenceGroupsData, isLoading: egLoading } = useQuery({
+  const equivalenceGroupsQuery = useQuery({
     queryKey: ['equivalence-groups', pid],
     queryFn: () => equivalenceApi.list(pid),
     enabled: !!pid,
+    retry: retryUnanswered,
   })
+  const equivalenceGroupsData = equivalenceGroupsQuery.data
+
+  /**
+   * #963 — "No variable groups yet", with Suggest Groups and Start blank beside
+   * it, rests on THREE lists, so it waits for all three (§1: a claim that rests
+   * on several lists is only as known as the least-known one). The old gate was
+   * `columnsLoading || domainsLoading || egLoading`, and React Query v5 reports
+   * each of those `false` once its failure has settled — so a failed load
+   * offered "create your first group" on a project that has groups.
+   */
+  const crosswalkLoad = useListLoad(allColumnsQuery, domainsQuery, equivalenceGroupsQuery)
 
   const { data: reverseColsData } = useQuery({
     queryKey: ['reverse-columns', pid],
@@ -930,15 +949,26 @@ export default function CrosswalkView() {
     [],
   )
 
-  const isLoading = columnsLoading || domainsLoading || egLoading
-  if (isLoading) {
+  if (crosswalkLoad.status !== 'ready') {
     return (
       <div className="p-6">
-        <div className="animate-pulse space-y-4">
-          <div className="h-6 w-48 bg-mm-surface rounded" />
-          <div className="h-4 w-96 bg-mm-surface rounded" />
-          <div className="h-32 w-full bg-mm-surface/50 rounded-lg mt-8" />
-        </div>
+        {crosswalkLoad.status === 'failed' || crosswalkLoad.retrying ? (
+          <LoadFailedNotice
+            title="This project's variables and groups could not be loaded."
+            load={crosswalkLoad}
+            landingRef={mainLanding}
+          />
+        ) : (
+          // The skeleton is drawn for the eye; `role="status"` and the sr-only
+          // line are what say "loading" to anyone else (#961's CodebookView
+          // pattern — the skeleton is kept, the accessible half added).
+          <div role="status" className="animate-pulse space-y-4">
+            <span className="sr-only">Loading this project&apos;s variables and groups…</span>
+            <div className="h-6 w-48 bg-mm-surface rounded" />
+            <div className="h-4 w-96 bg-mm-surface rounded" />
+            <div className="h-32 w-full bg-mm-surface/50 rounded-lg mt-8" />
+          </div>
+        )}
       </div>
     )
   }

@@ -6,8 +6,6 @@ consistent, and leaves the DISPLAY queries (chips of what codes are literally on
 unit) all-coder. Also covers the #400 fix to text-coding coverage (universal-only
 codes no longer count) and its new per-coder breakdown.
 """
-import asyncio
-
 import pytest
 
 from app.models.project import Project
@@ -25,10 +23,6 @@ from app.services.code_analysis import (
     get_segments_with_context,
 )
 from app.routers.text_coding import coding_progress
-
-
-def _run(coro):
-    return asyncio.run(coro)
 
 
 # Fixed IDs
@@ -239,7 +233,7 @@ def test_source_frequencies_single_coder_scopes(two_coder_fixture, db_session):
 def test_coding_progress_excludes_universal_only(two_coder_fixture, db_session):
     """#400: a value coded ONLY with a universal marker must not count as coded."""
     pid = two_coder_fixture["project_id"]
-    resp = _run(coding_progress(project_id=pid, column_ids=None, user=_user(), db=db_session))
+    resp = coding_progress(project_id=pid, column_ids=None, user=_user(), db=db_session)
     # 4 non-empty values; 3 carry a non-universal code; 9604 (universal-only) excluded.
     assert resp.overall_texts["total"] == 4
     assert resp.overall_texts["coded"] == 3
@@ -250,7 +244,7 @@ def test_coding_progress_excludes_universal_only(two_coder_fixture, db_session):
 def test_coding_progress_by_coder(two_coder_fixture, db_session):
     """Per-coder coverage uses the same non-universal rule; universal-only is excluded."""
     pid = two_coder_fixture["project_id"]
-    resp = _run(coding_progress(project_id=pid, column_ids=None, user=_user(), db=db_session))
+    resp = coding_progress(project_id=pid, column_ids=None, user=_user(), db=db_session)
     by_coder = {c.user_id: c for c in resp.by_coder}
 
     # Both coders appear; the universal-only application (9805 by A) must NOT be counted.

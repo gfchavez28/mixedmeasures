@@ -20,6 +20,9 @@ import {
   type ScratchpadEntry,
 } from '@/lib/api'
 import { formatDate, ENTITY_TYPE_LABELS } from '@/lib/memo-constants'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
+import { listStatus, type ListStatus } from '@/lib/list-status'
 import { toast } from 'sonner'
 
 const CREATABLE_ENTITY_TYPES: { value: string; label: string }[] = [
@@ -38,10 +41,17 @@ interface ScratchpadSectionProps {
 export default function ScratchpadSection({ projectId, search, onExpandedChange }: ScratchpadSectionProps) {
   const queryClient = useQueryClient()
 
-  const { data: scratchpadData } = useQuery({
+  const scratchpadQuery = useQuery({
     queryKey: ['scratchpad', projectId, false],
     queryFn: () => scratchpadApi.list(projectId, false),
   })
+  const scratchpadData = scratchpadQuery.data
+  /**
+   * #963 Tier 2 — the strip's empty form ("Use Jot to capture thoughts") is
+   * indistinguishable from its loading form, so a researcher whose jots failed
+   * to load is told, quietly, that they have none.
+   */
+  const scratchpadLoad = useListLoad(scratchpadQuery)
 
   const allEntries = useMemo(() => scratchpadData?.entries ?? [], [scratchpadData?.entries])
   const count = allEntries.length
@@ -68,27 +78,48 @@ export default function ScratchpadSection({ projectId, search, onExpandedChange 
   const [convertEntityId, setConvertEntityId] = useState<number | null>(null)
 
   // Data for entity picker
-  const { data: codesData } = useQuery({
+  const codesQuery = useQuery({
     queryKey: ['codes', projectId],
     queryFn: () => codesApi.list(projectId),
     enabled: convertingId != null,
   })
-  const { data: conversationsData } = useQuery({
+  const codesData = codesQuery.data
+  const conversationsQuery = useQuery({
     queryKey: ['conversations', projectId],
     queryFn: () => conversationsApi.list(projectId),
     enabled: convertingId != null,
   })
+  const conversationsData = conversationsQuery.data
   const { data: collectionsData } = useQuery({
     queryKey: ['material-collections', projectId],
     queryFn: () => materialsApi.list(projectId),
     enabled: convertingId != null,
   })
   const defaultCollectionId = collectionsData?.collections?.[0]?.id ?? null
-  const { data: collectionDetail } = useQuery({
+  const collectionDetailQuery = useQuery({
     queryKey: ['material-collection-detail', projectId, defaultCollectionId],
     queryFn: () => materialsApi.get(projectId, defaultCollectionId!),
     enabled: !!defaultCollectionId && convertingId != null,
   })
+  const collectionDetail = collectionDetailQuery.data
+
+  /**
+   * #963 — which list the picker's claim rests on, branched exactly like
+   * `entityOptions` so the two can never name different queries.
+   *
+   * ⚠️ `project` needs no list (it is the project itself) and the `analysis`
+   * arm's query is DISABLED until a collection exists — a project with no
+   * material collection has no analyses, which is an answer the client already
+   * has, so it reports `ready` rather than waiting forever (#961 §1).
+   */
+  const entityOptionsStatus: ListStatus = useMemo(() => {
+    switch (convertEntityType) {
+      case 'conversation': return listStatus(conversationsQuery)
+      case 'code': return listStatus(codesQuery)
+      case 'analysis': return defaultCollectionId == null ? 'ready' : listStatus(collectionDetailQuery)
+      default: return 'ready'
+    }
+  }, [convertEntityType, conversationsQuery, codesQuery, collectionDetailQuery, defaultCollectionId])
 
   const entityOptions = useMemo(() => {
     switch (convertEntityType) {
@@ -166,6 +197,21 @@ export default function ScratchpadSection({ projectId, search, onExpandedChange 
     if (entityId == null) return
     convertMutation.mutate({ entryId, entityType: convertEntityType, entityId })
   }, [convertEntityType, convertEntityId, projectId, convertMutation])
+
+  if (scratchpadLoad.status !== 'ready') {
+    // Same strip, same place — the section does not jump — but it says which of
+    // the two states it is in rather than showing the empty one for both.
+    return (
+      <div className="border-b border-mm-border-subtle bg-mm-bg dark:bg-mm-surface flex-shrink-0">
+        <LoadState
+          load={scratchpadLoad}
+          loadingLabel="Loading scratchpad…"
+          failedTitle="Your scratchpad could not be loaded"
+          size="panel"
+        />
+      </div>
+    )
+  }
 
   if (count === 0) {
     // Neutral persistent header when empty — blends with background
@@ -332,10 +378,20 @@ export default function ScratchpadSection({ projectId, search, onExpandedChange 
                       </Select>
                     )}
 
+                    {/* #963 — each branch of `entityOptions` reads ONE list, so
+                        the picker asks about that one rather than combining. */}
                     {convertEntityType !== 'project' && entityOptions.length === 0 && (
-                      <p className="text-[10px] text-mm-text-muted italic px-1">
-                        No {ENTITY_TYPE_LABELS[convertEntityType]?.toLowerCase() ?? 'entities'} available
-                      </p>
+                      entityOptionsStatus === 'ready' ? (
+                        <p className="text-[10px] text-mm-text-muted italic px-1">
+                          No {ENTITY_TYPE_LABELS[convertEntityType]?.toLowerCase() ?? 'entities'} available
+                        </p>
+                      ) : (
+                        <p className="text-[10px] text-mm-text-muted italic px-1">
+                          {entityOptionsStatus === 'failed'
+                            ? 'This list could not be loaded'
+                            : 'Loading…'}
+                        </p>
+                      )
                     )}
 
                     <div className="flex items-center justify-end gap-1.5">

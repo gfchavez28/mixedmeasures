@@ -2,18 +2,30 @@ import type { CrossTabulationResponse } from '@/lib/api'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 
 interface CrossTabTableProps {
-  data: CrossTabulationResponse | null
-  loading: boolean
+  /**
+   * #963 Tier 3 — the ANSWERED matrix. REQUIRED.
+   *
+   * It used to be nullable and stood for THREE different facts — no cross-tab
+   * variable selected, a request still running, and a request that FAILED —
+   * with a `loading` boolean telling the second apart from the other two. So a
+   * failure rendered *"Select a cross-tab variable to see the matrix."* at a
+   * researcher who had just selected one. The non-ready states are the
+   * parent's now (`CrossAnalysisPanel`), which is where the query lives.
+   *
+   * ⚠️ And the no-selection sentence was DEAD CODE at the only call site: the
+   * parent has always wrapped this in `{crossColumnId && …}`, so `null` never
+   * arrived for that reason. Keeping it as a defensive branch would have been
+   * a guard that cannot fire (#941); requiring the prop makes the compiler say
+   * so instead.
+   */
+  data: CrossTabulationResponse
 }
 
-export default function CrossTabTable({ data, loading }: CrossTabTableProps) {
-  if (loading) {
-    return <div className="text-center py-8 text-mm-text-muted text-sm">Loading cross-tabulation...</div>
-  }
-  if (!data || data.matrix.length === 0) {
+export default function CrossTabTable({ data }: CrossTabTableProps) {
+  if (data.matrix.length === 0) {
     return (
       <div className="text-center py-8 text-mm-text-muted text-sm">
-        {data ? 'No coded comments found for this cross-tabulation.' : 'Select a cross-tab variable to see the matrix.'}
+        No coded comments found for this cross-tabulation.
       </div>
     )
   }

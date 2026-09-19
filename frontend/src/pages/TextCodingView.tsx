@@ -16,11 +16,13 @@ import {
   SelectTrigger,
 } from '@/components/ui/select'
 import {
-  textCodingApi, codesApi, categoriesApi, excerptsApi, datasetsApi, extractApiError,
+  textCodingApi, codesApi, categoriesApi, excerptsApi, datasetsApi, extractApiError, retryUnanswered,
   TEXT_PAGE_SIZE,
   type TextCodingViewConfig, type TextCodingColumn, type Code, type TextCodingListResponse,
 } from '@/lib/api'
 import { invalidateTextEmptinessReaders } from '@/lib/text-coding-cache'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState, LoadingNotice } from '@/components/LoadStatus'
 import { ratableCodes } from '@/lib/rating-targets'
 import MagnitudeStrip from '@/components/MagnitudeStrip'
 import { useHistory } from '@/hooks/useHistory'
@@ -83,8 +85,12 @@ export default function TextCodingView() {
   // #451: archived coders' chips hidden by default; "view all coders" reveals them.
   const [showArchivedCoders, setShowArchivedCoders] = useState(false)
   // Blind mode (Track J · J2-5, DEC-G): effectiveHidden = all-but-self while blind.
-  const { blind, blindHiddenSet, toggleReveal } = useBlindMode(projectId)
-  const effectiveHidden = blind ? blindHiddenSet : hiddenCoders
+  // #964: the lens keys on `withholding` (fail-closed while the roster is
+  // unanswered); the wording keys on `blind` (only once it is known).
+  const { blind, withholding, settled: blindSettled, blindLens, toggleReveal } = useBlindMode(projectId)
+  const effectiveHidden = withholding ? blindLens : hiddenCoders
+  // #964: "View all — N archived" must not bring an archived colleague back after re-blinding.
+  const chipShowArchived = showArchivedCoders && !withholding
   // Group A (#457): who coded THESE columns — drives the picklist "active here" markers.
   const coderCoverage = useCoderCoverage(
     projectId, { textColumnIds: focalColumnIds }, { enabled: multiCoder, rosterCoderIds: coders.map(c => c.id) },
@@ -120,22 +126,40 @@ export default function TextCodingView() {
   const history = useHistory()
   // #825: the jump handler lives here; the scroller lives in ByTextTable.
   const byTextRef = useRef<ByTextTableHandle>(null)
+  // #961 — where focus lands when a Retry succeeds and the failure notice, with
+  // its focused button, unmounts (see `LoadFailedNotice`). A real control at the
+  // top of the workspace, deliberately NOT a `tabIndex={-1}` container: a
+  // focusable wrapper would take focus on every click on its whitespace.
+  const codingTabRef = useRef<HTMLButtonElement>(null)
   const configLoadedRef = useRef(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // ── Queries ───────────────────────────────────────────────────────────
 
-  const { data: columnsData } = useQuery({
+  const columnsQuery = useQuery({
     queryKey: ['text-columns', projectId],
     queryFn: () => textCodingApi.columns(projectId),
+    // #961 — a failed column list now says so and offers Retry, so the client
+    // default's silent second ask only doubles the wait for a server that
+    // answered (~3.4 s per attempt on a large survey).
+    retry: retryUnanswered,
   })
+  const columnsData = columnsQuery.data
   const textColumns = useMemo(() => columnsData?.columns ?? [], [columnsData?.columns])
+  /** #961 — `textColumns` is `[]` both before the answer and when there are
+   * none; this is the only thing that may tell them apart. */
+  const columnsLoad = useListLoad(columnsQuery)
 
-  const { data: configData } = useQuery({
+  const { data: configData, isError: configFailed } = useQuery({
     queryKey: ['text-config', projectId],
     queryFn: () => textCodingApi.getConfig(projectId),
     staleTime: Infinity,
   })
+  /** #961 — the saved column selection arrives with the config, so until it has
+   * answered an empty selection means "not restored yet", not "none chosen".
+   * A FAILED config still reads as answered: nothing will be restored, and
+   * "select a column" is then the true instruction. */
+  const configAnswered = configData !== undefined || configFailed
 
   // Load config on first fetch
   useEffect(() => {
@@ -181,13 +205,7 @@ export default function TextCodingView() {
    * scrolled past would vanish from that lookup and `handleBulkQuoteToggle`
    * would silently take its "not quoted" branch and duplicate the excerpt.
    */
-  const {
-    data: commentsData,
-    isLoading: commentsLoading,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useInfiniteQuery({
+  const commentsQuery = useInfiniteQuery({
     queryKey: ['text-data', projectId, columnIdsStr, datasetFilterIds, hideEmpty, searchText, randomSeed, quotedOnly],
     queryFn: ({ pageParam }) => textCodingApi.list(projectId, {
       column_ids: columnIdsStr,
@@ -207,6 +225,14 @@ export default function TextCodingView() {
     enabled: focalColumnIds.length > 0,
     placeholderData: keepPreviousData,
   })
+  const { data: commentsData, fetchNextPage, hasNextPage, isFetchingNextPage } = commentsQuery
+  /** #961 — read ONLY once a column is selected (the query is disabled before,
+   * and a disabled query reads `loading` forever); the page says "select a
+   * column" first. `keepPreviousData` keeps a filter change `ready` on the
+   * previous page while the next one loads; a filter change whose request FAILS
+   * has no data and reads `failed`, which used to render "No texts found. Try
+   * adjusting your filters." */
+  const textsLoad = useListLoad(commentsQuery)
 
   const comments = useMemo(
     () => commentsData?.pages.flatMap(p => p.texts) ?? [],
@@ -329,31 +355,51 @@ export default function TextCodingView() {
 
   // ── Progress query ────────────────────────────────────────────────────
 
-  const { data: progressData } = useQuery({
+  const { data: progressData, isError: progressFailed } = useQuery({
     // Blind mode (DEC-G): the gauge is SERVER all-coder coverage, so scope it to self
     // via coder_id (the client hidden-set can't touch it). Key on blind self-id so it
     // refetches self-only when blind and all-coder when revealed.
-    queryKey: ['text-progress', projectId, columnIdsStr, blind ? self : null],
+    // #964: scoped by `withholding`, and WAITS until the blind state is settled — a
+    // guess would be self-only, and on a single-coder install the count would then
+    // run twice (18 s each on a large selection, #956).
+    queryKey: ['text-progress', projectId, columnIdsStr, withholding ? self : null],
     queryFn: () => textCodingApi.progress(projectId, {
       column_ids: columnIdsStr || undefined,
-      coder_id: blind && self != null ? self : undefined,
+      coder_id: withholding && self != null ? self : undefined,
     }),
-    enabled: focalColumnIds.length > 0,
+    enabled: focalColumnIds.length > 0 && blindSettled,
+    // #956 — above SQLite's variable ceiling this count fails the same way every
+    // time, and the endpoint holds the event loop ~5 s per attempt (#837): the
+    // client default's automatic second ask freezes the whole server again for
+    // the same 500. A coding act invalidates this key, which is the retry.
+    retry: retryUnanswered,
   })
 
   // ── Codes query ───────────────────────────────────────────────────────
 
-  const { data: codesData } = useQuery({
+  const codesQuery = useQuery({
     queryKey: ['codes', projectId],
     queryFn: () => codesApi.list(projectId),
   })
+  const codesData = codesQuery.data
   const codes = useMemo(() => codesData?.codes ?? [], [codesData?.codes])
+  /** #961 — the code panel's "No codes yet" and its duplicate-name check both
+   * read `codes`; neither may act before the list has answered. */
+  const codesLoad = useListLoad(codesQuery)
 
-  const { data: categoriesData } = useQuery({
+  const categoriesQuery = useQuery({
     queryKey: ['categories', projectId],
     queryFn: () => categoriesApi.list(projectId),
+    retry: retryUnanswered,
   })
+  const categoriesData = categoriesQuery.data
   const categories = useMemo(() => categoriesData?.categories ?? [], [categoriesData?.categories])
+  /**
+   * #963 — whether the category list is an ANSWER. `FloatingCreateCode`'s
+   * picker creates a category from a typed name, and `create_category` refuses
+   * no duplicate, so the list is the only duplicate guard there is.
+   */
+  const categoriesLoad = useListLoad(categoriesQuery)
 
   // #824: THE PANEL'S LABELS ARE NOT DERIVED HERE ANY MORE, and the map that
   // used to be is why `6.1` applied *Teacher Attitudes*.
@@ -974,6 +1020,24 @@ export default function TextCodingView() {
 
   // ── Render ────────────────────────────────────────────────────────────
 
+  // #961 — this page used to open on "No text columns found in this project."
+  // for as long as the column list took to answer (~3.4 s on a large survey),
+  // and for good when it failed: `textColumns` is `[]` in both cases. Only an
+  // ANSWERED empty list may say so. A saved selection that arrives first still
+  // renders the workspace, as it always has — the texts load in parallel.
+  if (focalColumnIds.length === 0 && columnsLoad.status !== 'ready') {
+    return (
+      <div className="h-full p-4">
+        <LoadState
+          load={columnsLoad}
+          loadingLabel="Loading text columns…"
+          failedTitle="The text columns could not be loaded."
+          landingRef={codingTabRef}
+        />
+      </div>
+    )
+  }
+
   if (focalColumnIds.length === 0 && textColumns.length === 0) {
     return (
       <div className="h-full p-4">
@@ -1000,6 +1064,7 @@ export default function TextCodingView() {
         {/* Main tab toggle */}
         <div className="flex bg-mm-bg rounded p-0.5 shrink-0" role="tablist" aria-label="Main view">
           <button
+            ref={codingTabRef}
             role="tab"
             id="cv-tab-coding"
             aria-controls="cv-panel-coding"
@@ -1234,9 +1299,17 @@ export default function TextCodingView() {
           </span>
         )}
 
-        {/* Progress gauges */}
-        {progressData && (
-          <div className="flex items-center gap-4 text-xs">
+        {/* Progress gauges, then the multi-coder controls.
+          * #956 — the blind toggle and the coder badge used to render INSIDE
+          * `progressData &&`, so whenever the count was loading or had failed
+          * the page lost its only statement of blind state and its only way to
+          * reveal. That included every Reveal press: blind is in the count's
+          * query key, so the key changed, the data went undefined, and the
+          * focused toggle unmounted under the keyboard user. The three sibling
+          * workbenches never gated either control on data. */}
+        <div className="flex items-center gap-4 text-xs empty:hidden">
+        {progressData ? (
+          <>
             <div className="flex items-center gap-2" title={`${overallComments.coded} of ${overallComments.total} texts coded${blind ? ' — colleagues hidden (blind coding); other surfaces show all coders' : ''}`}>
               <span className="text-muted-foreground">Texts:</span>
               <span className="font-medium">{overallComments.coded}/{overallComments.total}</span>
@@ -1251,10 +1324,24 @@ export default function TextCodingView() {
                 <div className="h-full bg-mm-blue rounded-full transition-all" style={{ width: `${recordPct}%` }} />
               </div>
             </div>
-            {multiCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="text_workbench" />}
-            <CoderCountBadge projectId={projectId} textColumnIds={focalColumnIds} enabled={multiCoder} />
-          </div>
-        )}
+          </>
+        ) : progressFailed ? (
+          // #956 — say the count is missing rather than vanish, so an absent
+          // gauge cannot read as "this layout has no progress". No Retry: the
+          // failure is deterministic for this selection, and each attempt
+          // freezes the server (see the query). Cause-free on purpose — the
+          // sentence stays true whichever failure produced it.
+          <span
+            className="text-mm-text-muted whitespace-nowrap"
+            title="Coding progress could not be counted for the selected columns. Your coding still saves."
+          >
+            Progress unavailable
+            <span className="sr-only">: coding progress could not be counted for the selected columns. Your coding still saves.</span>
+          </span>
+        ) : null}
+        {multiCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="text_workbench" />}
+        <CoderCountBadge projectId={projectId} textColumnIds={focalColumnIds} enabled={multiCoder} />
+        </div>
 
         {/* Codebook */}
         <Button variant="ghost" size="icon" onClick={openCodebook} title="Codebook" aria-label="Codebook">
@@ -1291,7 +1378,9 @@ export default function TextCodingView() {
               a "prefer a column with prose" heuristic would have been a fix to
               a code path that does not exist, and it would have fought the
               saved config on every load. */}
-          {focalColumnIds.length > 0 && (
+          {/* #961 — summed from the column list, so before it answers this read
+              "0/0 responded" beside a restored selection. Nothing, not a zero. */}
+          {focalColumnIds.length > 0 && columnsLoad.status === 'ready' && (
             <span className="text-xs text-mm-text-muted tabular-nums">
               {codeableBase.nonEmpty}/{codeableBase.total} responded
             </span>
@@ -1507,9 +1596,11 @@ export default function TextCodingView() {
             onSelectionChange={setFocalColumnIds}
             {...treatAsEmptyProps}
           />
-          <span className="text-xs text-muted-foreground">
-            {focalColumnIds.length} column{focalColumnIds.length !== 1 ? 's' : ''} selected
-          </span>
+          {configAnswered && (
+            <span className="text-xs text-muted-foreground">
+              {focalColumnIds.length} column{focalColumnIds.length !== 1 ? 's' : ''} selected
+            </span>
+          )}
         </div>
       )}
 
@@ -1518,7 +1609,9 @@ export default function TextCodingView() {
         {activeTab === 'analysis' ? (
           /* Cross-Analysis panel */
           <div className="flex-1 overflow-y-auto" role="tabpanel" id="cv-panel-analysis" aria-labelledby="cv-tab-analysis">
-            {focalColumnIds.length === 0 ? (
+            {focalColumnIds.length === 0 && !configAnswered ? (
+              <LoadingNotice label="Loading your column selection…" />
+            ) : focalColumnIds.length === 0 ? (
               <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
                 Select one or more text columns to use cross-analysis.
               </div>
@@ -1535,7 +1628,12 @@ export default function TextCodingView() {
             {/* Content */}
             <div className="flex-1 overflow-hidden flex flex-col" role="tabpanel" id="cv-panel-coding" aria-labelledby="cv-tab-coding">
               <div className="flex-1 min-h-0">
-              {focalColumnIds.length === 0 ? (
+              {/* #961 — the saved selection arrives with the config, so until it
+                  has answered "select a column" is an instruction to redo work
+                  that is about to be restored. */}
+              {focalColumnIds.length === 0 && !configAnswered ? (
+                <LoadingNotice label="Loading your column selection…" />
+              ) : focalColumnIds.length === 0 ? (
                 <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
                   Select one or more text columns to begin coding.
                 </div>
@@ -1551,7 +1649,8 @@ export default function TextCodingView() {
                     <ByTextTable
                       ref={byTextRef}
                       comments={filteredComments}
-                      loading={commentsLoading}
+                      textsLoad={textsLoad}
+                      retryLandingRef={codingTabRef}
                       selectedValueIds={selectedValueIds}
                       onSelectionChange={setSelectedValueIds}
                       onQuoteToggle={handleQuoteToggle}
@@ -1574,7 +1673,7 @@ export default function TextCodingView() {
                       hiddenCoderIds={effectiveHidden}
                       activeCoderId={self}
                       extraCoders={coderCoverage.extraCoders}
-                      showArchived={showArchivedCoders}
+                      showArchived={chipShowArchived}
                       searchText={searchText}
                       onClearSearch={() => { setSearchInput(''); setSearchText('') }}
                       totalRowCount={activeColumnId ? undefined : totalTexts}
@@ -1593,13 +1692,15 @@ export default function TextCodingView() {
                 <ByRecordPanel
                   projectId={projectId}
                   comments={comments}
+                  textsLoad={textsLoad}
+                  retryLandingRef={codingTabRef}
                   focalColumnIds={focalColumnIds}
                   selectedRecordId={selectedRecordId}
                   codes={codes}
                   hiddenCoderIds={effectiveHidden}
                   activeCoderId={self}
                   extraCoders={coderCoverage.extraCoders}
-                  showArchived={showArchivedCoders}
+                  showArchived={chipShowArchived}
                   selectedValueIds={selectedValueIds}
                   onSelectComment={(dvId) => setSelectedValueIds([dvId])}
                   onQuoteToggle={handleQuoteToggle}
@@ -1662,6 +1763,7 @@ export default function TextCodingView() {
                 <PageErrorBoundary>
                   <TextCodePanel
                     codes={codes}
+                    codesLoad={codesLoad}
                     categories={categories}
                     projectId={projectId}
                     appliedCodeIds={appliedCodeIds}
@@ -1710,6 +1812,7 @@ export default function TextCodingView() {
       {/* Floating create code dialog */}
       {createCodeDialog && (
         <FloatingCreateCode
+          categoriesLoad={categoriesLoad}
           position={createCodeDialog.position}
           projectId={projectId}
           initialName={createCodeDialog.initialName}

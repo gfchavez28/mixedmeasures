@@ -2113,6 +2113,53 @@ describe('coverage gauge + density strip + `u` (6a — D33/D34/D35/D36)', () => 
     expect(screen.getByRole('progressbar')).toHaveTextContent('50% covered')
   })
 
+  // #964 (found by its review): "View all — N archived" is component state that
+  // outlived re-blinding, and blind mode's set is built from the NON-archived
+  // roster — so an archived colleague's chips came back while "Colleagues hidden".
+  it('re-blinding hides an archived colleague\'s chips even after "View all" was switched on', async () => {
+    twoCoders()
+    coderCoverage.mockResolvedValue({
+      coders: [{ user_id: 3, username: 'Carla', display_color: null, archived: true, coding_count: 1 }],
+      count: 1,
+    })
+    const archivedCoded = clip(35, 100, 150, 'Carla only', {
+      applied_codes: [7],
+      applied_code_details: [{ code_id: 7, user_id: 3, attribution: null, is_universal: false, magnitude: null, magnitude_conflict: null }],
+    })
+    localStorage.setItem('mm-blind-revealed-1-1', '1')
+    listSegments.mockResolvedValue([codedByMe(31, 0, 50), archivedCoded])
+    renderWorkbench()
+
+    expect(await screen.findByText('Colleagues shown')).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: 'Filter codes by coder' }))
+    fireEvent.click(await screen.findByRole('button', { name: /View all — 1 archived/ }))
+    // Positive control: "View all" really does show her chip while revealed.
+    expect(await screen.findByText(/coded by Carla/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Colleagues shown' })) // re-hide (no dialog)
+    expect(await screen.findByRole('button', { name: 'Colleagues hidden' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText(/coded by Carla/)).not.toBeInTheDocument())
+  })
+
+  // #964 — measured live: an unanswered roster read as a ONE-person roster, so
+  // blind mode was off and the gauge counted a colleague's coding. MIXED is the
+  // discriminating fixture: blind 25% (mine), all-coder 30% (mine + Bob's).
+  it.each([
+    ['loading', () => listCoders.mockReturnValue(new Promise(() => {}))],
+    ['failed', () => listCoders.mockRejectedValue(new Error('network'))],
+  ] as const)('while the roster is %s, the gauge and strip count only MY coding — and claim no blind mode', async (_s, arrange) => {
+    arrange()
+    listSegments.mockResolvedValue(MIXED)
+    renderWorkbench()
+    const strip = await screen.findByTestId('coverage-density-strip')
+    const gauge = await screen.findByRole('progressbar')
+    expect(gauge).toHaveTextContent('25% covered')
+    expect(strip.children).toHaveLength(1)
+    // The claim waits for the roster: no toggle, no "colleagues hidden" wording.
+    expect(screen.queryByText('Colleagues hidden')).not.toBeInTheDocument()
+    expect(screen.queryByText('Colleagues shown')).not.toBeInTheDocument()
+  })
+
   it('the density strip marks each visible-coded clip, aria-hidden (D36)', async () => {
     twoCoders()
     listSegments.mockResolvedValue(MIXED)
@@ -2340,5 +2387,76 @@ describe('#868 (c) — the rating strip on the observation workbench', () => {
     await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(11, 7, null))
     // The undo of the RATING, not of the apply: the code stays on the clip.
     expect(removeCode).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * #963 — what this page may CLAIM before the clip list answers.
+ *
+ * Driven on the running app with the request held back 14 s, on an observation
+ * that has SIX clips: the list said *"No clips yet. Press I while the recording
+ * plays…"*, the gauge said *"0 clips"* and announced *"0% of the recording
+ * covered by coding, 1 gap remaining"*, and Freeze was disabled under the
+ * accessible name *"Freeze segmentation — there are no clips to freeze yet"*.
+ *
+ * The empty state is an INSTRUCTION to mark a first clip, so on a set that
+ * already exists it invites re-marking it.
+ *
+ * Both empty arms are POSITIVE CONTROLS here: a fix that simply stopped saying
+ * "no clips yet" would satisfy every negative assertion below.
+ */
+describe('#963 — the clip list says "none" only of an answered query', () => {
+  const freezeButton = () =>
+    screen.getByRole('button', { name: /^Freeze segmentation/ })
+
+  it('while loading: no empty instruction, no count, no gauge, and Freeze says why', async () => {
+    listSegments.mockReturnValue(new Promise(() => {}))
+    renderWorkbench()
+
+    // ONE loading line for one wait: the list's `role="status"`, not a second
+    // copy in the gauge slot (which says nothing until there is a count).
+    const loading = await screen.findByText(/Loading clips/)
+    // ONE loading line for one wait — the list's, inside a `role="status"`
+    // region; the gauge slot says nothing until there is a count to show.
+    expect(screen.getAllByText(/Loading clips/)).toHaveLength(1)
+    expect(loading.closest('[role="status"]')).not.toBeNull()
+    expect(screen.queryByText(/No clips yet/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/\b\d+ clips?\b/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(freezeButton()).toBeDisabled()
+    expect(freezeButton()).toHaveAccessibleName('Freeze segmentation — still loading the clips')
+  })
+
+  it('after a failure: says the load failed, offers Retry, and still claims nothing', async () => {
+    listSegments.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }))
+    renderWorkbench()
+
+    expect(await screen.findByText(/The clips could not be loaded/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.getByText(/Clips not loaded/)).toBeInTheDocument()
+    expect(screen.queryByText(/No clips yet/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(freezeButton()).toHaveAccessibleName('Freeze segmentation — the clips could not be loaded')
+  })
+
+  it('POSITIVE CONTROL — an answered EMPTY list still gets the instruction and the real reason', async () => {
+    listSegments.mockResolvedValue([])
+    renderWorkbench()
+
+    expect(await screen.findByText(/No clips yet/)).toBeInTheDocument()
+    expect(screen.getByText(/\b0 clips\b/)).toBeInTheDocument()
+    expect(screen.queryByText(/Loading clips/)).not.toBeInTheDocument()
+    expect(freezeButton()).toBeDisabled()
+    expect(freezeButton()).toHaveAccessibleName('Freeze segmentation — there are no clips to freeze yet')
+  })
+
+  it('POSITIVE CONTROL — an answered list counts its clips and enables Freeze', async () => {
+    renderWorkbench()
+
+    expect(await screen.findByText(/\b4 clips\b/)).toBeInTheDocument()
+    expect(screen.queryByText(/Loading clips/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/No clips yet/)).not.toBeInTheDocument()
+    expect(freezeButton()).toBeEnabled()
+    expect(freezeButton()).toHaveAccessibleName('Freeze segmentation')
   })
 })

@@ -32,6 +32,8 @@
  */
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { LoadState } from '@/components/LoadStatus'
+import { useListLoad } from '@/hooks/useListLoad'
 import { Check, Search, UserRound, X } from 'lucide-react'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
@@ -63,13 +65,26 @@ export default function DocumentSubjectDialog({
 }: Props) {
   const [search, setSearch] = useState('')
 
-  const { data, isLoading } = useQuery({
+  const participantsQuery = useQuery({
     queryKey: ['participants', projectId],
     queryFn: () => participantsApi.list(projectId),
     enabled: open,
   })
+  const data = participantsQuery.data
 
   const participants = useMemo(() => data?.participants ?? [], [data?.participants])
+  /**
+   * #963 Tier 3 — a settled failure fell through to *"This project has no
+   * participants yet. Add them on the Participants page, or import a dataset
+   * with an identifier column."* — a false claim AND an instruction to go do
+   * work the researcher has already done, on a project that may hold hundreds.
+   *
+   * ⚠️ The query is `enabled: open`, which `listStatus` would read as `loading`
+   * forever while the dialog is shut — harmless here only because Radix
+   * unmounts the content, so nothing asks. The list is never spoken about from
+   * outside this dialog.
+   */
+  const participantsLoad = useListLoad(participantsQuery)
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase()
@@ -145,11 +160,18 @@ export default function DocumentSubjectDialog({
               </button>
             </li>
 
-            {isLoading && (
-              <li className="px-2 py-3 text-sm text-mm-text-muted">Loading participants…</li>
+            {participantsLoad.status !== 'ready' && (
+              <li>
+                <LoadState
+                  load={participantsLoad}
+                  loadingLabel="Loading participants…"
+                  failedTitle="The participant list could not be loaded."
+                  size="panel"
+                />
+              </li>
             )}
 
-            {!isLoading && participants.length === 0 && (
+            {participantsLoad.status === 'ready' && participants.length === 0 && (
               /* The empty state names where to fix it — the remedy is on another
                * screen and nothing on this one would say so. */
               <li className="px-2 py-3 text-sm text-mm-text-muted">
@@ -158,7 +180,7 @@ export default function DocumentSubjectDialog({
               </li>
             )}
 
-            {!isLoading && participants.length > 0 && filtered.length === 0 && (
+            {participantsLoad.status === 'ready' && participants.length > 0 && filtered.length === 0 && (
               <li className="px-2 py-3 text-sm text-mm-text-muted">
                 No participant matches “{search.trim()}”.
               </li>

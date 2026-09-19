@@ -15,7 +15,9 @@ import {
   Download,
   SwatchBook,
 } from 'lucide-react'
-import { metricsApi, domainsApi, datasetsApi, materialsApi, statisticalTestsApi, correlationsApi, comparisonsApi, dataQualityApi } from '@/lib/api'
+import { metricsApi, domainsApi, datasetsApi, materialsApi, statisticalTestsApi, correlationsApi, comparisonsApi, dataQualityApi, retryUnanswered } from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 import type {
   MetricDefinitionResponse,
   MaterialResponse,
@@ -372,14 +374,28 @@ export default function AnalysisView() {
   })
 
   // Statistical tests
-  const { data: testsData } = useQuery({
+  const testsQuery = useQuery({
     queryKey: ['statistical-tests', pid],
     queryFn: () => statisticalTestsApi.list(pid),
     enabled: !!pid,
     staleTime: 300_000,
+    retry: retryUnanswered,
   })
+  const testsData = testsQuery.data
 
   const allTests = useMemo(() => testsData?.tests ?? [], [testsData?.tests])
+  /**
+   * #963 — whether the saved-test list is an ANSWER.
+   *
+   * Two claims rest on it, and the second is the harmful one. The panel said
+   * *"No reliability tests yet — add one with the button below"* for the whole
+   * load and permanently after a failure; and #395's duplicate guard in
+   * `submitTest` reads the same `allTests`, so during that window the test a
+   * researcher had already saved was invisible AND its duplicate was
+   * creatable. Nothing on the server refuses a second identical test — that
+   * check is the only guard there is.
+   */
+  const testsLoad = useListLoad(testsQuery)
 
   // Metric list — needed for test creation dialog (grouped metrics) and backward compat
   const { data: metricList } = useQuery({
@@ -957,6 +973,18 @@ export default function AnalysisView() {
   // one — same construct + same item set. Skip-with-toast instead of stacking
   // identical rows (the reliability panel was the worst-felt case).
   const submitTest = (testType: string, targetType: string, targetId: number) => {
+    // #963 — the duplicate check below is only a check once the list has
+    // answered. Refusing here (rather than disabling the dialog's submit) keeps
+    // the whole flow reachable: a researcher can pick their scale while the
+    // list loads, and the act itself waits.
+    if (testsLoad.status !== 'ready') {
+      toast.info(
+        testsLoad.status === 'failed'
+          ? 'Your saved tests could not be loaded, so a duplicate cannot be ruled out. Retry the list first.'
+          : 'Still loading your saved tests — try again in a moment.',
+      )
+      return
+    }
     const existing = allTests.find(
       t => t.test_type === testType && t.target_type === targetType && t.target_id === targetId,
     )
@@ -1672,7 +1700,35 @@ export default function AnalysisView() {
                 </button>
                 {statsExpanded && (
                   <div id="statistics-panel" className="px-4 pb-4 space-y-2">
-                    {relevantTests.length === 0 && (
+                    {/* #963 — "none yet" is a claim about the researcher's
+                        saved work, so it waits for the list. The panel's own
+                        count in the header above already gates on
+                        `relevantTests.length > 0`, so it says nothing while
+                        loading and needs no change.
+
+                        ⚠️ **Reachability, measured rather than assumed.** The
+                        whole section is gated on
+                        `relevantTests.length > 0 || allTests.length > 0 ||
+                        hasAnySelection`, and the first two are `[]` while the
+                        list loads — so on a project with saved tests and no
+                        selection the section is ABSENT for the duration and
+                        then appears. That outer gate is deliberately LEFT: an
+                        absent section makes no claim, whereas "No reliability
+                        tests yet" does, and rendering a section that vanishes a
+                        second later trades a false sentence for a flicker. The
+                        consequence to know is that this notice is reachable
+                        only when the section renders — which is the ordinary
+                        case, since a researcher reading a chart has a
+                        selection. `submitTest`'s refusal above is unconditional
+                        and is the half that protects the data. */}
+                    {testsLoad.status !== 'ready' ? (
+                      <LoadState
+                        load={testsLoad}
+                        size="panel"
+                        loadingLabel="Loading your saved tests…"
+                        failedTitle="Your saved tests could not be loaded."
+                      />
+                    ) : relevantTests.length === 0 && (
                       <p className="text-sm text-mm-text-faint italic">
                         {activeTab === 'descriptives'
                           ? 'No reliability tests yet — add one with the button below.'

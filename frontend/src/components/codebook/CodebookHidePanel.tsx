@@ -3,8 +3,17 @@ import { useTreeKeyboardNav, useTreeAriaPositions } from '@/hooks/useTreeKeyboar
 import { EyeOff, Filter, ChevronDown, ChevronRight } from 'lucide-react'
 import type { CodebookTreeResponse, CodebookCategoryNode, Conversation, TextCodingColumn } from '@/lib/api'
 import { getCodeColor } from '@/lib/utils'
+import type { ListLoad } from '@/lib/list-status'
+import { LoadState } from '@/components/LoadStatus'
 
 interface CodebookHidePanelProps {
+  /**
+   * #963 Tier 2 — whether `conversations` and `textColumns` are an ANSWER.
+   * The page gate above this panel waits for the codebook TREE; the two
+   * source lists are a separate pair, so this panel called itself empty
+   * over requests still in flight.
+   */
+  sourcesLoad: ListLoad
   treeData: CodebookTreeResponse
   conversations: Conversation[]
   textColumns: TextCodingColumn[]
@@ -36,6 +45,7 @@ function getColLabel(col: TextCodingColumn): string {
 }
 
 export default function CodebookHidePanel({
+  sourcesLoad,
   treeData,
   conversations,
   textColumns,
@@ -118,6 +128,10 @@ export default function CodebookHidePanel({
 
   const totalHidden = hiddenCodeIds.size + hiddenConvIds.size + hiddenColIds.size
   const hasAnyCodes = allCodeIds.length > 0
+  // #963 — `hasAnySources` is "there are none", which an unanswered pair cannot
+  // say. The CODES half reads `treeData`, a required prop the page gate already
+  // waits for, so only the sources half needed this.
+  const sourcesKnown = sourcesLoad.status === 'ready'
   const hasAnySources = conversations.length > 0 || textColumns.length > 0
 
   // Toggle helpers
@@ -274,7 +288,7 @@ export default function CodebookHidePanel({
         )}
 
         {/* ── Sources section ──────────────────────────────────── */}
-        {hasAnySources && (
+        {sourcesKnown && hasAnySources && (
           <div role="none">
             <div
               role="treeitem"
@@ -394,9 +408,16 @@ export default function CodebookHidePanel({
           </div>
         )}
 
-        {!hasAnyCodes && !hasAnySources && (
+        {!hasAnyCodes && !sourcesKnown ? (
+          <LoadState
+            load={sourcesLoad}
+            loadingLabel="Loading sources…"
+            failedTitle="Your sources could not be loaded"
+            size="panel"
+          />
+        ) : !hasAnyCodes && !hasAnySources ? (
           <p className="text-xs text-mm-text-faint text-center py-4">No codes or sources available.</p>
-        )}
+        ) : null}
       </div>
 
       {/* Footer */}

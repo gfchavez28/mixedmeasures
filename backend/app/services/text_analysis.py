@@ -13,6 +13,7 @@ from ..models.code import Code
 from ..models.text_coding_config import TextCodingConfig, is_empty_text, parse_treat_as_empty
 from ..routers.helpers import TEXT_TYPES
 from .coding_layers import LAYER_CONSENSUS, layer_origin_filter
+from .id_set import in_id_set
 
 
 def _validate_text_columns(
@@ -99,7 +100,7 @@ def substantive_text_clause(treat_as_empty: list[str]):
 def get_non_empty_comment_values(
     db: Session, column_ids: list[int], treat_as_empty: list[str],
     row_ids: list[int] | None = None,
-) -> list[DatasetValue]:
+) -> list:
     """Get substantive DatasetValues for text columns, optionally filtered by row IDs.
 
     `treat_as_empty` is required (#519): every text-analysis denominator must match
@@ -107,9 +108,19 @@ def get_non_empty_comment_values(
     strings ("N/A", …) — a NULL/''-only filter over-counted by the N/A values.
     This is the single place the "which texts count" decision lives; new
     text-analysis surfaces must route through it, never hand-roll the filter.
+
+    ⚠️ **Returns ROWS carrying `id`, `row_id`, `column_id` and `value_text` —
+    not ORM `DatasetValue` instances (#956).** Once the bind-parameter ceiling
+    stopped refusing these requests they ran to completion over every text of
+    the selection, and ORM identity-mapped instances were the measured memory:
+    #842 put them at ~3× a plain row. The four fields are everything a caller
+    reads; a new caller needing another column adds it here, never a second
+    query.
     """
     q = (
-        db.query(DatasetValue)
+        db.query(
+            DatasetValue.id, DatasetValue.row_id, DatasetValue.column_id, DatasetValue.value_text,
+        )
         .filter(
             DatasetValue.column_id.in_(column_ids),
             DatasetValue.value_text.isnot(None),
@@ -117,7 +128,9 @@ def get_non_empty_comment_values(
         )
     )
     if row_ids is not None:
-        q = q.filter(DatasetValue.row_id.in_(row_ids))
+        # #956: a subgroup filter's row set is every row of an unfiltered focal
+        # dataset, so it is dataset-scaled — never a bound list.
+        q = q.filter(in_id_set(DatasetValue.row_id, row_ids))
     return [v for v in q.all() if not is_empty_text(v.value_text, treat_as_empty)]
 
 
@@ -186,7 +199,7 @@ def compute_comment_frequencies(
     # are two rows and would otherwise push the percentage past 100%.
     code_counts_q = (
         db.query(CodeApplication.code_id, func.count(func.distinct(CodeApplication.dataset_value_id)))
-        .filter(CodeApplication.dataset_value_id.in_(value_ids), layer_origin_filter(layer_scope))
+        .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_origin_filter(layer_scope))
     )
     if coder_ids and layer_scope != LAYER_CONSENSUS:
         code_counts_q = code_counts_q.filter(CodeApplication.user_id.in_(coder_ids))

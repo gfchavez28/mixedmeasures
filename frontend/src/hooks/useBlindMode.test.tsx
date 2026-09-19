@@ -21,9 +21,21 @@ import { isCoderVisible } from '@/lib/coder-color'
 const setRoster = (multiCoder: boolean, selfId: number | null = 1) => {
   (useAuth as unknown as Mock).mockReturnValue({ user: selfId == null ? null : { id: selfId } })
   ;(useCoders as unknown as Mock).mockReturnValue({
-    coders: [{ id: 1, username: 'Me' }, { id: 2, username: 'Alice' }, { id: 3, username: 'Bob' }],
+    coders: multiCoder
+      ? [{ id: 1, username: 'Me' }, { id: 2, username: 'Alice' }, { id: 3, username: 'Bob' }]
+      : [{ id: 1, username: 'Me' }],
     coderMap: new Map(),
     multiCoder,
+    status: 'ready',
+  })
+}
+
+/** #964 — the roster has not ANSWERED: `useCoders` then reports no coders and
+ * `multiCoder: false`, exactly the shape a one-person roster has. */
+const setUnansweredRoster = (status: 'loading' | 'failed', selfId: number | null = 1) => {
+  (useAuth as unknown as Mock).mockReturnValue({ user: selfId == null ? null : { id: selfId } })
+  ;(useCoders as unknown as Mock).mockReturnValue({
+    coders: [], coderMap: new Map(), multiCoder: false, status,
   })
 }
 
@@ -50,24 +62,76 @@ describe('useBlindMode', () => {
     setRoster(true, 1)
     const { result } = renderHook(() => useBlindMode(99))
     expect(result.current.blind).toBe(true)
-    expect([...result.current.blindHiddenSet].sort()).toEqual([2, 3]) // all-but-self
+    expect(result.current.withholding).toBe(true)
+    expect(result.current.settled).toBe(true)
+    expect([...(result.current.blindLens as Set<number>)].sort()).toEqual([2, 3]) // all-but-self
   })
 
   it('the all-but-self set hides colleagues but never self or unattributed (the no-leak lens)', () => {
     setRoster(true, 1)
     const { result } = renderHook(() => useBlindMode(99))
-    const hidden = result.current.blindHiddenSet
+    const hidden = result.current.blindLens
     expect(isCoderVisible(2, hidden)).toBe(false) // Alice hidden
     expect(isCoderVisible(3, hidden)).toBe(false) // Bob hidden
     expect(isCoderVisible(1, hidden)).toBe(true)  // self always shown
     expect(isCoderVisible(null, hidden)).toBe(true) // unattributed always shown
   })
 
-  it('is never blind for a single-coder project', () => {
+  it('is never blind — and withholds nothing — once a single-coder roster has ANSWERED', () => {
     setRoster(false, 1)
     const { result } = renderHook(() => useBlindMode(99))
     expect(result.current.blind).toBe(false)
-    expect(result.current.blindHiddenSet.size).toBe(0)
+    expect(result.current.withholding).toBe(false)
+    expect(result.current.settled).toBe(true)
+  })
+
+  describe('#964 — an unanswered roster fails CLOSED', () => {
+    it.each(['loading', 'failed'] as const)(
+      'while the roster is %s: withholds, claims nothing, and hides every colleague WITHOUT knowing who they are',
+      (status) => {
+        setUnansweredRoster(status, 1)
+        const { result } = renderHook(() => useBlindMode(99))
+        // The claim waits: no surface may say "blind mode is on" yet.
+        expect(result.current.blind).toBe(false)
+        expect(result.current.settled).toBe(false)
+        // The act does not wait.
+        expect(result.current.withholding).toBe(true)
+        const lens = result.current.blindLens
+        expect(isCoderVisible(1, lens)).toBe(true)      // self
+        expect(isCoderVisible(null, lens)).toBe(true)   // unattributed
+        // Ids the (empty) roster never named — the case a hide set cannot express.
+        expect(isCoderVisible(2, lens)).toBe(false)
+        expect(isCoderVisible(4242, lens)).toBe(false)
+      },
+    )
+
+    it('a coder who revealed is not withheld while the roster loads, and the state is settled', () => {
+      localStorage.setItem('mm-blind-revealed-99-1', '1')
+      setUnansweredRoster('loading', 1)
+      const { result } = renderHook(() => useBlindMode(99))
+      expect(result.current.withholding).toBe(false)
+      expect(result.current.blind).toBe(false)
+      expect(result.current.settled).toBe(true)
+    })
+
+    it('with no active coder the unanswered-roster lens hides every attributed coding', () => {
+      setUnansweredRoster('loading', null)
+      const { result } = renderHook(() => useBlindMode(99))
+      expect(isCoderVisible(1, result.current.blindLens)).toBe(false)
+      expect(isCoderVisible(null, result.current.blindLens)).toBe(true)
+    })
+
+    it('switches to the roster-derived set when the roster answers, keeping its identity stable between', () => {
+      setUnansweredRoster('loading', 1)
+      const { result, rerender } = renderHook(() => useBlindMode(99))
+      const first = result.current.blindLens
+      rerender()
+      expect(result.current.blindLens).toBe(first) // memoized — rows compare by identity
+      setRoster(true, 1)
+      rerender()
+      expect(result.current.blind).toBe(true)
+      expect([...(result.current.blindLens as Set<number>)].sort()).toEqual([2, 3])
+    })
   })
 
   it('toggleReveal un-blinds, persists the override, and logs the reveal', () => {
@@ -99,11 +163,11 @@ describe('useBlindMode', () => {
   it('recenters the hidden set + re-blinds when the active coder switches', () => {
     setRoster(true, 1)
     const { result, rerender } = renderHook(() => useBlindMode(99))
-    expect([...result.current.blindHiddenSet].sort()).toEqual([2, 3])
+    expect([...(result.current.blindLens as Set<number>)].sort()).toEqual([2, 3])
     setRoster(true, 2) // coder switched to id 2 (no reveal flag for coder 2)
     rerender()
     expect(result.current.blind).toBe(true)
-    expect([...result.current.blindHiddenSet].sort()).toEqual([1, 3]) // all-but-self=2
+    expect([...(result.current.blindLens as Set<number>)].sort()).toEqual([1, 3]) // all-but-self=2
   })
 
   it('logs the reveal exactly ONCE under StrictMode (side effects are outside the setState updater)', () => {

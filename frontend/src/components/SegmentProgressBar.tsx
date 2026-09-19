@@ -2,11 +2,12 @@ import { useMemo } from 'react'
 import { type Segment } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { isSegmentCodedVisible } from '@/lib/coding-progress'
+import type { CoderLens } from '@/lib/coder-color'
 
 interface SegmentProgressBarProps {
   segments: Segment[]
-  /** coder ids hidden by the per-coder filter — bar/count reflect only visible coders. */
-  hiddenCoderIds?: Set<number>
+  /** the per-coder lens (filter or blind mode) — bar/count reflect only visible coders. */
+  hiddenCoderIds?: CoderLens
   className?: string
 }
 
@@ -54,24 +55,33 @@ export default function SegmentProgressBar({
     }
   }, [participantSegments, hiddenCoderIds])
 
-  // Also calculate overall stats for debugging/verification
-  const codedCount = participantSegments.filter(s => isSegmentCodedVisible(s.applied_code_details, hiddenCoderIds)).length
-  const totalCount = participantSegments.length
-
   return (
     <div
       className={cn("h-2 rounded overflow-hidden", className)}
       style={gradientStyle}
-      title={`${codedCount} of ${totalCount} participant segments coded (facilitator excluded)`}
-      /* #351/#352: explicit progressbar semantics + valuetext so screen
-       * readers get the full count + the facilitator-excluded context
-       * without depending on the title attribute (which is sighted-only). */
-      role="progressbar"
-      aria-label="Coding progress"
-      aria-valuenow={codedCount}
-      aria-valuemin={0}
-      aria-valuemax={totalCount}
-      aria-valuetext={`${codedCount} of ${totalCount} participant segments coded`}
+      /**
+       * 🔴 **DECORATIVE, and that is a correction (#963 Tier 2, 2026-09-18).**
+       *
+       * #351/#352 gave this bar its own `role="progressbar"` +
+       * `aria-label="Coding progress"` + `aria-valuetext`. Track J · J1 3c then
+       * wrapped it in a toolbar region carrying **the same role and the same
+       * name**, so the workbench shipped TWO nested progressbars both called
+       * *"Coding progress"*, both stating the same count — found by a new guard
+       * failing with *"Found multiple elements with the role progressbar and
+       * name Coding progress"*, never by reading either file.
+       *
+       * The outer one wins, for a reason beyond being outermost: ARIA gives
+       * `progressbar` PRESENTATIONAL CHILDREN, so a conforming reader prunes
+       * this one anyway — and the outer `aria-valuetext` is the only one that
+       * carries the blind-scope qualifier (*"(colleagues hidden)"*, #503/#517).
+       * Where the two could disagree, the one that would survive is the one
+       * that says less. A gauge's VISUAL half does not need its own semantics.
+       *
+       * ⚠️ The `title` went with the role: the sibling text says the count and
+       * the region's own `title` carries the facilitator/blind context, so a
+       * second tooltip over the same number was two things to read.
+       */
+      aria-hidden="true"
     />
   )
 }

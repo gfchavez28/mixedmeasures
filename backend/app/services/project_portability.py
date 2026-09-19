@@ -31,6 +31,7 @@ from .archive_safety import assert_expanded_size_within_limit, assert_member_wit
 from .dataset_rows import materialise_manual_cells  # #897
 from .participant_dataset import MANAGED_COLUMN_SOURCE  # #921
 from .participant_scores import build_managed_spec, parse_managed_spec  # #922
+from .safety_copies import safety_copy_filename, write_safety_copy  # #919
 from .text_offsets import has_astral, utf16_to_codepoint
 from .text_similarity import similarity_ratio
 from .media_duration import MAX_MEDIA_OFFSET_SECONDS, sane_duration
@@ -1352,14 +1353,17 @@ def _safety_export_before_overwrite(
     `test_trackj_j3_roundtrip.py` scans this file's `report[...]` keys against the
     `MergeReport` schema. Two out-params one substring apart is how a scan starts
     reporting one as the other.
+
+    🔴 **Naming and writing belong to `services/safety_copies.py` (#919)** — the module
+    the Settings list reads — so the list cannot miss a copy this function writes.
+    The name is decided BEFORE the `try`: an unknown prefix is a programming error, and
+    inside the `try` it would reach the researcher as "Could not create a safety backup".
+    The write is atomic and never replaces an existing copy (see `write_safety_copy`).
     """
+    filename = safety_copy_filename(prefix, target.id, datetime.now(timezone.utc))
     try:
         buf = export_project(db, target.id, docs_dir, media_dir)
-        backup_dir = get_backup_dir()
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        path = backup_dir / f"{prefix}_{target.id}_{ts}.mmproject"
-        path.write_bytes(buf.getvalue())
+        path = write_safety_copy(get_backup_dir(), filename, buf)
         if safety_report is not None:
             safety_report["filename"] = path.name
         return path

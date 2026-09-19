@@ -11,6 +11,7 @@
  */
 
 import { ApiError } from './api/client'
+import { isRequestTimeout } from './api/error-utils'
 
 /**
  * 4 GB — mirrors backend `MAX_MEDIA_SIZE` (routers/media.py). The streaming
@@ -121,8 +122,7 @@ export function describeMediaUploadError(err: unknown): string {
     }
   }
   // Non-ApiError: a timeout abort or a network reject (a raw browser string).
-  const name = (err as { name?: string } | null)?.name
-  if (name === 'TimeoutError' || name === 'AbortError') {
+  if (isRequestTimeout(err)) {
     return 'The upload timed out. Check your connection and try again, or attach the recording later from the workbench.'
   }
   const msg = err instanceof Error ? err.message : ''

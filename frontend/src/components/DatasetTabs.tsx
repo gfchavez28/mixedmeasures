@@ -40,6 +40,14 @@ import { SELECTION_TEXT_FLOOR } from '@/lib/selection'
  * Passed in rather than fetched: both callers already hold their columns query,
  * and a second fetch here would be a third consumer of a payload two components
  * already have.
+ *
+ * 🔴 **`variableCount` is REQUIRED, and `undefined` is a value it takes (#963
+ * Tier 2).** It was optional, documented as *"omitted while the columns query
+ * is loading"* — and NEITHER caller omitted it: both passed `columns.length`
+ * unconditionally, so the strip read *"Variables 0"* over a list still in
+ * flight. A contract stated only in a doc comment is a contract nobody has to
+ * meet; a required prop makes the compiler name the call sites, which is what
+ * Tier 1 learned from `CreatableComboList`.
  */
 export default function DatasetTabs({
   projectId,
@@ -48,8 +56,10 @@ export default function DatasetTabs({
 }: {
   projectId: number | string
   datasetId: number | string
-  /** Variables in this dataset; omitted while the columns query is loading. */
-  variableCount?: number
+  /** Variables in this dataset, or `undefined` while the list is unanswered —
+   *  the badge is then absent, which makes no claim, where "0" makes a false
+   *  one. Required: the caller has to decide. */
+  variableCount: number | undefined
 }) {
   const { pathname } = useLocation()
   // The Variables view owns exactly one path; anything else under this dataset

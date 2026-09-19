@@ -4,6 +4,7 @@ import { SELECTED_TINT } from '@/lib/selection'
 import { optionPositionAria } from '@/lib/listbox-aria'
 import { Quote, Paperclip, Check } from 'lucide-react'
 import { type Segment, type SegmentExcerptInfo, type Code, type Coder, type Speaker, segmentsApi, speakersApi } from '@/lib/api'
+import type { ListStatus } from '@/lib/list-status'
 import { isWholeExcerpt } from '@/lib/excerpt-shape'
 import InlineCodeActions from '@/components/qualitative-analysis/InlineCodeActions'
 import { highlightText } from '@/components/qualitative-analysis/highlight-text'
@@ -12,6 +13,7 @@ import { formatTimestamp, cn, getCodeColor, getContrastColor, hexToRowBg, hexToR
 import { useTheme } from '@/lib/theme-context'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import { isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
+import type { CoderLens } from '@/lib/coder-color'
 import type { FloatingCoords } from '@/lib/floating-utils'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import {
@@ -150,6 +152,8 @@ interface SegmentRowProps {
   showCodes?: boolean
   projectId?: number
   allCodes?: Code[]
+  /** #961 — whether `allCodes` is an answer; the add-code popover reads it. */
+  codesStatus: ListStatus
   codeMap?: Map<number, Code>
   onCodeChange?: () => void
   /** Clicking an applied-code chip pivots to that code in the codes panel (#422a). */
@@ -166,7 +170,7 @@ interface SegmentRowProps {
   /** Track J · J1: user_id → Coder lens for attribution badges (only set in multi-coder mode). */
   coderMap?: Map<number, Coder>
   /** Track J · J1: coder ids hidden by the visibility filter (chips by these coders are hidden). */
-  hiddenCoderIds?: Set<number>
+  hiddenCoderIds?: CoderLens
   /** Track J · J1: the active coder, so the context-menu "applied" check is per-me (#446). */
   activeCoderId?: number | null
 }
@@ -215,6 +219,7 @@ function SegmentRow({
   showCodes = true,
   projectId,
   allCodes,
+  codesStatus,
   codeMap,
   onCodeChange,
   onFocusCode,
@@ -666,6 +671,7 @@ function SegmentRow({
                     appliedCodeIds={segment.applied_codes}
                     codeMap={codeMap}
                     allCodes={allCodes}
+                    codesStatus={codesStatus}
                     onCodeChange={onCodeChange}
                     onFocusCode={onFocusCode}
                     coderMap={coderMap}
@@ -1059,6 +1065,9 @@ export default React.memo(SegmentRow, (prevProps, nextProps) => {
     prevProps.showNotes === nextProps.showNotes &&
     prevProps.showCodes === nextProps.showCodes &&
     prevProps.allCodes === nextProps.allCodes &&
+    // #961 — `allCodes` keeps ONE memoised `[]` from loading through a failure,
+    // so the status is the only prop that says the list changed state.
+    prevProps.codesStatus === nextProps.codesStatus &&
     prevProps.codeMap === nextProps.codeMap &&
     prevProps.onCodeChange === nextProps.onCodeChange &&
     prevProps.onFocusCode === nextProps.onFocusCode &&

@@ -84,12 +84,12 @@ def test_filtered_frequencies_distinct_and_excludes_consensus(db_session):
     pid = _setup(db)
     user = db.get(User, 1)
 
-    default = _run(filtered_frequencies(
-        project_id=pid, body=FilteredFrequenciesRequest(column_ids=[COMMENT_COL]), db=db, user=user))
-    consensus = _run(filtered_frequencies(
+    default = filtered_frequencies(
+        project_id=pid, body=FilteredFrequenciesRequest(column_ids=[COMMENT_COL]), db=db, user=user)
+    consensus = filtered_frequencies(
         project_id=pid,
         body=FilteredFrequenciesRequest(column_ids=[COMMENT_COL], layer_scope=LAYER_CONSENSUS),
-        db=db, user=user))
+        db=db, user=user)
 
     # 2 DISTINCT coded comments, not 3 raw rows and NOT 4 with the consensus row.
     assert _freq(default, CODE_X).count == 2
@@ -102,12 +102,12 @@ def test_code_density_distinct_and_excludes_consensus(db_session):
     pid = _setup(db)
     user = db.get(User, 1)
 
-    default = _run(code_density(project_id=pid, column_ids=str(COMMENT_COL),
-                                group_by_column_id=None, coder_ids=None, layer_scope=None,
-                                db=db, user=user))
-    consensus = _run(code_density(project_id=pid, column_ids=str(COMMENT_COL),
-                                  group_by_column_id=None, coder_ids=None, layer_scope=LAYER_CONSENSUS,
-                                  db=db, user=user))
+    default = code_density(project_id=pid, column_ids=str(COMMENT_COL),
+                           group_by_column_id=None, coder_ids=None, layer_scope=None,
+                           db=db, user=user)
+    consensus = code_density(project_id=pid, column_ids=str(COMMENT_COL),
+                             group_by_column_id=None, coder_ids=None, layer_scope=LAYER_CONSENSUS,
+                             db=db, user=user)
 
     # 1 distinct code on each of 2 comments → 1.0 (raw-count bug gave (3+1)/2 = 2.0).
     assert default.overall.avg_codes_per_text == 1.0
@@ -121,15 +121,15 @@ def test_cross_tabulation_excludes_consensus(db_session):
     pid = _setup(db)
     user = db.get(User, 1)
 
-    default = _run(cross_tabulation(
+    default = cross_tabulation(
         project_id=pid,
         body=CrossTabulationRequest(text_column_ids=[COMMENT_COL], cross_column_id=CROSS_COL),
-        db=db, user=user))
-    consensus = _run(cross_tabulation(
+        db=db, user=user)
+    consensus = cross_tabulation(
         project_id=pid,
         body=CrossTabulationRequest(text_column_ids=[COMMENT_COL], cross_column_id=CROSS_COL,
                                     layer_scope=LAYER_CONSENSUS),
-        db=db, user=user))
+        db=db, user=user)
 
     assert default.total_coded_texts == 2, "both comments coded in the human layer"
     assert consensus.total_coded_texts == 1, "only V1 in the consensus layer"
@@ -140,10 +140,10 @@ def test_response_length_excludes_consensus(db_session):
     pid = _setup(db)
     user = db.get(User, 1)
 
-    default = _run(response_length_by_code(project_id=pid, column_ids=str(COMMENT_COL),
-                                           coder_ids=None, layer_scope=None, db=db, user=user))
-    consensus = _run(response_length_by_code(project_id=pid, column_ids=str(COMMENT_COL),
-                                             coder_ids=None, layer_scope=LAYER_CONSENSUS, db=db, user=user))
+    default = response_length_by_code(project_id=pid, column_ids=str(COMMENT_COL),
+                                      coder_ids=None, layer_scope=None, db=db, user=user)
+    consensus = response_length_by_code(project_id=pid, column_ids=str(COMMENT_COL),
+                                        coder_ids=None, layer_scope=LAYER_CONSENSUS, db=db, user=user)
 
     default_x = {c.code_id: c for c in default.codes}[CODE_X]
     consensus_x = {c.code_id: c for c in consensus.codes}[CODE_X]
@@ -163,12 +163,12 @@ def test_export_excludes_consensus_and_reflects_layer(db_session):
     pid = _setup(db)
     user = db.get(User, 1)
 
-    human = _run(export_cross_analysis(project_id=pid, column_ids=str(COMMENT_COL),
-                                       filters_json="[]",
-                                       coder_ids=None, layer_scope=None, db=db, user=user))
-    consensus = _run(export_cross_analysis(project_id=pid, column_ids=str(COMMENT_COL),
-                                           filters_json="[]",
-                                           coder_ids=None, layer_scope=LAYER_CONSENSUS, db=db, user=user))
+    human = export_cross_analysis(project_id=pid, column_ids=str(COMMENT_COL),
+                                  filters_json="[]",
+                                  coder_ids=None, layer_scope=None, db=db, user=user)
+    consensus = export_cross_analysis(project_id=pid, column_ids=str(COMMENT_COL),
+                                      filters_json="[]",
+                                      coder_ids=None, layer_scope=LAYER_CONSENSUS, db=db, user=user)
     human_body = _run(_csv_body(human))
     consensus_body = _run(_csv_body(consensus))
 

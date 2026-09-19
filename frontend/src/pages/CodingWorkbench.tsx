@@ -18,6 +18,7 @@ import {
   type Segment,
   type Code,
   mediaApi,
+  retryUnanswered,
 } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -43,11 +44,13 @@ import { codeKeyHint } from '@/lib/codeShortcuts'
 import { useCoders } from '@/hooks/useCoders'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { isSegmentCodedVisible, computeCoverage, isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
+import { lensHidesAnyCoder } from '@/lib/coder-color'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import { describeQuoteNotesStayed } from '@/lib/split-disclosure'
 import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
 import { useAuth } from '@/lib/auth-context'
 import CodePanel, { type CodePanelHandle } from '@/components/CodePanel'
+import { useListLoad } from '@/hooks/useListLoad'
 import CollapsiblePanel from '@/components/CollapsiblePanel'
 import NotesPanel, { type NotesPanelHandle } from '@/components/NotesPanel'
 import MemoPanel, { type MemoPanelHandle } from '@/components/MemoPanel'
@@ -82,8 +85,10 @@ export default function CodingWorkbench() {
   // Blind mode (Track J · J2-5, DEC-G): while blind, force the per-coder lens to
   // all-but-self so colleagues' codes/coverage are hidden. effectiveHidden feeds
   // every consumer; the manual filter (hiddenCoders) is suppressed while blind.
-  const { blind, blindHiddenSet, toggleReveal } = useBlindMode(pid)
-  const effectiveHidden = blind ? blindHiddenSet : hiddenCoders
+  // #964: the lens keys on `withholding` (fail-closed while the roster is
+  // unanswered); the wording below keys on `blind` (only once it is known).
+  const { blind, withholding, blindLens, toggleReveal } = useBlindMode(pid)
+  const effectiveHidden = withholding ? blindLens : hiddenCoders
   // Group A (#457): who coded THIS conversation — drives the picklist "active here" markers.
   const coderCoverage = useCoderCoverage(
     pid, { conversationId: cid }, { enabled: multiCoder, rosterCoderIds: coders.map(c => c.id) },
@@ -238,24 +243,54 @@ export default function CodingWorkbench() {
     if (conversation?.name) setBreadcrumbLabel(conversation.name)
   }, [conversation?.name, setBreadcrumbLabel])
 
-  const { data: segmentsData } = useQuery({
+  const segmentsQuery = useQuery({
     queryKey: ['segments', cid],
     queryFn: () => segmentsApi.list(cid),
     enabled: !!cid,
+    // #961's rule for a list that feeds a load state: a second silent ask only
+    // doubles the wait before the failure notice, when the server already
+    // answered. Measured: the client-wide `retry: 1` made this two requests.
+    retry: retryUnanswered,
   })
+  const segmentsData = segmentsQuery.data
+  /**
+   * #963 Tier 2 — whether the transcript is an ANSWER.
+   *
+   * The page gate above covers the project and the conversation, never the
+   * segments, so everything derived from `allSegments` spoke for an empty array
+   * while they loaded. MEASURED (dev corpus, conversation 9, `/segments` held
+   * back 25 s by an in-page wrapper): the gauge announced
+   * `aria-valuenow=0` / `aria-valuemax=0` / *"0 of 0 participant segments
+   * coded"* and the transcript read *"No segments found"*; with the request
+   * failed instead, both said the same thing PERMANENTLY.
+   */
+  const segmentsLoad = useListLoad(segmentsQuery)
+  const segmentsKnown = segmentsLoad.status === 'ready'
 
-  const { data: codesData } = useQuery({
+  const codesQuery = useQuery({
     queryKey: ['codes', pid],
     queryFn: () => codesApi.list(pid),
     enabled: !!pid,
   })
+  const codesData = codesQuery.data
+  /** #961 — `codes` is `[]` before the list answers; the code panel's empty
+   * state and its duplicate-name check must not read that as "no codes". */
+  const codesLoad = useListLoad(codesQuery)
 
-  const { data: categoriesData } = useQuery({
+  const categoriesQuery = useQuery({
     queryKey: ['categories', pid],
     queryFn: () => categoriesApi.list(pid),
     enabled: !!pid,
+    retry: retryUnanswered,
   })
+  const categoriesData = categoriesQuery.data
   const categories = categoriesData?.categories || []
+  /**
+   * #963 — whether the category list is an ANSWER. `FloatingCreateCode`'s
+   * picker creates a category from a typed name, and `create_category` refuses
+   * no duplicate, so the list is the only duplicate guard there is.
+   */
+  const categoriesLoad = useListLoad(categoriesQuery)
 
   const { data: conversationsData } = useQuery({
     queryKey: ['conversations', pid],
@@ -1866,36 +1901,55 @@ export default function CodingWorkbench() {
           * segments not counting is no surprise to the analyst). Computed
           * client-side (Track J · J1 item 3c) so it reflects the per-coder
           * filter; the count/bar/% all read `codedVisible`. */}
+        {/* #963 Tier 2 — the gauge measures the transcript, so it says NOTHING
+          * until the transcript is an answer. `ObservationWorkbench`'s shape,
+          * for its reason: with no list in hand the region carries no
+          * progressbar semantics AT ALL rather than announcing a fake 0% over
+          * an `aria-valuemax` of 0, which is a degenerate range as well as a
+          * false one.
+          * ⚠️ While merely LOADING this slot is silent: `TranscriptPanel`
+          * below already mounts a `role="status"` line reading "Loading
+          * segments…", and a second copy is a duplicate on screen and a second
+          * announcement. A FAILURE does get a word here, because the gauge slot
+          * would otherwise sit blank beside a transcript-shaped hole. */}
         <div
           className="flex items-center gap-2"
-          role="progressbar"
-          aria-label="Coding progress"
-          aria-valuenow={coverage.codedVisible}
-          aria-valuemin={0}
-          aria-valuemax={coverage.total}
-          aria-valuetext={
-            blind
-              // #503: not "by you" — archived colleagues' codings still count
-              // in gauges under blind (#451 CHIPS-ONLY rule + DEC-G roster-
-              // derived hidden set), so the value can exceed your own work.
-              ? `${coverage.codedVisible} of ${coverage.total} participant segments coded (colleagues hidden)`
-              : effectiveHidden.size > 0
-                ? `${coverage.codedVisible} of ${coverage.total} participant segments coded by visible coders`
-                : `${coverage.codedVisible} of ${coverage.total} participant segments coded`
-          }
+          {...(segmentsKnown
+            ? {
+                role: 'progressbar' as const,
+                'aria-label': 'Coding progress',
+                'aria-valuenow': coverage.codedVisible,
+                'aria-valuemin': 0,
+                'aria-valuemax': coverage.total,
+                'aria-valuetext': blind
+                  // #503: not "by you" — archived colleagues' codings still count
+                  // in gauges under blind (#451 CHIPS-ONLY rule + DEC-G roster-
+                  // derived hidden set), so the value can exceed your own work.
+                  ? `${coverage.codedVisible} of ${coverage.total} participant segments coded (colleagues hidden)`
+                  : lensHidesAnyCoder(effectiveHidden)
+                    ? `${coverage.codedVisible} of ${coverage.total} participant segments coded by visible coders`
+                    : `${coverage.codedVisible} of ${coverage.total} participant segments coded`,
+              }
+            : {})}
         >
-          <span
-            className="text-sm text-mm-text-secondary font-mono tabular-nums"
-            title={blind
-              // #517: the conversations list shows ALL-coder coverage, so while
-              // blind the two numbers legitimately disagree — say so at the gauge.
-              ? "Colleagues' coding is hidden (blind coding) — this count reflects only coding visible to you. The conversations list and Overview show all coders' coverage. Facilitator segments are excluded."
-              : 'Facilitator segments are excluded from coding progress.'}
-          >
-            {coverage.codedVisible}/{coverage.total} participant segments coded
-          </span>
-          <SegmentProgressBar segments={allSegments} hiddenCoderIds={effectiveHidden} className="w-32" />
-          <span className="text-sm font-medium font-mono tabular-nums">{progress}%</span>
+          {segmentsKnown ? (
+            <>
+              <span
+                className="text-sm text-mm-text-secondary font-mono tabular-nums"
+                title={blind
+                  // #517: the conversations list shows ALL-coder coverage, so while
+                  // blind the two numbers legitimately disagree — say so at the gauge.
+                  ? "Colleagues' coding is hidden (blind coding) — this count reflects only coding visible to you. The conversations list and Overview show all coders' coverage. Facilitator segments are excluded."
+                  : 'Facilitator segments are excluded from coding progress.'}
+              >
+                {coverage.codedVisible}/{coverage.total} participant segments coded
+              </span>
+              <SegmentProgressBar segments={allSegments} hiddenCoderIds={effectiveHidden} className="w-32" />
+              <span className="text-sm font-medium font-mono tabular-nums">{progress}%</span>
+            </>
+          ) : segmentsLoad.status === 'failed' ? (
+            <span className="text-sm text-mm-text-faint">Coding progress unavailable</span>
+          ) : null}
         </div>
 
         {multiCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="workbench" />}
@@ -1945,6 +1999,7 @@ export default function CodingWorkbench() {
             onSelectionChange={setSelectedSegments}
             conversationId={cid}
             codes={codes}
+            segmentsLoad={segmentsLoad}
             uniqueSpeakers={uniqueSpeakers}
             speakerFilter={speakerFilter}
             onSpeakerFilterChange={setSpeakerFilter}
@@ -1978,6 +2033,7 @@ export default function CodingWorkbench() {
             showCodes={columnVisibility.codes}
             projectId={pid}
             allCodes={codes}
+            codesStatus={codesLoad.status}
             codeMap={codeMap}
             onCodeChange={handleInlineCodeChange}
             onFocusCode={handleFocusCode}
@@ -1992,9 +2048,11 @@ export default function CodingWorkbench() {
             onCoderFilterChange={setHiddenCoders}
             coderActiveIds={coderCoverage.isLoaded ? coderCoverage.activeCoderIds : undefined}
             coderExtra={coderCoverage.extraCoders}
-            coderShowArchived={showArchivedCoders}
+            // #964: "View all — N archived" is a coder-filter choice; it must not
+            // bring an archived colleague's chips back after re-blinding.
+            coderShowArchived={showArchivedCoders && !withholding}
             onCoderShowArchivedChange={setShowArchivedCoders}
-            hideCoderFilter={blind}
+            hideCoderFilter={withholding}
             scrubberPortalRef={scrubberSlotRef}
             conversation={conversation}
             playbackRef={playbackRef}
@@ -2086,9 +2144,14 @@ export default function CodingWorkbench() {
             className={panelStates.codes.collapsed ? '' : 'flex-[2] min-h-0'}
             headerExtra={
               <span className="flex items-center gap-1.5">
+                {/* #963 — nothing to jump to until the transcript answers, and
+                  * a control that cannot act must not be a control (#933). The
+                  * TRANSIENT arm of `lib/mode-disabled.ts`: native `disabled`,
+                  * earning no tab stop, because the state resolves itself. */}
                 <button
                   onClick={(e) => { e.stopPropagation(); handleJumpToNextUncoded() }}
-                  className="text-[10px] text-mm-text-muted hover:text-mm-text-secondary transition-colors"
+                  disabled={!segmentsKnown}
+                  className="text-[10px] text-mm-text-muted hover:text-mm-text-secondary transition-colors disabled:opacity-50"
                 >
                   Jump to uncoded ⏭
                 </button>
@@ -2107,6 +2170,7 @@ export default function CodingWorkbench() {
               <CodePanel
                 ref={codePanelRef}
                 codes={codes}
+                codesLoad={codesLoad}
                 projectId={pid}
                 selectedCodesMap={selectedCodesMap}
                 onCodeToggle={handleCodeToggle}
@@ -2199,6 +2263,7 @@ export default function CodingWorkbench() {
       {/* Floating create code dialog */}
       {createCodeDialog && (
         <FloatingCreateCode
+          categoriesLoad={categoriesLoad}
           position={createCodeDialog.position}
           projectId={pid}
           initialName={createCodeDialog.initialName}

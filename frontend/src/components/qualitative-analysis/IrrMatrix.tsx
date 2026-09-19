@@ -1,9 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { CircleCheck, CircleAlert, CircleX, Loader2 } from 'lucide-react'
+import { CircleCheck, CircleAlert, CircleX } from 'lucide-react'
 import {
-  codeAnalysisApi, type Code, type IrrCodeResult, type IrrMagnitudeResult, type IrrThresholds,
+  codeAnalysisApi, EXPORT_TIMEOUT_MS, isRequestTimeout, isServerRefusal, retryUnanswered,
+  serverDetailMessage, type Code, type IrrCodeResult, type IrrMagnitudeResult, type IrrThresholds,
 } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { LoadingNotice } from '@/components/LoadStatus'
 import { cn } from '@/lib/utils'
 import { describeUndefined, undefinedTooltip } from '@/lib/stat-format'
 import { ciCaveat, ciQualifier, ciUnavailableNote } from '@/lib/ci-label'
@@ -196,6 +199,11 @@ function BandValue({ value, band, reason, ci, thresholds }: {
   )
 }
 
+// #957 — the loading state. Pooled reliability measured 46 s on a large coded
+// project; a bare spinner for that long reads as a hang. The line and its
+// slow-load hint are `LoadingNotice` since #961, which needed the same thing on
+// four more surfaces — one wording, one delay.
+
 export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
   // IRR is ALWAYS all-roster — never pass coder_ids (the CoderFilterPopover is a
   // visibility filter, not a "compare these raters" selector). See the build scope.
@@ -207,31 +215,100 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
   // serves the previous source's numbers from cache (#454's class).
   const [source, setSource] = useState<string | null>(null)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, isFetching, refetch, dataUpdatedAt, errorUpdatedAt } = useQuery({
     queryKey: ['irr', projectId, null, source],
     queryFn: () => codeAnalysisApi.irr(projectId, source ? { source } : undefined),
     enabled: !!projectId,
     staleTime: 5 * 60_000, // IRR is O(units×codes), uncached server-side, rarely changes
     refetchOnWindowFocus: false,
+    // #957 — the client default retries every failure once. Here that ran the
+    // heaviest read on the tab TWICE on the server (a timed-out request keeps
+    // computing), and repeated a deterministic 500 for the same result.
+    retry: retryUnanswered,
   })
+
+  // #957 — where focus goes after Retry (#955 b: a focused control that
+  // unmounts needs a destination). The press unmounts the button AT ONCE: with
+  // no data cached, React Query v5 resets an errored query to `pending` when it
+  // refetches, so the loading line replaces the error panel. Every branch below
+  // hangs `landingRef` on its own landing — the loading line while the retry
+  // runs, then the headline, the unavailable reason, or the failure message.
+  // Armed ONLY by the press, so a first load never pulls focus into the page;
+  // moves focus only when it was lost, or when it is still on the Retry button
+  // once the retry settles — a failure fast enough to batch `pending` and the
+  // new error into one render never unmounts the button, and an identical
+  // message beside a still-focused button says nothing happened. Anyone who
+  // has moved elsewhere in the meantime keeps their place.
+  //
+  // ⚠️ Keyed on the UPDATE TIMESTAMPS: in that batched case `isFetching`,
+  // `isError` and `data` all read the same before and after, so an effect keyed
+  // on them never runs and the press stays armed.
+  const retryPressedRef = useRef(false)
+  const retryButtonRef = useRef<HTMLButtonElement>(null)
+  const landingRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!retryPressedRef.current) return
+    const active = document.activeElement
+    const settled = !isFetching
+    // A removed element is "lost" whether or not the browser has already moved
+    // `activeElement` to <body> (Chrome does; not every DOM implementation does).
+    const lost = active == null || active === document.body || !active.isConnected
+    if (lost || (settled && active === retryButtonRef.current)) landingRef.current?.focus()
+    if (settled) retryPressedRef.current = false
+  }, [isFetching, dataUpdatedAt, errorUpdatedAt])
 
   const colorMap = useMemo(
     () => new Map((codes ?? []).map(c => [c.id, c.color])),
     [codes],
   )
 
-  if (isLoading) {
+  if (isLoading) return <LoadingNotice ref={landingRef} label="Computing reliability…" />
+
+  // #957 — a failed REQUEST is not an unavailable STATISTIC. Before this branch
+  // both fell through to `!data?.available` and a timeout rendered "Reliability
+  // is unavailable for this project." — a claim about the data, made when the
+  // client had simply stopped waiting for an answer that was on its way.
+  if (isError) {
+    const timedOut = isRequestTimeout(error)
     return (
-      <div className="flex items-center gap-2 text-mm-text-muted py-16 justify-center">
-        <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
-        <span>Computing reliability…</span>
+      <div className="flex flex-col items-center gap-3 py-16 text-center">
+        <div ref={landingRef} tabIndex={-1} role="alert" className="flex flex-col gap-1 max-w-prose outline-none">
+          <p className="text-mm-text">
+            {timedOut
+              ? `Reliability took longer than ${Math.round(EXPORT_TIMEOUT_MS / 60_000)} minutes to compute.`
+              : 'Reliability could not be computed.'}
+          </p>
+          <p className="text-sm text-mm-text-muted">
+            {timedOut
+              // No "try again": a retry gets the same budget and stops in the
+              // same place (#820), while the first attempt may still be running.
+              ? 'The calculation may still be running on the server. Nothing about your coding has changed.'
+              // A refusal's reason is the server's guidance; a 5xx body is an
+              // exception string or "Internal Server Error", which says nothing.
+              : (isServerRefusal(error) ? serverDetailMessage(error) : null)
+                ?? 'The server could not finish the calculation. Nothing about your coding has changed.'}
+          </p>
+        </div>
+        {!timedOut && (
+          <Button
+            ref={retryButtonRef}
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              retryPressedRef.current = true
+              void refetch()
+            }}
+          >
+            Retry
+          </Button>
+        )}
       </div>
     )
   }
 
   if (!data?.available) {
     return (
-      <div className="text-center py-16">
+      <div ref={landingRef} tabIndex={-1} className="text-center py-16 outline-none">
         <p className="text-mm-text-muted">{data?.reason || 'Reliability is unavailable for this project.'}</p>
       </div>
     )
@@ -327,7 +404,9 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
 
       {/* Header strip: overall α summary + what's being measured + the roster. */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-        <div className="inline-flex items-center gap-1.5 text-sm font-medium">
+        {/* #957 — the landing after a successful Retry: the headline number is
+            the answer the researcher pressed Retry to get. */}
+        <div ref={landingRef} tabIndex={-1} className="inline-flex items-center gap-1.5 text-sm font-medium outline-none">
           <SummaryIcon
             className={cn('w-4 h-4', overallBand ? BAND_CLASS[overallBand] : 'text-mm-text-muted')}
             aria-hidden="true"

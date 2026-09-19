@@ -25,7 +25,13 @@ const { DISCLOSURE } = vi.hoisted(() => ({
   },
 }))
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async () => ({
+  // #963 Tier 3 — both queries name a retry policy now, and this factory
+  // replaces the whole module: without handing the real predicate back,
+  // `retry` becomes `undefined` and the policy case would pass vacuously.
+  retryUnanswered: (await vi.importActual<typeof import('@/lib/api/error-utils')>(
+    '@/lib/api/error-utils',
+  )).retryUnanswered,
   codeAnalysisApi: {
     binnedKappa: vi.fn().mockResolvedValue({
       available: true, reason: null, n_coders: 2, coders: [1, 2],
@@ -54,8 +60,10 @@ import OpenCutReliability from './OpenCutReliability'
 
 afterEach(cleanup)
 
-function renderPanel() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+function renderPanel(opts: { clientRetry?: boolean | number } = {}) {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: opts.clientRetry ?? false, retryDelay: 0 } },
+  })
   return render(
     <QueryClientProvider client={qc}>
       <OpenCutReliability projectId={1} observationId={7} observationName="Playground" />
@@ -154,5 +162,89 @@ describe('OpenCutReliability', () => {
     })
     renderPanel()
     await waitFor(() => expect(screen.getByText(/at least 2 coders/)).toBeInTheDocument())
+  })
+})
+
+/**
+ * #963 Tier 3 — this panel WAITED and then said nothing at all.
+ *
+ * Every block below the loading line is gated on `data?.available`, so a
+ * settled failure left the explainer paragraph sitting above empty space, for
+ * the life of the page. Silence there reads as "still thinking" or as a
+ * reliability figure that does not exist; neither is what happened. `IrrMatrix`
+ * got this treatment in #957 and its sibling on the same tab did not.
+ */
+describe('#963 Tier 3 — a failed measurement says so, per method', () => {
+  const api = async () => (await import('@/lib/api')).codeAnalysisApi as unknown as {
+    binnedKappa: ReturnType<typeof vi.fn>
+    unitizingAlpha: ReturnType<typeof vi.fn>
+  }
+  /** An ANSWERED refusal — duck-typed on `status`, like the real predicates. */
+  const answered500 = () => Object.assign(new Error('boom'), { status: 500 })
+
+  it('READY: the coefficients render and no notice appears (positive control)', async () => {
+    renderPanel()
+    await waitFor(() => expect(screen.getByText('Off-task')).toBeInTheDocument())
+    expect(screen.queryByText(/could not be measured/)).toBeNull()
+  })
+
+  it('LOADING: says it is measuring', async () => {
+    ;(await api()).binnedKappa.mockReturnValueOnce(new Promise(() => {}))
+    renderPanel()
+    expect(await screen.findByText('Measuring agreement…')).toBeInTheDocument()
+    expect(screen.queryByText(/could not be measured/)).toBeNull()
+  })
+
+  it('FAILED: names WHICH measurement failed, and offers a Retry', async () => {
+    ;(await api()).binnedKappa.mockRejectedValueOnce(answered500())
+    renderPanel()
+    // The picker above offers two different measurements, so "agreement could
+    // not be measured" alone would not say which one the researcher is looking
+    // at. The bin-size control is still on screen beside it.
+    expect(await screen.findByText('Moment-by-moment agreement could not be measured.'))
+      .toBeInTheDocument()
+    expect(screen.getByText(/Nothing in your project has changed\./)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByText('Off-task')).toBeNull()
+  })
+
+  it('the OTHER method has its OWN failure sentence', async () => {
+    ;(await api()).unitizingAlpha.mockRejectedValueOnce(answered500())
+    renderPanel()
+    await waitFor(() => expect(screen.getByText('Off-task')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('tab', { name: 'How it was carved up' }))
+    expect(await screen.findByText(
+      'Agreement about how the recording was carved up could not be measured.',
+    )).toBeInTheDocument()
+  })
+
+  it('a FAILED method does not make the OTHER one look failed', async () => {
+    // ⚠️ The disabled-query case, which is what makes a combined load wrong:
+    // the inactive query is `enabled: false` with nothing cached, and
+    // `listStatus` reports `loading` for exactly that shape — so a single load
+    // over both would hold this panel on a notice whichever method is showing.
+    ;(await api()).unitizingAlpha.mockRejectedValue(answered500())
+    renderPanel()
+    // Binned is the default and answers fine; the unitizing failure is not its.
+    await waitFor(() => expect(screen.getByText('Off-task')).toBeInTheDocument())
+    expect(screen.queryByText(/could not be measured/)).toBeNull()
+    // ⚠️ …and NO non-ready notice at all. Without this line the case survived a
+    // mutant that read the INACTIVE query's load: that query is disabled, so it
+    // reports `loading`, and the panel rendered a "Measuring agreement…" line
+    // ABOVE a fully drawn table while every other assertion here still passed.
+    // #941's third meaning — the mutated line ran and the test could not see it.
+    expect(screen.queryByText('Measuring agreement…')).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
+    ;(await api()).unitizingAlpha.mockResolvedValue(undefined)
+  })
+
+  it('does NOT re-ask on its own when the server ANSWERED the refusal', async () => {
+    const a = await api()
+    a.binnedKappa.mockClear()
+    a.binnedKappa.mockRejectedValue(answered500())
+    renderPanel({ clientRetry: 1 })
+    await screen.findByText('Moment-by-moment agreement could not be measured.')
+    await new Promise(r => setTimeout(r, 30))
+    expect(a.binnedKappa).toHaveBeenCalledTimes(1)
   })
 })

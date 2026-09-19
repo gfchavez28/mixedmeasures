@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -50,6 +52,31 @@ class BackupInfo(BaseModel):
     created_at: str
     size_bytes: int
     backup_type: str
+
+
+class SafetyCopyInfo(BaseModel):
+    """A copy of a project taken before a merge or an overwrite (#919).
+
+    It is a `.mmproject`, not a `.mmbackup`: it comes back through Import, never
+    through Restore, which is why it has its own list rather than a row in
+    `BackupInfo`'s.
+    """
+    filename: str
+    # Which in-place import the copy precedes. `merge_or_overwrite` is an older
+    # build's `pre-overwrite` file, which before 1.5.2 also named a merge's copy.
+    act: Literal["merge", "overwrite", "merge_or_overwrite"]
+    taken_at: str  # ISO 8601 with an explicit UTC offset (#408)
+    size_bytes: int
+    # From the copy's own manifest, never looked up by id: a project id can be
+    # reused, and the project may no longer exist. None when unreadable.
+    project_name: str | None
+    # Whether a project with this copy's identity is in the app now. None when
+    # the copy's identity cannot be read. False is the case to warn about: the
+    # file may be the only copy of that project anywhere.
+    project_in_app: bool | None
+    # False when the archive or its manifest cannot be read — such a copy is
+    # still listed, because it still takes disk space, and it may be damaged.
+    readable: bool
 
 
 class RestorePreview(BaseModel):

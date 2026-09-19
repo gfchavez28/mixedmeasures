@@ -32,6 +32,7 @@ from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
 from ..services.participant_scores import mark_participant_scores_stale
 from ..services.coding_layers import non_consensus_filter
+from ..services.id_set import in_id_set
 from ..services.text_analysis import substantive_text_clause
 from .helpers import _get_project_or_404, parse_int_list, sanitize_csv_filename, TEXT_TYPES
 from .export_helpers import csv_safe
@@ -478,7 +479,7 @@ def list_texts(
 # ── 2. GET /records ─────────────────────────────────────────────────────
 
 @router.get("/records", response_model=RecordsListResponse)
-async def list_records(
+def list_records(
     project_id: int,
     column_ids: str = Query(..., description="Comma-separated DatasetColumn IDs"),
     dataset_ids: str | None = Query(None),
@@ -528,9 +529,11 @@ async def list_records(
         # grain-allow: existence guard (which values have ANY coding). A consensus
         # row only exists where humans coded the same target, so origin-filtering
         # this set is a no-op in steady state; left unfiltered intentionally.
+        # #956: every value of the selected columns — rows × columns, so
+        # never a bound list.
         coded_dv_ids = (
             db.query(func.distinct(CodeApplication.dataset_value_id))
-            .filter(CodeApplication.dataset_value_id.in_(value_ids))
+            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids))
             .all()
         )
         coded_values = {dv_id for (dv_id,) in coded_dv_ids}
@@ -565,10 +568,15 @@ async def list_records(
     linked_convs = defaultdict(list)
     if participant_ids:
         from ..models.segment import Segment
+        # The GROUP BY already makes each pair distinct. This selected
+        # `func.distinct(...)` beside another column, which renders
+        # `SELECT a, distinct(b)` — a syntax error in SQLite — so the endpoint
+        # 500'd for ANY record linked to a participant. Found by #956's guard,
+        # the first test ever to reach this line.
         conv_links = (
-            db.query(Speaker.participant_id, func.distinct(Segment.conversation_id))
+            db.query(Speaker.participant_id, Segment.conversation_id)
             .join(Segment, Segment.speaker_id == Speaker.id)
-            .filter(Speaker.participant_id.in_(participant_ids))
+            .filter(in_id_set(Speaker.participant_id, participant_ids))
             .group_by(Speaker.participant_id, Segment.conversation_id)
             .all()
         )
@@ -578,8 +586,10 @@ async def list_records(
     # Get participant names
     participant_names = {}
     if participant_ids:
+        # A participant per record at most — a participant table derived from a
+        # dataset has one per row, so this set is dataset-scaled too.
         parts = db.query(Participant.id, Participant.display_name, Participant.identifier).filter(
-            Participant.id.in_(participant_ids)
+            in_id_set(Participant.id, participant_ids)
         ).all()
         participant_names = {p.id: p.display_name or p.identifier for p in parts}
 
@@ -1378,7 +1388,7 @@ async def update_config(
 # ── 12. GET /coding-progress ────────────────────────────────────────────────
 
 @router.get("/coding-progress", response_model=CodingProgressResponse)
-async def coding_progress(
+def coding_progress(
     project_id: int,
     column_ids: str | None = Query(None, description="Comma-separated column IDs (all text columns if omitted)"),
     user: User = Depends(get_current_user),
@@ -1433,7 +1443,9 @@ async def coding_progress(
             db.query(func.distinct(CodeApplication.dataset_value_id))
             .join(Code, Code.id == CodeApplication.code_id)
             .filter(
-                CodeApplication.dataset_value_id.in_(value_ids),
+                # #956: nine BES waves are 272,408 values — past SQLite's
+                # 250,000-parameter ceiling as a bound list.
+                in_id_set(CodeApplication.dataset_value_id, value_ids),
                 Code.is_universal == False,
                 non_consensus_filter(),
             )
@@ -1452,7 +1464,7 @@ async def coding_progress(
             db.query(CodeApplication.user_id, CodeApplication.dataset_value_id)
             .join(Code, Code.id == CodeApplication.code_id)
             .filter(
-                CodeApplication.dataset_value_id.in_(value_ids),
+                in_id_set(CodeApplication.dataset_value_id, value_ids),
                 Code.is_universal == False,
                 CodeApplication.user_id.isnot(None),
                 # Exclude the consensus user so it never appears as a phantom coder
@@ -1478,8 +1490,15 @@ async def coding_progress(
 
     col_map = {c[0]: (c[1] or c[2][:50]) for c in cols}
 
+    # ONE pass to bucket by column. This used to filter `values` once PER column,
+    # which is nothing on one column and 30 × 843,535 comparisons on BES's thirty
+    # (#956 — invisible while the request 500'd before reaching it).
+    values_by_column: dict[int, list] = defaultdict(list)
+    for v in values:
+        values_by_column[v[1]].append(v)
+
     for col_id in col_ids:
-        col_values = [v for v in values if v[1] == col_id]
+        col_values = values_by_column.get(col_id, [])
         non_empty = [v for v in col_values if not _is_empty(v[2], treat_as_empty)]
         coded = [v for v in non_empty if v[0] in coded_value_ids]
 
@@ -1527,7 +1546,7 @@ async def coding_progress(
 # ── 14. GET /export ──────────────────────────────────────────────────────────
 
 @router.get("/export")
-async def export_coded_texts(
+def export_coded_texts(
     project_id: int,
     coded_only: bool = Query(False),
     column_ids: str | None = Query(None),
@@ -1583,7 +1602,7 @@ async def export_coded_texts(
             # Human/working layer only + de-dup per coder: a code applied by N
             # coders is one name in the export, and the consensus canonical name
             # never leaks into this user-facing CSV (#448b / J2-B).
-            .filter(CodeApplication.dataset_value_id.in_(value_ids), non_consensus_filter())
+            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), non_consensus_filter())
             .distinct()
             .all()
         )
@@ -1596,7 +1615,7 @@ async def export_coded_texts(
         notes = (
             db.query(Note.dataset_value_id, Note.content)
             .filter(
-                Note.dataset_value_id.in_(value_ids),
+                in_id_set(Note.dataset_value_id, value_ids),
                 Note.is_archived == False,
             )
             .order_by(Note.id)

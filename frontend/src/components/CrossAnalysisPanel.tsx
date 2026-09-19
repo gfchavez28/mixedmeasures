@@ -23,6 +23,8 @@ import CoderFilterPopover from './CoderFilterPopover'
 import SegmentedControl from '@/components/ui/segmented-control'
 import SubgroupFilterPanel from './SubgroupFilterPanel'
 import FrequencyComparisonChart from './FrequencyComparisonChart'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 import CrossTabTable from './CrossTabTable'
 import CodeDensityPanel from './CodeDensityPanel'
 import ResponseLengthPanel from './ResponseLengthPanel'
@@ -91,7 +93,7 @@ export default function CrossAnalysisPanel({
   })
 
   // Filtered frequencies query
-  const { data: freqData } = useQuery({
+  const freqQuery = useQuery({
     queryKey: ['text-filtered-freq', projectId, columnIdsStr, filtersJSON, coderIncludeCsv, layerScope],
     queryFn: () => textAnalysisApi.filteredFrequencies(projectId, {
       column_ids: focalColumnIds,
@@ -102,9 +104,22 @@ export default function CrossAnalysisPanel({
     }),
     enabled: filtersReady,
   })
+  const freqData = freqQuery.data
+  /**
+   * #963 Tier 2 — `FrequencyComparisonChart` is handed `?? { frequencies: [] }`
+   * and says *"No codes applied to matching comments."* of it, which is a claim
+   * about the RESEARCHER'S FILTERS rather than about the request.
+   *
+   * ⚠️ Visible on ordinary use, not only on a cold load: every filter change is
+   * a new query key, so the sentence reappears on each one — the shape #961
+   * recorded for this page's own count.
+   * ⚠️ The DISABLED case is decided by the mount below (`filtersReady`), which
+   * is the same flag this query is `enabled` on.
+   */
+  const freqLoad = useListLoad(freqQuery)
 
   // Cross-tabulation query
-  const { data: crossTabData, isLoading: crossTabLoading } = useQuery({
+  const crossTabQuery = useQuery({
     queryKey: ['text-crosstab', projectId, columnIdsStr, crossColumnId, coderIncludeCsv, layerScope],
     queryFn: () => textAnalysisApi.crossTabulation(projectId, {
       text_column_ids: focalColumnIds,
@@ -114,6 +129,15 @@ export default function CrossAnalysisPanel({
     }),
     enabled: crossColumnId !== null,
   })
+  const crossTabData = crossTabQuery.data
+  /**
+   * #963 Tier 3 — the child rendered `null` for three different facts (see its
+   * own comment). The decision belongs here because this is where the query is,
+   * and because the DISABLED case has to be answered first: with no cross-tab
+   * variable chosen the query is off with nothing cached, which `listStatus`
+   * reports as `loading` forever.
+   */
+  const crossTabLoad = useListLoad(crossTabQuery)
 
   // Code density query
   const { data: densityData, isLoading: densityLoading } = useQuery({
@@ -238,11 +262,19 @@ export default function CrossAnalysisPanel({
 
       {/* Frequency comparison (only when filters are active) */}
       {filtersReady && (
-        <FrequencyComparisonChart
-          filtered={freqData?.filtered ?? { row_count: 0, text_count: 0, frequencies: [] }}
-          overall={freqData?.overall ?? null}
-          filterDescription={freqData?.filter_description ?? ''}
-        />
+        freqLoad.status !== 'ready' ? (
+          <LoadState
+            load={freqLoad}
+            loadingLabel="Counting codes for these filters…"
+            failedTitle="The filtered code counts could not be loaded"
+          />
+        ) : (
+          <FrequencyComparisonChart
+            filtered={freqData!.filtered}
+            overall={freqData!.overall ?? null}
+            filterDescription={freqData!.filter_description}
+          />
+        )
       )}
 
       {/* Cross-tabulation */}
@@ -271,7 +303,16 @@ export default function CrossAnalysisPanel({
           </Select>
         </div>
         {crossColumnId && (
-          <CrossTabTable data={crossTabData ?? null} loading={crossTabLoading} />
+          crossTabLoad.status !== 'ready' || !crossTabData ? (
+            <LoadState
+              load={crossTabLoad}
+              loadingLabel="Loading cross-tabulation…"
+              failedTitle="The cross-tabulation could not be loaded."
+              size="panel"
+            />
+          ) : (
+            <CrossTabTable data={crossTabData} />
+          )
         )}
       </div>
 

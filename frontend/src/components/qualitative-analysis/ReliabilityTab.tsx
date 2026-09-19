@@ -1,6 +1,9 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { observationsApi, type Code, type Observation } from '@/lib/api'
+import { LoadFailedNotice } from '@/components/LoadStatus'
+import { useListLoad } from '@/hooks/useListLoad'
+import type { ListLoad } from '@/lib/list-status'
 import {
   Select, SelectContent, SelectGroup, SelectItem, SelectLabel,
   SelectTrigger, SelectValue,
@@ -31,13 +34,25 @@ interface ViewProps {
   projectId: number
   codes?: Code[]
   observations: Observation[]
+  /**
+   * #963 Tier 3 — whether `observations` is an ANSWER. The picker, and #859's
+   * signpost beside it, are the only things that say open-cut reliability
+   * exists; read off an unanswered list both vanish, so a failed request
+   * withdraws the capability and the sentence announcing it at once — which is
+   * #859's own defect, re-created by a failure.
+   *
+   * REQUIRED: the test view is a second mount and must decide too.
+   */
+  observationsLoad: ListLoad
   /** Selected OPEN observation id, or null = the pooled matrix. */
   selectedId: number | null
   onSelect: (id: number | null) => void
 }
 
 /** Controlled view — exported for tests (Radix Select can't be driven in jsdom). */
-export function ReliabilityTabView({ projectId, codes, observations, selectedId, onSelect }: ViewProps) {
+export function ReliabilityTabView({
+  projectId, codes, observations, observationsLoad, selectedId, onSelect,
+}: ViewProps) {
   const open = openObservations(observations)
   const frozen = selectableObservations(observations)
   // Falls back to pooled when the selection is stale — an observation frozen (or
@@ -66,6 +81,26 @@ export function ReliabilityTabView({ projectId, codes, observations, selectedId,
               </SelectGroup>
             </SelectContent>
           </Select>
+        </div>
+      )}
+
+      {/* ⚠️ SILENT while merely loading, on purpose: `IrrMatrix` below already
+          mounts its own `role="status"` line, and a second one for a list whose
+          only job is to add a picker would be a duplicate on screen and a
+          second announcement (Tier 2's one-region rule — check what the
+          neighbour renders). A FAILURE still gets a word, because otherwise
+          nothing on the tab says the scope list is missing. */}
+      {observationsLoad.status === 'failed' && (
+        <div className="max-w-3xl">
+          <LoadFailedNotice
+            title="The reliability scope list could not be loaded."
+            load={observationsLoad}
+            size="panel"
+          />
+          <p className="text-xs text-mm-text-muted text-center">
+            Observations with open clips are measured separately and are not offered here until
+            the list loads. The pooled figures below are unaffected.
+          </p>
         </div>
       )}
 
@@ -117,16 +152,22 @@ export function ReliabilityTabView({ projectId, codes, observations, selectedId,
 
 export default function ReliabilityTab({ projectId, codes }: { projectId: number; codes?: Code[] }) {
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const { data: observations = [] } = useQuery({
+  // ⚠️ NOT `data: observations = []` — a destructuring default is a fresh array
+  // on every render AND makes "no answer" indistinguishable from "none", which
+  // is the whole defect (#963 §1).
+  const observationsQuery = useQuery({
     queryKey: ['observations', projectId],
     queryFn: () => observationsApi.list(projectId),
     enabled: !!projectId,
   })
+  const observations = useMemo(() => observationsQuery.data ?? [], [observationsQuery.data])
+  const observationsLoad = useListLoad(observationsQuery)
   return (
     <ReliabilityTabView
       projectId={projectId}
       codes={codes}
       observations={observations}
+      observationsLoad={observationsLoad}
       selectedId={selectedId}
       onSelect={setSelectedId}
     />

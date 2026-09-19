@@ -4,7 +4,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { FileInput, Trash2, Pencil, Search, X, ArrowUpDown, Volume2, Video, Mic, BookOpen, MessageSquare, Film } from 'lucide-react'
 import { toast } from 'sonner'
 import { validateMediaFile, MEDIA_ACCEPT, describeMediaUploadError } from '@/lib/media-constants'
-import { conversationsApi, mediaApi, observationsApi, type Conversation } from '@/lib/api'
+import { conversationsApi, mediaApi, observationsApi, type Conversation, retryUnanswered} from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { useMainContentLanding } from '@/hooks/useMainContentLanding'
+import { LoadState } from '@/components/LoadStatus'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
 import { TRANSCRIPT_FORMAT_LABEL } from '@/lib/conversation-import-formats'
 import { routeDroppedFiles } from '@/lib/import-routing'
@@ -36,11 +39,15 @@ export default function ConversationsListPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
-  const { data: conversationsData, isLoading } = useQuery({
+  const conversationsQuery = useQuery({
     queryKey: ['conversations', projectId],
     queryFn: () => conversationsApi.list(projectId),
     enabled: !isNaN(projectId),
+    retry: retryUnanswered,
   })
+  const conversationsData = conversationsQuery.data
+  const conversationsLoad = useListLoad(conversationsQuery)
+  const mainLanding = useMainContentLanding()
 
   const conversations = useMemo(() => conversationsData?.conversations ?? [], [conversationsData?.conversations])
 
@@ -228,10 +235,27 @@ export default function ConversationsListPage() {
     },
   }), [projectId, navigate])
 
-  if (isLoading) {
+  /**
+   * #963 — ONE gate for both non-ready states.
+   *
+   * The hand-written line this replaces covered only `isLoading`, and React
+   * Query v5 reports that `false` once a failure has SETTLED — so a failed load
+   * fell straight through to "No conversations yet" with the import affordance
+   * beside it. Driven on the running app: the page said that while the nav rail
+   * next to it still showed the real count from another query.
+   *
+   * `LoadState` is also what gives this wait a `role="status"`, the shared
+   * slow-load hint and, on a failure, a Retry (`components/LoadStatus.tsx`).
+   */
+  if (conversationsLoad.status !== 'ready') {
     return (
       <div className="max-w-4xl mx-auto px-3.5 py-3.5">
-        <div className="text-center py-12 text-mm-text-muted">Loading conversations...</div>
+        <LoadState
+          load={conversationsLoad}
+          loadingLabel="Loading conversations…"
+          failedTitle="Your conversations could not be loaded."
+          landingRef={mainLanding}
+        />
       </div>
     )
   }
@@ -246,8 +270,16 @@ export default function ConversationsListPage() {
           >
             All Conversations
             {conversations.length > 0 && (
-              // #908: a text-node space keeps the count out of the label's name.
-              <span className="ml-1.5 opacity-60">{' '}{conversations.length}</span>
+              // 🔴 #908 CORRECTED 2026-09-12 — the space goes OUTSIDE the span,
+              // and the fragment is what lets it: an expression container holds
+              // ONE expression, so the space cannot simply sit beside the span
+              // inside this `&&`. MEASURED with `computeAccessibleName`: a space
+              // typed inside the span AND `<span>{' '}{n}</span>` BOTH compute
+              // "All Datasets1", because the algorithm trims each text node
+              // before joining, so only a space in the BUTTON's own child list
+              // survives (a fragment adds no node, so it flattens into one).
+              // This site carried the ineffective form from #908 until now.
+              <>{' '}<span className="ml-1.5 opacity-60">{conversations.length}</span></>
             )}
           </button>
           <button

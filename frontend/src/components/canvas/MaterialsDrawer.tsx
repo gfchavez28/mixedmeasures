@@ -1,10 +1,12 @@
-import { useState, useMemo, useEffect, useRef } from 'react'
+import { useState, useMemo, useEffect, useRef, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
 import { X, ChevronDown, ChevronRight, Check, Plus, ExternalLink } from 'lucide-react'
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu'
 import { excerptsApi, materialsApi, memosApi } from '@/lib/api'
 import { excerptDisplayLabel, excerptAttributionLine } from '@/lib/canvas-excerpt'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -22,6 +24,12 @@ interface MaterialsDrawerProps {
   onInsertMaterial: (materialId: number) => void
   onInsertMemo: (memoId: number) => void
   insertingId?: number | null
+  /**
+   * Where focus goes when this pane closes (#955's class). The pane becomes
+   * `inert`, which blurs whatever was focused inside it — including its own
+   * Close button — so without a destination focus falls to `<body>`.
+   */
+  closeReturnRef?: RefObject<HTMLElement | null>
 }
 
 // ── Section key type ─────────────────────────────────────────────────────────
@@ -40,6 +48,7 @@ export default function MaterialsDrawer({
   onInsertMaterial,
   onInsertMemo,
   insertingId,
+  closeReturnRef,
 }: MaterialsDrawerProps) {
   const [filter, setFilter] = useState('')
   const [expanded, setExpanded] = useState<Record<Section, boolean>>({
@@ -70,25 +79,72 @@ export default function MaterialsDrawer({
     if (!open) setFilter('')
   }, [open])
 
+  const panelRef = useRef<HTMLDivElement>(null)
+  const wasOpen = useRef(open)
+  /**
+   * #955's class: a focused control that disappears needs a destination.
+   *
+   * Making the closed pane `inert` is what removes its phantom tab stops, and
+   * it also blurs whatever was focused inside it — its own Close button, most
+   * of the time — so focus would land on `<body>` and put the keyboard user
+   * back at the top of the page. It goes to the toggle that owns this pane,
+   * which is the first rung of `lib/dialog-focus-return.ts`'s ladder.
+   *
+   * ⚠️ Only when focus was actually LOST, and only on the open→closed
+   * TRANSITION: `open === false` is true on every render of a closed canvas, so
+   * an unconditional focus call would fight the researcher for focus.
+   */
+  useEffect(() => {
+    if (wasOpen.current && !open) {
+      const active = document.activeElement
+      const lost = active == null
+        || active === document.body
+        || !active.isConnected
+        || (panelRef.current?.contains(active) ?? false)
+      if (lost) closeReturnRef?.current?.focus()
+    }
+    wasOpen.current = open
+  }, [open, closeReturnRef])
+
   // ── Queries (only fetch when drawer is open) ──────────────────────────────
 
-  const { data: excerptsData } = useQuery({
+  const excerptsQuery = useQuery({
     queryKey: ['excerpts', projectId],
     queryFn: () => excerptsApi.list(projectId),
     enabled: open,
   })
+  const excerptsData = excerptsQuery.data
 
-  const { data: materialsData } = useQuery({
+  const materialsQuery = useQuery({
     queryKey: ['materials-all', projectId],
     queryFn: () => materialsApi.listAllMaterials(projectId),
     enabled: open,
   })
+  const materialsData = materialsQuery.data
 
-  const { data: memosData } = useQuery({
+  const memosQuery = useQuery({
     queryKey: ['memos', projectId],
     queryFn: () => memosApi.list(projectId),
     enabled: open,
   })
+  const memosData = memosQuery.data
+
+  /**
+   * #963 Tier 2 — each section speaks for its OWN list.
+   *
+   * Three separate loads rather than one combined: the Excerpts section has no
+   * business waiting on the memos request, and a failure in one must not blank
+   * the two that answered.
+   *
+   * ⚠️ **The DISABLED case is decided by the pane, not by a branch here.** All
+   * three queries are `enabled: open`, and a disabled query with nothing cached
+   * reads `loading` forever (#961 §1). While closed this pane is `inert` and
+   * `aria-hidden`, so nothing it says is reachable by eye, by Tab or by a
+   * reader; the first honest render is the one after it opens.
+   */
+  const excerptsLoad = useListLoad(excerptsQuery)
+  const materialsLoad = useListLoad(materialsQuery)
+  const memosLoad = useListLoad(memosQuery)
 
   // useMemo'd for stable identity — each feeds a filtering useMemo below.
   const excerpts = useMemo(() => excerptsData?.excerpts ?? [], [excerptsData])
@@ -157,9 +213,25 @@ export default function MaterialsDrawer({
 
   return (
     <div
+      ref={panelRef}
       data-materials-panel
       role="complementary"
       aria-label="Materials panel"
+      /**
+       * 🔴 **A collapsed pane keeps its controls in the Tab order unless it is
+       * `inert` (#910's rule, reached one step earlier).** This pane collapses
+       * to `w-0` and carried NEITHER marker: measured in Chrome, five focusable
+       * controls — Close, the filter box and three section headers — with
+       * `.focus()` succeeding on a 24px button inside a 0px pane. Reachable by
+       * Tab, invisible on screen, and announced by a reader: the worst
+       * combination there is.
+       *
+       * The two go together and under the SAME condition. `aria-hidden` alone
+       * hides it from a reader and leaves the tab stops; `inert` alone removes
+       * focus and hit-testing and leaves it in the tree.
+       */
+      inert={!open}
+      aria-hidden={!open || undefined}
       className={`shrink-0 h-full flex flex-col bg-mm-surface border-l border-mm-border-subtle shadow-xl overflow-hidden transition-[width] duration-250 ease-in-out ${open ? 'w-[280px]' : 'w-0 border-l-0'}`}
     >
       {/* Header */}
@@ -202,13 +274,23 @@ export default function MaterialsDrawer({
         {/* ── Excerpts ─────────────────────────────────────────────────── */}
         <SectionHeader
           label="Excerpts"
-          count={filteredExcerpts.length}
+          count={excerptsLoad.status === 'ready' ? filteredExcerpts.length : null}
           expanded={expanded.excerpts}
           onToggle={() => toggleSection('excerpts')}
         />
         {expanded.excerpts && (
           <div className="px-2 pb-2" role="region" aria-label="Excerpts">
-            {filteredExcerpts.length === 0 ? (
+            {excerptsLoad.status !== 'ready' ? (
+              /* #963 — "there are none" and "we have not asked yet" are
+                 different sentences, and this one also names a place to go
+                 and make some. */
+              <LoadState
+                load={excerptsLoad}
+                loadingLabel="Loading excerpts…"
+                failedTitle="Your excerpts could not be loaded"
+                size="panel"
+              />
+            ) : filteredExcerpts.length === 0 ? (
               <p className="text-xs text-mm-text-muted italic px-2 py-1">
                 {lowerFilter ? 'No excerpts match your filter.' : 'Create excerpts in a Coding Workbench to embed them here.'}
               </p>
@@ -276,13 +358,23 @@ export default function MaterialsDrawer({
         {/* ── Charts ───────────────────────────────────────────────────── */}
         <SectionHeader
           label="Charts"
-          count={filteredMaterials.length}
+          count={materialsLoad.status === 'ready' ? filteredMaterials.length : null}
           expanded={expanded.charts}
           onToggle={() => toggleSection('charts')}
         />
         {expanded.charts && (
           <div className="px-2 pb-2" role="region" aria-label="Charts">
-            {filteredMaterials.length === 0 ? (
+            {materialsLoad.status !== 'ready' ? (
+              /* #963 — "there are none" and "we have not asked yet" are
+                 different sentences, and this one also names a place to go
+                 and make some. */
+              <LoadState
+                load={materialsLoad}
+                loadingLabel="Loading charts…"
+                failedTitle="Your charts could not be loaded"
+                size="panel"
+              />
+            ) : filteredMaterials.length === 0 ? (
               <p className="text-xs text-mm-text-muted italic px-2 py-1">
                 {lowerFilter ? 'No charts match your filter.' : 'Create charts in the Analysis View to embed them here.'}
               </p>
@@ -341,13 +433,23 @@ export default function MaterialsDrawer({
         {/* ── Memos ────────────────────────────────────────────────────── */}
         <SectionHeader
           label="Memos"
-          count={filteredMemos.length}
+          count={memosLoad.status === 'ready' ? filteredMemos.length : null}
           expanded={expanded.memos}
           onToggle={() => toggleSection('memos')}
         />
         {expanded.memos && (
           <div className="px-2 pb-2" role="region" aria-label="Memos">
-            {filteredMemos.length === 0 ? (
+            {memosLoad.status !== 'ready' ? (
+              /* #963 — "there are none" and "we have not asked yet" are
+                 different sentences, and this one also names a place to go
+                 and make some. */
+              <LoadState
+                load={memosLoad}
+                loadingLabel="Loading memos…"
+                failedTitle="Your memos could not be loaded"
+                size="panel"
+              />
+            ) : filteredMemos.length === 0 ? (
               <p className="text-xs text-mm-text-muted italic px-2 py-1">
                 {lowerFilter ? 'No memos match your filter.' : 'Write memos from any workbench to embed them here.'}
               </p>
@@ -419,7 +521,9 @@ function SectionHeader({
   onToggle,
 }: {
   label: string
-  count: number
+  /** #963 — `null` while the section's list is unanswered: a count is a claim,
+   *  and an absent badge makes none. */
+  count: number | null
   expanded: boolean
   onToggle: () => void
 }) {
@@ -436,9 +540,11 @@ function SectionHeader({
         <ChevronRight className="w-3.5 h-3.5 text-mm-text-muted shrink-0" />
       )}
       <span className="text-xs font-semibold text-mm-text">{label}</span>
-      <span className="text-[10px] text-mm-text-secondary bg-mm-bg rounded-full px-1.5 py-0.5 tabular-nums ml-auto">
-        {count}
-      </span>
+      {count !== null && (
+        <span className="text-[10px] text-mm-text-secondary bg-mm-bg rounded-full px-1.5 py-0.5 tabular-nums ml-auto">
+          {count}
+        </span>
+      )}
     </button>
   )
 }

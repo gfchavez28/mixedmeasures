@@ -30,6 +30,7 @@ import { useQuery } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { codesApi, categoriesApi, observationsApi } from '@/lib/api'
 import { useCoders } from '@/hooks/useCoders'
+import { useListLoad } from '@/hooks/useListLoad'
 import { useBlindMode } from '@/hooks/useBlindMode'
 import { useAuth } from '@/lib/auth-context'
 import BlindScopeNotice from '@/components/qualitative-analysis/BlindScopeNotice'
@@ -72,29 +73,58 @@ export default function QualTimelineEmbed({ projectId, params, labelFontSize }: 
   const isConsensus = params.layerScope === 'consensus'
   const wanted = !isConsensus && !!projectId
 
-  const { data: observationsData, isLoading: observationsLoading } = useQuery({
+  const observationsQuery = useQuery({
     queryKey: ['observations', projectId],
     queryFn: () => observationsApi.list(projectId),
     enabled: wanted,
     staleTime: REFERENCE_STALE_TIME,
   })
+  const observationsData = observationsQuery.data
+  /**
+   * #963 — `TimedAnalytics` requires this so BOTH mounts decide what an
+   * unanswered list means. Here it is always `ready` by the time the child
+   * mounts: the gate below returns a loading notice first, and the empty case
+   * is answered with copy that names controls a canvas has (the reason this
+   * component handles those states itself). Passing a real one rather than a
+   * literal keeps the claim true if that gate is ever moved.
+   */
+  const observationsLoad = useListLoad(observationsQuery)
 
-  const { data: codesData, isLoading: codesLoading } = useQuery({
+  const codesQuery = useQuery({
     queryKey: ['codes', projectId],
     queryFn: () => codesApi.list(projectId),
     enabled: wanted,
     staleTime: REFERENCE_STALE_TIME,
   })
+  const codesData = codesQuery.data
 
-  const { data: categoriesData, isLoading: categoriesLoading } = useQuery({
+  const categoriesQuery = useQuery({
     queryKey: ['categories', projectId],
     queryFn: () => categoriesApi.list(projectId, true),
     enabled: wanted,
     staleTime: REFERENCE_STALE_TIME,
   })
+  const categoriesData = categoriesQuery.data
 
-  const { coderMap, multiCoder: rosterMultiCoder } = useCoders()
-  const { blind } = useBlindMode(projectId)
+  /**
+   * #963 Tier 3 — the three reference lists this figure is DRAWN FROM, as one
+   * load. The gate below used three `isLoading` flags, and `isLoading` is
+   * `isPending && isFetching`: it goes false once a failure has settled, so the
+   * component fell straight through to *"This project has no observations to
+   * chart."* — a failed request reading, inside a written document, as the
+   * observations having been deleted.
+   *
+   * ⚠️ The ROSTER is deliberately not in here. It decides whether the figure is
+   * blind-scoped and whether it says so, and a failed roster must still DRAW
+   * (under the fail-closed lens) rather than stall a canvas export — that
+   * decision is #964's and is unchanged.
+   */
+  const referenceLoad = useListLoad(observationsQuery, codesQuery, categoriesQuery)
+
+  const { coderMap, multiCoder: rosterMultiCoder, status: rosterStatus } = useCoders()
+  // #964: the lens narrows on `withholding`, which fails CLOSED while the roster
+  // is unanswered; `blind` alone read an unanswered roster as a one-person one.
+  const { blind, withholding } = useBlindMode(projectId)
   const { user } = useAuth()
 
   const observations = useMemo(
@@ -111,8 +141,8 @@ export default function QualTimelineEmbed({ projectId, params, labelFontSize }: 
   )
 
   const lens = useMemo(
-    () => resolveTimelineCoderLens(params.request.coder_ids ?? null, blind, user?.id ?? null, rosterMultiCoder),
-    [params.request.coder_ids, blind, user?.id, rosterMultiCoder],
+    () => resolveTimelineCoderLens(params.request.coder_ids ?? null, withholding, user?.id ?? null, rosterMultiCoder),
+    [params.request.coder_ids, withholding, user?.id, rosterMultiCoder],
   )
 
   if (isConsensus) {
@@ -124,7 +154,10 @@ export default function QualTimelineEmbed({ projectId, params, labelFontSize }: 
     )
   }
 
-  if (observationsLoading || codesLoading || categoriesLoading) {
+  // #964: the roster decides whether this figure is blind-scoped and whether it
+  // says so, so it waits for the roster too. A FAILED roster does not wait (it
+  // would spin forever and stall a canvas export); it draws under the fail-closed lens.
+  if (referenceLoad.status === 'loading' || rosterStatus === 'loading') {
     // The exact wording `waitForChartsReady` polls for, alongside the spin class
     // — so a canvas export never rasterizes this state.
     return (
@@ -132,6 +165,22 @@ export default function QualTimelineEmbed({ projectId, params, labelFontSize }: 
         <RefreshCw className="w-4 h-4 animate-spin" aria-hidden />
         Loading chart...
       </div>
+    )
+  }
+
+  // #963 Tier 3 — a failed reference list is a statement about the REQUEST, and
+  // it must not be told as a statement about the project. Kept as this file's
+  // own `Notice` rather than `LoadState`: `LoadFailedNotice` offers a Retry,
+  // and a canvas is a reading surface whose embeds redraw on their own when the
+  // page is revisited — a button per embed on a document with several would be
+  // noise where there is nothing to decide. The words are the ones
+  // `InlineChartRenderer` already uses for every embed kind it gates itself.
+  if (referenceLoad.status === 'failed') {
+    return (
+      <Notice>
+        Chart unavailable — this project&rsquo;s observations, codes or categories could not be
+        loaded. Nothing in your project has changed.
+      </Notice>
     )
   }
 
@@ -153,11 +202,16 @@ export default function QualTimelineEmbed({ projectId, params, labelFontSize }: 
           surfaces, where it is logged. `BlindScopeNotice` renders nothing when
           `blind` is false. */}
       <BlindScopeNotice blind={lens.blinded}>
-        Blind mode is on — this timeline shows only your own coding, and coder names are hidden.
+        {/* #964: narrowed without `blind` means the roster FAILED (a loading
+            roster never reaches here) — "blind mode is on" is not known to be true. */}
+        {blind
+          ? 'Blind mode is on — this timeline shows only your own coding, and coder names are hidden.'
+          : 'The coder list could not be loaded, so this timeline shows only your own coding.'}
       </BlindScopeNotice>
       <TimedAnalytics
         projectId={projectId}
         observations={observations}
+        observationsLoad={observationsLoad}
         codes={codes}
         categories={categories}
         include={lens.include}

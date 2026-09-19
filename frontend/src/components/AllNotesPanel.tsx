@@ -2,9 +2,11 @@ import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   ChevronRight, ChevronDown, ExternalLink, FileText, MessageSquare,
-  LoaderCircle, TableProperties, Video
+  TableProperties, Video
 } from 'lucide-react'
 import { allNotesApi } from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 import {
   formatDate,
   ENTITY_TYPE_COLORS,
@@ -80,10 +82,24 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
     return () => clearTimeout(timer)
   }, [search])
 
-  const { data, isLoading } = useQuery({
+  const notesQuery = useQuery({
     queryKey: ['all-notes', projectId, debouncedSearch, showArchived],
     queryFn: () => allNotesApi.list(projectId, debouncedSearch || undefined, showArchived),
   })
+  const data = notesQuery.data
+/**
+ * #963 Tier 2 — a count and an empty state are claims about an ANSWERED list.
+ *
+ * This panel had an `isLoading` arm, so the filed entry recorded it as
+ * loading-only. Two things were wrong with that: the arm was a bare spinner
+ * with no accessible text (a reader met an empty list region), and
+ * `isLoading` is `isPending && isFetching`, so it is FALSE once a failure has
+ * settled — the empty state then made its claim permanently, with nothing
+ * saying the request had failed. The header count was outside the arm
+ * altogether and read 0 throughout.
+ */
+  const notesLoad = useListLoad(notesQuery)
+  const notesKnown = notesLoad.status === 'ready'
 
   const conversations = useMemo(() => data?.conversations ?? [], [data?.conversations])
   const comments = useMemo(() => data?.texts ?? [], [data?.texts])
@@ -239,10 +255,13 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
 
   // Announce search results
   useEffect(() => {
-    if (debouncedSearch && announceRef.current) {
+    // #963 — "0 notes found" while the search is still running is a wrong
+    // answer said out loud, which is worse than saying nothing: the reader
+    // hears it and stops waiting.
+    if (debouncedSearch && notesKnown && announceRef.current) {
       announceRef.current.textContent = `${totalCount} note${totalCount !== 1 ? 's' : ''} found`
     }
-  }, [debouncedSearch, totalCount])
+  }, [debouncedSearch, totalCount, notesKnown])
 
   // Auto-expand all groups when searching
   useEffect(() => {
@@ -276,9 +295,11 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
       <div className="flex items-center gap-2 px-4 py-2 border-b border-mm-border-subtle bg-mm-bg flex-shrink-0">
         <FileText className="h-3.5 w-3.5 text-mm-text-muted flex-shrink-0" />
         <span className="text-xs font-semibold text-mm-text-muted uppercase tracking-wider">Notes</span>
-        <span className="text-xs text-mm-text-muted bg-mm-surface rounded-full px-2 py-0.5">
-          {totalCount}
-        </span>
+        {notesKnown && (
+          <span className="text-xs text-mm-text-muted bg-mm-surface rounded-full px-2 py-0.5">
+            {totalCount}
+          </span>
+        )}
         <button
           onClick={() => setShowArchived(prev => !prev)}
           className={`text-[11px] px-2 py-0.5 rounded-full transition-colors ${showArchived ? 'bg-mm-bg text-mm-text' : 'text-mm-text-faint hover:text-mm-text-muted'}`}
@@ -313,10 +334,13 @@ export default function AllNotesPanel({ projectId, search = '', focusedType, foc
       <div className="flex-1 overflow-y-auto" role="list" aria-label="Notes">
         {/* Each NoteSourceGroup renders role="listitem" — a role="list" whose
             children carry no listitem role announces as a list of 0 items. */}
-        {isLoading ? (
-          <div className="flex items-center justify-center py-12">
-            <LoaderCircle className="h-5 w-5 animate-spin text-mm-text-muted" />
-          </div>
+        {!notesKnown ? (
+          <LoadState
+            load={notesLoad}
+            loadingLabel="Loading notes…"
+            failedTitle="Your notes could not be loaded"
+            size="panel"
+          />
         ) : totalCount === 0 ? (
           <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
             <FileText className="h-8 w-8 text-mm-text-muted/40 mb-2" />

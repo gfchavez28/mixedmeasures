@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { coderColor, coderInitials, isCoderVisible, CODER_PALETTE } from './coder-color'
+import {
+  coderColor, coderInitials, isCoderVisible, CODER_PALETTE,
+  onlyCoders, lensHidesAnyCoder, chipHiddenWithArchived,
+} from './coder-color'
 
 describe('coderColor', () => {
   it('uses display_color when set', () => {
@@ -43,5 +46,44 @@ describe('isCoderVisible (per-coder visibility filter)', () => {
   it('never hides unattributed (null/undefined applier) codes', () => {
     expect(isCoderVisible(null, new Set([5]))).toBe(true)
     expect(isCoderVisible(undefined, new Set([5]))).toBe(true)
+  })
+})
+
+// #964 — blind mode before the roster answers: "everyone but me" with no roster.
+describe('the allow-list lens (onlyCoders)', () => {
+  it('shows only its members — including ids no roster ever named', () => {
+    const lens = onlyCoders([1])
+    expect(isCoderVisible(1, lens)).toBe(true)
+    expect(isCoderVisible(2, lens)).toBe(false)
+    expect(isCoderVisible(987654, lens)).toBe(false)
+  })
+  it('never hides unattributed codes, exactly like a hide set', () => {
+    expect(isCoderVisible(null, onlyCoders([1]))).toBe(true)
+    expect(isCoderVisible(undefined, onlyCoders([]))).toBe(true)
+  })
+  it('an EMPTY allow-list hides every attributed coding (fail-closed), unlike an empty hide set', () => {
+    expect(isCoderVisible(1, onlyCoders([]))).toBe(false)
+    expect(isCoderVisible(1, new Set())).toBe(true)
+  })
+  it('counts as hiding someone, so a gauge says "coded by visible coders"', () => {
+    expect(lensHidesAnyCoder(onlyCoders([1]))).toBe(true)
+    expect(lensHidesAnyCoder(new Set([2]))).toBe(true)
+    expect(lensHidesAnyCoder(new Set())).toBe(false)
+    expect(lensHidesAnyCoder(undefined)).toBe(false)
+  })
+  it('chipHiddenWithArchived passes an allow-list through — archived colleagues are already outside it', () => {
+    // ⚠️ showArchived FALSE with archived ids present is the only input that
+    // reaches the fold (a first draft passed `true`, returned early, and let the
+    // pass-through be deleted). Without it the fold copies the lens into a Set,
+    // and an allow-list is not iterable.
+    const lens = onlyCoders([1])
+    const out = chipHiddenWithArchived(lens, new Set([9]), false)
+    expect(out).toBe(lens)
+    expect(isCoderVisible(9, out)).toBe(false)
+    expect(isCoderVisible(1, out)).toBe(true)
+  })
+  it('chipHiddenWithArchived still folds archived ids into a hide set unless shown', () => {
+    expect(isCoderVisible(9, chipHiddenWithArchived(new Set([2]), new Set([9]), false))).toBe(false)
+    expect(isCoderVisible(9, chipHiddenWithArchived(new Set([2]), new Set([9]), true))).toBe(true)
   })
 })

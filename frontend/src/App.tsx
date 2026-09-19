@@ -36,6 +36,7 @@ const QualitativeAnalysisView = lazy(() => import('./pages/QualitativeAnalysisVi
 const CanvasView = lazy(() => import('./pages/CanvasView'))
 const CanvasCompareView = lazy(() => import('./pages/CanvasCompareView'))
 const CodebookView = lazy(() => import('./pages/CodebookView'))
+const RatingSweep = lazy(() => import('./pages/RatingSweep'))
 const MergeProject = lazy(() => import('./pages/MergeProject'))
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -156,6 +157,10 @@ function AppRoutes() {
             `starred` redirect below. #636 */}
         <Route path="analysis/integrated" element={<Navigate to="../analysis/canvas" replace />} />
         <Route path="analysis/codebook" element={<CodebookView />} />
+        {/* #35 variant B — the rating sweep. Grouped under `analysis` for the
+            same reason the codebook is: it is CROSS-SOURCE and code-level, so
+            it belongs to no single source list. */}
+        <Route path="analysis/ratings" element={<RatingSweep />} />
         <Route path="participants" element={<ParticipantsPage />} />
         <Route path="starred" element={<Navigate to="../analysis/qualitative?tab=quoteboard" replace />} />
         <Route path="memos-notes" element={<MemosNotesPage />} />

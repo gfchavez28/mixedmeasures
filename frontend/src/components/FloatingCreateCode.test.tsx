@@ -8,9 +8,14 @@ import { render, screen, cleanup } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
+// #963 — the dialog now asks the project's code names for a duplicate check
+// (`useProjectCodeNames`), so the mock has to answer `codesApi.list` and supply
+// the retry predicate that hook passes to React Query.
 vi.mock('@/lib/api', () => ({
-  codesApi: { create: vi.fn() },
+  codesApi: { create: vi.fn(), list: vi.fn().mockResolvedValue({ codes: [], total: 0 }) },
   categoriesApi: { create: vi.fn() },
+  serverDetailMessage: vi.fn(() => null),
+  retryUnanswered: vi.fn(() => false),
 }))
 
 import FloatingCreateCode from './FloatingCreateCode'
@@ -50,6 +55,7 @@ it('prefills the name input from initialName', () => {
         position={{ x: 10, y: 10 }}
         projectId={1}
         categories={[]}
+        categoriesLoad={{ status: 'ready', error: null, retry: () => {}, retrying: false }}
         onCreated={() => {}}
         onClose={() => {}}
         initialName="inquiry devolved into group work"

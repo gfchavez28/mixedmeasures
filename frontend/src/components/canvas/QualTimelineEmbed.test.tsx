@@ -18,7 +18,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import '@testing-library/jest-dom/vitest'
-import { render, screen, cleanup, within } from '@testing-library/react'
+import { render, screen, cleanup, within, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import QualTimelineEmbed from './QualTimelineEmbed'
 import { extractQualComputeParams } from './inline-chart-params'
@@ -29,11 +29,19 @@ vi.mock('@/lib/api', () => ({
   observationsApi: { list: vi.fn(), listSegments: vi.fn() },
 }))
 
-const blindState = { blind: false }
-const rosterState = { multiCoder: true }
+// #964: `blind` is the claim and `withholding` the act; they differ exactly while
+// the roster is unanswered, so the tests set them independently.
+const blindState = { blind: false, withholding: false }
+const rosterState: { multiCoder: boolean; status: 'ready' | 'loading' | 'failed' } = { multiCoder: true, status: 'ready' }
 
 vi.mock('@/hooks/useBlindMode', () => ({
-  useBlindMode: () => ({ blind: blindState.blind, blindHiddenSet: new Set<number>(), toggleReveal: vi.fn() }),
+  useBlindMode: () => ({
+    blind: blindState.blind,
+    withholding: blindState.withholding,
+    settled: rosterState.status === 'ready',
+    blindLens: new Set<number>(),
+    toggleReveal: vi.fn(),
+  }),
 }))
 vi.mock('@/hooks/useCoders', () => ({
   useCoders: () => ({
@@ -46,6 +54,7 @@ vi.mock('@/hooks/useCoders', () => ({
       [2, { id: 2, username: 'bram', display_color: '#ef4444' }],
     ]),
     multiCoder: rosterState.multiCoder,
+    status: rosterState.status,
   }),
 }))
 vi.mock('@/lib/auth-context', () => ({
@@ -125,7 +134,9 @@ afterEach(cleanup)
 
 beforeEach(() => {
   blindState.blind = false
+  blindState.withholding = false
   rosterState.multiCoder = true
+  rosterState.status = 'ready'
   vi.mocked(codesApi.list).mockReset()
   vi.mocked(categoriesApi.list).mockReset()
   vi.mocked(observationsApi.list).mockReset()
@@ -248,6 +259,7 @@ describe('blind mode — the canvas had no lens before this (multi-coder invaria
 
   it('hides colleague marks AND colleague names while blind', async () => {
     blindState.blind = true
+    blindState.withholding = true
     renderEmbed(timelineConfig({ observation_ids: [1] }))
 
     await screen.findByText('Playground morning')
@@ -268,6 +280,7 @@ describe('blind mode — the canvas had no lens before this (multi-coder invaria
 
   it('drops the colleague-only mark from the numbers while blind', async () => {
     blindState.blind = true
+    blindState.withholding = true
     renderEmbed(timelineConfig({ observation_ids: [1] }))
 
     const table = await screen.findByRole('table', { name: /Playground morning/i })
@@ -277,6 +290,49 @@ describe('blind mode — the canvas had no lens before this (multi-coder invaria
     // Silence was marked ONLY by the colleague ⇒ nothing visible.
     const silence = within(table).getByRole('row', { name: /^Silence/ })
     expect(within(silence).getAllByRole('cell')[0]).toHaveTextContent('0')
+  })
+
+  // #964 — the discriminating case: `blind` false (nothing known) but
+  // `withholding` true. An embed that narrowed on `blind` draws the colleague.
+  it('narrows on `withholding`, not `blind`, when the roster FAILED', async () => {
+    rosterState.status = 'failed'
+    rosterState.multiCoder = false
+    blindState.withholding = true
+    renderEmbed(timelineConfig({ observation_ids: [1] }))
+
+    const table = await screen.findByRole('table', { name: /Playground morning/i })
+    const silence = within(table).getByRole('row', { name: /^Silence/ })
+    expect(within(silence).getAllByRole('cell')[0]).toHaveTextContent('0')
+    const titles = Array.from(document.querySelectorAll('[title]')).map(el => el.getAttribute('title'))
+    expect(titles.some(t => t?.includes('bram'))).toBe(false)
+    // …and it does not claim blind mode it cannot know is on.
+    expect(screen.getByText(/coder list could not be loaded/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Blind mode is on/)).not.toBeInTheDocument()
+  })
+
+  it('waits for a LOADING roster instead of drawing a figure whose scope is unknown', async () => {
+    rosterState.status = 'loading'
+    rosterState.multiCoder = false
+    blindState.withholding = true
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const ui = () => (
+      <QueryClientProvider client={qc}>
+        <QualTimelineEmbed projectId={3} params={extractQualComputeParams(timelineConfig({ observation_ids: [1] }))} />
+      </QueryClientProvider>
+    )
+    const { rerender } = render(ui())
+
+    // ⚠️ The spinner ALSO shows while the three reference lists load, so seeing it
+    // proves nothing (a first draft passed with the roster wait deleted). Let
+    // every OTHER query answer, then assert the figure is still withheld.
+    await waitFor(() => expect(qc.isFetching()).toBe(0))
+    expect(screen.getByText('Loading chart...')).toBeInTheDocument()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+
+    // Positive control: the roster answering is what releases it.
+    rosterState.status = 'ready'
+    rerender(ui())
+    expect(await screen.findByRole('table', { name: /Playground morning/i })).toBeInTheDocument()
   })
 })
 
@@ -315,5 +371,78 @@ describe('the consensus layer', () => {
     expect(await screen.findByText(/saved with the Consensus layer/i)).toBeInTheDocument()
     expect(observationsApi.list).not.toHaveBeenCalled()
     expect(observationsApi.listSegments).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * #963 Tier 3 — the two canvas embeds that fetch for themselves.
+ *
+ * `InlineChartRenderer` carries `notice('Chart unavailable')` for every embed
+ * kind EXCEPT this one and the co-occurrence matrix, and its own comments say
+ * why: "this is the one component that owns its query, so it renders its own
+ * states". The canvas delegated the failure state to the child; the child never
+ * implemented one. The gate read three `isLoading` flags, which are
+ * `isPending && isFetching` — false the moment a failure settles — so a failed
+ * request fell through to "This project has no observations to chart.", inside
+ * a written document.
+ */
+describe('#963 Tier 3 — a failed reference list is not a project with no observations', () => {
+  const answered500 = () => Object.assign(new Error('boom'), { status: 500 })
+
+  it('READY with no observations: the claim is true, and is made (positive control)', async () => {
+    vi.mocked(observationsApi.list).mockResolvedValue([] as never)
+    renderEmbed(timelineConfig({ observation_ids: [] }))
+    expect(await screen.findByText(/no observations to chart/i)).toBeInTheDocument()
+  })
+
+  it('a FAILED observations list says the chart is unavailable, never that there are none', async () => {
+    vi.mocked(observationsApi.list).mockRejectedValue(answered500())
+    renderEmbed(timelineConfig({ observation_ids: [] }))
+    expect(await screen.findByText(/Chart unavailable/)).toBeInTheDocument()
+    expect(screen.queryByText(/no observations to chart/i)).toBeNull()
+    expect(screen.queryByText(/no longer in this project/i)).toBeNull()
+    // The words are true of the REQUEST, and say the project is untouched.
+    expect(screen.getByText(/Nothing in your project has changed\./)).toBeInTheDocument()
+  })
+
+  it('a FAILED codes list is the same fact — the lanes are drawn from it', async () => {
+    vi.mocked(codesApi.list).mockRejectedValue(answered500())
+    renderEmbed(timelineConfig())
+    expect(await screen.findByText(/Chart unavailable/)).toBeInTheDocument()
+    expect(screen.queryByRole('table')).toBeNull()
+  })
+
+  it('a FAILED categories list too — it decides the lane order', async () => {
+    vi.mocked(categoriesApi.list).mockRejectedValue(answered500())
+    renderEmbed(timelineConfig())
+    expect(await screen.findByText(/Chart unavailable/)).toBeInTheDocument()
+  })
+
+  it('offers NO Retry, deliberately, and stops matching the export poll', async () => {
+    // ⚠️ A canvas is a reading surface whose embeds redraw when the page is
+    // revisited, so a button per embed on a document holding several would be
+    // noise where there is nothing to decide — the reason this keeps the file's
+    // own `Notice` rather than `LoadState`.
+    // ⚠️ And it must NOT read as loading: `waitForChartsReady` polls for
+    // `.animate-spin` or the words "Loading chart" before rasterizing, so a
+    // failure that kept either would stall every export by its full deadline.
+    vi.mocked(observationsApi.list).mockRejectedValue(answered500())
+    const { container } = renderEmbed(timelineConfig())
+    await screen.findByText(/Chart unavailable/)
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(screen.queryByText('Loading chart...')).toBeNull()
+    expect(container.querySelector('.animate-spin')).toBeNull()
+  })
+
+  it('a FAILED ROSTER still draws — that decision is #964’s and is unchanged', async () => {
+    // The roster is deliberately NOT in the reference load: it decides whether
+    // the figure is blind-scoped and whether it says so, and a figure that
+    // refused to draw over it would stall a canvas export.
+    rosterState.status = 'failed'
+    blindState.withholding = true
+    renderEmbed(timelineConfig({ observation_ids: [1] }))
+    expect(await screen.findByRole('table', { name: /Playground morning/i })).toBeInTheDocument()
+    expect(screen.getByText(/coder list could not be loaded/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Chart unavailable/)).toBeNull()
   })
 })

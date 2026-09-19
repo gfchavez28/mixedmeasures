@@ -2,6 +2,8 @@ import { useState, useMemo, useCallback, useRef } from 'react'
 import { Check, ChevronDown, ChevronRight } from 'lucide-react'
 import { useTreeKeyboardNav, useTreeAriaPositions } from '@/hooks/useTreeKeyboardNav'
 import type { ConversationOption, TextColumnInfo, DocumentListItem, Observation } from '@/lib/api'
+import type { ListLoad } from '@/lib/list-status'
+import { LoadState } from '@/components/LoadStatus'
 
 interface SourceSelectorProps {
   conversations: ConversationOption[]
@@ -17,6 +19,15 @@ interface SourceSelectorProps {
   onDocumentChange?: (ids: Set<number>) => void
   onObservationChange?: (ids: Set<number>) => void
   onAllSourcesChange?: (convIds: Set<number>, ccolIds: Set<number>, docIds: Set<number>, obsIds: Set<number>) => void
+  /**
+   * #963 Tier 2 — whether the FOUR source lists are an answer.
+   *
+   * REQUIRED: `QualitativeAnalysisView`'s page gate waits for conversations
+   * but not for text columns, documents or observations, so this tree said
+   * *"No sources available."* over three lists still in flight — and said it
+   * permanently once any of them failed.
+   */
+  sourcesLoad: ListLoad
 }
 
 export default function SourceSelector({
@@ -33,6 +44,7 @@ export default function SourceSelector({
   onDocumentChange,
   onObservationChange,
   onAllSourcesChange,
+  sourcesLoad,
 }: SourceSelectorProps) {
   const [convsExpanded, setConvsExpanded] = useState(true)
   const [expandedDatasets, setExpandedDatasets] = useState<Set<number>>(new Set())
@@ -436,10 +448,20 @@ export default function SourceSelector({
         </div>
       )}
 
-      {/* Empty state */}
-      {conversations.length === 0 && textColumns.length === 0 && documents.length === 0 && observations.length === 0 && (
+      {/* Empty state — #963: only an ANSWERED set of lists may be called empty.
+          ⚠️ All four, via `combineListStatus` upstream: with conversations in
+          hand and observations outstanding the tree would otherwise show a
+          partial list under a heading that says it is complete. */}
+      {sourcesLoad.status !== 'ready' ? (
+        <LoadState
+          load={sourcesLoad}
+          loadingLabel="Loading sources…"
+          failedTitle="Your sources could not be loaded"
+          size="panel"
+        />
+      ) : conversations.length === 0 && textColumns.length === 0 && documents.length === 0 && observations.length === 0 ? (
         <p className="text-xs text-mm-text-faint text-center py-4">No sources available.</p>
-      )}
+      ) : null}
     </div>
   )
 }

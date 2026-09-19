@@ -16,6 +16,7 @@ import { jotAccessibleName } from '@/lib/rail-labels'
 // systems without an emoji font (Linux/WSL) and as inconsistent OS art elsewhere.
 import {
   Search,
+  Gauge,
   PenLine,
   StickyNote,
   FileOutput,
@@ -922,6 +923,9 @@ function AnalysisDropdown({
       </button>
       <button role="menuitem" className={DROPDOWN_ITEM} onClick={() => go(`${projectBase}/analysis/codebook`)}>
         <BookOpen className="w-3 h-3" /> Codebook
+      </button>
+      <button role="menuitem" className={DROPDOWN_ITEM} onClick={() => go(`${projectBase}/analysis/ratings`)}>
+        <Gauge className="w-3 h-3" /> Ratings
       </button>
       <button role="menuitem" className={DROPDOWN_ITEM} onClick={() => go(`${projectBase}/analysis/canvas`)}>
         <Palette className="w-3 h-3" /> Canvas

@@ -546,3 +546,40 @@ describe('describeStaledDefinitions (#584)', () => {
     expect(msg).not.toMatch(/automatic|re-derive|we (have )?updated|fixed for you/i)
   })
 })
+
+/**
+ * #963 Tier 3 — NOT in the filed entry; found by asking what every `isLoading`
+ * gate in `src/` does with a SETTLED failure.
+ *
+ * The editor is seeded from the column's frequencies, and the missing-values
+ * picker's chips ARE those frequencies (#823a's remedy for a sentinel whose
+ * stored text cannot be told apart by reading). On a failure the old gate went
+ * false, the editor rendered with no responses to label and no chips to pick,
+ * and nothing said why — so the researcher read a column with responses as a
+ * column without them, and the one control that exists to stop them TYPING a
+ * sentinel by hand offered nothing to pick instead.
+ *
+ * ⚠️ The old loading arm was a bare spinner with no role and no text — Tier 2's
+ * finding on the notes panels, here as well.
+ */
+describe('#963 Tier 3 — the dictionary editor waits for the responses it is built from', () => {
+  const answered500 = () => Object.assign(new Error('boom'), { status: 500 })
+
+  it('LOADING: a named status line, not a bare spinner', async () => {
+    getFrequencies.mockReturnValue(new Promise(() => {}))
+    renderDialog(BASE_COLUMN)
+    expect(await screen.findByText('Loading this variable’s responses…')).toBeInTheDocument()
+    expect(screen.queryByTestId('value-labels-section')).toBeNull()
+  })
+
+  it('FAILED: says so, offers a Retry, and does not present an empty dictionary', async () => {
+    getFrequencies.mockRejectedValue(answered500())
+    renderDialog(BASE_COLUMN)
+    expect(await screen.findByText('This variable’s responses could not be loaded.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    // No editor at all — an Apply over a dictionary seeded from nothing is the
+    // act this gate exists to prevent.
+    expect(screen.queryByTestId('value-labels-section')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull()
+  })
+})

@@ -75,3 +75,65 @@ class CodingProgressResponse(BaseModel):
     participant_segments: int
     participant_coded: int
     progress_percent: float
+
+
+class RatingQueueEntryResponse(BaseModel):
+    """One outstanding rating act on the sweep surface (#35 variant B).
+
+    ⚠️ `scale` is REQUIRED, not optional. An entry only reaches the queue
+    because its code declares an instrument, and a nullable field here would
+    invite a client branch for a state the query cannot produce — the shape
+    that lets a "not rated" render over a rating nobody can see.
+    """
+
+    code_id: int
+    code_name: str
+    code_color: str | None = None
+    scale: dict
+
+    #: Which endpoint commits this one: "segment" or "dataset_value".
+    target_kind: str
+    #: Exactly one of these is set, matching the CodeApplication target CHECK.
+    segment_id: int | None = None
+    dataset_value_id: int | None = None
+
+    source_type: str
+    source_id: int
+    source_label: str
+    text: str
+    start_time: float | None = None
+    end_time: float | None = None
+    record_identifier: str | None = None
+
+    #: Segments this ONE rating covers. >1 only for a coded segment GROUP,
+    #: which is rated as one unit because it is coded as one.
+    n_targets: int
+
+
+class RatingQueueCodeCountResponse(BaseModel):
+    """One code's outstanding rating count, named."""
+
+    code_id: int
+    code_name: str
+    outstanding: int
+
+
+class RatingQueueResponse(BaseModel):
+    """The queue window plus what it is a window ONTO.
+
+    ⚠️ There is no offset (see `services/rating_queue.py`): entries leave the
+    list as they are rated, so paging into it by index skips work. `total` is
+    what a progress indicator reads; `truncated` says more remain than were
+    returned.
+    """
+
+    entries: list[RatingQueueEntryResponse]
+    total: int
+    truncated: bool
+    #: Per-code coverage, because thin ratings on ONE code are what make that
+    #: code's agreement figure misleading and a single global percentage hides
+    #: it. ⚠️ Each entry carries its NAME: the counts span the whole queue
+    #: while `entries` is one batch, so a client naming these from `entries`
+    #: labels a chip with a bare id exactly when the queue is long enough for
+    #: the filter to be worth having.
+    per_code: list[RatingQueueCodeCountResponse]

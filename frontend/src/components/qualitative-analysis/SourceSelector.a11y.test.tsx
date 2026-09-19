@@ -30,6 +30,10 @@ import type { ConversationOption, TextColumnInfo } from '@/lib/api'
 
 afterEach(cleanup)
 
+/** #963 — an ANSWERED list, for fixtures whose subject is not the load state. */
+const READY_LOAD = { status: 'ready' as const, error: null, retry: () => {}, retrying: false }
+
+
 const conversations = [
   { id: 1, name: 'Interview A', segment_count: 3, coded_count: 2 },
   { id: 2, name: 'Interview B', segment_count: 4, coded_count: 1 },
@@ -44,6 +48,7 @@ function renderTree(textColumns: TextColumnInfo[] = []) {
       selectedTextColumnIds={new Set()}
       onConversationChange={vi.fn()}
       onTextColumnChange={vi.fn()}
+      sourcesLoad={READY_LOAD}
     />,
   )
 }

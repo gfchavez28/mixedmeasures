@@ -142,6 +142,10 @@ function walkNodes(node: TiptapNode, callback: (n: TiptapNode) => void): void {
  *
  * Absent (e.g. a caller that predates this) ⇒ not blind, which is the historical
  * behaviour and correct on every single-coder install.
+ *
+ * #964: `blind` here means "narrow to self", so `CanvasView` passes
+ * `useBlindMode`'s fail-closed `withholding` — true while the roster is
+ * unanswered too — never the display flag `blind`.
  */
 export interface TimelineExportLens {
   blind: boolean

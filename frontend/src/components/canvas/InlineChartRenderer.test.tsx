@@ -38,10 +38,12 @@ vi.mock('@/lib/api', () => ({
 // exercised properly in `QualTimelineEmbed.test.tsx`; here they only need to
 // resolve so the MOUNT can be asserted.
 vi.mock('@/hooks/useCoders', () => ({
-  useCoders: () => ({ coders: [], coderMap: new Map(), multiCoder: false }),
+  useCoders: () => ({ coders: [], coderMap: new Map(), multiCoder: false, status: 'ready' }),
 }))
 vi.mock('@/hooks/useBlindMode', () => ({
-  useBlindMode: () => ({ blind: false, blindHiddenSet: new Set<number>(), toggleReveal: vi.fn() }),
+  useBlindMode: () => ({
+    blind: false, withholding: false, settled: true, blindLens: new Set<number>(), toggleReveal: vi.fn(),
+  }),
 }))
 vi.mock('@/lib/auth-context', () => ({
   useAuth: () => ({ user: { id: 1, username: 'researcher' } }),

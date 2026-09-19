@@ -55,6 +55,14 @@ export default function CodePicker({
     return m
   }, [frequencies, source])
 
+  // #961 — `frequencies` is UNDEFINED until the count answers, and again on
+  // every filter or source change (each is a new query). A code the answered
+  // count does not list really has 0; a code the count has not answered for
+  // yet does not, so the count cell stays empty until there is an answer — it
+  // used to print 0 beside every code for the length of the request.
+  const countFor = (codeId: number): number | null =>
+    frequencies ? (freqMap.get(codeId) ?? 0) : null
+
   // Active codes filtered by search
   const activeCodes = useMemo(() => {
     const lowerSearch = search.toLowerCase()
@@ -276,7 +284,7 @@ export default function CodePicker({
                 <div key={code.id} className="flex items-center gap-2 px-2 py-1 text-xs text-mm-text-muted">
                   <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: getCodeColor(code) }} />
                   <span className="truncate">{code.name}</span>
-                  <span className="text-mm-text-faint tabular-nums ml-auto">{freqMap.get(code.id) ?? 0}</span>
+                  <span className="text-mm-text-faint tabular-nums ml-auto">{countFor(code.id)}</span>
                 </div>
               ))}
               {group.children.map(child => renderCategoryGroup(child, depth + 1))}
@@ -347,7 +355,7 @@ export default function CodePicker({
                 ) : (
                   <span className="truncate flex-1 text-left">{code.name}</span>
                 )}
-                <span className="text-xs text-mm-text-faint tabular-nums">{freqMap.get(code.id) ?? 0}</span>
+                <span className="text-xs text-mm-text-faint tabular-nums">{countFor(code.id)}</span>
                 {projectId && (
                   <button
                     className="shrink-0 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 p-0.5 text-mm-text-faint hover:text-mm-blue-text"
@@ -474,7 +482,7 @@ export default function CodePicker({
                 ) : (
                   <span className="truncate flex-1 text-left">{code.name}</span>
                 )}
-                <span className="text-xs text-mm-text-faint tabular-nums">{freqMap.get(code.id) ?? 0}</span>
+                <span className="text-xs text-mm-text-faint tabular-nums">{countFor(code.id)}</span>
               </div>
             ))}
           </div>

@@ -12,6 +12,7 @@ import {
 import CodeChip from '@/components/qualitative-analysis/CodeChip'
 import InlineCodeActions from '@/components/qualitative-analysis/InlineCodeActions'
 import { type Code, type QuotedExcerptItem } from '@/lib/api'
+import type { ListStatus } from '@/lib/list-status'
 import { formatTimecode } from '@/lib/utils'
 import { isTimeExcerpt } from '@/lib/excerpt-shape'
 import type { QuoteDensity } from '@/lib/qual-analysis-types'
@@ -29,6 +30,7 @@ interface QuoteCardProps {
   onUnquote: (excerptId: number) => void
   onCopy: (excerpt: QuotedExcerptItem) => void
   allCodes?: Code[]
+  codesStatus?: ListStatus
   onCodeChange?: () => void
   onFocusCode?: (codeId: number) => void
   onSendToCanvas?: (canvasId: number, canvasName: string) => void
@@ -169,6 +171,7 @@ const QuoteCard = memo(function QuoteCard({
   onUnquote,
   onCopy,
   allCodes,
+  codesStatus,
   onCodeChange,
   onFocusCode,
   onSendToCanvas,
@@ -268,7 +271,7 @@ const QuoteCard = memo(function QuoteCard({
       {/* Code chips with inline add/remove — delegates to InlineCodeActions */}
       {showCodes && (
         <div className="mt-2">
-          {onCodeChange && allCodes ? (
+          {onCodeChange && allCodes && codesStatus ? (
             <InlineCodeActions
               projectId={projectId}
               itemType={itemType}
@@ -276,6 +279,7 @@ const QuoteCard = memo(function QuoteCard({
               appliedCodeIds={excerpt.applied_code_ids}
               codeMap={codeMap}
               allCodes={allCodes}
+              codesStatus={codesStatus}
               onCodeChange={onCodeChange}
               onFocusCode={onFocusCode}
             />

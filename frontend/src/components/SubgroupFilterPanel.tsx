@@ -1,5 +1,8 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
+import type { ListLoad } from '@/lib/list-status'
 import { Plus, X, ChevronDown, Filter, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -65,11 +68,15 @@ export default function SubgroupFilterPanel({
     return Array.from(ids)
   }, [textColumns, focalColumnIds])
 
-  const { data: allColumnsData } = useQuery({
+  const allColumnsQuery = useQuery({
     queryKey: ['project-columns', projectId],
     queryFn: () => datasetsApi.allColumns(projectId),
     enabled: !!projectId,
   })
+  const allColumnsData = allColumnsQuery.data
+  /** #963 Tier 2 — *"No filter columns available"* is a claim about this
+   *  project's variables, and it was made from `[]` while they loaded. */
+  const columnsLoad = useListLoad(allColumnsQuery)
 
   const filterColumns = useMemo(() => {
     if (!allColumnsData) return []
@@ -146,6 +153,7 @@ export default function SubgroupFilterPanel({
             <ColumnPickerDropdown
               demographics={groupedColumns.demographics}
               scaleColumns={groupedColumns.scaleColumns}
+              columnsLoad={columnsLoad}
               onSelect={addFilter}
               onClose={() => setShowAddFilter(false)}
             />
@@ -176,11 +184,14 @@ export default function SubgroupFilterPanel({
 function ColumnPickerDropdown({
   demographics,
   scaleColumns,
+  columnsLoad,
   onSelect,
   onClose,
 }: {
   demographics: ProjectColumnInfo[]
   scaleColumns: ProjectColumnInfo[]
+  /** #963 — whether the two lists above are an ANSWER. */
+  columnsLoad: ListLoad
   onSelect: (colId: number) => void
   onClose: () => void
 }) {
@@ -240,9 +251,16 @@ function ColumnPickerDropdown({
           ))}
         </>
       )}
-      {demographics.length === 0 && scaleColumns.length === 0 && (
+      {columnsLoad.status !== 'ready' ? (
+        <LoadState
+          load={columnsLoad}
+          loadingLabel="Loading variables…"
+          failedTitle="Your variables could not be loaded"
+          size="panel"
+        />
+      ) : demographics.length === 0 && scaleColumns.length === 0 ? (
         <p className="text-xs text-mm-text-faint px-3 py-2">No filter columns available</p>
-      )}
+      ) : null}
     </div>
   )
 }

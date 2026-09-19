@@ -4,7 +4,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { CircleCheck } from 'lucide-react'
 import { toast } from 'sonner'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
-import { codebookApi, codesApi, categoriesApi, conversationsApi, textCodingApi, projectPortabilityApi, extractApiError } from '@/lib/api'
+import { codebookApi, codesApi, categoriesApi, conversationsApi, textCodingApi, projectPortabilityApi, extractApiError, retryUnanswered } from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadFailedNotice } from '@/components/LoadStatus'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import type { CodebookTreeResponse, CodebookCategoryNode } from '@/lib/api'
 import { useCodebookState } from '@/hooks/useCodebookState'
@@ -47,16 +49,30 @@ export default function CodebookView() {
   }, [])
 
   // ── Source queries (for hide panel + visible source computation) ─────────
-  const { data: convsData } = useQuery({
+  const convsQuery = useQuery({
     queryKey: ['conversations', projectId],
     queryFn: () => conversationsApi.list(projectId),
   })
-  const { data: colsData } = useQuery({
+  const convsData = convsQuery.data
+  const colsQuery = useQuery({
     queryKey: ['text-columns', projectId],
     queryFn: () => textCodingApi.columns(projectId),
   })
+  const colsData = colsQuery.data
   const conversations = useMemo(() => convsData?.conversations ?? [], [convsData?.conversations])
   const textColumns = useMemo(() => colsData?.columns ?? [], [colsData?.columns])
+  /**
+   * #963 Tier 2 — the page gate below waits for the TREE; these two are a
+   * separate pair, and two claims rest on them.
+   *
+   * `emptyMessage`'s *"All sources are hidden"* branch reads
+   * `conversations.length === 0 || allConvsHidden` — so an unanswered list
+   * satisfies the first half and, with anything hidden, the message fires over
+   * sources it has not seen. And `CodebookHidePanel` calls itself empty from
+   * the same two arrays.
+   */
+  const sourcesLoad = useListLoad(convsQuery, colsQuery)
+  const sourcesKnown = sourcesLoad.status === 'ready'
 
   // Creation panel state (floating panels replace modal dialogs)
   const [showCreateCode, setShowCreateCode] = useState(false)
@@ -114,12 +130,25 @@ export default function CodebookView() {
     return params
   }, [visibleConvIds, visibleColIds, cb.inactive, cb.minSeg, cb.maxSeg])
 
-  const { data: treeData, isLoading } = useQuery({
+  const treeQuery = useQuery({
     queryKey: ['codebook-tree', projectId, ...Object.entries(treeParams).flat()],
     queryFn: () => codebookApi.tree(projectId, treeParams),
     enabled: !isNaN(projectId),
     staleTime: 30_000,
+    // #961 — a failed tree now says so and offers Retry; the client default's
+    // silent second ask only doubles a wait the server already answered.
+    retry: retryUnanswered,
   })
+  const treeData = treeQuery.data
+  /**
+   * #961 — the status bar counted from `treeData` with a `0` fallback, so it
+   * read "0 codes · 0 categories" for the whole load (6–19 s on a large
+   * project), and a FAILED tree left a blank page under those zeros. `isLoading`
+   * could say neither "failed" nor, after a failure, anything at all.
+   */
+  const treeLoad = useListLoad(treeQuery)
+  const isLoading = treeLoad.status === 'loading' && !treeLoad.retrying
+  const treeFailed = treeLoad.status === 'failed' || treeLoad.retrying
 
   // Baseline tree query (no segment filters) — for computing the slider range
   const baselineTreeParams = useMemo(() => {
@@ -251,7 +280,10 @@ export default function CodebookView() {
   const emptyMessage = useMemo(() => {
     if (!filteredTreeData) return null
     if (filteredTotalCodes === 0 && filteredTreeData.universal_codes.length === 0) {
-      if (cb.hiddenConvIds.size > 0 || cb.hiddenColIds.size > 0) {
+      // #963 — "all sources are hidden" is a statement about the source lists,
+      // so it waits for them. The other branches below read the TREE, which the
+      // page gate already covers.
+      if (sourcesKnown && (cb.hiddenConvIds.size > 0 || cb.hiddenColIds.size > 0)) {
         // Check if ALL sources are hidden
         const allConvsHidden = conversations.length > 0 && conversations.every(c => cb.hiddenConvIds.has(c.id))
         const allColsHidden = textColumns.length > 0 && textColumns.every(c => cb.hiddenColIds.has(c.column_id))
@@ -271,7 +303,7 @@ export default function CodebookView() {
       return 'Create codes in conversations or the Text Coding tab to see your codebook here'
     }
     return null
-  }, [filteredTreeData, filteredTotalCodes, totalCodes, cb.hiddenConvIds, cb.hiddenColIds, cb.hiddenCodeIds, conversations, textColumns, cb.minSeg, cb.maxSeg, cb.search])
+  }, [filteredTreeData, filteredTotalCodes, totalCodes, cb.hiddenConvIds, cb.hiddenColIds, cb.hiddenCodeIds, conversations, textColumns, cb.minSeg, cb.maxSeg, cb.search, sourcesKnown])
 
   const handleSearchMatchCount = useCallback((count: number) => {
     setSearchMatchCount(count)
@@ -1029,6 +1061,7 @@ export default function CodebookView() {
               treeData={treeData}
               conversations={conversations}
               textColumns={textColumns}
+              sourcesLoad={sourcesLoad}
               hiddenCodeIds={cb.hiddenCodeIds}
               hiddenConvIds={cb.hiddenConvIds}
               hiddenColIds={cb.hiddenColIds}
@@ -1042,9 +1075,27 @@ export default function CodebookView() {
 
         {/* Center: Main visualization (wrapper for action bar positioning) */}
         <div className="flex-1 relative overflow-hidden">
-          <div ref={treeContainerRef} className="h-full p-4 overflow-hidden">
+          {/* `tabIndex={-1}`: where focus lands when a Retry succeeds and the
+              failure notice, with its focused button, unmounts (#961). This
+              page has no workbench keyboard layer, so a click on the
+              whitespace taking focus here costs nothing. */}
+          {/* Scrolls while there is no tree (#961): the tree view pans itself and
+              needs `overflow-hidden`, but at 640×360 this box is 87 px tall and
+              a clipped failure notice hid its own Retry button. */}
+          <div ref={treeContainerRef} tabIndex={-1} className={`h-full p-4 outline-none ${treeData ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+            {treeFailed && (
+              <LoadFailedNotice
+                title="The codebook could not be loaded."
+                load={treeLoad}
+                landingRef={treeContainerRef}
+              />
+            )}
+
             {isLoading && (
-              <div className="space-y-3 animate-pulse">
+              // #961 — the skeleton is drawn for the eye; `role="status"` and
+              // the sr-only line are what say "loading" to anyone else.
+              <div role="status" className="space-y-3 animate-pulse">
+                <span className="sr-only">Loading the codebook…</span>
                 <div className="h-4 w-48 bg-mm-border-subtle rounded" />
                 <div className="space-y-2 ml-4">
                   <div className="h-3 w-36 bg-mm-border-subtle/60 rounded" />
@@ -1204,9 +1255,17 @@ export default function CodebookView() {
 
       {/* Status bar */}
       <div className="px-4 py-1.5 border-t border-mm-border-subtle text-xs text-mm-text-faint flex items-center gap-3 shrink-0">
-        <span>{filteredTotalCodes} codes{cb.hiddenCodeIds.size > 0 ? ` (${cb.hiddenCodeIds.size} hidden)` : ''}</span>
-        <span className="text-mm-text-faint">{'\u00b7'}</span>
-        <span>{totalCategories} categories</span>
+        {/* #961: counts only once the tree has answered. Before, the bar read
+            "0 codes, 0 categories" beside a codebook that had both. */}
+        {treeData ? (
+          <>
+            <span>{filteredTotalCodes} codes{cb.hiddenCodeIds.size > 0 ? ` (${cb.hiddenCodeIds.size} hidden)` : ''}</span>
+            <span className="text-mm-text-faint">{'\u00b7'}</span>
+            <span>{totalCategories} categories</span>
+          </>
+        ) : (
+          <span>{treeFailed ? 'Codebook not loaded' : 'Loading codebook\u2026'}</span>
+        )}
 
         {/* Health badges (use original treeData for diagnostics) */}
         {treeData && !isEmpty && (() => {

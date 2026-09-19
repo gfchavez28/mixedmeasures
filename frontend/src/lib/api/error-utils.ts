@@ -84,6 +84,50 @@ export function isServerRefusal(err: unknown): boolean {
 }
 
 /**
+ * Did the CLIENT stop waiting? (#957)
+ *
+ * `client.ts` bounds every request with `AbortSignal.timeout`, which rejects
+ * with a `DOMException` named `TimeoutError` — not an `ApiError`, and with no
+ * `status`, because no answer arrived. `AbortError` is the same rejection from a
+ * signal aborted by hand.
+ *
+ * ⚠️ **A timeout is not a failure of the work, and "try again" is the wrong
+ * advice** (#820): a retry gets the same budget and stops in the same place,
+ * while the server may still be finishing the first attempt.
+ *
+ * ⚠️ **Duck-typed on `name`, like the two readers above** — callers' tests build
+ * a timeout as a plain `Error` with that name. This predicate was FIVE
+ * hand-rolled copies before it lived here; `request-timeout-single-source.test.ts`
+ * fails the suite on a sixth.
+ */
+export function isRequestTimeout(err: unknown): boolean {
+  const name = (err as { name?: unknown } | null)?.name
+  return name === 'TimeoutError' || name === 'AbortError'
+}
+
+/**
+ * A React Query `retry` for a request whose answer will not change if it is
+ * asked again: retry ONCE, and only when no answer arrived (#956/#957).
+ *
+ * The client-wide default (`main.tsx`) retries every failure once. That is
+ * wrong for a heavy read in two directions at once:
+ *   - **the server answered** (any `status`) — a 500 from a query that exceeds a
+ *     database limit, or a refusal, is deterministic for the same request, so the
+ *     retry repeats the full cost for the same result;
+ *   - **the client timed out** — the server never stopped; a retry starts a
+ *     SECOND computation beside the first (measured for #957: pooled
+ *     reliability, 46 s and +780 MB each).
+ *
+ * What is left is a request that never reached an answer for a reason other
+ * than the budget — a dropped connection — which is the case a retry exists for.
+ */
+export function retryUnanswered(failureCount: number, err: unknown): boolean {
+  if (failureCount >= 1) return false
+  if (isRequestTimeout(err)) return false
+  return typeof (err as { status?: unknown } | null)?.status !== 'number'
+}
+
+/**
  * Extract a human-readable error message from an API error.
  *
  * The server's reason when it gave one, else the thrown Error's own message,

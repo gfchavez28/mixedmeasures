@@ -42,6 +42,11 @@ from app.routers.export_excel import export_datasets_excel, export_study_excel
 from app.routers.export_r import export_r_data
 from app.routers.metrics import get_row_matrix, get_row_matrix_csv
 from app.routers.recode import apply_value_labels_endpoint, bulk_set_missing_values
+from app.routers.text_analysis import (
+    code_density, cross_tabulation, export_cross_analysis, filtered_frequencies,
+    response_length_by_code,
+)
+from app.routers.text_coding import coding_progress, export_coded_texts, list_records
 
 from tests.guard_support import app_files
 
@@ -73,6 +78,21 @@ MUST_BE_SYNC = [
     (export_study_excel, "15.1s"),
     (get_row_matrix, "7.9s — and it is a plain GET the analysis UI issues, not an export"),
     (get_row_matrix_csv, "7.1s — its body is a call to get_row_matrix; the two move together"),
+    # #956 — the text read paths, measured on the BES corpus (965,917 values, 30
+    # open-text waves), 2026-09-13. Before #956 each 500'd at SQLite's bind
+    # ceiling AFTER holding the loop (the first figure); with the ceiling lifted
+    # each runs to completion (the second, as `def`, worst concurrent /health in
+    # brackets). Left `async`, the fix would have turned a fast 500 into a freeze
+    # of the second length on every one of them.
+    (coding_progress, "5.8s on the loop before its 500; 18.3s to completion on 30 waves [0.37s]"),
+    (list_records, "6.6s before its 500; 13.9s to completion [0.48s] — and no client calls it"),
+    (export_coded_texts, "7.4s on the loop; 25.3s to completion, a 92.5 MB CSV [0.83s]"),
+    (code_density, "14.1s on the loop before its 500; 13.0s to completion [0.40s]"),
+    (response_length_by_code, "15.3s on the loop before its 500; 18.2s to completion [0.69s]"),
+    (filtered_frequencies, "8.4s to completion on 30 waves [0.20s]"),
+    (export_cross_analysis, "27.2s to completion on 30 waves [0.66s]"),
+    (cross_tabulation, "same gather as code_density plus the participant-linked arm; BES has no "
+                       "categorical column to cross it with, so its own wall time is unmeasured"),
 ]
 
 # Endpoints that genuinely await I/O and therefore CANNOT take that treatment.

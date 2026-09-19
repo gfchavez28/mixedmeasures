@@ -1,8 +1,71 @@
 import api from './client'
 import type { BulkCodeResponse } from '../bulk-code-result'
+import type { MagnitudeScale } from '../magnitude'
+
+/**
+ * One outstanding rating act on the sweep surface (#35 variant B).
+ *
+ * ⚠️ `scale` is REQUIRED, not nullable. An entry only reaches the queue
+ * because its code declares an instrument, so a client branch for "no scale"
+ * would be dead code guarding a state the server cannot emit.
+ */
+export interface RatingQueueEntry {
+  code_id: number
+  code_name: string
+  code_color: string | null
+  scale: MagnitudeScale
+  /** Which endpoint commits it. Route through `lib/rating-commit.ts`. */
+  target_kind: 'segment' | 'dataset_value'
+  segment_id: number | null
+  dataset_value_id: number | null
+  source_type: 'conversation' | 'document' | 'observation' | 'column'
+  source_id: number
+  source_label: string
+  text: string
+  start_time: number | null
+  end_time: number | null
+  record_identifier: string | null
+  /** Segments this ONE rating covers — >1 only for a coded segment group. */
+  n_targets: number
+}
+
+/** One code's outstanding rating count, NAMED by the server. */
+export interface RatingQueueCodeCount {
+  code_id: number
+  code_name: string
+  outstanding: number
+}
+
+export interface RatingQueueResponse {
+  entries: RatingQueueEntry[]
+  total: number
+  truncated: boolean
+  /**
+   * Per-code coverage, most-outstanding first.
+   *
+   * ⚠️ **Each row carries its own NAME — do not look one up in `entries`.**
+   * These counts span the whole queue while `entries` is a single batch, so a
+   * code with nothing in the current window has no entry to be named from, and
+   * a client deriving names that way shows a bare id exactly when the queue is
+   * long enough for the filter to be worth having.
+   */
+  per_code: RatingQueueCodeCount[]
+}
 
 // API functions - Coding
 export const codingApi = {
+  /**
+   * #35 variant B — this coder's applications that declare a scale and carry
+   * no rating.
+   *
+   * ⚠️ **There is no offset, deliberately.** Entries LEAVE the queue as they
+   * are rated, so paging into it by index skips work. Refetch to advance;
+   * `total` is what a progress indicator reads.
+   */
+  getRatingQueue: (projectId: number, params?: { codeId?: number; limit?: number }) =>
+    api.get<RatingQueueResponse>(`/projects/${projectId}/rating-queue`, {
+      params: { code_id: params?.codeId, limit: params?.limit },
+    }).then(res => res.data),
   /**
    * Apply a code; optionally with a rating (#35).
    *

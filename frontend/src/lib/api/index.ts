@@ -2,12 +2,12 @@
 export { default as api } from './client'
 export { default } from './client'
 export { setCsrfToken, ApiError } from './client'
-export { extractApiError, serverDetailMessage, isServerRefusal } from './error-utils'
+export { extractApiError, serverDetailMessage, isServerRefusal, isRequestTimeout, retryUnanswered } from './error-utils'
 
 // Downloads — the canonical blob→anchor helpers. Exported here because they
 // were not reachable from the barrel, and six components hand-rolled their own
 // copy rather than go looking (#743).
-export { downloadBlob, extractFilename, namedBlob } from './download'
+export { downloadBlob, extractFilename, namedBlob, EXPORT_TIMEOUT_MS } from './download'
 export type { NamedBlob } from './download'
 
 // Auth
@@ -415,6 +415,8 @@ export type {
   BackupInfo,
   RestorePreview,
   ProjectBackupSummary,
+  SafetyCopyAct,
+  SafetyCopyInfo,
 } from './backup'
 
 // Canvas

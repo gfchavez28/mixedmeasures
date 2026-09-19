@@ -67,6 +67,7 @@ function renderRow(over: Record<string, unknown> = {}, isSelected = false) {
         segmentationMode="paragraph"
         codeMap={new Map()}
         allCodes={[]}
+        codesStatus="ready"
         projectId={1}
         onCodeChange={vi.fn()}
         onToggleQuote={vi.fn()}

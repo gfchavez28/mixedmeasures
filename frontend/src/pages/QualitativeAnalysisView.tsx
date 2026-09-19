@@ -25,6 +25,7 @@ import {
   exportApi,
   excerptsApi,
   canvasApi,
+  retryUnanswered,
   type CodeAnalysisFilterParams,
   type TextColumnInfo,
   type DocumentListItem,
@@ -72,6 +73,9 @@ import { SELECTED_SEGMENT, SELECTED_ROW } from '@/lib/selection'
 import BlindModeToggle from '@/components/BlindModeToggle'
 import { qualChartHasEnoughToFetch, extractQualComputeParams } from '@/components/canvas/inline-chart-params'
 import { useBlindMode } from '@/hooks/useBlindMode'
+import { useListLoad } from '@/hooks/useListLoad'
+import { listStatus } from '@/lib/list-status'
+import { LoadState } from '@/components/LoadStatus'
 
 
 // ── Constants (hoisted out of component to avoid re-creation per render) ────
@@ -107,9 +111,18 @@ export default function QualitativeAnalysisView() {
 
   const qa = useQualitativeAnalysis()
   const { openCodebook } = useProjectLayout()
-  const { coders, coderMap, multiCoder } = useCoders()
+  // #961 — where focus lands when a Retry on the coding counts succeeds.
+  const activeTabRef = useRef<HTMLButtonElement>(null)
+  const { coders, coderMap, multiCoder, query: codersQuery } = useCoders()
   const { user } = useAuth()
-  const { blind, toggleReveal } = useBlindMode(pid)
+  // #964: scopes key on `withholding` (fail-closed); the notices key on `blind`.
+  // The page gate below also waits for the roster, and the page's own
+  // coder-scoped queries wait for `blindSettled`, so nothing is fetched under a
+  // scope that is about to change. ⚠️ Behind those two gates `blind` and
+  // `withholding` agree wherever a scope is read (a mutant swapping them
+  // survives); the scope reads `withholding` anyway so that no coder scope in the
+  // app reads the claim, and removing a gate cannot turn this one fail-open.
+  const { blind, withholding, settled: blindSettled, toggleReveal } = useBlindMode(pid)
   const self = user?.id ?? null
   const [srAnnouncement, setSrAnnouncement] = useState('')
 
@@ -121,10 +134,10 @@ export default function QualitativeAnalysisView() {
   // is forced to just-me + hidden, and the comparison tabs are gated off below).
   // Memoized so the [self] array keeps a stable ref (else downstream useMemo deps churn).
   const effectiveCoderInclude = useMemo(
-    () => (blind && self != null ? [self] : coderInclude),
-    [blind, self, coderInclude],
+    () => (withholding && self != null ? [self] : coderInclude),
+    [withholding, self, coderInclude],
   )
-  const effectiveCoderIncludeCsv = blind && self != null ? String(self) : coderIncludeCsv
+  const effectiveCoderIncludeCsv = withholding && self != null ? String(self) : coderIncludeCsv
   // Set form for the client-computed timeline chart (§8q DEC-6c-2) — the SAME
   // effective scope the backend-computed charts receive, null = no filter.
   const effectiveCoderIncludeSet = useMemo(
@@ -257,11 +270,12 @@ export default function QualitativeAnalysisView() {
 
   // ── Data queries ──────────────────────────────────────────────────────
 
-  const { data: codesData, isLoading: codesLoading } = useQuery({
+  const codesQuery = useQuery({
     queryKey: ['codes', pid],
     queryFn: () => codesApi.list(pid),
     enabled: !!pid,
   })
+  const codesData = codesQuery.data
 
   const { data: categoriesData } = useQuery({
     queryKey: ['categories', pid],
@@ -269,29 +283,66 @@ export default function QualitativeAnalysisView() {
     enabled: !!pid,
   })
 
-  const { data: conversationsData, isLoading: convsLoading } = useQuery({
+  const conversationsQuery = useQuery({
     queryKey: ['conversations', pid],
     queryFn: () => conversationsApi.list(pid),
     enabled: !!pid,
   })
+  const conversationsData = conversationsQuery.data
 
-  const { data: textColumnsData } = useQuery({
+  /** #961 — the page's two empty states ("No conversations or coded text
+   * yet" · "No codes created yet") are claims about these two lists, so they
+   * wait for both to ANSWER — and a failure says the load failed instead of
+   * offering to import conversations the project already has.
+   * #964 — and for the coder roster: every tab below is coder-scoped, and
+   * until the roster answers nobody knows whether blind mode is on. */
+  const pageLoad = useListLoad(codesQuery, conversationsQuery, codersQuery)
+  /** Rendered below the page gate, so `ready` whenever it is read; computed
+   * rather than asserted, because the components that take it are not told. */
+  const codesStatus = listStatus(codesQuery)
+
+  const textColumnsQuery = useQuery({
     queryKey: ['qual-text-columns', pid],
     queryFn: () => codeAnalysisApi.textColumnsWithCoding(pid),
     enabled: !!pid,
   })
+  const textColumnsData = textColumnsQuery.data
 
-  const { data: documentsData } = useQuery({
+  const documentsQuery = useQuery({
     queryKey: ['documents', pid],
     queryFn: () => documentsApi.list(pid),
     enabled: !!pid,
   })
+  const documentsData = documentsQuery.data
 
-  const { data: observationsData } = useQuery({
+  const observationsQuery = useQuery({
     queryKey: ['observations', pid],
     queryFn: () => observationsApi.list(pid),
     enabled: !!pid,
   })
+  const observationsData = observationsQuery.data
+  /**
+   * #961 — the Sources header counts four lists; before this it summed
+   * whichever had arrived and read low until the last one did.
+   *
+   * #963 Tier 2 — and the same four decide whether *"No sources available"* is
+   * true. The page gate above waits for codes, conversations and the coder
+   * roster ONLY, so `textColumns`, `documents` and `observations` are still in
+   * flight when the sidebar and the Content tab first render. A `ListLoad`
+   * rather than a bare status, because both surfaces are large enough that a
+   * failed load needs a way back that is not a page reload — and `sourcesStatus`
+   * is DERIVED from it so the header count and the empty states cannot come to
+   * disagree about what is known.
+   */
+  const sourcesLoad = useListLoad(conversationsQuery, textColumnsQuery, documentsQuery, observationsQuery)
+  const sourcesStatus = sourcesLoad.status
+  /**
+   * #963 Tier 2 — the Timeline chart rests on the observations list ALONE, and
+   * its empty copy is an INSTRUCTION ("pick one under Sources"), so reading an
+   * unanswered list as "none selected" sends the researcher to redo a selection
+   * they may already have made.
+   */
+  const observationsLoad = useListLoad(observationsQuery)
 
   // Palette queries
   const { data: collectionsData } = useQuery({
@@ -352,11 +403,21 @@ export default function QualitativeAnalysisView() {
     enabled: !!pid && qa.tab === 'quoteboard',
   })
 
-  const { data: freqData } = useQuery({
+  const freqQuery = useQuery({
     queryKey: ['code-frequencies', pid, qa.excludeFacilitator, Array.from(qa.selectedConversationIds).join(','), qa.participantIds.join(','), qa.source, Array.from(qa.selectedTextColumnIds).join(','), Array.from(qa.selectedDocumentIds).join(','), Array.from(qa.selectedObservationIds).join(','), effectiveCoderIncludeCsv ?? '', qa.layerScope],
     queryFn: () => codeAnalysisApi.frequencies(pid, filterParams),
-    enabled: !!pid,
+    enabled: !!pid && blindSettled,
+    // #961 — a failed count now says so and offers Retry, so the client
+    // default's silent second ask only doubles a wait the server already
+    // answered (8.4 s filtered on a large survey; #956/#957's rule).
+    retry: retryUnanswered,
   })
+  const freqData = freqQuery.data
+  /** #961 — `hasCoding` below is read off this count. Undefined used to mean
+   * "no coding", so every tab said "No segments or text has been coded yet."
+   * for as long as the count took (~5.7 s measured) — and again on every
+   * filter, source or blind-mode change, because each one is a new key. */
+  const freqLoad = useListLoad(freqQuery)
 
   // Source frequencies for Descriptives charts (heatmap, bar, stacked bar, summary)
   const sourceFreqRequest: SourceFrequenciesRequest = useMemo(() => ({
@@ -388,7 +449,7 @@ export default function QualitativeAnalysisView() {
       qa.layerScope,
     ],
     queryFn: () => codeAnalysisApi.sourceFrequencies(pid, sourceFreqRequest),
-    enabled: !!pid && qa.tab === 'descriptives' && qa.chartType !== 'saturation'
+    enabled: !!pid && blindSettled && qa.tab === 'descriptives' && qa.chartType !== 'saturation'
       && qa.selectedCodeIds.size > 0
       && (qa.selectedConversationIds.size > 0 || qa.selectedTextColumnIds.size > 0 || qa.selectedDocumentIds.size > 0 || qa.selectedObservationIds.size > 0),
   })
@@ -411,7 +472,7 @@ export default function QualitativeAnalysisView() {
       coder_ids: effectiveCoderIncludeCsv,
       layer_scope: qa.layerScope,
     }),
-    enabled: !!pid && qa.tab === 'descriptives' && qa.chartType === 'saturation',
+    enabled: !!pid && blindSettled && qa.tab === 'descriptives' && qa.chartType === 'saturation',
   })
 
   // Demographic filters for comparison group-by dropdown
@@ -451,7 +512,7 @@ export default function QualitativeAnalysisView() {
       qa.layerScope,
     ],
     queryFn: () => codeAnalysisApi.demographicComparison(pid, comparisonRequest!),
-    enabled: !!pid && qa.tab === 'relationships' && qa.relView === 'comparisons' && !!comparisonRequest,
+    enabled: !!pid && blindSettled && qa.tab === 'relationships' && qa.relView === 'comparisons' && !!comparisonRequest,
   })
 
   // Co-occurrence N (reported by QualCooccurrence via onDataLoad callback)
@@ -993,11 +1054,18 @@ export default function QualitativeAnalysisView() {
   }, [qa.setContentCodeId]) // eslint-disable-line react-hooks/exhaustive-deps -- qa destructured access
 
   // ── Loading state ─────────────────────────────────────────────────────
+  // #961 — `isLoading` alone let a FAILED codes or conversations request fall
+  // through to the empty states below, which then told the researcher to
+  // import conversations the project already has.
 
-  if (codesLoading || convsLoading) {
+  if (pageLoad.status !== 'ready') {
     return (
-      <div className="h-full flex items-center justify-center">
-        <p className="text-mm-text-muted">Loading...</p>
+      <div className="h-full p-4">
+        <LoadState
+          load={pageLoad}
+          loadingLabel="Loading codes, sources and coders…"
+          failedTitle="This project’s codes, sources or coders could not be loaded."
+        />
       </div>
     )
   }
@@ -1126,6 +1194,7 @@ export default function QualitativeAnalysisView() {
           return (
             <button
               key={t.id}
+              ref={isActive ? activeTabRef : undefined}
               id={`tab-${t.id}`}
               role="tab"
               data-tab={t.id}
@@ -1159,9 +1228,11 @@ export default function QualitativeAnalysisView() {
               <ReconciliationGrid
                 projectId={pid}
                 codes={codes}
+                codesStatus={codesStatus}
                 currentUserId={user?.id ?? null}
                 staleCount={consensusStatus?.stale_count ?? 0}
                 setSrAnnouncement={setSrAnnouncement}
+                landingRef={activeTabRef}
               />
             ) : (
               <ReliabilityTab projectId={pid} codes={codes} />
@@ -1290,9 +1361,11 @@ export default function QualitativeAnalysisView() {
               >
                 <ChevronDown className={`w-4 h-4 text-mm-text-muted transition-transform ${!sourcesOpen ? '-rotate-90' : ''}`} aria-hidden="true" />
                 Sources
-                <span className="text-xs text-mm-text-faint ml-auto">
-                  {conversations.length + textColumns.length + documents.length + observations.length}
-                </span>
+                {sourcesStatus === 'ready' && (
+                  <span className="text-xs text-mm-text-faint ml-auto">
+                    {conversations.length + textColumns.length + documents.length + observations.length}
+                  </span>
+                )}
               </button>
               {sourcesOpen && (
                 <div className="flex-1 min-h-0 overflow-y-auto pt-2">
@@ -1358,6 +1431,7 @@ export default function QualitativeAnalysisView() {
                     onDocumentChange={qa.setSelectedDocumentIds}
                     onObservationChange={qa.setSelectedObservationIds}
                     onAllSourcesChange={qa.setAllSourceIds}
+                    sourcesLoad={sourcesLoad}
                   />
                 </div>
               )}
@@ -1485,7 +1559,17 @@ export default function QualitativeAnalysisView() {
             <div className="flex-1 overflow-y-auto p-4" role="tabpanel" id="qual-tabpanel" aria-labelledby={`tab-${qa.tab}`}>
               {/* Reconciliation/Reliability render full-width above (outside this
                   PanelGroup), so this switch only handles the sidebar-bearing tabs. */}
-              {!hasCoding ? (
+              {/* #961 — "has been coded yet" is a claim about the count, so it
+                  waits for the count to ANSWER. The landing is the active tab:
+                  a Retry that succeeds unmounts its own focused button. */}
+              {freqLoad.status !== 'ready' ? (
+                <LoadState
+                  load={freqLoad}
+                  loadingLabel="Counting coded segments and texts…"
+                  failedTitle="The coding counts could not be loaded."
+                  landingRef={activeTabRef}
+                />
+              ) : !hasCoding ? (
                 <div className="text-center py-16">
                   {/* #517: while blind this emptiness only means YOUR coding is empty —
                       "nothing has been coded yet" would misread as lost colleague work. */}
@@ -1539,6 +1623,7 @@ export default function QualitativeAnalysisView() {
                       onChartTypeChange={handleChartTypeChange}
                       projectId={pid}
                       timedObservations={contentObservations}
+                      observationsLoad={observationsLoad}
                       timedCodes={timedCodes}
                       timedCategories={categories}
                       coderInclude={effectiveCoderIncludeSet}
@@ -1599,6 +1684,7 @@ export default function QualitativeAnalysisView() {
                           projectId={pid}
                           codes={contentCodes}
                           allCodes={codes}
+                          codesStatus={codesStatus}
                           frequencies={contentFrequencies}
                           selectedContentCodeId={qa.contentCodeId}
                           onCodeSelect={handleContentCodeSelect}
@@ -1619,6 +1705,8 @@ export default function QualitativeAnalysisView() {
                           projectId={pid}
                           codes={codes}
                           allCodes={codes}
+                          codesStatus={codesStatus}
+                          sourcesLoad={sourcesLoad}
                           conversations={contentConversations}
                           textColumns={contentTextColumns}
                           documents={contentDocuments}
@@ -1641,6 +1729,7 @@ export default function QualitativeAnalysisView() {
                     <QuoteBoardView
                       projectId={pid}
                       codes={codes}
+                      codesStatus={codesStatus}
                       filterParams={quoteFilterParams}
                       quoteData={quoteData}
                       groupBy={qa.quoteGroupBy}

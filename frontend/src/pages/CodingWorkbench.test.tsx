@@ -10,7 +10,7 @@
  * Harness mirrors `ObservationWorkbench.test.tsx` / `DocumentCodingWorkbench.test.tsx`.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -212,5 +212,209 @@ describe('the rating strip on the conversation workbench', () => {
     fireEvent.keyDown(group, { key: '7' })
     await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(51, 7, 7))
     expect(applyCode).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * #964 — measured live: with the coder roster held back, a multi-coder
+ * transcript rendered 19 chips instead of 5 and no blind toggle. An unanswered
+ * roster read as a one-person one, so blind mode was off.
+ */
+describe('#964 — an unanswered coder roster keeps colleagues hidden', () => {
+  // Segment 51 carries ONLY a colleague's code; 52 carries mine.
+  const WITH_COLLEAGUE = [
+    segment(51, 0, 'The first turn of the interview.', {
+      applied_codes: [8],
+      applied_code_details: [{ code_id: 8, user_id: 2, attribution: null, is_universal: false,
+                               magnitude: null, magnitude_conflict: null }],
+    }),
+    SEGMENTS[1],
+  ]
+
+  it.each([
+    ['loading', () => listCoders.mockReturnValue(new Promise(() => {}))],
+    ['failed', () => listCoders.mockRejectedValue(new Error('network'))],
+  ] as const)('roster %s: my chip renders, the colleague\'s does not, and the gauge counts only mine', async (_s, arrange) => {
+    arrange()
+    listSegments.mockResolvedValue({
+      segments: WITH_COLLEAGUE, total: 2, coded_count: 2, participant_total: 2, participant_coded: 2,
+    })
+    renderWorkbench()
+
+    const rows = await screen.findAllByRole('option')
+    await waitFor(() => expect(within(rows[1]).getByText('Engagement')).toBeInTheDocument())
+    expect(within(rows[0]).queryByText('Disruption')).not.toBeInTheDocument()
+    const gauge = screen.getAllByRole('progressbar', { name: 'Coding progress' })[0]
+    expect(gauge).toHaveAttribute('aria-valuetext', '1 of 2 participant segments coded by visible coders')
+    // The claim waits: no toggle, and the gauge does not say "(colleagues hidden)".
+    expect(screen.queryByRole('button', { name: /Colleagues/ })).not.toBeInTheDocument()
+  })
+
+  // Found by #964's review: "View all — N archived" outlived re-blinding, and the
+  // blind set is built from the NON-archived roster.
+  it('re-blinding hides an archived colleague\'s chips even after "View all" was switched on', async () => {
+    listCoders.mockResolvedValue([
+      { id: 1, username: 'Alice', display_color: null, archived: false },
+      { id: 2, username: 'Bob', display_color: null, archived: false },
+    ])
+    coderCoverage.mockResolvedValue({
+      coders: [{ user_id: 3, username: 'Carla', display_color: null, archived: true, coding_count: 1 }],
+      count: 1,
+    })
+    listSegments.mockResolvedValue({
+      segments: [
+        segment(51, 0, 'The first turn of the interview.', {
+          applied_codes: [8],
+          applied_code_details: [{ code_id: 8, user_id: 3, attribution: null, is_universal: false,
+                                   magnitude: null, magnitude_conflict: null }],
+        }),
+        SEGMENTS[1],
+      ],
+      total: 2, coded_count: 2, participant_total: 2, participant_coded: 2,
+    })
+    localStorage.setItem('mm-blind-revealed-1-1', '1')
+    renderWorkbench()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Filter codes by coder' }))
+    fireEvent.click(await screen.findByRole('button', { name: /View all — 1 archived/ }))
+    expect(await screen.findByText(/coded by Carla/)).toBeInTheDocument() // positive control
+
+    fireEvent.click(screen.getByRole('button', { name: 'Colleagues shown' }))
+    expect(await screen.findByRole('button', { name: 'Colleagues hidden' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText(/coded by Carla/)).not.toBeInTheDocument())
+  })
+})
+
+/**
+ * #963 Tier 2 — the coverage gauge and the transcript measure ONE list, and
+ * neither may speak for it before it answers.
+ *
+ * MEASURED before the fix (dev corpus, conversation 9, `/segments` held back by
+ * an in-page `fetch` wrapper): the toolbar announced `aria-valuenow="0"` /
+ * `aria-valuemax="0"` and *"0 of 0 participant segments coded"* while the
+ * transcript said *"No segments found"*. With the request failing instead, both
+ * said the same thing PERMANENTLY — two requests, then silence — and the only
+ * reading available to a researcher is that their transcript is gone.
+ *
+ * ⚠️ These cases render with the app's own retry policy, NOT the `retry: false`
+ * the rest of this file uses: under `retry: false` deleting `retryUnanswered`
+ * from the query changes nothing and the assertion below cannot fail (#961 §4).
+ */
+function renderWithAppRetry() {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: 1, retryDelay: 0 } },
+  })
+  return render(
+    <QueryClientProvider client={qc}>
+      <ThemeProvider>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={['/projects/1/conversations/9']}>
+            <VirtuosoMockContext.Provider value={{ viewportHeight: 1000, itemHeight: 48 }}>
+              <Routes>
+                <Route path="/projects/:projectId/conversations/:conversationId" element={<CodingWorkbench />} />
+              </Routes>
+            </VirtuosoMockContext.Provider>
+          </MemoryRouter>
+        </TooltipProvider>
+      </ThemeProvider>
+    </QueryClientProvider>,
+  )
+}
+
+const gauge = () => screen.queryByRole('progressbar', { name: 'Coding progress' })
+
+describe('#963 — the gauge and the transcript wait for the segment list', () => {
+  it('READY: the gauge states the real coverage and the transcript renders (positive control)', async () => {
+    renderWithAppRetry()
+
+    const bar = await screen.findByRole('progressbar', { name: 'Coding progress' })
+    expect(bar).toHaveAttribute('aria-valuenow', '1')
+    expect(bar).toHaveAttribute('aria-valuemax', '2')
+    expect(bar).toHaveAttribute('aria-valuetext', expect.stringContaining('1 of 2 participant segments coded'))
+    expect(screen.queryByText('Loading segments…')).not.toBeInTheDocument()
+    expect(screen.queryByText('No segments found')).not.toBeInTheDocument()
+  })
+
+  it('LOADING: no progressbar at all, and the transcript says it is loading', async () => {
+    listSegments.mockReturnValue(new Promise(() => {})) // never settles
+    renderWithAppRetry()
+
+    // The page gate resolves first (project + conversation), so the toolbar is up.
+    expect(await screen.findByRole('button', { name: 'Codebook' })).toBeInTheDocument()
+
+    // A fake 0-of-0 is worse than no gauge: `aria-valuemax="0"` is a degenerate
+    // range AND the number is false.
+    expect(gauge()).toBeNull()
+    expect(screen.queryByText(/participant segments coded/)).not.toBeInTheDocument()
+    expect(screen.queryByText('No segments found')).not.toBeInTheDocument()
+
+    const notice = await screen.findByText('Loading segments…')
+    expect(notice.closest('[role="status"]')).not.toBeNull()
+  })
+
+  it('LOADING: exactly ONE status line — the toolbar slot stays silent beside it', async () => {
+    listSegments.mockReturnValue(new Promise(() => {}))
+    renderWithAppRetry()
+
+    await screen.findByText('Loading segments…')
+    const spoken = screen.getAllByRole('status').map(n => n.textContent?.trim()).filter(Boolean)
+    expect(spoken).toEqual(['Loading segments…'])
+  })
+
+  it('FAILED: says the LOAD failed, offers a Retry, and never claims the transcript is empty', async () => {
+    listSegments.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }))
+    renderWithAppRetry()
+
+    expect(await screen.findByText('This transcript could not be loaded')).toBeInTheDocument()
+    expect(screen.getByText(/Nothing in your project has changed/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByText('No segments found')).not.toBeInTheDocument()
+    expect(gauge()).toBeNull()
+    // The gauge slot explains itself rather than sitting blank.
+    expect(screen.getByText('Coding progress unavailable')).toBeInTheDocument()
+  })
+
+  it('FAILED: the server settled it, so it is asked ONCE — not retried', async () => {
+    listSegments.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }))
+    renderWithAppRetry()
+
+    await screen.findByText('This transcript could not be loaded')
+    expect(listSegments).toHaveBeenCalledTimes(1)
+  })
+
+  it('a dropped connection IS retried — the case a retry exists for', async () => {
+    // No `status`: nothing answered, so asking again is not asking twice.
+    listSegments.mockRejectedValue(new Error('network down'))
+    renderWithAppRetry()
+
+    await screen.findByText('This transcript could not be loaded')
+    await waitFor(() => expect(listSegments).toHaveBeenCalledTimes(2))
+  })
+
+  it('ONE gauge, not two — the bar inside the region carries no semantics of its own', async () => {
+    // #351/#352 gave `SegmentProgressBar` its own `role="progressbar"` named
+    // "Coding progress"; J1 3c wrapped it in a region with the SAME role and
+    // name. Two nested progressbars stated the same count, and only the OUTER
+    // one carries the blind-scope qualifier. Pinned as an ARITY check: a
+    // `length > 0` assertion is satisfied by exactly the state that was wrong.
+    renderWithAppRetry()
+
+    await screen.findByRole('progressbar', { name: 'Coding progress' })
+    expect(screen.getAllByRole('progressbar')).toHaveLength(1)
+  })
+
+  it('"Jump to uncoded" cannot act on an unknown list, so it is not operable', async () => {
+    listSegments.mockReturnValue(new Promise(() => {}))
+    renderWithAppRetry()
+
+    const jump = await screen.findByRole('button', { name: /Jump to uncoded/ })
+    expect(jump).toBeDisabled()
+  })
+
+  it('"Jump to uncoded" is operable once the list answers (positive control)', async () => {
+    renderWithAppRetry()
+
+    const jump = await screen.findByRole('button', { name: /Jump to uncoded/ })
+    await waitFor(() => expect(jump).not.toBeDisabled())
   })
 })

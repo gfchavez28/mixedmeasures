@@ -1,5 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 import { Check, TriangleAlert, ArrowRightLeft } from 'lucide-react'
 import {
   recodeApi,
@@ -52,11 +54,23 @@ export function CopyToEquivalentsDialog({
   const queryClient = useQueryClient()
 
   // Fetch equivalence groups for this project
-  const { data: eqData } = useQuery({
+  const eqQuery = useQuery({
     queryKey: ['equivalence-groups', projectId],
     queryFn: () => equivalenceApi.list(projectId),
     enabled: open,
   })
+  const eqData = eqQuery.data
+  /**
+   * #963 Tier 2 — *"No other variables in this linked group."* is a claim about
+   * the equivalence groups, and the dialog's existing `targetDefsLoaded` gate
+   * covers only the SECOND fetch (the per-target definitions), which does not
+   * start until this one has answered. So the first thing a researcher saw on
+   * opening this dialog was the sentence saying there is nothing to copy to.
+   *
+   * ⚠️ The DISABLED case is decided by the dialog: this query is `enabled: open`
+   * and the whole body renders only while open.
+   */
+  const eqLoad = useListLoad(eqQuery)
 
   const group = eqData?.groups.find((g: EquivalenceGroupResponse) => g.id === equivalenceGroupId)
   const targetColumns = useMemo(
@@ -318,7 +332,14 @@ export function CopyToEquivalentsDialog({
             {/* Target columns */}
             <div className="flex-1 min-h-0 overflow-y-auto">
               <div className="text-xs font-medium text-mm-text-muted uppercase mb-1.5">Target variables</div>
-              {targetColumns.length === 0 ? (
+              {eqLoad.status !== 'ready' ? (
+                <LoadState
+                  load={eqLoad}
+                  loadingLabel="Loading linked variables…"
+                  failedTitle="The linked variables could not be loaded"
+                  size="panel"
+                />
+              ) : targetColumns.length === 0 ? (
                 <div className="text-sm text-mm-text-faint p-3 text-center border rounded border-dashed">
                   No other variables in this linked group.
                 </div>

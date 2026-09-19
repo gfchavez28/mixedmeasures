@@ -2,6 +2,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import { useAuth } from '@/lib/auth-context'
 import { useCoders } from '@/hooks/useCoders'
 import { codeAnalysisApi } from '@/lib/api'
+import { onlyCoders, type CoderLens } from '@/lib/coder-color'
 
 /**
  * Blind coding (Track J · J2-5, D4 / DEC-G). While blind, a coder does not see
@@ -29,18 +30,46 @@ export const readRevealed = (projectId: number, userId: number | null): boolean 
   catch { return false }
 }
 
+/**
+ * #964 — blind mode is TWO facts, and they must not share a variable (#790's rule).
+ *
+ * - `blind` is what a surface may SAY: the roster answered, it has a colleague,
+ *   and this coder has not revealed. It drives the toggle, the "Blind mode is on"
+ *   notices and the gauge wording — which must not claim blindness on a
+ *   single-coder install while its roster loads.
+ * - `withholding` is what a surface must DO, and it fails CLOSED: true whenever
+ *   `blind` is, AND while the roster has not answered (loading, failed, or reset
+ *   after an import) unless this coder revealed. It drives every lens and every
+ *   coder scope. Before #964 both were `blind`, so an unanswered roster — read as
+ *   a one-person roster — showed colleagues' coding.
+ *
+ * `withholding` without `blind` only while `settled` is false.
+ */
 export interface BlindModeState {
-  /** true = colleagues' coding is hidden (the independent-coding default). */
+  /** The claim: colleagues' coding is hidden AND we know there are colleagues. */
   blind: boolean
-  /** All-but-self coder ids when blind; empty when revealed. Feed to the J1 hidden-set. */
-  blindHiddenSet: Set<number>
+  /** The act (fail-closed): colleagues' coding must be hidden now. Drives lenses + scopes. */
+  withholding: boolean
+  /**
+   * The blind state no longer depends on an unanswered roster (it answered, or
+   * this coder revealed). A SERVER-scoped query waits for this rather than
+   * fetching under a scope that is about to change — on a single-coder install a
+   * fail-closed guess is self-only, so it would fetch twice.
+   */
+  settled: boolean
+  /**
+   * The lens to apply while `withholding`: all-but-self from the roster once it
+   * has answered (archived colleagues are not on it — #451/#503 keep their coding
+   * in the GAUGES), or an allow-list of self before it has, which needs no roster.
+   */
+  blindLens: CoderLens
   /** Flip blindness. Revealing logs the reveal (audit trail); re-hiding is silent. */
   toggleReveal: (surface?: string) => void
 }
 
 export function useBlindMode(projectId: number): BlindModeState {
   const { user } = useAuth()
-  const { coders, multiCoder } = useCoders()
+  const { coders, multiCoder, status: rosterStatus } = useCoders()
   const self = user?.id ?? null
 
   const [revealed, setRevealed] = useState<boolean>(() => readRevealed(projectId, self))
@@ -56,11 +85,19 @@ export function useBlindMode(projectId: number): BlindModeState {
     setRevealed(readRevealed(projectId, self))
   }
 
+  const rosterKnown = rosterStatus === 'ready'
+  // `multiCoder` is only ever true of an answered roster, so `blind` needs no status.
   const blind = multiCoder && !revealed
+  const withholding = !revealed && (multiCoder || !rosterKnown)
+  const settled = revealed || rosterKnown
 
-  const blindHiddenSet = useMemo(
-    () => blind ? new Set(coders.filter(c => c.id !== self).map(c => c.id)) : new Set<number>(),
-    [blind, coders, self],
+  // Fail-closed on a missing self id in both arms: the set then names every
+  // roster coder, and the allow-list is empty.
+  const blindLens = useMemo<CoderLens>(
+    () => rosterKnown
+      ? new Set(coders.filter(c => c.id !== self).map(c => c.id))
+      : onlyCoders(self != null ? [self] : []),
+    [rosterKnown, coders, self],
   )
 
   // Track the live `revealed` so toggleReveal computes `next` without a stale closure
@@ -81,5 +118,5 @@ export function useBlindMode(projectId: number): BlindModeState {
     setRevealed(next)
   }, [projectId, self])
 
-  return { blind, blindHiddenSet, toggleReveal }
+  return { blind, withholding, settled, blindLens, toggleReveal }
 }

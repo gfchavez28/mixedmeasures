@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { codesApi } from '@/lib/api'
 import type { CodebookTreeResponse } from '@/lib/api'
+import { useProjectCodeNames } from '@/hooks/useProjectCodeNames'
 import CategoryTreePicker from './CategoryTreePicker'
 
 interface CreateCodePanelProps {
@@ -31,6 +32,15 @@ export default function CreateCodePanel({
   const [description, setDescription] = useState('')
   const [categoryId, setCategoryId] = useState<number | null>(null)
 
+  /**
+   * #963 — this panel refused no duplicate name at all, and the obvious source for
+   * the check is the WRONG one: `treeData` is the Codebook page's FILTERED tree
+   * (source filters, segment-count filters, include-inactive), so a check against
+   * it would pass silently whenever a filter happened to hide the twin.
+   */
+  const { duplicateOf } = useProjectCodeNames(projectId)
+  const duplicate = duplicateOf(name)
+
   const createMut = useMutation({
     mutationFn: (data: { name: string; description?: string; category_id?: number }) =>
       codesApi.create(projectId, data),
@@ -50,12 +60,12 @@ export default function CreateCodePanel({
 
   const handleSubmit = useCallback(() => {
     const trimmed = name.trim()
-    if (!trimmed) return
+    if (!trimmed || duplicate) return
     const data: { name: string; description?: string; category_id?: number } = { name: trimmed }
     if (description.trim()) data.description = description.trim()
     if (categoryId !== null) data.category_id = categoryId
     createMut.mutate(data)
-  }, [name, description, categoryId, createMut])
+  }, [name, description, categoryId, duplicate, createMut])
 
   // Report name changes for spotlight label
   useEffect(() => {
@@ -96,7 +106,14 @@ export default function CreateCodePanel({
             placeholder="Code name..."
             autoFocus
             className="h-8 text-sm"
+            aria-invalid={duplicate ? true : undefined}
+            aria-describedby={duplicate ? 'create-code-panel-duplicate' : undefined}
           />
+          {duplicate && (
+            <p id="create-code-panel-duplicate" className="text-xs text-mm-text-muted mt-1">
+              A code named “{duplicate.name}” already exists.
+            </p>
+          )}
         </div>
 
         <div>
@@ -130,7 +147,7 @@ export default function CreateCodePanel({
           <Button
             size="sm"
             onClick={handleSubmit}
-            disabled={!name.trim() || createMut.isPending}
+            disabled={!name.trim() || !!duplicate || createMut.isPending}
           >
             Create
           </Button>

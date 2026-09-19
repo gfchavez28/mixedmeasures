@@ -1,4 +1,4 @@
-import { useMemo, useEffect, useRef } from 'react'
+import { useMemo, useEffect, useRef, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { SELECTED_CARD } from '@/lib/selection'
 import { useNavigate } from 'react-router'
@@ -12,12 +12,19 @@ import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import type { FloatingCoords } from '@/lib/floating-utils'
 import CodeChip from '@/components/qualitative-analysis/CodeChip'
 import { useCoders } from '@/hooks/useCoders'
-import { mergeArchivedIntoCoderMap, chipHiddenWithArchived } from '@/lib/coder-color'
+import { mergeArchivedIntoCoderMap, chipHiddenWithArchived, type CoderLens } from '@/lib/coder-color'
 import { visibleCodeChipRows } from '@/lib/coding-progress'
+import { LoadState } from '@/components/LoadStatus'
+import type { ListLoad } from '@/lib/list-status'
 
 interface ByRecordPanelProps {
   projectId: number
   comments: TextCodingResponse[]
+  /** #961 — whether `comments` is an ANSWER. Without it this panel read "No
+   * records found." for as long as the first page took, and after a failure. */
+  textsLoad: ListLoad
+  /** #961 — where focus lands when a Retry succeeds (see `LoadFailedNotice`). */
+  retryLandingRef?: RefObject<HTMLElement | null>
   focalColumnIds: number[]
   selectedRecordId: number | null
   // `magnitude_scale` rides along so the chip can render a rating against its
@@ -33,7 +40,7 @@ interface ByRecordPanelProps {
   /** #868 (d) — the re-rate route; see `TextCodingContextMenu`. */
   onRateCode?: (dvId: number, code: Code) => void
   ratableCodesFor?: (dvId: number) => Code[]
-  hiddenCoderIds?: Set<number>  // Track J · J1 visibility filter
+  hiddenCoderIds?: CoderLens  // Track J · J1 visibility filter (#964: or blind mode's allow-list)
   activeCoderId?: number | null  // Track J · J1 active coder (#446 context-menu check)
   extraCoders?: Coder[]  // #451 archived-who-coded — folded into the chip map
   showArchived?: boolean  // #451 "view all coders" — reveal archived chips
@@ -42,6 +49,8 @@ interface ByRecordPanelProps {
 export default function ByRecordPanel({
   projectId,
   comments,
+  textsLoad,
+  retryLandingRef,
   focalColumnIds,
   selectedRecordId,
   codes,
@@ -132,6 +141,17 @@ export default function ByRecordPanel({
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [selectedValueIds, recordComments, onSelectComment])
+
+  if (textsLoad.status !== 'ready') {
+    return (
+      <LoadState
+        load={textsLoad}
+        loadingLabel="Loading records…"
+        failedTitle="The records could not be loaded."
+        landingRef={retryLandingRef}
+      />
+    )
+  }
 
   if (records.length === 0) {
     return (

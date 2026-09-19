@@ -1,8 +1,10 @@
 import { useMemo } from 'react'
 import type { QualTimelineTableMode } from '@/lib/qual-analysis-types'
 import { useQueries } from '@tanstack/react-query'
-import { Loader2 } from 'lucide-react'
 import { observationsApi, type ObservationSegment } from '@/lib/api'
+import type { ListLoad } from '@/lib/list-status'
+import { useListLoad, type ListLoadQuery } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 import SegmentedControl from '@/components/ui/segmented-control'
 import { coderColor, coderInitials } from '@/lib/coder-color'
 import { formatTimecode } from '@/lib/utils'
@@ -61,6 +63,15 @@ export interface TimedCoderLite {
 interface Props {
   projectId: number
   observations: TimedObservationLite[]
+  /**
+   * #963 Tier 2 — whether the OBSERVATIONS list is an answer.
+   *
+   * REQUIRED, so both mounts decide. The empty branch below is not merely a
+   * false sentence but an INSTRUCTION — *"pick one under Sources"* — so over
+   * an unanswered list it sends the researcher to redo a selection they may
+   * already have made, and over a failed one it says so forever.
+   */
+  observationsLoad: ListLoad
   /** Selected codes, in sidebar order (already active-filtered by the caller). */
   codes: TimedCodeLite[]
   /** Category display order (backend CodeCategory order). */
@@ -135,7 +146,7 @@ const rate = formatTimedRate
 const secs = formatTimedSeconds
 
 export default function TimedAnalytics({
-  projectId, observations, codes, categories, include, multiCoder, coderMap,
+  projectId, observations, observationsLoad, codes, categories, include, multiCoder, coderMap,
   consensusScope = false, labelFontSize, showTableModeToggle = true,
   tableMode = 'code', onTableModeChange,
 }: Props) {
@@ -155,6 +166,17 @@ export default function TimedAnalytics({
     )
   }
 
+  if (observationsLoad.status !== 'ready') {
+    // #963 — before the list answers there is no "selected" to speak of.
+    return (
+      <LoadState
+        load={observationsLoad}
+        loadingLabel="Loading observations…"
+        failedTitle="Your observations could not be loaded"
+      />
+    )
+  }
+
   if (observations.length === 0) {
     return (
       <div className="text-center py-16 text-mm-text-muted">
@@ -170,7 +192,10 @@ export default function TimedAnalytics({
           key={obs.id}
           obs={obs}
           clips={clipQueries[i].data}
-          loading={clipQueries[i].isLoading}
+          // #963 Tier 3 — the WHOLE query, not an `isLoading` boolean: the
+          // block derives its own `ListLoad` from it, so it can tell "this
+          // observation has no clips" from "we were never told".
+          clipQuery={clipQueries[i]}
           codes={codes}
           categories={categories}
           include={include}
@@ -187,13 +212,13 @@ export default function TimedAnalytics({
 }
 
 function ObservationTimedBlock({
-  obs, clips, loading, codes, categories, include, multiCoder, coderMap, labelFontSize,
+  obs, clips, clipQuery, codes, categories, include, multiCoder, coderMap, labelFontSize,
   tableMode, onTableModeChange,
   showTableModeToggle,
 }: {
   obs: TimedObservationLite
   clips: ObservationSegment[] | undefined
-  loading: boolean
+  clipQuery: ListLoadQuery
   codes: TimedCodeLite[]
   categories: { id: number; name: string }[]
   include: CoderInclude
@@ -251,11 +276,30 @@ function ObservationTimedBlock({
     return seen.size
   }, [clips, include])
 
-  if (loading) {
+  /**
+   * #963 Tier 3 — MEASURED 2026-09-18 on three observations holding 4, 6 and 13
+   * clips, with `/observations/{id}/segments` failing: at 2.5 s each block read
+   * *"Loading clips…"*, and at 10 s each read the observation's name, its real
+   * recording length, and **"No clips in this observation yet."**
+   *
+   * The duration is what makes it convincing — the figure plainly knows about
+   * the recording, so the claim reads as a finding rather than as a fault. The
+   * gate was `isLoading`, which is `isPending && isFetching` and therefore
+   * false the moment a failure settles.
+   *
+   * ⚠️ One load PER OBSERVATION, never one over all of them: these are separate
+   * requests, and a block that answered must not be blanked because its
+   * neighbour failed (the Materials drawer's three-loads decision, Tier 2).
+   */
+  const clipLoad = useListLoad(clipQuery)
+  if (clipLoad.status !== 'ready') {
     return (
-      <div className="flex items-center gap-2 text-sm text-mm-text-muted py-8 justify-center">
-        <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" /> Loading clips…
-      </div>
+      <LoadState
+        load={clipLoad}
+        loadingLabel="Loading clips…"
+        failedTitle={`The clips for “${obs.name}” could not be loaded.`}
+        size="panel"
+      />
     )
   }
 

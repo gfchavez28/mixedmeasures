@@ -7,6 +7,214 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-09-19
+
+### Added
+
+- **See, download and delete the copies taken before a merge or an overwrite.**
+  Merging a colleague's coding into a project, or replacing a project from an
+  imported file, has always saved a full copy of the project first. Those copies
+  were never listed anywhere and never cleaned up, and the advice to "import that
+  file" pointed at a folder the app does not show. *Settings → Backup & Data* now
+  lists them: which project each one is of, whether it came before a merge or an
+  overwrite, when it was taken and how much space it takes, with the total shown
+  before you open the list. Download a copy to bring it back with Import Project,
+  or delete the ones you no longer need. Nothing deletes them for you, and the
+  confirmation warns you when a copy belongs to a project that is no longer in
+  Mixed Measures, because it may be the only copy of it. A copy is also now
+  written in full before it appears under its name, so a full disk can no longer
+  leave a broken file that looks like a good one, and two copies of the same
+  project taken within one second no longer overwrite each other. (#919)
+
+- **The data grid can be worked from the keyboard.** In a dataset's Data view
+  the cells are now reachable by Tab and navigable with the arrow keys, with
+  Home and End for the ends of a row and Ctrl+Home / Ctrl+End for the ends of
+  the table. Pressing F2 or Enter opens the editor on the cell you are on, and
+  Escape puts you back on that cell rather than dropping you out of the grid.
+  Until now the only way to select a cell was to click it, so a keyboard user
+  could not reach one to edit at all: the editing shortcuts added in the last
+  release worked only after a mouse had started the job. The grid takes a single
+  Tab stop however many cells it holds, in the usual spreadsheet way. (#946)
+
+- **Rate coded passages in a second pass.** *Analysis → Ratings* walks through
+  the passages you have coded with a code that carries a rating scale but have
+  not yet rated, one at a time, with that code's scale and its anchor labels on
+  screen. Type the number, or arrow to it and press Enter; **Esc** leaves the
+  passage unrated and moves on. It covers everything you can code — interview
+  turns, document paragraphs, observation clips and survey responses — and you
+  can work through one code at a time, which is what makes a run of ratings
+  comparable: the same instrument, the same anchors, many passages in a row.
+  It shows only your own coding and never a colleague's rating, because seeing
+  someone else's judgement before giving yours is exactly what makes an
+  agreement figure meaningless. A count per code tells you where the thin
+  coverage is. Until now a rating could only be given at the moment of coding,
+  or one at a time from the coding screens, so a scale declared after the
+  coding was done left every earlier passage unrated with no practical way to
+  catch up. (Roadmap row 45)
+
+### Fixed
+
+- **Two codes can no longer be given the same name.** Mixed Measures accepted a
+  second code named exactly like one you already had, and once created the two
+  were impossible to tell apart on a coded passage — every count, co-occurrence
+  and agreement figure was then split between them, silently. Three of the ways
+  into creating a code never checked at all: the Create Code panel and dialog on
+  the Codebook page, and the quick *New Code* box the coding screens open. They
+  check now, naming the code you already have before you press Create, and
+  Mixed Measures itself refuses a duplicate whichever route you came by — so
+  renaming one code to another's name is refused too, which it was not. Names
+  are compared ignoring capitals and surrounding spaces, and a code you have
+  deactivated still holds its name: reactivating it later beside a twin is the
+  situation this prevents. Importing a codebook is unaffected — an imported code
+  is still identified by its name *and* its place in the category tree, so two
+  codes that legitimately share a name under different categories still import.
+  (#963)
+
+- **Screens no longer tell you your work does not exist while they are still
+  loading it — or after the loading failed.** A list that had not arrived yet
+  looked exactly like a list with nothing in it, so a dozen screens said *"No
+  clips yet"*, *"No conversations yet"*, *"No reliability tests yet"*, *"Create
+  your first canvas"*, *"No participants found"* or *"No response values found"*
+  about work that was there — briefly on a fast project, and permanently when
+  the request failed. Each of those screens now says that it is loading, or that
+  the loading failed and nothing in your project has changed, with a Retry.
+  Where a request fails, pressing Retry and succeeding puts you back in the page
+  rather than at the top of it.
+
+  The same mistake also switched off checks that only run in the app, so while a
+  list was unanswered you could: type a rule's response values and have them
+  silently replaced the moment the rule list arrived; save a recode rule that
+  maps nothing; add a second category, or a second reliability test, of one that
+  already existed; import a dataset or a conversation under a name already in
+  use; and not be told that a speaker or an imported ID matches someone already
+  in your project. The observation workbench also invited you to mark your first
+  clip on a recording that already had six, and offered *Freeze segmentation*
+  with the words "there are no clips to freeze yet" beside six clips.
+
+  Two deliberate choices, because they are visible: an import whose duplicate-name
+  check *failed* still lets you import, with a line saying the name was not
+  checked — an import you cannot finish loses more than a name you can change;
+  and a rating-scale test you have already saved is now only offered for creation
+  once the app knows what you have saved.
+
+  The same round covered the screens that showed a wrong *number* rather than a
+  wrong sentence. A conversation's coding progress read *"0 of 10 participant
+  segments coded — 0%"* beside a transcript saying *"No segments found"* while
+  the transcript was still arriving, and said both permanently if it failed to
+  arrive, which reads as the transcript having been lost. The Sources list in
+  Qualitative Analysis said *"No sources available"* while three of its four
+  lists were still loading; the timeline chart told you to pick an observation
+  under Sources when you may already have picked one; the canvas Materials panel
+  counted your excerpts, charts and memos as zero; the Notes and Memos panels did
+  the same, and announced *"0 notes found"* for a search still running; the
+  dataset tab strip read *"Variables 0"*; the picker for linking a participant to
+  a dataset record said *"No rows found"*; and the Codebook's filter panel said
+  there were no sources to hide. Each of these now shows nothing rather than a
+  nought until it knows, and says so when a load fails.
+
+  Two smaller things fixed alongside: a conversation's coding progress was being
+  announced twice by screen readers, because the bar and the number around it had
+  each been given the same name at different times; and the canvas Materials
+  panel, when closed, still held five controls that could be reached with the Tab
+  key even though the panel was not on screen. Closing it now returns you to the
+  Materials button.
+
+  The last of this round covered the screens that waited properly for a list and
+  then said the wrong thing when the request *failed*. A co-occurrence chart
+  placed in a written canvas read *"No coded units found with current filters"* —
+  as a finding, beside two charts on the same page that had drawn — and a
+  timeline in a canvas said the observations it was built from were *no longer in
+  this project* — asserting a deletion that had not happened. The
+  timeline on the analysis screen printed each recording's name and real length
+  beside *"No clips in this observation yet."* The analysis sidebar said *"No
+  variables found"* on a project with four datasets and a hundred variables, and
+  said it permanently. A search that failed read as *"No results for …"*, which
+  says your own material does not contain what you searched for. The quote board
+  invited you to start curating quotes; the picker for "who is this document
+  about?" told you to go and add participants you already have; the cross-tab
+  told you to select a variable you had just selected; and the value-label editor
+  opened with no responses to label and nothing saying why. Each now says the
+  load failed, that nothing in your project has changed, and offers a Retry.
+
+  Two judgements worth stating. Setting up a merge of a colleague's coding now
+  *stops* if your own codebook cannot be loaded, rather than carrying on — with
+  it missing, every code of theirs could only be brought in as a new one, which
+  would have quietly doubled your codebook. And a chart inside a canvas says it
+  is unavailable without offering a Retry, because a canvas redraws its charts
+  when you open it again and a button on every figure would be noise. (#963)
+
+- **Three "All …" buttons announced their count with no gap.** The buttons at
+  the top of the Conversations, Documents and Datasets lists read out as
+  *"All Datasets1"* rather than *"All Datasets 1"* to a screen reader. This was
+  reported fixed in 1.5.1 and was not: the change made then looked right in the
+  page's text and made no difference to what is announced. Measured and fixed
+  properly this time, on those three buttons and on the new Ratings screen.
+  (#954)
+
+- **Reliability no longer says it is "unavailable" when it is only slow.** On a
+  large coded project the pooled reliability table can take close to a minute to
+  compute, and the app gave up waiting after 30 seconds and then told you
+  *"Reliability is unavailable for this project"* — a statement about your data
+  that was not true. It now waits as long as an export does, says *"Computing
+  reliability…"* and then that a large project can take a minute or more, and if
+  the calculation genuinely fails it says so and offers to try again. A request
+  that ran out of time is no longer quietly sent a second time, which had made
+  the server do the whole calculation twice. (#957)
+
+- **Large text selections no longer fail.** Selecting many open-ended questions
+  at once — on a large survey, roughly nine waves or four big questions — made
+  several things fail with an error: the coding progress count in Text Coding,
+  exporting the coded texts, Cross-Analysis (code frequencies, cross-tabulation,
+  code density, response length and its export), and merging two heavily used
+  codes on a project with more than one coder. All of these now work at that
+  scale, and the progress count, the export and Cross-Analysis no longer hold up
+  the rest of the app while they run. When the
+  progress count cannot be shown, Text Coding now says *"Progress unavailable"*
+  instead of silently removing the whole status area, and the *Colleagues hidden*
+  switch and coder count stay on screen. (#956)
+
+- **Screens no longer say your work is missing while it is still loading.** On a
+  large project, several screens briefly told you there was nothing there:
+  Text Coding said *"No text columns found in this project"*, Qualitative
+  Analysis said *"No segments or text has been coded yet"* and showed a count of
+  0 beside every code, and the codebook panel opened on *"No codes yet. Add your
+  first code below."* — for as long as the data took to arrive, which can be
+  several seconds. If the data failed to arrive at all, they kept saying it. Each
+  of these now says the data is loading (and, after a while, that a large project
+  can take a minute or more), or that it could not be loaded, with a Retry button
+  and a reminder that nothing in your project has changed. The code panels no
+  longer let you add a code before the code list has arrived: until then they
+  could not tell that a code with that name already existed, and would create a
+  second one. The codebook panel now also refuses a name that is already in use,
+  as the other code panels always have. (#961)
+
+- **Blind coding no longer shows colleagues' coding while the coder list is
+  loading.** Blind coding hides your colleagues' codes until you choose to
+  reveal them, so that your own judgement is independent. It depends on knowing
+  who the other coders are, and until that list arrived the app treated you as
+  the only coder: blind mode was off, and colleagues' codes appeared on the
+  coding screens and in the analysis counts. The most likely way to meet this
+  was opening a project you had just imported from a colleague: the import adds
+  their coders, but the app kept using the list of coders from before the
+  import, so their coding stayed visible for as long as you stayed on that page.
+  Now, until the coder list is known, every coding screen shows only your own
+  coding, the analysis and progress counts wait for it rather than counting
+  everyone, and importing or merging a project refreshes the list straight away.
+  Separately, if you revealed colleagues, chose to view archived coders, and then
+  hid colleagues again, archived colleagues' codes stayed visible; they are now
+  hidden again along with everyone else's. (#964)
+
+- **Closing a dialog no longer sends keyboard users back to the top of the
+  page.** After any dialog closed — Export, a delete confirmation, "Reveal
+  colleagues' coding", Add variable and the rest — keyboard focus went nowhere,
+  so the next press of Tab started again from the very top. Focus now returns to
+  the control you opened the dialog from, including a card whose menu you used.
+  If that control is gone — a card you just deleted, or Freeze, which turns into
+  Unfreeze — focus moves to whatever took its place, such as the next card in the
+  list. A delete's confirm button also keeps focus while the delete is running,
+  instead of losing it the moment you press it. (#959)
+
+
 ## [1.5.2] - 2026-09-11
 
 ### Added
@@ -1253,7 +1461,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.2...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.3...HEAD
+[1.5.3]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.2...v1.5.3
 [1.5.2]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.4.0...v1.5.0

@@ -2,7 +2,8 @@ import { useState, useCallback, useMemo, useRef, useEffect, useId } from 'react'
 import { useParams, useNavigate, Link } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert, Tags } from 'lucide-react'
-import { datasetsApi, participantsApi, type DatasetPreviewResponse, type DatasetColumnPreview, type DatasetColumnConfig, type ParticipantLinkReport } from '@/lib/api'
+import { retryUnanswered, datasetsApi, participantsApi, type DatasetPreviewResponse, type DatasetColumnPreview, type DatasetColumnConfig, type ParticipantLinkReport } from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -160,7 +161,9 @@ function ParticipantLinkNote({
 }: {
   report?: ParticipantLinkReport | null
   projectId?: string | number
-  hadParticipants?: boolean
+  /** #963 — `undefined` = the participant list never answered, which is NOT
+   *  the same as "the project had nobody". */
+  hadParticipants?: boolean | undefined
   compact?: boolean
 }) {
   if (!report) return null
@@ -183,7 +186,9 @@ function ParticipantLinkNote({
   if (report.skipped_conflict > 0) {
     skippedParts.push(`${report.skipped_conflict} whose participant is already linked to another record`)
   }
-  const pollution = hadParticipants && report.created > 0 && report.matched === 0
+  // #963 — `!== false`, not truthiness: `undefined` means the participant list
+  // never answered, and suppressing the callout then is the unsafe direction.
+  const pollution = hadParticipants !== false && report.created > 0 && report.matched === 0
   return (
     <div className="pt-1 space-y-1 text-xs text-mm-text-muted">
       <div>
@@ -417,21 +422,48 @@ export default function DatasetImport() {
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch existing datasets for name collision detection
-  const { data: existingDatasets } = useQuery({
+  const existingDatasetsQuery = useQuery({
     queryKey: ['datasets', id],
     queryFn: () => datasetsApi.list(id),
     enabled: !!id,
+    retry: retryUnanswered,
   })
+  const existingDatasets = existingDatasetsQuery.data
+  /**
+   * #963 — whether the existing-dataset list is an ANSWER. Nothing on the server
+   * refuses a duplicate dataset NAME (no unique index, no 409), so
+   * `nameDuplicates` below is the only guard there is.
+   *
+   * 🔴 **The two non-ready states are treated DIFFERENTLY, deliberately.** While
+   * it is LOADING the configure step waits — the wait resolves itself and the
+   * researcher is still filling the form. After a FAILURE the step proceeds
+   * anyway, with the note below saying the check could not run: blocking an
+   * import because an unrelated list failed is worse than a duplicate name,
+   * which costs a rename and destroys nothing.
+   */
+  const existingDatasetsLoad = useListLoad(existingDatasetsQuery)
 
   // #414: whether the project had participants BEFORE this import — drives
   // the results-step identity-pollution callout. Snapshotted into a ref at
   // import start (the import itself creates participants).
-  const { data: participantsData } = useQuery({
+  const participantsQuery = useQuery({
     queryKey: ['participants', id],
     queryFn: () => participantsApi.list(id),
     enabled: !!id,
+    retry: retryUnanswered,
   })
-  const hadParticipantsRef = useRef(false)
+  const participantsData = participantsQuery.data
+  /**
+   * #963 — `undefined` means "we could not tell", never `false`.
+   *
+   * The identity-pollution callout is gated on the project having had
+   * participants BEFORE the import; read from an unanswered list that gate was
+   * `false`, so the callout was SUPPRESSED and the researcher was not told that
+   * none of their IDs matched anyone already here. It now discloses unless we
+   * KNOW the project was empty — the safe direction, and the sentence it prints
+   * is true whenever nothing matched.
+   */
+  const hadParticipantsRef = useRef<boolean | undefined>(false)
 
   const existingDatasetNames = useMemo(
     () => (existingDatasets?.datasets || []).map(d => d.name.toLowerCase()),
@@ -439,6 +471,9 @@ export default function DatasetImport() {
   )
 
   // Check for duplicate dataset names (existing + within batch)
+  /** #963 — shown when the duplicate-name check could not run at all. */
+  const nameCheckFailed = existingDatasetsLoad.status === 'failed'
+
   const nameDuplicates = useMemo(() => {
     const result: Record<number, string> = {}
     const batchNames = fileConfigs.map(c => c.datasetName.trim().toLowerCase())
@@ -854,20 +889,25 @@ export default function DatasetImport() {
   // --- Can proceed from configure step? ---
 
   const configureStepValid = useMemo(() => {
+    // #963 — wait for the name check while it is LOADING; proceed after a
+    // FAILURE (see `existingDatasetsLoad`).
+    if (existingDatasetsLoad.status === 'loading') return false
     return fileConfigs.every((config, i) => {
       if (config.previewError) return false // files with errors can't proceed
       if (!config.datasetName.trim()) return false
       if (nameDuplicates[i]) return false
       return true
     })
-  }, [fileConfigs, nameDuplicates])
+  }, [fileConfigs, nameDuplicates, existingDatasetsLoad.status])
 
   // --- Import ---
 
   const handleImport = useCallback(async () => {
     setError('')
 
-    hadParticipantsRef.current = (participantsData?.participants?.length ?? 0) > 0
+    hadParticipantsRef.current = participantsData
+      ? participantsData.participants.length > 0
+      : undefined
 
     if (files.length === 1) {
       // Single file: import directly, navigate to ProjectView
@@ -1316,6 +1356,16 @@ export default function DatasetImport() {
                 <p className="text-sm text-red-600 flex items-center gap-1">
                   <CircleAlert className="w-4 h-4" />
                   {nameDuplicates[fileIndex]}
+                </p>
+              )}
+              {/* #963 — an absent warning must not read as "this name is free".
+                  Beside the field, like the duplicate message it stands in for,
+                  and not red: nothing is wrong with what was typed. */}
+              {nameCheckFailed && (
+                <p className="text-sm text-mm-text-muted flex items-center gap-1">
+                  <CircleAlert className="w-4 h-4 flex-shrink-0" aria-hidden="true" />
+                  Your existing datasets could not be loaded, so this name was not
+                  checked against them. The import will still work.
                 </p>
               )}
             </div>

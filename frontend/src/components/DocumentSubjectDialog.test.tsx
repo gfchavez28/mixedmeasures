@@ -154,3 +154,52 @@ describe('DocumentSubjectDialog', () => {
     expect(listParticipants).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * #963 Tier 3 — a settled failure fell through to the EMPTY state, which here
+ * is not merely a false sentence but an instruction: *"This project has no
+ * participants yet. Add them on the Participants page, or import a dataset
+ * with an identifier column."* — sending a researcher who has participants off
+ * to create them again.
+ */
+describe('#963 Tier 3 — what the picker says when the list has not answered', () => {
+  const answered500 = () => Object.assign(new Error('boom'), { status: 500 })
+
+  function renderRaw(mock: () => void) {
+    mock()
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    return render(
+      <QueryClientProvider client={qc}>
+        <DocumentSubjectDialog
+          open
+          projectId={1}
+          documentName="Workplan 2026"
+          participantId={null}
+          onClose={vi.fn()}
+          onChoose={vi.fn()}
+        />
+      </QueryClientProvider>,
+    )
+  }
+
+  it('READY and genuinely empty: the instruction is right, and is given (positive control)', async () => {
+    renderDialog(vi.fn(), null, [])
+    expect(await screen.findByText(/This project has no participants yet/)).toBeInTheDocument()
+  })
+
+  it('LOADING: says so, and sends nobody anywhere', async () => {
+    renderRaw(() => listParticipants.mockReturnValue(new Promise(() => {})))
+    expect(await screen.findByText('Loading participants…')).toBeInTheDocument()
+    expect(screen.queryByText(/This project has no participants yet/)).toBeNull()
+  })
+
+  it('FAILED: says the LIST failed, with a Retry, and never claims the project is empty', async () => {
+    renderRaw(() => listParticipants.mockRejectedValue(answered500()))
+    expect(await screen.findByText('The participant list could not be loaded.')).toBeInTheDocument()
+    expect(screen.queryByText(/This project has no participants yet/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    // The CLEAR row is not part of the list and must survive: unlinking is
+    // still a legal act when the list of candidates could not be fetched.
+    expect(screen.getByRole('button', { name: /Not about a specific subject/ })).toBeInTheDocument()
+  })
+})

@@ -17,6 +17,7 @@
  */
 
 import { ApiError } from './api/client'
+import { isRequestTimeout } from './api/error-utils'
 
 /** The `accept` attribute for any dataset file input. */
 export const DATASET_ACCEPT = '.csv,.xlsx,.sav'
@@ -138,8 +139,7 @@ export function describeDatasetUploadError(err: unknown): string {
         return detail || FALLBACK
     }
   }
-  const name = (err as { name?: string } | null)?.name
-  if (name === 'TimeoutError' || name === 'AbortError') {
+  if (isRequestTimeout(err)) {
     // Deliberately does NOT say "try again" — the timeout is derived from the
     // file's size, so a retry gets exactly the same budget and the same result.
     // Saying otherwise would send the researcher round a loop that cannot work.

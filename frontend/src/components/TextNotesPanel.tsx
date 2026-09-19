@@ -4,6 +4,8 @@ import { Plus, X, Check, PenLine } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 import { textCodingApi } from '@/lib/api'
 
 /** Note shape returned by the text-coding notes endpoints */
@@ -36,11 +38,23 @@ export default function TextNotesPanel({ projectId, focalColumnIds, selectedValu
   const columnIdsStr = focalColumnIds.join(',')
 
   // Broad query: all notes for focal columns
-  const { data: allNotes = [] } = useQuery<TextCodingNote[]>({
+  const notesQuery = useQuery<TextCodingNote[]>({
     queryKey: ['text-notes', projectId, columnIdsStr],
     queryFn: () => textCodingApi.listNotes(projectId, { column_ids: columnIdsStr }),
     enabled: focalColumnIds.length > 0,
   })
+  /** ⚠️ A `useMemo`, not the `= []` destructuring default it replaced: that is a
+   *  FRESH array on every render, so every consumer below re-ran needlessly. */
+  const allNotes = useMemo(() => notesQuery.data ?? [], [notesQuery.data])
+  const notesLoad = useListLoad(notesQuery)
+  /**
+   * #963 — the DISABLED case is decided first (#961 §1): with no focal column
+   * this query never runs, so `listStatus` would read `loading` forever. There
+   * are genuinely no notes in scope then — the researcher's own selection says
+   * so, and no request is needed to know it — so today's copy stands, and the
+   * load state answers only for a scope that WAS asked about.
+   */
+  const noColumnsInScope = focalColumnIds.length === 0
 
   // Split notes: selected comment's notes first, then rest
   const { selectedNotes, otherNotes } = useMemo(() => {
@@ -208,11 +222,18 @@ export default function TextNotesPanel({ projectId, focalColumnIds, selectedValu
         {/* Other notes */}
         {otherNotes.map(note => renderNote(note, false))}
 
-        {allNotes.length === 0 && (
+        {!noColumnsInScope && notesLoad.status !== 'ready' ? (
+          <LoadState
+            load={notesLoad}
+            loadingLabel="Loading notes…"
+            failedTitle="Your notes could not be loaded"
+            size="panel"
+          />
+        ) : allNotes.length === 0 ? (
           <div className="px-2 py-3 text-xs text-muted-foreground text-center">
             No notes yet
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   )

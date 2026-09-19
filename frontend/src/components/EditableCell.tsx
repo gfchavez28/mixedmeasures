@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, type CSSProperties } from 'react'
 import { toast } from 'sonner'
+import { FOCUS_RING } from '@/lib/selection'
 import type { DatasetColumn, DatasetValueCell, RecodeDefinitionSummary } from '@/lib/api'
 import { useTheme } from '@/lib/theme-context'
 import { reflectReverseValue } from '@/lib/recode-utils'
@@ -136,6 +137,15 @@ interface EditableCellProps {
   activeDef: RecodeDefinitionSummary | null
   isSelected: boolean
   isEditing: boolean
+  /**
+   * This cell is the grid's single tab stop (#946, roving tabindex).
+   *
+   * ⚠️ Separate from `isSelected` on purpose. On arrival nothing is selected
+   * and there must STILL be a tab stop, or the grid is unreachable — see
+   * `lib/dataset-grid-nav.ts::rovingStop`. So the ring and the tab stop are two
+   * questions, and only the ring is about selection.
+   */
+  isRovingStop?: boolean
   onSelect: () => void
   onStartEdit: () => void
   onSave: (answerId: number, value: string | null) => void
@@ -151,6 +161,7 @@ export default function EditableCell({
   activeDef,
   isSelected,
   isEditing,
+  isRovingStop = false,
   onSelect,
   onStartEdit,
   onSave,
@@ -167,6 +178,16 @@ export default function EditableCell({
   const isComputed = column.source === 'computed'
   const computedTint = isComputed ? ' bg-violet-50/30 dark:bg-violet-950/20' : ''
   const selectionRing = isSelected && !isEditing ? ' ring-2 ring-ring/50' : ''
+  /**
+   * The FOCUS ring, which is a different fact from the selection ring above.
+   *
+   * `lib/selection.ts` states the rule: selection is the blue tint recipe and
+   * focus stays the green ring, and the two must never be confused. They also
+   * co-occur constantly here, because selection follows focus — so a keyboard
+   * user sees both and a mouse user, whose click focuses without
+   * `:focus-visible`, sees only the selection ring. That is the intended split.
+   */
+  const focusRing = ` ${FOCUS_RING}`
   const qType = column.column_type
 
   // Initialize edit value when entering edit mode
@@ -332,11 +353,37 @@ export default function EditableCell({
     editAction?.()
   }
 
+  /**
+   * 🔴 The keyboard contract, spread on EVERY display branch (#946).
+   *
+   * There are SIX display `<td>` returns below (manual-empty, imported-empty,
+   * excluded, numeric, open-text, default), each with its own className and its
+   * own click. Writing `tabIndex` and `onFocus` into each is six places to keep
+   * in step and a seventh branch that inherits nothing — the enumeration debt
+   * this codebase keeps paying. One object, spread six times, and a guard
+   * asserts the count.
+   *
+   * ⚠️ **`onFocus` selects, so selection FOLLOWS FOCUS.** That is what makes
+   * `F2` work after tabbing in, and it is the model the Variables listbox
+   * already chose. It fires on click too (a `tabIndex` element focuses on
+   * mousedown), which is harmless: the click handler selects the same cell.
+   *
+   * ⚠️ **There is no `onKeyDown` here.** The arrow handler lives on the
+   * `<table>` in `DatasetView`, where it fires only while focus is inside the
+   * grid — never on `window`, which would have to stand down for the search
+   * box, the pager's jump input and every popover on the page (#784's trap).
+   */
+  const navProps = {
+    tabIndex: isRovingStop ? 0 : -1,
+    onFocus: onSelect,
+  }
+
   // Manual empty cell: dashed border placeholder
   if (isManual && display === null) {
     return (
       <td
-        className={`px-3 py-2 text-center text-mm-text-faint border border-dashed border-mm-border-subtle cursor-pointer hover:bg-mm-surface-hover transition-colors${selectionRing}`}
+        {...navProps}
+        className={`px-3 py-2 text-center text-mm-text-faint border border-dashed border-mm-border-subtle cursor-pointer hover:bg-mm-surface-hover transition-colors${selectionRing}${focusRing}`}
         onClick={() => handleClick(onStartEdit)}
       >
         &mdash;
@@ -348,7 +395,8 @@ export default function EditableCell({
   if (display === null) {
     return (
       <td
-        className={`px-3 py-2 text-center text-mm-text-faint${selectionRing}`}
+        {...navProps}
+        className={`px-3 py-2 text-center text-mm-text-faint${selectionRing}${focusRing}`}
         onClick={onSelect}
       >
         &mdash;
@@ -360,7 +408,8 @@ export default function EditableCell({
   if (isExcluded) {
     return (
       <td
-        className={`px-3 py-2 text-sm text-center text-mm-text-faint italic overflow-hidden text-ellipsis whitespace-nowrap${computedTint}${selectionRing} ${isManual ? 'cursor-pointer hover:bg-mm-surface-hover' : ''}`}
+        {...navProps}
+        className={`px-3 py-2 text-sm text-center text-mm-text-faint italic overflow-hidden text-ellipsis whitespace-nowrap${computedTint}${selectionRing}${focusRing} ${isManual ? 'cursor-pointer hover:bg-mm-surface-hover' : ''}`}
         onClick={() => handleClick(isManual ? onStartEdit : undefined)}
         title={display || undefined}
       >
@@ -373,7 +422,8 @@ export default function EditableCell({
   if (isNumeric && numericValue !== null) {
     return (
       <td
-        className={`px-3 py-2 text-sm text-center font-mono tabular-nums overflow-hidden text-ellipsis whitespace-nowrap${computedTint}${selectionRing} ${isManual ? 'cursor-pointer hover:brightness-95' : ''}`}
+        {...navProps}
+        className={`px-3 py-2 text-sm text-center font-mono tabular-nums overflow-hidden text-ellipsis whitespace-nowrap${computedTint}${selectionRing}${focusRing} ${isManual ? 'cursor-pointer hover:brightness-95' : ''}`}
         style={ordinalBgStyle(numericValue, maxValue, isDark)}
         onClick={() => handleClick(isManual ? onStartEdit : undefined)}
         title={titleText ?? (display || undefined)}
@@ -407,7 +457,8 @@ export default function EditableCell({
     const hasContent = text.length > 0
     return (
       <td
-        className={`px-3 py-2 text-sm max-w-[200px]${selectionRing} ${isManual || hasContent ? 'cursor-pointer hover:bg-mm-surface-hover' : ''}`}
+        {...navProps}
+        className={`px-3 py-2 text-sm max-w-[200px]${selectionRing}${focusRing} ${isManual || hasContent ? 'cursor-pointer hover:bg-mm-surface-hover' : ''}`}
         onClick={() => handleClick(
           isManual ? onStartEdit : (hasContent ? () => onOpenText(column.column_text, text) : undefined),
         )}
@@ -426,7 +477,8 @@ export default function EditableCell({
   const computedLabel = column.source === 'computed' ? `Computed: ${display || 'empty'}` : undefined
   return (
     <td
-      className={`px-3 py-2 text-sm text-center overflow-hidden text-ellipsis whitespace-nowrap${computedTint}${selectionRing} ${isManual ? 'cursor-pointer hover:bg-mm-surface-hover' : ''}`}
+      {...navProps}
+      className={`px-3 py-2 text-sm text-center overflow-hidden text-ellipsis whitespace-nowrap${computedTint}${selectionRing}${focusRing} ${isManual ? 'cursor-pointer hover:bg-mm-surface-hover' : ''}`}
       onClick={() => handleClick(isManual ? onStartEdit : undefined)}
       title={display || undefined}
       aria-label={computedLabel}

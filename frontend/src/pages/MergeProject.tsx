@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { LoadState } from '@/components/LoadStatus'
+import { useListLoad } from '@/hooks/useListLoad'
 import {
   GitMerge, Check, ChevronRight, Users, TriangleAlert, Sparkles, Info,
   CircleAlert, LoaderCircle, ArrowLeft, FileInput, Link2, ArrowRight,
@@ -12,7 +14,7 @@ import type {
   MergeDivergenceDetail, MergeDivergenceKind, CoderMappingDecision, CodeMappingDecision, Code,
 } from '@/lib/api'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
-import { useCoders } from '@/hooks/useCoders'
+import { useCoders, resetCoderRoster } from '@/hooks/useCoders'
 import { coderColor, coderInitials } from '@/lib/coder-color'
 import { getContrastColor, cn } from '@/lib/utils'
 import { consumePendingMerge } from '@/lib/pending-merge'
@@ -31,6 +33,7 @@ import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Card, CardContent } from '@/components/ui/card'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
+import { SAFETY_COPIES_QUERY_KEY } from '@/lib/safety-copies'
 import {
   Select, SelectContent, SelectGroup, SelectItem, SelectLabel,
   SelectTrigger, SelectValue,
@@ -94,11 +97,38 @@ export default function MergeProject() {
 
   // The local codebook (active, non-universal) — drives the reconcile target picker + the
   // review provenance matrix. Same query key the rest of the app uses.
-  const { data: codesData, isLoading: codesLoading } = useQuery({
+  const codesQuery = useQuery({
     queryKey: ['codes', targetId],
     queryFn: () => codesApi.list(targetId),
     enabled: !!targetId,
   })
+  const codesData = codesQuery.data
+  /**
+   * #963 Tier 3 — the LOCAL codebook, and the highest-consequence row of this
+   * tier.
+   *
+   * Both steps below were gated on `!codesLoading`, and `isLoading` is
+   * `isPending && isFetching` — false the moment a failure settles. So a failed
+   * request left `localCodes` as `[]`, and then:
+   *   · the reconcile step offered no local code to collapse or link ONTO, so
+   *     every divergent code's only remaining action is "create new";
+   *   · the review step drew its provenance matrix over an empty codebook and
+   *     said how many codes change — over nothing;
+   *   · the server does NOT catch it. `_assert_merge_compatible` refuses only
+   *     UNDECIDED divergent codes, and "create new" for all of them is a
+   *     perfectly decided mapping.
+   * The merge would then duplicate the colleague's whole codebook into the
+   * target, and the way back is the pre-merge safety copy.
+   *
+   * 🔴 **So this one BLOCKS, and that is the opposite of the decision Tier 1
+   * took for the import wizards — deliberately.** There the failed list was an
+   * auxiliary duplicate-NAME check: blocking would have lost an import the
+   * researcher could not finish, while proceeding costs a rename. Here the
+   * failed list IS the substance of the step, and proceeding corrupts the
+   * target. The rule underneath both is the same — compare what is lost by
+   * waiting against what is lost by proceeding — and it points the other way.
+   */
+  const codesLoad = useListLoad(codesQuery)
   const localCodes: LocalCodeLite[] = useMemo(
     () => (codesData?.codes ?? [])
       .filter((c: Code) => !c.is_universal && c.is_active)
@@ -187,10 +217,14 @@ export default function MergeProject() {
       // The merge changed codings, the roster, the codebook, and every analysis surface
       // for this project — invalidate the roster + anything keyed on this project id.
       queryClient.invalidateQueries({ queryKey: ['projects'] })
-      queryClient.invalidateQueries({ queryKey: ['coders'] })
+      // #964: RESET, not invalidate — an invalidated roster keeps serving the
+      // pre-merge coders as an answer until the refetch lands.
+      void resetCoderRoster(queryClient)
       queryClient.invalidateQueries({
         predicate: q => Array.isArray(q.queryKey) && q.queryKey.includes(targetId),
       })
+      // #919: the merge wrote a safety copy, and Settings lists them.
+      queryClient.invalidateQueries({ queryKey: SAFETY_COPIES_QUERY_KEY })
       setReport(result.merge_report)
       setSafetyBackup(result.safety_backup_filename)
       setStep('report')
@@ -282,10 +316,23 @@ export default function MergeProject() {
           ))}
         </nav>
 
-        {(step === 'loading' || ((step === 'reconcile' || step === 'review') && codesLoading)) && (
+        {step === 'loading' && (
           <div className="flex items-center justify-center py-16 text-mm-text-muted">
             <LoaderCircle className="w-5 h-5 animate-spin" />
           </div>
+        )}
+
+        {/* #963 Tier 3 — the two steps that read the local codebook wait for it,
+            and say which of the two non-ready states they are in. Retry rather
+            than a dead end: the file is already staged in this page's state, so
+            a second attempt costs nothing and losing it would mean starting the
+            whole import again. */}
+        {(step === 'reconcile' || step === 'review') && codesLoad.status !== 'ready' && (
+          <LoadState
+            load={codesLoad}
+            loadingLabel="Loading your codebook…"
+            failedTitle="Your codebook could not be loaded, so this merge cannot be set up."
+          />
         )}
 
         {/* #935 — the step's own heading, and the element focus lands on when the
@@ -345,7 +392,7 @@ export default function MergeProject() {
           />
         )}
 
-        {step === 'reconcile' && !codesLoading && (
+        {step === 'reconcile' && codesLoad.status === 'ready' && (
           <ReconcileStep
             previews={codesPreview}
             localCodes={localCodes}
@@ -357,7 +404,7 @@ export default function MergeProject() {
           />
         )}
 
-        {step === 'review' && !codesLoading && (
+        {step === 'review' && codesLoad.status === 'ready' && (
           <ReviewStep
             plan={reviewPlan}
             incomingLabel={incomingLabel}
@@ -910,16 +957,18 @@ function ReportStep({ report, safetyBackup, targetId, navigate, headingRef }: {
         {/* The snapshot has always been taken and was never NAMED — so a researcher
             who wanted to go back had to guess at a file they had never been told
             about. It is a `.mmproject`, so it comes back through Import — NOT through
-            the Settings backup list, which globs `*.mmbackup` and can never show it;
-            say so, or the obvious next step is the one that cannot work. */}
+            Restore from Backup. #919: the backup folder is not somewhere a researcher
+            can reach, so the copy is listed (with a Download) under Settings › Backup
+            & Data; say where, or "import that file" names a file nobody can find. */}
         {safetyBackup ? (
           <p className="text-xs text-mm-text-faint">
-            A safety copy of this project was saved with your backups before merging, as{' '}
+            A safety copy of this project was saved before merging, as{' '}
             {/* `break-all`: the name is one ~40-char token with no spaces, and this
                 paragraph has to survive the 640x360 viewport a 1280x720 window has at
                 200% zoom (#717/#718). */}
             <span className="font-mono text-mm-text-muted break-all">{safetyBackup}</span>. To go
-            back to it, import that file and choose “Overwrite my copy”.
+            back to it, download it from Settings › Backup & Data, import it, and choose
+            “Overwrite my copy”.
           </p>
         ) : (
           <p className="text-xs text-mm-text-faint">A safety backup of your project was saved before merging.</p>

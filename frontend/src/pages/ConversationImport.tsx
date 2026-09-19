@@ -4,7 +4,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, Video, Volume2, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import { countLabel } from '@/lib/format'
-import { conversationsApi, participantsApi, mediaApi, type Participant } from '@/lib/api'
+import { conversationsApi, participantsApi, mediaApi, retryUnanswered, type Participant } from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
 import { validateMediaFile, MEDIA_ACCEPT, MEDIA_FORMAT_LABEL, describeMediaUploadError, isVideoFilename } from '@/lib/media-constants'
 import { formatBytes } from '@/lib/format'
 import { TRANSCRIPT_ACCEPT, isSupportedTranscriptFile } from '@/lib/conversation-import-formats'
@@ -142,17 +143,41 @@ export default function ConversationImport() {
   const userEditedNames = useRef<Set<number>>(new Set())
 
   // Fetch existing conversations and participants
-  const { data: existingConversations } = useQuery({
+  const existingConversationsQuery = useQuery({
     queryKey: ['conversations', id],
     queryFn: () => conversationsApi.list(id),
     enabled: !!id,
+    retry: retryUnanswered,
   })
+  const existingConversations = existingConversationsQuery.data
 
-  const { data: existingParticipants } = useQuery({
+  const existingParticipantsQuery = useQuery({
     queryKey: ['participants', id],
     queryFn: () => participantsApi.list(id),
     enabled: !!id,
+    retry: retryUnanswered,
   })
+  const existingParticipants = existingParticipantsQuery.data
+
+  /**
+   * #963 — TWO checks on the Speakers step rest on these lists, and nothing on
+   * the server backs either of them up: a duplicate conversation NAME is not
+   * refused (no unique index, no 409), and the speaker↔participant collision
+   * warning is a DISCLOSURE with no server equivalent at all. Read from
+   * unanswered lists, both simply do not fire — so the step reads as "this name
+   * is free" and "this speaker is nobody we know".
+   *
+   * 🔴 **The two non-ready states are treated DIFFERENTLY, deliberately.** While
+   * LOADING the step waits — it resolves itself while the researcher is still
+   * mapping speakers. After a FAILURE the step proceeds, with the notes below
+   * saying which check could not run: blocking an import because a list failed
+   * is worse than a duplicate name or a merge to sort out on the Participants
+   * page, and an import that cannot be completed loses the researcher's work.
+   */
+  const existingConversationsLoad = useListLoad(existingConversationsQuery)
+  const existingParticipantsLoad = useListLoad(existingParticipantsQuery)
+  const nameCheckFailed = existingConversationsLoad.status === 'failed'
+  const participantCheckFailed = existingParticipantsLoad.status === 'failed'
 
   const isMultiFile = files.length > 1
   const recIsVideo = !!mediaFile && isVideoFilename(mediaFile.name)
@@ -227,12 +252,18 @@ export default function ConversationImport() {
 
   // Can proceed from speakers step?
   const speakersStepValid = useMemo(() => {
+    // #963 — wait while either check is LOADING; proceed after a FAILURE.
+    if (existingConversationsLoad.status === 'loading') return false
+    if (existingParticipantsLoad.status === 'loading') return false
     // All files need valid speakers
     const allSpeakersValid = fileSpeakerValidation.every(v => v.valid)
     // All files need non-empty, non-duplicate names
     const allNamesValid = fileConversationNames.every((n, i) => n.trim() && !nameDuplicates[i])
     return allSpeakersValid && allNamesValid
-  }, [fileSpeakerValidation, fileConversationNames, nameDuplicates])
+  }, [
+    fileSpeakerValidation, fileConversationNames, nameDuplicates,
+    existingConversationsLoad.status, existingParticipantsLoad.status,
+  ])
 
   // #410: participant-derived auto-names update the VISIBLE name field live on
   // the Speakers step (for files the user hasn't manually edited), instead of
@@ -941,7 +972,19 @@ export default function ConversationImport() {
               </Label>
             </div>
           </div>
-          {/* Name collision warning */}
+          {/* Name collision warning. #963 — an absent warning must not read as
+              "this speaker is nobody we know", so a failed participant list says
+              so in the warning's own place. */}
+          {!mapping.is_facilitator && participantCheckFailed && (
+            <div className="flex items-center gap-2 ml-12 p-2 border rounded text-sm bg-mm-surface-hover border-mm-border-subtle text-mm-text-secondary">
+              <CircleAlert className="w-4 h-4 flex-shrink-0" aria-hidden="true" />
+              <span>
+                Your existing participants could not be loaded, so this name was not
+                checked against them. If it belongs to someone already in the project,
+                review and merge them on the Participants page after importing.
+              </span>
+            </div>
+          )}
           {!mapping.is_facilitator && (() => {
             const match = participantsByName.get(mapping.normalized_name.trim().toLowerCase())
             if (!match) return null
@@ -1590,6 +1633,15 @@ export default function ConversationImport() {
                         {nameDuplicates[0]}
                       </p>
                     )}
+                    {/* #963 — an absent warning must not read as "this name is
+                        free". Not red: nothing is wrong with what was typed. */}
+                    {nameCheckFailed && (
+                      <p className="text-sm text-mm-text-muted flex items-center gap-1">
+                        <CircleAlert className="w-4 h-4 flex-shrink-0" aria-hidden="true" />
+                        Your existing conversations could not be loaded, so this name
+                        was not checked against them. The import will still work.
+                      </p>
+                    )}
                   </div>
 
                   {fileSpeakerMappings[0]?.length === 0 ? (
@@ -1686,6 +1738,14 @@ export default function ConversationImport() {
                                 <p className="text-sm text-red-600 flex items-center gap-1">
                                   <CircleAlert className="w-4 h-4" />
                                   {nameDuplicates[i]}
+                                </p>
+                              )}
+                              {/* #963 — see the single-file field above. */}
+                              {nameCheckFailed && (
+                                <p className="text-sm text-mm-text-muted flex items-center gap-1">
+                                  <CircleAlert className="w-4 h-4 flex-shrink-0" aria-hidden="true" />
+                                  Your existing conversations could not be loaded, so this
+                                  name was not checked against them. The import will still work.
                                 </p>
                               )}
                             </div>

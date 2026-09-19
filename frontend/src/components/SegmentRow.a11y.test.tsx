@@ -62,6 +62,7 @@ function renderRow(over: Partial<Segment> = {}, isSelected = false) {
           onClick={vi.fn()}
           conversationId={7}
           codes={[]}
+          codesStatus="ready"
           positionInSet={3}
           setSize={20}
           onToggleQuote={vi.fn()}

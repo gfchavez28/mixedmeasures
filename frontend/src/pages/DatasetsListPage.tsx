@@ -2,7 +2,10 @@ import { useState, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { FileInput, ChevronRight, SlidersHorizontal, Pencil, Trash2, Palette, Package, MessageSquareText, Table2, Users, TableProperties as TablePropertiesIcon } from 'lucide-react'
-import { datasetsApi, domainsApi, textCodingApi, extractApiError } from '@/lib/api'
+import { datasetsApi, domainsApi, textCodingApi, extractApiError, retryUnanswered} from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { useMainContentLanding } from '@/hooks/useMainContentLanding'
+import { LoadState } from '@/components/LoadStatus'
 import { toast } from 'sonner'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
 import { isSupportedDatasetFile } from '@/lib/dataset-import-formats'
@@ -40,11 +43,15 @@ export default function DatasetsListPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
-  const { data: datasetsData, isLoading } = useQuery({
+  const datasetsQuery = useQuery({
     queryKey: ['datasets', projectId],
     queryFn: () => datasetsApi.list(projectId),
     enabled: !isNaN(projectId),
+    retry: retryUnanswered,
   })
+  const datasetsData = datasetsQuery.data
+  const datasetsLoad = useListLoad(datasetsQuery)
+  const mainLanding = useMainContentLanding()
 
   const { data: domainsData } = useQuery({
     queryKey: ['analysis-domains', projectId],
@@ -171,10 +178,27 @@ export default function DatasetsListPage() {
     },
   }), [projectId, navigate])
 
-  if (isLoading) {
+  /**
+   * #963 — ONE gate for both non-ready states.
+   *
+   * The hand-written line this replaces covered only `isLoading`, and React
+   * Query v5 reports that `false` once a failure has SETTLED — so a failed load
+   * fell straight through to "No datasets yet" with the import affordance
+   * beside it. Driven on the running app: the page said that while the nav rail
+   * next to it still showed the real count from another query.
+   *
+   * `LoadState` is also what gives this wait a `role="status"`, the shared
+   * slow-load hint and, on a failure, a Retry (`components/LoadStatus.tsx`).
+   */
+  if (datasetsLoad.status !== 'ready') {
     return (
       <div className="max-w-5xl mx-auto px-3.5 py-3.5">
-        <div className="text-center py-12 text-mm-text-muted">Loading datasets...</div>
+        <LoadState
+          load={datasetsLoad}
+          loadingLabel="Loading datasets…"
+          failedTitle="Your datasets could not be loaded."
+          landingRef={mainLanding}
+        />
       </div>
     )
   }
@@ -189,9 +213,16 @@ export default function DatasetsListPage() {
           >
             All Datasets
             {datasets.length > 0 && (
-              // #908: the leading space is a TEXT node, not margin — an inline
-              // span with only `ml-1.5` computes the name "All Datasets1".
-              <span className="ml-1.5 opacity-60">{' '}{datasets.length}</span>
+              // 🔴 #908 CORRECTED 2026-09-12 — the space goes OUTSIDE the span,
+              // and the fragment is what lets it: an expression container holds
+              // ONE expression, so the space cannot simply sit beside the span
+              // inside this `&&`. MEASURED with `computeAccessibleName`: a space
+              // typed inside the span AND `<span>{' '}{n}</span>` BOTH compute
+              // "All Datasets1", because the algorithm trims each text node
+              // before joining, so only a space in the BUTTON's own child list
+              // survives (a fragment adds no node, so it flattens into one).
+              // This site carried the ineffective form from #908 until now.
+              <>{' '}<span className="ml-1.5 opacity-60">{datasets.length}</span></>
             )}
           </button>
           <button

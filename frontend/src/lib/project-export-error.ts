@@ -1,5 +1,6 @@
 import { toast } from 'sonner'
 import { ApiError } from './api/client'
+import { isRequestTimeout } from './api/error-utils'
 
 /**
  * The reason a `.mmproject` export or duplicate failed, and how to show it.
@@ -60,8 +61,7 @@ export function describeProjectExportError(
         return withDetail(detail)
     }
   }
-  const name = (err as { name?: string } | null)?.name
-  if (name === 'TimeoutError' || name === 'AbortError') {
+  if (isRequestTimeout(err)) {
     return {
       title: fallbackTitle,
       // Deliberately does NOT say "try again": the budget is fixed, so a retry gets

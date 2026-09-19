@@ -45,8 +45,10 @@ import {
 
 import {
   categoriesApi, codesApi, codingApi, excerptsApi, notesApi, observationsApi,
+  retryUnanswered,
   type Code, type Observation, type ObservationNote, type ObservationSegment,
 } from '@/lib/api'
+import { LoadState } from '@/components/LoadStatus'
 import FloatingCreateCode from '@/components/FloatingCreateCode'
 import FloatingCreateNote from '@/components/FloatingCreateNote'
 import { coordsFromElement, selectionPrefill, type FloatingCoords } from '@/lib/floating-utils'
@@ -103,6 +105,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import CollapsiblePanel from '@/components/CollapsiblePanel'
 import { PageErrorBoundary } from '@/components/PageErrorBoundary'
 import CodePanel, { type CodePanelHandle } from '@/components/CodePanel'
+import { useListLoad } from '@/hooks/useListLoad'
 import MemoPanel, { type MemoPanelHandle } from '@/components/MemoPanel'
 import BlindModeToggle from '@/components/BlindModeToggle'
 import CoderCountBadge from '@/components/CoderCountBadge'
@@ -268,8 +271,10 @@ export default function ObservationWorkbench() {
   const selfId = user?.id ?? null
   const [hiddenCoders, setHiddenCoders] = useState<Set<number>>(new Set())
   const [showArchivedCoders, setShowArchivedCoders] = useState(false)
-  const { blind, blindHiddenSet, toggleReveal } = useBlindMode(projectId)
-  const effectiveHidden = blind ? blindHiddenSet : hiddenCoders
+  // #964: the lens keys on `withholding` (fail-closed while the roster is
+  // unanswered); the wording keys on `blind` (only once it is known).
+  const { blind, withholding, blindLens, toggleReveal } = useBlindMode(projectId)
+  const effectiveHidden = withholding ? blindLens : hiddenCoders
   const coderCoverage = useCoderCoverage(
     projectId, { observationId }, { enabled: multiCoder, rosterCoderIds: coders.map(c => c.id) },
   )
@@ -281,9 +286,11 @@ export default function ObservationWorkbench() {
     () => (multiCoder && coderMap ? mergeArchivedIntoCoderMap(coderMap, coderCoverage.extraCoders) : undefined),
     [multiCoder, coderMap, coderCoverage.extraCoders],
   )
+  // #964: "View all — N archived" is a coder-filter choice; it must not bring an
+  // archived colleague's chips back after re-blinding.
   const chipHidden = useMemo(
-    () => chipHiddenWithArchived(effectiveHidden, archivedCoderIds, showArchivedCoders),
-    [effectiveHidden, archivedCoderIds, showArchivedCoders],
+    () => chipHiddenWithArchived(effectiveHidden, archivedCoderIds, showArchivedCoders && !withholding),
+    [effectiveHidden, archivedCoderIds, showArchivedCoders, withholding],
   )
 
   // The breadcrumb (ProjectLayout) reads EXACTLY this key to resolve the name.
@@ -293,11 +300,23 @@ export default function ObservationWorkbench() {
     enabled: Number.isFinite(observationId),
   })
 
-  const { data: clips = [] } = useQuery({
+  const clipsQuery = useQuery({
     queryKey: ['observation-segments', projectId, observationId],
     queryFn: () => observationsApi.listSegments(projectId, observationId),
     enabled: Number.isFinite(observationId),
+    retry: retryUnanswered,
   })
+  const clips = useMemo(() => clipsQuery.data ?? [], [clipsQuery.data])
+  /**
+   * #963 — whether the clip list is an ANSWER. Driven on the running app with
+   * the request held back 14 s, on an observation that has SIX clips: the page
+   * said *"No clips yet. Press I while the recording plays…"*, the gauge said
+   * *"0 clips"*, and Freeze was disabled under the accessible name *"Freeze
+   * segmentation — there are no clips to freeze yet"*. The empty state is an
+   * instruction to re-mark a clip set that already exists.
+   */
+  const clipsLoad = useListLoad(clipsQuery)
+  const clipsKnown = clipsLoad.status === 'ready'
 
   // Prev/next across the project's observations (list order = the list page's).
   const { data: siblings = [] } = useQuery({
@@ -305,11 +324,15 @@ export default function ObservationWorkbench() {
     queryFn: () => observationsApi.list(projectId),
   })
 
-  const { data: codesData } = useQuery({
+  const codesQuery = useQuery({
     queryKey: ['codes', projectId],
     queryFn: () => codesApi.list(projectId),
     enabled: Number.isFinite(projectId),
   })
+  const codesData = codesQuery.data
+  /** #961 — `codes` is `[]` before the list answers; the code panel's empty
+   * state and its duplicate-name check must not read that as "no codes". */
+  const codesLoad = useListLoad(codesQuery)
   const codes = useMemo(() => codesData?.codes ?? [], [codesData?.codes])
   const codeMap = useMemo(() => {
     const map = new Map<number, Code>()
@@ -323,12 +346,20 @@ export default function ObservationWorkbench() {
   // Real categories, for the `c` dialog's picker. Distinct from
   // `chordCategories` below, which is a {id,name} projection off the CODES list
   // for CodePanel's chord header and carries no colour or display_order.
-  const { data: categoriesData } = useQuery({
+  const categoriesQuery = useQuery({
     queryKey: ['categories', projectId],
     queryFn: () => categoriesApi.list(projectId),
     enabled: Number.isFinite(projectId),
+    retry: retryUnanswered,
   })
+  const categoriesData = categoriesQuery.data
   const categories = useMemo(() => categoriesData?.categories ?? [], [categoriesData?.categories])
+  /**
+   * #963 — whether the category list is an ANSWER. `FloatingCreateCode`'s
+   * picker creates a category from a typed name, and `create_category` refuses
+   * no duplicate, so the list is the only duplicate guard there is.
+   */
+  const categoriesLoad = useListLoad(categoriesQuery)
 
   // Category list for CodePanel's chord-label header (doc-workbench pattern).
   const chordCategories = useMemo(() => {
@@ -358,6 +389,8 @@ export default function ObservationWorkbench() {
 
   const [selectedClips, setSelectedClips] = useState<number[]>([])
   const [searchText, setSearchText] = useState('')
+  /** #963 — the Retry landing for the clip list; see the notice that uses it. */
+  const clipSearchRef = useRef<HTMLInputElement>(null)
   const [editingClipId, setEditingClipId] = useState<number | null>(null)
   const [editingLabel, setEditingLabel] = useState('')
   const [renaming, setRenaming] = useState(false)
@@ -1696,8 +1729,14 @@ export default function ObservationWorkbench() {
   // The denominator is NAMED: a percentage of "marked extent" is a different
   // claim from a percentage of the recording, and that fallback is reachable
   // today on every .mov/.webm uploaded before #574's backfill.
+  // #963 — and NULL while the clip list is unanswered, for the same reason. The
+  // unfrozen arm's denominator is the recording, which `observation` supplies,
+  // so with no clips in hand `coveredTotal` is 0 over a real extent and the
+  // gauge announced "0% of the recording covered by coding, 1 gap remaining".
   const coverageProgress: { now: number; max: number; text: string } | null =
-    frozen
+    !clipsKnown
+      ? null
+      : frozen
       ? (clips.length > 0
           ? {
               now: frozenCoverage.codedVisible,
@@ -2113,9 +2152,26 @@ export default function ObservationWorkbench() {
           ) : (
             <Button
               variant="outline" size="sm" className="h-6 px-2 text-xs"
-              aria-label={clips.length === 0
-                ? 'Freeze segmentation — there are no clips to freeze yet'
-                : 'Freeze segmentation'}
+              // #963 — the reason in the name has to be TRUE. "There are no
+              // clips to freeze yet" was said of a six-clip observation for as
+              // long as the list took to arrive. Native `disabled` in every
+              // arm: not knowing yet is a transient precondition
+              // (`lib/mode-disabled.ts`), and the failure is explained where it
+              // happened — the list's own notice carries the Retry.
+              aria-label={
+                !clipsKnown
+                  ? (clipsLoad.status === 'failed'
+                    ? 'Freeze segmentation — the clips could not be loaded'
+                    : 'Freeze segmentation — still loading the clips')
+                  : clips.length === 0
+                    ? 'Freeze segmentation — there are no clips to freeze yet'
+                    : 'Freeze segmentation'
+              }
+              // ⚠️ NOT `!clipsKnown || clips.length === 0`: an unanswered list
+              // IS the empty array, so that arm was unkillable by mutation and
+              // went the way of #941's redundant guards. The NAME still needs
+              // the distinction — "there are no clips" and "we do not know yet"
+              // are different sentences, and a mutant proved that one.
               disabled={clips.length === 0}
               onClick={() => setFreezeDialogOpen(true)}
             >
@@ -2144,19 +2200,38 @@ export default function ObservationWorkbench() {
               : coverageProgress?.text}
           >
             <span>
-              {clips.length} clip{clips.length === 1 ? '' : 's'}
-              {frozen ? (
-                clips.length > 0 && <> · {frozenCoverage.codedVisible} of {frozenCoverage.total} coded</>
-              ) : (
-                coveragePercent !== null && (
-                  <>
-                    {' '}· {coveragePercent}% {durationIsKnown ? 'covered' : 'of marked extent'}
-                    {coverageGaps.length > 0 && <> · {coverageGaps.length} gap{coverageGaps.length === 1 ? '' : 's'}</>}
-                  </>
-                )
-              )}
+              {/* #963 — the count and the coverage are said only of an
+                  answered list.
+                  ⚠️ And while it is merely LOADING this slot says NOTHING: the
+                  list below already mounts a `role="status"` line reading
+                  "Loading clips…", and a second copy of the same words is a
+                  duplicate on screen and a second announcement. A FAILURE does
+                  get a word here, because the count slot would otherwise sit
+                  blank with no explanation anywhere near it. The recording's
+                  length comes from a DIFFERENT query and stays either way,
+                  which is why the separator is conditional. */}
+              {clipsKnown ? (
+                <>
+                  {clips.length} clip{clips.length === 1 ? '' : 's'}
+                  {frozen ? (
+                    clips.length > 0 && <> · {frozenCoverage.codedVisible} of {frozenCoverage.total} coded</>
+                  ) : (
+                    coveragePercent !== null && (
+                      <>
+                        {' '}· {coveragePercent}% {durationIsKnown ? 'covered' : 'of marked extent'}
+                        {coverageGaps.length > 0 && <> · {coverageGaps.length} gap{coverageGaps.length === 1 ? '' : 's'}</>}
+                      </>
+                    )
+                  )}
+                </>
+              ) : clipsLoad.status === 'failed' ? (
+                <span className="text-mm-text-faint">Clips not loaded</span>
+              ) : null}
               {observation?.media_duration_seconds != null && (
-                <> · {formatTimestamp(observation.media_duration_seconds)}</>
+                <>
+                  {clipsKnown || clipsLoad.status === 'failed' ? ' · ' : ''}
+                  {formatTimestamp(observation.media_duration_seconds)}
+                </>
               )}
             </span>
           </span>
@@ -2308,6 +2383,7 @@ export default function ObservationWorkbench() {
           <span className="relative">
             <Search aria-hidden className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-mm-text-faint" />
             <Input
+              ref={clipSearchRef}
               value={searchText}
               onChange={e => setSearchText(e.target.value)}
               placeholder="Search clips…"
@@ -2346,7 +2422,20 @@ export default function ObservationWorkbench() {
           <span className="w-8 flex-none" aria-hidden />
         </div>
 
-        {clips.length === 0 ? (
+        {/* #963 — "no clips yet" is an INSTRUCTION to mark a first clip, so it
+            may be said only of an answered list; on a six-clip observation it
+            invites re-marking a set that already exists. The Retry lands on
+            the search box above — a real control, mounted in every state,
+            rather than a `tabIndex={-1}` wrapper this page's chord layer would
+            have to share whitespace clicks with. */}
+        {!clipsKnown ? (
+          <LoadState
+            load={clipsLoad}
+            loadingLabel="Loading clips…"
+            failedTitle="The clips could not be loaded."
+            landingRef={clipSearchRef}
+          />
+        ) : clips.length === 0 ? (
           <div className="flex-1 flex items-center justify-center text-sm text-mm-text-secondary px-6 text-center">
             No clips yet. Press <kbd className="px-1 border border-mm-border-medium rounded">I</kbd> while
             the recording plays, then <kbd className="px-1 border border-mm-border-medium rounded">O</kbd>, to
@@ -2472,6 +2561,7 @@ export default function ObservationWorkbench() {
                           appliedCodeIds={clip.applied_codes}
                           codeMap={codeMap}
                           allCodes={codes}
+                          codesStatus={codesLoad.status}
                           onCodeChange={invalidateAfterCodeChange}
                           onFocusCode={handleFocusCode}
                           appliedCodeDetails={clip.applied_code_details}
@@ -2826,6 +2916,7 @@ export default function ObservationWorkbench() {
               <CodePanel
                 ref={codePanelRef}
                 codes={codes}
+                codesLoad={codesLoad}
                 projectId={projectId}
                 /* #752: this workbench codes CLIPS, not segments. */
                 disabledHint="Select a clip to apply codes."
@@ -2963,6 +3054,7 @@ export default function ObservationWorkbench() {
         * belongs to what they were looking at when they pressed the key. */}
       {createCodeDialog && (
         <FloatingCreateCode
+          categoriesLoad={categoriesLoad}
           position={createCodeDialog.position}
           projectId={projectId}
           categories={categories}

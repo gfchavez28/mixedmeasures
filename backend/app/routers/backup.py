@@ -14,7 +14,8 @@ from ..config import get_settings, get_documents_dir, get_media_dir, get_backup_
 from ..database import engine, get_db
 from ..models.user import User
 from ..models.audit import AuditEntry
-from ..schemas.backup import BackupInfo, BackupStatus, RestorePreview
+from ..models.project import Project
+from ..schemas.backup import BackupInfo, BackupStatus, RestorePreview, SafetyCopyInfo
 from ..services.backup import (
     RestoreError,
     create_backup,
@@ -23,6 +24,11 @@ from ..services.backup import (
     list_backups,
     restore_from_backup,
     validate_backup,
+)
+from ..services.safety_copies import (
+    SafetyCopyNameError,
+    find_safety_copy,
+    list_safety_copies,
 )
 
 import asyncio
@@ -132,6 +138,98 @@ async def backup_list(user: User = Depends(get_current_user)):
     """List all backups."""
     _, _, _, backup_dir = _get_paths()
     return list_backups(backup_dir)
+
+
+@router.get("/safety-copies", response_model=list[SafetyCopyInfo])
+def safety_copy_list(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List the copies of projects taken before a merge or an overwrite (#919).
+
+    `def`, not `async def`: it opens every copy's archive to read its manifest,
+    which is blocking file I/O (#837).
+    """
+    _, _, _, backup_dir = _get_paths()
+    copies = list_safety_copies(backup_dir)
+    # Every project's identity, not only this user's: the question is whether the
+    # project still exists here at all, which is what makes a copy the only one.
+    # Bounded by the number of projects, so no id list reaches `.in_()`.
+    present = {u for (u,) in db.query(Project.project_uuid) if u}
+    return [
+        SafetyCopyInfo(
+            filename=c.filename,
+            act=c.act,
+            taken_at=c.taken_at,
+            size_bytes=c.size_bytes,
+            project_name=c.project_name,
+            project_in_app=(c.project_uuid in present) if c.project_uuid else None,
+            readable=c.readable,
+        )
+        for c in copies
+    ]
+
+
+def _safety_copy_or_error(backup_dir: Path, filename: str) -> Path:
+    try:
+        return find_safety_copy(backup_dir, filename)
+    except SafetyCopyNameError:
+        raise HTTPException(400, "That is not a safety copy.")
+    except FileNotFoundError:
+        raise HTTPException(404, "That safety copy no longer exists.")
+
+
+@router.get("/safety-copies/{filename}")
+def safety_copy_download(
+    filename: str,
+    user: User = Depends(get_current_user),
+):
+    """Download a safety copy, so it can be brought back through Import.
+
+    The backup folder is not shown anywhere in the app, and on the desktop build
+    it is under the OS's per-user application data — without this the recovery
+    instruction names a file nobody can reach. The name is ASCII by construction
+    (`_NAME_RE`), so it is safe in Content-Disposition as it stands.
+    """
+    _, _, _, backup_dir = _get_paths()
+    path = _safety_copy_or_error(backup_dir, filename)
+    return FileResponse(
+        path=str(path),
+        media_type="application/octet-stream",
+        filename=path.name,
+    )
+
+
+@router.delete("/safety-copies/{filename}", status_code=204)
+def safety_copy_delete(
+    filename: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Permanently delete one safety copy. Nothing deletes them automatically."""
+    _, _, _, backup_dir = _get_paths()
+    path = _safety_copy_or_error(backup_dir, filename)
+    try:
+        size = path.stat().st_size
+        path.unlink()
+    except FileNotFoundError:
+        raise HTTPException(404, "That safety copy no longer exists.")
+    except OSError as e:
+        # Windows refuses to delete a file another program has open.
+        logger.warning("Could not delete safety copy %s: %s", path.name, e)
+        raise HTTPException(
+            409,
+            "The safety copy could not be deleted. If it is open in another "
+            "program, close it and try again.",
+        )
+
+    db.add(AuditEntry(
+        user_id=user.id,
+        action="safety_copy_deleted",
+        entity_type="system",
+        details=json.dumps({"filename": path.name, "size_bytes": size}),
+    ))
+    db.commit()
 
 
 @router.post("/create")

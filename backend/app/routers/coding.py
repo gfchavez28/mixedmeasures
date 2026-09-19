@@ -17,6 +17,9 @@ from ..schemas.coding import (
     BulkCodeResponse,
     CodingProgressResponse,
     MagnitudeValueUpdate,
+    RatingQueueCodeCountResponse,
+    RatingQueueEntryResponse,
+    RatingQueueResponse,
 )
 from ..auth import get_current_user
 from ..services.audit import log_action
@@ -28,6 +31,7 @@ from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
 from ..services.participant_scores import mark_participant_scores_stale
 from ..services.coding_layers import project_scoped_segments
+from ..services.rating_queue import DEFAULT_QUEUE_LIMIT, build_rating_queue
 from ..services import magnitude
 from .helpers import _get_project_or_404, _verify_segment_ownership, _verify_conversation_ownership
 
@@ -336,6 +340,42 @@ def set_code_magnitude(
         applied=True,
         created_at=application.created_at,
         magnitude=rating,
+    )
+
+
+@router.get("/projects/{project_id}/rating-queue", response_model=RatingQueueResponse)
+def get_rating_queue(
+    project_id: int,
+    code_id: int | None = None,
+    limit: int = DEFAULT_QUEUE_LIMIT,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """This coder's applications that declare a scale and carry no rating (#35 B).
+
+    The read half of the rating sweep. Every filter it applies is a refusal one
+    of the two commit endpoints would otherwise issue — offering a work item
+    whose commit 403s is the #806 shape — and the grain is the RATING ACT, so a
+    coded segment group appears once rather than once per member. Both are
+    argued in `services/rating_queue.py`.
+
+    ⚠️ **Own applications only, and no colleague's rating is carried** (the
+    developer's design call, 2026-09-12): a rating seen before yours is given
+    destroys the independence a reliability coefficient needs. That makes the
+    surface blind by construction rather than by a lens, so there is no reveal
+    to gate and nothing here consults `useBlindMode`.
+
+    ⚠️ **`code_id` narrows to one code on purpose.** Rating one instrument
+    across many passages in a row is what makes those ratings comparable; a
+    mixed queue asks the coder to re-read a different scale every item.
+    """
+    _get_project_or_404(db, project_id, user.id)
+    queue = build_rating_queue(db, project_id, user.id, code_id=code_id, limit=limit)
+    return RatingQueueResponse(
+        entries=[RatingQueueEntryResponse(**e.as_dict()) for e in queue.entries],
+        total=queue.total,
+        truncated=queue.truncated,
+        per_code=[RatingQueueCodeCountResponse(**vars(c)) for c in queue.per_code],
     )
 
 

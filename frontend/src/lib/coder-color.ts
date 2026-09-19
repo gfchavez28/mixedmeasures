@@ -27,13 +27,51 @@ export function coderInitials(username: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
 }
 
+/**
+ * #964 — an ALLOW-LIST lens: every attributed applier NOT in `allow` is hidden.
+ *
+ * Blind mode's lens is "everyone but me", and a HIDE set can only say that by
+ * naming everyone — which it learns from the coder roster. While the roster has
+ * not answered (or failed, or predates an import that added coders) that list
+ * is empty, so a hide set built from it hides NOBODY: blind mode failed OPEN,
+ * showing colleagues' coding (measured: 19 chips instead of 5; and 8 colleague
+ * chips on a project imported seconds earlier). This arm says "only these" with
+ * no roster at all. Build it with `onlyCoders`.
+ */
+export interface CoderAllowList {
+  readonly allow: ReadonlySet<number>
+}
+
+/**
+ * The per-coder visibility lens every chip, gauge and jump-to-uncoded reads:
+ * a SET of hidden coder ids (the coder filter; blind mode once the roster is
+ * known) or an ALLOW-LIST (blind mode before it is).
+ */
+export type CoderLens = Set<number> | CoderAllowList
+
+export function onlyCoders(ids: Iterable<number>): CoderAllowList {
+  return { allow: new Set(ids) }
+}
+
+export function isAllowList(lens: CoderLens): lens is CoderAllowList {
+  return !(lens instanceof Set)
+}
+
+/** Does this lens hide anyone? (A gauge says "coded by visible coders" when it does.) */
+export function lensHidesAnyCoder(lens: CoderLens | undefined): boolean {
+  if (!lens) return false
+  return isAllowList(lens) || lens.size > 0
+}
+
 // Per-coder visibility predicate (Track J · J1). `hidden` is the set of coder ids
 // the user has chosen to hide. Unattributed (legacy) codes are never hidden, and
 // the popover never lets you add your OWN id to `hidden`, so your codes always show.
-export function isCoderVisible(applierId: number | null | undefined, hidden?: Set<number>): boolean {
-  if (!hidden || hidden.size === 0) return true
+// #964: an allow-list shows only its members — and still never hides unattributed.
+export function isCoderVisible(applierId: number | null | undefined, hidden?: CoderLens): boolean {
+  if (!hidden) return true
   if (applierId == null) return true
-  return !hidden.has(applierId)
+  if (isAllowList(hidden)) return hidden.allow.has(applierId)
+  return hidden.size === 0 || !hidden.has(applierId)
 }
 
 // #451 — archived coders who coded a source are absent from the roster `coderMap`
@@ -53,11 +91,15 @@ export function mergeArchivedIntoCoderMap<T extends { id: number }>(
 // #451 — archived coders' chips are hidden by DEFAULT (declutter); a "view all
 // coders" toggle reveals them. Force the archived ids into the hidden set unless
 // the user opted to show them. (When already revealed, the explicit set wins.)
+// #964: an allow-list already hides every archived coder, so it passes through.
+// ⚠️ Callers pass `showArchived && !withholding`: an archived colleague is still a
+// colleague, and "View all" is a coder-FILTER choice that must not survive re-blinding.
 export function chipHiddenWithArchived(
-  hidden: Set<number>,
+  hidden: CoderLens,
   archivedIds: Set<number>,
   showArchived: boolean,
-): Set<number> {
+): CoderLens {
+  if (isAllowList(hidden)) return hidden
   if (showArchived || archivedIds.size === 0) return hidden
   const s = new Set(hidden)
   for (const id of archivedIds) s.add(id)

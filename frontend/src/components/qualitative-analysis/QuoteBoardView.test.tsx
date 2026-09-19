@@ -29,6 +29,7 @@ vi.mock('@/lib/api', async () => {
 vi.mock('sonner', () => ({ toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }) }))
 
 import QuoteBoardView from './QuoteBoardView'
+import { excerptsApi } from '@/lib/api'
 
 function clip(over: Partial<QuotedExcerptItem> & { excerpt_id: number }): QuotedExcerptItem {
   return {
@@ -70,6 +71,7 @@ function renderBoard(excerpts: QuotedExcerptItem[], props: Record<string, unknow
         <QuoteBoardView
           projectId={1}
           codes={[]}
+          codesStatus="ready"
           filterParams={{}}
           quoteData={quoteData(excerpts)}
           groupBy="source"
@@ -155,5 +157,77 @@ describe('CSV export', () => {
     expect(row).toContain('1:20.0')
 
     vi.unstubAllGlobals()
+  })
+})
+
+/**
+ * #963 Tier 3 — the board WAITED for its own request and did not distinguish a
+ * FAILURE: `totalCount === 0` then rendered *"No quoted excerpts yet. Use the
+ * quote button (s) in the Coding Workbench or Text Coding tab to curate quotes
+ * here."* — an instruction to start curating, given to a researcher who may
+ * have hundreds.
+ *
+ * ⚠️ The DISABLED-query case is what makes this surface interesting. The board
+ * takes an optional `quoteData` prop; when the page supplies it the board's own
+ * query is `enabled: false` with nothing cached, and `listStatus` reports
+ * exactly that shape as `loading` FOREVER. So the status is consulted only when
+ * the board is the one fetching.
+ */
+describe('#963 Tier 3 — the board fetching for itself', () => {
+  const listQuoted = () =>
+    (excerptsApi as unknown as { listQuoted: ReturnType<typeof vi.fn> }).listQuoted
+  const answered500 = () => Object.assign(new Error('boom'), { status: 500 })
+
+  /** No `quoteData` prop — the board owns the request. */
+  function renderSelfFetching() {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <QuoteBoardView
+            projectId={1}
+            codes={[]}
+            codesStatus="ready"
+            filterParams={{}}
+            groupBy="source"
+            sortMode="source"
+            density="quote"
+            setSrAnnouncement={vi.fn()}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+  }
+
+  it('READY and genuinely empty: the invitation is TRUE, and is given (positive control)', async () => {
+    listQuoted().mockResolvedValue({ excerpts: [], total_excerpts: 0 })
+    renderSelfFetching()
+    expect(await screen.findByText('No quoted excerpts yet.')).toBeInTheDocument()
+  })
+
+  it('LOADING: says so, and invites nothing', async () => {
+    listQuoted().mockReturnValue(new Promise(() => {}))
+    renderSelfFetching()
+    expect(await screen.findByText('Loading quoted excerpts…')).toBeInTheDocument()
+    expect(screen.queryByText('No quoted excerpts yet.')).toBeNull()
+  })
+
+  it('FAILED: says the load failed, offers a Retry, and never invites curating', async () => {
+    listQuoted().mockRejectedValue(answered500())
+    renderSelfFetching()
+    expect(await screen.findByText('Your quoted excerpts could not be loaded.')).toBeInTheDocument()
+    expect(screen.queryByText('No quoted excerpts yet.')).toBeNull()
+    expect(screen.queryByText(/to curate quotes here/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
+
+  it('a board HANDED its data never consults the disabled query', async () => {
+    // 🔴 The trap: with `quoteData` passed, the board's own query is disabled
+    // with nothing cached, which `listStatus` calls `loading` forever. Reading
+    // it unconditionally would hold every page-fed board on a loading line.
+    listQuoted().mockReturnValue(new Promise(() => {}))
+    renderBoard([])
+    expect(await screen.findByText('No quoted excerpts yet.')).toBeInTheDocument()
+    expect(screen.queryByText('Loading quoted excerpts…')).toBeNull()
   })
 })

@@ -20,8 +20,10 @@ import {
   datasetsApi,
   speakersApi,
   type Participant,
-  type Dataset,
-} from '@/lib/api'
+  type Dataset, retryUnanswered} from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { useMainContentLanding } from '@/hooks/useMainContentLanding'
+import { LoadState } from '@/components/LoadStatus'
 import { toast } from 'sonner'
 import { filterLinkableRows, linkableRowDetail } from '@/lib/linkable-rows'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
@@ -42,11 +44,15 @@ export default function ParticipantsPage() {
   const { projectId } = useProjectLayout()
   const queryClient = useQueryClient()
 
-  const { data: participantsData, isLoading } = useQuery({
+  const participantsListQuery = useQuery({
     queryKey: ['participants', projectId],
     queryFn: () => participantsApi.list(projectId),
     staleTime: 30_000,
+    retry: retryUnanswered,
   })
+  const participantsData = participantsListQuery.data
+  const participantsLoad = useListLoad(participantsListQuery)
+  const mainLanding = useMainContentLanding()
 
   const { data: datasetsData } = useQuery({
     queryKey: ['datasets', projectId],
@@ -206,10 +212,27 @@ export default function ParticipantsPage() {
     })
   }
 
-  if (isLoading) {
+  /**
+   * #963 — ONE gate for both non-ready states.
+   *
+   * The hand-written line this replaces covered only `isLoading`, and React
+   * Query v5 reports that `false` once a failure has SETTLED — so a failed load
+   * fell straight through to "No participants yet" with the import affordance
+   * beside it. Driven on the running app: the page said that while the nav rail
+   * next to it still showed the real count from another query.
+   *
+   * `LoadState` is also what gives this wait a `role="status"`, the shared
+   * slow-load hint and, on a failure, a Retry (`components/LoadStatus.tsx`).
+   */
+  if (participantsLoad.status !== 'ready') {
     return (
       <div className="h-full overflow-auto p-8">
-        <div className="text-center py-12 text-mm-text-muted">Loading participants...</div>
+        <LoadState
+          load={participantsLoad}
+          loadingLabel="Loading participants…"
+          failedTitle="Your participants could not be loaded."
+          landingRef={mainLanding}
+        />
       </div>
     )
   }
@@ -737,11 +760,22 @@ function ParticipantDetailPanel({
     queryFn: () => participantsApi.getDetail(projectId, participantId),
   })
 
-  const { data: linkableData } = useQuery({
+  const linkableQuery = useQuery({
     queryKey: ['linkable-rows', projectId, linkingDatasetId],
     queryFn: () => datasetsApi.linkableRows(projectId, linkingDatasetId!),
     enabled: !!linkingDatasetId,
   })
+  const linkableData = linkableQuery.data
+  /**
+   * #963 Tier 2 — *"No rows found"* over an unanswered list, in the one place a
+   * researcher goes to link a participant to their dataset record.
+   *
+   * ⚠️ Fed by a query in this DETAIL component, so the page-level gate Tier 1
+   * added does NOT cover it. The disabled case is decided by the render: this
+   * whole block is inside the `linkingDatasetId` branch, which is the same flag
+   * the query is `enabled` on.
+   */
+  const linkableLoad = useListLoad(linkableQuery)
 
   const linkMutation = useMutation({
     mutationFn: ({ datasetId, rowId }: { datasetId: number; rowId: number }) =>
@@ -1026,9 +1060,20 @@ function ParticipantDetailPanel({
                   </button>
                 )
               })}
-              {filteredRows.length === 0 && (
-                <p className="text-xs text-mm-text-faint p-2 text-center">No rows found</p>
-              )}
+              {linkableLoad.status !== 'ready' ? (
+                <LoadState
+                  load={linkableLoad}
+                  loadingLabel="Loading records…"
+                  failedTitle="This dataset's records could not be loaded"
+                  size="panel"
+                />
+              ) : filteredRows.length === 0 ? (
+                /* Two different facts: an empty dataset and a search that
+                   matched nothing. The old copy said the first of both. */
+                <p className="text-xs text-mm-text-faint p-2 text-center">
+                  {linkSearch ? 'No records match your search' : 'No records in this dataset'}
+                </p>
+              ) : null}
             </div>
           </div>
         )}

@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback, type MouseEvent as ReactMouseEvent } from 'react'
 import { useFocusTrap } from '@/hooks/useFocusTrap'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -40,6 +42,7 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { toast } from 'sonner'
+import { findCodeByName } from '@/lib/code-name'
 import { type Code, type CodeCategory, codesApi, categoriesApi, projectsApi } from '@/lib/api'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import FreezeCodebookButton from '@/components/codebook/FreezeCodebookButton'
@@ -196,15 +199,27 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
   const [deletingCategory, setDeletingCategory] = useState<CodeCategory | null>(null)
 
   // ---- Queries ----
-  const { data: codesData } = useQuery({
+  const codesQuery = useQuery({
     queryKey: ['codes', projectId, 'all'],
     queryFn: () => codesApi.list(projectId, true),
   })
+  const codesData = codesQuery.data
 
-  const { data: categoriesData } = useQuery({
+  const categoriesQuery = useQuery({
     queryKey: ['categories', projectId],
     queryFn: () => categoriesApi.list(projectId),
   })
+  const categoriesData = categoriesQuery.data
+
+  /**
+   * #961 — the panel's every claim and both of its creation forms read these two
+   * lists. Measured on a large project: the panel opened on "0 codes · No codes
+   * yet. Add your first code below." with the new-code box ready, for as long as
+   * the list took — and nothing refused a second code of an existing name,
+   * because the server does not and this panel never checked.
+   */
+  const codebookLoad = useListLoad(codesQuery, categoriesQuery)
+  const codebookKnown = codebookLoad.status === 'ready'
 
   // Track J · J3-1: warn before adding to a frozen codebook (soft lock). Shares the
   // ['project'] cache with ProjectLayout + the FreezeCodebookButton.
@@ -676,9 +691,20 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
   )
 
   // ---- Create code ----
+  // #961 — the same exact-name refusal `CodePanel` and `TextCodePanel` apply
+  // (case-insensitive, inactive codes included — this panel lists them), and
+  // only against an ANSWERED list; before that nothing can be checked, so
+  // nothing is offered.
+  // #963 — shared comparison (`lib/code-name.ts`), matching the server's refusal.
+  const newCodeDuplicate = useMemo(
+    () => !!findCodeByName(codes, newCodeName),
+    [codes, newCodeName],
+  )
+  const canCreateCode = codebookKnown && newCodeName.trim().length > 0 && !newCodeDuplicate
+
   const handleCreateCode = useCallback(() => {
     const trimmed = newCodeName.trim()
-    if (!trimmed) return
+    if (!trimmed || !canCreateCode) return
     guardCodebook(() => {
       createCodeMut.mutate({
         name: trimmed,
@@ -687,19 +713,20 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
       setNewCodeName('')
       setNewCodeCategoryId(null)
     })
-  }, [newCodeName, newCodeCategoryId, createCodeMut, guardCodebook])
+  }, [newCodeName, canCreateCode, newCodeCategoryId, createCodeMut, guardCodebook])
 
   // ---- Create category ----
   const handleCreateCategory = useCallback(() => {
     const trimmed = newCategoryName.trim()
-    if (!trimmed) return
+    // #961 — the server does not refuse a duplicate category name either.
+    if (!trimmed || !codebookKnown) return
     guardCodebook(() => {
       createCategoryMut.mutate({ name: trimmed, color: newCategoryColor })
       setNewCategoryName('')
       setNewCategoryColor(CATEGORY_COLORS[0])
       setShowCreateCategory(false)
     })
-  }, [newCategoryName, newCategoryColor, createCategoryMut, guardCodebook])
+  }, [newCategoryName, codebookKnown, newCategoryColor, createCategoryMut, guardCodebook])
 
   // ---- Delete category ----
   const handleDeleteCategory = useCallback(() => {
@@ -1099,12 +1126,16 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
         <div className="flex items-center justify-between px-4 py-3 border-b border-mm-border-subtle flex-shrink-0">
           <div className="flex items-center gap-2">
             <h2 className="text-base font-semibold text-mm-text">Codebook</h2>
-            <span className="text-xs text-mm-text-muted">
-              {codeCount} code{codeCount !== 1 ? 's' : ''}
-              {categoryCount > 0 && (
-                <> &middot; {categoryCount} categor{categoryCount !== 1 ? 'ies' : 'y'}</>
-              )}
-            </span>
+            {/* #961 — a count only once there is one; "0 codes" was the panel's
+                first claim while the list loaded. */}
+            {codebookKnown && (
+              <span className="text-xs text-mm-text-muted">
+                {codeCount} code{codeCount !== 1 ? 's' : ''}
+                {categoryCount > 0 && (
+                  <> &middot; {categoryCount} categor{categoryCount !== 1 ? 'ies' : 'y'}</>
+                )}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-1.5">
             <FreezeCodebookButton projectId={projectId} />
@@ -1144,6 +1175,21 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
         {/* ---- Scrollable content ---- */}
         <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
         <div className="flex-1 overflow-y-auto">
+          {/* #961 — NOTHING below renders until BOTH lists have answered. The
+              categories usually answer first, and this panel lists empty
+              categories on purpose (for management) — so with only the codes
+              outstanding, every category rendered as "0 · Drop codes here".
+              Found by driving it; a fixture with no categories cannot show it. */}
+          {!codebookKnown ? (
+            <LoadState
+              load={codebookLoad}
+              size="panel"
+              loadingLabel="Loading codes…"
+              failedTitle="The codebook could not be loaded."
+              landingRef={closeButtonRef}
+            />
+          ) : (<>
+
           {/* Universal codes (pinned top, not reorderable) */}
           {universalCodes.length > 0 && (
             <div className="border-b border-mm-border-subtle">
@@ -1188,7 +1234,7 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
             </div>
           )}
 
-          {/* Empty state */}
+          {/* Empty state — reached only for an ANSWERED list (#961) */}
           {codes.length === 0 && (
             <div className="px-4 py-8 text-center text-sm text-mm-text-muted">
               No codes yet. Add your first code below.
@@ -1205,6 +1251,7 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
                 No codes matching "{searchQuery}"
               </div>
             )}
+          </>)}
         </div>
 
         {/* Drag overlay — portaled to body to escape the codebook panel's transform containing block */}
@@ -1245,16 +1292,28 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
                 placeholder="New code name..."
                 className="h-7 text-sm flex-1"
                 aria-label="New code name"
+                aria-describedby={newCodeDuplicate ? 'codebook-new-code-duplicate' : undefined}
+                aria-invalid={newCodeDuplicate || undefined}
               />
               <Button
                 variant="ghost"
                 size="sm"
                 className="h-7 px-2 text-xs"
                 onClick={handleCreateCode}
-                disabled={!newCodeName.trim() || createCodeMut.isPending}
+                disabled={!canCreateCode || createCodeMut.isPending}
+                title={!codebookKnown
+                  ? (codebookLoad.status === 'failed' ? 'The codebook could not be loaded' : 'Codes are still loading')
+                  : undefined}
               >
                 Add
               </Button>
+            </div>
+            <div aria-live="polite">
+              {newCodeDuplicate && (
+                <p id="codebook-new-code-duplicate" className="text-xs text-mm-text-muted pl-[1.375rem]">
+                  A code named “{newCodeName.trim()}” already exists.
+                </p>
+              )}
             </div>
             {categories.length > 0 && (
               <div className="flex items-center gap-1.5 pl-[1.375rem]">
@@ -1312,7 +1371,7 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
                   size="sm"
                   className="h-7 text-xs"
                   onClick={handleCreateCategory}
-                  disabled={!newCategoryName.trim() || createCategoryMut.isPending}
+                  disabled={!newCategoryName.trim() || !codebookKnown || createCategoryMut.isPending}
                 >
                   Create Category
                 </Button>
@@ -1325,6 +1384,7 @@ export default function CodebookSlideOut({ projectId, onClose, zIndex }: Codeboo
                 size="sm"
                 className="w-full h-7 text-xs"
                 onClick={() => setShowCreateCategory(true)}
+                disabled={!codebookKnown}
               >
                 <Plus className="h-3 w-3 mr-1" />
                 New Category

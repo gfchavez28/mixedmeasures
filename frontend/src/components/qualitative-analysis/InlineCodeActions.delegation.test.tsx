@@ -51,6 +51,7 @@ function renderActions(over: Record<string, unknown> = {}) {
         appliedCodeIds={[CODE.id]}
         codeMap={codeMap}
         allCodes={[CODE]}
+        codesStatus="ready"
         onCodeChange={vi.fn()}
         appliedCodeDetails={[{ code_id: CODE.id, user_id: 1, magnitude: 7, magnitude_conflict: null }]}
         {...over}

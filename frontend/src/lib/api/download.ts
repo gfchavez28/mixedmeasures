@@ -1,5 +1,6 @@
 import { toast } from 'sonner'
 import api, { ApiError } from './client'
+import { isRequestTimeout } from './error-utils'
 
 // ── Browser download helpers ──────────────────────────────────────────
 // Canonical blob+anchor download. This is the same-origin-safe replacement
@@ -76,11 +77,6 @@ export function namedBlob(
  */
 export const EXPORT_TIMEOUT_MS = 15 * 60 * 1000
 
-/** True for the AbortSignal-driven client timeout, which is not an `ApiError`. */
-function isTimeout(err: unknown): boolean {
-  return err instanceof DOMException && (err.name === 'TimeoutError' || err.name === 'AbortError')
-}
-
 /**
  * Fetch an export endpoint as a blob (via the credentialed api client) and
  * trigger a browser download, using the server's Content-Disposition filename.
@@ -108,7 +104,7 @@ export async function downloadFromApi(
     })
     downloadBlob(res.data as Blob, extractFilename(res.headers, fallbackName))
   } catch (err) {
-    if (isTimeout(err)) {
+    if (isRequestTimeout(err)) {
       toast.error(
         `${what} is taking longer than ${Math.round(EXPORT_TIMEOUT_MS / 60_000)} minutes.`,
         {

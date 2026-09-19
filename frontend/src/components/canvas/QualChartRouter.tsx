@@ -75,6 +75,10 @@ export default function QualChartRouter({
         colorPreset={params.cooccurrencePreset}
         labelFontSize={formatting.labelFontSize}
         onDataLoad={onCooccurrenceLoad}
+        // #963 Tier 3 — a canvas embed sits inside prose, so its loading and
+        // failure notices take the compact form. The analysis tab keeps the
+        // full-height default.
+        noticeSize="panel"
       />
     )
   }

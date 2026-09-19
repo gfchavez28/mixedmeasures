@@ -1,9 +1,11 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Loader2 } from 'lucide-react'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import SegmentedControl from '@/components/ui/segmented-control'
-import { codeAnalysisApi, type OpenCutDisclosure } from '@/lib/api'
+import { LoadState } from '@/components/LoadStatus'
+import { useListLoad } from '@/hooks/useListLoad'
+import { useMainContentLanding } from '@/hooks/useMainContentLanding'
+import { codeAnalysisApi, retryUnanswered, type OpenCutDisclosure } from '@/lib/api'
 import { ciUnavailableNote } from '@/lib/ci-label'
 
 /**
@@ -50,15 +52,41 @@ export default function OpenCutReliability({ projectId, observationId, observati
     queryKey: ['binned-kappa', projectId, observationId, binSeconds],
     queryFn: () => codeAnalysisApi.binnedKappa(projectId, observationId, { bin_seconds: binSeconds }),
     enabled: !!projectId && !!observationId && method === 'binned',
+    // Both of these are computations over every mark on the recording, so a
+    // deterministic refusal repeated costs the server twice for one answer
+    // (#957's reasoning, applied to this panel's pair).
+    retry: retryUnanswered,
   })
   const unitizing = useQuery({
     queryKey: ['unitizing-alpha', projectId, observationId],
     queryFn: () => codeAnalysisApi.unitizingAlpha(projectId, observationId),
     enabled: !!projectId && !!observationId && method === 'unitizing',
+    retry: retryUnanswered,
   })
 
   const active = method === 'binned' ? binned : unitizing
   const data = active.data
+  /**
+   * #963 Tier 3 — this panel waited and said NOTHING about a failure: below
+   * `active.isLoading` every block is gated on `data?.available`, so a settled
+   * failure left the explainer paragraph sitting above empty space, for good.
+   * Silence there reads as "still thinking", or as a reliability figure that
+   * does not exist — and neither is what happened.
+   *
+   * ⚠️ **The load is picked per METHOD, and that is the disabled-query case
+   * decided.** The inactive query is `enabled: false` with nothing cached, and
+   * `listStatus` reports `loading` forever for exactly that shape — so a
+   * combined load would hold this panel on a loading line whichever method is
+   * showing. Both hooks are called unconditionally; only the answer is chosen.
+   */
+  const binnedLoad = useListLoad(binned)
+  const unitizingLoad = useListLoad(unitizing)
+  const activeLoad = method === 'binned' ? binnedLoad : unitizingLoad
+  // The panel's own wrapper survives a successful retry, but the notice does
+  // not, so focus needs somewhere real to go (#955 b). This component is
+  // mounted from a tab whose own ref belongs to the page; the layout's
+  // `<main>` is the destination that holds wherever it is mounted from.
+  const landingRef = useMainContentLanding()
 
   return (
     <div className="flex flex-col gap-3">
@@ -97,13 +125,24 @@ export default function OpenCutReliability({ projectId, observationId, observati
           : `Scores how closely the coders' marked stretches line up, boundaries included — "did they carve the recording up the same way?" Two coders can spot every event and still score low here if they disagree about where each one starts and ends.`}
       </p>
 
-      {active.isLoading && (
-        <div className="flex items-center gap-2 text-sm text-mm-text-muted">
-          <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" /> Measuring agreement…
-        </div>
+      {activeLoad.status !== 'ready' && (
+        <LoadState
+          load={activeLoad}
+          loadingLabel="Measuring agreement…"
+          failedTitle={method === 'binned'
+            // Named per method: the picker above chooses between two different
+            // measurements, and "agreement" alone would not say which failed.
+            ? 'Moment-by-moment agreement could not be measured.'
+            : 'Agreement about how the recording was carved up could not be measured.'}
+          size="panel"
+          landingRef={landingRef}
+        />
       )}
 
-      {data && !data.available && (
+      {/* An answered request that carries a `reason` is the SERVER saying this
+          observation cannot be measured — a different fact from the notice
+          above, which is about the request. */}
+      {activeLoad.status === 'ready' && data && !data.available && (
         <p className="text-sm text-mm-text-muted rounded-md border border-mm-surface-border bg-mm-surface px-3 py-2">
           {data.reason}
         </p>

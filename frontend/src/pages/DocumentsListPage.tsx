@@ -2,7 +2,10 @@ import { useState, useMemo, useRef, useCallback, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { FileInput, Trash2, Search, X, ArrowUpDown, FileText, UserRound } from 'lucide-react'
-import { documentsApi, type DocumentListItem } from '@/lib/api'
+import { documentsApi, type DocumentListItem, retryUnanswered} from '@/lib/api'
+import { useListLoad } from '@/hooks/useListLoad'
+import { useMainContentLanding } from '@/hooks/useMainContentLanding'
+import { LoadState } from '@/components/LoadStatus'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
 import { isSupportedDocumentFile } from '@/lib/document-import-formats'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
@@ -46,11 +49,15 @@ export default function DocumentsListPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
-  const { data: documents = [], isLoading } = useQuery({
+  const documentsQuery = useQuery({
     queryKey: ['documents', projectId],
     queryFn: () => documentsApi.list(projectId),
     enabled: !isNaN(projectId),
+    retry: retryUnanswered,
   })
+  const documents = useMemo(() => documentsQuery.data ?? [], [documentsQuery.data])
+  const documentsLoad = useListLoad(documentsQuery)
+  const mainLanding = useMainContentLanding()
 
   const [sortBy, setSortBy] = useState<'name' | 'date' | 'progress'>('date')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
@@ -198,10 +205,27 @@ export default function DocumentsListPage() {
     },
   }), [projectId, navigate])
 
-  if (isLoading) {
+  /**
+   * #963 — ONE gate for both non-ready states.
+   *
+   * The hand-written line this replaces covered only `isLoading`, and React
+   * Query v5 reports that `false` once a failure has SETTLED — so a failed load
+   * fell straight through to "No documents yet" with the import affordance
+   * beside it. Driven on the running app: the page said that while the nav rail
+   * next to it still showed the real count from another query.
+   *
+   * `LoadState` is also what gives this wait a `role="status"`, the shared
+   * slow-load hint and, on a failure, a Retry (`components/LoadStatus.tsx`).
+   */
+  if (documentsLoad.status !== 'ready') {
     return (
       <div className="max-w-4xl mx-auto px-3.5 py-3.5">
-        <div className="text-center py-12 text-mm-text-muted">Loading documents...</div>
+        <LoadState
+          load={documentsLoad}
+          loadingLabel="Loading documents…"
+          failedTitle="Your documents could not be loaded."
+          landingRef={mainLanding}
+        />
       </div>
     )
   }
@@ -216,8 +240,16 @@ export default function DocumentsListPage() {
           >
             All Documents
             {documents.length > 0 && (
-              // #908: a text-node space keeps the count out of the label's name.
-              <span className="ml-1.5 opacity-60">{' '}{documents.length}</span>
+              // 🔴 #908 CORRECTED 2026-09-12 — the space goes OUTSIDE the span,
+              // and the fragment is what lets it: an expression container holds
+              // ONE expression, so the space cannot simply sit beside the span
+              // inside this `&&`. MEASURED with `computeAccessibleName`: a space
+              // typed inside the span AND `<span>{' '}{n}</span>` BOTH compute
+              // "All Datasets1", because the algorithm trims each text node
+              // before joining, so only a space in the BUTTON's own child list
+              // survives (a fragment adds no node, so it flattens into one).
+              // This site carried the ineffective form from #908 until now.
+              <>{' '}<span className="ml-1.5 opacity-60">{documents.length}</span></>
             )}
           </button>
           <button

@@ -84,10 +84,14 @@ function rowText(codeName: string): string {
   return row?.textContent ?? ''
 }
 
+/** #961 — both panels take whether their code list has answered; here it has. */
+const READY = { status: 'ready', error: null, retry: () => {}, retrying: false } as const
+
 function renderTextPanel() {
   return wrap(
     <TextCodePanel
       codes={CODES as never}
+      codesLoad={READY}
       categories={CATEGORIES as never}
       projectId={1}
       appliedCodeIds={[]}
@@ -103,6 +107,7 @@ function renderCodePanel() {
   return wrap(
     <CodePanel
       codes={CODES as never}
+      codesLoad={READY}
       projectId={1}
       selectedCodesMap={new Map()}
       onCodeToggle={() => {}}

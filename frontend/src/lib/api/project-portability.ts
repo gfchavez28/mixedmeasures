@@ -199,9 +199,11 @@ export interface ProjectImportResult {
    * take no snapshot — do NOT render a recovery line when it is null, or a
    * researcher goes looking for a file that protects them from nothing.
    *
-   * The file lives in the app's backup folder and is deliberately NOT in the
-   * Settings backup list, which lists only restorable `.mmbackup` archives. This
-   * is a `.mmproject`: it comes back through Import, not Restore.
+   * The file lives in the app's backup folder. It is NOT a row of the Settings
+   * backup history, which lists only restorable `.mmbackup` archives: this is a
+   * `.mmproject`, so it comes back through Import, not Restore. Since #919 it is
+   * listed separately in Settings › Backup & Data, with a Download — the folder
+   * itself is not somewhere a researcher can reach.
    */
   safety_backup_filename: string | null
 }

@@ -28,6 +28,7 @@ import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover
 import { ColorDotButton } from '@/components/ColorDotButton'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import SoftwareUpdateSection from '@/components/SoftwareUpdateSection'
+import SafetyCopiesSection from '@/components/SafetyCopiesSection'
 import { useCoders } from '@/hooks/useCoders'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
 import { useCreateCoder } from '@/hooks/useCreateCoder'
@@ -649,6 +650,11 @@ function BackupSection() {
           )}
         </div>
       )}
+
+      {/* #919: the copies taken before a merge or an overwrite. They are
+        * `.mmproject` files, restored through Import rather than Restore, so
+        * they are a separate list rather than rows of the history above. */}
+      <SafetyCopiesSection />
 
       {/* Restore confirmation dialog */}
       <AlertDialog open={restorePreview !== null} onOpenChange={(open) => { if (!open) handleCancelRestore() }}>

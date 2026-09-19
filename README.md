@@ -193,7 +193,11 @@ across, leaving the original and its coding untouched.
   present* but *how much*. Unrated is a real, distinct state, never a zero. Ratings
   carry into the reliability figures, the consensus layer and the exports, and can
   be recorded on **every coding surface** — conversation and document transcripts,
-  observation clips, and open-text responses.
+  observation clips, and open-text responses. A second-pass **Ratings** sweep
+  walks the passages you have coded with a scaled code but not yet rated, one at a
+  time with that code's scale and anchors on screen, so a scale declared after the
+  coding was done can be caught up — and so a run of ratings is given against the
+  same instrument, which is what makes them comparable.
 - **Participants** and **speakers** form a shared cross-source identity spine, so a
   person links across their survey record, their interview, and the **documents
   that are about them** — a report, a workplan, a case file. Datasets with an
@@ -439,8 +443,11 @@ recordings so a multi-gigabyte project doesn't multiply across the backup
 rotation — downloaded backups can include video, and restoring never deletes
 video files already on disk. Project exports (`.mmproject`) can likewise
 include or exclude recordings; a media-less archive re-imports cleanly with
-recordings re-attachable. Back up regularly, and keep a copy off the
-working machine.
+recordings re-attachable. Before a merge or an overwrite changes a project, a
+full copy of it is written first — *Settings → Backup & Data* lists those safety
+copies with their project, date and size, and lets you download one to bring it
+back or delete the ones you no longer need. Back up regularly, and keep a copy
+off the working machine.
 
 ## License
 

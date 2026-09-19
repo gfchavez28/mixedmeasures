@@ -1,9 +1,10 @@
 import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react'
+import { findCodeByName } from '@/lib/code-name'
 import { SELECTED_TINT } from '@/lib/selection'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Search, Plus, Ellipsis, Pencil, Check, X, Power, PowerOff, StickyNote, FolderInput, ChevronLeft, Gauge } from 'lucide-react'
 import MagnitudeScaleDialog from '@/components/MagnitudeScaleDialog'
-import { type Code, codesApi, categoriesApi } from '@/lib/api'
+import { type Code, codesApi, categoriesApi, retryUnanswered } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -26,6 +27,9 @@ import { ColorSwatchPicker, CATEGORY_COLORS } from '@/components/ColorSwatchPick
 import { ColorDotButton } from '@/components/ColorDotButton'
 import { CreatableComboList } from '@/components/ui/creatable-combobox'
 import { buildCategoryOptions } from '@/lib/category-options'
+import { LoadState } from '@/components/LoadStatus'
+import { useListLoad } from '@/hooks/useListLoad'
+import type { ListLoad } from '@/lib/list-status'
 
 export interface CodePanelHandle {
   focus: () => void
@@ -39,6 +43,21 @@ export interface CodePanelHandle {
 
 interface CodePanelProps {
   codes: Code[]
+  /**
+   * #961 — whether `codes` is an ANSWER. REQUIRED, so every workbench that mounts
+   * this panel has to decide. All three passed `codesData?.codes ?? []`, which
+   * is `[]` before the list answers: the panel read "No codes yet. Create one
+   * above." and the duplicate-name check below read the same empty array, so
+   * typing an existing code's name and pressing Enter created a second code of
+   * that name.
+   *
+   * ⚠️ **The parenthetical here used to read "the server does not refuse
+   * duplicate names"; since #963 it DOES** (`routers/codes.py::
+   * _refuse_duplicate_code_name`, 409). The prop is still required — this panel
+   * must not offer a create affordance against an unanswered list — but the
+   * consequence of getting it wrong is now a refused request rather than a twin.
+   */
+  codesLoad: ListLoad
   projectId: number
   selectedCodesMap: Map<number, 'all' | 'some' | 'none'>
   onCodeToggle: (code: Code) => void
@@ -63,6 +82,7 @@ interface CodePanelProps {
 
 const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel({
   codes,
+  codesLoad,
   projectId,
   selectedCodesMap,
   onCodeToggle,
@@ -174,19 +194,25 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
     }
   }, [codes, searchQuery])
 
-  // Check if search query exactly matches an existing code name (case-insensitive)
+  // Check if search query exactly matches an existing code name (case-insensitive).
+  // #963 — the comparison is `lib/code-name.ts` now, shared with the five other
+  // surfaces that ask it and with the server's own refusal. The empty-query arm
+  // stays HERE: "nothing typed" is this panel's can't-create rule, not a match.
   const exactMatchExists = useMemo(() => {
     if (!searchQuery.trim()) return true // Empty query = can't create
-    const query = searchQuery.trim().toLowerCase()
-    return codes.some((code) => code.name.toLowerCase() === query)
+    return !!findCodeByName(codes, searchQuery)
   }, [codes, searchQuery])
 
+  // #961 — the check above is only a check once the list has answered.
+  const codesKnown = codesLoad.status === 'ready'
+  const canCreateTyped = codesKnown && !!searchQuery.trim() && !exactMatchExists
+
   const handleCreateCode = useCallback(() => {
-    if (searchQuery.trim() && !exactMatchExists) {
+    if (canCreateTyped) {
       onCreateCode(searchQuery.trim())
       setSearchQuery('')
     }
-  }, [searchQuery, exactMatchExists, onCreateCode])
+  }, [canCreateTyped, searchQuery, onCreateCode])
 
   // Expose methods to parent
   useImperativeHandle(ref, () => ({
@@ -364,7 +390,9 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
   }, [isFocused, allDisplayedCodes, focusedIndex, selectedCodeIndices, disabled, onCodeToggle, onMultiCodeToggle, pendingApplyCodeId, onNavigateToTranscript, onNavigateToNextPanel])
 
   const handleInputKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if ((e.key === 'Tab' || e.key === 'Enter') && searchQuery.trim() && !exactMatchExists) {
+    // Tab is claimed ONLY when it creates — while the list is still loading it
+    // must stay ordinary focus movement.
+    if ((e.key === 'Tab' || e.key === 'Enter') && canCreateTyped) {
       e.preventDefault()
       handleCreateCode()
     } else if (e.key === 'ArrowDown') {
@@ -377,7 +405,7 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
       e.preventDefault()
       onNavigateToPrevPanel?.()
     }
-  }, [searchQuery, exactMatchExists, handleCreateCode, onNavigateToPrevPanel])
+  }, [canCreateTyped, handleCreateCode, onNavigateToPrevPanel])
 
   // Scroll focused item into view
   useEffect(() => {
@@ -471,18 +499,22 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
           <Button
             size="sm"
             variant="ghost"
-            disabled={exactMatchExists || !searchQuery.trim()}
+            disabled={!canCreateTyped}
             onClick={handleCreateCode}
             aria-label="Add code"
             // #518: an empty query must not read "Code already exists" — the empty-string
             // short-circuit in exactMatchExists is a can't-create guard, not a name match.
-            title={!searchQuery.trim() ? "Type a name to add a code" : exactMatchExists ? "Code already exists" : "Add new code (Tab or Enter)"}
+            title={
+              !codesKnown ? (codesLoad.status === 'failed' ? 'Codes could not be loaded' : 'Codes are still loading')
+                : !searchQuery.trim() ? "Type a name to add a code"
+                  : exactMatchExists ? "Code already exists" : "Add new code (Tab or Enter)"
+            }
           >
-            <Plus className={cn("w-4 h-4", !exactMatchExists && searchQuery.trim() && "text-mm-blue")} />
+            <Plus className={cn("w-4 h-4", canCreateTyped && "text-mm-blue")} />
           </Button>
         </div>
         <div aria-live="polite">
-          {searchQuery.trim() && !exactMatchExists && (
+          {canCreateTyped && (
             <p className="text-xs text-mm-blue-text mt-1">
               <kbd className="px-1 py-0.5 bg-mm-bg border border-mm-border-medium rounded text-[10px] font-mono">Tab</kbd>
               {' or '}
@@ -614,10 +646,14 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
                 </div>
               )}
 
-              {/* Empty state */}
-              {allDisplayedCodes.length === 0 && (
+              {/* Empty state — #961: said only of an ANSWERED list. And a search
+                  that matches nothing is not an empty codebook: it used to read
+                  "No codes yet" while every code was one backspace away. */}
+              {!codesKnown ? (
+                <LoadState load={codesLoad} size="panel" loadingLabel="Loading codes…" failedTitle="Codes could not be loaded." />
+              ) : allDisplayedCodes.length === 0 && (
                 <div className="p-4 text-sm text-mm-text-muted text-center">
-                  No codes yet. Create one above.
+                  {searchQuery.trim() ? 'No matching codes.' : 'No codes yet. Create one above.'}
                 </div>
               )}
             </>
@@ -665,11 +701,25 @@ function CodeItem({
 
   // #462: categories for the "Move to category" picker. Only fetched once the
   // user opens that view (React Query dedupes the shared key across rows).
-  const { data: categoriesData } = useQuery({
+  const categoriesQuery = useQuery({
     queryKey: ['categories', projectId],
     queryFn: () => categoriesApi.list(projectId),
     enabled: menuView === 'category',
+    retry: retryUnanswered,
   })
+  const categoriesData = categoriesQuery.data
+  /**
+   * #963 — fetched on OPEN, so *every* cold open of this picker shows an
+   * unanswered list. `create_category` refuses no duplicate name, so the list
+   * is the only duplicate guard; `CreatableComboList` withholds the create row
+   * until this says `ready`.
+   *
+   * ⚠️ Asking `listStatus` of a DISABLED query would read `loading` forever
+   * (§1 of the internal design notes) — safe here only because this
+   * whole branch renders under `menuView === 'category'`, the same condition
+   * that enables the query.
+   */
+  const categoriesLoad = useListLoad(categoriesQuery)
   const categoryOptions = useMemo(
     () => buildCategoryOptions(categoriesData?.categories ?? []),
     [categoriesData],
@@ -893,6 +943,8 @@ function CodeItem({
               <div onClick={(e) => e.stopPropagation()}>
                 <CreatableComboList
                   options={categoryOptions}
+                  optionsLoad={categoriesLoad}
+                  optionsNoun="categories"
                   value={code.category_id}
                   onSelect={(catId) => moveCategoryMutation.mutate(catId)}
                   onCreate={(label) => createCategoryAndAssignMutation.mutate(label)}

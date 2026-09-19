@@ -14,6 +14,8 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadState } from '@/components/LoadStatus'
 import {
   memosApi,
   codesApi,
@@ -87,10 +89,18 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
   const [showArchived, setShowArchived] = useState(false)
 
   // Data queries
-  const { data: memosData, isLoading } = useQuery({
+  const memosQuery = useQuery({
     queryKey: ['memos', projectId, showArchived],
     queryFn: () => memosApi.list(projectId, undefined, undefined, showArchived),
   })
+  const memosData = memosQuery.data
+/**
+ * #963 Tier 2 — the same shape as `AllNotesPanel`'s: an `isLoading` arm that is
+ * a bare spinner with no accessible text, FALSE once a failure has settled, and
+ * a header count outside it that read 0 throughout.
+ */
+  const memosLoad = useListLoad(memosQuery)
+  const memosKnown = memosLoad.status === 'ready'
 
   const { data: codesData } = useQuery({
     queryKey: ['codes', projectId],
@@ -364,9 +374,11 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
         <div className="flex items-center gap-2 px-4 py-2">
           <StickyNote className="h-3.5 w-3.5 text-mm-text-muted flex-shrink-0" />
           <span className="text-xs font-semibold text-mm-text-muted uppercase tracking-wider">Memos</span>
-          <span className="text-xs text-mm-text-muted bg-mm-surface rounded-full px-2 py-0.5">
-            {filteredMemos.length}
-          </span>
+          {memosKnown && (
+            <span className="text-xs text-mm-text-muted bg-mm-surface rounded-full px-2 py-0.5">
+              {filteredMemos.length}
+            </span>
+          )}
           <button
             onClick={() => setShowArchived(prev => !prev)}
             className={`text-[11px] px-2 py-0.5 rounded-full transition-colors ${showArchived ? 'bg-mm-bg text-mm-text' : 'text-mm-text-faint hover:text-mm-text-muted'}`}
@@ -516,10 +528,13 @@ export default function MemosPanelContent({ projectId, headerExtra, search = '',
 
       {/* Memo list */}
       <div className="flex-1 overflow-y-auto" role="list" aria-label="Memos">
-        {isLoading ? (
-          <div className="flex items-center justify-center py-12">
-            <LoaderCircle className="h-5 w-5 animate-spin text-mm-text-muted" />
-          </div>
+        {!memosKnown ? (
+          <LoadState
+            load={memosLoad}
+            loadingLabel="Loading memos…"
+            failedTitle="Your memos could not be loaded"
+            size="panel"
+          />
         ) : filteredMemos.length === 0 && !isCreating ? (
           /* #944(b) — `&& !isCreating`. The empty state used to render directly
              beneath the open create form, telling the researcher there is nothing

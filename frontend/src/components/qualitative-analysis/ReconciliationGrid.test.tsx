@@ -3,42 +3,57 @@
  * test (rows, dual-encoded needs-review/agree, own-cell-only editing, read-only
  * consensus column) + the #471(b) chip-navigation flows.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, waitFor, cleanup, within, fireEvent } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
-const { navigateMock } = vi.hoisted(() => ({ navigateMock: vi.fn() }))
+const { navigateMock, DEFAULT_RECONCILIATION } = vi.hoisted(() => ({
+  navigateMock: vi.fn(),
+  /**
+   * The suite's standing payload. Hoisted so the #963 Tier 3 cases below — the
+   * only ones that make the request FAIL — can put it back afterwards:
+   * `mockRejectedValue` replaces the implementation for the rest of the file,
+   * and the mock is created once at module scope.
+   */
+  DEFAULT_RECONCILIATION: {
+    available: true,
+    reason: null,
+    n_coders: 2,
+    coders: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }],
+    codes: [
+      { id: 10, name: 'Positive', color: null },
+      { id: 20, name: 'Negative', color: null },
+    ],
+    units: [
+      {
+        unit_type: 'segment', unit_id: 100, source_type: 'conversation', source_id: 5,
+        source_label: 'Interview 1', text: 'I really liked the program.',
+        by_coder: { '1': [10], '2': [20] }, engaged: [1, 2],
+        consensus: [], consensus_context: {}, has_disagreement: true,
+      },
+      {
+        unit_type: 'segment', unit_id: 101, source_type: 'conversation', source_id: 5,
+        source_label: 'Interview 1', text: 'It was helpful overall.',
+        by_coder: { '1': [10], '2': [10] }, engaged: [1, 2],
+        consensus: [10], consensus_context: { '10': { rule: 'unanimous', agree: 2, voters: 2 } },
+        has_disagreement: false,
+      },
+    ],
+    total: 2,
+    has_more: false,
+  },
+}))
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async () => ({
+  // #963 Tier 3 — the grid's query now names a retry policy, and this whole
+  // module is replaced, so the real predicate has to be handed back or `retry`
+  // silently becomes `undefined` and the policy test would pass vacuously.
+  retryUnanswered: (await vi.importActual<typeof import('@/lib/api/error-utils')>(
+    '@/lib/api/error-utils',
+  )).retryUnanswered,
   codeAnalysisApi: {
-    reconciliation: vi.fn().mockResolvedValue({
-      available: true,
-      reason: null,
-      n_coders: 2,
-      coders: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }],
-      codes: [
-        { id: 10, name: 'Positive', color: null },
-        { id: 20, name: 'Negative', color: null },
-      ],
-      units: [
-        {
-          unit_type: 'segment', unit_id: 100, source_type: 'conversation', source_id: 5,
-          source_label: 'Interview 1', text: 'I really liked the program.',
-          by_coder: { '1': [10], '2': [20] }, engaged: [1, 2],
-          consensus: [], consensus_context: {}, has_disagreement: true,
-        },
-        {
-          unit_type: 'segment', unit_id: 101, source_type: 'conversation', source_id: 5,
-          source_label: 'Interview 1', text: 'It was helpful overall.',
-          by_coder: { '1': [10], '2': [10] }, engaged: [1, 2],
-          consensus: [10], consensus_context: { '10': { rule: 'unanimous', agree: 2, voters: 2 } },
-          has_disagreement: false,
-        },
-      ],
-      total: 2,
-      has_more: false,
-    }),
+    reconciliation: vi.fn().mockResolvedValue(DEFAULT_RECONCILIATION),
     recomputeConsensus: vi.fn().mockResolvedValue({ recomputed: 0, remaining: 0 }),
   },
   codingApi: { applyCode: vi.fn(), removeCode: vi.fn() },
@@ -75,7 +90,7 @@ import {
   selectableObservations, sourceParams, sourceQueryKey,
 } from '@/lib/reconciliation-source'
 import { isReconciliationTabVisible } from '@/lib/qual-analysis-types'
-import type { Code } from '@/lib/api'
+import { codeAnalysisApi, type Code } from '@/lib/api'
 
 afterEach(() => { cleanup(); navigateMock.mockClear() })
 
@@ -90,16 +105,24 @@ const CODES = [
   { id: 20, name: 'Negative', color: '#ef4444', is_active: true, is_universal: false },
 ] as unknown as Code[]
 
-function renderGrid(currentUserId: number | null = 1) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+/** #963 Tier 3 — the grid takes a REQUIRED Retry landing; the page passes its
+ *  active tab. A detached ref here is what a real mount never has, so the
+ *  landing itself is asserted in the load-state suite rather than this one. */
+function renderGrid(currentUserId: number | null = 1, opts: { clientRetry?: boolean | number } = {}) {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: opts.clientRetry ?? false, retryDelay: 0 } },
+  })
+  const landing = { current: null as HTMLElement | null }
   return render(
     <QueryClientProvider client={qc}>
       <ReconciliationGrid
         projectId={42}
         codes={CODES}
+        codesStatus="ready"
         currentUserId={currentUserId}
         staleCount={3}
         setSrAnnouncement={() => {}}
+        landingRef={landing}
       />
     </QueryClientProvider>,
   )
@@ -423,5 +446,91 @@ describe('#35 — ratings in the grid', () => {
     expect(screen.queryByTitle(/more than one step/)).toBeNull()
     expect(screen.queryByText(/^differ by \d/)).toBeNull()
     expect(screen.getByRole('gridcell', { name: 'Bob: Negative · differs from consensus' })).toBeInTheDocument()
+  })
+})
+
+/**
+ * #963 Tier 3 — the grid waited for its request and did not distinguish a
+ * FAILURE, so a settled error fell through to *"Reconciliation is unavailable
+ * for this project."* — a claim about the PROJECT made because nothing had
+ * answered. `IrrMatrix`'s #957 fix is the worked example; this is the same
+ * shape on the same tab.
+ */
+describe('#963 Tier 3 — what the grid says before, and instead of, an answer', () => {
+  const reconciliation = () =>
+    (codeAnalysisApi as unknown as { reconciliation: ReturnType<typeof vi.fn> }).reconciliation
+  /** An ANSWERED refusal: duck-typed on `status`, like the real predicates. */
+  const answered500 = () => Object.assign(new Error('boom'), { status: 500 })
+
+  // ⚠️ The call COUNTS below are the point of two of these cases, and the mock
+  // lives at module scope — so the history has to be cleared per test, and the
+  // standing payload put back after a persistent rejection. Without this the
+  // first version of these tests read 13 and 14 calls.
+  beforeEach(() => {
+    reconciliation().mockReset()
+    reconciliation().mockResolvedValue(DEFAULT_RECONCILIATION)
+  })
+  afterEach(() => {
+    reconciliation().mockReset()
+    reconciliation().mockResolvedValue(DEFAULT_RECONCILIATION)
+  })
+
+  it('READY and unavailable: the server’s own verdict is still said (positive control)', async () => {
+    // The guard has to fail when the fix is over-applied — this sentence is
+    // correct about an ANSWERED payload, and must survive.
+    reconciliation().mockResolvedValueOnce({
+      available: false, reason: null, n_coders: 1, coders: [], codes: [], units: [],
+      total: 0, has_more: false,
+    })
+    renderGrid()
+    expect(await screen.findByText('Reconciliation is unavailable for this project.')).toBeInTheDocument()
+  })
+
+  it('LOADING: says it is loading, and makes no claim about the project', async () => {
+    reconciliation().mockReturnValueOnce(new Promise(() => {}))
+    renderGrid()
+    expect(await screen.findByText('Loading reconciliation…')).toBeInTheDocument()
+    expect(screen.queryByText(/unavailable for this project/)).toBeNull()
+    expect(screen.queryByRole('grid')).toBeNull()
+  })
+
+  it('FAILED: says the LOAD failed, offers a Retry, and never blames the project', async () => {
+    reconciliation().mockRejectedValueOnce(answered500())
+    renderGrid()
+    expect(await screen.findByText('Reconciliation could not be loaded.')).toBeInTheDocument()
+    expect(screen.queryByText(/unavailable for this project/)).toBeNull()
+    // The words are true of the REQUEST, and say the project is untouched.
+    expect(screen.getByText(/Nothing in your project has changed\./)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
+
+  it('Retry asks again and renders the grid when the second attempt answers', async () => {
+    reconciliation().mockRejectedValueOnce(answered500())
+    renderGrid()
+    const retry = await screen.findByRole('button', { name: 'Retry' })
+    expect(reconciliation()).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(retry)
+    await waitFor(() => expect(screen.getByRole('grid', { name: /reconciliation/i })).toBeInTheDocument())
+    expect(screen.queryByText('Reconciliation could not be loaded.')).toBeNull()
+  })
+
+  it('does NOT re-ask on its own when the server ANSWERED the refusal', async () => {
+    // Under the app's own client default (`retry: 1`), so the query's
+    // `retryUnanswered` is what decides. A 500 is an answer; asking again runs
+    // the heaviest read on this tab twice for the same result.
+    reconciliation().mockRejectedValue(answered500())
+    renderGrid(1, { clientRetry: 1 })
+    await screen.findByText('Reconciliation could not be loaded.')
+    await new Promise(r => setTimeout(r, 30))
+    expect(reconciliation()).toHaveBeenCalledTimes(1)
+  })
+
+  it('DOES re-ask once when nothing answered at all', async () => {
+    // No `status` — a dropped connection, which a second ask can genuinely fix.
+    reconciliation().mockRejectedValue(new Error('network down'))
+    renderGrid(1, { clientRetry: 1 })
+    await screen.findByText('Reconciliation could not be loaded.')
+    expect(reconciliation()).toHaveBeenCalledTimes(2)
   })
 })

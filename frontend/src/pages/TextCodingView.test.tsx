@@ -30,6 +30,7 @@ import { MemoryRouter, Route, Routes } from 'react-router'
 import { VirtuosoMockContext } from 'react-virtuoso'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { Code, TextCodingListResponse, TextCodingResponse } from '@/lib/api'
+import { ApiError } from '@/lib/api/client'
 
 const columns = vi.fn()
 const getConfig = vi.fn()
@@ -122,8 +123,10 @@ const CODES = [
   makeCode(8, 2, 'Disruption'),
 ]
 
-function renderView() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+/** `retry` mirrors `main.tsx`'s client default when a test is about the retry
+ * policy; `retryDelay: 0` so the automatic second ask, if any, happens at once. */
+function renderView({ clientRetry = false as boolean | number } = {}) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: clientRetry, retryDelay: 0 } } })
   return render(
     <QueryClientProvider client={qc}>
       <TooltipProvider>
@@ -270,6 +273,243 @@ describe('the rating strip on the text-coding surface (#868 d)', () => {
     // meter is decorative. A chip handed no scale renders neither.
     await waitFor(() => expect(within(row).getByText(/0 out of 10/)).toBeInTheDocument())
     expect(within(row).queryByText(/not rated/)).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * #956 — the header's multi-coder controls do not depend on the progress count.
+ *
+ * Measured on a 965,917-value survey: selecting nine open-text columns makes
+ * `coding-progress` 500 (SQLite's variable ceiling). The gauges, the blind
+ * toggle AND the coder badge all rendered inside `progressData &&`, so the
+ * whole group vanished — including the page's only statement that colleagues
+ * were hidden. The three sibling workbenches never gated either control on data.
+ */
+describe('#956 — the header survives a progress count that fails or is still loading', () => {
+  const TWO_CODERS = [
+    { id: 1, username: 'Alice', display_color: null, archived: false },
+    { id: 2, username: 'Bob', display_color: null, archived: false },
+  ]
+
+  it('a failed count says progress is unavailable, and the blind toggle stays', async () => {
+    listCoders.mockResolvedValue(TWO_CODERS)
+    progress.mockRejectedValue(new ApiError(500, { detail: 'Internal Server Error' }, {}))
+    renderView()
+
+    expect(await screen.findByText('Progress unavailable')).toBeInTheDocument()
+    // Blind is the default with two coders; the toggle is its only statement.
+    expect(await screen.findByRole('button', { name: /Colleagues hidden/ })).toBeInTheDocument()
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(screen.queryByText('Texts:')).not.toBeInTheDocument()
+  })
+
+  it('a count that has not answered yet does not hide the toggle either', async () => {
+    // The discriminating case: gating on the count having SETTLED (data or an
+    // error) passes the test above and still unmounts the toggle on every key
+    // change — including the Reveal press itself, because blind is part of the
+    // count's query key.
+    listCoders.mockResolvedValue(TWO_CODERS)
+    progress.mockReturnValue(new Promise(() => {}))
+    renderView()
+
+    expect(await screen.findByRole('button', { name: /Colleagues hidden/ })).toBeInTheDocument()
+    expect(screen.queryByText('Progress unavailable')).not.toBeInTheDocument()
+  })
+
+  it('a count that never got an answer is asked once more on its own', async () => {
+    // Pins the query's `retry` wiring — this harness's client default is
+    // `retry: false`, so only the page's own option can produce the second call.
+    // One coder, so the key does not move under the test.
+    progress
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({ by_column: [], overall_texts: { coded: 1, total: 2 }, overall_records: { coded: 1, total: 2 } })
+    renderView()
+    // React Query waits 1 s before its first retry.
+    expect(await screen.findByRole('progressbar', { name: 'Texts coded: 50%' }, { timeout: 4000 })).toBeInTheDocument()
+  })
+
+  it('a successful count still renders both gauges beside the toggle', async () => {
+    listCoders.mockResolvedValue(TWO_CODERS)
+    renderView()
+
+    expect(await screen.findByRole('progressbar', { name: 'Texts coded: 50%' })).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: 'Records coded: 50%' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Colleagues hidden/ })).toBeInTheDocument()
+    expect(screen.queryByText('Progress unavailable')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * #964 — blind mode read an unanswered coder roster as a one-person roster, so a
+ * colleague's chips rendered and the server gauge was fetched all-coder.
+ */
+describe('#964 — while the roster has not answered, colleagues stay hidden', () => {
+  const TWO_CODERS = [
+    { id: 1, username: 'Alice', display_color: null, archived: false },
+    { id: 2, username: 'Bob', display_color: null, archived: false },
+  ]
+  // Response 101 carries ONLY a colleague's code; 102 carries mine.
+  const WITH_COLLEAGUE: TextCodingListResponse = {
+    ...PAGE,
+    texts: [
+      text(101, 'The first response.', {
+        applied_code_ids: [8],
+        applied_code_details: [{ code_id: 8, user_id: 2, attribution: null, is_universal: false,
+                                 magnitude: null, magnitude_conflict: null }],
+      }),
+      PAGE.texts[1],
+    ],
+  }
+
+  it.each([
+    ['loading', () => listCoders.mockReturnValue(new Promise(() => {}))],
+    ['failed', () => listCoders.mockRejectedValue(new Error('network'))],
+  ] as const)('roster %s: my chip renders, the colleague\'s does not, and no gauge is fetched', async (_s, arrange) => {
+    arrange()
+    list.mockResolvedValue(WITH_COLLEAGUE)
+    renderView()
+
+    const mine = await findRow(102)
+    await waitFor(() => expect(within(mine).getByText('Engagement')).toBeInTheDocument())
+    expect(within(await findRow(101)).queryByText('Disruption')).not.toBeInTheDocument()
+    // The server-counted gauge waits for a settled scope rather than guessing one.
+    expect(progress).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: /Colleagues/ })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['two coders', TWO_CODERS, 1],
+    ['one coder', TWO_CODERS.slice(0, 1), undefined],
+  ] as const)('a roster that answers late (%s) fetches the gauge ONCE, under the right scope', async (_s, roster, coderId) => {
+    let answer!: (v: unknown) => void
+    listCoders.mockReturnValue(new Promise(r => { answer = r }))
+    renderView()
+    await findRow(102)
+    expect(progress).not.toHaveBeenCalled()
+
+    answer(roster)
+    await waitFor(() => expect(progress).toHaveBeenCalled())
+    expect(progress).toHaveBeenCalledTimes(1)
+    expect((progress.mock.calls[0][1] as { coder_id?: number }).coder_id).toBe(coderId)
+  })
+
+  // Found by #964's review: "View all — N archived" outlived re-blinding.
+  it('re-blinding hides an archived colleague\'s chips even after "View all" was switched on', async () => {
+    listCoders.mockResolvedValue(TWO_CODERS)
+    coderCoverage.mockResolvedValue({
+      coders: [{ user_id: 3, username: 'Carla', display_color: null, archived: true, coding_count: 1 }],
+      count: 1,
+    })
+    list.mockResolvedValue({
+      ...PAGE,
+      texts: [
+        text(101, 'The first response.', {
+          applied_code_ids: [8],
+          applied_code_details: [{ code_id: 8, user_id: 3, attribution: null, is_universal: false,
+                                   magnitude: null, magnitude_conflict: null }],
+        }),
+        PAGE.texts[1],
+      ],
+    })
+    store['mm-blind-revealed-1-1'] = '1'
+    renderView()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Filter codes by coder' }))
+    fireEvent.click(await screen.findByRole('button', { name: /View all — 1 archived/ }))
+    expect(await screen.findByText(/coded by Carla/)).toBeInTheDocument() // positive control
+
+    fireEvent.click(screen.getByRole('button', { name: /Colleagues shown/ }))
+    expect(await screen.findByRole('button', { name: /Colleagues hidden/ })).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText(/coded by Carla/)).not.toBeInTheDocument())
+  })
+})
+
+/**
+ * #961 — nothing on this page claims a list is empty before the list answers.
+ *
+ * Measured on a large survey (production build): the page opened on "No text
+ * columns found in this project." for ~3.4 s, and made the same claim for good
+ * when the column list failed. Each case below forces one list to be slow or to
+ * fail and asserts the page says THAT, never the empty claim; the "answered and
+ * empty" cases are the positive controls that keep the true claims alive.
+ */
+describe('#961 — no "nothing here" before the lists answer', () => {
+  const NO_SELECTION = {
+    view_mode: 'by_text', focal_column_ids: [], dataset_filter_ids: null, random_seed: null,
+    context_visibility: {}, hide_empty: true, starred_value_ids: [],
+    treat_as_empty: [], treat_as_empty_is_default: true,
+  }
+  const SERVER_ERROR = () => new ApiError(500, { detail: 'Internal Server Error' }, {})
+
+  it('a column list still loading says so — never "No text columns found"', async () => {
+    getConfig.mockResolvedValue(NO_SELECTION)
+    columns.mockReturnValue(new Promise(() => {}))
+    renderView()
+    expect(await screen.findByText('Loading text columns…')).toBeInTheDocument()
+    expect(screen.queryByText('No text columns found in this project.')).not.toBeInTheDocument()
+  })
+
+  it('a FAILED column list says the load failed; Retry asks again and lands focus in the workspace', async () => {
+    getConfig.mockResolvedValue(NO_SELECTION)
+    columns.mockRejectedValueOnce(SERVER_ERROR())
+    // The app's own client default (`retry: 1`), so the page's `retryUnanswered`
+    // is what decides — a server that ANSWERED is not asked again on its own.
+    renderView({ clientRetry: 1 })
+
+    expect(await screen.findByText('The text columns could not be loaded.')).toBeInTheDocument()
+    expect(screen.queryByText('No text columns found in this project.')).not.toBeInTheDocument()
+    expect(columns).toHaveBeenCalledTimes(1)
+
+    const retry = screen.getByRole('button', { name: 'Retry' })
+    retry.focus()
+    fireEvent.click(retry)
+    expect(await screen.findByText('Select one or more text columns to begin coding.')).toBeInTheDocument()
+    expect(columns).toHaveBeenCalledTimes(2)
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Coding' })))
+  })
+
+  it('an ANSWERED empty column list still says so (positive control)', async () => {
+    getConfig.mockResolvedValue(NO_SELECTION)
+    columns.mockResolvedValue({ columns: [] })
+    renderView()
+    expect(await screen.findByText('No text columns found in this project.')).toBeInTheDocument()
+  })
+
+  it('a saved selection not restored yet is not "select a column"', async () => {
+    getConfig.mockReturnValue(new Promise(() => {}))
+    renderView()
+    expect(await screen.findByText('Loading your column selection…')).toBeInTheDocument()
+    expect(screen.queryByText('Select one or more text columns to begin coding.')).not.toBeInTheDocument()
+  })
+
+  it('the responded count waits for the column list rather than reading 0/0', async () => {
+    let answer!: (v: unknown) => void
+    columns.mockReturnValue(new Promise(r => { answer = r }))
+    renderView()
+    await findRow(101)  // the saved selection restored; the texts loaded in parallel
+    expect(screen.queryByText(/responded/)).not.toBeInTheDocument()
+
+    answer({ columns: [{
+      column_id: 10, dataset_id: 1, dataset_name: 'Survey', column_name: 'Q7', column_text: 'Anything else?',
+      column_type: 'open_text', sequence_order: 0, total_rows: 2, non_empty_rows: 2, coded_rows: 1,
+    }] })
+    expect(await screen.findByText('2/2 responded')).toBeInTheDocument()
+  })
+
+  it('a FAILED page of texts says the load failed — not "No texts found. Try adjusting your filters."', async () => {
+    list.mockRejectedValue(SERVER_ERROR())
+    renderView()
+    expect(await screen.findByText('The texts could not be loaded.')).toBeInTheDocument()
+    expect(screen.queryByText(/No texts found/)).not.toBeInTheDocument()
+  })
+
+  it('the code panel says codes are loading — not "No codes yet"', async () => {
+    listCodes.mockReturnValue(new Promise(() => {}))
+    renderView()
+    await findRow(101)
+    const panel = screen.getByRole('region', { name: 'Code panel' })
+    expect(within(panel).getByText('Loading codes…')).toBeInTheDocument()
+    expect(within(panel).queryByText('No codes yet')).not.toBeInTheDocument()
   })
 })
 

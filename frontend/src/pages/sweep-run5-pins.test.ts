@@ -33,16 +33,41 @@ describe('#907 — the participant-table button keeps its visible label as its n
 })
 
 describe('#908 — a count badge is separated from its label by a TEXT space', () => {
+  // 🔴 **REWRITTEN 2026-09-12, and this block had been CERTIFYING THE DEFECT.**
+  // It asserted the source matched `opacity-60">{' '}{n}` — the shape #908
+  // shipped — and that shape **still computes "All Datasets1"**. Measured with
+  // `computeAccessibleName`: the algorithm trims each text node before joining
+  // them, so a space anywhere INSIDE the count span is discarded, whether it is
+  // typed or written as `{' '}`. Only a space in the BUTTON's own child list
+  // survives, which needs a fragment here because an expression container holds
+  // one expression.
+  //
+  // This is the #939 lesson two blocks below, reached the hard way: that one
+  // pinned an implementation that later improved, and cost a false FAILURE.
+  // This one pinned an implementation that never worked, and cost a false PASS
+  // for four days — the worse direction, because nothing ever complained.
+  //
+  // The property itself is measured in `pages/count-badge-spacing.test.ts`
+  // (both shapes, both names, plus the tell that `textContent` cannot see the
+  // difference). This block stays as the per-SITE pin it was always meant to be.
   it.each([
     ['pages/DatasetsListPage.tsx', 'datasets.length'],
     ['pages/ConversationsListPage.tsx', 'conversations.length'],
     ['pages/DocumentsListPage.tsx', 'documents.length'],
   ])('%s', (rel, expr) => {
     const src = source(rel)
-    // The old shape: `<span className="ml-1.5 opacity-60">{n}</span>` — margin
-    // is not a space, so the name computed to "All Datasets1".
-    expect(src).not.toMatch(new RegExp(`opacity-60">\\{${expr.replace('.', '\\.')}\\}`))
-    expect(src).toMatch(new RegExp(`opacity-60">\\{' '\\}\\{${expr.replace('.', '\\.')}\\}`))
+    const n = expr.replace('.', '\\.')
+    // ⚠️ The old block's first assertion — `not.toMatch(opacity-60">{n})` — is
+    // GONE and must not come back: the CORRECT shape contains that substring
+    // too, because the span rightly holds nothing but the number. It could
+    // never distinguish "no space anywhere" from "space outside the span",
+    // which is the whole distinction.
+    //
+    // #908's own remedy, measured to do nothing:
+    expect(src).not.toMatch(new RegExp(`opacity-60">\\{' '\\}\\{${n}\\}`))
+    // The space is a SIBLING of the span, inside a fragment. This positive is
+    // what carries the property.
+    expect(src).toMatch(new RegExp(`<>\\{' '\\}<span[^>]*opacity-60">\\{${n}\\}</span></>`))
   })
 })
 
