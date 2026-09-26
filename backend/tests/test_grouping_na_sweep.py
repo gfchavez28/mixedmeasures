@@ -115,11 +115,26 @@ def test_code_density_excludes_recognized_na(db_session):
 # The grouping-map select shapes. The `,?\s*\)` terminator excludes the
 # four-column (…, value_text, value_numeric) VALUE loads, which are cell reads,
 # not grouping maps.
+#
+# 🔴 **ANCHORED AT THE PROJECTION'S OPENING PAREN since 2026-09-22, because
+# without it the two-column pattern matched a SUFFIX and reported a PHANTOM.**
+# `db.query(DatasetValue.id, DatasetValue.row_id, DatasetValue.value_text)` — a
+# three-column CELL READ, the category the terminator above was already written
+# to exclude — ends in the two columns this pattern names, so row 49's unit
+# matcher was reported as a hand-rolled grouping map on its first run. It
+# pointed at a real line in real code and looked exactly like the defect: #772's
+# class, in a guard.
+#
+# The shape being policed is *a projection whose columns ARE these*, so the
+# regex now says that. `select(` is covered as well as `query(` — a Core select
+# is the same claim in the other spelling, and #842's rewrites moved several
+# reads to it.
+_PROJECTION = r"(?:query|select)\(\s*"
 TWO_COL_SHAPE = re.compile(
-    r"DatasetValue\.row_id\s*,\s*DatasetValue\.value_text\s*,?\s*\)"
+    _PROJECTION + r"DatasetValue\.row_id\s*,\s*DatasetValue\.value_text\s*,?\s*\)"
 )
 THREE_COL_SHAPE = re.compile(
-    r"DatasetValue\.row_id\s*,\s*DatasetValue\.column_id\s*,"
+    _PROJECTION + r"DatasetValue\.row_id\s*,\s*DatasetValue\.column_id\s*,"
     r"\s*DatasetValue\.value_text\s*,?\s*\)"
 )
 
@@ -137,12 +152,28 @@ THREE_COL_ALLOWLIST = {
     # 2) get_demographic_filter_options — filter OPTIONS are subsetting, not
     #    grouping; offering "Decline to state" as a selectable filter value is
     #    deliberate.
-    "services/text_analysis.py": 1,
-    # get_non_empty_comment_values — the #519 "which texts count" set, NOT a
-    # grouping map: the value_text is the TEXT being counted, judged by
-    # `is_empty_text` against the project's treat-as-empty list, and never used
-    # as a group key. It selected whole ORM `DatasetValue`s (which this regex
-    # cannot see) until #956 narrowed it to four columns for memory.
+    "services/append_duplicates.py": 1,
+    # existing_fingerprints (#1014) — record IDENTITY for the append dedup, not
+    # grouping. It must NOT apply the missing rule: a stored "Refused" is a
+    # different answer from a blank cell (#596), and the appended side lands a
+    # declared-missing code as that same text via resolve_labelled_cell, so raw
+    # text equality is the comparison. The same semantics existed before as an
+    # ORM load the scan could not see.
+    # 🔴 `services/text_analysis.py` WAS allowlisted here and is not any more
+    # (2026-09-22) — its entry was pinning a PHANTOM, and its own comment said
+    # so without anyone noticing. `get_non_empty_comment_values` selects FOUR
+    # columns (`id, row_id, column_id, value_text`), i.e. exactly the cell-read
+    # category the `,?\s*\)` terminator above was written to exclude; it matched
+    # only because the pattern was unanchored and read the last three as a
+    # suffix. Now that the regex is anchored at the projection it no longer
+    # matches, so the entry had to go or the "a vanished site must fail the
+    # suite" rule would have fired on it.
+    #
+    # ⚠️ The lesson is about ALLOWLISTS, not about that function: an entry
+    # excusing a false positive is indistinguishable from one excusing a real
+    # exemption, and it makes the list read as though the class is wider than it
+    # is. When a guard is repaired, re-derive its allowlist rather than carrying
+    # it over.
 }
 
 # ── Bare `_is_na(` call sites (#592 §I.9, the second half) ───────────────────

@@ -10,7 +10,13 @@
 import type { SafetyCopyAct, SafetyCopyInfo } from '@/lib/api'
 
 /** ONE key: the Settings list reads it, and every import that writes a copy
- * (the merge stepper, the overwrite import) invalidates it. */
+ * (the merge stepper, the overwrite import) invalidates it.
+ *
+ * ⚠️ The reading surface appends its page size (#978), so its key is a CHILD of
+ * this one. That is safe precisely because `invalidateQueries` is prefix-matching
+ * — the two invalidation sites stay correct without knowing the page size — while
+ * `setQueryData`/`getQueryData` are exact-match and would not. Nothing writes
+ * this cache directly today; anything that starts to must carry the full key. */
 export const SAFETY_COPIES_QUERY_KEY = ['backup-safety-copies'] as const
 
 /** A fourth act is a compile error until it has words. The vocabulary is the
@@ -43,9 +49,13 @@ export function formatTakenAt(iso: string): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'medium' }).format(date)
 }
 
-export function totalSafetyCopyBytes(copies: readonly Pick<SafetyCopyInfo, 'size_bytes'>[]): number {
-  return copies.reduce((sum, c) => sum + c.size_bytes, 0)
-}
+/** How many copies one request asks for (#978).
+ *
+ * The server bounds itself too and is the authority; this is what the client
+ * asks for, and what "Show all" replaces with every copy. Generous enough that a
+ * real working folder is never truncated — the 1,954 that made the cost visible
+ * were test leakage, not a normal rate. */
+export const SAFETY_COPY_PAGE_SIZE = 50
 
 /**
  * The sentences a delete confirmation must say about THIS copy, beyond "it is

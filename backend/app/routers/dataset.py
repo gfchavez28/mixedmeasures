@@ -29,6 +29,8 @@ from ..models.dataset import (
 from ..models.participant import Participant
 from ..schemas.dataset import (
     PrimaryRecodeSummary,
+    DatasetColumnsResponse,
+    DatasetColumnSummary,
     DatasetPreviewResponse,
     DatasetColumnPreview,
     DatasetCreate,
@@ -77,11 +79,17 @@ from ..schemas.dataset import (
 )
 from ..models.recode import RecodeDefinition, RecodeType
 from ..services.dataset_import import (
+    ColumnSelectionError,
     DatasetTooLargeError,
+    MAX_DATASET_CELLS,
+    append_cell_count_error,
     cell_count_error,
+    describe_csv_text,
+    describe_xlsx,
     preview_dataset_csv,
     import_dataset_csv,
     parse_header,
+    select_csv_columns,
     _strip_bom,
     _compute_value_numeric,
     is_xlsx_upload,
@@ -90,6 +98,7 @@ from ..services.dataset_import import (
 )
 from ..services.sav_import import (
     apply_sav_metadata,
+    describe_sav,
     is_sav_upload,
     sav_to_csv_text,
     SavColumnMeta,
@@ -111,6 +120,11 @@ from ..models.metric import MetricDefinition
 from ..models.row_score import RowScore
 from ..models.statistical_test import StatisticalTest
 from ..services.staleness import mark_metrics_stale
+from ..services.append_duplicates import (  # #1014
+    DuplicateCheck,
+    existing_fingerprints,
+    fingerprint,
+)
 from ..services.dataset_rows import (  # #897 / row 47
     create_manual_row,
     format_record_identifier,
@@ -405,9 +419,133 @@ def _refuse_if_managed(dataset, action: str) -> None:
         raise HTTPException(status_code=409, detail=refusal)
 
 
+def _refuse_oversize_append(db: Session, dataset_id: int, incoming_rows: int) -> None:
+    """400 when appending this file would take the dataset over the cell cap (#972).
 
-@router.post("/preview", response_model=DatasetPreviewResponse)
-async def preview_dataset(
+    🔴 **Adding ONE record by hand asked this question and appending TEN THOUSAND
+    did not** — `create_row` has carried `cell_count_error` since row 47 while the
+    only bound on an append was the 50 MB byte cap on the file. The cheap operation
+    was guarded and the expensive one was not, which is the reverse of what
+    `create_row`'s own note reasons its way to.
+
+    🔴 **CALL THIS BEFORE THE DUPLICATE-FINGERPRINT READ.** Both append steps read
+    every existing value of the mapped columns to build their dedup fingerprints
+    (`services/append_duplicates.py`) — ~3.6M values on the GSS corpus. Streamed
+    since #1014 rather than loaded as ORM objects, it is still the expensive part,
+    so a refusal placed after it would read the entire dataset in order to say
+    the dataset is too large. Two `COUNT`s answer it first, which is
+    `preview_dataset_csv`'s own rule: never spend the memory you are refusing.
+
+    ⚠️ **The width is the DATASET's, not the file's.** An append maps onto columns
+    that already exist, so the file's column count decides nothing about how wide
+    the result is. `create_row` counts the same way, and the two are the only
+    non-import writers that can grow a table.
+    """
+    existing_rows = (
+        db.query(func.count(DatasetRow.id))
+        .filter(DatasetRow.dataset_id == dataset_id)
+        .scalar()
+    ) or 0
+    n_cols = (
+        db.query(func.count(DatasetColumn.id))
+        .filter(DatasetColumn.dataset_id == dataset_id)
+        .scalar()
+    ) or 0
+    over = append_cell_count_error(existing_rows, incoming_rows, n_cols)
+    if over:
+        raise HTTPException(status_code=400, detail=over)
+
+
+#: How many of the file's records the append preview shows. The duplicate count
+#: covers the whole file; only the sample is capped.
+APPEND_PREVIEW_ROWS = 10
+
+
+def _append_column_meta(column: DatasetColumn) -> dict:
+    """What `_resolve_append_cell` needs to know about one existing column.
+
+    Shared by both append steps (#1014): the preview used to fingerprint the
+    raw cell while the import fingerprinted the resolved one, so a code-format
+    file appended to a value-labelled column matched duplicates at the import
+    that the preview had reported as new.
+
+    `scale_values` carries the codes the column was imported with (#28) — an
+    SPSS scale may be 0-based or gapped, and an append must encode identically
+    to the original import or the same label would mean two different numbers
+    within one column.
+    """
+    scale_labels = None
+    scale_values = None
+    if column.scale_labels:
+        try:
+            scale_labels = json.loads(column.scale_labels)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("Failed to parse scale_labels JSON for column %s during append: %s", column.id, e)
+    if column.scale_values:
+        try:
+            scale_values = json.loads(column.scale_values)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("Failed to parse scale_values JSON for column %s during append: %s", column.id, e)
+    return {
+        "column_type": column.column_type.value,
+        "scale_labels": scale_labels,
+        "scale_values": scale_values,
+        # #575 append parity: {code: label} lets a code-format file appended to
+        # a value-labelled column substitute code→label so value_text (and the
+        # dedup fingerprint) match the existing label rows. Empty for non-scale
+        # columns → resolve_labelled_cell leaves them untouched.
+        "code_to_label": build_code_to_label(scale_labels, scale_values),
+        # #592: the column's missing declaration (None = the defaults) —
+        # drives the append missing channel in resolve_labelled_cell.
+        "missing_rules": parse_missing_rules(column.missing_values),
+    }
+
+
+def _resolve_append_cell(cell: str, meta: dict) -> tuple[str, float | None]:
+    """One appended cell → the `(value_text, value_numeric)` it would be stored as."""
+    return resolve_labelled_cell(
+        cell, meta["column_type"], meta["scale_labels"],
+        meta["scale_values"], meta["code_to_label"],
+        missing_rules=meta["missing_rules"],
+    )
+
+
+def _parse_column_selection(raw: str | None, *, field: str = "columns") -> list[int] | None:
+    """A JSON array of ORIGINAL column indices, or None for the whole file (#973 c).
+
+    Validated HERE rather than trusted, because the selection decides what the
+    adapter reads: a non-integer, a negative index or a duplicate would each
+    produce a narrowed file that does not match what the wizard believes it
+    chose. Order is the caller's and is preserved — the researcher may reorder.
+    """
+    if raw is None or raw == "":
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid {field}: {e}")
+    if not isinstance(value, list) or not all(
+        isinstance(i, int) and not isinstance(i, bool) for i in value
+    ):
+        raise HTTPException(status_code=400, detail=f"{field} must be a list of integers.")
+    if not value:
+        raise HTTPException(
+            status_code=400,
+            detail="Select at least one column to import.",
+        )
+    if any(i < 0 for i in value):
+        raise HTTPException(status_code=400, detail=f"{field} must not contain negative indices.")
+    if len(set(value)) != len(value):
+        raise HTTPException(status_code=400, detail=f"{field} must not repeat a column.")
+    return value
+
+
+# ⚠️ NOT `/columns`: `GET /columns` on this same prefix already lists the
+# PROJECT's existing dataset columns (the crosswalk's source). Two unrelated
+# meanings on one path, separated only by the verb, is a trap for the next
+# reader — this is the cheap half of `/preview`, and is named for it.
+@router.post("/preview-columns", response_model=DatasetColumnsResponse)
+async def describe_dataset_columns(
     project_id: int,
     file: UploadFile = File(...),
     encoding: str = Form("utf-8"),
@@ -415,11 +553,94 @@ async def preview_dataset(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Preview a dataset file (CSV, .xlsx #523, or SPSS .sav #28) before importing."""
+    """What columns this file has, and how big it is — WITHOUT reading it (#973 c).
+
+    🔴 **The one dataset endpoint that does NOT apply `MAX_DATASET_CELLS`,
+    deliberately.** It is the way out of that refusal: `/preview` cannot answer
+    for an over-cap file (every format refuses before it has a column list —
+    `.xlsx` on declared dimensions, `.sav` on metadata, CSV by bailing
+    mid-stream), so a researcher told to "remove columns you do not need" had no
+    way to see what the columns were. This answers that, then `/preview` runs
+    against the chosen subset.
+
+    Cheap by construction rather than by a limit: a row counter and five sample
+    values per column. MEASURED on the GSS workbook — **0.15 s against 22.9 s for
+    the full conversion**, because `describe_xlsx` reads the header row and the
+    sheet's declared dimensions instead of every cell.
+    """
     _get_project_or_404(db, project_id, user.id)
     validate_encoding(encoding)
 
-    text, sheet_names, sav_meta = await _upload_to_csv_text(file, encoding, sheet_name)
+    content = await read_upload_with_limit(file)
+    sheet_names: list[str] | None = None
+
+    try:
+        if is_xlsx_upload(file.filename, content):
+            described = await run_in_threadpool(describe_xlsx, content, sheet_name)
+            sheet_names = described["sheet_names"]
+        elif is_sav_upload(file.filename, content):
+            described = await run_in_threadpool(describe_sav, content)
+        else:
+            described = await run_in_threadpool(
+                describe_csv_text, _decode_csv(content, encoding),
+            )
+    except (XlsxImportError, SavImportError) as e:
+        logger.warning("column describe failed: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
+    except (ValueError, csv.Error, TypeError) as e:
+        logger.warning("column describe failed: %s", e)
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to read this file. Check the file format and try again.",
+        )
+
+    headers = described["headers"]
+    if not headers:
+        raise HTTPException(status_code=400, detail="This file has no columns.")
+    rows = described["row_count"]
+    samples = described["samples"]
+
+    return DatasetColumnsResponse(
+        columns=[
+            DatasetColumnSummary(
+                column_index=i,
+                column_name=name,
+                sample_values=samples[i] if i < len(samples) else [],
+            )
+            for i, name in enumerate(headers)
+        ],
+        total_rows=rows,
+        # None, not a guess, when the format did not declare a row count (#539).
+        cells=rows * len(headers) if rows >= 0 else None,
+        max_cells=MAX_DATASET_CELLS,
+        sheet_names=sheet_names,
+    )
+
+
+@router.post("/preview", response_model=DatasetPreviewResponse)
+async def preview_dataset(
+    project_id: int,
+    file: UploadFile = File(...),
+    encoding: str = Form("utf-8"),
+    sheet_name: str | None = Form(None),
+    column_indices: str | None = Form(None),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Preview a dataset file (CSV, .xlsx #523, or SPSS .sav #28) before importing.
+
+    ``column_indices`` (#973 c) is a JSON array of ORIGINAL column indices; the
+    file is narrowed to them at the format seam, so the preview's statistics —
+    and the cell cap — describe the selection and nothing else. Omitted for an
+    ordinary import, which is every file that fits.
+    """
+    _get_project_or_404(db, project_id, user.id)
+    validate_encoding(encoding)
+
+    selection = _parse_column_selection(column_indices, field="column_indices")
+    text, sheet_names, sav_meta = await _upload_to_csv_text(
+        file, encoding, sheet_name, selection,
+    )
 
     try:
         # #596: .sav carries its user-missing declaration, and the preview must
@@ -446,6 +667,9 @@ async def preview_dataset(
         # #803: caught BEFORE the generic arm. This file parses fine; it is
         # simply too big, and saying "check the file format" would send the
         # researcher hunting a fault that does not exist (#797).
+        # ⚠️ `ColumnSelectionError` is deliberately NOT listed: the narrowing it
+        # comes from runs inside `_upload_to_csv_text`, above this block, and is
+        # converted there. An arm here could never fire (#941).
         raise HTTPException(status_code=400, detail=str(e))
     except (ValueError, csv.Error, TypeError) as e:
         logger.warning("CSV parse failed: %s", e)
@@ -525,7 +749,18 @@ async def import_dataset(
             status_code=400, detail=f"Invalid import config: {e}",
         )
 
-    text, _sheet_names, sav_meta = await _upload_to_csv_text(file, encoding, config.sheet_name)
+    # #973 (c): narrow to the SAME selection the preview was given. The wizard's
+    # `column_index` values are positions in the narrowed text, so this list and
+    # the preview's must agree or the researcher's type choices land on other
+    # columns. It is validated the same way the preview's Form field is.
+    selection = config.source_column_indices
+    if selection is not None:
+        selection = _parse_column_selection(
+            json.dumps(selection), field="source_column_indices",
+        )
+    text, _sheet_names, sav_meta = await _upload_to_csv_text(
+        file, encoding, config.sheet_name, selection,
+    )
 
     # Convert Pydantic models to dicts for the service
     column_configs = [cfg.model_dump() for cfg in config.column_configs]
@@ -557,6 +792,7 @@ async def import_dataset(
     except DatasetTooLargeError as e:
         # #803: same reason as the preview arm — this file is fine, it is too
         # big, and "check the file format" would be a wrong diagnosis (#797).
+        # ⚠️ `ColumnSelectionError` is converted at the seam; see the preview.
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
     except (ValueError, csv.Error, TypeError, KeyError) as e:
@@ -715,7 +951,7 @@ async def create_dataset(
 
 
 @router.post("/participants", response_model=DatasetResponse, status_code=201)
-async def create_participants_dataset(
+def create_participants_dataset(
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -733,6 +969,9 @@ async def create_participants_dataset(
 
     It refreshes on creation so the table is never born empty — an empty table is
     what makes a new capability read as broken.
+
+    ⚠️ **Plain `def`, like the refresh below, and for its reason** — it runs the
+    same whole-project rollup, on every call.
     """
     _get_project_or_404(db, project_id, user.id)
 
@@ -768,7 +1007,7 @@ async def create_participants_dataset(
 
 
 @router.post("/participants/refresh", response_model=ParticipantDatasetRefreshResponse)
-async def refresh_participants_dataset(
+def refresh_participants_dataset(
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -783,6 +1022,11 @@ async def refresh_participants_dataset(
 
     ⚠️ A GET may not do this (DEC-C, and `GET …/data` is the endpoint paginated
     for scale). The snapshot moves when the researcher says so.
+
+    ⚠️ **Plain `def` (#837's rule): it awaits nothing, and as `async def` the
+    whole rollup ran ON the event loop** — measured on BES (843,408 coded cells),
+    19.3 s with every concurrent request, `/health` included, held for 19.3 s.
+    Pinned in `test_endpoint_event_loop.py::MUST_BE_SYNC`.
     """
     _get_project_or_404(db, project_id, user.id)
 
@@ -3127,7 +3371,10 @@ async def update_value(
 
 
 async def _upload_to_csv_text(
-    file: UploadFile, encoding: str, sheet_name: str | None = None,
+    file: UploadFile,
+    encoding: str,
+    sheet_name: str | None = None,
+    columns: list[int] | None = None,
 ) -> tuple[str, list[str] | None, dict[str, SavColumnMeta] | None]:
     """Read a dataset upload (CSV, .xlsx, or SPSS .sav) as CSV text (#523/#28).
 
@@ -3140,23 +3387,55 @@ async def _upload_to_csv_text(
     ``sav_meta`` is .sav-only and carries what CSV cannot express (SPSS's measure
     and code-ordered scale points). Only the preview endpoint can act on the
     metadata — everything downstream consumes plain CSV, unchanged.
+
+    🔴 **``columns`` (#973 c) narrows to those ORIGINAL column indices HERE, at
+    the one seam every dataset upload passes through, and that placement is the
+    design.** Downstream then sees a file that IS the selection, so nothing else
+    has to learn about selections: `preview_dataset_csv` and `import_dataset_csv`
+    are unchanged, every `column_index` means the same thing on both paths, and
+    `cell_count_error(rows, len(headers))` is already counting the selection —
+    which is #973 (a), obtained rather than built.
+
+    ⚠️ **The caller must pass the SAME selection to the preview and to the
+    import.** The wizard's `column_index` values are positions in the narrowed
+    text; a different list at import time would apply the researcher's type
+    choices to different columns, silently. `DatasetImportRequest` carries it for
+    exactly that reason.
+
+    ⚠️ Each format narrows at its own source — openpyxl per row, pyreadstat via
+    `usecols`, CSV by re-emitting — because a post-hoc filter would first spend
+    the memory the cell cap exists to refuse.
     """
     content = await read_upload_with_limit(file)
     if is_xlsx_upload(file.filename, content):
         try:
-            text, sheet_names = await run_in_threadpool(xlsx_to_csv_text, content, sheet_name)
+            text, sheet_names = await run_in_threadpool(
+                xlsx_to_csv_text, content, sheet_name, columns,
+            )
             return text, sheet_names, None
         except XlsxImportError as e:
             logger.warning("xlsx parse failed: %s", e)
             raise HTTPException(status_code=400, detail=str(e))
     if is_sav_upload(file.filename, content):
         try:
-            text, sav_meta = await run_in_threadpool(sav_to_csv_text, content)
+            text, sav_meta = await run_in_threadpool(sav_to_csv_text, content, columns)
             return text, None, sav_meta
         except SavImportError as e:
             logger.warning("sav parse failed: %s", e)
             raise HTTPException(status_code=400, detail=str(e))
-    return _decode_csv(content, encoding), None, None
+    text = _decode_csv(content, encoding)
+    if columns is not None:
+        try:
+            text = await run_in_threadpool(select_csv_columns, text, columns)
+        except ColumnSelectionError as e:
+            # Converted HERE, like the two binary arms above: the narrowing runs
+            # before either endpoint's own try block, and a bare ValueError
+            # escaping to their generic arm would be rewritten to "check the file
+            # format" — wrong twice, since the file parses and the fault is in
+            # the request (#797).
+            logger.warning("column selection rejected: %s", e)
+            raise HTTPException(status_code=400, detail=str(e))
+    return text, None, None
 
 
 def _decode_csv(content: bytes, encoding: str) -> str:
@@ -3200,6 +3479,12 @@ async def append_preview(
 
     if not csv_rows:
         raise HTTPException(status_code=400, detail="CSV file has no data rows")
+
+    # #972: refuse here as well as at the import, so the wall arrives BEFORE the
+    # researcher maps every column rather than after. The import keeps its own
+    # call — a script reaches it directly, and a guard at one of two doors is not
+    # a guard on the operation (#589).
+    _refuse_oversize_append(db, dataset_id, len(csv_rows))
 
     # Load existing columns (imported only -- manual columns excluded from matching)
     columns = (
@@ -3284,67 +3569,42 @@ async def append_preview(
         if q.id not in matched_column_ids
     ]
 
-    # Duplicate detection: build fingerprints from existing rows
-    existing_rows = (
-        db.query(DatasetRow)
-        .options(joinedload(DatasetRow.values))
-        .filter(DatasetRow.dataset_id == dataset_id)
-        .all()
-    )
+    # Duplicate detection (#1014): the SAME resolution, fingerprint and decision
+    # as `append_import`, so "N rows match" here is what the import will skip.
+    # The displayed values stay the file's own cells; only the comparison
+    # resolves them (#575: a code-format "3" matches an existing "Agree").
+    col_meta = {q.id: _append_column_meta(q) for q in col_to_column.values()}
+    dup_check = DuplicateCheck(existing_fingerprints(db, dataset_id, matched_column_ids))
 
-    existing_fingerprints: set[tuple] = set()
-    for row in existing_rows:
-        # Fingerprint = sorted tuple of (column_id, value_text) for matched columns
-        val_map = {v.column_id: (v.value_text or "").strip().lower() for v in row.values}
-        fp = tuple(sorted(
-            (cid, val_map.get(cid, ""))
-            for cid in matched_column_ids
-        ))
-        existing_fingerprints.add(fp)
-
-    # Build preview rows + detect duplicates
     preview_rows: list[AppendPreviewRow] = []
     duplicate_count = 0
+    in_file_duplicate_count = 0
 
     for row_idx, row in enumerate(csv_rows):
         values: dict[str, str] = {}
-        fp_parts: list[tuple[int, str]] = []
+        resolved: dict[int, str] = {}
 
         for col_idx, q in col_to_column.items():
             cell = row[col_idx].strip() if col_idx < len(row) else ""
             values[str(q.id)] = cell
-            fp_parts.append((q.id, cell.lower()))
+            resolved[q.id] = _resolve_append_cell(cell, col_meta[q.id])[0]
 
-        fp = tuple(sorted(fp_parts))
-        is_dup = fp in existing_fingerprints
-
-        if is_dup:
+        kind = dup_check.check(fingerprint(resolved, matched_column_ids))
+        if kind is not None:
             duplicate_count += 1
+            if kind == DuplicateCheck.IN_FILE:
+                in_file_duplicate_count += 1
 
-        preview_rows.append(AppendPreviewRow(
-            csv_row_index=row_idx,
-            values=values,
-            is_duplicate=is_dup,
-        ))
+        if row_idx < APPEND_PREVIEW_ROWS:
+            preview_rows.append(AppendPreviewRow(
+                csv_row_index=row_idx,
+                values=values,
+                is_duplicate=kind is not None,
+            ))
 
-    # Determine next record ID
-    existing_rids = (
-        db.query(DatasetRow.row_identifier)
-        .filter(DatasetRow.dataset_id == dataset_id)
-        .all()
-    )
-
-    max_num = 0
-    pad_width = 4  # default
-    for (rid,) in existing_rids:
-        parsed_rid = parse_record_identifier(rid)
-        if parsed_rid:
-            num, pw = parsed_rid
-            if num > max_num:
-                max_num = num
-                pad_width = pw
-
-    next_rid = f"R{str(max_num + 1).zfill(pad_width)}"
+    # The same derivation the import uses (#542b — this was a second copy).
+    next_num, pad_width = next_record_number(db, dataset_id)
+    next_rid = format_record_identifier(next_num, pad_width)
 
     # #414 (DEC-7): offer append-linking when the dataset has exactly ONE
     # identifier column AND the file matched it (otherwise new rows would
@@ -3363,7 +3623,8 @@ async def append_preview(
         unmatched_columns=unmatched_cols,
         total_rows=len(csv_rows),
         duplicate_count=duplicate_count,
-        preview_rows=preview_rows[:10],  # preview first 10 rows only
+        in_file_duplicate_count=in_file_duplicate_count,
+        preview_rows=preview_rows,
         next_row_id=next_rid,
         row_pad_width=pad_width,
         sheet_names=sheet_names,
@@ -3410,6 +3671,10 @@ async def append_import(
     if not csv_rows:
         raise HTTPException(status_code=400, detail="CSV file has no data rows")
 
+    # #972: BEFORE the duplicate-fingerprint read below, which reads every existing
+    # value of the mapped columns (#1014). See `_refuse_oversize_append`.
+    _refuse_oversize_append(db, dataset_id, len(csv_rows))
+
     # Build column mapping: csv_col_index -> column
     col_mapping: dict[int, DatasetColumn] = {}
     column_ids_in_mapping: set[int] = set()
@@ -3433,22 +3698,8 @@ async def append_import(
     if not col_mapping:
         raise HTTPException(status_code=400, detail="No valid column mappings provided")
 
-    # Duplicate detection (re-compute fingerprints)
-    existing_rows = (
-        db.query(DatasetRow)
-        .options(joinedload(DatasetRow.values))
-        .filter(DatasetRow.dataset_id == dataset_id)
-        .all()
-    )
-
-    existing_fingerprints: set[tuple] = set()
-    for row in existing_rows:
-        val_map = {v.column_id: (v.value_text or "").strip().lower() for v in row.values}
-        fp = tuple(sorted(
-            (cid, val_map.get(cid, ""))
-            for cid in column_ids_in_mapping
-        ))
-        existing_fingerprints.add(fp)
+    # Duplicate detection — the preview's check, streamed (#1014).
+    dup_check = DuplicateCheck(existing_fingerprints(db, dataset_id, column_ids_in_mapping))
 
     # Determine record start ID. #897/row 47: the scan is
     # `services/dataset_rows.py::next_record_number` now — ONE derivation shared
@@ -3469,34 +3720,7 @@ async def append_import(
     # the codes the column was imported with (#28) — an SPSS scale may be 0-based
     # or gapped, and an append must encode identically to the original import or
     # the same label would mean two different numbers within one column.
-    col_meta: dict[int, dict] = {}
-    for q in col_mapping.values():
-        qtype = q.column_type.value
-        scale_labels = None
-        scale_values = None
-        if q.scale_labels:
-            try:
-                scale_labels = json.loads(q.scale_labels)
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning("Failed to parse scale_labels JSON for column %s during append: %s", q.id, e)
-        if q.scale_values:
-            try:
-                scale_values = json.loads(q.scale_values)
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning("Failed to parse scale_values JSON for column %s during append: %s", q.id, e)
-        col_meta[q.id] = {
-            "column_type": qtype,
-            "scale_labels": scale_labels,
-            "scale_values": scale_values,
-            # #575 append parity: {code: label} lets a code-format file appended to
-            # a value-labelled column substitute code→label so value_text (and the
-            # dedup fingerprint) match the existing label rows. Empty for non-scale
-            # columns → resolve_labelled_cell leaves them untouched.
-            "code_to_label": build_code_to_label(scale_labels, scale_values),
-            # #592: the column's missing declaration (None = the defaults) —
-            # drives the append missing channel in resolve_labelled_cell.
-            "missing_rules": parse_missing_rules(q.missing_values),
-        }
+    col_meta = {q.id: _append_column_meta(q) for q in col_mapping.values()}
 
     # Generate batch ID
     file_name = file.filename or "unknown"
@@ -3522,20 +3746,17 @@ async def append_import(
         resolved: dict[int, tuple[str, float | None]] = {}
         for col_idx, q in col_mapping.items():
             cell = row[col_idx].strip() if col_idx < len(row) else ""
-            meta = col_meta[q.id]
-            resolved[col_idx] = resolve_labelled_cell(
-                cell, meta["column_type"], meta["scale_labels"],
-                meta["scale_values"], meta["code_to_label"],
-                missing_rules=meta["missing_rules"],
-            )
+            resolved[col_idx] = _resolve_append_cell(cell, col_meta[q.id])
 
-        # Build fingerprint from the resolved text.
-        fp_parts: list[tuple[int, str]] = [
-            (q.id, resolved[col_idx][0].lower()) for col_idx, q in col_mapping.items()
-        ]
-        fp = tuple(sorted(fp_parts))
+        # Fingerprint the resolved text; the check remembers every record, so a
+        # later copy within the file is a duplicate too.
+        fp = fingerprint(
+            {q.id: resolved[col_idx][0] for col_idx, q in col_mapping.items()},
+            column_ids_in_mapping,
+        )
+        is_duplicate = dup_check.check(fp) is not None
 
-        if config.skip_duplicates and fp in existing_fingerprints:
+        if config.skip_duplicates and is_duplicate:
             duplicates_skipped += 1
             continue
 
@@ -3554,9 +3775,6 @@ async def append_import(
         db.flush()
         new_row_ids.append(new_row.id)
         rows_created += 1
-
-        # Add to fingerprint set to detect dupes within this batch
-        existing_fingerprints.add(fp)
 
         # Create values from the resolved (text, numeric) pair.
         for col_idx, q in col_mapping.items():

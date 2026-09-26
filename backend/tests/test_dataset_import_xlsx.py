@@ -129,7 +129,7 @@ def test_preview_endpoint_accepts_xlsx_and_reports_sheets(db_session):
     upload = StarletteUploadFile(filename="survey.xlsx", file=io.BytesIO(blob))
 
     resp = asyncio.run(preview_dataset(
-        project_id=980, file=upload, encoding="utf-8", sheet_name=None, user=user, db=db,
+        project_id=980, file=upload, encoding="utf-8", sheet_name=None, column_indices=None, user=user, db=db,
     ))
     assert resp.sheet_names == ["Wave1", "Wave2"]
     assert resp.total_rows == 2
@@ -140,7 +140,7 @@ def test_preview_endpoint_accepts_xlsx_and_reports_sheets(db_session):
     bad = StarletteUploadFile(filename="broken.xlsx", file=io.BytesIO(b"PK\x03\x04garbage"))
     with pytest.raises(HTTPException) as exc:
         asyncio.run(preview_dataset(
-            project_id=980, file=bad, encoding="utf-8", sheet_name=None, user=user, db=db,
+            project_id=980, file=bad, encoding="utf-8", sheet_name=None, column_indices=None, user=user, db=db,
         ))
     assert exc.value.status_code == 400
 
@@ -190,7 +190,7 @@ def test_preview_inference_runs_off_the_event_loop(db_session, monkeypatch):
         beat = asyncio.create_task(heartbeat())
         resp = await preview_dataset(
             project_id=981, file=upload, encoding="utf-8",
-            sheet_name=None, user=user, db=db,
+            sheet_name=None, column_indices=None, user=user, db=db,
         )
         beat.cancel()
         return resp
@@ -618,7 +618,7 @@ def test_cell_cap_refuses_every_format_at_the_same_size(db_session, monkeypatch)
                               file=io.BytesIO(csv_text(50, 10).encode()))
     with pytest.raises(HTTPException) as http_exc:
         asyncio.run(preview_dataset(project_id=986, file=big, encoding="utf-8",
-                                    sheet_name=None, user=user, db=db))
+                                    sheet_name=None, column_indices=None, user=user, db=db))
     assert http_exc.value.status_code == 400
     assert "limit" in http_exc.value.detail
     assert "check the file format" not in http_exc.value.detail.lower()

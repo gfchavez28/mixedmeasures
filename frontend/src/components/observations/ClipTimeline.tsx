@@ -788,7 +788,7 @@ export default function ClipTimeline({
                             data-testid="clip-bar"
                             className={cn(
                               'absolute rounded text-[10px] leading-[18px] px-1.5 overflow-hidden whitespace-nowrap cursor-pointer',
-                              !fill && 'bg-mm-teal-text/80 text-white',
+                              !fill && 'bg-mm-teal-fill text-mm-on-fill',
                               selected && SELECTED_BAR,
                               // Selection wins when both apply (D27) — the ring
                               // only marks UNSELECTED playhead containment.

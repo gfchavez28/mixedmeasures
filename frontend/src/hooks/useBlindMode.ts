@@ -69,7 +69,19 @@ export interface BlindModeState {
 
 export function useBlindMode(projectId: number): BlindModeState {
   const { user } = useAuth()
-  const { coders, multiCoder, status: rosterStatus } = useCoders()
+  // 🔴 `multiHumanCoder`, never `multiCoder` (#989). Blind coding exists so a
+  // coder forms their own reading before seeing a COLLEAGUE's, and its whole
+  // vocabulary — "Reveal colleagues' work", a logged act of breaking blindness
+  // — is about people. A machine coder is not a colleague: gating on
+  // `multiCoder` would have turned blind mode on for a single researcher the
+  // moment they imported model output, hiding it behind a logged reveal, and
+  // named the model a colleague while doing it (#912 — a name is a claim about
+  // the act). Withholding a machine's suggestions while coding to avoid
+  // anchoring is a real and SEPARATE want — it is served by the per-coder
+  // visibility filter, which already hides any coder on request and now names
+  // the machine ones — deliberately not by this toggle, whose reveal is a
+  // logged research-integrity act about a person.
+  const { coders, multiHumanCoder, status: rosterStatus } = useCoders()
   const self = user?.id ?? null
 
   const [revealed, setRevealed] = useState<boolean>(() => readRevealed(projectId, self))
@@ -86,9 +98,9 @@ export function useBlindMode(projectId: number): BlindModeState {
   }
 
   const rosterKnown = rosterStatus === 'ready'
-  // `multiCoder` is only ever true of an answered roster, so `blind` needs no status.
-  const blind = multiCoder && !revealed
-  const withholding = !revealed && (multiCoder || !rosterKnown)
+  // `multiHumanCoder` is only ever true of an answered roster, so `blind` needs no status.
+  const blind = multiHumanCoder && !revealed
+  const withholding = !revealed && (multiHumanCoder || !rosterKnown)
   const settled = revealed || rosterKnown
 
   // Fail-closed on a missing self id in both arms: the set then names every

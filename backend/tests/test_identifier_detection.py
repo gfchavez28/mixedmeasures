@@ -10,6 +10,7 @@ to skip when the values are a dense sequential row counter, e.g. LimeSurvey's
 `id`). "response" is a negative signal (a platform response key, not a person).
 """
 from app.services.dataset_import import (
+    SubstantiveValues,
     _detect_column_type,
     _is_identifier_column,
     _is_sequential_counter,
@@ -22,7 +23,9 @@ def _parsed(header: str) -> dict:
 
 def _detect(header: str, values: list[str], raw_code: str | None = None):
     parsed = {"column_text": header, "raw_code": raw_code}
-    return _detect_column_type(header, parsed, set(values), values, 0)
+    return _detect_column_type(
+        header, parsed, SubstantiveValues.from_cells(values), 0,
+    )
 
 
 # ── The #414 symptom: participant_id must stop masquerading ────────────────────
@@ -125,7 +128,9 @@ def test_prose_under_subject_header_stays_open_text():
 
 
 def test_too_few_rows_to_judge_uniqueness():
-    assert not _is_identifier_column("participant_id", None, {"P1", "P2"}, ["P1", "P2"])
+    assert not _is_identifier_column(
+        "participant_id", None, SubstantiveValues.from_cells(["P1", "P2"]),
+    )
 
 
 # ── Helper unit coverage ───────────────────────────────────────────────────────

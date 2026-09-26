@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
-from ..auth import SYSTEM_CODER_TYPES
+from ..auth import reliability_coder_clause
 from ..models.code import Code
 from ..models.code_application import CodeApplication
 from ..models.observation import Observation
@@ -177,7 +177,7 @@ def gather_open_cut_marks(
     disclosure = OpenCutDisclosure()
 
     roster_q = db.query(User).filter(
-        User.coder_type.notin_(SYSTEM_CODER_TYPES),
+        reliability_coder_clause(),
         User.archived == False,  # noqa: E712
     )
     if coder_ids:
@@ -199,7 +199,7 @@ def gather_open_cut_marks(
             *visible_segment_filter(),
             non_consensus_filter(),
             Code.is_universal == False,  # noqa: E712
-            User.coder_type.notin_(SYSTEM_CODER_TYPES),
+            reliability_coder_clause(),
             CodeApplication.user_id.in_(roster) if roster else False,
         )
         .all()

@@ -72,8 +72,13 @@ export interface ResponseLengthResponse {
 }
 
 // API functions - Text Analysis
-// Track J · J2 slab 3b — `layer_scope` ('human' default | 'consensus') selects the coder layer.
-export type LayerScope = 'human' | 'consensus'
+// Track J · J2 slab 3b — `layer_scope` selects the coder layer. 🔴 The type is
+// single-sourced in `lib/coding-layers.ts` (#989): it was restated as an inline
+// union here and at FIVE more places in `code-analysis.ts`, so adding the machine
+// layer meant finding every one of them. Re-exported so existing importers of
+// `LayerScope` from this module are unchanged.
+export type { LayerScope } from '@/lib/coding-layers'
+import type { LayerScope } from '@/lib/coding-layers'
 
 export const textAnalysisApi = {
   filteredFrequencies: (pid: number, data: { column_ids: number[]; filters: SubgroupFilter[]; include_overall: boolean; coder_ids?: number[] | null; layer_scope?: LayerScope }) =>

@@ -30,17 +30,22 @@
 export type SourceSortKey = 'name' | 'date' | 'progress'
 export type SortDirection = 'asc' | 'desc'
 
-/** The fields both lists' items share. */
+/**
+ * The fields every source list's items share. The counts are OPTIONAL since
+ * #1008 brought Datasets onto this comparator: a dataset has no single coding
+ * progress, so its list never offers the progress sort and carries no counts.
+ */
 export interface SortableSource {
   id: number
   name: string
-  segment_count: number
-  coded_segment_count: number
+  segment_count?: number
+  coded_segment_count?: number
 }
 
 /** Coding progress as a fraction, 0 when there is nothing to code. */
 export function sourceProgress(item: SortableSource): number {
-  return item.segment_count > 0 ? item.coded_segment_count / item.segment_count : 0
+  const total = item.segment_count ?? 0
+  return total > 0 ? (item.coded_segment_count ?? 0) / total : 0
 }
 
 /**
@@ -56,6 +61,13 @@ export function compareSources<T extends SortableSource>(
   sortBy: SourceSortKey,
   sortDir: SortDirection,
   dateOf: (item: T) => string,
+  /**
+   * What "progress" means for this list — the caller's, like `dateOf`. Defaults to
+   * coded/total segments. Observations pass TIMELINE COVERAGE instead: on an open
+   * observation the coder marks the clips, so coded-of-marked is circular (mark one,
+   * code it, read 100%), which is why that list displays % covered.
+   */
+  progressOf: (item: T) => number = sourceProgress,
 ): number {
   let cmp: number
   if (sortBy === 'name') {
@@ -63,7 +75,7 @@ export function compareSources<T extends SortableSource>(
   } else if (sortBy === 'date') {
     cmp = new Date(dateOf(a)).getTime() - new Date(dateOf(b)).getTime()
   } else {
-    cmp = sourceProgress(a) - sourceProgress(b)
+    cmp = progressOf(a) - progressOf(b)
   }
   // ⚠️ **This is a READABILITY choice, not a correctness one, and the first
   // version of this comment claimed otherwise.** `cmp || (a.id - b.id)` behaves
@@ -82,6 +94,7 @@ export function sortSources<T extends SortableSource>(
   sortBy: SourceSortKey,
   sortDir: SortDirection,
   dateOf: (item: T) => string,
+  progressOf?: (item: T) => number,
 ): T[] {
-  return [...items].sort((a, b) => compareSources(a, b, sortBy, sortDir, dateOf))
+  return [...items].sort((a, b) => compareSources(a, b, sortBy, sortDir, dateOf, progressOf))
 }

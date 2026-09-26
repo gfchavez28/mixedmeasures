@@ -930,6 +930,16 @@ function AnalysisDropdown({
       <button role="menuitem" className={DROPDOWN_ITEM} onClick={() => go(`${projectBase}/analysis/canvas`)}>
         <Palette className="w-3 h-3" /> Canvas
       </button>
+      <div className={DROPDOWN_SEPARATOR} role="separator" />
+      {/* Queue row 49. In the ANALYSIS menu rather than under a source tab,
+          because a coding import is about CODES and CODERS rather than about
+          one kind of material — it reaches transcripts, documents, clips and
+          survey responses from a single screen. The other four Import items
+          each add MATERIAL; this one adds judgements about material already
+          here, which is why it is separated rather than listed beside them. */}
+      <button role="menuitem" className={DROPDOWN_ITEM} onClick={() => go(`${projectBase}/coding-import`)}>
+        <FileInput className="w-3 h-3" /> Import codings…
+      </button>
     </>
   )
 }
@@ -1042,7 +1052,7 @@ function UserMenu() {
     setNewName('')
   }, [])
 
-  const { coders, multiCoder } = useCoders()
+  const { coders, selectableCoders, multiCoder, multiHumanCoder } = useCoders()
 
   // #3 — per-source "coded here" markers in the switcher. The TopRail is global,
   // so this only scopes to a single conversation/document we can read from the
@@ -1065,7 +1075,12 @@ function UserMenu() {
   // flag fresh each render (not a useBlindMode instance) so a reveal/blind toggle
   // in the workbench is reflected the next time this transient menu opens.
   const revealed = sourceProjectId != null && user ? readRevealed(sourceProjectId, user.id) : false
-  const blind = multiCoder && !revealed
+  // 🔴 `multiHumanCoder`, mirroring `useBlindMode` exactly (#989). This is the
+  // one place blindness is re-derived rather than read from the hook, so the two
+  // must agree: gating on `multiCoder` would make the coverage menu believe it
+  // was blind because a MACHINE coder exists, and silently withhold the
+  // "coded here" markers on a single-researcher project.
+  const blind = multiHumanCoder && !revealed
   const coverage = useCoderCoverage(
     sourceProjectId ?? 0,
     { conversationId, documentId },
@@ -1115,7 +1130,10 @@ function UserMenu() {
 
   if (!user) return null
 
-  const others = coders.filter(c => c.id !== user.id)
+  // #989 — `selectableCoders`, never `coders`: the roster includes MACHINE coders
+  // (their codings must be attributable) and `switch-coder` refuses them, so a
+  // list built from the full roster offers an act the server 404s.
+  const others = selectableCoders.filter(c => c.id !== user.id)
   const itemClass =
     'flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[hsl(var(--mm-chrome-text-muted))] hover:text-[hsl(var(--mm-chrome-text))] hover:bg-white/[0.06] transition-colors'
 

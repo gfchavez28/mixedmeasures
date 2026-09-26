@@ -113,3 +113,20 @@ describe('the edges', () => {
     expect(sourceProgress(doc(1, { segment_count: 0 }))).toBe(0)
   })
 })
+
+describe('#1008 — a list may say what progress means, and may have none', () => {
+  it('uses the caller’s progress measure when given one (observations: coverage)', () => {
+    // Coded-of-marked says a is ahead (1/1 vs 1/4); coverage says b is (0.9 vs 0.1).
+    const a = { id: 1, name: 'a', segment_count: 1, coded_segment_count: 1, cov: 0.1 }
+    const b = { id: 2, name: 'b', segment_count: 4, coded_segment_count: 1, cov: 0.9 }
+    const byCoverage = sortSources([a, b], 'progress', 'desc', () => '2026-01-01', x => x.cov)
+    expect(byCoverage.map(x => x.name)).toEqual(['b', 'a'])
+    // POSITIVE control: without the measure, the default reads the other way.
+    expect(sortSources([a, b], 'progress', 'desc', () => '2026-01-01').map(x => x.name))
+      .toEqual(['a', 'b'])
+  })
+
+  it('reads a source with no counts at all (a dataset) as zero progress, not NaN', () => {
+    expect(sourceProgress({ id: 1, name: 'survey' })).toBe(0)
+  })
+})

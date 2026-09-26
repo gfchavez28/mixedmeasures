@@ -22,6 +22,7 @@ import type {
 import { orientationFromToken } from '@/lib/qual-analysis-types'
 import { DEFAULT_FORMATTING, type ChartFormatting } from '@/lib/chart-data'
 import type { MaterialResponse } from '@/lib/api'
+import { asLayerScope, type LayerScope } from '@/lib/coding-layers'
 
 function getDefaultForKey(key: string): string {
   switch (key) {
@@ -81,7 +82,7 @@ export interface QualitativeAnalysisState {
   /** Track J · J1 item 4 — coder (user) IDs to INCLUDE; empty = all coders. */
   coderIds: number[]
   /** Track J · J2-5 — analysis coding layer: 'human' (default) or the derived 'consensus' layer. */
-  layerScope: 'human' | 'consensus'
+  layerScope: LayerScope
 
   // Descriptives
   chartType: QualChartType
@@ -157,7 +158,7 @@ export interface QualitativeAnalysisActions {
   setExcludeFacilitator: (exclude: boolean) => void
   setParticipantIds: (ids: number[]) => void
   setCoderIds: (ids: number[]) => void
-  setLayerScope: (scope: 'human' | 'consensus') => void
+  setLayerScope: (scope: LayerScope) => void
   setChartType: (type: QualChartType) => void
   setValueMode: (mode: QualValueMode) => void
   setDenominatorMode: (mode: QualDenominatorMode) => void
@@ -295,7 +296,9 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     if (!codersRaw) return [] as number[]
     return codersRaw.split(',').map(Number).filter(n => !isNaN(n))
   }, [codersRaw])
-  const layerScope = (layerRaw === 'consensus' ? 'consensus' : 'human') as 'human' | 'consensus'
+  // #989 — narrowed through the single source, so a saved `machine` scope in a
+  // bookmarked URL survives and an unknown one still falls back to `human`.
+  const layerScope = asLayerScope(layerRaw)
   const chartType = chartRaw as QualChartType
   const valueMode = valRaw as QualValueMode
   const denominatorMode = denomRaw as QualDenominatorMode
@@ -453,7 +456,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     }, { replace: true })
   }, [setSearchParams])
 
-  const setLayerScope = useCallback((v: 'human' | 'consensus') => setUrlParam('layer', v), [setUrlParam])
+  const setLayerScope = useCallback((v: LayerScope) => setUrlParam('layer', v), [setUrlParam])
 
   const setChartType = useCallback((v: QualChartType) => setUrlParam('chart', v), [setUrlParam])
   const setValueMode = useCallback((v: QualValueMode) => setUrlParam('val', v), [setUrlParam])

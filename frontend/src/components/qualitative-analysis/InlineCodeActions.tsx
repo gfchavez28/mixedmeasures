@@ -270,7 +270,7 @@ export default function InlineCodeActions({
               the #647 entry). The icon stays 12px; only the hit area moves. */}
           <button
             type="button"
-            className="w-6 h-6 rounded-full border border-dashed border-mm-border-subtle flex items-center justify-center opacity-0 group-hover/actions:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity hover:border-mm-accent hover:text-mm-accent"
+            className="w-6 h-6 rounded-full border border-dashed border-mm-border-subtle flex items-center justify-center opacity-0 group-hover/actions:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity hover:border-mm-blue hover:text-mm-blue-text"
             tabIndex={tabbable ? undefined : -1}
             title="Add code"
             aria-label="Add code"
@@ -326,7 +326,7 @@ export default function InlineCodeActions({
             })}
             {canCreateTyped && (
               <button
-                className="w-full flex items-center gap-2 px-2 py-1 rounded text-xs text-left hover:bg-mm-surface-hover text-mm-accent font-medium"
+                className="w-full flex items-center gap-2 px-2 py-1 rounded text-xs text-left hover:bg-mm-surface-hover text-mm-blue-text font-medium"
                 onClick={() => createAndApplyMutation.mutate(searchTrimmed)}
                 disabled={createAndApplyMutation.isPending}
               >

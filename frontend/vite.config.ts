@@ -57,6 +57,8 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    // Node 25+ shadows jsdom's localStorage with its own, method-less one (#996).
+    setupFiles: ['./src/test-support/jsdom-storage.ts'],
   },
   build: {
     rollupOptions: {

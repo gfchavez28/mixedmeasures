@@ -28,6 +28,8 @@ function config(overrides: Partial<FileConfig> = {}): FileConfig {
     datasetDescription: '',
     datasetSource: '',
     previewError: null,
+    columnChoice: null,
+    sourceColumnIndices: null,
     sheetName: null,
     linkParticipants: true,
     linkColumnIndex: null,

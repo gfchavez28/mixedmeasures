@@ -243,7 +243,7 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
             </div>
           ) : isCorrFetching ? (
             <div className="flex items-center justify-center py-16 text-mm-text-faint text-sm gap-2">
-              <div className="animate-spin w-4 h-4 border-2 border-mm-accent border-t-transparent rounded-full" />
+              <div className="animate-spin w-4 h-4 border-2 border-mm-text-muted border-t-transparent rounded-full" />
               Computing {corrType === 'pearson' ? 'Pearson' : 'Spearman'} correlations...
             </div>
           ) : corrMatrixData ? (
@@ -354,7 +354,7 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
             </div>
           ) : isComparisonFetching ? (
             <div className="flex items-center justify-center py-16 text-mm-text-faint text-sm gap-2">
-              <div className="animate-spin w-4 h-4 border-2 border-mm-accent border-t-transparent rounded-full" />
+              <div className="animate-spin w-4 h-4 border-2 border-mm-text-muted border-t-transparent rounded-full" />
               Computing group comparisons...
             </div>
           ) : comparisonData && comparisonData.rows.length > 0 ? (

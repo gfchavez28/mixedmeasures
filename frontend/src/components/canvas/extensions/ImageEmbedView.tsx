@@ -70,7 +70,7 @@ export default function ImageEmbedView({ node, updateAttributes, deleteNode, sel
 
   return (
     <NodeViewWrapper
-      className={`group/material relative my-3 ${selected ? 'ring-2 ring-mm-accent/30' : ''}`}
+      className={`group/material relative my-3 ${selected ? 'ring-2 ring-mm-blue/30' : ''}`}
       data-type="image-embed"
       role="figure"
       aria-label={`Image${alt ? `: ${String(alt).slice(0, 60)}` : ''}${materialTag ? ` (${materialTag})` : ''}`}
@@ -143,7 +143,7 @@ export default function ImageEmbedView({ node, updateAttributes, deleteNode, sel
                   }}
                   onBlur={commitAlt}
                   placeholder="Alt text..."
-                  className="w-full text-xs px-2 py-1 rounded border border-mm-border-subtle bg-transparent text-mm-text focus:outline-none focus:ring-1 focus:ring-mm-accent"
+                  className="w-full text-xs px-2 py-1 rounded border border-mm-border-subtle bg-transparent text-mm-text focus:outline-none focus:ring-1 focus:ring-ring"
                   aria-label="Image alt text"
                 />
               </div>
@@ -157,7 +157,7 @@ export default function ImageEmbedView({ node, updateAttributes, deleteNode, sel
             {isEditable && src && (
               <div
                 onMouseDown={handleResizeStart}
-                className="absolute bottom-1 right-1 w-2.5 h-2.5 rounded-sm bg-mm-border cursor-nwse-resize opacity-0 group-hover/material:opacity-60 transition-opacity"
+                className="absolute bottom-1 right-1 w-2.5 h-2.5 rounded-sm bg-mm-border-medium cursor-nwse-resize opacity-0 group-hover/material:opacity-60 transition-opacity"
                 title="Drag to resize"
                 aria-hidden="true"
               />

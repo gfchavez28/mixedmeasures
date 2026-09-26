@@ -160,6 +160,12 @@ class ProjectImportResult(BaseModel):
     # returned. A recovery net nobody can find is not one. None = no snapshot was
     # taken, which is correct for a plain import and for a duplicate.
     safety_backup_filename: str | None = None
+    # #958 §6: how many of the imported project's saved results were declared out of date
+    # because their per-record scores are DERIVED and are no longer carried in the archive.
+    # 0 on a merge (which imports no metrics) and on a project that saved none. Defaulted
+    # rather than required so a caller that passes no `import_report` still validates — the
+    # same bargain `ProjectSummary`'s counts make for older manifests (#639).
+    metrics_marked_stale: int = 0
 
 
 class CodebookImportResult(BaseModel):

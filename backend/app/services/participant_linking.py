@@ -4,10 +4,19 @@ from sqlalchemy.orm import Session
 
 from ..models.participant import Participant
 from ..models.dataset import DatasetColumn, DatasetRow, DatasetValue, Dataset, ColumnType
+from .identifier_match import IDENTIFIER_MAX_LENGTH, group_unique_by_key, normalize_key
 from .missing_values import column_missing_rules, is_missing
 
 
-IDENTIFIER_MAX_LENGTH = 100  # Participant.identifier is String(100)
+# ⚠️ `IDENTIFIER_MAX_LENGTH` MOVED to `services/identifier_match.py` (row 49) and
+# is imported above for this module's own use. An `__all__` re-exporting it was
+# written here and REMOVED at close-out: its justification was "so existing
+# importers are unchanged", and there are none — nothing outside this file has
+# ever imported that constant or `DUPLICATE_VALUES_REPORT_CAP`, and nothing
+# star-imports this module. A declaration whose stated reason names an empty
+# population is #941's shape, in the same session that applied that rule to two
+# surviving mutants.
+
 DUPLICATE_VALUES_REPORT_CAP = 10
 
 
@@ -81,20 +90,20 @@ def link_rows_by_identifier_column(
     missing_rules = column_missing_rules(column)
 
     skipped_missing = 0
-    rows_by_value: dict[str, list[DatasetRow]] = {}
+    usable: list[tuple[str, DatasetRow]] = []
     for row in candidates:
-        raw = value_by_row_id.get(row.id)
-        value = raw.strip() if raw else ""
+        value = normalize_key(value_by_row_id.get(row.id))
         if not value or is_missing(value, missing_rules) or len(value) > IDENTIFIER_MAX_LENGTH:
             skipped_missing += 1
             continue
-        rows_by_value.setdefault(value, []).append(row)
+        usable.append((value, row))
 
-    duplicate_values = sorted(v for v, rs in rows_by_value.items() if len(rs) > 1)
-    skipped_duplicate = sum(
-        len(rows_by_value[v]) for v in duplicate_values
-    )
-    linkable = {v: rs[0] for v, rs in rows_by_value.items() if len(rs) == 1}
+    # The "a value on >1 candidate links NOTHING" rule (DEC-4) lives in
+    # `services/identifier_match.py` since 2026-09-22 — row 49's coding import
+    # asks the same question of a different key space, and two implementations of
+    # a refusal is how the two drift apart (#733).
+    linkable, duplicate_values = group_unique_by_key(usable)
+    skipped_duplicate = len(usable) - len(linkable)
 
     existing_by_identifier: dict[str, Participant] = {
         p.identifier: p

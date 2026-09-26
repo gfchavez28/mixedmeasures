@@ -18,6 +18,7 @@ from .dataset import Dataset, DatasetColumn, ColumnType, DatasetRow, DatasetValu
 from .recode import RecodeDefinition, RecodeType, OutputType
 from .equivalence_group import EquivalenceGroup
 from .code_equivalence_group import CodeEquivalenceGroup
+from .code_set import CodeSet
 from .analysis_domain import AnalysisDomain, AnalysisDomainMember
 from .metric import MetricDefinition, ComputedResult
 from .materials import MaterialCollection, Material
@@ -59,6 +60,7 @@ __all__ = [
     "OutputType",
     "EquivalenceGroup",
     "CodeEquivalenceGroup",
+    "CodeSet",
     "AnalysisDomain",
     "AnalysisDomainMember",
     "MetricDefinition",

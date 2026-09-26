@@ -22,7 +22,7 @@ from ..models.speaker import Speaker
 from ..models.participant import Participant
 from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, ColumnType
 from ..models.excerpt import Excerpt, segment_has_any_quote_filter
-from .coding_layers import LAYER_CONSENSUS, layer_origin_filter, non_consensus_filter
+from .coding_layers import LAYER_CONSENSUS, layer_scope_filter, non_consensus_filter
 from .grouping import order_value_labels
 from .missing_values import column_missing_rules, is_missing
 from .text_analysis import substantive_text_clause, treat_as_empty_for_project
@@ -67,7 +67,7 @@ def _coder_filter(query, coder_ids: list[int] | None, layer_scope: str | None = 
 
     Two responsibilities, both on `CodeApplication`, single-sourced HERE so every
     count/frequency/co-occurrence surface in this module is layer-correct:
-      - **Layer selection (J2-C, Slab 7):** `layer_origin_filter(layer_scope)` —
+      - **Layer selection (J2-C, Slab 7):** `layer_scope_filter(layer_scope)` —
         `layer_scope='consensus'` selects ONLY the derived consensus layer;
         otherwise (the `'human'` default) excludes consensus (the J2-B guard). The
         consensus layer is a single synthetic coder, so a `coder_ids` restriction
@@ -81,7 +81,7 @@ def _coder_filter(query, coder_ids: list[int] | None, layer_scope: str | None = 
     on this unit" queries (codes_by_seg / codes_by_dv), which must stay all-coder.
     The `~code_id.in_(universal_ids)` exclusion is orthogonal and stays put.
     """
-    query = query.filter(layer_origin_filter(layer_scope))
+    query = query.filter(layer_scope_filter(layer_scope))
     if layer_scope == LAYER_CONSENSUS:
         return query  # consensus is one synthetic coder — coder_ids is moot
     if coder_ids:
@@ -788,7 +788,7 @@ def get_segments_with_context(
         db.query(CodeApplication.segment_id, CodeApplication.code_id)
         .filter(
             CodeApplication.segment_id.in_(focal_seg_ids),
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
         )
         .distinct()
         .all()
@@ -949,7 +949,7 @@ def get_segments_with_context(
             db.query(CodeApplication.segment_id, CodeApplication.code_id)
             .filter(
                 CodeApplication.segment_id.in_(doc_focal_seg_ids),
-                layer_origin_filter(layer_scope),
+                layer_scope_filter(layer_scope),
             )
             .distinct()
             .all()
@@ -1086,7 +1086,7 @@ def get_segments_with_context(
             db.query(CodeApplication.segment_id, CodeApplication.code_id)
             .filter(
                 CodeApplication.segment_id.in_(obs_focal_seg_ids),
-                layer_origin_filter(layer_scope),
+                layer_scope_filter(layer_scope),
             )
             .distinct()
             .all()
@@ -1737,7 +1737,7 @@ def get_coded_comments_with_context(
         db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
         .filter(
             CodeApplication.dataset_value_id.in_(paged_dv_ids),
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
         )
         .distinct()
         .all()

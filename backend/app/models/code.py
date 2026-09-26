@@ -31,6 +31,19 @@ class Code(Base):
         nullable=True, index=True,
     )
 
+    # Code sets (queue row 48): a mutually exclusive group of codes read as ONE
+    # variable. Mirrors the two FKs above — a code belongs to at most ONE set,
+    # because two sets claiming one code makes "which value did this unit take?"
+    # ambiguous and the resolver would need a tie-break nobody could state.
+    #
+    # ⚠️ This is the OPPOSITE relation from `code_equivalence_group_id`: that one
+    # collapses synonyms to one effective code, this one keeps alternatives
+    # distinct and picks one per unit. Every rule lives in `services/code_sets.py`.
+    code_set_id = Column(
+        Integer, ForeignKey("code_sets.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+
     # Track J · J3-2-0: stable cross-instance identity for merge matching
     uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
 
@@ -59,6 +72,7 @@ class Code(Base):
     applications = relationship("CodeApplication", back_populates="code", cascade="all, delete-orphan")
     category = relationship("CodeCategory", back_populates="codes")
     code_equivalence_group = relationship("CodeEquivalenceGroup", back_populates="codes")
+    code_set = relationship("CodeSet", back_populates="codes")
 
     __table_args__ = (
         Index("ix_codes_project_numeric", "project_id", "numeric_id", unique=True),

@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { CircleArrowUp, ExternalLink, LoaderCircle, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
 import { backupApi } from '@/lib/api'
+import { serverDetailMessage } from '@/lib/api/error-utils'
 import { CITATION_REPO_URL } from '@/lib/citation'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -34,14 +35,19 @@ export default function SoftwareUpdateSection() {
   if (!state) return null
 
   const handleInstall = async () => {
+    // The refusal behind the button's `aria-disabled` (#1025).
+    if (installing) return
     setInstalling(true)
     try {
       await backupApi.now()
       queryClient.invalidateQueries({ queryKey: ['backup-status'] })
       queryClient.invalidateQueries({ queryKey: ['backup-list'] })
-    } catch {
+    } catch (err) {
       toast.error(
         'Could not take a pre-update backup, so the update was not installed. Try again, or use Backup now above.',
+        // #1025: the server says WHY, and the next step differs — a busy database
+        // ("try again when that task has finished") is not a full disk.
+        { description: serverDetailMessage(err) ?? undefined, duration: 10_000 },
       )
       setInstalling(false)
       return
@@ -126,8 +132,17 @@ export default function SoftwareUpdateSection() {
           </div>
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
+            {/* `aria-disabled`, never `disabled`, while backing up (#1025, #965/#959
+                §4): Chrome blurs a focused button that becomes disabled, and the
+                backup takes tens of seconds on a large project. */}
             {downloaded && (
-              <Button size="sm" onClick={() => void handleInstall()} disabled={installing}>
+              <Button
+                size="sm"
+                onClick={() => void handleInstall()}
+                aria-disabled={installing || undefined}
+                aria-busy={installing || undefined}
+                className="aria-busy:cursor-wait aria-busy:opacity-50"
+              >
                 {installing ? (
                   <LoaderCircle className="w-3.5 h-3.5 mr-1.5 animate-spin" />
                 ) : (

@@ -18,6 +18,7 @@
 
 import { ApiError } from './api/client'
 import { isRequestTimeout } from './api/error-utils'
+import { MAX_IMPORT_FILE_BYTES } from './upload-limits'
 
 /** The `accept` attribute for any dataset file input. */
 export const DATASET_ACCEPT = '.csv,.xlsx,.sav'
@@ -33,11 +34,11 @@ export function isSupportedDatasetFile(filename: string): boolean {
 }
 
 /**
- * 50 MB — mirrors backend `routers/helpers.py::MAX_UPLOAD_SIZE`, which
- * `_upload_to_csv_text` applies to every dataset upload via
- * `read_upload_with_limit`. Update both together.
+ * The per-file limit a dataset upload meets — the shared import limit, declared in
+ * `lib/upload-limits.ts` (#1007), which mirrors backend `MAX_UPLOAD_SIZE`. Kept
+ * under this name because the timeout below derives its cap from it.
  */
-export const MAX_DATASET_UPLOAD_SIZE = 50 * 1024 * 1024
+export const MAX_DATASET_UPLOAD_SIZE = MAX_IMPORT_FILE_BYTES
 
 /**
  * Per-upload timeout (ms) for the four dataset upload endpoints (#796).

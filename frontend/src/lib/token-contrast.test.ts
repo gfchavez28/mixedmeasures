@@ -517,3 +517,110 @@ describe('#936 — each theme declares the scheme the BROWSER paints in', () => 
     expect(CSS).not.toMatch(/color-scheme:\s*(light dark|dark light)/)
   })
 })
+
+describe('#1009 — a solid fill that carries text clears AA in both themes, hover included', () => {
+  /**
+   * White on the base section accents measured 3.05 (green) · 2.60 (orange) ·
+   * 2.82 (teal) in light, and white on dark mode's `--primary` measured 2.92 —
+   * every default button and every tooltip. None of those pairs was on any
+   * matrix, which is how they went unmeasured. The fix is per theme: light
+   * deepens the fill and keeps white; dark keeps the bright fill and puts
+   * near-black on it. These assertions are the matrix those pairs were missing.
+   *
+   * ⚠️ HOVER IS A SEPARATE STATE WITH ITS OWN RATIO. `hover:opacity-90` and
+   * `hover:bg-primary/90` composite the fill with whatever it sits on, which
+   * LIGHTENS it on a light page — the old `--primary` passed at rest (4.93) and
+   * failed on hover (4.10). So each pair is checked at rest AND composited at
+   * 90% over every surface a button lands on.
+   */
+  const FILLS: Array<[fill: string, text: string]> = [
+    ['mm-green-fill', 'mm-on-fill'],
+    ['mm-orange-fill', 'mm-on-fill'],
+    ['mm-teal-fill', 'mm-on-fill'],
+    // #1016 — the same model, for the selection/entity fills that carry text.
+    ['mm-blue-fill', 'mm-on-fill'],
+    ['mm-purple-fill', 'mm-on-fill'],
+    ['primary', 'primary-foreground'],
+  ]
+  const BUTTON_SURFACES = ['mm-bg', 'mm-surface', 'card', 'background', 'mm-surface-hover'] as const
+
+  for (const theme of themes) {
+    for (const [fill, text] of FILLS) {
+      it(`${theme}: ${text} on ${fill} at rest and at 90% over every surface`, () => {
+        const f = readToken(CSS, theme, fill)
+        const t = readToken(CSS, theme, text)
+        expect(contrast(t, f), `${text} on ${fill} at rest`).toBeGreaterThanOrEqual(AA_NORMAL)
+        for (const s of BUTTON_SURFACES) {
+          const bg = readToken(CSS, theme, s)
+          // `opacity-90` fades the text too; `bg-primary/90` does not. Check the
+          // worse of the two for each surface.
+          const hoverFill = over(f, bg, 0.9)
+          const worst = Math.min(contrast(t, hoverFill), contrast(over(t, bg, 0.9), hoverFill))
+          expect(worst, `${text} on ${fill} hovered over ${s}`).toBeGreaterThanOrEqual(AA_NORMAL)
+        }
+      })
+    }
+
+    it(`${theme}: a tooltip's secondary line (primary-foreground/90) stays readable`, () => {
+      // CanvasView's tooltips dim their second line; /70 measured 3.72 light / 3.83 dark.
+      const f = readToken(CSS, theme, 'primary')
+      const t = over(readToken(CSS, theme, 'primary-foreground'), f, 0.9)
+      expect(contrast(t, f)).toBeGreaterThanOrEqual(AA_NORMAL)
+    })
+  }
+
+  it('the base accents really do fail with white — the fill tokens are not decoration', () => {
+    // The negative control: if someone "simplifies" the fills back to the base
+    // accents, this is the number they would be shipping.
+    const white: Rgb = [1, 1, 1]
+    for (const base of ['mm-green', 'mm-orange', 'mm-teal', 'mm-blue']) {
+      expect(contrast(white, readToken(CSS, 'light', base)), base).toBeLessThan(AA_NORMAL)
+    }
+    // Purple passes at rest in light (4.70) and fails in dark (3.53) — #1016.
+    expect(contrast(white, readToken(CSS, 'dark', 'mm-purple'))).toBeLessThan(AA_NORMAL)
+  })
+
+  /**
+   * The source half: no element paints `text-white` on a base accent (green,
+   * orange, teal, and since #1016 blue and purple) or
+   * on `bg-primary` (which must take `text-primary-foreground`, since that is
+   * near-black in dark mode). A WINDOW of lines rather than one line, because
+   * a `cn()` call routinely puts the text colour and the fill on different lines
+   * — the TimelineScrubber ticker was exactly that shape.
+   */
+  const BASE_FILL = /bg-\[hsl\(var\(--mm-(?:green|orange|teal|blue|purple)\)\)\]|\bbg-mm-(?:green|orange|teal|blue|purple)(?![-\w/])|\bbg-primary(?![-\w/])/
+  const FILL_TOKEN = /\bbg-mm-(?:green|orange|teal|blue|purple)-fill\b/
+  const WINDOW = 3
+
+  const scan = () => {
+    const offenders: string[] = []
+    let correct = 0
+    let scanned = 0
+    for (const path of sourceFiles({ ext: 'tsx', floor: 100 })) {
+      scanned++
+      const raw = readFileSync(path, 'utf-8')
+      if (!raw.includes('bg-')) continue
+      const lines = stripComments(raw, path).split('\n')
+      lines.forEach((line, i) => {
+        const near = lines.slice(Math.max(0, i - WINDOW), i + WINDOW + 1).join(' ')
+        if (BASE_FILL.test(line) && /\btext-white\b/.test(near)) {
+          offenders.push(`${path.slice(join(__dirname, '..').length + 1)}:${i + 1}`)
+        }
+        if (FILL_TOKEN.test(line) && /\btext-mm-on-fill\b/.test(near)) correct++
+      })
+    }
+    return { offenders, correct, scanned }
+  }
+
+  it('no component paints white text on a base accent or on bg-primary', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
+    expect(scan().offenders, 'use `bg-mm-*-fill text-mm-on-fill`, or '
+      + '`bg-primary text-primary-foreground` (#1009)').toEqual([])
+  })
+
+  it('the scan reaches real class strings (it cannot pass by seeing nothing)', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
+    const { correct, scanned } = scan()
+    expect(scanned).toBeGreaterThan(100)
+    expect(correct, 'the fill-token pairing vanished — the scan is looking at the wrong thing')
+      .toBeGreaterThanOrEqual(15)
+  })
+})

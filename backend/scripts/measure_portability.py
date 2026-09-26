@@ -143,6 +143,68 @@ def cmd_build(args: argparse.Namespace) -> int:
     return cmd_export(args)
 
 
+def _archive_entity_counts(archive: Path) -> dict[str, int]:
+    """Rows per entity, counted from the v7 entries WITHOUT parsing them.
+
+    🔴 **This is what makes the round trip a real fidelity gate rather than a spot check.**
+    `--expect-values` covers `dataset_values` and nothing else, so a reader that silently
+    dropped `segments` or `code_applications` — the two entities #958 added to the streamed
+    set — would have passed it. Counting newlines is O(bytes) and allocates nothing, so it
+    can run on a half-gigabyte corpus beside the measurement it is checking.
+
+    Returns `{}` for a v<=6 archive, where the rows are inside `project.json` and counting
+    them means the very parse being measured.
+    """
+    counts: dict[str, int] = {}
+    with zipfile.ZipFile(archive) as zf:
+        names = set(zf.namelist())
+        for key in ("segments", "code_applications", "dataset_rows",
+                    "dataset_values", "row_scores"):
+            name = f"{key}.jsonl"
+            if name not in names:
+                return {}
+            n = 0
+            with zf.open(name) as fh:
+                while chunk := fh.read(1 << 20):
+                    n += chunk.count(b"\n")
+            counts[key] = n
+    return counts
+
+
+def _database_entity_counts(db_path: Path, pid: int) -> dict[str, int]:
+    """The same five counts, read back out of the imported project."""
+    con = sqlite3.connect(db_path)
+    q = con.execute
+    ds = "(SELECT id FROM datasets WHERE project_id=?)"
+    rows = f"(SELECT id FROM dataset_rows WHERE dataset_id IN {ds})"
+    vals = f"(SELECT id FROM dataset_values WHERE row_id IN {rows})"
+    segs = (
+        "(SELECT id FROM segments WHERE conversation_id IN "
+        "(SELECT id FROM conversations WHERE project_id=?) "
+        "OR document_id IN (SELECT id FROM documents WHERE project_id=?) "
+        "OR observation_id IN (SELECT id FROM observations WHERE project_id=?))"
+    )
+    out = {
+        "segments": q(f"SELECT count(*) FROM segments WHERE id IN {segs}",
+                      (pid, pid, pid)).fetchone()[0],
+        "code_applications": q(
+            f"SELECT count(*) FROM code_applications WHERE origin != 'consensus' AND "
+            f"(segment_id IN {segs} OR dataset_value_id IN {vals})",
+            (pid, pid, pid, pid),
+        ).fetchone()[0],
+        "dataset_rows": q(f"SELECT count(*) FROM dataset_rows WHERE dataset_id IN {ds}",
+                          (pid,)).fetchone()[0],
+        "dataset_values": q(f"SELECT count(*) FROM dataset_values WHERE row_id IN {rows}",
+                            (pid,)).fetchone()[0],
+        "row_scores": q(
+            "SELECT count(*) FROM row_scores WHERE metric_definition_id IN "
+            "(SELECT id FROM metric_definitions WHERE project_id=?)", (pid,)
+        ).fetchone()[0],
+    }
+    con.close()
+    return out
+
+
 def cmd_import(args: argparse.Namespace) -> int:
     archive = Path(args.archive)
     workdir = Path(args.workdir)
@@ -196,14 +258,28 @@ def cmd_import(args: argparse.Namespace) -> int:
     con.close()
 
     import_peak = peak_mb()
+
+    # 🔴 The ROUND-TRIP fidelity check (#958 step 3): every entity the format moved,
+    # counted in the archive and again in the database. Taken AFTER the peak snapshot —
+    # both sides stream or run in SQLite, but the ordering rule this file opens with
+    # applies to any probe, not only to the expensive ones.
+    in_file = _archive_entity_counts(archive)
+    in_db = _database_entity_counts(target, pid) if in_file else {}
+    entities_ok = (not in_file) or in_file == in_db
+
     print(json.dumps({
         "op": "import", "archive_mb": round(archive.stat().st_size / 1e6, 2),
         "values_expected": n_values, "values_landed": landed,
         "peak_mb_import": round(import_peak, 1),
         "fidelity_ok": landed == n_values,
+        "entities_in_file": in_file or "v<=6 archive (rows are inline)",
+        "entities_in_db": in_db,
+        "entities_ok": entities_ok,
         "wall_s": round(wall, 2),
         "s_per_1000": round(wall / max(n_values or landed, 1) * 1000, 4),
     }, indent=2), flush=True)
+    if not entities_ok:
+        return 1
     return 0 if (n_values is None or landed == n_values) else 1
 
 

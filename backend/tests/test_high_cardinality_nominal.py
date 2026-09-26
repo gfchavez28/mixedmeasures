@@ -12,7 +12,7 @@ when it looks like repeated short labels (bounded cardinality, low uniqueness
 ratio, short avg label length) rather than free prose. The control tests guard
 against over-correcting the heuristic onto genuine free text (see #358's rigor).
 """
-from app.services.dataset_import import _detect_column_type
+from app.services.dataset_import import SubstantiveValues, _detect_column_type
 
 
 def _parsed(header: str) -> dict:
@@ -20,9 +20,12 @@ def _parsed(header: str) -> dict:
 
 
 def _detect(header: str, values: list[str]):
-    substantive_list = values
-    substantive_set = set(values)
-    return _detect_column_type(header, _parsed(header), substantive_set, substantive_list, 5)
+    # `values` is the CELL list: `SubstantiveValues.from_cells` is what collapses
+    # it to distinct-plus-a-count, and the count is what this heuristic's
+    # uniqueness ratio divides by.
+    return _detect_column_type(
+        header, _parsed(header), SubstantiveValues.from_cells(values), 5,
+    )
 
 
 def test_high_cardinality_short_label_column_is_nominal():

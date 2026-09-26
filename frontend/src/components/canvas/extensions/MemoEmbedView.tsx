@@ -20,7 +20,7 @@ export default function MemoEmbedView({ node, updateAttributes, deleteNode, sele
 
   return (
     <NodeViewWrapper
-      className={`group/material relative my-3 ${selected ? 'ring-2 ring-mm-accent/30' : ''}`}
+      className={`group/material relative my-3 ${selected ? 'ring-2 ring-mm-blue/30' : ''}`}
       data-type="memo-embed"
       role="figure"
       aria-label={`Memo: ${title || 'Untitled'}${materialTag ? ` (${materialTag})` : ''}`}
@@ -78,7 +78,7 @@ export default function MemoEmbedView({ node, updateAttributes, deleteNode, sele
 
             <Link
               to={`/projects/${projectId}/memos-notes`}
-              className="flex items-center gap-1 text-[11px] text-mm-accent hover:underline mt-1.5 py-1"
+              className="flex items-center gap-1 text-[11px] text-mm-blue-text hover:underline mt-1.5 py-1"
             >
               Open in Memos <span className="text-[9px]">{'\u2192'}</span>
             </Link>

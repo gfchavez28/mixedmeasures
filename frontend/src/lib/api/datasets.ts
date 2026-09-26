@@ -49,6 +49,37 @@ export interface DatasetPreviewResponse {
   sheet_names?: string[] | null
 }
 
+/** #973 (c): one column as the CHEAP first stage knows it — no statistics. */
+export interface DatasetColumnSummary {
+  column_index: number
+  column_name: string
+  /** At most five values, so a researcher choosing columns for an over-cap file
+   *  can tell `Q014` from `Q015`. EMPTY on the `.sav` arm, which answers from
+   *  metadata and reads no rows at all. */
+  sample_values: string[]
+}
+
+/** What columns a file has and how big it is, WITHOUT reading it (#973 c).
+ *
+ *  🔴 This is the escape hatch from the cell-cap refusal, so it is the one
+ *  dataset endpoint that does not apply the cap. Everything else on the path
+ *  refuses before a column list exists, which is what made an over-cap file a
+ *  dead end: the researcher was told to remove columns and shown none. */
+export interface DatasetColumnsResponse {
+  columns: DatasetColumnSummary[]
+  /** -1 when the format declares its row count as unknown, which SPSS legally
+   *  does (#539). Treat a negative as "not known", never as a number. */
+  total_rows: number
+  /** `total_rows * columns.length`, or null when the row count is unknown.
+   *  Computed by the SERVER so this cannot disagree with the refusal it
+   *  predicts (#974). */
+  cells: number | null
+  /** The cap this file is measured against — carried on the wire so the client
+   *  holds no copy of the threshold. */
+  max_cells: number
+  sheet_names?: string[] | null
+}
+
 export interface DatasetColumnConfig {
   column_index: number
   skip: boolean
@@ -82,6 +113,12 @@ export interface DatasetImportConfig {
   /** #414: column_index of the identifier column to link rows to Participants
    *  by. Omit/null = no linking. Index 0 is valid — check `!= null`. */
   participant_link_column_index?: number | null
+  /** #973 (c): the columns chosen at the cheap first stage, as indices into the
+   *  ORIGINAL file. 🔴 **Must be the SAME list the preview was given** — the
+   *  server narrows the file to it, so every `column_index` above is a position
+   *  in that narrowed text and a different list here would apply the
+   *  researcher's type choices to other columns. Omit for an ordinary import. */
+  source_column_indices?: number[] | null
 }
 
 /** #414: what import-time / append / retro participant linking did. */
@@ -665,7 +702,11 @@ export interface DatasetAppendPreviewResponse {
   unmatched_csv_columns: AppendUnmatchedCsvColumn[]
   unmatched_columns: AppendUnmatchedColumn[]
   total_rows: number
+  /** Every record the import skips with skip_duplicates on — a match for an
+   *  existing record OR for an earlier record in the same file (#1014). */
   duplicate_count: number
+  /** The in-file part of `duplicate_count`. */
+  in_file_duplicate_count: number
   preview_rows: AppendPreviewRow[]
   next_row_id: string
   row_pad_width: number
@@ -751,11 +792,36 @@ export interface ParticipantDatasetRefresh {
 }
 
 export const datasetsApi = {
-  preview: (projectId: number, file: File, encoding = 'utf-8', sheetName?: string) => {
+  /** #973 (c): what columns are in this file, without reading it.
+   *
+   *  The way out of a cell-cap refusal: `preview` cannot answer for an over-cap
+   *  file, so this answers instead and the researcher chooses a subset. Cheap
+   *  server-side (0.15s vs 22.9s on the GSS workbook), but it still UPLOADS the
+   *  file, so it keeps the same size-derived timeout as the other calls. */
+  describeColumns: (projectId: number, file: File, encoding = 'utf-8', sheetName?: string) => {
     const formData = new FormData()
     formData.append('file', file)
     formData.append('encoding', encoding)
     if (sheetName) formData.append('sheet_name', sheetName)
+    return api.post<DatasetColumnsResponse>(
+      `/projects/${projectId}/datasets/preview-columns`, formData,
+      { headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: datasetUploadTimeoutMs(file.size) },
+    ).then(res => res.data)
+  },
+  preview: (
+    projectId: number, file: File, encoding = 'utf-8', sheetName?: string,
+    /** #973 (c): ORIGINAL column indices to narrow to. Omit for the whole file.
+     *  Whatever is passed here must also reach `import` as
+     *  `source_column_indices`, or the two calls disagree about which column is
+     *  which. */
+    columnIndices?: number[],
+  ) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('encoding', encoding)
+    if (sheetName) formData.append('sheet_name', sheetName)
+    if (columnIndices) formData.append('column_indices', JSON.stringify(columnIndices))
     return api.post<DatasetPreviewResponse>(
       `/projects/${projectId}/datasets/preview`, formData,
       { headers: { 'Content-Type': 'multipart/form-data' },

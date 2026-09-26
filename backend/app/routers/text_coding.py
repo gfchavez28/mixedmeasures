@@ -18,6 +18,7 @@ from ..models.user import User
 from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, ColumnType
 from ..models.code_application import CodeApplication
 from ..models.code import Code
+from ..models.code_set import CodeSet
 from ..models.note import Note
 from ..services.note_numbering import next_note_sequence
 from ..models.text_coding_config import TextCodingConfig, is_empty_text, parse_treat_as_empty
@@ -26,16 +27,18 @@ from ..models.speaker import Speaker
 from ..models.conversation import Conversation
 from ..models.participant import Participant
 from ..auth import get_current_user
+from ..services import code_sets as code_set_rules
 from ..services import magnitude
 from ..services.audit import log_action
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
 from ..services.participant_scores import mark_participant_scores_stale
-from ..services.coding_layers import non_consensus_filter
+from ..services.coding_layers import build_effective_code_map, non_consensus_filter
 from ..services.id_set import in_id_set
 from ..services.text_analysis import substantive_text_clause
 from .helpers import _get_project_or_404, parse_int_list, sanitize_csv_filename, TEXT_TYPES
 from .export_helpers import csv_safe
+from ..schemas.code_set import CodeSetSelectionResponse, TextCodeSetSelectionRequest
 from ..schemas.text_coding import (
     TextCodeRequest, TextMagnitudeUpdate, BulkCodeRequest, BulkRemoveCodeRequest,
     TextNoteCreate, TextNoteUpdate,
@@ -1004,6 +1007,80 @@ def set_text_code_magnitude(
         created_at=application.created_at,
         magnitude=rating,
     )
+
+
+# ── 5b. POST /code-sets/{set_id}/selection ───────────────────────────────────
+
+@router.post("/code-sets/{set_id}/selection", response_model=CodeSetSelectionResponse)
+def set_text_code_set_selection(
+    project_id: int,
+    set_id: int,
+    data: TextCodeSetSelectionRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Choose ONE member of a code set on a dataset cell — row 48's fourth surface.
+
+    The segment sibling is `routers/coding.py::set_segment_code_set_selection`.
+    The two differ in their TARGET COLUMN and nothing else: both delegate the
+    swap to `services/code_sets.py::apply_selection`, so neither can answer
+    "which member is selected" or "what does choosing clear" differently.
+
+    ⚠️ **Body-keyed, not path-keyed, for the target** — this router keys its
+    coding endpoints on the cell (`dataset_value_id` in the body), and a second
+    convention here would be one more thing for a client to get right.
+
+    Plain `def`: the body awaits nothing (#837).
+    """
+    _get_project_or_404(db, project_id, user.id)
+    _get_text_value_or_404(db, project_id, data.dataset_value_id, user.id)
+
+    code_set = db.query(CodeSet).filter(
+        CodeSet.id == set_id, CodeSet.project_id == project_id,
+    ).first()
+    if not code_set:
+        raise HTTPException(status_code=404, detail="Code set not found")
+
+    if data.code_id is not None:
+        code = db.query(Code).filter(
+            Code.id == data.code_id, Code.project_id == project_id,
+        ).first()
+        if not code:
+            raise HTTPException(status_code=404, detail="Code not found")
+        if not code.is_active:
+            raise HTTPException(status_code=400, detail="Code is inactive")
+
+    index = code_set_rules.build_code_set_index(
+        db, project_id, build_effective_code_map(db, project_id),
+    )
+    resolved = index.by_id(set_id)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Code set not found")
+
+    try:
+        chosen, removed = code_set_rules.apply_selection(
+            db, resolved, user_id=user.id, code_id=data.code_id,
+            # A one-element LIST since row 49 widened both target arms so the bulk
+            # import could reuse the swap instead of re-implementing it
+            # (`code-sets.md` §6 reason 4). This surface is unchanged: one cell.
+            dataset_value_ids=[data.dataset_value_id],
+        )
+    except code_set_rules.SetSelectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    log_action(
+        db, action="code_set_selection", entity_type="code_application",
+        entity_id=data.dataset_value_id, user_id=user.id, project_id=project_id,
+        details={
+            "dataset_value_id": data.dataset_value_id, "set_id": set_id,
+            "code_id": chosen,
+        },
+    )
+    mark_participant_scores_stale(db, project_id)
+    if consensus_enabled(db):
+        mark_consensus_stale(db, project_id, dataset_value_ids=[data.dataset_value_id])
+    db.commit()
+    return CodeSetSelectionResponse(set_id=set_id, code_id=chosen, removed=removed)
 
 
 # ── 6. DELETE /code ──────────────────────────────────────────────────────────

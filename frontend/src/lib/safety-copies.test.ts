@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   SAFETY_COPY_ACT_LABEL,
+  SAFETY_COPY_PAGE_SIZE,
   formatTakenAt,
   safetyCopyDeleteWarnings,
   safetyCopyTitle,
-  totalSafetyCopyBytes,
 } from './safety-copies'
 
 describe('safety copy descriptions (#919)', () => {
@@ -21,9 +21,13 @@ describe('safety copy descriptions (#919)', () => {
       .toBe('pre-merge_1_20260901_090000.mmproject')
   })
 
-  it('sums sizes', () => {
-    expect(totalSafetyCopyBytes([])).toBe(0)
-    expect(totalSafetyCopyBytes([{ size_bytes: 1024 }, { size_bytes: 2048 }])).toBe(3072)
+  it('🔴 does not sum the page to get the folder (#978)', () => {
+    // `totalSafetyCopyBytes` was DELETED rather than kept: the totals now come
+    // from the server, over the whole folder, because the list below them is
+    // bounded. A client-side sum of a 50-row page would state a disk cost 39×
+    // smaller than the truth on the folder this was measured against, in the one
+    // line whose job is to state the cost before it is paid.
+    expect(SAFETY_COPY_PAGE_SIZE).toBeGreaterThan(0)
   })
 
   it('🔴 tells apart two copies taken within the same MINUTE', () => {

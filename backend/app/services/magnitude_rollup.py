@@ -38,6 +38,16 @@ consensus stored"):
   voter model; the reconciliation grid and the IRR gather already use two
   (target-level and source-level) for stated reasons.
 
+  🔴 **"Reached consensus" is `consensus.decide_target`'s answer, the one the
+  stored layer is written from — never `_decide_consensus` alone (#1018).** A
+  code-set member is decided as a set VALUE, whose electorate drops a coder with
+  no answer on the variable; the unsplit rule counted them, so a member could be
+  unanimous in the stored layer and excluded here as `no_code_consensus`.
+  ⚠️ **Deliberately NOT changed with it:** a lone VOTER still has their
+  judgement stand even when they hold two members of one set (a contradiction),
+  and several voters of whom only ONE chose a member of an exhaustive set still
+  exclude that rating. Both are Decision-3 questions, recorded open as #1019.
+
   🔴 **This is derived LIVE rather than read from the stored consensus layer,
   and that is forced rather than preferred:** an absent consensus row cannot say
   whether it is absent because only one coder looked or because the code was a
@@ -90,16 +100,21 @@ level up:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import batched
 from statistics import fmean, stdev
 
 from sqlalchemy.orm import Session
 
 from ..models.code import Code
 from .consensus import (
+    GATHER_STREAM_BATCH,
     SEGMENT_SCOPE_PROJECT,
-    _decide_consensus,
+    TARGET_SEGMENT,
+    TARGET_VALUE,
+    TargetBallot,
     _decide_magnitude,
     _rating_values,
+    decide_target,
     gather_target_votes,
 )
 from .metrics import _ci_mean
@@ -282,14 +297,13 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
     # `consensus_eligible` drops an UNFROZEN observation's clips before they
     # arrive, so their ratings vanish with no disclosure — the one failure mode
     # Decision 4 forbids. See `gather_target_votes`' docstring.
-    votes = gather_target_votes(db, project_id, segment_scope=SEGMENT_SCOPE_PROJECT)
-
-    # Resolve every target ONCE. Bounded by coding volume, not dataset size.
-    resolution = resolve_participants(
-        db, project_id,
-        segment_ids=votes.seg_buckets.keys(),
-        dataset_value_ids=votes.val_buckets.keys(),
+    votes = gather_target_votes(
+        db, project_id, segment_scope=SEGMENT_SCOPE_PROJECT,
+        # 🔴 ONE, never the writer's MIN_CONSENSUS_VOTERS: Decision 3's sole-voter
+        # arm scores exactly the targets the writer skips (#958).
+        min_voters=1,
     )
+
     code_names = dict(
         db.query(Code.id, Code.name).filter(Code.project_id == project_id).all()
     )
@@ -300,12 +314,9 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
     # Participants any usable application reached, whether or not it was rated.
     reached: set[int] = set()
 
-    def _consume(
-        target_key: tuple[str, int],
-        per_coder: dict[int, set[int]],
-        ratings: dict[int, dict[int, float | None]],
-        route: ParticipantRoute | None,
-    ) -> None:
+    def _consume(ballot: TargetBallot, route: ParticipantRoute | None) -> None:
+        per_coder, ratings = ballot.per_coder, ballot.ratings
+
         # How many coder judgements does this target carry at all? Counted up
         # front so an excluded target discloses its ratings rather than its
         # applications — the grain the docstring promises.
@@ -330,7 +341,11 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
         reached.add(route.participant_id)
 
         if len(per_coder) >= 2:
-            agreed = {eff for eff, _rule, _agree, _voters in _decide_consensus(per_coder)}
+            # `decide_target`, never `_decide_consensus` alone: a code-set member
+            # is decided as a set VALUE, and the unsplit rule disagreed with the
+            # stored layer about it (#1018 — unanimous there, "no code
+            # consensus" here, on an exhaustive set).
+            agreed = {d.code_id for d in decide_target(per_coder, votes.set_index)}
         else:
             # One voter: no consensus is possible, and their judgement stands.
             agreed = all_effs
@@ -350,19 +365,21 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
             if decision is None:
                 continue  # applied but nobody rated it — contributes nothing
             collected.setdefault((route.participant_id, eff), []).append(
-                {"key": target_key, "decision": decision}
+                {"key": (ballot.kind, ballot.target_id), "decision": decision}
             )
 
-    for seg_id, per_coder in votes.seg_buckets.items():
-        _consume(
-            ("seg", seg_id), per_coder, votes.seg_ratings.get(seg_id, {}),
-            resolution.segments.get(seg_id),
+    # Resolve each BATCH of targets as it streams past (#958). Resolving the
+    # whole project up front held a route for every coded target — 843,408 on
+    # BES — which `participant_resolution`'s own docstring warns a project-wide
+    # consumer against. A batch is one query per grain.
+    for batch in batched(votes.ballots(), GATHER_STREAM_BATCH):
+        resolution = resolve_participants(
+            db, project_id,
+            segment_ids=[b.target_id for b in batch if b.kind == TARGET_SEGMENT],
+            dataset_value_ids=[b.target_id for b in batch if b.kind == TARGET_VALUE],
         )
-    for val_id, per_coder in votes.val_buckets.items():
-        _consume(
-            ("val", val_id), per_coder, votes.val_ratings.get(val_id, {}),
-            resolution.dataset_values.get(val_id),
-        )
+        for ballot in batch:
+            _consume(ballot, resolution.for_target(**ballot.target()))
 
     scores: list[ParticipantCodeScore] = []
     for (participant_id, eff), entries in sorted(collected.items()):

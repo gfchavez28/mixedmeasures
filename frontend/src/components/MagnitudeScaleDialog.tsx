@@ -111,7 +111,7 @@ export default function MagnitudeScaleDialog({ projectId, code, open, onOpenChan
         </div>
 
         {!boundsValid && (
-          <p className="text-xs text-mm-amber">
+          <p className="text-xs text-amber-700 dark:text-amber-300">
             The maximum must be greater than the minimum, and the step must fit inside the range.
           </p>
         )}

@@ -19,12 +19,15 @@ from app.services.backup import (
     cleanup_old_backups,
     STALE_HOURS,
 )
+from tests.backup_support import stamp_revision
 
 
 def _create_test_db(path: Path):
     """Create a minimal SQLite DB that passes integrity check.
 
-    Includes all tables that _read_project_summaries queries.
+    Includes all tables that _read_project_summaries queries, and claims this
+    build's schema revision — a restore refuses a database that records none
+    (#1026).
     """
     conn = sqlite3.connect(str(path))
     conn.execute("CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT)")
@@ -33,6 +36,7 @@ def _create_test_db(path: Path):
     conn.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY, project_id INTEGER)")
     conn.execute("CREATE TABLE observations (id INTEGER PRIMARY KEY, project_id INTEGER)")
     conn.execute("INSERT INTO projects VALUES (1, 'Test Project')")
+    stamp_revision(conn)
     conn.commit()
     conn.close()
 
@@ -114,7 +118,7 @@ def test_create_backup_manifest_fields(tmp_path):
         manifest = json.loads(zf.read("manifest.json"))
 
     assert manifest["format_version"] == 1
-    assert manifest["app_version"] == "1.5.3"
+    assert manifest["app_version"] == "1.5.4"
     assert "created_at" in manifest
     assert manifest["backup_type"] == "auto"
     assert manifest["db_size_bytes"] > 0
@@ -762,3 +766,18 @@ def test_validate_warns_on_video_excluded_backup(tmp_path):
     preview_full = validate_backup(backup_dir / info.filename)
     assert preview_full.manifest.video_excluded is False
     assert not any("does not include video" in w for w in preview_full.warnings)
+
+
+def test_a_backup_that_left_no_video_out_does_not_warn_about_video(tmp_path):
+    """Every automatic backup sets `video_excluded`, so an install with no video
+    was warned before every restore that "0 video recordings were excluded" and
+    told to re-attach recordings that never existed."""
+    live_db = tmp_path / "live.db"
+    _create_test_db(live_db)
+    info = create_backup(
+        live_db, tmp_path / "docs", tmp_path / "media", tmp_path / "b", "auto", include_video=False
+    )
+    preview = validate_backup(tmp_path / "b" / info.filename)
+    assert preview.manifest.video_excluded is True
+    assert preview.manifest.video_files_excluded == 0
+    assert not any("video" in w for w in preview.warnings)

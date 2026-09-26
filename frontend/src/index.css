@@ -113,6 +113,15 @@
   --color-mm-teal-text: hsl(var(--mm-teal-text));
   --color-mm-canvas: hsl(var(--mm-canvas));
   --color-mm-canvas-text: hsl(var(--mm-canvas-text));
+  /* #1009: a SOLID section-colour fill carrying text, and the text colour for it.
+   * The base accents (--mm-green etc.) stay as they are for tints, borders, bars
+   * and icons; these exist only where text sits ON the colour. */
+  --color-mm-green-fill: hsl(var(--mm-green-fill));
+  --color-mm-orange-fill: hsl(var(--mm-orange-fill));
+  --color-mm-teal-fill: hsl(var(--mm-teal-fill));
+  --color-mm-blue-fill: hsl(var(--mm-blue-fill));
+  --color-mm-purple-fill: hsl(var(--mm-purple-fill));
+  --color-mm-on-fill: hsl(var(--mm-on-fill));
 }
 
 @layer base {
@@ -145,7 +154,11 @@
     --card-foreground: 200 12% 16%;
     --popover: 0 0% 100%;
     --popover-foreground: 200 12% 16%;
-    --primary: 152 56% 32%;
+    /* #1009: 32% -> 29%. White measured 4.93:1 at rest but 4.10:1 under the
+       default button's `hover:bg-primary/90`, which lightens the fill against a
+       light page; 29% keeps white at or above 4.5:1 in the hover state too
+       (5.77 at rest). Same value as --mm-green-fill. */
+    --primary: 152 56% 29%;
     --primary-foreground: 0 0% 100%;
     --secondary: 148 8% 96%;
     --secondary-foreground: 152 56% 32%;
@@ -222,6 +235,22 @@
     --mm-blue-cell: 210 60% 93%;  /* #480: OPAQUE selected-cell bg (sticky cells can't use the alpha tint) */
     --mm-teal: 174 60% 42%;
     --mm-teal-text: 170 40% 30%;
+    /* #1009 — SOLID FILLS THAT CARRY TEXT. White on the base accents measured
+       3.05 (green), 2.60 (orange) and 2.82 (teal), under WCAG's 4.5:1 for normal
+       text. Light mode keeps WHITE text and deepens the fill; each lightness is
+       the highest that still holds 4.5:1 under `hover:opacity-90` over every
+       light surface (green 4.69 · orange 4.54 · teal 4.65 at hover). Dark mode
+       keeps the bright fills and puts near-black text on them instead (see
+       .dark). Pinned by lib/token-contrast.test.ts §#1009. */
+    --mm-green-fill: 152 56% 29%;
+    --mm-orange-fill: 28 80% 35%;
+    --mm-teal-fill: 174 60% 28%;
+    /* #1016: the same model for the blue and purple fills — white measured
+       3.84 on --mm-blue and 4.70 on --mm-purple at rest, and both fail hovered
+       (blue 4.64 · purple 4.58 at these values). */
+    --mm-blue-fill: 210 70% 41%;
+    --mm-purple-fill: 262 50% 54%;
+    --mm-on-fill: 0 0% 100%;
     --mm-media-well: 204 12% 20%;  /* video letterbox fill — deep neutral in the app's hue family, never raw black (§7.5) */
     --mm-canvas: 45 70% 50%;
     /* #7: 3.12-3.73:1 against its real background (a 6-12% --mm-canvas tint over
@@ -267,7 +296,10 @@
     --popover: 230 10% 13%;
     --popover-foreground: 40 12% 90%;
     --primary: 152 52% 44%;
-    --primary-foreground: 0 0% 100%;
+    /* #1009: white on this green measured 2.92:1 — every default button and
+       every tooltip in dark mode. Near-black (the dark page colour) reads 6.26:1,
+       5.28 under the button's hover. */
+    --primary-foreground: 230 14% 9%;
     --secondary: 150 8% 14%;
     --secondary-foreground: 152 52% 44%;
     --muted: 200 10% 16%;
@@ -315,6 +347,17 @@
     --mm-blue-cell: 212 28% 24%;  /* #480: OPAQUE selected-cell bg (dark) */
     --mm-teal: 174 55% 50%;
     --mm-teal-text: 170 50% 70%;
+    /* #1009: dark mode keeps the bright accents as fills and inverts the TEXT —
+       near-black on them reads 6.26 (green) · 7.23 (orange) · 8.62 (teal). */
+    --mm-green-fill: 152 52% 44%;
+    --mm-orange-fill: 28 76% 58%;
+    --mm-teal-fill: 174 55% 50%;
+    /* #1016: white measured 3.20 on dark --mm-blue and 3.53 on dark --mm-purple.
+       Purple is 1pp lighter than the accent (64% -> 65%) because near-black on
+       the accent itself read 4.42 hovered over --mm-surface-hover; 65% is 4.60. */
+    --mm-blue-fill: 210 66% 58%;
+    --mm-purple-fill: 262 46% 65%;
+    --mm-on-fill: 230 14% 9%;
     --mm-media-well: 228 10% 8%;  /* video letterbox fill (dark) */
     --mm-canvas: 45 66% 55%;
     --mm-canvas-text: 42 68% 68%;

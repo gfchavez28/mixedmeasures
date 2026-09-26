@@ -654,7 +654,7 @@ export default function CodebookPeekPanel({
               <div className="flex gap-1.5">
                 <button
                   onClick={handleSaveDesc}
-                  className="text-[11px] px-2 py-0.5 rounded bg-mm-blue text-white hover:bg-mm-blue/90"
+                  className="text-[11px] px-2 py-0.5 rounded bg-mm-blue-fill text-mm-on-fill hover:bg-mm-blue-fill/90"
                 >
                   Save
                 </button>

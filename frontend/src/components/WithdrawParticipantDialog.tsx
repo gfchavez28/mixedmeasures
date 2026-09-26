@@ -13,14 +13,44 @@
  * researcher who closes this dialog believing the withdrawal is complete, while
  * the name sits three turns later in the same conversation, is worse off than
  * with no feature at all. That sentence is the most important text here.
+ *
+ * 🔴 **The confirm must not close the dialog (#1025, #1037's shape).** Radix's
+ * `AlertDialogAction` is a Close, so pressing it closed the dialog in the same
+ * click and the busy state never rendered: nothing on screen said a backup and a
+ * removal were running, and the person's row was still in the list — pressing
+ * again started a SECOND backup and a second withdrawal — over a wait measured at
+ * 38.7 s over HTTP and ~60 s in a browser on a 546 MB database.
+ * `preventDefault()` keeps the dialog; it closes on success (the page's
+ * `onSuccess`) or when the researcher cancels, never while the request runs.
  */
-import { TriangleAlert, Info } from 'lucide-react'
+import { TriangleAlert, Info, LoaderCircle } from 'lucide-react'
 import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle,
   AlertDialogDescription, AlertDialogFooter, AlertDialogCancel, AlertDialogAction,
 } from '@/components/ui/alert-dialog'
 import type { WithdrawalReport } from '@/lib/api'
 import { removedSummary, keptSummary } from '@/lib/withdrawal-copy'
+import { useElapsedSeconds } from '@/hooks/useElapsedSeconds'
+import { ANNOUNCE_EVERY_SECONDS, elapsedOnlyNote, stillWorkingMessage } from '@/lib/elapsed-progress'
+
+/** The wait, said once and then every 30 s — `RestoreBackupDialog`'s shape. No
+ * estimate: no withdrawal has been timed on real data. */
+function WithdrawingStatus() {
+  const elapsed = useElapsedSeconds(true)
+  const bucket = Math.floor(elapsed / ANNOUNCE_EVERY_SECONDS)
+  const spoken = bucket === 0
+    ? 'Taking a backup, then removing. Keep Mixed Measures open until this finishes.'
+    : stillWorkingMessage(bucket * ANNOUNCE_EVERY_SECONDS, false)
+  return (
+    <div className="rounded-md border border-mm-border-subtle bg-mm-bg p-3 space-y-1 text-xs">
+      <p className="flex items-center gap-2 font-medium text-mm-text">
+        <LoaderCircle className="w-3.5 h-3.5 animate-spin" aria-hidden="true" /> Taking a backup, then removing…
+      </p>
+      <p className="text-mm-text-muted" aria-hidden="true">{elapsedOnlyNote(elapsed)}</p>
+      <p role="status" className="sr-only">{spoken}</p>
+    </div>
+  )
+}
 
 interface Props {
   open: boolean
@@ -39,7 +69,9 @@ export default function WithdrawParticipantDialog({
   const kept = keptSummary(report)
 
   return (
-    <AlertDialog open={open} onOpenChange={(o) => { if (!o) onCancel() }}>
+    // The Root refuses a close while the request runs — Escape, the overlay and
+    // Cancel alike (`ConfirmDialog`'s shape, #959 §4).
+    <AlertDialog open={open} onOpenChange={(o) => { if (!o && !isPending) onCancel() }}>
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>Remove {identifier}&rsquo;s data?</AlertDialogTitle>
@@ -95,12 +127,24 @@ export default function WithdrawParticipantDialog({
           <span>Mixed Measures cannot tell you whether this satisfies your obligations.</span>
         </div>
 
+        {isPending && <WithdrawingStatus />}
+
+        {/* Busy is `aria-disabled`, never `disabled` (#959 §4): Chrome blurs a
+            focused button that becomes disabled. `disabled` stays only for the
+            report still loading — a transient precondition, and the button is not
+            focused when it lifts. */}
         <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogCancel aria-disabled={isPending || undefined}>Cancel</AlertDialogCancel>
           <AlertDialogAction
-            disabled={isPending || report === null}
-            onClick={onConfirm}
-            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            disabled={report === null}
+            aria-disabled={isPending || undefined}
+            aria-busy={isPending || undefined}
+            onClick={(e) => {
+              e.preventDefault()
+              if (isPending || report === null) return
+              onConfirm()
+            }}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90 aria-busy:cursor-wait aria-busy:opacity-50"
           >
             {isPending ? 'Removing…' : 'Back up and remove'}
           </AlertDialogAction>

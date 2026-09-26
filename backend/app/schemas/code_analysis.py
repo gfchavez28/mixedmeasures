@@ -462,6 +462,83 @@ class IrrMagnitudeResult(BaseModel):
     alpha_ci: IrrInterval | None = None
 
 
+class IrrSetMemberResult(BaseModel):
+    """One VALUE of a code set, scored as the binary indicator it used to be.
+
+    The breakdown inside a set's row, and the answer to *which value is
+    destroying my α*: a set's single coefficient says the coders disagreed and
+    not about what. These are the rows the per-code table no longer shows,
+    reported here under the definition that makes them a part of the set rather
+    than a rival account of the same coding.
+    """
+    code_id: int
+    code_name: str
+    n_units: int
+    prevalence: float | None = None
+    percent_agreement: float | None = None
+    krippendorff_alpha: float | None = None
+    alpha_interpretation: str | None = None
+    undefined_reason: str | None = None
+
+
+class IrrSetConfusion(BaseModel):
+    """One coder PAIR's k×k confusion counts, in `axis` order both ways.
+
+    ⚠️ Per pair, never pooled: with three coders a single confusion matrix is
+    not defined, because one unit would have to contribute to several cells.
+    """
+    coder_a_id: int
+    coder_b_id: int
+    counts: list[list[int]]
+
+
+class IrrSetResult(BaseModel):
+    """Agreement on ONE code set — a k-valued nominal variable (row 48).
+
+    🔴 **Never pooled into `overall_alpha`.** A binary presence/absence α and a
+    k-valued nominal α are different instruments, so one coefficient over both
+    averages disagreements measured on different scales — the same rule, and the
+    same reason, as `IrrMagnitudeResult`.
+    """
+    set_id: int
+    label: str
+    exhaustive: bool
+    #: 🔴 The TWELFTH stated-basis member — `code_sets.SET_BASIS_*`, mirrored in
+    #: `lib/code-set-basis.ts`. The same coders on the same data produce
+    #: DIFFERENT numbers under the two, and nothing in the figure says which.
+    set_basis: str
+    #: `reliability_basis.ALPHA_METRIC_*` — nominal, always: the values are
+    #: category identifiers and a reserved sentinel, which no ordered metric can
+    #: interpret.
+    alpha_metric: str
+    n_units: int
+    #: How many values the variable has — the set's member count.
+    n_values: int
+    #: 🔴 Occasions where a coder held TWO members of this set on one unit. A
+    #: CONTRADICTION, not a value: the cell is dropped and counted rather than
+    #: resolved, because picking one (lowest id, most recent) fabricates a
+    #: judgement nobody made. Reachable from legacy data, a merge, a set built
+    #: over existing coding, or a direct API call.
+    n_multiple_selection: int = 0
+    #: The confusion matrix's axis: member code ids, then `code_sets.SET_NONE`
+    #: (−1) when a blank is the value "none of these" rather than missing data.
+    axis: list[int] = []
+    #: Axis id (as a string key) → the words for it.
+    value_names: dict[str, str] = {}
+    percent_agreement: float | None = None
+    cohens_kappa: float | None = None
+    kappa_interpretation: str | None = None
+    krippendorff_alpha: float | None = None
+    alpha_interpretation: str | None = None
+    #: `degenerate` (fewer than two values — a binary code wearing a costume) ·
+    #: `insufficient_n` · `no_variance` · None.
+    undefined_reason: str | None = None
+    kappa_ci: IrrInterval | None = None
+    alpha_ci: IrrInterval | None = None
+    members: list[IrrSetMemberResult] = []
+    confusion: list[IrrSetConfusion] = []
+
+
 class IrrSourceInfo(BaseModel):
     """One selectable source for the reliability scope (#829).
 
@@ -499,6 +576,9 @@ class IrrResponse(BaseModel):
     #: #35 — rating agreement per scaled code. Empty when no code declares a
     #: scale, or none was applied in scope.
     magnitude_per_code: list[IrrMagnitudeResult] = []
+    #: Row 48 — the THIRD table: one α per code set, never pooled into the
+    #: headline. Empty when the project declares no sets.
+    set_agreement: list[IrrSetResult] = []
 
 
 class ConsensusStatusResponse(BaseModel):
@@ -577,6 +657,18 @@ class ReconciliationUnit(BaseModel):
     #: #35 — a THIRD: some coder's own two copies disagreed at a merge and the
     #: coder has not re-rated since. In the review set until adjudicated.
     has_merge_conflict: bool = False
+    #: Row 48 — str(set_id) → {str(coder_id): chosen member id, or
+    #: `code_sets.SET_NONE` (−1) for "none of these", or None}. None means the
+    #: coder has NOT decided: either missing data on an exhaustive set, or the
+    #: contradictory state of holding two members at once.
+    #: ⚠️ A set's cell renders a SINGLE-CHOICE control, not chips — chips say
+    #: "these applied", a set says "this one was chosen from these", and the
+    #: rejected alternatives are the content of the judgement being adjudicated.
+    set_selection_by_coder: dict[str, dict[str, int | None]] = {}
+    #: Row 48 — a FOURTH fact, never folded into the other three: the engaged
+    #: coders chose different values of one set. *Needs review* and `j`/`k` mean
+    #: ANY of the four; the badge says which.
+    has_set_disagreement: bool = False
 
 
 class ReconciliationResponse(BaseModel):
@@ -685,3 +777,52 @@ class BinnedKappaResponse(BaseModel):
     per_code: list[BinnedKappaCodeResult] = []
     disclosure: OpenCutDisclosureResponse
     interpretation_thresholds: dict = {}
+
+
+# ── Human-vs-machine agreement (queue row 49) ────────────────────────────────
+#
+# 🔴 A SEPARATE table, never pooled into the headline. These numbers describe a
+# MODEL; they are not reliability and they are not validation of the coding.
+# The copy that says so is single-sourced in `lib/machine-agreement-copy.ts`.
+
+
+class MachineCodeAgreement(BaseModel):
+    code_id: int
+    code_name: str
+    n_units: int
+    #: 🔴 BOTH coverage counts ride every row, and they are the disclosure.
+    #: `3` against `480` is a figure about a corpus one side barely touched, and
+    #: no coefficient can say so on its own.
+    human_applied: int
+    machine_applied: int
+    both_applied: int
+    percent_agreement: float | None = None
+    kappa: float | None = None
+    kappa_interpretation: str | None = None
+    #: The base rate, beside the coefficient — the prevalence paradox teaching
+    #: the IRR table already carries (a rare code reads as a failure without it).
+    prevalence: float | None = None
+    #: `no_variance` / `insufficient_n` from `services/undefined_stats.py` — an
+    #: undefined statistic is None WITH a reason, never 0.0 (#689).
+    undefined_reason: str | None = None
+
+
+class MachinePairAgreementResponse(BaseModel):
+    human_id: int
+    human_name: str
+    machine_id: int
+    machine_name: str
+    #: The configuration that produced these labels. Stated even when absent, so
+    #: "we did not record it" is visible rather than indistinguishable from a
+    #: table that never had the field.
+    machine_provenance: dict | None = None
+    n_units: int
+    per_code: list[MachineCodeAgreement] = []
+
+
+class MachineAgreementResponse(BaseModel):
+    available: bool
+    #: `no_machine_coder` / `no_human_coder` / `no_shared_source`. Distinct
+    #: sentences, distinct remedies — a silence here reads as "still thinking".
+    unavailable_reason: str | None = None
+    pairs: list[MachinePairAgreementResponse] = []

@@ -16,6 +16,7 @@ import { exportApi, metricsApi, projectPortabilityApi, projectsApi, extractApiEr
 import type { ExportOptions } from '@/lib/api'
 import { defaultIncludeMedia } from '@/lib/api/project-portability'
 import { formatBytes } from '@/lib/format'
+import { ceilingLevel, describeCeiling, hasCeilingToReport } from '@/lib/project-export-ceiling'
 import { toast } from 'sonner'
 import { toastProjectExportError } from '@/lib/project-export-error'
 
@@ -91,6 +92,17 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
   const { data: storage } = useQuery({
     queryKey: ['project-storage', projectId],
     queryFn: () => projectsApi.storage(projectId),
+    enabled: open && !!projectId,
+    staleTime: 60_000,
+  })
+  // #974: the limit that governs whether this export can happen at all — a
+  // DIFFERENT question from the media footprint above, which blocks nothing.
+  // A separate call deliberately: this one is a ~250 ms COUNT, and folding it
+  // into `project-storage` would delay the include-media default that the
+  // checkbox below is waiting on.
+  const { data: exportCeiling } = useQuery({
+    queryKey: ['project-export-ceiling', projectId],
+    queryFn: () => projectsApi.exportCeiling(projectId),
     enabled: open && !!projectId,
     staleTime: 60_000,
   })
@@ -270,6 +282,15 @@ export function ExportDialog({ open, onOpenChange, projectId }: ExportDialogProp
                 <p className="text-xs text-mm-text-secondary mt-1 ml-0.5">
                   Self-contained archive with all project data and documents
                 </p>
+                {/* #974: state the share ceiling at the point of the act. Shown
+                  * only once it is worth saying — a project at 3% of the limit
+                  * does not need a number, and the same threshold decides it
+                  * here and on the Overview because both read one helper. */}
+                {hasCeilingToReport(exportCeiling) && ceilingLevel(exportCeiling) !== 'fine' && (
+                  <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-1 ml-0.5">
+                    {describeCeiling(exportCeiling).figure} — {describeCeiling(exportCeiling).consequence}
+                  </p>
+                )}
                 {(storage?.media_bytes ?? 0) > 0 && (
                   <div className="flex items-start gap-2 mt-2 ml-0.5">
                     <Checkbox

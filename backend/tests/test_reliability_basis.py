@@ -109,9 +109,21 @@ class TestCrossLanguageContract:
 
 class TestTheConsumersReadTheConstant:
     def test_the_categorical_alpha_rows_state_nominal(self):
+        """Nominal α rows state the metric through the CONSTANT, never a literal.
+
+        ⚠️ **This asserted `== 2` until row 48 made it 3, and the count was the
+        defect in the test rather than in the code.** A count of result shapes
+        is a claim that rots on every slab that adds one — and the thing that
+        actually goes wrong is a *restated literal*, which drifts silently from
+        the constant the R export emits. That is what is asserted now; the
+        population claim ("every α-bearing row carries the field") is
+        behavioural and lives in `test_code_sets.py`, where a payload exists to
+        walk.
+        """
         src = _py("services/irr.py")
-        assert src.count('"alpha_metric": ALPHA_METRIC_NOMINAL') == 2, (
-            "both per-code result shapes (defined and no-variance) must state the metric"
+        assert '"alpha_metric": ALPHA_METRIC_NOMINAL' in src
+        assert '"alpha_metric": "nominal"' not in src, (
+            "a restated literal drifts from the constant the R export emits"
         )
 
     def test_the_rating_rows_state_the_magnitude_metric(self):

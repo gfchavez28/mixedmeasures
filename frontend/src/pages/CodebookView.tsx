@@ -23,6 +23,7 @@ import CodebookOverviewView from '@/components/codebook/CodebookOverviewView'
 import CodebookActionBar from '@/components/codebook/CodebookActionBar'
 import CodebookNodeMenu from '@/components/codebook/CodebookNodeMenu'
 import CreateCodePanel from '@/components/codebook/CreateCodePanel'
+import { CodeSetsPanel } from '@/components/codebook/CodeSetsPanel'
 import CreateCategoryPanel from '@/components/codebook/CreateCategoryPanel'
 import MergeCodesDialog from '@/components/codebook/MergeCodesDialog'
 import MergeCategoriesDialog from '@/components/codebook/MergeCategoriesDialog'
@@ -77,6 +78,7 @@ export default function CodebookView() {
   // Creation panel state (floating panels replace modal dialogs)
   const [showCreateCode, setShowCreateCode] = useState(false)
   const [showCreateCategory, setShowCreateCategory] = useState(false)
+  const [showCodeSets, setShowCodeSets] = useState(false)
   const [spotlightCatId, setSpotlightCatId] = useState<number | null>(null)
   const [spotlightLabel, setSpotlightLabel] = useState('')
   const [spotlightColor, setSpotlightColor] = useState('')
@@ -1034,6 +1036,7 @@ export default function CodebookView() {
         projectId={projectId}
         onCreateCode={() => (showCreateCode ? handleToggleCreateCode() : freezeGuard.guard(handleToggleCreateCode))}
         onCreateCategory={() => (showCreateCategory ? handleToggleCreateCategory() : freezeGuard.guard(handleToggleCreateCategory))}
+        onManageCodeSets={() => setShowCodeSets(prev => !prev)}
         onTreeExport={() => handleExport('codebook-tree')}
         onOverviewExport={() => handleExport('codebook-overview')}
         onExportCodebook={handleExportCodebook}
@@ -1219,6 +1222,9 @@ export default function CodebookView() {
               onHoverCategory={setSpotlightCatId}
               onLabelChange={setSpotlightLabel}
             />
+          )}
+          {showCodeSets && (
+            <CodeSetsPanel projectId={projectId} onClose={() => setShowCodeSets(false)} />
           )}
           {showCreateCategory && treeData && (
             <CreateCategoryPanel

@@ -212,10 +212,10 @@ export default function SourceSelector({
 
   const renderCheckbox = (checked: boolean, indeterminate?: boolean) => (
     <span className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${
-      checked ? 'bg-mm-blue border-mm-blue' : indeterminate ? 'bg-mm-blue/50 border-mm-blue/70' : 'border-mm-border-medium'
+      checked || indeterminate ? 'bg-mm-blue-fill border-mm-blue-fill' : 'border-mm-border-medium'
     }`}>
-      {checked && <Check className="w-3 h-3 text-white" />}
-      {indeterminate && !checked && <span className="w-2 h-0.5 bg-white rounded-full" />}
+      {checked && <Check className="w-3 h-3 text-mm-on-fill" />}
+      {indeterminate && !checked && <span className="w-2 h-0.5 bg-mm-on-fill rounded-full" />}
     </span>
   )
 
@@ -263,7 +263,7 @@ export default function SourceSelector({
             onClick={toggleAllConvs}
           >
             <button
-              className="flex-shrink-0 p-0.5 -ml-0.5 rounded hover:bg-mm-border-light"
+              className="flex-shrink-0 p-0.5 -ml-0.5 rounded hover:bg-mm-surface-hover"
               onClick={e => { e.stopPropagation(); setConvsExpanded(!convsExpanded) }}
               aria-label={convsExpanded ? 'Collapse conversations' : 'Expand conversations'}
             >
@@ -316,7 +316,7 @@ export default function SourceSelector({
               onClick={() => toggleDataset(datasetId)}
             >
               <button
-                className="flex-shrink-0 p-0.5 -ml-0.5 rounded hover:bg-mm-border-light"
+                className="flex-shrink-0 p-0.5 -ml-0.5 rounded hover:bg-mm-surface-hover"
                 onClick={e => { e.stopPropagation(); toggleDatasetExpand(datasetId) }}
                 aria-label={expanded ? 'Collapse' : 'Expand'}
               >
@@ -366,7 +366,7 @@ export default function SourceSelector({
             onClick={toggleAllDocs}
           >
             <button
-              className="flex-shrink-0 p-0.5 -ml-0.5 rounded hover:bg-mm-border-light"
+              className="flex-shrink-0 p-0.5 -ml-0.5 rounded hover:bg-mm-surface-hover"
               onClick={e => { e.stopPropagation(); setDocsExpanded(!docsExpanded) }}
               aria-label={docsExpanded ? 'Collapse documents' : 'Expand documents'}
             >
@@ -414,7 +414,7 @@ export default function SourceSelector({
             onClick={toggleAllObs}
           >
             <button
-              className="flex-shrink-0 p-0.5 -ml-0.5 rounded hover:bg-mm-border-light"
+              className="flex-shrink-0 p-0.5 -ml-0.5 rounded hover:bg-mm-surface-hover"
               onClick={e => { e.stopPropagation(); setObsExpanded(!obsExpanded) }}
               aria-label={obsExpanded ? 'Collapse observations' : 'Expand observations'}
             >

@@ -155,10 +155,47 @@ it('a failed backup blocks the install (D4 fails closed)', async () => {
   backupNow.mockRejectedValue(new Error('disk full'))
   renderSection()
   fireEvent.click(await screen.findByRole('button', { name: /restart to update/i }))
-  await waitFor(() => expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/not installed/i)))
+  await waitFor(() =>
+    expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/not installed/i), expect.anything()),
+  )
   expect(bridge.install).not.toHaveBeenCalled()
   // The button recovers so the user can retry.
   expect(screen.getByRole('button', { name: /restart to update/i })).toBeEnabled()
+  expect(screen.getByRole('button', { name: /restart to update/i })).not.toHaveAttribute('aria-disabled')
+})
+
+it('a refused pre-update backup says WHY, from the server (#1025)', async () => {
+  installBridge({ status: 'downloaded', version: '9.9.9', percent: 100 })
+  const detail = 'The backup was not taken: another program kept the database locked for the 19 seconds it waited. Nothing was saved. If another program has the Mixed Measures database open, close it, then try again.'
+  backupNow.mockRejectedValue(Object.assign(new Error(detail), { response: { status: 409, data: { detail } } }))
+  renderSection()
+  fireEvent.click(await screen.findByRole('button', { name: /restart to update/i }))
+  await waitFor(() =>
+    expect(toastError).toHaveBeenCalledWith(
+      expect.stringMatching(/not installed/i),
+      expect.objectContaining({ description: detail }),
+    ),
+  )
+  expect(bridge.install).not.toHaveBeenCalled()
+})
+
+it('Restart to update stays focusable while backing up, and takes one backup (#1025)', async () => {
+  installBridge({ status: 'downloaded', version: '9.9.9', percent: 100 })
+  let finish!: () => void
+  backupNow.mockImplementation(() => new Promise<void>(res => { finish = res }))
+  renderSection()
+  const button = await screen.findByRole('button', { name: /restart to update/i })
+  button.focus()
+  fireEvent.click(button)
+
+  const busy = await screen.findByRole('button', { name: /backing up/i })
+  expect(busy).toHaveAttribute('aria-disabled', 'true')
+  expect(busy).not.toBeDisabled()
+  expect(document.activeElement).toBe(busy)
+  fireEvent.click(busy)
+  expect(backupNow).toHaveBeenCalledTimes(1)
+  finish()
+  await waitFor(() => expect(bridge.install).toHaveBeenCalledTimes(1))
 })
 
 it('install returning false (nothing staged) surfaces an error and recovers', async () => {

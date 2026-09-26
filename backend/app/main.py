@@ -48,31 +48,12 @@ configure_app_logging()
 
 logger = logging.getLogger(__name__)
 from .database import run_migrations, SessionLocal
+from .services.restore_gate import DatabaseGateMiddleware, db_gate
 from .startup_errors import emit_fatal_startup
 from .models.user import Session as SessionModel
 from slowapi.errors import RateLimitExceeded
 from starlette.responses import JSONResponse
-from .routers import auth, projects, conversations, segments, codes, coding, notes, memos, export, search, participants, dataset, recode, equivalence, code_equivalence, analysis_domains, crosswalk, metrics, materials, code_analysis, statistical_tests, text_coding, text_analysis, excerpts, all_notes, correlations, comparisons, scratchpad, data_quality, quote_board, codebook, documents, backup, project_portability, canvas, media, observations
-
-
-def repair_reverse_recodes():
-    """One-time idempotent repair of the #578 reverse double-flip on startup.
-
-    Reverse recodes created through the (buggy) Recode Workbench stored flipped
-    codes that the backend then re-flipped at apply time, so value_numeric kept
-    its forward (un-reversed) value. This rewrites those mappings to forward codes
-    and re-applies primaries. Self-terminating: once forward, subsequent startups
-    find nothing to do. Bounded (reverse defs are few); never fails startup.
-    """
-    from .services.recode import repair_reverse_recode_mappings
-    db = SessionLocal()
-    try:
-        repair_reverse_recode_mappings(db)
-    except Exception:
-        db.rollback()
-        logger.exception("Reverse recode repair (#578) failed; skipping")
-    finally:
-        db.close()
+from .routers import auth, projects, conversations, segments, codes, coding, notes, memos, export, search, participants, dataset, recode, equivalence, code_equivalence, code_sets, coding_import, analysis_domains, crosswalk, metrics, materials, code_analysis, statistical_tests, text_coding, text_analysis, excerpts, all_notes, correlations, comparisons, scratchpad, data_quality, quote_board, codebook, documents, backup, project_portability, canvas, media, observations
 
 
 def cleanup_expired_sessions():
@@ -91,53 +72,109 @@ def cleanup_expired_sessions():
         db.close()
 
 
+def _run_auto_backup(db_path: Path, docs_dir: Path, media_dir: Path, backup_dir: Path,
+                     max_count: int) -> bool:
+    """One scheduled backup, holding a database-gate slot (#1024).
+
+    Returns False, having done nothing, while a restore is running: a snapshot taken
+    across the swap is half one database and half the other, and the restore has just
+    taken a full `pre_restore` backup of its own. The slot also makes a restore WAIT
+    for a backup already under way, rather than swap the file under its copy.
+    """
+    from .services.backup import (
+        AUTO_BACKUP_BUSY_WAIT_SECONDS,
+        cleanup_old_backups,
+        create_backup,
+    )
+    if not db_gate.try_enter():
+        return False
+    try:
+        # Auto rotation excludes video (slab 5 policy: 4h × 5-rotation would
+        # multiply multi-GB recordings; restore preserves them).
+        create_backup(
+            db_path, docs_dir, media_dir, backup_dir, "auto", False,
+            busy_wait_seconds=AUTO_BACKUP_BUSY_WAIT_SECONDS,
+        )
+        cleanup_old_backups(backup_dir, "auto", max_count)
+        return True
+    finally:
+        db_gate.leave()
+
+
+async def _auto_backup_turn(settings) -> float:
+    """One turn of the automatic backup; returns the seconds until the next turn.
+
+    #1025: a backup refused because the database stayed busy (an import, export or
+    merge holding it) is tried again after `AUTO_BACKUP_BUSY_RETRY_SECONDS`, not a
+    whole interval later. Refusing is what keeps an incomplete copy out of the
+    rotation; it must not also cost four hours of cover.
+    """
+    from .services.backup import AUTO_BACKUP_BUSY_RETRY_SECONDS, DatabaseBusyError
+    interval = settings.auto_backup_interval_hours * 3600
+    try:
+        db_path = Path(settings.mm_database_path)
+        if db_path.exists() and db_path.stat().st_size > 0:
+            ran = await asyncio.to_thread(
+                _run_auto_backup, db_path, get_documents_dir(), get_media_dir(),
+                get_backup_dir(), settings.auto_backup_max_count,
+            )
+            if ran:
+                logger.info("Auto-backup completed")
+            else:
+                logger.info("Auto-backup skipped: a restore was running")
+    except DatabaseBusyError as e:
+        retry = min(interval, AUTO_BACKUP_BUSY_RETRY_SECONDS)
+        logger.warning(
+            "Auto-backup not taken: %s It will be tried again in %.0f minutes.",
+            e, retry / 60,
+        )
+        return retry
+    except Exception as e:
+        logger.warning("Auto-backup failed: %s", e)
+    return interval
+
+
 async def _auto_backup_loop():
     """Periodic auto-backup loop. Runs as a background task."""
-    from .services.backup import create_backup, cleanup_old_backups
     settings = get_settings()
-    interval = settings.auto_backup_interval_hours * 3600
-
+    delay = settings.auto_backup_interval_hours * 3600
     while True:
-        await asyncio.sleep(interval)
-        try:
-            db_path = Path(settings.mm_database_path)
-            docs_dir = get_documents_dir()
-            media_dir = get_media_dir()
-            backup_dir = get_backup_dir()
+        await asyncio.sleep(delay)
+        delay = await _auto_backup_turn(settings)
 
-            if db_path.exists() and db_path.stat().st_size > 0:
-                # Auto rotation excludes video (slab 5 policy: 4h × 5-rotation
-                # would multiply multi-GB recordings; restore preserves them).
-                await asyncio.to_thread(
-                    create_backup, db_path, docs_dir, media_dir, backup_dir, "auto",
-                    False,  # include_video
-                )
-                await asyncio.to_thread(
-                    cleanup_old_backups, backup_dir, "auto", settings.auto_backup_max_count
-                )
-                logger.info("Auto-backup completed")
-        except Exception as e:
-            logger.warning("Auto-backup failed: %s", e)
+
+#: Stale markers whose recompute raised, carried from tick to tick so the next
+#: batch leaves them out instead of failing on them again (#1017). Only the
+#: sweep's worker thread touches it, one tick at a time.
+_consensus_failed_markers: frozenset[int] = frozenset()
 
 
 def _drain_consensus() -> int:
-    """Drain a batch of consensus staleness markers in its own session/txn.
+    """Drain a batch of consensus staleness markers in its own session.
 
     Runs in a worker thread (its own ``SessionLocal``, never shared across
     threads). Caps the batch so a large backlog drains over several ticks instead
-    of one long transaction.
+    of one long transaction. `drain_stale_consensus` commits, and isolates a
+    target that raises so it cannot block the rest of the queue (#1017).
     """
-    from .services.consensus_staleness import sweep_stale_consensus
+    global _consensus_failed_markers
+    from .services.consensus_staleness import drain_stale_consensus
+    # #1024: this tick opens a connection on every install, so it was the likeliest
+    # thing to reach the old database file during a restore. The markers persist,
+    # so a skipped tick costs thirty seconds.
+    if not db_gate.try_enter():
+        return 0
     db = SessionLocal()
     try:
-        recomputed = sweep_stale_consensus(db, limit=500)
-        db.commit()
-        return recomputed
+        result = drain_stale_consensus(db, limit=500, known_failed=_consensus_failed_markers)
+        _consensus_failed_markers = result.failed_marker_ids
+        return result.recomputed
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
+        db_gate.leave()
 
 
 async def _consensus_sweep_loop():
@@ -161,8 +198,24 @@ async def _consensus_sweep_loop():
 
 
 def _shutdown_backup():
-    """Create a final backup on graceful shutdown."""
-    from .services.backup import create_backup, cleanup_old_backups
+    """Create an end-of-session backup on graceful shutdown.
+
+    🔴 **Type `shutdown`, with its own rotation — NOT `auto` (#920).** Both are
+    automatic, so this hook used to write an `auto` backup and rotate the `auto`
+    set, which meant every quit spent one of the five recovery points the 4-hourly
+    loop is building. Five restarts emptied the window; measured twice, once in
+    development and once by the very session that fixed it. Its own rotation makes
+    a quit cost nothing but its own slots, and no snapshot has to be skipped or
+    guessed at. Reasoning and both measurements: `services/backup.py`'s
+    `VALID_BACKUP_TYPES`.
+    """
+    from .services.backup import (
+        SHUTDOWN_BACKUP_BUSY_WAIT_SECONDS,
+        SHUTDOWN_BACKUP_MAX_COUNT,
+        DatabaseBusyError,
+        cleanup_old_backups,
+        create_backup,
+    )
     settings = get_settings()
     try:
         db_path = Path(settings.mm_database_path)
@@ -171,9 +224,27 @@ def _shutdown_backup():
         backup_dir = get_backup_dir()
 
         if db_path.exists() and db_path.stat().st_size > 0:
-            create_backup(db_path, docs_dir, media_dir, backup_dir, "auto", include_video=False)
-            cleanup_old_backups(backup_dir, "auto", settings.auto_backup_max_count)
+            # #1024: uvicorn lets in-flight requests finish before this runs, so a
+            # restore should be over — unless the grace period expired, in which
+            # case a snapshot across the swap would rotate out a good one.
+            if not db_gate.try_enter():
+                logger.warning("Shutdown backup skipped: a restore was still running")
+                return
+            try:
+                # #1025: a short wait — the desktop shell kills the backend 5 s
+                # after asking it to stop, and a refused copy is better than one
+                # that silently lacks the session's last work.
+                create_backup(
+                    db_path, docs_dir, media_dir, backup_dir, "shutdown",
+                    include_video=False,
+                    busy_wait_seconds=SHUTDOWN_BACKUP_BUSY_WAIT_SECONDS,
+                )
+                cleanup_old_backups(backup_dir, "shutdown", SHUTDOWN_BACKUP_MAX_COUNT)
+            finally:
+                db_gate.leave()
             logger.info("Shutdown backup completed")
+    except DatabaseBusyError as e:
+        logger.warning("Shutdown backup not taken: %s", e)
     except Exception as e:
         logger.warning("Shutdown backup failed: %s", e)
 
@@ -242,13 +313,12 @@ async def lifespan(app: FastAPI):
         get_media_dir().mkdir(parents=True, exist_ok=True)
         get_backup_dir().mkdir(parents=True, exist_ok=True)
         cleanup_expired_sessions()
-        repair_reverse_recodes()
-        # File IO, unlike the DB-only pass above, so it goes to a thread — the same
-        # reason `copy_recording` does (media IO on the event loop is what stalls
-        # Electron's /health probe). Bounded: the IS NULL filter means a settled
-        # install does one query and opens nothing.
-        from .services.media_backfill import run_media_duration_backfill
-        await asyncio.to_thread(run_media_duration_backfill, SessionLocal)
+        # The data repairs every opened database gets — here and after a restore
+        # (#1026). In a thread: the media backfill opens files, and media IO on the
+        # event loop is what stalls Electron's /health probe. Bounded: a settled
+        # install does a few queries and opens nothing.
+        from .services.data_repairs import run_data_repairs
+        await asyncio.to_thread(run_data_repairs, SessionLocal)
         _check_production_safety()
     except Exception as exc:
         emit_fatal_startup(exc)
@@ -275,7 +345,7 @@ _startup_settings = get_settings()
 app = FastAPI(
     title="Mixed Measures",
     description="Mixed-methods research analysis platform",
-    version="1.5.3",
+    version="1.5.4",
     lifespan=lifespan,
     docs_url="/docs" if _startup_settings.enable_api_docs else None,
     redoc_url="/redoc" if _startup_settings.enable_api_docs else None,
@@ -317,6 +387,12 @@ async def _enospc_handler(request: Request, exc: OSError):
 
 app.add_exception_handler(OSError, _enospc_handler)
 
+
+# #1024: every request that can reach the database holds a restore-gate slot, and
+# is refused with a 503 while a restore replaces the file. Added FIRST, so it is the
+# INNERMOST layer: a refusal still passes out through CORS and the security headers,
+# and the Host and loopback-token checks turn a stranger away before it is counted.
+app.add_middleware(DatabaseGateMiddleware, gate=db_gate)
 
 # CORS configuration
 _settings = get_settings()
@@ -456,6 +532,8 @@ app.include_router(dataset.router)
 app.include_router(recode.router)
 app.include_router(equivalence.router)
 app.include_router(code_equivalence.router)
+app.include_router(code_sets.router)
+app.include_router(coding_import.router)
 app.include_router(analysis_domains.router)
 app.include_router(crosswalk.router)
 app.include_router(metrics.router)

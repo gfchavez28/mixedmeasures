@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { memoPreview } from '@/lib/memo-preview'
 import { useListLoad } from '@/hooks/useListLoad'
 import { LoadState } from '@/components/LoadStatus'
+import { PANEL_SCROLLER } from '@/components/CollapsiblePanel'
 
 export interface MemoPanelHandle {
   focus: () => void
@@ -510,7 +511,7 @@ const MemoPanel = forwardRef<MemoPanelHandle, MemoPanelProps>(function MemoPanel
       </div>
 
       {/* Memos List */}
-      <div ref={listRef} className="flex-1 overflow-y-auto">
+      <div ref={listRef} className={PANEL_SCROLLER}>
         {/* Code Memo Form (only for code memos from CodePanel) */}
         {isCreatingForCode && creatingForCode && (
           <NewMemoForm

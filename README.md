@@ -97,6 +97,14 @@ mean anything is wrong:
 - **Observations** — import a recording on its own, with **no transcript**, and
   code what happens on the timeline itself. Start from an empty timeline, slice it
   into fixed intervals, or seed the first clips from a cue file.
+- **Codings** — bring in coding done elsewhere from a **CSV** (`unit_id, coder,
+  code`, optionally a rating), applied to passages already in the project:
+  transcript turns, document paragraphs, observation clips or open-text responses
+  (*Analysis → Import codings…*). Every coder name in the file needs an explicit
+  answer, and nothing is applied until the whole file checks out. Labels a model
+  produced elsewhere arrive the same way, as a **machine coder** that records which
+  model, how it was reached, its settings and its prompt — attributed and
+  filterable, and kept out of every agreement figure.
 
 ### Describe and prepare variables
 
@@ -198,6 +206,12 @@ across, leaving the original and its coding untouched.
   time with that code's scale and anchors on screen, so a scale declared after the
   coding was done can be caught up — and so a run of ratings is given against the
   same instrument, which is what makes them comparable.
+- **Code sets** — a group of codes a passage takes exactly **one** of (a stance
+  that is positive, negative, neutral or ambiguous), coded with a single-choice
+  control and reported on the Reliability tab as one agreement figure per set, with
+  a breakdown of which values coders confuse. You state whether every passage must
+  take a value, because the same coding gives different figures under the two
+  readings.
 - **Participants** and **speakers** form a shared cross-source identity spine, so a
   person links across their survey record, their interview, and the **documents
   that are about them** — a report, a workplan, a case file. Datasets with an
@@ -259,7 +273,9 @@ across, leaving the original and its coding untouched.
   cross-tool standard, so codes, hierarchy, descriptions and colours move between
   Mixed Measures and other QDA tools that read the REFI-QDA codebook format.
 - **`.mmproject`** — a complete, database-agnostic project archive for moving a
-  whole project between machines or instances.
+  whole project between machines or instances. A file saved by a newer version
+  than the one opening it is refused with a message rather than half-read, so
+  colleagues exchanging project files should be on the same version.
 
 ## What it is *not*
 
@@ -270,15 +286,20 @@ Being honest about scope:
   separate **copies** of a project and merge them back together, with per-coder
   attribution, blind coding, intercoder reliability (Cohen's kappa, Krippendorff's
   alpha, percent agreement — each with a **95% confidence interval**, and a stated
-  reason where one cannot be computed), agreement on **code ratings** as well as on
-  the codes themselves, side-by-side reconciliation, and a derived consensus layer. Several coders can also take turns on one computer under named
+  reason where one cannot be computed), agreement on **code ratings** and on **code
+  sets** as well as on the codes themselves, side-by-side reconciliation, and a
+  derived consensus layer. A separate **model comparison** sets a machine coder's
+  labels beside each person's, per code — a description of the model's behaviour,
+  not inter-rater reliability. Several coders can also take turns on one computer under named
   identities. (Separate researchers with unrelated projects on a shared computer
   should still use separate operating-system accounts.)
 - **Not cloud-based.** Everything runs locally against a local database. Moving a
   project between machines is a manual file transfer (`.mmproject` / backup).
 - **No generative AI, and nothing leaves your computer.** Mixed Measures 1.x sends
   your data nowhere and contains no generative AI — it doesn't analyze your data,
-  write your findings, or upload anything. Every result comes from a conventional,
+  write your findings, or upload anything. It can *import* labels a model produced
+  elsewhere (see Codings, above) — it records where they came from and keeps them
+  out of every agreement figure, but it never runs a model. Every result comes from a conventional,
   documented method you can inspect and check, computed locally and
   deterministically, and reproducible in the exported R script; that holds for any
   statistical method added to the 1.x line. A future 2.x will introduce generative
@@ -436,12 +457,18 @@ guidance, and dependency policy.
 ## Backups & data safety
 
 Qualitative coding is irreplaceable manual work, so the app keeps several backup
-mechanisms: automatic pre-migration backups, periodic auto-backups, and
-user-triggered `.mmbackup` archives (database + documents + media) with a
-validate-and-preview restore flow. Periodic auto-backups exclude **video**
-recordings so a multi-gigabyte project doesn't multiply across the backup
-rotation — downloaded backups can include video, and restoring never deletes
-video files already on disk. Project exports (`.mmproject`) can likewise
+mechanisms: automatic pre-migration backups, periodic auto-backups, a snapshot
+taken when the app closes, and user-triggered `.mmbackup` archives (database +
+documents + media) with a validate-and-preview restore flow. *Settings → Backup
+& Data → Backup history* lists them all, and any one can be restored, downloaded
+or deleted from there — restoring from that list is not held to the upload limit,
+because nothing is copied or uploaded; a backup brought from another computer is
+limited to 500 MB. Periodic auto-backups exclude **video** recordings so a
+multi-gigabyte project doesn't multiply across the backup rotation — downloaded
+backups can include video, and restoring never deletes video files already on
+disk. The snapshot taken on closing is kept separately from the 4-hourly ones,
+so restarting the app does not use up the automatic backups that cover your
+working day. Project exports (`.mmproject`) can likewise
 include or exclude recordings; a media-less archive re-imports cleanly with
 recordings re-attachable. Before a merge or an overwrite changes a project, a
 full copy of it is written first — *Settings → Backup & Data* lists those safety

@@ -255,7 +255,7 @@ export default function MaterialsDrawer({
           value={filter}
           onChange={e => setFilter(e.target.value)}
           placeholder="Filter materials..."
-          className="w-full text-sm rounded-md border border-mm-border bg-mm-bg px-2.5 py-1.5 pr-7 text-mm-text placeholder:text-mm-text-faint outline-none focus:ring-1 focus:ring-mm-accent"
+          className="w-full text-sm rounded-md border border-border bg-mm-bg px-2.5 py-1.5 pr-7 text-mm-text placeholder:text-mm-text-faint outline-none focus:ring-1 focus:ring-ring"
         />
         {filter && (
           <button

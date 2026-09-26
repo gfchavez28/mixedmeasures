@@ -7,8 +7,9 @@
  * and a dialog that lets someone believe otherwise is worse than no feature.
  */
 import '@testing-library/jest-dom/vitest'
+import { useState } from 'react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import WithdrawParticipantDialog from './WithdrawParticipantDialog'
 import { removedSummary, keptSummary } from '@/lib/withdrawal-copy'
 import type { WithdrawalReport } from '@/lib/api'
@@ -127,5 +128,69 @@ describe('the control', () => {
   it('enables once the report has arrived', () => {
     setup()
     expect(screen.getByRole('button', { name: /Back up and remove/ })).toBeEnabled()
+  })
+})
+
+/** The page's side of the contract: pressing the confirm starts the request, and
+ * the page closes the dialog only on success. */
+function Harness({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
+  const [pending, setPending] = useState(false)
+  return (
+    <WithdrawParticipantDialog
+      open identifier="P07" report={report()} isPending={pending}
+      onCancel={onCancel}
+      onConfirm={() => { onConfirm(); setPending(true) }}
+    />
+  )
+}
+
+describe('while the backup and the removal run (#1025)', () => {
+  /**
+   * `AlertDialogAction` is a Radix Close. Without `preventDefault()` the press
+   * closed the dialog in the same click (the page's `onCancel`), so the busy
+   * state never rendered and the person's row invited a second press.
+   */
+  it('stays open, says what is happening, and keeps the pressed button focusable', () => {
+    const onConfirm = vi.fn()
+    const onCancel = vi.fn()
+    render(<Harness onConfirm={onConfirm} onCancel={onCancel} />)
+    const confirm = screen.getByRole('button', { name: /Back up and remove/ })
+    confirm.focus()
+    fireEvent.click(confirm)
+
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+    expect(onCancel).not.toHaveBeenCalled()
+    const busy = screen.getByRole('button', { name: /Removing/ })
+    expect(busy).toHaveAttribute('aria-disabled', 'true')
+    expect(busy).toHaveAttribute('aria-busy', 'true')
+    // Chrome blurs a focused button that becomes `disabled`; jsdom does not, so
+    // the attribute is what is asserted.
+    expect(busy).not.toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent(/Taking a backup, then removing/)
+  })
+
+  it('a second press does not start a second withdrawal', () => {
+    const onConfirm = vi.fn()
+    render(<Harness onConfirm={onConfirm} onCancel={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /Back up and remove/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Removing/ }))
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('neither Cancel nor Escape closes it while the request runs', () => {
+    const onCancel = vi.fn()
+    render(<Harness onConfirm={vi.fn()} onCancel={onCancel} />)
+    fireEvent.click(screen.getByRole('button', { name: /Back up and remove/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+    expect(onCancel).not.toHaveBeenCalled()
+  })
+
+  it('Cancel still closes it before anything has started', () => {
+    // The POSITIVE control for the case above.
+    const onCancel = vi.fn()
+    render(<Harness onConfirm={vi.fn()} onCancel={onCancel} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).toHaveBeenCalledTimes(1)
   })
 })

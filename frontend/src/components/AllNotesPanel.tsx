@@ -550,7 +550,7 @@ function NoteCard({
       {note.content.length > 120 && (
         <button
           onClick={onToggleContent}
-          className="text-[10px] text-mm-accent hover:underline mt-0.5"
+          className="text-[10px] text-mm-blue-text hover:underline mt-0.5"
         >
           {isContentExpanded ? 'Show less' : 'Show more'}
         </button>
@@ -582,7 +582,7 @@ function NoteCard({
           className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity rounded-sm"
           aria-label={`Open this note's ${openInLabel} — opens in a new tab`}
         >
-          <ExternalLink className="h-3 w-3 text-mm-text-muted hover:text-mm-accent" aria-hidden="true" />
+          <ExternalLink className="h-3 w-3 text-mm-text-muted hover:text-mm-blue-text" aria-hidden="true" />
         </a>
       </div>
     </div>

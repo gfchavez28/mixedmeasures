@@ -27,7 +27,7 @@ migrations (RELEASING §4c).
 
 Usage (from backend/, venv active, sqlcipher3 installed):
 
-    python scripts/migration_rehearsal.py --from-revision a9c3e7b1d5f2   # v1.5.1
+    python scripts/migration_rehearsal.py --from-revision d3f8b6e2a915   # v1.5.3
 
 `--from-revision` is the Alembic head of the PREVIOUS release. Find it with:
 
@@ -92,6 +92,23 @@ def _indexes(conn, table: str) -> dict[str, str]:
         "AND name NOT LIKE 'sqlite_%' ORDER BY name", (table,))}
 
 
+def _fks(conn, table: str) -> list[tuple]:
+    """Every FK on `table` as (referenced table, from, to, on_update, on_delete, match).
+
+    The pragma's `id`/`seq` are dropped: a rebuild may re-declare the FKs in another
+    order, and the order is not what a delete depends on.
+    """
+    return sorted((r[2], r[3], r[4], r[5], r[6], r[7])
+                  for r in conn.execute(f"PRAGMA foreign_key_list({table})"))
+
+
+def _full_rows(conn, table: str, cols: list[str]) -> list[list[str]]:
+    """Every row of `table`, over exactly `cols`, stringified (so 0.0 ≠ None ≠ 0)."""
+    sel = ", ".join(f'"{c}"' for c in cols)
+    return [list(map(repr, r))
+            for r in conn.execute(f"SELECT {sel} FROM {table} ORDER BY id")]
+
+
 # ── What THIS release's migration must do ────────────────────────────────────
 #
 # ⚠️ **Review this block at every cut, exactly like `--from-revision`.** It is the
@@ -100,64 +117,82 @@ def _indexes(conn, table: str) -> dict[str, str]:
 # correctness. A DATA-REPAIR migration inverts that — the rows it is supposed to
 # rewrite MUST move, and a corpus on which it no-ops proves nothing while exiting 0.
 #
-# ── v1.5.2 (2026-09-11) — TWO TABLE REBUILDS, and v1.5.1's fixture CHANGES SIDES ──
+# ── The cut after v1.5.3 (rehearsed 2026-09-25) — ONE REBUILD, and it is `codes` ──
 #
-# `--from-revision a9c3e7b1d5f2` (v1.5.1's head). THREE migrations:
+# `--from-revision d3f8b6e2a915` — v1.5.3's head. v1.5.3 carried NO migrations, so
+# this is also v1.5.2's head, and everything v1.5.2's block asserted as ARRIVING now
+# exists before the upgrade starts. TWO migrations:
 #
-#   c2f8a5b31d47  documents.participant_id       REBUILD  (row 46 — the document spine)
-#   b7d4e2a9c153  datasets.managed_kind          REBUILD  (row 45 i.3 — the participant table)
-#                 + uq_datasets_project_managed_kind, a PARTIAL unique index
-#   d3f8b6e2a915  datasets.managed_synced_at               (row 45 i.4 — the freshness pair)
-#                 datasets.managed_stale
-#                 dataset_columns.managed_spec
+#   e4a9c7b21f68  code_sets (a new table)             REBUILD of `codes`   (row 48)
+#                 + codes.code_set_id → code_sets, ON DELETE SET NULL
+#   f5b2d8c47e13  users.machine_provenance            plain ADD COLUMN     (row 49)
 #
-# 🔴 **THE REBUILDS ARE BACK, AND THIS IS v1.3.0's SHAPE, NOT v1.5.0's.** The last
-# two cuts were purely additive, where this script's parentage checks were cheap
-# insurance rather than the point. Both rebuilds here are
-# `batch_alter_table(recreate='always')` = DROP + RENAME, and both are on a PARENT
-# of the coded spine:
+# 🔴 **THE REBUILT TABLE IS THE PARENT OF EVERY CODING.** v1.5.2 rebuilt two tables
+# one and two levels above the coded spine; this cut rebuilds the table the spine
+# hangs from directly:
 #
-#   documents → segments (ON DELETE CASCADE) → code_applications (CASCADE)
-#             → notes (CASCADE)
-#   datasets  → dataset_columns (CASCADE) → dataset_values (CASCADE)
-#             → dataset_rows (CASCADE)
+#   codes → code_applications          (ON DELETE CASCADE)  every coding and rating
+#         → code_category_memberships  (ON DELETE CASCADE)  the legacy M2M, still a table
 #
-# If `PRAGMA foreign_keys` were ever left ON during either, SQLite's implicit
-# DELETE would cascade TWO levels and the coding would vanish while the app still
-# opened fine. `env.py` holds it OFF at the connection level; this script is what
-# proves that held. **The seed therefore hangs a code application off a DOCUMENT
-# segment**, not only a conversation one — a canary one level below the rebuilt
-# table catches a cascade that counting the rebuilt table's own rows cannot see.
+# If `PRAGMA foreign_keys` were ever left ON during the rebuild, SQLite's implicit
+# DELETE would take every coding in the database with it, and the app would still
+# open. **So the seed puts applications on FOUR codes** — one by a MACHINE coder,
+# one on an inactive code — at NON-CONTIGUOUS ids (1, 2, 7, 12), because a copy
+# that renumbered instead of preserving ids would re-point applications at other
+# codes and keep every count.
 #
-# **The second thing a rebuild can do is lose an index.** Batch reflection copies
-# them; a copy that silently drops one leaves a UNIQUE constraint unenforced and
-# nothing else looks wrong. `REBUILT_TABLES` snapshots every index on both tables
-# before and after.
+# **A rebuild can lose three things no count can see, so each is compared whole:**
+#   * a COLUMN's data — `codes` carries the four magnitude-scale columns, `uuid`,
+#     `category_order` and more. `FULL_ROW_TABLES` compares EVERY pre-existing column
+#     of every seeded row, so a column added to `codes` later is covered without
+#     anyone remembering to list it here.
+#   * an INDEX — `ix_codes_project_numeric` and `ix_codes_uuid` are UNIQUE, and a
+#     dropped one leaves a constraint unenforced with nothing else looking wrong.
+#   * a FOREIGN KEY — batch reflection re-declares `codes`' outbound FKs (project
+#     CASCADE, category SET NULL, equivalence group SET NULL); a lost one is silent
+#     until something is deleted. `FK_TABLES` compares `PRAGMA foreign_key_list`
+#     before and after, for `codes` AND for the two children that point at it.
 #
-# ── What must ARRIVE — and the one column that must NOT arrive empty ─────────
+# ── What must ARRIVE, and what each must arrive HOLDING ──────────────────────
 #
-# 🔴 **`managed_stale` carries a `server_default='0'`, so "every new column
-# arrives NULL" — the v1.5.0 assertion — IS NOW FALSE, and carrying it forward
-# would have failed a CORRECT migration.** The expectation is therefore per
-# COLUMN, and the split is `d3f8b6e2a915`'s central promise rather than a detail:
+#   * `codes.code_set_id` MUST be NULL. Membership in a set is a CLAIM — "this code
+#     is one of k mutually exclusive values" — and it changes what the Reliability
+#     tab computes; a default would assert one nobody made.
+#   * `users.machine_provenance` MUST be NULL, on the seeded MACHINE coder too. The
+#     migration's own docstring: NULL is the honest state for a machine whose
+#     configuration was never recorded, and nothing may infer one.
+#   * `code_sets` MUST exist and be EMPTY. A migration that fabricated a set would
+#     reclassify coding that already exists.
+#   * 🔴 `code_sets.exhaustive` MUST default to 0 for a row that omits it. Set, it
+#     makes a passage nobody assigned MISSING data instead of the answer "none of
+#     these", so a default of 1 would silently change every figure for a set written
+#     by anything that omits the column. A declared default is visible only to a
+#     WRITE, so this is checked by inserting one after the upgrade.
+#   * 🔴 `fk_codes_code_set_id` MUST be ON DELETE SET NULL. Deleting a set has to
+#     leave its codes as ordinary codes; a CASCADE would delete the codes and — at
+#     runtime, where `foreign_keys` is ON — every coding on them. Checked by deleting
+#     a set after the upgrade with foreign keys ON, as the app runs.
+#   * three new indexes, `ix_code_sets_uuid` UNIQUE (by its statement, and by a
+#     duplicate it has to refuse).
 #
-#   * `managed_synced_at` MUST be NULL. It is the honest half — *"computed 3 days
-#     ago"* — and a fabricated timestamp on a dataset that was never scored would
-#     claim a snapshot exists when none does. That is the precise failure the
-#     pair was designed to avoid.
-#   * `managed_stale` MUST be 0. It is a POSITIVE signal only ("we know something
-#     changed"), and its ABSENCE never claims freshness — so 0 on an untouched
-#     dataset is TRUE, not merely harmless.
-#   * `managed_spec` and `documents.participant_id` MUST be NULL. Both are CLAIMS
-#     (which code this column scores; who this document is about) and a default
-#     would assert one that nobody made.
+# ── v1.5.2's fixtures CHANGE SIDES ────────────────────────────────────────────
 #
-# ── v1.5.1's magnitude fixture CHANGES SIDES ─────────────────────────────────
+# 🔴 `d3f8b6e2a915` IS `--from-revision`, so `documents.participant_id`, the three
+# `managed_*` columns on `datasets` and `dataset_columns.managed_spec` exist BEFORE
+# these migrations start. **v1.5.2's "they arrive NULL" now passes VACUOUSLY —
+# MEASURED: the block as v1.5.2 left it exited 0 against this cut's code-set
+# migration switched to ON DELETE CASCADE.** They are seeded with REAL values instead —
+# a participant table (`DS_SECOND`) with a sync time, a raised stale flag and a score
+# column whose `managed_spec` names a code id IN THE REBUILT TABLE — and asserted
+# invariant. v1.5.2's behavioural checks (the document link's SET NULL, one
+# participant table per project) stay, as coverage of the BUILT database rather than
+# as claims about this cut.
 #
-# 🔴 `a9c3e7b1d5f2` IS `--from-revision` now, so the #35 columns are present
-# BEFORE these migrations start. **Asserting they arrive would pass VACUOUSLY** —
-# the inert-gate failure this block warns about above — so they move to the "must
-# NOT touch" side, seeded with REAL VALUES, which is the stronger test anyway:
+# ⚠️ The v1.3.1 repairs (`a1b2c3d4e5f7` astral offsets, `b8e4c2a70d19` note
+# numbering), v1.4.0's provenance columns and v1.5.1's #35 ratings remain seeded at
+# real values and asserted invariant. **The #35 fixture is this cut's sharpest, not
+# inherited coverage:** the scale lives ON the rebuilt table and the ratings on its
+# child —
 #
 #   * a rating of **0.0** on a declared −2…+2 scale. Zero is an interior,
 #     meaningful neutral and NULL means UNRATED (`magnitude-coding.md` §2: MAXQDA
@@ -165,10 +200,6 @@ def _indexes(conn, table: str) -> dict[str, str]:
 #     that coerced either into the other is invisible to every count in this file.
 #   * an application deliberately left UNRATED, so NULL has to survive AS NULL.
 #   * a `magnitude_conflict` — the other coder's differing rating, kept beside ours.
-#
-# ⚠️ The v1.3.1 repairs (`a1b2c3d4e5f7` astral offsets, `b8e4c2a70d19` note
-# numbering) and v1.4.0's provenance columns remain seeded at their post-migration
-# values and asserted invariant, for the same reason they were at the last cut.
 
 # The v1.3.1 fixtures, now seeded post-repair and asserted INVARIANT.
 #
@@ -190,9 +221,11 @@ NOTE_SEQ_INVARIANT = [
 
 # `dataset_columns` ids are deliberately NON-CONTIGUOUS: a rebuild that renumbers
 # instead of preserving ids breaks every child FK, and contiguous ids would let
-# that pass. ⚠️ v1.5.2 does NOT rebuild this table — these are invariance fixtures,
-# and the tables it DOES rebuild carry non-contiguous ids for the same reason.
+# that pass. ⚠️ This cut does NOT rebuild this table — these are invariance
+# fixtures, and the table it DOES rebuild carries non-contiguous ids for the same
+# reason. `DC_SCORE` is the participant table's score column (below).
 DC_SOURCE, DC_TARGET, DC_EQUIV, DC_PLAIN = 41, 47, 53, 61
+DC_SCORE = 67
 
 # v1.4.0's additions. At `--from-revision a9c3e7b1d5f2` they are ALREADY PRESENT,
 # so they are asserted UNCHANGED, never as evidence that anything ran.
@@ -209,38 +242,72 @@ MAGNITUDE_SCALE = (-2.0, 2.0, 1.0, '{"-2": "Strongly negative", "2": "Strongly p
 # not a state the app can produce, and a fixture that cannot occur proves nothing.
 APP_CONFLICTED, APP_RATED_POSITIVE, APP_RATED_ZERO, APP_UNRATED = 1, 2, 5, 6
 
-# Row 46 / row 45's own fixtures. Non-contiguous, and the second participant and
-# second dataset exist only so the new constraints have something to refuse.
+# Row 46 / row 45's fixtures (v1.5.2's, now below --from-revision). Non-contiguous.
+# `DS_SECOND` is the project's PARTICIPANT TABLE, seeded as a refresh leaves one —
+# synced, then marked stale by a later rating — with a score column whose spec
+# names `SCALE_CODE_ID`: an id inside a JSON blob, pointing INTO the rebuilt table.
 PARTICIPANT_LINKED, PARTICIPANT_SPARE = 7, 11
 PROJECT_OTHER = 2
 DS_MAIN, DS_SECOND, DS_OTHER_PROJECT = 1, 5, 9
+PARTICIPANT_TABLE = DS_SECOND
+MANAGED_SPEC = json.dumps({"kind": "magnitude_score", "code_id": SCALE_CODE_ID})
 
-# Both tables this release REBUILDS. A rebuild that drops an index leaves a UNIQUE
-# constraint unenforced and nothing else looks wrong, so every index on both is
-# snapshotted before and after. `dataset_columns` is not rebuilt here but is kept
-# in the set: it is the child of one rebuilt table and was rebuilt at the v1.4.0 cut.
-REBUILT_TABLES = ("documents", "datasets")
-INDEXED_TABLES = REBUILT_TABLES + ("dataset_columns",)
+# This cut's `codes` fixtures, beside SCALE_CODE_ID (1) and code 2. Non-contiguous,
+# and each carries a different dependant of the rebuilt table: `CODE_GROUPED` sits in
+# a category (FK + legacy membership row) AND an equivalence group, with a uuid, a
+# colour and a description; `CODE_RETIRED` is inactive. The MACHINE coder is the one
+# `machine_provenance` must arrive NULL on, and it holds one of the applications.
+CODE_GROUPED, CODE_RETIRED = 7, 12
+CATEGORY_ID, CODE_GROUP_ID = 3, 5
+MACHINE_CODER = 4
+APP_MACHINE, APP_RETIRED = 7, 8
+# Written AFTER the upgrade by the behavioural checks — the table does not exist before.
+CODE_SET_ID, CODE_SET_DUPLICATE = 4, 6
+CODE_SET_UUID = "5c0de5e7-0000-4000-8000-000000000048"
 
-# ── What v1.5.2 must ADD, per column, with the value it must arrive HOLDING ──
-#
-# 🔴 Per COLUMN, not per table, and that is the correction this cut forced: three
-# of these must be NULL and `managed_stale` must be 0. See the block above — the
-# v1.5.0 shape ("every new column arrives empty") would fail a correct migration.
+# The one table this cut REBUILDS.
+REBUILT_TABLES = ("codes",)
+# Every index on these is compared before and after, with its CREATE statement. A
+# rebuild that drops one leaves a UNIQUE constraint unenforced and nothing else looks
+# wrong. The children of `codes`, the table gaining a column, and v1.5.2's rebuilt
+# tables are kept in the set: it costs nothing and they are all parents of data.
+INDEXED_TABLES = REBUILT_TABLES + (
+    "code_applications", "code_category_memberships", "users",
+    "documents", "datasets", "dataset_columns",
+)
+# `PRAGMA foreign_key_list` before and after: the rebuilt table's own FKs, and the
+# FKs of the two children that name it.
+FK_TABLES = ("codes", "code_applications", "code_category_memberships")
+# Every PRE-EXISTING column of every seeded row, compared whole. Listing columns by
+# hand is how a column added later goes unchecked, so the column list is read from
+# the database at seed time.
+FULL_ROW_TABLES = (
+    "codes", "users", "code_applications", "code_category_memberships",
+    "code_categories", "code_equivalence_groups",
+    "documents", "datasets", "dataset_columns", "dataset_rows",
+)
+
+# ── What this cut must ADD, per column: the value it must arrive HOLDING, and why ──
 NEW_COLUMNS = {
-    "documents": {"participant_id": None},
-    "datasets": {"managed_kind": None, "managed_synced_at": None, "managed_stale": 0},
-    "dataset_columns": {"managed_spec": None},
+    "codes": {"code_set_id": (
+        None,
+        "membership in a set is a CLAIM that the code is one of k mutually exclusive "
+        "values, and it changes what the Reliability tab computes — a default asserts "
+        "one nobody made")},
+    "users": {"machine_provenance": (
+        None,
+        "NULL is the honest state for every human coder and for a machine whose "
+        "configuration was never recorded — a default fabricates a provenance")},
 }
-
-# Indexes this release must CREATE. The partial `WHERE` on the second is what
-# scopes "at most one participant dataset" to a project; its liveness is checked
-# behaviourally below, and its partial-ness structurally, because SQLite treats
-# NULLs as distinct in a plain unique index and the two are otherwise
-# indistinguishable by behaviour alone.
+# New tables that must arrive EMPTY: a fabricated set would reclassify existing coding.
+NEW_TABLES_EMPTY = ("code_sets",)
+# New FKs: (table, column) -> (referenced table, ON DELETE). SET NULL is the point.
+NEW_FKS = {("codes", "code_set_id"): ("code_sets", "SET NULL")}
+# Indexes this cut must CREATE: name -> must it be UNIQUE?
 NEW_INDEXES = {
-    "ix_documents_participant_id": None,
-    "uq_datasets_project_managed_kind": "managed_kind IS NOT NULL",
+    "ix_codes_code_set_id": False,
+    "ix_code_sets_project_id": False,
+    "ix_code_sets_uuid": True,
 }
 
 
@@ -248,9 +315,12 @@ def seed(db_path: Path) -> dict:
     """Fill the old-revision DB with the shapes a table rebuild can damage.
 
     Deliberately includes: segments under BOTH parents, the self-referencing
-    merge/split links, children hanging off segments (the cascade canaries),
-    excerpts in both pre-time-range shapes, and non-contiguous ids (a rebuild
-    that renumbers instead of preserving ids breaks every child FK).
+    merge/split links, children hanging off segments and off CODES (the cascade
+    canaries), every kind of row that depends on `codes` (applications by a human
+    and a machine coder, a category membership, a category and an equivalence
+    group it points at), excerpts in both pre-time-range shapes, and
+    non-contiguous ids (a rebuild that renumbers instead of preserving ids breaks
+    every child FK).
 
     Tables absent at the given revision are skipped with a note rather than
     crashing — the seed has to survive a moving "from" revision.
@@ -261,6 +331,15 @@ def seed(db_path: Path) -> dict:
     skipped = []
 
     x("INSERT INTO users (id, username, is_admin, created_at) VALUES (1,'lead',1,?)", (NOW,))
+    # Row 49's column must arrive NULL on a MACHINE coder specifically — the one
+    # coder a migration might be tempted to give a provenance. `coder_type='ai'` is
+    # reachable before this cut through a merged project file (#989).
+    machine = "coder_type" in _cols(conn, "users")
+    if machine:
+        x("INSERT INTO users (id, username, is_admin, created_at, coder_type) "
+          "VALUES (?,'Model A',0,?,'ai')", (MACHINE_CODER, NOW))
+    else:
+        skipped.append("machine coder")
     x("INSERT INTO projects (id, user_id, name, status, created_at, updated_at) "
       "VALUES (1,1,'Rehearsal project','active',?,?), (?,1,'Second study','active',?,?)",
       (NOW, NOW, PROJECT_OTHER, NOW, NOW))
@@ -282,6 +361,12 @@ def seed(db_path: Path) -> dict:
         x("INSERT INTO documents (id, project_id, name, source_filename, source_format, "
           "segmentation_mode, created_at, updated_at) "
           "VALUES (1,1,'Brief','brief.pdf','pdf','paragraph',?,?)", (NOW, NOW))
+        # v1.5.2's row-46 link, below --from-revision now: seeded LINKED, so the
+        # full-row comparison proves it is carried, not that it arrives empty.
+        if "participant_id" in _cols(conn, "documents") and "participants" in have:
+            x("UPDATE documents SET participant_id=? WHERE id=1", (PARTICIPANT_LINKED,))
+        else:
+            skipped.append("document participant link")
     else:
         skipped.append("documents")
 
@@ -305,6 +390,54 @@ def seed(db_path: Path) -> dict:
     for aid, sid, code in [(1, 10, 1), (2, 11, 1), (3, 12, 2), (4, 15, 2)]:
         x("INSERT INTO code_applications (id, segment_id, code_id, user_id, created_at) "
           "VALUES (?,?,?,1,?)", (aid, sid, code, NOW))
+
+    # ── codes: THE table this cut rebuilds ───────────────────────────────────
+    #
+    # Two more codes at non-contiguous ids, each carrying what a DROP + RENAME can
+    # lose: `CODE_GROUPED` points OUT of the table twice (a category and an
+    # equivalence group — both ON DELETE SET NULL, both re-declared by the batch)
+    # and has a row pointing IN from the legacy membership table, plus the plain
+    # columns a partial copy would drop; `CODE_RETIRED` is inactive, a state no
+    # count distinguishes from active.
+    code_cols = _cols(conn, "codes")
+    x("INSERT INTO codes (id, project_id, numeric_id, name, description, color, "
+      "is_universal, is_active, created_at, updated_at) VALUES "
+      "(?,1,3,'Resilience','Recovering after a setback','#3b82f6',0,1,?,?), "
+      "(?,1,4,'Retired theme',NULL,NULL,0,0,?,?)",
+      (CODE_GROUPED, NOW, NOW, CODE_RETIRED, NOW, NOW))
+    if "uuid" in code_cols:
+        x("UPDATE codes SET uuid=? WHERE id=?",
+          ("c0de0007-0000-4000-8000-000000000007", CODE_GROUPED))
+        x("UPDATE codes SET uuid=? WHERE id=?",
+          ("c0de0012-0000-4000-8000-000000000012", CODE_RETIRED))
+    else:
+        skipped.append("code uuids")
+    if "code_categories" in have and {"category_id", "category_order"} <= code_cols:
+        x("INSERT INTO code_categories (id, project_id, name, display_order, created_at) "
+          "VALUES (?,1,'Context',0,?)", (CATEGORY_ID, NOW))
+        x("UPDATE codes SET category_id=?, category_order=1 WHERE id=?",
+          (CATEGORY_ID, CODE_GROUPED))
+        if "code_category_memberships" in have:
+            x("INSERT INTO code_category_memberships (id, code_id, category_id, created_at) "
+              "VALUES (1,?,?,?)", (CODE_GROUPED, CATEGORY_ID, NOW))
+        else:
+            skipped.append("code category membership")
+    else:
+        skipped.append("code category")
+    if "code_equivalence_groups" in have and "code_equivalence_group_id" in code_cols:
+        x("INSERT INTO code_equivalence_groups (id, project_id, label, canonical_code_id, "
+          "created_at, updated_at) VALUES (?,1,'Coping',?,?,?)",
+          (CODE_GROUP_ID, CODE_GROUPED, NOW, NOW))
+        x("UPDATE codes SET code_equivalence_group_id=? WHERE id=?",
+          (CODE_GROUP_ID, CODE_GROUPED))
+    else:
+        skipped.append("code equivalence group")
+    # One application on each new code: the machine coder's on the grouped code, and
+    # one on the inactive code, whose coding is kept when the code is retired.
+    x("INSERT INTO code_applications (id, segment_id, code_id, user_id, created_at) "
+      "VALUES (?,17,?,?,?), (?,18,?,1,?)",
+      (APP_MACHINE, CODE_GROUPED, MACHINE_CODER if machine else 1, NOW,
+       APP_RETIRED, CODE_RETIRED, NOW))
 
     # 🔴 The cascade canary for the `documents` rebuild, one level BELOW the rebuilt
     # table: documents → segments (ON DELETE CASCADE) → code_applications (CASCADE).
@@ -380,19 +513,29 @@ def seed(db_path: Path) -> dict:
     else:
         skipped.append("observation notes")
 
-    # ── datasets: one of THE TWO tables this release rebuilds ─────────────────
+    # ── datasets: rebuilt at the v1.5.2 cut, now an invariance fixture ─────────
     #
     # Three datasets: two in project 1, so "at most one participant dataset per
     # project" has something to refuse, and one in a SECOND project, so an index
     # wrongly scoped to `managed_kind` alone is caught by refusing there too.
+    # `PARTICIPANT_TABLE` carries v1.5.2's three columns at REAL values — a kind, a
+    # sync time and a RAISED stale flag — because "they arrive NULL/0" is what v1.5.2
+    # asserted and it would pass vacuously now.
+    managed = False
     if "datasets" in have:
         x("INSERT INTO datasets (id, project_id, name, created_at) "
-          "VALUES (?,1,'Survey',?), (?,1,'Follow-up',?), (?,?,'Other study',?)",
+          "VALUES (?,1,'Survey',?), (?,1,'Participants',?), (?,?,'Other study',?)",
           (DS_MAIN, NOW, DS_SECOND, NOW, DS_OTHER_PROJECT, PROJECT_OTHER, NOW))
+        managed = {"managed_kind", "managed_synced_at", "managed_stale"} <= _cols(conn, "datasets")
+        if managed:
+            x("UPDATE datasets SET managed_kind='participants', managed_synced_at=?, "
+              "managed_stale=1 WHERE id=?", (NOW, PARTICIPANT_TABLE))
+        else:
+            skipped.append("participant table")
     else:
         skipped.append("datasets")
 
-    # ── dataset_columns: rebuilt at the v1.4.0 cut, a CHILD of a rebuilt table now ─
+    # ── dataset_columns: a CHILD of v1.5.2's rebuilt `datasets` ───────────────
     #
     # Four columns on deliberately NON-CONTIGUOUS ids, each carrying a different
     # kind of dependant, because a DROP+RENAME can fail in four different ways:
@@ -452,6 +595,23 @@ def seed(db_path: Path) -> dict:
               (DC_SOURCE, NOW, NOW))
         else:
             skipped.append("recode_definitions")
+
+        # The participant table's score column, as `participant_scores.py` writes it:
+        # `source='managed'` and a `managed_spec` naming the code it scores. That
+        # code id points INTO the table this cut rebuilds, from inside a JSON blob no
+        # FK can see — so ids preserved across the rebuild is what keeps it true. One
+        # participant row carries a score, which is what a refresh leaves.
+        if managed and "managed_spec" in dc_cols:
+            x(f"INSERT INTO dataset_columns (id, dataset_id, column_text, column_type, "
+              f"sequence_order, source, managed_spec{extra}) "
+              f"VALUES (?,?,'Barriers (score)','numeric',1,'managed',?{val})",
+              (DC_SCORE, PARTICIPANT_TABLE, MANAGED_SPEC))
+            x("INSERT INTO dataset_rows (id, dataset_id, participant_id, created_at) "
+              "VALUES (3,?,?,?)", (PARTICIPANT_TABLE, PARTICIPANT_SPARE, NOW))
+            x("INSERT INTO dataset_values (id, row_id, column_id, value_text) "
+              "VALUES (?,3,?,'1.5')", (vid, DC_SCORE))
+        else:
+            skipped.append("participant score column")
     else:
         skipped.append("dataset_columns")
 
@@ -475,8 +635,16 @@ def seed(db_path: Path) -> dict:
                        "users", "projects", "participants", "conversations",
                        "documents", "segments",
                        "codes", "code_applications", "excerpt", "notes",
+                       "code_categories", "code_equivalence_groups",
+                       "code_category_memberships",
                        "datasets", "dataset_columns", "dataset_rows", "dataset_values",
                        "recode_definitions", "equivalence_groups"})},
+        # Every PRE-EXISTING column of every row, read from the database rather than
+        # listed, so a column nobody named here is still compared.
+        "full_rows": {t: (cols, _full_rows(conn, t, cols))
+                      for t in FULL_ROW_TABLES if t in have
+                      for cols in [sorted(_cols(conn, t))]},
+        "fks": {t: _fks(conn, t) for t in FK_TABLES if t in have},
         "apps": conn.execute(
             "SELECT id, segment_id, code_id FROM code_applications ORDER BY id").fetchall(),
         "segment_links": conn.execute(
@@ -527,9 +695,9 @@ def seed(db_path: Path) -> dict:
             "SELECT id, magnitude_min, magnitude_max, magnitude_step, magnitude_labels "
             "FROM codes ORDER BY id"
         ).fetchall() if "magnitude_min" in _cols(conn, "codes") else [],
-        # Every index on both rebuilt tables (and on `dataset_columns`, a child of
-        # one of them), so a silently-dropped one is caught. A dropped UNIQUE index
-        # leaves a constraint unenforced and nothing else looks wrong.
+        # Every index on the rebuilt table and the tables around it, so a
+        # silently-dropped one is caught. A dropped UNIQUE index leaves a constraint
+        # unenforced and nothing else looks wrong.
         "indexes": {t: _indexes(conn, t) for t in INDEXED_TABLES if t in have},
     }
     conn.close()
@@ -575,67 +743,113 @@ def verify(db_path: Path, before: dict) -> list[str]:
     same("notes parentage AND numbering (this release must not renumber)",
          "SELECT id, conversation_id, segment_id, sequence_number FROM notes ORDER BY id",
          "notes")
-    same("dataset_columns rows (the REBUILT table — ids must be preserved)",
+    same("dataset_columns rows (rebuilt at v1.5.2 — ids must stay preserved)",
          "SELECT id, dataset_id, column_text, column_type, sequence_order, source, "
          "equivalence_group_id FROM dataset_columns ORDER BY id", "dataset_columns")
-    same("dataset_values parentage (the cascade canary for the rebuild)",
+    same("dataset_values parentage (the cascade canary for v1.5.2's rebuild)",
          "SELECT id, row_id, column_id, value_text FROM dataset_values ORDER BY id",
          "dataset_values")
-    same("recode_definitions parentage (a rebuilt table's second child)",
+    same("recode_definitions parentage (a v1.5.2-rebuilt table's second child)",
          "SELECT id, column_id, name, is_primary FROM recode_definitions ORDER BY id",
          "recode_defs")
-    same("documents rows (REBUILT — ids must be preserved, they are segment parents)",
+    same("documents rows (rebuilt at v1.5.2 — they are segment parents)",
          "SELECT id, project_id, name, source_filename FROM documents ORDER BY id",
          "documents")
-    same("datasets rows (REBUILT — ids must be preserved, they are column parents)",
+    same("datasets rows (rebuilt at v1.5.2 — they are column parents)",
          "SELECT id, project_id, name FROM datasets ORDER BY id", "datasets")
-    same("participants (neither rebuild may disturb the shared identity spine)",
+    same("participants (no rebuild may disturb the shared identity spine)",
          "SELECT id, project_id, identifier, display_name FROM participants ORDER BY id",
          "participants")
-    same("dataset_rows participant links (the FK crossing the `datasets` rebuild)",
+    same("dataset_rows participant links (the FK crossing v1.5.2's `datasets` rebuild)",
          "SELECT id, dataset_id, participant_id FROM dataset_rows ORDER BY id",
          "dataset_rows")
-    same("magnitude ratings (v1.5.1's fixture: 0.0 stays 0.0, NULL stays UNRATED)",
+    same("magnitude ratings (0.0 stays 0.0, NULL stays UNRATED — on the REBUILT table's child)",
          "SELECT id, magnitude, magnitude_conflict FROM code_applications ORDER BY id",
          "magnitudes")
-    same("declared rating scales (v1.5.1's fixture — the scale 0.0 is interior to)",
+    same("declared rating scales (ON the REBUILT table — the scale 0.0 is interior to)",
          "SELECT id, magnitude_min, magnitude_max, magnitude_step, magnitude_labels "
          "FROM codes ORDER BY id", "code_scales")
 
-    # ── What v1.5.2 must have CHANGED: five columns, and the VALUE each holds ──
+    # ── Every PRE-EXISTING column, every row, of the tables this cut can touch ──
+    #
+    # 🔴 The check a rebuild most needs and the one a hand-listed SELECT cannot give:
+    # a copy that dropped ONE column's data keeps every count, id and parent link.
+    # The column list was read from the database at seed time, so a column that
+    # exists but nobody thought to name is compared too. New columns are not in it;
+    # what they must hold is asserted separately below.
+    for table, (cols, want) in before["full_rows"].items():
+        missing = [c for c in cols if c not in _cols(conn, table)]
+        if missing:
+            fails.append(f"`{table}` LOST column(s) {missing} in the upgrade — every row's "
+                         "value for them is gone")
+            continue
+        got = _full_rows(conn, table, cols)
+        if got != want:
+            diff = [(w, g) for w, g in zip(want, got) if w != g]
+            first = (f"\n     before={diff[0][0]}\n     after ={diff[0][1]}"
+                     if diff else "")
+            fails.append(
+                f"`{table}`: {len(diff) or 'the set of'} row(s) changed across the upgrade "
+                f"(rows {len(want)} -> {len(got)}; columns {cols}){first}")
+
+    # ── Foreign keys: the rebuilt table's own, and its two children's ─────────
+    #
+    # Batch reflection RE-DECLARES `codes`' FKs on the recreated table. One lost or
+    # re-declared with another ON DELETE is invisible to every count until something
+    # is deleted — and a category delete that CASCADEd instead of SET NULL would take
+    # its codes and, at runtime, their coding.
+    for table, was in before["fks"].items():
+        now = _fks(conn, table)
+        for fk in was:
+            if fk not in now:
+                same_col = [n for n in now if n[1] == fk[1]]
+                fails.append(
+                    f"FK on `{table}.{fk[1]}` → `{fk[0]}` did not survive the upgrade "
+                    f"(ON DELETE {fk[4]})" +
+                    (f"; it now reads {same_col}" if same_col else "; it is GONE"))
+    for (table, col), (ref, on_delete) in NEW_FKS.items():
+        got = [fk for fk in _fks(conn, table) if fk[1] == col]
+        if not got:
+            fails.append(f"row 48: `{table}.{col}` has no FK to `{ref}` at all")
+        elif got[0][0] != ref or got[0][4] != on_delete:
+            fails.append(
+                f"row 48: `{table}.{col}` → `{got[0][0]}` is ON DELETE {got[0][4]}, not "
+                f"{on_delete} — deleting a set must leave its codes as ordinary codes, "
+                "and a CASCADE would take them and every coding on them")
+
+    # ── What this cut must have ADDED, and the VALUE each new column holds ─────
     #
     # The rows must not move (asserted above); what must be different is the SHAPE,
-    # and what each new column must arrive HOLDING is the assertion no count,
-    # parentage or integrity check can make. 🔴 Per COLUMN — `managed_stale` has a
-    # `server_default='0'` and the other four must be NULL, so the v1.5.0 form of
-    # this loop ("every new column arrives empty") would fail a correct migration.
+    # and what each new column arrives HOLDING is the assertion no count, parentage or
+    # integrity check can make. Per COLUMN, with each one's own reason — v1.5.2's
+    # `managed_stale` showed that "every new column arrives empty" is not a rule.
     for table, expected in NEW_COLUMNS.items():
         have_cols = _cols(conn, table)
         missing = [c for c in expected if c not in have_cols]
         if missing:
-            fails.append(f"v1.5.2: {table} is missing {missing} after the upgrade")
+            fails.append(f"{table} is missing {missing} after the upgrade")
             continue
         rows = x(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         if not rows:
-            fails.append(f"v1.5.2: {table} has NO rows, so what its new columns hold "
+            fails.append(f"{table} has NO rows, so what its new columns hold "
                          "proves nothing — seed one before trusting this run")
             continue
-        for col, want in expected.items():
+        for col, (want, why) in expected.items():
             if want is None:
                 bad = x(f"SELECT COUNT(*) FROM {table} WHERE {col} IS NOT NULL").fetchone()[0]
-                why = ("it is a CLAIM — which code this column scores, who this document "
-                       "is about, when this was last computed — and a default asserts one "
-                       "that nobody made")
             else:
                 bad = x(f"SELECT COUNT(*) FROM {table} "
                         f"WHERE {col} IS NULL OR {col} != ?", (want,)).fetchone()[0]
-                why = (f"it must arrive as {want!r}: `managed_stale` is a POSITIVE signal "
-                       "only, so 0 on an untouched dataset is true, while NULL would leave "
-                       "a three-state flag the freshness pair does not define")
             if bad:
                 fails.append(
-                    f"v1.5.2: {bad} pre-existing {table} row(s) came out of the migration "
+                    f"{bad} pre-existing {table} row(s) came out of the migration "
                     f"with {col} not {want!r} — {why}")
+    for table in NEW_TABLES_EMPTY:
+        if table not in _tables(conn):
+            fails.append(f"row 48: table `{table}` was never created")
+        elif n := x(f"SELECT COUNT(*) FROM {table}").fetchone()[0]:
+            fails.append(f"row 48: `{table}` arrived holding {n} row(s) — a migration that "
+                         "fabricates a set reclassifies coding that already exists")
 
     # v1.4.0's provenance fields are BELOW --from-revision: present before this
     # release starts, so they are checked as INVARIANT, never as evidence anything ran.
@@ -646,9 +860,9 @@ def verify(db_path: Path, before: dict) -> list[str]:
     if V140_INDEX not in _indexes(conn, "dataset_columns"):
         fails.append(f"v1.4.0 index `{V140_INDEX}` vanished — this release must not touch it")
 
-    # ── Indexes across the two REBUILDS ───────────────────────────────────────
+    # ── Indexes across the REBUILD of `codes` ─────────────────────────────────
     #
-    # 🔴 This is the check the last two cuts did not need. Batch reflection COPIES
+    # 🔴 Batch reflection COPIES
     # a table's indexes onto the recreated table; a copy that quietly drops one
     # leaves a UNIQUE constraint unenforced, and nothing else about the database
     # looks wrong afterwards. Every index that existed before must still exist, and
@@ -672,28 +886,106 @@ def verify(db_path: Path, before: dict) -> list[str]:
                 fails.append(f"index `{name}` on `{table}` changed definition\n"
                              f"     before={sql}\n     after ={now[name]}")
 
-    # What this release must CREATE. Checked here rather than behaviourally for the
-    # partial `WHERE`: SQLite treats NULLs as distinct in a plain unique index, so a
-    # non-partial version of `uq_datasets_project_managed_kind` would behave
-    # identically on every row this corpus can hold. The text is the only tell.
-    all_indexes = {n: s for t in INDEXED_TABLES for n, s in _indexes(conn, t).items()}
-    for name, predicate in NEW_INDEXES.items():
+    # What this cut must CREATE, and which of it must be UNIQUE. `code_sets` is a
+    # new table, so the lookup is over every index in the database rather than
+    # `INDEXED_TABLES`.
+    all_indexes = {r[0]: (r[1] or "") for r in x(
+        "SELECT name, sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")}
+    for name, unique in NEW_INDEXES.items():
         if name not in all_indexes:
-            fails.append(f"v1.5.2: index `{name}` was never created")
-        elif predicate and predicate.lower() not in all_indexes[name].lower():
-            fails.append(
-                f"v1.5.2: index `{name}` exists but is NOT partial on `{predicate}` — "
-                "without it the constraint reaches ordinary datasets, where NULL is the "
-                f"normal value: {all_indexes[name]}")
+            fails.append(f"index `{name}` was never created")
+        elif unique and "unique" not in all_indexes[name].lower():
+            fails.append(f"index `{name}` exists but is NOT UNIQUE: {all_indexes[name]}")
 
     # ══ BEHAVIOURAL: the new constraints actually DO what they declare ═══════
     #
     # Reflecting a constraint back only re-reads what the migration wrote. These
-    # checks exercise it instead. ⚠️ **They all MUTATE the database, so every
-    # comparison above must already have run** — in particular the partial-index
-    # check sets `managed_kind`, which the "arrives NULL" assertion reads.
+    # checks exercise it instead, with foreign keys ON, as the app runs. ⚠️ **They
+    # all MUTATE the database, so every comparison above must already have run.**
     conn.execute("PRAGMA foreign_keys=ON")
 
+    # Row 48 — a code set, written the way a writer that omits `exhaustive` would.
+    # The default is visible only to a write; 1 would turn every blank on the set
+    # into MISSING data.
+    if "code_sets" in _tables(conn) and "code_set_id" in _cols(conn, "codes"):
+        x("INSERT INTO code_sets (id, project_id, uuid, label, created_at, updated_at) "
+          "VALUES (?,1,?,'Stance',?,?)", (CODE_SET_ID, CODE_SET_UUID, NOW, NOW))
+        conn.commit()
+        ex = x("SELECT exhaustive FROM code_sets WHERE id=?", (CODE_SET_ID,)).fetchone()[0]
+        if ex != 0:
+            fails.append(f"row 48: a code set written without `exhaustive` reads {ex!r}, "
+                         "not 0 — a blank passage on it would count as MISSING data "
+                         "rather than the answer 'none of these'")
+        # The uuid is what a merge matches a set on; two sets sharing one would merge
+        # a colleague's set into the wrong one.
+        try:
+            x("INSERT INTO code_sets (id, project_id, uuid, label, created_at, updated_at) "
+              "VALUES (?,1,?,'Stance (copy)',?,?)",
+              (CODE_SET_DUPLICATE, CODE_SET_UUID, NOW, NOW))
+            conn.commit()
+            fails.append("row 48: two code sets were stored with ONE uuid — "
+                         "`ix_code_sets_uuid` does not enforce uniqueness")
+        except Exception:
+            conn.rollback()
+
+        # 🔴 Deleting a set must leave its codes, and their coding, exactly where they
+        # were. Two codes join it: one with a human's applications, one with the
+        # MACHINE coder's.
+        members = (2, CODE_GROUPED)
+        coded = x("SELECT COUNT(*) FROM code_applications WHERE code_id IN (?,?)",
+                  members).fetchone()[0]
+        x("UPDATE codes SET code_set_id=? WHERE id IN (?,?)", (CODE_SET_ID, *members))
+        conn.commit()
+        x("DELETE FROM code_sets WHERE id=?", (CODE_SET_ID,))
+        conn.commit()
+        left = x("SELECT id, code_set_id FROM codes WHERE id IN (?,?) ORDER BY id",
+                 members).fetchall()
+        still = x("SELECT COUNT(*) FROM code_applications WHERE code_id IN (?,?)",
+                  members).fetchone()[0]
+        if len(left) != len(members):
+            fails.append(
+                f"row 48 ON DELETE SET NULL: deleting a code set DELETED {len(members) - len(left)} "
+                f"of its codes, and {coded - still} of {coded} codings with them — the FK "
+                "behaves as CASCADE")
+        elif any(r[1] is not None for r in left):
+            fails.append(f"row 48 ON DELETE SET NULL did not fire: {left}")
+        elif still != coded:
+            fails.append(f"row 48: deleting a code set lost {coded - still} codings")
+
+    # The rebuild RE-DECLARED `codes`' two SET NULL FKs. Deleting what a code points
+    # at must leave the code — and its machine coder's application — in place.
+    for parent, pid, col in (("code_categories", CATEGORY_ID, "category_id"),
+                             ("code_equivalence_groups", CODE_GROUP_ID,
+                              "code_equivalence_group_id")):
+        if parent in _tables(conn) and col in _cols(conn, "codes") and \
+                x(f"SELECT 1 FROM {parent} WHERE id=?", (pid,)).fetchone():
+            # ⚠️ Only a check whose subject still EXISTS can blame its own delete.
+            # When an earlier failure already took the code or its coding (measured:
+            # a CASCADE set FK, or foreign keys ON during the rebuild), this delete
+            # would be reported as the cause — the wrong question for the reader.
+            if not (x("SELECT 1 FROM codes WHERE id=?", (CODE_GROUPED,)).fetchone() and
+                    x("SELECT 1 FROM code_applications WHERE id=?",
+                      (APP_MACHINE,)).fetchone()):
+                fails.append(f"(`codes.{col}` ON DELETE not exercised: code {CODE_GROUPED} "
+                             "or its coding was already gone — see the failures above)")
+                continue
+            x(f"DELETE FROM {parent} WHERE id=?", (pid,))
+            conn.commit()
+            code = x(f"SELECT {col} FROM codes WHERE id=?", (CODE_GROUPED,)).fetchone()
+            if code is None:
+                fails.append(f"deleting a row of `{parent}` DELETED the code that pointed "
+                             f"at it — `codes.{col}` came out of the rebuild as CASCADE")
+            elif code[0] is not None:
+                fails.append(f"deleting a row of `{parent}` left `codes.{col}` = {code[0]} "
+                             "— its ON DELETE SET NULL did not survive the rebuild")
+            elif not x("SELECT 1 FROM code_applications WHERE id=?",
+                       (APP_MACHINE,)).fetchone():
+                fails.append(f"deleting a row of `{parent}` lost the coding on its code")
+
+    # v1.5.2's checks below are RETAINED as coverage of the BUILT database, not as
+    # claims about this cut: the constraints they exercise were created below
+    # --from-revision.
+    #
     # Row 46: deleting a participant must degrade the document's link, never take
     # the document. This is the withdrawal case — `withdrawal_redaction.py` UNLINKS
     # documents and reports them precisely because "about this person" is true of a
@@ -704,12 +996,10 @@ def verify(db_path: Path, before: dict) -> list[str]:
                            (PARTICIPANT_LINKED,)).fetchone()
     if doc_has_link and participant_seeded and \
             x("SELECT 1 FROM documents WHERE id=1").fetchone():
-        x("UPDATE documents SET participant_id=? WHERE id=1", (PARTICIPANT_LINKED,))
-        conn.commit()
         linked = x("SELECT participant_id FROM documents WHERE id=1").fetchone()
         if not linked or linked[0] != PARTICIPANT_LINKED:
-            fails.append(f"row 46: a document could not be linked to a participant at "
-                         f"all — participant_id reads {linked}")
+            fails.append(f"row 46: the document's seeded participant link reads {linked} "
+                         f"after the upgrade, not {PARTICIPANT_LINKED}")
         else:
             x("DELETE FROM participants WHERE id=?", (PARTICIPANT_LINKED,))
             conn.commit()
@@ -722,7 +1012,7 @@ def verify(db_path: Path, before: dict) -> list[str]:
             elif doc[0] is not None:
                 fails.append("row 46 ON DELETE SET NULL did not fire: "
                              f"documents.participant_id={doc[0]}")
-            # The same FK family on a child of the REBUILT `datasets` table.
+            # The same FK family on a child of v1.5.2's rebuilt `datasets` table.
             row = x("SELECT participant_id FROM dataset_rows WHERE id=1").fetchone()
             if row is None:
                 fails.append("the dataset ROW was deleted with the participant — its "
@@ -732,13 +1022,13 @@ def verify(db_path: Path, before: dict) -> list[str]:
 
     # Row 45 (i).3: at most one participant dataset PER PROJECT. The index is what
     # makes that structural rather than something a service has to remember, so it
-    # has to refuse the second one in a project — and permit one in the next.
+    # has to refuse a second one in a project — `PARTICIPANT_TABLE` is the first —
+    # and permit one in the next.
     if "managed_kind" in _cols(conn, "datasets") and \
-            x("SELECT 1 FROM datasets WHERE id=?", (DS_SECOND,)).fetchone():
-        x("UPDATE datasets SET managed_kind='participants' WHERE id=?", (DS_MAIN,))
-        conn.commit()
+            x("SELECT 1 FROM datasets WHERE id=? AND managed_kind='participants'",
+              (PARTICIPANT_TABLE,)).fetchone():
         try:
-            x("UPDATE datasets SET managed_kind='participants' WHERE id=?", (DS_SECOND,))
+            x("UPDATE datasets SET managed_kind='participants' WHERE id=?", (DS_MAIN,))
             conn.commit()
             fails.append(
                 "uq_datasets_project_managed_kind did NOT refuse a SECOND participant "

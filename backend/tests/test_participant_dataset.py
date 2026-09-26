@@ -599,12 +599,27 @@ class TestPortability:
             "the rows must re-point at the IMPORTED participants, not the source's"
         )
 
-    def test_the_format_version_is_not_bumped(self):
+    def test_this_row_needed_no_format_bump_and_the_reason_is_structural(self):
         """Pinned so a later reader does not 'tidy' this into a bump. The gate
         question is what an OLDER build does with a file it half-understands, and
-        here the answer is: it gets a perfectly ordinary dataset."""
-        from app.services.project_portability import CURRENT_FORMAT_VERSION
-        assert CURRENT_FORMAT_VERSION == 6
+        here the answer is: it gets a perfectly ordinary dataset — because the
+        marker is NULLABLE, and every refusal keys on it being non-null, so a build
+        that drops the column sees exactly the state it had before the column
+        existed.
+
+        🔴 **It used to assert `CURRENT_FORMAT_VERSION == 6`, and #958's bump to v7 —
+        nothing whatever to do with managed datasets — turned it red.** That is a
+        number pinned in two files going stale in the one nobody was looking at. The
+        version has ONE pin, `test_project_portability.py::TestFormatVersionIsPinned`,
+        which is also where a bump has to state what the new version MEANS; this test
+        keeps the claim that is actually about THIS row.
+        """
+        from app.models.dataset import Dataset
+
+        assert Dataset.__table__.columns["managed_kind"].nullable, (
+            "the marker became required, so an older build dropping it no longer "
+            "yields an ordinary dataset — the no-bump argument is gone"
+        )
 
 
 class TestEveryRowSetEndpointAsksTheGate:

@@ -30,6 +30,8 @@ import { buildCategoryOptions } from '@/lib/category-options'
 import { LoadState } from '@/components/LoadStatus'
 import { useListLoad } from '@/hooks/useListLoad'
 import type { ListLoad } from '@/lib/list-status'
+import { focusedElementOwnsKey } from '@/lib/keyboard-scope'
+import { PANEL_SCROLLER } from '@/components/CollapsiblePanel'
 
 export interface CodePanelHandle {
   focus: () => void
@@ -72,6 +74,17 @@ interface CodePanelProps {
    */
   disabledHint?: string
   categories?: { id: number; name: string; parent_id?: number | null }[]
+  /**
+   * Row 48 — the code-set pickers, rendered ABOVE the code list.
+   *
+   * A slot rather than props, because the strip fetches its own sets and owns
+   * its own mutation: the three workbenches that mount this panel differ in the
+   * shape of their applied-code payload and in whether they have a history
+   * stack, and threading five props through each of them is the enumeration
+   * debt a slot avoids. `CodebookView` mounts this panel too and passes none —
+   * it is an analysis surface with no target to write a selection to.
+   */
+  codeSets?: React.ReactNode
   // Keyboard navigation props
   isFocused?: boolean
   onFocusChange?: (focused: boolean) => void
@@ -92,6 +105,7 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
   disabled,
   disabledHint = 'Select a segment to apply codes.',
   categories: categoriesProp,
+  codeSets,
   isFocused = false,
   onFocusChange,
   onNavigateToTranscript,
@@ -283,6 +297,16 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     // Only handle if this panel is supposed to be focused (prevents stale focus issues)
     if (!isFocused) return
+    // 🔴 #1041 — this listener sees keys aimed at every control INSIDE the panel,
+    // so it stands down twice, like the workbench layer (#784): a key a control
+    // already handled (the code-set picker's arrows and printable keys), and an
+    // activation key on a real control. Without the second, Space and Enter were
+    // cancelled on the code-set values, the colour dots and the Options buttons
+    // alike — none of them could be operated from the keyboard. The container
+    // itself holds focus while the code LIST is navigated, so that path is
+    // untouched: its role is null and it owns no key.
+    if (e.nativeEvent.defaultPrevented) return
+    if (e.target !== e.currentTarget && focusedElementOwnsKey(e.key, e.target as Element)) return
 
     // In input: Tab/Enter to create code
     if (e.target === e.currentTarget || !(e.target instanceof HTMLInputElement)) {
@@ -474,6 +498,11 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
         }
       }}
     >
+      {/* Row 48 — the variables, above the tag list. A set answers "which ONE
+          of these?" and the list below answers "which of these apply?"; putting
+          the two in one list would make the exclusive one look optional. */}
+      {codeSets}
+
       {/* Header */}
       <div className="px-4 pt-3 pb-3 border-b">
         {/* Search/Add row */}
@@ -546,7 +575,7 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
       )}
 
       {/* Code List */}
-      <div ref={listRef} className="flex-1 overflow-y-auto">
+      <div ref={listRef} className={PANEL_SCROLLER}>
         {(() => {
           // Build a flat-index lookup: code.id → index in allDisplayedCodes
           const flatIndexMap = new Map<number, number>()

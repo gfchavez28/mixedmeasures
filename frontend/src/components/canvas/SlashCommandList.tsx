@@ -58,7 +58,7 @@ const SlashCommandList = forwardRef<SlashCommandListRef, SlashCommandListProps>(
       if (!rect) return null
       return (
         <div
-          className="bg-white dark:bg-mm-surface border border-mm-border rounded-lg shadow-lg py-2 px-3 text-xs text-mm-text-muted"
+          className="bg-white dark:bg-mm-surface border border-border rounded-lg shadow-lg py-2 px-3 text-xs text-mm-text-muted"
           style={{ position: 'fixed', top: rect.bottom + 4, left: Math.max(8, rect.left), width: 220, zIndex: 60 }}
         >
           No matching commands
@@ -79,7 +79,7 @@ const SlashCommandList = forwardRef<SlashCommandListRef, SlashCommandListProps>(
         ref={listRef}
         role="listbox"
         aria-label="Slash commands"
-        className="bg-white dark:bg-mm-surface border border-mm-border rounded-lg shadow-lg overflow-hidden py-1"
+        className="bg-white dark:bg-mm-surface border border-border rounded-lg shadow-lg overflow-hidden py-1"
         style={{
           position: 'fixed',
           top,

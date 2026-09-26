@@ -141,18 +141,20 @@ def _export(db, tmp_path: Path) -> Path:
 
 
 def _rewrite(src: Path, dest: Path, mutate) -> Path:
-    """Re-zip an export with `project.json` edited by `mutate(data)`."""
+    """Re-zip an export with the payload edited by `mutate(data)`.
+
+    Goes through `tests/archive_support` rather than touching `project.json` directly:
+    since v7 (#958) the five data-scaled entities are their own members, so a mutation of
+    one of them would otherwise be written into a document nothing reads — silently, which
+    is the failure mode this file is about in the product.
+    """
+    from tests.archive_support import archive_extras, archive_payload, write_archive
+
     zin = zipfile.ZipFile(src)
-    data = json.loads(zin.read("project.json"))
+    manifest = json.loads(zin.read("manifest.json"))
+    data = archive_payload(zin)
     mutate(data)
-    buf = BytesIO()
-    with zipfile.ZipFile(buf, "w") as zout:
-        for name in zin.namelist():
-            zout.writestr(
-                name, json.dumps(data) if name == "project.json" else zin.read(name),
-            )
-    dest.write_bytes(buf.getvalue())
-    return dest
+    return write_archive(dest, manifest, data, archive_extras(zin))
 
 
 def _import_as_new(db, path: Path, tmp_path: Path) -> int:

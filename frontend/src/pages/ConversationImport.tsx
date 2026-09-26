@@ -8,7 +8,10 @@ import { conversationsApi, participantsApi, mediaApi, retryUnanswered, type Part
 import { useListLoad } from '@/hooks/useListLoad'
 import { validateMediaFile, MEDIA_ACCEPT, MEDIA_FORMAT_LABEL, describeMediaUploadError, isVideoFilename } from '@/lib/media-constants'
 import { formatBytes } from '@/lib/format'
-import { TRANSCRIPT_ACCEPT, isSupportedTranscriptFile } from '@/lib/conversation-import-formats'
+import { TRANSCRIPT_ACCEPT, TRANSCRIPT_FORMAT_LABEL, isSupportedTranscriptFile } from '@/lib/conversation-import-formats'
+import { checkImportFiles } from '@/lib/upload-limits'
+import { useStepFocus } from '@/hooks/useStepFocus'
+import UploadLimitNote from '@/components/UploadLimitNote'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -326,15 +329,21 @@ export default function ConversationImport() {
 
     // Transcript formats: CSV + VTT/SRT subtitles (#524 — Zoom/Teams exports).
     // Single-sourced in lib/conversation-import-formats.ts (#552).
-    const csvFiles = selectedFiles.filter(f => isSupportedTranscriptFile(f.name))
-    if (csvFiles.length === 0) return
+    // #1007/#1012: refuse a wrong-type or over-limit transcript at selection,
+    // naming it — a wrong-type file used to vanish here in silence.
+    const { accepted: csvFiles, message } = checkImportFiles(selectedFiles, {
+      isSupported: isSupportedTranscriptFile, formatLabel: TRANSCRIPT_FORMAT_LABEL, noun: 'transcript',
+    })
+    const messages: string[] = message ? [message] : []
+    if (csvFiles.length === 0) { setError(messages.join(' ')); return }
 
     // Enforce max
     const newFiles = [...files, ...csvFiles].slice(0, MAX_FILES)
     const addedCount = newFiles.length - files.length
     if (addedCount < csvFiles.length) {
-      setError(`File limit is ${MAX_FILES}. Only ${addedCount} file(s) added.`)
+      messages.push(`File limit is ${MAX_FILES}. Only ${addedCount} file(s) added.`)
     }
+    setError(messages.join(' '))
 
     setFiles(newFiles)
 
@@ -852,6 +861,7 @@ export default function ConversationImport() {
   ]
 
   const stepIndex = steps.findIndex(s => s.key === step)
+  const stepHeadingRef = useStepFocus(step)
 
   // --- Render helpers ---
 
@@ -1035,7 +1045,7 @@ export default function ConversationImport() {
                 className={cn(
                   'w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium',
                   stepIndex === i
-                    ? 'bg-primary text-white'
+                    ? 'bg-primary text-primary-foreground'
                     : stepIndex > i
                     ? 'bg-primary/15 text-primary'
                     : 'bg-mm-border-subtle text-mm-text-secondary'
@@ -1055,8 +1065,18 @@ export default function ConversationImport() {
           ))}
         </nav>
 
+        {/* #1011: where focus lands when the step changes. A step not on the rail
+            (a single-file import's results) still gets a heading to land on. */}
+        <h2 ref={stepHeadingRef} tabIndex={-1} className="sr-only">
+          {stepIndex >= 0
+            ? `Step ${stepIndex + 1} of ${steps.length}: ${steps[stepIndex].label}`
+            : step === 'results' ? 'Results' : step === 'importing' ? 'Importing' : ''}
+        </h2>
+
+        {/* #1012: an ALERT, so a refused file is announced — this slot was a
+            plain div, the only wizard error area a reader never heard. */}
         {error && (
-          <div className="mb-6 p-4 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 rounded-lg flex items-start gap-2">
+          <div role="alert" className="mb-6 p-4 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 rounded-lg flex items-start gap-2">
             <CircleAlert className="w-5 h-5 flex-shrink-0 mt-0.5" />
             <span>{error}</span>
           </div>
@@ -1114,6 +1134,7 @@ export default function ConversationImport() {
                 <p className="text-mm-text-secondary mb-4">
                   Drag and drop transcript file(s) here, or click to browse
                 </p>
+                <UploadLimitNote noun="transcript files" recordings className="-mt-2 mb-4" />
                 <input
                   ref={transcriptInputRef}
                   type="file"

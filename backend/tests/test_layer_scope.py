@@ -14,7 +14,7 @@ from app.models.conversation import Conversation
 from app.models.project import Project
 from app.models.segment import Segment
 from app.models.user import User
-from app.services.coding_layers import LAYER_CONSENSUS, LAYER_HUMAN, layer_origin_filter
+from app.services.coding_layers import LAYER_CONSENSUS, LAYER_HUMAN, layer_scope_filter
 from app.services.consensus import consensus_exists_for_project, materialize_consensus_for_project
 from app.services.coding_counts import coded_segment_count_for_project
 from app.services.code_analysis import get_code_frequencies
@@ -54,13 +54,13 @@ def _setup(db, pid=40):
     return pid, 4000, 4001
 
 
-def test_layer_origin_filter_selects_layer(db_session):
+def test_layer_scope_filter_selects_layer(db_session):
     db = db_session
     pid, _, _ = _setup(db)
     rows = db.query(CodeApplication).filter(CodeApplication.code_id == CODE_X)
-    assert rows.filter(layer_origin_filter(LAYER_HUMAN)).count() == 3, "3 human applications"
-    assert rows.filter(layer_origin_filter(LAYER_CONSENSUS)).count() == 1, "1 consensus row (S1)"
-    assert rows.filter(layer_origin_filter()).count() == 3, "default (None) == human"
+    assert rows.filter(layer_scope_filter(LAYER_HUMAN)).count() == 3, "3 human applications"
+    assert rows.filter(layer_scope_filter(LAYER_CONSENSUS)).count() == 1, "1 consensus row (S1)"
+    assert rows.filter(layer_scope_filter()).count() == 3, "default (None) == human"
 
 
 def test_consensus_exists_for_project(db_session):

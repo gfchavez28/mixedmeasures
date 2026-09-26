@@ -41,6 +41,16 @@ from app.routers.media import (
     sanitize_duration_hint,
 )
 from app.services.backup import create_backup, restore_from_backup
+from tests.backup_support import stamp_revision
+
+
+def _claim_head(db_path) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    stamp_revision(conn)
+    conn.commit()
+    conn.close()
 
 
 REFERENCE_DIR = Path(__file__).parent / "reference_data"
@@ -441,6 +451,7 @@ class TestBackupWithMedia:
         eng = ce(f"sqlite:///{db_path}")
         Base.metadata.create_all(eng)
         eng.dispose()
+        _claim_head(db_path)  # create_all records no revision; a restore refuses that (#1026)
 
         # Create media file
         conv_media = media_dir / str(project.id) / str(conv.id)
@@ -474,6 +485,7 @@ class TestBackupWithMedia:
         eng = ce(f"sqlite:///{db_path}")
         Base.metadata.create_all(eng)
         eng.dispose()
+        _claim_head(db_path)  # create_all records no revision; a restore refuses that (#1026)
 
         # Create media file
         conv_media = media_dir / "1" / "1"
@@ -709,6 +721,7 @@ class TestSlab5StoragePolicy:
         eng = ce(f"sqlite:///{db_path}")
         Base.metadata.create_all(eng)
         eng.dispose()
+        _claim_head(db_path)  # create_all records no revision; a restore refuses that (#1026)
 
         info = create_backup(db_path, docs_dir, media_dir, backup_dir, "auto", include_video=False)
         backup_path = backup_dir / info.filename
@@ -734,6 +747,7 @@ class TestSlab5StoragePolicy:
         eng = ce(f"sqlite:///{db_path}")
         Base.metadata.create_all(eng)
         eng.dispose()
+        _claim_head(db_path)  # create_all records no revision; a restore refuses that (#1026)
 
         video_path = media_dir / str(project.id) / str(conv.id) / "original.mp4"
         video_bytes = video_path.read_bytes()

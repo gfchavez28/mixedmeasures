@@ -61,6 +61,11 @@ from app.services.project_portability import (
     import_project,
     validate_project_file,
 )
+# v7 (#958) keeps the five data-scaled entities in their own zip members, so a test that
+# doctors a fixture inside an archive reads it through this helper, never through a bare
+# `json.loads(zf.read("project.json"))`.
+from app.services import project_portability as pp_module
+from tests.archive_support import archive_payload
 from app.services.codebook_exchange import (
     LEGACY_QDC_NAMESPACE,
     MAX_QDC_DEPTH,
@@ -581,11 +586,16 @@ class TestExportProject:
             assert manifest["project_summary"]["canvas_theme_count"] == 2
 
     def test_export_all_entities(self, db_session, populated_project):
-        """All entity arrays are populated in project.json."""
+        """Every entity array is populated — in `project.json` or, since v7, its entry.
+
+        This test is about the GATHER (a Segment parent with no branch here is silent
+        data loss), not about the layout, so it reads the archive the way an importer
+        does and asserts on the union. Where each entity lives is pinned by
+        `test_portability_stream_equivalence.py`.
+        """
         pid = populated_project["project"].id
         buf = export_project(db_session, pid, Path("/nonexistent"))
-        with zipfile.ZipFile(buf, "r") as zf:
-            data = json.loads(zf.read("project.json"))
+        data = archive_payload(buf)
 
         assert len(data["participants"]) == 1
         assert len(data["speakers"]) == 1
@@ -1156,7 +1166,9 @@ class TestObservationPortability:
         obs = populated_project["observation"]
 
         buf = export_project(db, pid, Path("/nonexistent"))
-        data = json.loads(zipfile.ZipFile(io.BytesIO(buf.getvalue())).read("project.json"))
+        # v7 keeps `segments` in its own entry; `archive_payload` folds it back in so
+        # this fixture surgery reads the way it always did.
+        data = archive_payload(buf)
 
         # The colleague marked a SECOND clip on the same observation — a clip-set
         # divergence that would refuse if observations went through the gate.
@@ -1191,7 +1203,7 @@ class TestObservationPortability:
     def _export_with_extra_clip(self, db, pid, obs):
         """An export of this project plus one clip the colleague added."""
         buf = export_project(db, pid, Path("/nonexistent"))
-        data = json.loads(zipfile.ZipFile(io.BytesIO(buf.getvalue())).read("project.json"))
+        data = archive_payload(buf)
         template = next(s for s in data["segments"] if s.get("observation_id") == obs.id)
         extra = dict(template)
         extra["_original_id"] = max(s["_original_id"] for s in data["segments"]) + 1
@@ -1278,7 +1290,10 @@ class TestObservationPortability:
         obs = populated_project["observation"]
 
         buf = export_project(db, pid, Path("/nonexistent"))
-        data = json.loads(zipfile.ZipFile(io.BytesIO(buf.getvalue())).read("project.json"))
+        # ⚠️ `archive_payload`: `_assert_merge_compatible` reads `data["segments"]`, and a
+        # bare `project.json` read would hand it an empty list — so the gate would find no
+        # clips to compare and this test would pass without exercising anything.
+        data = archive_payload(buf)
         obs_item = next(o for o in data["observations"] if o["_original_id"] == obs.id)
         obs_item["segmentation_frozen_at"] = "2026-07-19T12:00:00"
         obs.segmentation_frozen_at = datetime(2026, 7, 19, 12, 0, 0)
@@ -1733,19 +1748,37 @@ class TestImportProject:
         """Export -> import -> export produces structurally equivalent data."""
         pid = populated_project["project"].id
 
-        # First export
+        # First export. ⚠️ `archive_payload`, not a bare `project.json` read: since v7 the
+        # five data-scaled entities are their own members, so `for key in data1` below
+        # would silently SKIP exactly the entities this assertion exists to compare —
+        # segments, codings, rows, values and scores — and still pass.
         buf1 = export_project(db_session, pid, Path("/nonexistent"))
-        with zipfile.ZipFile(buf1, "r") as zf:
-            data1 = json.loads(zf.read("project.json"))
+        data1 = archive_payload(buf1)
 
         # Import
         new_id = self._export_and_import(db_session, pid)
 
         # Second export
         buf2 = export_project(db_session, new_id, Path("/nonexistent"))
-        with zipfile.ZipFile(buf2, "r") as zf:
-            data2 = json.loads(zf.read("project.json"))
+        data2 = archive_payload(buf2)
 
+        assert set(data1) >= set(pp_module.JSONL_ENTITY_KEYS), (
+            "the payload lost an entity key — this comparison would skip it silently"
+        )
+        # 🔴 **`row_scores` IS DELIBERATELY NOT ROUND-TRIPPED (#958 §6), and saying so
+        # HERE is the point.** After the drop, `data1["row_scores"]` and
+        # `data2["row_scores"]` are both `[]`, so the loop below compares 0 with 0 and
+        # certifies nothing — a guard gone blind rather than a contract enforced. The
+        # deliberate loss is pinned by `test_portability_row_scores_dropped.py`; what this
+        # file asserts is that the LOOP still has something to say about the other four.
+        assert data1["row_scores"] == [] and data2["row_scores"] == [], (
+            "row_scores are back in the archive — either #958 §6 was reverted, or this "
+            "assertion is now the only thing standing between the researcher and an "
+            "imported per-record score of unknown provenance"
+        )
+        assert any(data1[k] for k in pp_module.JSONL_ENTITY_KEYS if k != "row_scores"), (
+            "every remaining data-scaled entity is empty — the comparison below is vacuous"
+        )
         # Compare entity counts
         for key in data1:
             if key in ("project", "text_coding_config", "quote_board_config"):
@@ -2780,15 +2813,39 @@ class TestFormatVersionIsPinned:
     incidental side effect of another change.
     """
 
-    def test_current_version_is_6(self):
+    def test_current_version_is_7(self):
         from app.services.project_portability import CURRENT_FORMAT_VERSION
-        assert CURRENT_FORMAT_VERSION == 6, (
+        assert CURRENT_FORMAT_VERSION == 7, (
             "The .mmproject format version changed. That is a real decision, not a "
             "detail: v2 = #414 identifier, v3 = the third Segment parent, v4 = #592 "
             "missing declarations, v5 = #687 code-point excerpt offsets, "
-            "v6 = #823(d) recode range bands AND #35 magnitude coding. If this is "
-            "intentional, update this pin AND document what the new version means "
-            "in project_portability.py, the internal design notes, and the internal design notes."
+            "v6 = #823(d) recode range bands AND #35 magnitude coding, "
+            "v7 = #958 the five data-scaled entities in their own JSONL entries. If "
+            "this is intentional, update this pin AND document what the new version "
+            "means in project_portability.py, the internal design notes, and "
+            "the internal design notes."
+        )
+
+    def test_v7_is_a_refusal_gate_and_the_reason_is_a_MISSING_KEY(self):
+        """🔴 Every earlier bump asked what a dropped COLUMN does. v7 asks about a KEY.
+
+        A v6 build reading a v7 file finds no `dataset_values` in `project.json`,
+        `data.get(...)` answers `[]`, and the dataset imports with its columns, its rows
+        and not one cell — reporting success. That is v4's silent-wrongness case at the
+        largest scale the tool has, which is what the gate exists for.
+
+        Asserted against the CODE rather than restated in prose: the entities live in
+        their own members now, and `JSONL_ENTITY_KEYS` is where that set is written down.
+        """
+        from app.services.project_portability import (
+            CURRENT_FORMAT_VERSION,
+            JSONL_ENTITY_KEYS,
+            JSONL_FORMAT_VERSION,
+        )
+        assert JSONL_FORMAT_VERSION <= CURRENT_FORMAT_VERSION
+        assert "dataset_values" in JSONL_ENTITY_KEYS, (
+            "v7 exists because the data-scaled entities left `project.json`. If they "
+            "moved back, the bump's justification changed and this pin is stale."
         )
 
     def test_v6_also_covers_magnitude_coding(self):
@@ -2854,6 +2911,62 @@ class TestPreV5OffsetRepairOnImport:
     enters at the pipeline's mouth. (Guard-gap sweep, 2026-08-12.)
     """
 
+    def test_a_current_version_archive_keeps_its_offsets_end_to_end(
+        self, db_session, tmp_path,
+    ):
+        """🔴 The repair must NOT fire on a current-format archive — driven end to end.
+
+        **This defect was live and shipped (confirmed by execution 2026-09-21).**
+        `_repair_pre_v5_excerpt_offsets` took its version from
+        `data.get("format_version")`, off the parsed `project.json` — a key that
+        document has never carried; it lives in `manifest.json`. So the guard read
+        `0` on EVERY import, never fired, and the repair converted offsets that were
+        already code points: this exact fixture exported an excerpt at offset 16 and
+        imported it at 15, and a re-import would shift it again.
+
+        ⚠️ **Nothing in this class could see it, and that is the reusable part.** The
+        three cases above call the function DIRECTLY with a hand-built `data` dict
+        carrying the very key the real caller never supplies, so they proved the
+        arithmetic and nothing about the guard. The wiring test below is a spy on the
+        CALL — the #747 question — and its docstring says it deliberately avoids an
+        offset assertion. Between them they covered "does it work" and "is it
+        reached" and left "should it have run at all" to nobody.
+
+        The fixture must contain an ASTRAL character: on BMP text both bases agree,
+        so a conversion is a no-op and the test would pass under the defect.
+        """
+        from app.services import project_portability as pp
+
+        db = db_session
+        project = Project(name="Astral", user_id=1, project_uuid=str(uuid_module.uuid4()))
+        db.add(project)
+        db.flush()
+        conv = Conversation(project_id=project.id, name="C")
+        db.add(conv)
+        db.flush()
+        seg = Segment(conversation_id=conv.id, sequence_order=0,
+                      text=self.ASTRAL_TEXT, word_count=7)
+        db.add(seg)
+        db.flush()
+        cp = self.ASTRAL_TEXT.index(self.TARGET)
+        db.add(Excerpt(project_id=project.id, segment_id=seg.id,
+                       start_offset=cp, end_offset=cp + len(self.TARGET)))
+        db.flush()
+        db.commit()
+
+        archive = tmp_path / "current.mmproject"
+        archive.write_bytes(pp.export_project(db, project.id, tmp_path / "docs").getvalue())
+        new_pid, _ = pp.import_project(db, archive, tmp_path / "docs2", user_id=1)
+        db.flush()
+
+        imported = db.query(Excerpt).filter(Excerpt.project_id == new_pid).one()
+        imported_seg = db.query(Segment).filter(Segment.id == imported.segment_id).one()
+        assert imported_seg.text[imported.start_offset:imported.end_offset] == self.TARGET, (
+            f"an already-code-point offset was converted again: {cp} -> "
+            f"{imported.start_offset}. The repair is reading a format version the "
+            "importer does not have."
+        )
+
     def test_the_repair_is_wired_into_the_real_import(self, db_session, tmp_path, monkeypatch):
         """The repair must be reached, AFTER the excerpts it is supposed to repair.
 
@@ -2862,6 +2975,11 @@ class TestPreV5OffsetRepairOnImport:
         cases above already prove what it DOES. The open question this answers is
         only whether the pipeline reaches it with a non-empty inserted set — the
         #747 failure mode, which is invisible to every other test in this class.
+
+        ⚠️ **That reasoning left a hole and the hole was live for a month** — see
+        `test_a_current_version_archive_keeps_its_offsets_end_to_end` above. "Is it
+        reached?" and "does the arithmetic work?" do not add up to "should it have
+        run?", because the condition deciding that was read from the wrong document.
         """
         from app.services import project_portability as pp
         from app.models.excerpt import Excerpt
@@ -2882,9 +3000,9 @@ class TestPreV5OffsetRepairOnImport:
         seen = {}
         real = pp._repair_pre_v5_excerpt_offsets
 
-        def spy(dbx, data, remap, inserted):
+        def spy(dbx, data, remap, inserted, **kwargs):
             seen["inserted"] = set(inserted)
-            return real(dbx, data, remap, inserted)
+            return real(dbx, data, remap, inserted, **kwargs)
 
         monkeypatch.setattr(pp, "_repair_pre_v5_excerpt_offsets", spy)
         new_pid, _ = pp.import_project(db, archive, tmp_path / "docs2", user_id=1)
@@ -2929,10 +3047,10 @@ class TestPreV5OffsetRepairOnImport:
 
         repaired = _repair_pre_v5_excerpt_offsets(
             db_session,
-            {"format_version": 4,
-             "excerpts": [{"_original_id": 1, "start_offset": u16}]},
+            {"excerpts": [{"_original_id": 1, "start_offset": u16}]},
             {"excerpts": {1: exc.id}},
             {exc.id},
+            format_version=4,
         )
         assert repaired == 1
         db_session.refresh(exc)
@@ -2960,9 +3078,10 @@ class TestPreV5OffsetRepairOnImport:
 
         repaired = _repair_pre_v5_excerpt_offsets(
             db_session,
-            {"format_version": 5, "excerpts": [{"_original_id": 1, "start_offset": cp}]},
+            {"excerpts": [{"_original_id": 1, "start_offset": cp}]},
             {"excerpts": {1: exc.id}},
             {exc.id},
+            format_version=5,
         )
         assert repaired == 0
         db_session.refresh(exc)
@@ -2990,9 +3109,10 @@ class TestPreV5OffsetRepairOnImport:
 
         repaired = _repair_pre_v5_excerpt_offsets(
             db_session,
-            {"format_version": 4, "excerpts": [{"_original_id": 1, "start_offset": start}]},
+            {"excerpts": [{"_original_id": 1, "start_offset": start}]},
             {"excerpts": {1: exc.id}},
             {exc.id},
+            format_version=4,
         )
         assert repaired == 0
         db_session.refresh(exc)

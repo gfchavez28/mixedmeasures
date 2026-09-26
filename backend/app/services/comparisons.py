@@ -263,7 +263,14 @@ def compute_group_comparison(
         values, var_info = _load_column_vectors(db, column_ids, project_id)
         source_type = "column"
     elif domain_ids:
-        values, var_info = _load_domain_vectors(db, domain_ids, project_id)
+        # ⚠️ The loader's third value is the domains with no `RowScore` rows at all
+        # (#958 §6). This surface does NOT read it: it already distinguishes the two
+        # causes one level up, per RESULT rather than per cell, through
+        # `_domain_scores_reason` — `DOMAIN_SCORES_MISSING` when no scale-score
+        # metric exists, `DOMAIN_SCORES_NOT_COMPUTED` when one does — and that
+        # vocabulary drives the *Compute the scale score* button. Reading it here
+        # would be a second derivation of a question already answered.
+        values, var_info, _unscored = _load_domain_vectors(db, domain_ids, project_id)
         source_type = "domain"
     else:
         return _no_comparison(NO_VARIABLES)

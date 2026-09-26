@@ -194,7 +194,10 @@ def test_backup_db_probe_rejects_wrong_key(enc, monkeypatch):
 # --- full encrypted backup → restore pipeline (Phase 6, gaps A + B) ----------
 
 def _seed_encrypted_db(db_path, project_names=("Alpha",)):
-    """Create the tables _read_project_summaries needs + seed projects, keyed."""
+    """Create the tables _read_project_summaries needs + seed projects, keyed, and
+    claim this build's revision — a restore refuses a database recording none (#1026)."""
+    from tests.backup_support import stamp_revision
+
     conn = database.open_raw_connection(db_path)
     conn.execute("CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT)")
     conn.execute("CREATE TABLE conversations (project_id INTEGER)")
@@ -203,8 +206,49 @@ def _seed_encrypted_db(db_path, project_names=("Alpha",)):
     conn.execute("CREATE TABLE observations (project_id INTEGER)")
     for i, name in enumerate(project_names, start=1):
         conn.execute("INSERT INTO projects (id, name) VALUES (?, ?)", (i, name))
+    stamp_revision(conn)
     conn.commit()
     conn.close()
+
+
+def test_an_older_encrypted_backup_is_migrated_in_staging_and_stays_ciphertext(enc, tmp_path):
+    """#1026 under SQLCipher, which is what the packaged app runs. The staging
+    migration opens the backup's database through `env.py`'s own engine, so the key
+    must reach it for a file that is NOT the running one — and the file swapped in
+    must still be ciphertext. A REAL baseline database, migrated forward."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.services import backup
+    from tests.backup_support import head_revision
+
+    docs = tmp_path / "documents"; docs.mkdir()
+    media = tmp_path / "media"
+    backups = tmp_path / "backups"
+    _seed_encrypted_db(enc)  # the live install, at head
+
+    old = tmp_path / "old.db"
+    cfg = database._script_only_alembic_config()
+    cfg.attributes["mm_database_path"] = str(old)
+    command.upgrade(cfg, ScriptDirectory.from_config(cfg).get_base())
+    conn = database.open_raw_connection(old)
+    conn.execute("INSERT INTO users (id, username, password_hash, created_at) "
+                 "VALUES (1, 'Researcher', '', '2026-06-06')")
+    conn.execute("INSERT INTO projects (id, user_id, name, status, created_at, updated_at) "
+                 "VALUES (1, 1, 'Old', 'active', '2026-06-06', '2026-06-06')")
+    conn.commit()
+    conn.close()
+    assert old.read_bytes()[:16] != SQLITE_HEADER, "precondition: the old backup is encrypted"
+    info = backup.create_backup(old, docs, media, backups, "auto", False)
+
+    backup.restore_from_backup(backups / info.filename, enc, docs, media, backups)
+
+    assert database.database_file_revision(enc) == head_revision()
+    conn = database.open_raw_connection(enc)
+    assert conn.execute("SELECT name FROM projects").fetchall() == [("Old",)]
+    conn.execute("SELECT code_set_id FROM codes").fetchall()
+    conn.close()
+    assert enc.read_bytes()[:16] != SQLITE_HEADER
 
 
 def test_encrypted_backup_restore_round_trip(enc, tmp_path):
@@ -234,6 +278,64 @@ def test_encrypted_backup_restore_round_trip(enc, tmp_path):
     conn.close()
     assert names == ["Alpha"]
     assert enc.read_bytes()[:16] != SQLITE_HEADER
+
+
+def test_an_encrypted_backup_holds_the_wal_work_and_stays_ciphertext(enc, tmp_path):
+    """#1025/#1044 under SQLCipher, which is what the packaged app runs. The copy goes
+    through the backup API into a destination opened by `open_raw_connection`, so it
+    is KEYED: a reader holding an old snapshot does not stop it, 'Beta' (committed
+    after the reader, so only in the WAL) is in it, and it is ciphertext readable
+    with the same key and no other."""
+    import zipfile
+
+    from app.services import backup
+
+    docs = tmp_path / "documents"; docs.mkdir()
+    media = tmp_path / "media"
+    backups = tmp_path / "backups"
+    _seed_encrypted_db(enc)
+    conn = database.open_raw_connection(enc)
+    assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    conn.close()
+
+    reader = database.open_raw_connection(enc)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM projects").fetchone()
+    writer = database.open_raw_connection(enc)
+    writer.execute("INSERT INTO projects (id, name) VALUES (2, 'Beta')")
+    writer.commit()
+    writer.close()
+    try:
+        info = backup.create_backup(enc, docs, media, backups, "manual", busy_wait_seconds=2.5)
+    finally:
+        reader.close()
+
+    with zipfile.ZipFile(backups / info.filename) as zf:
+        zf.extract("database.db", tmp_path / "out")
+    copy = tmp_path / "out" / "database.db"
+    assert copy.read_bytes()[:16] != SQLITE_HEADER
+    conn = database.open_raw_connection(copy)
+    assert [r[0] for r in conn.execute("SELECT name FROM projects ORDER BY id")] == ["Alpha", "Beta"]
+    assert conn.execute("PRAGMA cipher_integrity_check").fetchall() == []
+    conn.close()
+
+
+def test_an_encrypted_database_is_never_copied_into_a_plaintext_file(enc, tmp_path, monkeypatch):
+    """SQLCipher refuses a backup into an UNKEYED destination (measured: `SQL logic
+    error`), so if the destination were ever opened without the key the backup fails
+    loudly — it cannot quietly write a decrypted copy of the researcher's data."""
+    import sqlcipher3.dbapi2 as sqlcipher_dbapi
+
+    _seed_encrypted_db(enc)
+    real_open = database.open_raw_connection
+    dest = tmp_path / "copy.db"
+    monkeypatch.setattr(
+        database, "open_raw_connection",
+        lambda p: sqlcipher_dbapi.connect(str(p)) if str(p) == str(dest) else real_open(p),
+    )
+    with pytest.raises(Exception):
+        database.snapshot_database_file(enc, dest, busy_wait_seconds=2)
+    assert not dest.exists(), "a failed copy left its destination behind"
 
 
 def test_encrypted_restore_foreign_backup_rejected_before_mutation(enc, tmp_path, monkeypatch):

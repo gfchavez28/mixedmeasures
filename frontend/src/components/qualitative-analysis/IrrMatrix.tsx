@@ -3,7 +3,8 @@ import { useQuery } from '@tanstack/react-query'
 import { CircleCheck, CircleAlert, CircleX } from 'lucide-react'
 import {
   codeAnalysisApi, EXPORT_TIMEOUT_MS, isRequestTimeout, isServerRefusal, retryUnanswered,
-  serverDetailMessage, type Code, type IrrCodeResult, type IrrMagnitudeResult, type IrrThresholds,
+  serverDetailMessage, type Code, type IrrCodeResult, type IrrMagnitudeResult,
+  type IrrSetResult, type IrrThresholds,
 } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { LoadingNotice } from '@/components/LoadStatus'
@@ -14,6 +15,8 @@ import { formatMagnitude } from '@/lib/magnitude'
 import {
   alphaMetricLabel, describeAlphaMetric, describeReliabilityFacet, reliabilityFacetQualifier,
 } from '@/lib/reliability-basis'
+import { describeSetBasis, setValueLabel } from '@/lib/code-set-basis'
+import { bandWord } from '@/lib/reliability-band'
 import {
   intervalAccessibleText, intervalVisualText, straddleNote, straddledThresholds,
   type ReliabilityInterval,
@@ -40,11 +43,6 @@ interface IrrMatrixProps {
   codes?: Code[]
 }
 
-const BAND_LABEL: Record<string, string> = {
-  poor: 'poor', slight: 'slight', fair: 'fair', moderate: 'moderate',
-  substantial: 'substantial', almost_perfect: 'almost perfect',
-  unreliable: 'unreliable', tentative: 'tentative', reliable: 'reliable',
-}
 // Band → text color. ALWAYS paired with the band word in the UI (never color-only — #409).
 const GOOD = 'text-emerald-600 dark:text-emerald-400'
 const MID = 'text-amber-600 dark:text-amber-400'
@@ -57,7 +55,6 @@ const BAND_CLASS: Record<string, string> = {
 
 const fmt = (v: number | null | undefined, dp = 2) => (v == null ? '—' : v.toFixed(dp))
 const fmtPct = (v: number | null | undefined) => (v == null ? '—' : `${Math.round(v * 100)}%`)
-const bandWord = (b: string | null) => (b ? BAND_LABEL[b] ?? b : '')
 // Cutoffs print at their natural precision: 0.80 → "0.80", 0.667 → "0.667".
 const fmtThresh = (v: number) => (Number.isInteger(v * 100) ? v.toFixed(2) : v.toFixed(3))
 // Conventional Krippendorff (2004) α cutoffs — fallback only; the live payload's
@@ -126,6 +123,24 @@ function ratingRowAriaLabel(r: IrrMagnitudeResult, alphaThresholds?: Record<stri
       ? 'no unit rated by two coders'
       : `coders differ by ${r.mean_abs_difference.toFixed(2)} on average`,
   )
+  return parts.join(' ')
+}
+
+/**
+ * Row 48 — the set row's summary. Same shape as the two above: the whole fact in
+ * one string, because a browse-mode reader hears the ROW and not the cells.
+ *
+ * ⚠️ It states the number of VALUES and the dropped contradictions, because both
+ * change what the coefficient is about and neither is visible from the α alone.
+ */
+function setRowAriaLabel(s: IrrSetResult, alphaThresholds?: Record<string, number>): string {
+  const parts = [`${s.label}:`]
+  parts.push(`${s.n_values} values;`)
+  parts.push(`${metricPhrase('α', s.krippendorff_alpha, s.alpha_interpretation, s.undefined_reason, s.alpha_ci, alphaThresholds)};`)
+  parts.push(`${fmtPct(s.percent_agreement)} agreement over ${s.n_units} passages`)
+  if (s.n_multiple_selection > 0) {
+    parts.push(`; ${s.n_multiple_selection} left out for holding two values at once`)
+  }
   return parts.join(' ')
 }
 
@@ -328,6 +343,14 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
   const categoricalMetric = data.per_code[0]?.alpha_metric
   const unratedApplications = ratings.reduce((n, r) => n + (r.n_applications - r.n_rated), 0)
   const ratedCodeApplications = ratings.reduce((n, r) => n + r.n_applications, 0)
+  // Row 48 — one row per code set. Absent on older payloads and on projects
+  // that declare none; the section renders only when there is something to say.
+  const sets = data.set_agreement ?? []
+  // The confusion matrices name coders, and a bare id is not a name. Resolved
+  // from the payload's OWN roster rather than a second query, so the table can
+  // never name somebody the numbers were not computed over.
+  const coderName = (id: number) =>
+    data.coders.find(c => c.id === id)?.name ?? `Coder ${id}`
   const overallBand = data.overall_alpha_interpretation
   const SummaryIcon = overallBand === 'reliable' ? CircleCheck : overallBand === 'tentative' ? CircleAlert : CircleX
   // #473: α interpretation cutoffs — from the payload (single source of truth with
@@ -567,6 +590,126 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
               </tbody>
             </table>
           </div>
+        </section>
+      )}
+
+      {/* Row 48 — set agreement, a THIRD table for the same reason the rating
+          one is a second: a k-valued nominal α and a binary presence/absence α
+          are different instruments, and one coefficient over both would average
+          disagreements measured on different scales. Never pooled above. */}
+      {sets.length > 0 && (
+        <section aria-labelledby="irr-set-heading" className="flex flex-col gap-2 mt-2">
+          <h3 id="irr-set-heading" className="text-sm font-medium">Variable agreement</h3>
+          <p className="text-xs text-mm-text-muted max-w-prose">
+            For code sets — groups of codes where a passage takes exactly one value:
+            how much did the coders agree about <em>which</em> value? One α per set, over
+            its own values, so this is the single figure a methods reviewer asks for
+            rather than one figure per value.
+          </p>
+          <div className="overflow-x-auto rounded-md border border-mm-surface-border bg-mm-surface">
+            <table className="w-full text-sm border-collapse">
+              <caption className="sr-only">
+                Agreement per code set, across {data.n_coders} coders.
+              </caption>
+              <thead>
+                <tr className="border-b text-left text-mm-text-muted">
+                  <th scope="col" className="px-3 py-2 font-medium">Variable</th>
+                  <th scope="col" className="px-3 py-2 font-medium text-right" title="How many values this variable can take">Values</th>
+                  <th scope="col" className="px-3 py-2 font-medium text-right" title="Passages two or more coders both judged">Units</th>
+                  <th scope="col" className="px-3 py-2 font-medium text-right">% agreement</th>
+                  {showKappa && <th scope="col" className="px-3 py-2 font-medium text-right">Cohen's κ</th>}
+                  <th scope="col" className="px-3 py-2 font-medium text-right">Krippendorff's α (nominal)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sets.map(s => (
+                  <tr key={s.set_id} className="border-b last:border-b-0" aria-label={setRowAriaLabel(s, data.interpretation_thresholds?.alpha)}>
+                    <th scope="row" className="px-3 py-2 font-normal text-left text-mm-text">{s.label}</th>
+                    <td className="px-3 py-2 text-right tabular-nums text-mm-text-muted">{s.n_values}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-mm-text-muted">{s.n_units}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmt(s.percent_agreement)}</td>
+                    {showKappa && (
+                      <td className="px-3 py-2 text-right tabular-nums">
+                        <BandValue value={s.cohens_kappa} band={s.kappa_interpretation} reason={s.undefined_reason} ci={s.kappa_ci} thresholds={data.interpretation_thresholds?.kappa} />
+                      </td>
+                    )}
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      <BandValue value={s.krippendorff_alpha} band={s.alpha_interpretation} reason={s.undefined_reason} ci={s.alpha_ci} thresholds={data.interpretation_thresholds?.alpha} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {/* The basis and the dropped cells, per set. Stated as CONTENT rather
+              than a tooltip: both are standing properties of how the number was
+              produced, and a tooltip is unreachable from the keyboard. */}
+          <div className="text-xs text-mm-text-faint max-w-prose space-y-1.5">
+            {sets.map(s => (
+              <p key={s.set_id}>
+                <span className="font-medium">{s.label}:</span>{' '}
+                {describeSetBasis(s.set_basis)}
+                {s.n_multiple_selection > 0 && (
+                  <span className="text-amber-700 dark:text-amber-400">
+                    {' '}{s.n_multiple_selection} judgement
+                    {s.n_multiple_selection === 1 ? ' holds' : 's hold'} two values at once and
+                    {s.n_multiple_selection === 1 ? ' is' : ' are'} left out — a contradiction is
+                    not a value, and choosing one for the coder would invent a judgement.
+                  </span>
+                )}
+              </p>
+            ))}
+          </div>
+          {/* The artifact a single coefficient cannot give: WHICH pair of values
+              the coders confused. Per coder PAIR — with three coders a pooled
+              confusion matrix is not defined. */}
+          {sets.map(s => s.confusion.map(pair => (
+            <details key={`${s.set_id}-${pair.coder_a_id}-${pair.coder_b_id}`} className="text-xs">
+              <summary className="cursor-pointer text-mm-text-muted">
+                Where {s.label} disagreed — {coderName(pair.coder_a_id)} vs {coderName(pair.coder_b_id)}
+              </summary>
+              <div className="overflow-x-auto mt-1 rounded-md border border-mm-surface-border bg-mm-surface">
+                <table className="text-xs border-collapse">
+                  <caption className="sr-only">
+                    Counts of {coderName(pair.coder_a_id)}'s value against {coderName(pair.coder_b_id)}'s
+                    for {s.label}. The diagonal is agreement.
+                  </caption>
+                  <thead>
+                    <tr className="border-b text-mm-text-muted">
+                      <th scope="col" className="px-2 py-1 text-left font-medium">
+                        {coderName(pair.coder_a_id)} ↓ / {coderName(pair.coder_b_id)} →
+                      </th>
+                      {s.axis.map(v => (
+                        <th key={v} scope="col" className="px-2 py-1 text-right font-medium">
+                          {setValueLabel(v, s.value_names)}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pair.counts.map((row, i) => (
+                      <tr key={s.axis[i]} className="border-b last:border-b-0">
+                        <th scope="row" className="px-2 py-1 text-left font-normal">
+                          {setValueLabel(s.axis[i], s.value_names)}
+                        </th>
+                        {row.map((count, j) => (
+                          <td
+                            key={s.axis[j]}
+                            className={cn(
+                              'px-2 py-1 text-right tabular-nums',
+                              i === j ? 'text-mm-text-muted' : count > 0 ? 'font-medium' : '',
+                            )}
+                          >
+                            {count}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )))}
         </section>
       )}
 

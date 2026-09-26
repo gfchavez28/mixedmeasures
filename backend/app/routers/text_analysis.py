@@ -27,7 +27,7 @@ from ..services.text_analysis import (
     get_non_empty_comment_values,
     treat_as_empty_for_project,
 )
-from ..services.coding_layers import LAYER_CONSENSUS, layer_origin_filter
+from ..services.coding_layers import LAYER_CONSENSUS, layer_scope_filter
 from ..services.id_set import in_id_set
 from ..auth import get_current_user
 from .helpers import _get_project_or_404, parse_int_list, sanitize_content_disposition, TEXT_TYPES
@@ -419,7 +419,7 @@ def cross_tabulation(
     # #956: every substantive value of the selected columns — rows × columns.
     code_apps_q = (
         db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
-        .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_origin_filter(body.layer_scope))
+        .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_scope_filter(body.layer_scope))
     )
     if body.coder_ids and body.layer_scope != LAYER_CONSENSUS:
         code_apps_q = code_apps_q.filter(CodeApplication.user_id.in_(body.coder_ids))
@@ -553,7 +553,7 @@ def code_density(
     if value_ids:
         code_counts_query = (
             db.query(CodeApplication.dataset_value_id, func.count(func.distinct(CodeApplication.code_id)))
-            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_origin_filter(layer_scope))
+            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_scope_filter(layer_scope))
         )
         if parsed_coder_ids and layer_scope != LAYER_CONSENSUS:
             code_counts_query = code_counts_query.filter(CodeApplication.user_id.in_(parsed_coder_ids))
@@ -645,7 +645,7 @@ def response_length_by_code(
     if value_ids:
         code_apps_query = (
             db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
-            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_origin_filter(layer_scope))
+            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_scope_filter(layer_scope))
         )
         if parsed_coder_ids and layer_scope != LAYER_CONSENSUS:
             code_apps_query = code_apps_query.filter(CodeApplication.user_id.in_(parsed_coder_ids))
@@ -795,7 +795,7 @@ def export_cross_analysis(
     if value_ids:
         code_apps_all_q = (
             db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
-            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_origin_filter(layer_scope))
+            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_scope_filter(layer_scope))
         )
         if parsed_coder_ids and layer_scope != LAYER_CONSENSUS:
             code_apps_all_q = code_apps_all_q.filter(CodeApplication.user_id.in_(parsed_coder_ids))

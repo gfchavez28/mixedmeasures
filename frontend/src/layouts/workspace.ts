@@ -11,15 +11,30 @@ export type Workspace =
   | 'analysis'
   | 'none'
 
+/** The project route's first segment → the tab it belongs to. */
+const WORKSPACE_BY_SEGMENT: Record<string, Workspace> = {
+  overview: 'overview',
+  conversations: 'conversations',
+  datasets: 'datasets',
+  documents: 'documents',
+  observations: 'observations',
+  analysis: 'analysis',
+}
+
+/**
+ * 🔴 **An unrecognised route lights NO tab — the default is `'none'`, never
+ * `'overview'`.** It used to fall through to Overview, so every standalone page
+ * had to opt OUT by name (#428e added Participants and Memos & Notes), and each
+ * one added later — Merge, then Coding Import — lit Overview and marked it
+ * `aria-current="page"` until somebody noticed. A new page now claims nothing
+ * until it is taught which tab it belongs to, which is the safe direction.
+ */
 export function detectWorkspace(pathname: string): Workspace {
-  if (pathname.includes('/conversations')) return 'conversations'
-  if (pathname.includes('/datasets')) return 'datasets'
-  if (pathname.includes('/documents')) return 'documents'
-  if (pathname.includes('/observations')) return 'observations'
-  if (pathname.includes('/analysis')) return 'analysis'
-  // Standalone project routes belong to no workspace tab — they must not light
-  // (and aria-current) the Overview tab (#428e).
-  if (pathname.includes('/participants')) return 'none'
-  if (pathname.includes('/memos-notes')) return 'none'
-  return 'overview'
+  const segment = pathname.match(/^\/projects\/[^/]+\/([^/]+)/)?.[1]
+  // An own-property check, not a bare lookup: `WORKSPACE_BY_SEGMENT['constructor']`
+  // is the Object constructor, which is truthy and not a Workspace. (`Object.hasOwn`
+  // is ES2022; this project's `lib` is ES2020.)
+  return segment && Object.prototype.hasOwnProperty.call(WORKSPACE_BY_SEGMENT, segment)
+    ? WORKSPACE_BY_SEGMENT[segment]
+    : 'none'
 }

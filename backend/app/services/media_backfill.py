@@ -91,9 +91,10 @@ def backfill_media_durations(db: Session) -> dict[str, int]:
 
 
 def run_media_duration_backfill(session_factory) -> None:
-    """Lifespan entry point: bounded, self-limiting, never fails startup.
+    """Entry point via `data_repairs.run_data_repairs` — at startup and after a
+    restore (#1026): bounded, self-limiting, never fails its caller.
 
-    Mirrors `repair_reverse_recodes` in `main.py` — own session, broad except,
+    Mirrors `data_repairs.repair_reverse_recodes` — own session, broad except,
     rollback and log rather than propagate. The log line names the skip reasons
     so "why is my recording still lengthless?" is answerable from the log instead
     of by re-deriving the format matrix.

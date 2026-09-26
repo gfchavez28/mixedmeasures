@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
-import { FileInput, Check, ChevronRight, TriangleAlert, Link2, FileQuestion } from 'lucide-react'
+import { FileInput, Check, ChevronRight, TriangleAlert, Link2, FileQuestion, CircleAlert } from 'lucide-react'
 import {
   datasetsApi,
   type DatasetAppendPreviewResponse,
@@ -21,6 +21,10 @@ import {
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import { DATASET_ACCEPT, DATASET_FORMAT_LABEL, isSupportedDatasetFile, describeDatasetUploadError } from '@/lib/dataset-import-formats'
+import { checkImportFiles } from '@/lib/upload-limits'
+import { describeAppendDuplicates } from '@/lib/append-duplicates'
+import { useStepFocus } from '@/hooks/useStepFocus'
+import UploadLimitNote from '@/components/UploadLimitNote'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
 
 type Step = 'upload' | 'review' | 'results'
@@ -67,6 +71,16 @@ export default function AppendImport() {
   const [linkParticipants, setLinkParticipants] = useState(true)
 
   const handleFileSelect = useCallback(async (selectedFile: File, sheet?: string) => {
+    // #1007/#1012: type and size are known before any upload — refuse here. A
+    // wrong-type file picked through "All files" used to reach the server and be
+    // reported as an ENCODING problem.
+    const { accepted, message } = checkImportFiles([selectedFile], {
+      isSupported: isSupportedDatasetFile, formatLabel: DATASET_FORMAT_LABEL, noun: 'dataset',
+    })
+    if (accepted.length === 0) {
+      setError(message)
+      return
+    }
     setFile(selectedFile)
     setError('')
     setIsLoading(true)
@@ -89,10 +103,10 @@ export default function AppendImport() {
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault()
+      // #1012: hand every drop to the one check — a wrong-type file dropped
+      // here used to be ignored in silence.
       const droppedFile = e.dataTransfer.files[0]
-      if (droppedFile && isSupportedDatasetFile(droppedFile.name)) {
-        handleFileSelect(droppedFile)
-      }
+      if (droppedFile) handleFileSelect(droppedFile)
     },
     [handleFileSelect],
   )
@@ -134,6 +148,8 @@ export default function AppendImport() {
     { key: 'review', label: 'Review' },
     { key: 'results', label: 'Results' },
   ]
+  const stepIndex = steps.findIndex(s => s.key === step)
+  const stepHeadingRef = useStepFocus(step)
 
   const newRowCount = preview
     ? preview.total_rows - (skipDuplicates ? preview.duplicate_count : 0)
@@ -152,7 +168,7 @@ export default function AppendImport() {
                   className={cn(
                     'w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium',
                     currentIndex === i
-                      ? 'bg-[hsl(var(--mm-orange))] text-white'
+                      ? 'bg-mm-orange-fill text-mm-on-fill'
                       : currentIndex > i
                       ? 'bg-[hsl(var(--mm-orange)/0.15)] text-[hsl(var(--mm-orange-text))]'
                       : 'bg-mm-border-subtle text-mm-text-secondary'
@@ -173,8 +189,23 @@ export default function AppendImport() {
           })}
         </nav>
 
+        {/* #1011: where focus lands when the step changes (the pressed button
+            unmounts, which used to drop focus to <body>). */}
+        <h2 ref={stepHeadingRef} tabIndex={-1} className="sr-only">
+          {stepIndex >= 0 ? `Step ${stepIndex + 1} of ${steps.length}: ${steps[stepIndex].label}` : ''}
+        </h2>
+
+        {/* Parity with its sibling wizard, `DatasetImport.tsx` (#972). This banner
+            had no `role="alert"`, so a refusal — including the new cell-cap one,
+            which can arrive after a long upload — was announced to nobody, while
+            focus stayed on the button that triggered it. It also carried no dark
+            variants, so it painted a bright box in a dark UI. Two surfaces of one
+            wizard family, one of them silently behind: diff against the sibling. */}
         {error && (
-          <div className="mb-6 p-4 bg-red-50 text-red-700 rounded-lg">{error}</div>
+          <div role="alert" className="mb-6 p-4 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 rounded-lg flex items-start gap-2">
+            <CircleAlert className="w-5 h-5 flex-shrink-0 mt-0.5" />
+            <span>{error}</span>
+          </div>
         )}
 
         {/* Step 1: Upload */}
@@ -182,9 +213,9 @@ export default function AppendImport() {
           <div className="space-y-6">
             <Card>
               <CardHeader>
-                <CardTitle>Upload CSV to Append</CardTitle>
+                <CardTitle>Upload a file to append</CardTitle>
                 <CardDescription>
-                  Upload a CSV file with the same column structure as the existing dataset.
+                  Upload a {DATASET_FORMAT_LABEL} file with the same column structure as the existing dataset.
                   Columns will be matched by column code or column text.
                 </CardDescription>
               </CardHeader>
@@ -226,6 +257,7 @@ export default function AppendImport() {
                   <p className="text-mm-text-secondary mb-4">
                     Drag and drop a {DATASET_FORMAT_LABEL} file here, or click to browse
                   </p>
+                  <UploadLimitNote noun="dataset files" className="-mt-2 mb-4" />
                   <input
                     ref={appendInputRef}
                     type="file"
@@ -347,7 +379,7 @@ export default function AppendImport() {
                     <div className="flex items-center gap-2 text-sm">
                       <TriangleAlert className="w-4 h-4 text-amber-600" />
                       <span>
-                        <strong>{preview.duplicate_count}</strong> of {preview.total_rows} rows match existing responses
+                        {describeAppendDuplicates(preview)}
                       </span>
                     </div>
                     <label className="flex items-center gap-2 text-sm cursor-pointer">

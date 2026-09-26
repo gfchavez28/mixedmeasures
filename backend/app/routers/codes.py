@@ -34,9 +34,10 @@ from ..models.memo import Memo
 from ..auth import get_current_user
 from ..services.audit import log_action
 from ..services.coding_layers import (
+    LAYER_SCOPE_PATTERN,
     non_consensus_filter,
     code_usage_count_expr,
-    layer_origin_filter,
+    layer_scope_filter,
     visible_target_filter,
 )
 from ..services.consensus import consensus_enabled
@@ -139,7 +140,7 @@ async def list_codes(
     project_id: int,
     include_inactive: bool = Query(False),
     category_id: int | None = Query(None),
-    layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default) or 'consensus'"),
+    layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default), 'consensus' or 'machine'"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -182,7 +183,7 @@ async def list_codes(
         .outerjoin(Segment, CodeApplication.segment_id == Segment.id)
         .filter(
             CodeApplication.code_id.in_(code_ids),
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
             visible_target_filter(),  # #500
         )
         .group_by(CodeApplication.code_id)
@@ -712,7 +713,7 @@ category_router = APIRouter(prefix="/api/projects/{project_id}/categories", tags
 async def list_categories(
     project_id: int,
     include_codes: bool = Query(False),
-    layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default) or 'consensus' — applies to embedded code usage counts"),
+    layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default), 'consensus' or 'machine' — applies to embedded code usage counts"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -739,7 +740,7 @@ async def list_categories(
                 .outerjoin(Segment, CodeApplication.segment_id == Segment.id)
                 .filter(
                     CodeApplication.code_id.in_(code_ids),
-                    layer_origin_filter(layer_scope),
+                    layer_scope_filter(layer_scope),
                     visible_target_filter(),  # #500
                 )
                 .group_by(CodeApplication.code_id)

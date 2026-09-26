@@ -76,7 +76,7 @@ const ThemeMentionList = forwardRef<ThemeMentionListRef, ThemeMentionListProps>(
         role="listbox"
         aria-label="Mention a theme"
         aria-activedescendant={activeId}
-        className="fixed bg-white dark:bg-mm-surface border border-mm-border shadow-lg rounded-md overflow-auto"
+        className="fixed bg-white dark:bg-mm-surface border border-border shadow-lg rounded-md overflow-auto"
         style={{
           top: finalTop,
           left,

@@ -49,7 +49,7 @@ export default function ConvergenceMatrix({
       return (
         <td
           key={colTheme.id}
-          className="h-9 min-w-[58px] border border-mm-border-subtle bg-mm-surface-secondary cursor-default rounded-sm"
+          className="h-9 min-w-[58px] border border-mm-border-subtle bg-mm-bg cursor-default rounded-sm"
         />
       )
     }
@@ -83,7 +83,7 @@ export default function ConvergenceMatrix({
         key={colTheme.id}
         role="button"
         tabIndex={0}
-        className="h-9 min-w-[58px] border border-mm-border-subtle text-[9px] font-medium rounded-sm cursor-pointer hover:bg-mm-surface-secondary group/cell text-center"
+        className="h-9 min-w-[58px] border border-mm-border-subtle text-[9px] font-medium rounded-sm cursor-pointer hover:bg-mm-surface-hover group/cell text-center"
         onClick={() => onCellClick(rowTheme.id, colTheme.id)}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onCellClick(rowTheme.id, colTheme.id) } }}
         aria-label={`Create relationship between ${rowTheme.name} and ${colTheme.name}`}
@@ -94,7 +94,7 @@ export default function ConvergenceMatrix({
   }
 
   return (
-    <div data-convergence-matrix className="absolute top-14 right-4 w-[440px] z-[60] bg-white dark:bg-mm-surface border border-mm-border rounded-lg shadow-xl">
+    <div data-convergence-matrix className="absolute top-14 right-4 w-[440px] z-[60] bg-white dark:bg-mm-surface border border-border rounded-lg shadow-xl">
       {/* Header */}
       <div className="flex items-start justify-between px-4 pt-3 pb-2">
         <div>
@@ -105,7 +105,7 @@ export default function ConvergenceMatrix({
         <button
           type="button"
           onClick={onClose}
-          className="p-1 rounded text-mm-text-muted hover:text-mm-text hover:bg-mm-surface-secondary transition-colors"
+          className="p-1 rounded text-mm-text-muted hover:text-mm-text hover:bg-mm-surface-hover transition-colors"
           aria-label="Close convergence matrix"
         >
           <X className="w-4 h-4" />

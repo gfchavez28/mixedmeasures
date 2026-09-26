@@ -14,6 +14,14 @@
  * ⚠️ **Nothing here deletes on its own** — rotation is undecided (#919), because
  * five copies may be five different projects. The researcher sees each one and
  * chooses, and the confirmation says when a copy may be a project's only one.
+ *
+ * 🔴 **The list is BOUNDED (#978).** It used to render every copy: measured live
+ * on the developer's own Settings page, 1,954 rows, 3,941 tab stops and 37,361
+ * DOM nodes — so a keyboard user who opened this disclosure met ~3,900 controls
+ * inside a 320px box before reaching anything below it. A `max-height` scroll box
+ * is NOT a bound; it is what made the cost invisible until it was counted. The
+ * server bounds the payload too, because each row's project name comes from that
+ * copy's manifest and reading one means opening the zip.
  */
 import { useId, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -22,13 +30,15 @@ import { toast } from 'sonner'
 import { backupApi, type SafetyCopyInfo } from '@/lib/api'
 import { ApiError } from '@/lib/api/client'
 import { formatBytes, plural } from '@/lib/format'
+import { useListLoad } from '@/hooks/useListLoad'
+import { LoadFailedNotice } from '@/components/LoadStatus'
 import {
   SAFETY_COPIES_QUERY_KEY,
   SAFETY_COPY_ACT_LABEL,
+  SAFETY_COPY_PAGE_SIZE,
   formatTakenAt,
   safetyCopyDeleteWarnings,
   safetyCopyTitle,
-  totalSafetyCopyBytes,
 } from '@/lib/safety-copies'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
@@ -38,6 +48,10 @@ export default function SafetyCopiesSection() {
   const listId = useId()
   const toggleRef = useRef<HTMLButtonElement>(null)
   const [open, setOpen] = useState(false)
+  // `0` asks the server for every copy. Part of the query key, so asking for all
+  // of them is a new request rather than a cache write (#800's exact-vs-prefix
+  // trap: `invalidateQueries` on the parent key still reaches both).
+  const [pageSize, setPageSize] = useState<number>(SAFETY_COPY_PAGE_SIZE)
   // The copy being confirmed outlives `confirmOpen`, so the dialog keeps its
   // words while it animates closed instead of flashing an empty description.
   const [deleteTarget, setDeleteTarget] = useState<SafetyCopyInfo | null>(null)
@@ -47,11 +61,14 @@ export default function SafetyCopiesSection() {
   // opened the dialog is gone with its row, so focus must land somewhere real.
   const returnFocusToToggle = useRef(false)
 
-  const { data: copies, isError } = useQuery({
-    queryKey: SAFETY_COPIES_QUERY_KEY,
-    queryFn: backupApi.listSafetyCopies,
+  const copiesQuery = useQuery({
+    queryKey: [...SAFETY_COPIES_QUERY_KEY, pageSize],
+    queryFn: () => backupApi.listSafetyCopies(pageSize),
     staleTime: 60_000,
   })
+  const load = useListLoad(copiesQuery)
+  const page = copiesQuery.data
+  const copies = page?.copies
 
   const deleteMutation = useMutation({
     mutationFn: (copy: SafetyCopyInfo) => backupApi.deleteSafetyCopy(copy.filename),
@@ -81,23 +98,34 @@ export default function SafetyCopiesSection() {
   }
 
   // Silence would read as "there are none", which is the claim this list exists
-  // to stop the app making.
-  if (isError) {
+  // to stop the app making. The shared notice, not a hand-written line: its
+  // wording, its slow-load delay and its Retry are single-sourced (#961 §2), and
+  // this section predates them.
+  if (load.status === 'failed' || load.retrying) {
     return (
-      <p className="mt-3 text-xs text-amber-700 dark:text-amber-400">
-        Safety copies from merges and overwrites could not be listed.
-      </p>
+      <div className="mt-3">
+        <LoadFailedNotice
+          title="Safety copies could not be listed."
+          load={load}
+          size="panel"
+        />
+      </div>
     )
   }
-  // Nothing to show until a merge or overwrite has written a copy. Once the list
-  // is OPEN it stays mounted when its last copy is deleted, so the toggle survives
-  // as the place focus returns to.
-  if (!copies || (copies.length === 0 && !open)) return null
+  // Nothing to show until a merge or overwrite has written a copy — and nothing
+  // while the list is still loading either. ⚠️ That silence is deliberate and is
+  // NOT the #961 defect: ABSENCE makes no claim, where a "no safety copies" line
+  // would (Tier 1's `AnalysisView` reasoning). Once the list is OPEN it stays
+  // mounted when its last copy is deleted, so the toggle survives as the place
+  // focus returns to.
+  if (!page || !copies || (page.total_count === 0 && !open)) return null
 
-  // Locale-grouped: the sweep read "1954 copies" off a real folder.
+  // Locale-grouped, and from the FOLDER's totals rather than the page's: the
+  // trigger states the cost before it is paid, so a bounded list underneath must
+  // not make that number smaller than the truth (#978).
   const summary =
-    `${copies.length.toLocaleString()} ${plural(copies.length, 'copy', 'copies')}, ` +
-    formatBytes(totalSafetyCopyBytes(copies))
+    `${page.total_count.toLocaleString()} ${plural(page.total_count, 'copy', 'copies')}, ` +
+    formatBytes(page.total_bytes)
 
   return (
     <div className="mt-3">
@@ -126,6 +154,22 @@ export default function SafetyCopiesSection() {
             of it. These copies are never deleted automatically. To go back to one, download
             it and open it with Import Project on the Projects page.
           </p>
+          {page.truncated && (
+            // Said ABOVE the list, not below it: a researcher who reads to the
+            // bottom of a 320px scroll box has already assumed the list is all
+            // of them. `role="status"` because it changes when Show all runs.
+            <p className="text-xs text-mm-text-muted" role="status">
+              Showing the {copies.length.toLocaleString()} most recent of{' '}
+              {page.total_count.toLocaleString()}.{' '}
+              <button
+                type="button"
+                onClick={() => setPageSize(0)}
+                className="underline underline-offset-2 hover:text-mm-text"
+              >
+                Show all {page.total_count.toLocaleString()}
+              </button>
+            </p>
+          )}
           {copies.length === 0 ? (
             <p className="text-xs text-mm-text-faint">No safety copies remain.</p>
           ) : (

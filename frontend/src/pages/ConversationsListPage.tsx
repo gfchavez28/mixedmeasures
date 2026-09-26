@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useCallback } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { FileInput, Trash2, Pencil, Search, X, ArrowUpDown, Volume2, Video, Mic, BookOpen, MessageSquare, Film } from 'lucide-react'
+import { FileInput, Trash2, Pencil, Volume2, Video, Mic, MessageSquare, Film } from 'lucide-react'
 import { toast } from 'sonner'
 import { validateMediaFile, MEDIA_ACCEPT, describeMediaUploadError } from '@/lib/media-constants'
 import { conversationsApi, mediaApi, observationsApi, type Conversation, retryUnanswered} from '@/lib/api'
@@ -15,17 +15,11 @@ import { DROPPED_RECORDING_TITLE, DROPPED_RECORDING_DETAIL } from '@/lib/source-
 import { formatBytes } from '@/lib/format'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { sortSources } from '@/lib/source-list-sort'
+import SourceListToolbar from '@/components/SourceListToolbar'
+import { DATE_AND_NAME_SORTS, type SortChoice } from '@/lib/source-list-toolbar'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import InlineEditableText from '@/components/InlineEditableText'
-import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -33,6 +27,12 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
+
+const CONVERSATION_SORTS: SortChoice[] = [
+  ...DATE_AND_NAME_SORTS,
+  { key: 'progress', dir: 'desc', label: 'Most coded' },
+  { key: 'progress', dir: 'asc', label: 'Least coded' },
+]
 
 export default function ConversationsListPage() {
   const { projectId, openCodebook } = useProjectLayout()
@@ -262,93 +262,21 @@ export default function ConversationsListPage() {
 
   return (
     <div className="max-w-4xl mx-auto px-3.5 py-3.5">
-      {/* Sub-nav row */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-1">
-          <button
-            className="px-3 py-1.5 rounded-md text-sm font-medium bg-[hsl(var(--mm-green)/0.08)] text-mm-green-text border border-[hsl(var(--mm-green)/0.25)]"
-          >
-            All Conversations
-            {conversations.length > 0 && (
-              // 🔴 #908 CORRECTED 2026-09-12 — the space goes OUTSIDE the span,
-              // and the fragment is what lets it: an expression container holds
-              // ONE expression, so the space cannot simply sit beside the span
-              // inside this `&&`. MEASURED with `computeAccessibleName`: a space
-              // typed inside the span AND `<span>{' '}{n}</span>` BOTH compute
-              // "All Datasets1", because the algorithm trims each text node
-              // before joining, so only a space in the BUTTON's own child list
-              // survives (a fragment adds no node, so it flattens into one).
-              // This site carried the ineffective form from #908 until now.
-              <>{' '}<span className="ml-1.5 opacity-60">{conversations.length}</span></>
-            )}
-          </button>
-          <button
-            onClick={openCodebook}
-            className="px-3 py-1.5 rounded-md text-sm font-medium text-mm-text-muted hover:text-mm-text transition-colors inline-flex items-center gap-1.5 border border-mm-surface-border hover:border-mm-text-muted"
-          >
-            <BookOpen className="w-3.5 h-3.5" aria-hidden="true" />
-            Codebook
-          </button>
-        </div>
-        <div className="flex items-center gap-2">
-          {/* Search */}
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-mm-text-faint pointer-events-none" />
-            <Input
-              value={searchText}
-              onChange={(e) => setSearchText(e.target.value)}
-              placeholder="Search..."
-              className="w-44 h-8 pl-8 pr-7 text-sm"
-            />
-            {searchText && (
-              <button
-                onClick={() => setSearchText('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-mm-text-faint hover:text-mm-text transition-colors"
-                aria-label="Clear search"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-
-          {/* Sort */}
-          <Select
-            value={sortBy}
-            onValueChange={(val) => {
-              const v = val as 'name' | 'date' | 'progress'
-              if (v === sortBy) {
-                setSortDir(d => d === 'asc' ? 'desc' : 'asc')
-              } else {
-                setSortBy(v)
-                setSortDir(v === 'name' ? 'asc' : 'desc')
-              }
-            }}
-          >
-            {/* #892: `combobox` is not a name-from-content role, so the visible
-                "Date ↓" is the trigger's VALUE and never its name — measured in
-                Chrome's tree, this announced as a bare unnamed combobox. */}
-            <SelectTrigger className="w-[120px] h-8 text-sm" aria-label="Sort conversations">
-              <ArrowUpDown className="w-3.5 h-3.5 mr-1.5 shrink-0 text-mm-text-faint" />
-              <SelectValue />
-              <span className="ml-1 text-mm-text-faint text-[11px]">{sortDir === 'asc' ? '↑' : '↓'}</span>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="date">Date</SelectItem>
-              <SelectItem value="name">Name</SelectItem>
-              <SelectItem value="progress">Progress</SelectItem>
-            </SelectContent>
-          </Select>
-
-          {/* Import */}
-          <button
-            onClick={() => navigate(`/projects/${projectId}/conversations/import`)}
-            className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-green))] hover:opacity-90 transition-opacity"
-          >
-            <FileInput className="w-3.5 h-3.5" />
-            Import
-          </button>
-        </div>
-      </div>
+      <SourceListToolbar
+        title="All Conversations"
+        count={conversations.length}
+        accent="green"
+        noun="conversations"
+        onOpenCodebook={openCodebook}
+        showListControls={conversations.length > 0}
+        searchText={searchText}
+        onSearchChange={setSearchText}
+        sortChoices={CONVERSATION_SORTS}
+        sortBy={sortBy}
+        sortDir={sortDir}
+        onSortChange={(key, dir) => { setSortBy(key); setSortDir(dir) }}
+        onImport={() => navigate(`/projects/${projectId}/conversations/import`)}
+      />
 
       {/* Content */}
       {conversations.length === 0 ? (
@@ -375,7 +303,7 @@ export default function ConversationsListPage() {
               </p>
               <button
                 onClick={() => navigate(`/projects/${projectId}/conversations/import`)}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-green))] hover:opacity-90 transition-opacity"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-mm-on-fill bg-mm-green-fill hover:opacity-90 transition-opacity"
               >
                 <FileInput className="w-4 h-4" />
                 Import Conversation

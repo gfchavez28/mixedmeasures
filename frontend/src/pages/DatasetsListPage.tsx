@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { FileInput, ChevronRight, SlidersHorizontal, Pencil, Trash2, Palette, Package, MessageSquareText, Table2, Users, TableProperties as TablePropertiesIcon } from 'lucide-react'
@@ -8,7 +8,10 @@ import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { LoadState } from '@/components/LoadStatus'
 import { toast } from 'sonner'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
-import { isSupportedDatasetFile } from '@/lib/dataset-import-formats'
+import { DATASET_FORMAT_LABEL, isSupportedDatasetFile } from '@/lib/dataset-import-formats'
+import { sortSources, type SortDirection, type SourceSortKey } from '@/lib/source-list-sort'
+import SourceListToolbar from '@/components/SourceListToolbar'
+import { DATE_AND_NAME_SORTS, SOURCE_TAB_CLASS } from '@/lib/source-list-toolbar'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import InlineEditableText from '@/components/InlineEditableText'
@@ -39,7 +42,7 @@ import { isManagedDataset, managedDatasetRefusal } from '@/lib/managed-dataset'
 import { MODE_DISABLED_CLASS, modeDisabledProps } from '@/lib/mode-disabled'
 
 export default function DatasetsListPage() {
-  const { projectId } = useProjectLayout()
+  const { projectId, openCodebook } = useProjectLayout()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
@@ -65,8 +68,21 @@ export default function DatasetsListPage() {
     enabled: !isNaN(projectId),
   })
 
-  const datasets = datasetsData?.datasets ?? []
+  const datasets = useMemo(() => datasetsData?.datasets ?? [], [datasetsData?.datasets])
+  const allDatasetIds = useMemo(() => datasets.map(d => d.id), [datasets])
   const domainCount = domainsData?.domains?.length ?? 0
+
+  // #1008 — search and sort, which this list never had. Name and date only: a
+  // dataset has no single coding-progress figure, so offering "Most coded" here
+  // would be a control with nothing real to sort on.
+  const [sortBy, setSortBy] = useState<SourceSortKey>('date')
+  const [sortDir, setSortDir] = useState<SortDirection>('desc')
+  const [searchText, setSearchText] = useState('')
+  const filteredAndSorted = useMemo(() => {
+    const q = searchText.trim().toLowerCase()
+    const shown = q ? datasets.filter(d => d.name.toLowerCase().includes(q)) : datasets
+    return sortSources(shown, sortBy, sortDir, d => d.created_at)
+  }, [datasets, searchText, sortBy, sortDir])
   const hasTextColumns = (textColumnsData?.columns?.length ?? 0) > 0
 
   // Row 45 (i) — the project's participant table, if it has one. `managed_kind`
@@ -172,7 +188,11 @@ export default function DatasetsListPage() {
       // one consumer the dataset-import-formats sweep missed, silently dropping
       // .xlsx/.sav files that every other surface accepts.
       const supportedFiles = droppedFiles.filter(f => isSupportedDatasetFile(f.name))
-      if (supportedFiles.length === 0) return
+      if (supportedFiles.length === 0) {
+        // #1008: say why, rather than letting the drop vanish.
+        toast.error(`Drop a dataset (${DATASET_FORMAT_LABEL}) here.`)
+        return
+      }
       setPendingImportFiles(supportedFiles, 'dataset')
       navigate(`/projects/${projectId}/datasets/import`)
     },
@@ -205,29 +225,17 @@ export default function DatasetsListPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-3.5 py-3.5">
-      {/* Sub-nav row */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-1">
-          <button
-            className="px-3 py-1.5 rounded-md text-sm font-medium bg-[hsl(var(--mm-orange)/0.08)] text-mm-orange-text border border-[hsl(var(--mm-orange)/0.25)]"
-          >
-            All Datasets
-            {datasets.length > 0 && (
-              // 🔴 #908 CORRECTED 2026-09-12 — the space goes OUTSIDE the span,
-              // and the fragment is what lets it: an expression container holds
-              // ONE expression, so the space cannot simply sit beside the span
-              // inside this `&&`. MEASURED with `computeAccessibleName`: a space
-              // typed inside the span AND `<span>{' '}{n}</span>` BOTH compute
-              // "All Datasets1", because the algorithm trims each text node
-              // before joining, so only a space in the BUTTON's own child list
-              // survives (a fragment adds no node, so it flattens into one).
-              // This site carried the ineffective form from #908 until now.
-              <>{' '}<span className="ml-1.5 opacity-60">{datasets.length}</span></>
-            )}
-          </button>
+      <SourceListToolbar
+        title="All Datasets"
+        count={datasets.length}
+        accent="orange"
+        noun="datasets"
+        onOpenCodebook={openCodebook}
+        extraTabs={<>
           <button
             onClick={() => navigate(`/projects/${projectId}/datasets/variable-groups`)}
-            className="px-3 py-1.5 rounded-md text-sm font-medium text-mm-text-muted hover:text-mm-text transition-colors inline-flex items-center gap-1.5 border border-mm-surface-border hover:border-mm-text-muted"
+            type="button"
+            className={SOURCE_TAB_CLASS}
           >
             <Package className="w-3.5 h-3.5" aria-hidden="true" />
             Variable Groups{domainCount > 0 ? ` (${domainCount})` : ''}
@@ -236,15 +244,23 @@ export default function DatasetsListPage() {
           {hasTextColumns && (
             <button
               onClick={() => navigate(`/projects/${projectId}/datasets/text-coding`)}
-              className="px-3 py-1.5 rounded-md text-sm font-medium text-mm-text-muted hover:text-mm-text transition-colors inline-flex items-center gap-1.5 border border-mm-surface-border hover:border-mm-text-muted"
+              type="button"
+              className={SOURCE_TAB_CLASS}
             >
               <MessageSquareText className="w-3.5 h-3.5" aria-hidden="true" />
               Code Text
               <ChevronRight className="w-3 h-3" />
             </button>
           )}
-        </div>
-        <div className="flex items-center gap-2">
+        </>}
+        showListControls={datasets.length > 0}
+        searchText={searchText}
+        onSearchChange={setSearchText}
+        sortChoices={DATE_AND_NAME_SORTS}
+        sortBy={sortBy}
+        sortDir={sortDir}
+        onSortChange={(key, dir) => { setSortBy(key); setSortDir(dir) }}
+        actions={<>
           {/* Row 45 (i) step 4 — THE CREATION AFFORDANCE. Until this existed
               nothing in the product could make a participant table at all, so
               the whole seam was unreachable.
@@ -283,15 +299,9 @@ export default function DatasetsListPage() {
             <TablePropertiesIcon className="w-3.5 h-3.5" aria-hidden="true" />
             Blank table
           </button>
-          <button
-            onClick={() => navigate(`/projects/${projectId}/datasets/import`)}
-            className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-orange))] hover:opacity-90 transition-opacity"
-          >
-            <FileInput className="w-3.5 h-3.5" />
-            Import
-          </button>
-        </div>
-      </div>
+        </>}
+        onImport={() => navigate(`/projects/${projectId}/datasets/import`)}
+      />
 
       {/* Content */}
       {datasets.length === 0 ? (
@@ -307,21 +317,21 @@ export default function DatasetsListPage() {
           <Table2 className="w-8 h-8 mx-auto mb-4 text-mm-text-faint" aria-hidden="true" />
           {isDragOver ? (
             <>
-              <h2 className="text-lg font-semibold text-[hsl(var(--mm-orange))] mb-2">Drop CSV files to import</h2>
-              <p className="text-sm text-mm-text-muted">Release to start importing dataset</p>
+              <h2 className="text-lg font-semibold text-[hsl(var(--mm-orange))] mb-2">Drop dataset files to import</h2>
+              <p className="text-sm text-mm-text-muted">Release to start importing datasets</p>
             </>
           ) : (
             <>
               <h2 className="text-lg font-semibold text-mm-text mb-2">No datasets yet</h2>
               <p className="text-sm text-mm-text-muted mb-6">
-                Import a dataset CSV to add quantitative data, drag and drop CSV files here, or start a blank table and type it in.
+                Import a dataset to add quantitative data, drag and drop files here — {DATASET_FORMAT_LABEL} — or start a blank table and type it in.
               </p>
               {/* Row 47 — TWO ways to start now. A capability not listed where
                   its sibling is is, for discovery, absent. */}
               <div className="flex items-center justify-center gap-2">
                 <button
                   onClick={() => navigate(`/projects/${projectId}/datasets/import`)}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-orange))] hover:opacity-90 transition-opacity"
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-mm-on-fill bg-mm-orange-fill hover:opacity-90 transition-opacity"
                 >
                   <FileInput className="w-4 h-4" />
                   Import Dataset
@@ -357,8 +367,18 @@ export default function DatasetsListPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-mm-border-subtle">
-              {datasets.map((ds) => {
-                const allDatasetIds = datasets.map(d => d.id)
+              {filteredAndSorted.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-4 py-12 text-center text-mm-text-muted text-sm">
+                    No datasets matching &lsquo;{searchText}&rsquo;
+                  </td>
+                </tr>
+              )}
+              {filteredAndSorted.map((ds) => {
+                // 🔴 #1008: the accent is derived from the dataset's position in
+                // the FULL, server-ordered list — never the sorted or filtered
+                // one, or a dataset's colour would change as the researcher sorts
+                // and stop matching the same dataset in the crosswalk.
                 const accentColor = getDatasetAccent(ds.id, allDatasetIds, ds.color)
                 return (
                 <ContextMenu key={ds.id}>

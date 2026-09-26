@@ -95,12 +95,32 @@ export interface ProjectStorage {
   documents_bytes: number
 }
 
+/**
+ * How close this project is to the limit that governs SHARING it (#974).
+ *
+ * ⚠️ A different question from `ProjectStorage`, which is on-disk bytes. Crossing
+ * THIS one blocks export, Duplicate and accepting a colleague's merge; disk size
+ * blocks nothing. The two must not be conflated on screen.
+ *
+ * ⚠️ `limit` comes from the server rather than being mirrored here — the refusal
+ * message itself promises "A larger limit is planned", so a client copy would
+ * silently disagree the day it moves.
+ */
+export interface ProjectExportCeiling {
+  dataset_values: number
+  limit: number
+  warn_fraction: number
+}
+
 // API functions - Projects
 export const projectsApi = {
   list: () => api.get<{ projects: Project[]; total: number }>('/projects').then(res => res.data),
   get: (id: number) => api.get<Project>(`/projects/${id}`).then(res => res.data),
   summary: (id: number) => api.get<ProjectSummary>(`/projects/${id}/summary`).then(res => res.data),
   storage: (id: number) => api.get<ProjectStorage>(`/projects/${id}/storage`).then(res => res.data),
+  /** #974 — its own call because the count is ~250 ms and `summary` rides TopRail. */
+  exportCeiling: (id: number) =>
+    api.get<ProjectExportCeiling>(`/projects/${id}/export-ceiling`).then(res => res.data),
   create: (data: { name: string; description?: string }) =>
     api.post<Project>('/projects', data).then(res => res.data),
   update: (id: number, data: Partial<Project>) =>

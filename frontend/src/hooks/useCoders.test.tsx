@@ -81,3 +81,42 @@ describe('resetCoderRoster — after something may have added coders', () => {
     expect(result.current.multiCoder).toBe(false)
   })
 })
+
+describe('#989 — the selectable subset', () => {
+  it('excludes machine coders from the switcher list while keeping them on the roster', async () => {
+    // The roster must KEEP the machine (its codings have to be attributable and
+    // filterable); only the switcher list drops it. Driven live before this
+    // existed: the TopRail menu offered "Code as GPT-4o" and the server 404'd.
+    const MACHINE = { id: 9, username: 'GPT-4o', display_color: null, archived: false, coder_type: 'ai' }
+    listCoders.mockResolvedValue([ME, PRIYA, MACHINE])
+    const { result } = setup()
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+
+    expect(result.current.coders.map(c => c.id)).toEqual([1, 2, 9])
+    expect(result.current.selectableCoders.map(c => c.id)).toEqual([1, 2])
+    expect(result.current.machineCoders.map(c => c.id)).toEqual([9])
+  })
+
+  it('counts a machine for multiCoder and NOT for multiHumanCoder', async () => {
+    // One person + one machine: attribution UI yes, reliability/blind no.
+    const MACHINE = { id: 9, username: 'GPT-4o', display_color: null, archived: false, coder_type: 'ai' }
+    listCoders.mockResolvedValue([ME, MACHINE])
+    const { result } = setup()
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+
+    expect(result.current.multiCoder).toBe(true)
+    expect(result.current.multiHumanCoder).toBe(false)
+  })
+
+  it('treats an UNKNOWN coder_type as a person, so it stays selectable', async () => {
+    // The client's fail-closed direction is the opposite of the server's: an
+    // unrecognised kind must not silently vanish from the switcher.
+    const ODD = { id: 9, username: 'Odd', display_color: null, archived: false, coder_type: 'robot' }
+    listCoders.mockResolvedValue([ME, ODD])
+    const { result } = setup()
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+
+    expect(result.current.selectableCoders.map(c => c.id)).toEqual([1, 9])
+    expect(result.current.multiHumanCoder).toBe(true)
+  })
+})

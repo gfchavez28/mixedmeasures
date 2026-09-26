@@ -16,7 +16,7 @@ export type { User, AuthStatus, Coder } from './auth'
 
 // Projects
 export { projectsApi } from './projects'
-export type { Project, ProjectSummary, RecentConversation, RecentDataset, RecentDocument, RecentObservation } from './projects'
+export type { Project, ProjectSummary, ProjectExportCeiling, RecentConversation, RecentDataset, RecentDocument, RecentObservation } from './projects'
 
 // Conversations
 export { conversationsApi } from './conversations'
@@ -100,6 +100,8 @@ export type {
 export { datasetsApi, recodeApi, DATASET_PAGE_SIZE } from './datasets'
 export type {
   DatasetColumnPreview,
+  DatasetColumnSummary,
+  DatasetColumnsResponse,
   DatasetPreviewResponse,
   DatasetColumnConfig,
   DatasetImportConfig,
@@ -255,6 +257,15 @@ export type {
 
 // Code Analysis
 export { codeAnalysisApi } from './code-analysis'
+export { codingImportApi } from './coding-import'
+export type {
+  CodingImportTarget,
+  CodingImportProblem,
+  CodingImportCoderCandidate,
+  CodingImportPreview,
+  CodingImportDecision,
+  CodingImportResult,
+} from './coding-import'
 export type {
   // THE source-kind enumeration — consumers key `Record<SourceKind, …>` off
   // this so a fifth kind fails to compile instead of silently disappearing.
@@ -311,9 +322,15 @@ export type {
   IrrCodeResult,
   IrrMagnitudeScale,
   IrrMagnitudeResult,
+  IrrSetResult,
+  IrrSetMemberResult,
+  IrrSetConfusion,
   IrrThresholds,
   IrrResponse,
   IrrParams,
+  MachineCodeAgreement,
+  MachinePairAgreement,
+  MachineAgreementResponse,
 } from './code-analysis'
 
 // Text Coding
@@ -408,15 +425,17 @@ export type {
 } from './codebook'
 
 // Backup
-export { backupApi } from './backup'
+export { backupApi, MAX_BACKUP_UPLOAD_BYTES } from './backup'
 export type {
   BackupManifest,
   BackupStatus,
   BackupInfo,
   RestorePreview,
+  RestoreResult,
   ProjectBackupSummary,
   SafetyCopyAct,
   SafetyCopyInfo,
+  SafetyCopyPage,
 } from './backup'
 
 // Canvas
@@ -456,3 +475,12 @@ export type {
   CodeMapping,
   CodeMappingDecision,
 } from './project-portability'
+
+// Code sets (row 48) — a mutually exclusive group of codes read as one variable
+export { codeSetsApi } from './code-sets'
+export type {
+  CodeSet,
+  CodeSetMember,
+  CodeSetListResponse,
+  CodeSetSelectionResponse,
+} from './code-sets'

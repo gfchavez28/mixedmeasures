@@ -56,7 +56,7 @@ export default function SourceKindPanel({
   return (
     <section
       aria-labelledby="source-kind-heading"
-      className="mb-6 rounded-lg border border-mm-border bg-mm-bg p-4"
+      className="mb-6 rounded-lg border border-border bg-mm-bg p-4"
     >
       <div className="flex items-start gap-2">
         <Info className="w-4 h-4 text-mm-text-muted shrink-0 mt-0.5" aria-hidden />

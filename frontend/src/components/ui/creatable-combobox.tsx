@@ -189,7 +189,7 @@ export function CreatableComboList({
                 aria-selected={false}
                 disabled={creating}
                 className={cn(
-                  'w-full text-left px-2 py-1.5 text-sm rounded flex items-center gap-2 text-mm-accent font-medium hover:bg-mm-surface-hover',
+                  'w-full text-left px-2 py-1.5 text-sm rounded flex items-center gap-2 text-mm-blue-text font-medium hover:bg-mm-surface-hover',
                   active && 'bg-mm-surface-hover',
                 )}
                 onClick={() => commit(row)}

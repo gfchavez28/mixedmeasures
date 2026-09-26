@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 # Structural caps: a .sav is compressed, so a small upload can inflate a lot.
 # These bound the parse work independently of the 50 MB upload cap. Mirrors the
 # .xlsx adapter's caps so the two formats fail the same way.
-from .dataset_import import cell_count_error  # noqa: E402  (cell cap, #803)
+from .dataset_import import ColumnSelectionError, _refuse_unknown_columns, cell_count_error  # noqa: E402  (cell cap, #803)
 
 MAX_SAV_ROWS = 100_000
 MAX_SAV_COLS = 500
@@ -422,13 +422,61 @@ def _reconcile_scale_coverage(
     )
 
 
-def sav_to_csv_text(content: bytes) -> tuple[str, dict[str, SavColumnMeta]]:
+def describe_sav(content: bytes) -> dict:
+    """The cheap first stage for an SPSS file (#973 c).
+
+    Returns ``{"headers", "row_count", "samples"}``. SPSS records both dimensions
+    in its metadata, so this needs no data read at all and `samples` comes back
+    EMPTY — the format that can answer "what columns are here?" most cheaply is
+    also the one that cannot show a value without reading rows, and a five-row
+    read here would be the only data read in the cheap stage.
+
+    🔴 **Applies NO cap**, deliberately: this is the escape hatch from the
+    refusal `sav_to_csv_text` raises on exactly these numbers, so refusing here
+    would close the way out. See `dataset_import.describe_csv_text`.
+
+    ⚠️ ``row_count`` is ``-1`` when SPSS recorded the count as unknown, which is
+    legal and which #539 already relies on (the header cap cannot be trusted, so
+    the read is bounded by ``row_limit`` instead). A caller must treat a negative
+    count as "not known", never as a number.
+    """
+    import pyreadstat
+
+    try:
+        _, meta = pyreadstat.read_sav(
+            io.BytesIO(content), metadataonly=True, output_format="dict"
+        )
+    except Exception as e:
+        logger.warning("sav metadata read failed: %s", e)
+        raise SavImportError(f"Unable to read the SPSS file: {e}") from e
+
+    names = list(meta.column_names or [])
+    if not names:
+        raise SavImportError("The SPSS file contains no variables.")
+    rows = meta.number_rows
+    return {
+        "headers": names,
+        "row_count": rows if isinstance(rows, int) and rows >= 0 else -1,
+        "samples": [[] for _ in names],
+    }
+
+
+def sav_to_csv_text(
+    content: bytes, columns: list[int] | None = None,
+) -> tuple[str, dict[str, SavColumnMeta]]:
     """Convert an SPSS ``.sav`` upload into CSV text plus per-column metadata.
 
     Returns ``(csv_text, meta_by_column_name)``. The CSV carries value LABELS as
     cell text (matching how MM keys everything on ``value_text``); the metadata
     carries what CSV cannot express — SPSS's measure, variable label, and the
     ordered scale points.
+
+    ``columns`` (#973 c) narrows to those ORIGINAL variable positions, in order,
+    via pyreadstat's own ``usecols`` — so the unselected variables are never read
+    off disk. **Verified on 1.3.5: the per-variable metadata comes back narrowed
+    to match** (`variable_value_labels`, `variable_measure`, `column_names`), and
+    `apply_sav_metadata` keys on the variable NAME rather than its index, so the
+    overlay is unaffected by the narrowing.
 
     Raises SavImportError for anything the user should fix (unreadable file,
     empty data, over-cap dimensions).
@@ -451,8 +499,12 @@ def sav_to_csv_text(content: bytes) -> tuple[str, dict[str, SavColumnMeta]]:
         raise SavImportError(f"The SPSS file has more than {MAX_SAV_COLS} variables.")
     # #803: the CELL cap, applied identically to every format. SPSS declares
     # both dimensions in its metadata, so this refuses before any data is read.
-    if meta.number_rows and meta.number_columns:
-        over = cell_count_error(meta.number_rows, meta.number_columns)
+    # ⚠️ #973 (c): with a SELECTION the width is the selection's — that is all
+    # this read will fetch, and counting the file's full width here would refuse
+    # the very file the selection exists to rescue.
+    width = len(columns) if columns is not None else meta.number_columns
+    if meta.number_rows and width:
+        over = cell_count_error(meta.number_rows, width)
         if over:
             raise SavImportError(over)
     if meta.number_rows and meta.number_rows > MAX_SAV_ROWS:
@@ -468,6 +520,20 @@ def sav_to_csv_text(content: bytes) -> tuple[str, dict[str, SavColumnMeta]]:
     # meta.number_rows, which SPSS writers may legally record as -1 ("unknown"),
     # and an unbounded dict-of-lists read of such a file is the OOM vector the
     # cap exists to close. +1 so "we hit the limit" is distinguishable below.
+    # #973 (c): `usecols` narrows at the SOURCE — the unselected variables are
+    # never read off disk, which is the point (a post-hoc filter would spend the
+    # memory being refused). Names, not indices: pyreadstat takes variable names,
+    # so the router's index selection is resolved against the metadata read above.
+    usecols = None
+    if columns is not None:
+        declared = list(meta.column_names or [])
+        # Refuse rather than silently drop: dropping would return FEWER columns
+        # than were asked for, shifting every `column_index` the wizard holds.
+        try:
+            _refuse_unknown_columns(columns, len(declared))
+        except ColumnSelectionError as e:
+            raise SavImportError(str(e)) from e
+        usecols = [declared[i] for i in columns]
     try:
         data, meta = pyreadstat.read_sav(
             io.BytesIO(content),
@@ -475,6 +541,7 @@ def sav_to_csv_text(content: bytes) -> tuple[str, dict[str, SavColumnMeta]]:
             apply_value_formats=False,
             output_format="dict",
             row_limit=MAX_SAV_ROWS + 1,
+            **({"usecols": usecols} if usecols is not None else {}),
         )
     except Exception as e:
         logger.warning("sav read failed: %s", e)

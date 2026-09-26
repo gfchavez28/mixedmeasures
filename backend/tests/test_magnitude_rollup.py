@@ -499,7 +499,7 @@ class TestTheSharedGather:
 
     def test_an_unknown_scope_fails_closed(self, world):
         with pytest.raises(ValueError, match="unknown segment_scope"):
-            gather_target_votes(world["db"], 1, segment_scope="whatever")
+            gather_target_votes(world["db"], 1, segment_scope="whatever", min_voters=1)
 
     def test_the_two_scopes_differ_exactly_on_unfrozen_clips(self, world):
         """The property that makes the parameter load-bearing rather than
@@ -516,10 +516,75 @@ class TestTheSharedGather:
         turn = world["turn"]()
         world["rate"](turn, world["scaled"], 1, 3.0)
 
-        writer = gather_target_votes(db, 1, segment_scope="consensus_eligible")
-        discloser = gather_target_votes(db, 1, segment_scope="project")
-        assert set(writer.seg_buckets) == {turn.id}
-        assert set(discloser.seg_buckets) == {turn.id, clip.id}
+        def segments(scope):
+            votes = gather_target_votes(db, 1, segment_scope=scope, min_voters=1)
+            return {b.target_id for b in votes.ballots() if b.kind == "seg"}
+
+        assert segments("consensus_eligible") == {turn.id}
+        assert segments("project") == {turn.id, clip.id}
+
+
+class TestTheStreamedRollup:
+    """#958's last step: the rollup reads the gather as a STREAM and resolves
+    participants one batch of targets at a time. The batching is the one new
+    way to be wrong — a target resolved in the wrong batch is ABSENT from that
+    batch's answers, and `_consume` treats an absent route as unreachable and
+    drops the target silently. So every arrangement of boundaries must give the
+    answer one batch gives."""
+
+    def _mixed_world(self, world):
+        from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
+
+        db, person, scaled = world["db"], world["person"], world["scaled"]
+        rate = world["rate"]
+        rate(world["turn"](), scaled, 1, 2.0)                       # sole voter
+        agreed = world["turn"]()
+        rate(agreed, scaled, 1, 4.0)
+        rate(agreed, scaled, 2, 5.0)                                # two agree
+        split = world["turn"]()
+        rate(split, scaled, 1, 1.0)
+        rate(split, world["other_scale"], 2, 1.0)                   # no consensus
+        rate(world["turn"](facilitator_turn=True), scaled, 1, 5.0)  # facilitator
+        obs = Observation(project_id=1, name="Huddle")
+        doc = Document(project_id=1, name="Workplan", source_filename="w.docx",
+                       source_format="docx", participant_id=person.id)
+        ds = Dataset(project_id=1, name="Survey")
+        db.add_all([obs, doc, ds])
+        db.flush()
+        clip = Segment(observation_id=obs.id, sequence_order=0, text="clip",
+                       start_time=0.0, end_time=2.0)
+        doc_seg = Segment(document_id=doc.id, sequence_order=0, text="a goal")
+        column = DatasetColumn(dataset_id=ds.id, column_code="Q", column_name="Q",
+                               column_text="Open", column_type="open_text",
+                               sequence_order=0, display_order=0)
+        row = DatasetRow(dataset_id=ds.id, participant_id=person.id)
+        db.add_all([clip, doc_seg, column, row])
+        db.flush()
+        cell = DatasetValue(row_id=row.id, column_id=column.id, value_text="x")
+        db.add(cell)
+        db.flush()
+        rate(clip, scaled, 1, 3.0)                                  # disclosed
+        rate(doc_seg, scaled, 1, 5.0)                               # a second route
+        db.add(CodeApplication(dataset_value_id=cell.id, code_id=scaled.id,
+                               user_id=1, magnitude=1.0))           # a THIRD route
+        db.flush()
+
+    def test_the_batch_size_never_changes_the_answer(self, world, monkeypatch):
+        import app.services.consensus as consensus
+
+        db = world["db"]
+        self._mixed_world(world)
+        whole = compute_magnitude_rollup(db, 1)
+        # Non-vacuous: all three routes reached the score, and both kinds of
+        # disclosure are present, so a dropped target in any arm would show.
+        assert sorted(_only(whole).target_ratings) == [1.0, 2.0, 4.5, 5.0]
+        assert set(whole.excluded_ratings) == {
+            EXCLUDED_NO_CODE_CONSENSUS, EXCLUDED_FACILITATOR_TURN, UNRESOLVED_OBSERVATION_CLIP,
+        }
+        for size in (1, 2, 3):
+            monkeypatch.setattr(mr, "GATHER_STREAM_BATCH", size)
+            monkeypatch.setattr(consensus, "GATHER_STREAM_BATCH", size)
+            assert compute_magnitude_rollup(db, 1) == whole, size
 
 
 class TestTheVocabularyIsDeclared:

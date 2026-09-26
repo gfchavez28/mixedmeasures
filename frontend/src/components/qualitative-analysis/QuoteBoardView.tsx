@@ -943,7 +943,7 @@ export default function QuoteBoardView({
             const attr = formatAttribution(activeDragExcerpt, showSpeakerProp, showSourceProp)
             return (
               <div
-                className="rounded-lg border border-mm-accent/40 bg-mm-surface p-4 shadow-lg max-w-sm"
+                className="rounded-lg border border-mm-blue/40 bg-mm-surface p-4 shadow-lg max-w-sm"
                 aria-hidden="true"
               >
                 <p className="text-sm text-mm-text leading-relaxed line-clamp-3">

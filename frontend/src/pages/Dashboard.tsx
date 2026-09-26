@@ -7,6 +7,8 @@ import { useListLoad } from '@/hooks/useListLoad'
 import { LoadState } from '@/components/LoadStatus'
 import type { ImportValidationResult, ProjectImportMode } from '@/lib/api'
 import { setPendingMerge } from '@/lib/pending-merge'
+import { staleResultsNote } from '@/lib/stale-results'
+import type { ProjectImportResult } from '@/lib/api'
 import { toast } from 'sonner'
 import { useAuth } from '@/lib/auth-context'
 import { useTheme } from '@/lib/theme-context'
@@ -62,7 +64,7 @@ import { SAFETY_COPIES_QUERY_KEY } from '@/lib/safety-copies'
  */
 function DashboardCoderSwitcher() {
   const { user } = useAuth()
-  const { coders } = useCoders()
+  const { selectableCoders } = useCoders()
   const { requestSwitch, dialog, switching } = useCoderSwitch()
   const [open, setOpen] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -94,7 +96,10 @@ function DashboardCoderSwitcher() {
   }, [open, closeMenu])
 
   if (!user) return null
-  const others = coders.filter(c => c.id !== user.id)
+  // #989 — `selectableCoders`, never `coders`: the roster includes MACHINE coders
+  // (their codings must be attributable) and `switch-coder` refuses them, so a
+  // list built from the full roster offers an act the server 404s.
+  const others = selectableCoders.filter(c => c.id !== user.id)
   return (
     <div ref={ref} className="relative">
       <button
@@ -170,6 +175,25 @@ function DashboardCoderSwitcher() {
   )
 }
 
+/**
+ * #958 §6 — the toast options for an import or a duplicate, or `undefined`.
+ *
+ * **Why a duplicate says this at all:** duplicating a project is an export followed by an
+ * import, so the copy's saved results are declared out of date exactly as an imported
+ * colleague's are — their per-record scores are DERIVED and are rebuilt here, not carried.
+ *
+ * ⚠️ **The explanation lives HERE rather than at the two call sites, and not only for
+ * tidiness.** `project-export-error.test.ts` reads the 600 characters following each
+ * `projectPortabilityApi.duplicateProject(` call and requires `toastProjectExportError`
+ * inside them — and `stripComments` replaces a comment with SPACES to preserve offsets, so
+ * a comment inside that handler consumes the window just as code does. Two lines of prose
+ * in `onSuccess` pushed `onError` ten characters past it (measured 2026-09-21).
+ */
+function staleToast(result: ProjectImportResult): { description: string } | undefined {
+  const note = staleResultsNote(result.metrics_marked_stale)
+  return note ? { description: note } : undefined
+}
+
 export default function Dashboard() {
   const { isDark, toggleTheme } = useTheme()
   const navigate = useNavigate()
@@ -224,19 +248,24 @@ export default function Dashboard() {
       // and was never named to anyone — so the description carries the filename, and
       // the audit log carries it durably (a toast is gone in seconds, and the person
       // who needs this file is looking hours later).
+      // TWO facts can be true of one import, and the second has a consequence the
+      // researcher meets days later — so it must not be dropped when the first fires.
+      const notes: string[] = []
+      if (result.safety_backup_filename) {
+        // #919: say WHERE — the backup folder is not reachable from the app,
+        // so the copy is listed, with a Download, in Settings.
+        notes.push(
+          `Your previous copy was saved as ${result.safety_backup_filename}. ` +
+          `To go back to it, download it from Settings › Backup & Data and import it.`,
+        )
+      }
+      const stale = staleResultsNote(result.metrics_marked_stale)
+      if (stale) notes.push(stale)
       toast.success(
         mode === 'overwrite'
           ? `Updated "${result.project_name}" from the imported file`
           : `Imported "${result.project_name}"`,
-        result.safety_backup_filename
-          ? {
-              // #919: say WHERE — the backup folder is not reachable from the app,
-              // so the copy is listed, with a Download, in Settings.
-              description:
-                `Your previous copy was saved as ${result.safety_backup_filename}. ` +
-                `To go back to it, download it from Settings › Backup & Data and import it.`,
-            }
-          : undefined,
+        notes.length ? { description: notes.join(' ') } : undefined,
       )
       setImportFile(null)
       setImportPreview(null)
@@ -323,7 +352,7 @@ export default function Dashboard() {
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
       setDuplicateProjectId(null)
-      toast.success(`Duplicated as "${result.project_name}"`)
+      toast.success(`Duplicated as "${result.project_name}"`, staleToast(result))
     },
     // #842: Duplicate runs through the SAME export machinery, so it hits the
     // same size refusal — and it must say so rather than shrug.
@@ -390,14 +419,14 @@ export default function Dashboard() {
             <button
               onClick={() => importFileRef.current?.click()}
               disabled={importValidating}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-sm font-medium border border-mm-border text-mm-text bg-mm-surface hover:bg-mm-surface-hover transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-sm font-medium border border-border text-mm-text bg-mm-surface hover:bg-mm-surface-hover transition-colors disabled:opacity-50"
             >
               <FileInput className="w-4 h-4" />
               {importValidating ? 'Validating...' : 'Import Project'}
             </button>
           <Dialog open={isNewProjectOpen} onOpenChange={setIsNewProjectOpen}>
             <DialogTrigger asChild>
-              <button className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-green))] hover:opacity-90 transition-opacity">
+              <button className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-sm font-medium text-mm-on-fill bg-mm-green-fill hover:opacity-90 transition-opacity">
                 <Plus className="w-4 h-4" />
                 New Project
               </button>
@@ -572,7 +601,7 @@ export default function Dashboard() {
             </p>
             <button
               onClick={() => setIsNewProjectOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-green))] hover:opacity-90 transition-opacity"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-sm font-medium text-mm-on-fill bg-mm-green-fill hover:opacity-90 transition-opacity"
             >
               <Plus className="w-4 h-4" />
               New Project

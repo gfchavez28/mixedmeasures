@@ -43,6 +43,7 @@ interface CodebookToolbarProps {
   projectId: number
   onCreateCode: () => void
   onCreateCategory: () => void
+  onManageCodeSets: () => void
   onTreeExport: () => void
   onOverviewExport: () => void
   onExportCodebook?: (format: 'native' | 'qdc') => void
@@ -65,6 +66,7 @@ export default function CodebookToolbar({
   projectId,
   onCreateCode,
   onCreateCategory,
+  onManageCodeSets,
   onTreeExport,
   onOverviewExport,
   onExportCodebook,
@@ -131,7 +133,7 @@ export default function CodebookToolbar({
             </button>
           )}
           {cb.search && searchMatchCount > 0 && (
-            <span className="absolute -top-1.5 -right-1.5 px-1 py-0.5 rounded-full bg-mm-blue text-white text-[9px] font-bold leading-none">
+            <span className="absolute -top-1.5 -right-1.5 px-1 py-0.5 rounded-full bg-mm-blue-fill text-mm-on-fill text-[9px] font-bold leading-none">
               {searchMatchCount}
             </span>
           )}
@@ -154,6 +156,16 @@ export default function CodebookToolbar({
         >
           <Plus className="w-3.5 h-3.5" />
           Category
+        </button>
+
+        {/* Row 48 — a code SET is authored, unlike its equivalence-group
+            sibling, which is produced by the merge flow and has no UI at all. */}
+        <button
+          onClick={onManageCodeSets}
+          className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium text-mm-text-muted hover:text-mm-text-secondary hover:bg-mm-surface transition-colors"
+          aria-label="Code sets"
+        >
+          Sets
         </button>
 
         {treeData && !isEmpty && (

@@ -40,7 +40,7 @@ export default function CalloutStatView({ node, updateAttributes, deleteNode, se
   return (
     <NodeViewWrapper
       className={`group/material relative my-3 bg-white dark:bg-mm-surface shadow-sm rounded-md px-4 py-4 border-l-4 border-l-teal-500 text-center ${
-        selected ? 'ring-2 ring-mm-accent/30' : ''
+        selected ? 'ring-2 ring-mm-blue/30' : ''
       }`}
       data-type="callout-stat"
       role="figure"

@@ -340,8 +340,10 @@ export default function TimelineScrubber({
         {currentTime !== null && !isDragging && hoveredTime === null && (
           <div
             className={cn(
-              "absolute top-5 px-1.5 py-0.5 text-white text-[11px] rounded pointer-events-none whitespace-nowrap z-10",
-              playheadBeyond ? "bg-amber-500" : "bg-[hsl(var(--mm-green))]",
+              "absolute top-5 px-1.5 py-0.5 text-[11px] rounded pointer-events-none whitespace-nowrap z-10",
+              // #1009: each fill names its own text colour — white measured 3.05:1
+              // on the green and ~2.1:1 on amber-500.
+              playheadBeyond ? "bg-amber-500 text-amber-950" : "bg-mm-green-fill text-mm-on-fill",
             )}
             style={{
               left: `${currentPosition * 100}%`,

@@ -469,10 +469,21 @@ async def export_coded_segments_csv(
             scale_cache[code_obj.id] = read_scale(code_obj)
         return scale_cache[code_obj.id]
 
+    # Queue row 49 — `Unit ID` is APPENDED (every existing column keeps its
+    # position, #35's rule) and it is what makes this export an INPUT rather than
+    # only a report.
+    #
+    # 🔴 Until it existed this file carried NO unit identifier of any kind, so a
+    # researcher could not produce a file the bulk coding import's segment arm
+    # would read: the import's whole `target_kind='segments'` path had no
+    # producer. `Segment.uuid` rather than the primary key, because the uuid is
+    # the J3-2 spine and is stable across `.mmproject` copies — a `.mmproject`
+    # round trip renumbers ids, so a file keyed on one would silently address
+    # other segments after a colleague's project came back.
     writer.writerow([
         "Code", "Category", "Coder", "Source Type", "Source", "Speaker", "Participant",
         "Participant Role", "Segment Text", "Other Codes", "Is Quoted", "Timestamp",
-        "End Timestamp", "Rating", "Rating Scale", "Rating Anchor",
+        "End Timestamp", "Rating", "Rating Scale", "Rating Anchor", "Unit ID",
     ])
 
     for app in apps:
@@ -517,6 +528,11 @@ async def export_coded_segments_csv(
             rating_cell,
             scale_cell,
             csv_safe(anchor_cell),
+            # Not routed through `csv_safe`: a uuid is hex and hyphens, so it can
+            # carry no formula prefix — but it is machine-generated rather than
+            # user text, which is the property that makes that true. A
+            # user-derived column added here WOULD need it.
+            seg.uuid if seg else "",
         ])
 
     output.seek(0)

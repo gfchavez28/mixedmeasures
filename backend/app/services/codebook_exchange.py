@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from ..models import Code, CodeCategory, Project
+from ..models import Code, CodeCategory, CodeSet, Project
 from ..services import magnitude
 from ..services.backup import APP_VERSION
 
@@ -197,6 +197,19 @@ def export_codebook_native(db: Session, project_id: int) -> dict:
             # description only); that format is lossy for scales, stated here
             # rather than hidden.
             "magnitude_scale": magnitude.read_scale(code),
+            # Row 48: a code SET is codebook structure — the variable a code is
+            # a value of — so it travels with the codebook for the same reason
+            # the rating scale does. Carried as the set's LABEL rather than its
+            # id, because the id names a row in the exporting project and a
+            # codebook is imported into a different one. ⚠️ `exhaustive` rides
+            # with it: without the flag the set imports with the DEFAULT, which
+            # silently changes what a blank means and therefore the α.
+            "code_set": (
+                {"label": code.code_set.label,
+                 "exhaustive": bool(code.code_set.exhaustive),
+                 "description": code.code_set.description}
+                if code.code_set is not None else None
+            ),
         })
 
     return {
@@ -404,7 +417,38 @@ def import_codebook_native(db: Session, project_id: int, data: dict) -> dict:
         "codes_skipped": 0,
         "codes_uncategorized": 0,
         "scales_imported": 0,
+        "code_sets_created": 0,
     }
+
+    # Row 48 — a code set is matched by LABEL, because a codebook crosses
+    # projects and an id names a row in the exporting one. Existing sets are
+    # REUSED and never edited: this import creates, it does not edit, which is
+    # the same rule the duplicate-code skip above follows — and here it matters
+    # more, because `exhaustive` changes what every blank in the receiving
+    # project already means.
+    sets_by_label: dict[str, CodeSet] = {
+        cs.label: cs
+        for cs in db.query(CodeSet).filter(CodeSet.project_id == project_id).all()
+    }
+
+    def _resolve_code_set(spec: dict | None) -> CodeSet | None:
+        if not spec or not spec.get("label"):
+            return None
+        label = str(spec["label"])
+        found = sets_by_label.get(label)
+        if found is not None:
+            return found
+        created = CodeSet(
+            project_id=project_id,
+            label=label,
+            description=spec.get("description"),
+            exhaustive=bool(spec.get("exhaustive", False)),
+        )
+        db.add(created)
+        db.flush()
+        sets_by_label[label] = created
+        counts["code_sets_created"] += 1
+        return created
 
     # Import categories from tree
     def import_category_tree(nodes: list[dict], parent_id: int | None, parent_path: str | None):
@@ -500,6 +544,14 @@ def import_codebook_native(db: Session, project_id: int, data: dict) -> dict:
                     "Code '%s' carries a rating scale the tool refuses (%s); imported without it",
                     name, exc,
                 )
+        # Row 48 — membership travels with the code. ⚠️ A UNIVERSAL code never
+        # reaches here (skipped above), which is the same refusal
+        # `code_sets.membership_refusal` makes at the interactive door; an
+        # INACTIVE one legitimately does, because deactivating removes a value
+        # from the picker and not from the historical record.
+        code_set = _resolve_code_set(code_data.get("code_set"))
+        if code_set is not None:
+            code.code_set_id = code_set.id
         db.add(code)
         existing_code_paths.add(key)
         counts["codes_created"] += 1

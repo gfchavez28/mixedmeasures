@@ -47,8 +47,6 @@ const read = (rel: string) => stripComments(readFileSync(join(SRC, rel), 'utf8')
 
 /** Every trigger this run measured nameless in the tree, with the name it got. */
 const NAMED_TRIGGERS = [
-  { file: 'pages/ConversationsListPage.tsx', name: 'Sort conversations' },
-  { file: 'pages/DocumentsListPage.tsx', name: 'Sort documents' },
   { file: 'pages/AppendImport.tsx', name: 'File Encoding' },
   { file: 'components/MemosPanelContent.tsx', name: 'What this memo is about' },
 ] as const
@@ -82,12 +80,27 @@ describe('#892 — controls the sweep found nameless are named', () => {
   it('the stripper still reaches the real markup (a blind scan passes)', () => {
     // #823f: a scan that can no longer see its target reports clean. Prove the
     // stripped source retains a line only the JSX can supply.
-    const src = read('pages/ConversationsListPage.tsx')
+    const src = read('pages/AppendImport.tsx')
     expect(src).toContain('<SelectTrigger')
-    expect(src).toContain('aria-label="Sort conversations"')
-    // ...and prove the stripping actually happened, so the assertion above
-    // cannot be satisfied by the comment that explains it.
-    expect(src).not.toContain('name-from-content role')
+    expect(src).toContain('aria-label="File Encoding"')
+  })
+
+  it('the four source lists name their sort trigger through the shared toolbar (#1008)', () => {
+    // The two list-page triggers this run measured nameless moved into ONE
+    // component, which names every page's trigger from its noun — "Sort
+    // conversations", "Sort documents", "Sort datasets", "Sort observations".
+    const toolbar = read('components/SourceListToolbar.tsx')
+    expect(toolbar).toContain('<SelectTrigger')
+    expect(toolbar).toContain('aria-label={`Sort ${noun}`}')
+    // Prove the stripping happened, so the comment explaining #892 cannot be
+    // what satisfies the assertion above.
+    expect(toolbar).not.toContain('name-from-content role')
+    for (const [page, noun] of [
+      ['ConversationsListPage', 'conversations'], ['DocumentsListPage', 'documents'],
+      ['DatasetsListPage', 'datasets'], ['ObservationsListPage', 'observations'],
+    ]) {
+      expect(read(`pages/${page}.tsx`), `${page} must pass its noun`).toContain(`noun="${noun}"`)
+    }
   })
 })
 

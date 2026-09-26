@@ -49,6 +49,7 @@ class Project(Base):
     datasets = relationship("Dataset", back_populates="project", cascade="all, delete-orphan")
     equivalence_groups = relationship("EquivalenceGroup", back_populates="project", cascade="all, delete-orphan")
     code_equivalence_groups = relationship("CodeEquivalenceGroup", back_populates="project", cascade="all, delete-orphan")
+    code_sets = relationship("CodeSet", back_populates="project", cascade="all, delete-orphan")
     analysis_domains = relationship("AnalysisDomain", back_populates="project", cascade="all, delete-orphan")
     metric_definitions = relationship("MetricDefinition", back_populates="project", cascade="all, delete-orphan")
     material_collections = relationship("MaterialCollection", back_populates="project", cascade="all, delete-orphan")

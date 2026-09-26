@@ -24,6 +24,9 @@ const seen = vi.hoisted(() => ({
 vi.mock('./IrrMatrix', () => ({
   default: () => <div data-testid="irr-matrix" />,
 }))
+vi.mock('./MachineAgreementTable', () => ({
+  default: () => <div data-testid="machine-agreement" />,
+}))
 vi.mock('./OpenCutReliability', () => ({
   default: (props: { projectId: number; observationId: number; observationName: string }) => {
     seen.panel.push(props)
@@ -36,6 +39,12 @@ vi.mock('@/lib/api', () => ({
       { id: 7, name: 'Playground', segmentation_frozen_at: null },
     ]),
   },
+  // Row 49 — the default export now reads the roster to decide whether a model
+  // layer exists. Stubbed EXPLICITLY rather than left to React Query swallowing
+  // a TypeError: a mock that omits a dependency the component needs is a test
+  // passing for the wrong reason.
+  authApi: { listCoders: vi.fn().mockResolvedValue([]) },
+  codeAnalysisApi: { machineAgreement: vi.fn() },
 }))
 
 import ReliabilityTab, { ReliabilityTabView } from './ReliabilityTab'
@@ -56,6 +65,8 @@ function renderView(over: {
   observations?: ObsLike[]
   observationsLoad?: ListLoad
   selectedId?: number | null
+  /** Row 49 — REQUIRED on the view, so this second mount has to decide too. */
+  hasMachineCoders?: boolean
 } = {}) {
   return render(
     <ReliabilityTabView
@@ -64,6 +75,7 @@ function renderView(over: {
       observationsLoad={over.observationsLoad ?? load('ready')}
       selectedId={over.selectedId ?? null}
       onSelect={() => {}}
+      hasMachineCoders={over.hasMachineCoders ?? false}
     />,
   )
 }
@@ -190,5 +202,37 @@ describe('#963 Tier 3 — the scope list is a claim about what this tab offers',
       </QueryClientProvider>,
     )
     expect(await screen.findByText('The reliability scope list could not be loaded.')).toBeInTheDocument()
+  })
+})
+
+/**
+ * 🔴 Queue row 49 — the MOUNTING seam, and this file exists because of exactly
+ * this defect one component earlier.
+ *
+ * Found by a SURVIVING MUTANT: replacing the gate with `false` left every
+ * `MachineAgreementTable` test green, because those render it in isolation.
+ * That is #624 verbatim — this file's own docstring records `OpenCutReliability`
+ * shipping fully built, fully unit-tested and mounted NOWHERE.
+ */
+describe('the model-comparison section (row 49)', () => {
+  it('is MOUNTED when the roster holds a machine coder', async () => {
+    renderView({ hasMachineCoders: true })
+    expect(await screen.findByTestId('machine-agreement')).toBeInTheDocument()
+  })
+
+  it('is absent when it could only ever be empty', () => {
+    // Offering a surface whose request can only return "no machine coder" is
+    // the #806 shape — and it would cost a request on every project.
+    renderView({ hasMachineCoders: false })
+    expect(screen.queryByTestId('machine-agreement')).not.toBeInTheDocument()
+  })
+
+  it('is mounted on the OPEN-CUT branch too', async () => {
+    // A model layer is comparable whether the pooled matrix or an open-cut
+    // panel is showing; gating it on the pooled branch would hide it for any
+    // project whose reliability scope is an observation.
+    renderView({ observations: [OPEN], selectedId: 7, hasMachineCoders: true })
+    expect(await screen.findByTestId('open-cut-panel')).toBeInTheDocument()
+    expect(screen.getByTestId('machine-agreement')).toBeInTheDocument()
   })
 })

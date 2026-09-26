@@ -36,6 +36,8 @@ from app.services.participant_dataset import (
     create_participant_dataset,
 )
 from app.services.project_portability import export_project, import_project
+# v7 (#958): the data-scaled entities are their own zip members — see the module docstring.
+from tests.archive_support import archive_extras, archive_payload, write_archive
 
 
 @pytest.fixture
@@ -108,8 +110,11 @@ def _colleagues_copy(
     docs.mkdir(exist_ok=True)
     src.write_bytes(export_project(db, project.id, docs).getvalue())
 
+    # v7 (#958) keeps `dataset_rows` / `dataset_values` in their own entries, so the
+    # surgery below reads the folded payload and writes a whole archive back.
     zin = zipfile.ZipFile(src)
-    data = json.loads(zin.read("project.json"))
+    manifest = json.loads(zin.read("manifest.json"))
+    data = archive_payload(zin)
     managed_ids = {d["_original_id"] for d in data["datasets"] if d.get("managed_kind")}
     assert managed_ids, "fixture is degenerate: the export carries no managed dataset"
 
@@ -130,11 +135,7 @@ def _colleagues_copy(
                 v["value_text"] = recell
 
     dest = tmp_path / "colleague.mmproject"
-    buf = BytesIO()
-    with zipfile.ZipFile(buf, "w") as zout:
-        for name in zin.namelist():
-            zout.writestr(name, json.dumps(data) if name == "project.json" else zin.read(name))
-    dest.write_bytes(buf.getvalue())
+    write_archive(dest, manifest, data, archive_extras(zin))
     return dest
 
 
@@ -369,7 +370,8 @@ class TestAnOrdinaryDatasetIsUnaffected:
         docs.mkdir(exist_ok=True)
         src.write_bytes(export_project(db, p.id, docs).getvalue())
         zin = zipfile.ZipFile(src)
-        data = json.loads(zin.read("project.json"))
+        manifest = json.loads(zin.read("manifest.json"))
+        data = archive_payload(zin)
         target_ids = {
             d["_original_id"] for d in data["datasets"] if not d.get("managed_kind")
         }
@@ -380,11 +382,7 @@ class TestAnOrdinaryDatasetIsUnaffected:
             if c.get("dataset_id") in target_ids:
                 c["uuid"] = f"colleague-ordinary-col-{i}"
         dest = tmp_path / "colleague.mmproject"
-        buf = BytesIO()
-        with zipfile.ZipFile(buf, "w") as zout:
-            for name in zin.namelist():
-                zout.writestr(name, json.dumps(data) if name == "project.json" else zin.read(name))
-        dest.write_bytes(buf.getvalue())
+        write_archive(dest, manifest, data, archive_extras(zin))
 
         _merge(db, p, dest, tmp_path)
 

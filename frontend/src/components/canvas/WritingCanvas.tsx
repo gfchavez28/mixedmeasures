@@ -260,7 +260,7 @@ export default function WritingCanvas({
           <button
             type="button"
             onClick={() => onFocusTheme?.(null)}
-            className="mb-4 w-full flex items-center justify-center gap-2 py-2 rounded-md border border-dashed border-mm-border text-xs text-mm-text-muted hover:text-mm-text hover:border-mm-border-medium transition-colors"
+            className="mb-4 w-full flex items-center justify-center gap-2 py-2 rounded-md border border-dashed border-border text-xs text-mm-text-muted hover:text-mm-text hover:border-mm-border-medium transition-colors"
           >
             Focusing on one theme — click to show all
           </button>
@@ -290,7 +290,7 @@ export default function WritingCanvas({
                 {showColorBars ? (
                   <div className="w-1 h-5 rounded-full shrink-0" style={{ backgroundColor: themeColor }} />
                 ) : (
-                  <div className="w-1.5 h-1.5 rounded-full shrink-0 bg-mm-border" />
+                  <div className="w-1.5 h-1.5 rounded-full shrink-0 bg-mm-border-medium" />
                 )}
                 <span className="text-sm text-mm-text-muted truncate">{section.name}</span>
                 <span className="text-xs text-mm-text-faint tabular-nums shrink-0">{materialCount}</span>
@@ -339,7 +339,7 @@ export default function WritingCanvas({
           <button
             type="button"
             onClick={() => onCreateTheme({ name: 'New theme' })}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-mm-text-muted hover:text-mm-text border border-dashed border-mm-border hover:border-mm-border-medium transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-mm-text-muted hover:text-mm-text border border-dashed border-border hover:border-mm-border-medium transition-colors"
           >
             <Plus className="w-3 h-3" />
             Add theme
@@ -347,7 +347,7 @@ export default function WritingCanvas({
           <button
             type="button"
             onClick={() => onCreateTheme({ name: 'New section', section_type: 'prose' })}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-mm-text-muted hover:text-mm-text border border-dashed border-mm-border hover:border-mm-border-medium transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-mm-text-muted hover:text-mm-text border border-dashed border-border hover:border-mm-border-medium transition-colors"
           >
             <Plus className="w-3 h-3" />
             Add section
@@ -518,7 +518,7 @@ function ThemeSection({
             <GripVertical className="w-3.5 h-3.5" />
           </button>
           <div
-            className={`flex-1 rounded-full transition-all ${showColorBars ? (isTheme ? 'w-1' : 'w-0.5 bg-mm-border') : 'w-0'}`}
+            className={`flex-1 rounded-full transition-all ${showColorBars ? (isTheme ? 'w-1' : 'w-0.5 bg-mm-border-medium') : 'w-0'}`}
             style={showColorBars && isTheme ? { backgroundColor: themeColor } : undefined}
           />
         </div>
@@ -569,7 +569,7 @@ function ThemeSection({
                 <PopoverTrigger asChild>
                   <button
                     type="button"
-                    className="w-4 h-4 rounded-full border border-mm-border shrink-0 opacity-0 group-hover/theme:opacity-100 focus:opacity-100 transition-opacity"
+                    className="w-4 h-4 rounded-full border border-border shrink-0 opacity-0 group-hover/theme:opacity-100 focus:opacity-100 transition-opacity"
                     style={{ backgroundColor: themeColor }}
                     aria-label={`Change color for ${theme.name}`}
                   />
@@ -679,7 +679,7 @@ interface UnsortedSectionProps {
 
 function UnsortedSection({ pendingItems, onInsertPendingItem, onRemovePendingItem }: UnsortedSectionProps) {
   return (
-    <section id="unsorted-section" aria-label="Unsorted materials awaiting placement" className="mt-8 pt-6 border-t-2 border-dashed border-mm-border">
+    <section id="unsorted-section" aria-label="Unsorted materials awaiting placement" className="mt-8 pt-6 border-t-2 border-dashed border-border">
       <div className="flex items-center gap-2 mb-4">
         <h3 className="text-sm font-semibold text-mm-text-muted">Unsorted</h3>
         <span className="text-xs text-mm-text-muted bg-mm-bg rounded-full px-2 py-0.5 tabular-nums">
@@ -697,7 +697,7 @@ function UnsortedSection({ pendingItems, onInsertPendingItem, onRemovePendingIte
             <button
               type="button"
               onClick={() => onInsertPendingItem(item)}
-              className="flex items-center gap-2 flex-1 min-w-0 text-left rounded-md px-3 py-2 bg-white dark:bg-mm-surface border border-mm-border hover:border-mm-border-medium transition-colors text-sm"
+              className="flex items-center gap-2 flex-1 min-w-0 text-left rounded-md px-3 py-2 bg-white dark:bg-mm-surface border border-border hover:border-mm-border-medium transition-colors text-sm"
             >
               <span className="text-mm-text-muted shrink-0">
                 {PENDING_ICONS[item.item_type] ?? <FileText className="w-3.5 h-3.5" />}

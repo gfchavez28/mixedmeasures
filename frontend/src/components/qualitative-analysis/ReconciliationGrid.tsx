@@ -464,7 +464,7 @@ const ReconciliationRow = memo(function ReconciliationRow({
         tabIndex={focusedCol === 0 ? 0 : -1}
         onFocus={() => onFocusCell(rowIndex, 0)}
         aria-label={rowheaderLabel}
-        className="sticky left-0 z-10 bg-mm-surface px-3 py-2 border-r focus:outline-2 focus:outline-mm-accent"
+        className="sticky left-0 z-10 bg-mm-surface px-3 py-2 border-r focus:outline-2 focus:outline-ring"
       >
         <div className="flex items-center gap-1.5 mb-1">
           {unit.has_disagreement
@@ -644,7 +644,7 @@ const ReconciliationCell = memo(function ReconciliationCell(props: Reconciliatio
       onFocus={() => onFocusCell(rowIndex, colIndex)}
       aria-label={ariaLabel}
       className={cn(
-        'px-3 py-2 border-r last:border-r-0 focus:outline-2 focus:outline-mm-accent align-top min-w-0 overflow-hidden',
+        'px-3 py-2 border-r last:border-r-0 focus:outline-2 focus:outline-ring align-top min-w-0 overflow-hidden',
         // Consensus is the at-a-glance target — pinned to the right so it stays visible when
         // many coders force horizontal scroll (#442), and tinted mint (matching the merge
         // Review) when an agreed code exists, neutral when there's none — a dual-encoded

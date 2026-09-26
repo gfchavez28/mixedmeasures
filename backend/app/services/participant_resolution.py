@@ -46,10 +46,16 @@ something that is not here" from "this target reaches nobody".
 ⚠️ **Bounded by construction.** Ids are looked up in chunks (`_ID_CHUNK`)
 because SQLAlchemy renders one bind parameter per element and SQLite's
 `SQLITE_MAX_VARIABLE_NUMBER` is exactly 250,000 (#842 — the ceiling that broke
-`.mmproject` export). Callers hold a bounded set today (rated applications are
-bounded by coding volume, not dataset size); a future PROJECT-WIDE consumer
-should join back to `project_id` in its own query rather than materialise every
-id and pass it here.
+`.mmproject` export). ⚠️ **The one production caller, row 45's rollup, is
+PROJECT-WIDE, and it passes one streamed batch of targets per call (#958)** —
+until 2026-09-24 it materialised every coded target of the project (843,408 on
+BES) and passed them all at once. A new caller batches the same way.
+
+🔴 **The cell lookup filters on the ids ALONE and scopes to the project in
+Python (#1021).** Joined to `Dataset` and filtered on `project_id`, SQLite
+planned it FROM the project whenever the id list passed ~100 entries (measured:
+50 ids sought by key, 100 walked the project), probing every row of the project
+against the list — 139.8 s per 5,000-id chunk on BES.
 
 Enumeration is GATED, not remembered: `tests/test_participant_resolution.py`
 reflects over `Base.metadata` for every FK naming `participants.id` and over
@@ -299,7 +305,8 @@ def resolve_participants(
 
     Project-scoped: a target outside ``project_id`` is absent from the result,
     so a stale or foreign id can never resolve to another project's
-    participant. Two queries at most (one per grain), each chunked.
+    participant. One query per grain, each chunked, plus one read of the
+    project's dataset ids when cells are asked about (#1021).
     """
     seg_ids = sorted({int(i) for i in segment_ids})
     value_ids = sorted({int(i) for i in dataset_value_ids})
@@ -338,15 +345,28 @@ def resolve_participants(
             )
 
     dataset_values: dict[int, ParticipantRoute] = {}
+    # 🔴 THE PROJECT SCOPING IS APPLIED IN PYTHON, AND THE REASON IS THE QUERY
+    # PLAN (#1021). Joined to `Dataset` and filtered on `project_id`, SQLite
+    # (which has no ANALYZE statistics here) drove the join FROM the project's
+    # datasets: every row of the project, each probed against the whole id
+    # list. MEASURED on BES (122,382 rows): 139.8 s for ONE 5,000-id chunk, so
+    # a rollup over its 843,408 coded cells would have run for hours. Filtered
+    # on the ids alone, each value is sought by primary key. A project holds a
+    # handful of datasets, read once.
+    project_datasets = (
+        {dataset_id for (dataset_id,) in db.query(Dataset.id).filter(Dataset.project_id == project_id)}
+        if value_ids else set()
+    )
     for chunk in _chunks(value_ids):
         rows = (
-            db.query(DatasetValue.id, DatasetRow.participant_id)
+            db.query(DatasetValue.id, DatasetRow.participant_id, DatasetRow.dataset_id)
             .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-            .join(Dataset, DatasetRow.dataset_id == Dataset.id)
-            .filter(Dataset.project_id == project_id, DatasetValue.id.in_(chunk))
+            .filter(DatasetValue.id.in_(chunk))
             .all()
         )
-        for value_id, participant_id in rows:
+        for value_id, participant_id, dataset_id in rows:
+            if dataset_id not in project_datasets:
+                continue  # another project's cell is ABSENT, never unresolved
             dataset_values[value_id] = ParticipantRoute(
                 participant_id=participant_id,
                 route=ROUTE_DATASET_ROW,

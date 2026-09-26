@@ -143,3 +143,26 @@ class ProjectStorageResponse(BaseModel):
     media_bytes: int = 0
     video_bytes: int = 0
     documents_bytes: int = 0
+
+
+class ProjectExportCeilingResponse(BaseModel):
+    """How close this project is to the limit that governs SHARING it (#974).
+
+    🔴 **Deliberately its own endpoint rather than a field on `ProjectStorage` or
+    `ProjectSummary`, and the reason is measured.** The count is ~250 ms on a
+    3.6M-value project. `ProjectSummary` is fetched by `TopRail`, i.e. on every
+    page in the app; `ProjectStorage` computes the export dialog's include-media
+    default, so delaying it delays a control the researcher is looking at. A
+    separate call is paid for only by the two surfaces that show the figure.
+
+    ⚠️ **`limit` rides the payload rather than being mirrored client-side.** The
+    client renders a percentage of it, and a hardcoded copy would silently
+    disagree the first time `MAX_PROJECT_EXPORT_VALUES` moves — which its own
+    refusal message already promises will happen ("A larger limit is planned").
+
+    ⚠️ `dataset_values` is the GATE's quantity, not the archive's true size — see
+    `project_portability.project_export_value_count`.
+    """
+    dataset_values: int = 0
+    limit: int = 0
+    warn_fraction: float = 0.0

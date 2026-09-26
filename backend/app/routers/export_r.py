@@ -42,6 +42,10 @@ from ..services.recode import (
     mapping_numeric_values,
 )
 from ..services.reliability_basis import ALPHA_METRIC_NOMINAL, MAGNITUDE_ALPHA_METRIC
+from ..services.code_sets import (
+    SET_BASIS_EXHAUSTIVE_WITH_MISSING,
+    SET_BASIS_INCLUSIVE_WITH_NONE,
+)
 from ..services.computed_columns import (
     parse as parse_expression,
     validate as validate_expression,
@@ -490,6 +494,7 @@ def _build_r_script(
     irr_per_code: dict | None = None,
     irr_code_names: dict | None = None,
     irr_magnitude: dict | None = None,
+    irr_code_sets: dict | None = None,
     na_blanked_count: int = 0,
     identifier_cols: list[dict] | None = None,
 ) -> str:
@@ -980,6 +985,21 @@ def _build_r_script(
             " for this project"
         )
         r_lines.append("")
+
+    # #958 §6 — the columns that ARE emitted and hold nothing. `has_scores` is set at the
+    # pivot, where the rows were actually looked for; a metric's `stale` flag is a claim
+    # about freshness and would answer a different question. `.get(..., True)` keeps a
+    # caller that builds `domain_score_cols` without the key silent rather than wrong.
+    unscored = [d for d in domain_score_cols if not d.get("has_scores", True)]
+    if unscored:
+        script_notes.append(
+            "# The following variable-group score column(s) are entirely NA because their "
+            "per-record scores have not been computed on this copy of the project: "
+            + ", ".join(sorted(_escape_r_string(d["r_name"]) for d in unscored))
+        )
+        script_notes.append(
+            "# Recompute them in Mixed Measures (Analysis > Compute All) and export again."
+        )
 
     # Equivalence groups
     if equiv_groups:
@@ -2429,6 +2449,78 @@ def _build_r_script(
         r_lines.append("}")
         r_lines.append("")
 
+    # Row 48 / #995 — code-set agreement. One α per SET: the k-valued nominal
+    # figure a content analyst came for, where the per-code block above reports
+    # each member as a separate 0/1 indicator.
+    #
+    # 🔴 **THE CELLS ARE CODE IDS AND THERE IS NO `factor()` — the filed entry
+    # assumed one and that premise is REFUTED BY MEASUREMENT.** #995 reads "a set
+    # is a FACTOR in R, and #402's rule is that a factor's `levels` must live in
+    # the same space as the CSV cell", and concluded that the level space and the
+    # sentinel's spelling both had to be decided first. Measured against R 4.3.3 /
+    # irr 0.85 on a three-value set with `SET_NONE` present: `kripp.alpha` scores
+    # NOMINALLY by value IDENTITY, so a numeric matrix reproduces the app exactly
+    # (0.3624161074 both sides; κ and % agreement likewise), and the factor route
+    # returns the SAME number — it is not wrong, it is unnecessary, and it would
+    # import #402's silent-NA hazard for nothing. The two IRR blocks above already
+    # do exactly this; this is the third instance of one pattern, not a new one.
+    # ⚠️ **`SET_NONE` (-1) needs no escaping either**, because `codes.id` is a
+    # positive autoincrement — which is the documented reason the sentinel is
+    # negative (the internal design notes), so it can never collide.
+    if irr_coder_ids and len(irr_coder_ids) >= 2 and irr_code_sets:
+        needs_irr = True
+        coder_cols_r = ", ".join(f'"coder_{cid}"' for cid in irr_coder_ids)
+        toc_sections.append("Code-set agreement (one variable, k values)")
+        r_lines.append("# ---- Code-set agreement (one variable, k values) ----")
+        r_lines.append("# A code SET is a mutually exclusive group of codes read as ONE")
+        r_lines.append("# nominal variable, so it gets ONE k-valued alpha rather than k binary")
+        r_lines.append("# ones. Cells are the chosen member's code id; -1 is the real value")
+        r_lines.append('# "none of these"; a blank is no comparable choice by that coder (they')
+        r_lines.append("# never engaged the source, or hold two values of the set at once,")
+        r_lines.append("# which is a contradiction this tool counts rather than resolves).")
+        # 🔴 The BASIS rides the export because the flag changes the DENOMINATOR:
+        # the same coders on the same coding give a different alpha under the two
+        # readings, and nothing in the figure says which. The twelfth stated-basis
+        # member (the internal design notes) — a script that reproduces the
+        # number and drops the basis has reproduced only half the claim.
+        r_lines.append("# `set_basis` states what a blank MEANS for that set, and it changes")
+        r_lines.append(f"#   the number: {SET_BASIS_EXHAUSTIVE_WITH_MISSING} = a blank is missing data")
+        r_lines.append(f"#   (dropped), {SET_BASIS_INCLUSIVE_WITH_NONE} = -1 is a value and counts.")
+        r_lines.append("# NEVER pooled into the overall alpha above: two instruments, one")
+        r_lines.append("# coefficient is dishonest. The app shows this as its own table.")
+        r_lines.append("# NOTE: as above, the app's confidence intervals are not recomputed here.")
+        # ⚠️ Stated rather than silently diverging: `compute_irr` DECLINES to
+        # report a coefficient when a set has no variance or no comparable unit
+        # (`no_variance` / `insufficient_n`), where `kripp.alpha` returns a number
+        # for the same matrix. That is a reporting decision about a degenerate
+        # case, not a disagreement about the arithmetic, and re-deriving that
+        # vocabulary here would be a second implementation of a settled question.
+        r_lines.append("# NOTE: where a set has no variance to agree about, the app reports the")
+        r_lines.append("#   coefficient as undefined and this script still prints kripp.alpha's")
+        r_lines.append("#   value for it. The app's reason is the honest reading of that case.")
+        r_lines.append(f'irr_set_raw <- read_csv("{project_slug}_irr_code_sets.csv", na = c("", "NA"))')
+        r_lines.append(f"irr_set_coder_cols <- c({coder_cols_r})")
+        r_lines.append("for (sid in unique(irr_set_raw$set_id)) {")
+        r_lines.append("  rows_s <- irr_set_raw[irr_set_raw$set_id == sid, , drop = FALSE]")
+        r_lines.append("  sname <- as.character(rows_s$set_label[1])")
+        r_lines.append("  sbasis <- as.character(rows_s$set_basis[1])")
+        r_lines.append("  m <- as.matrix(rows_s[, irr_set_coder_cols, drop = FALSE])")
+        r_lines.append('  storage.mode(m) <- "numeric"')
+        # The metric is the constant the app scored with, never a restated literal
+        # — and a set α must stay NOMINAL: an ordered metric would sort "none of
+        # these" below every code id as though the identifiers meant something.
+        r_lines.append(f'  a <- kripp.alpha(t(m), method = "{ALPHA_METRIC_NOMINAL}")$value')
+        r_lines.append("  k <- NA; ag <- NA")
+        r_lines.append("  if (ncol(m) == 2) {")
+        r_lines.append("    dc <- m[stats::complete.cases(m), , drop = FALSE]")
+        r_lines.append("    if (nrow(dc) > 0) { k <- kappa2(dc)$value; ag <- agree(dc)$value / 100 }")
+        r_lines.append("  }")
+        r_lines.append('  cat(sprintf("IRR_CODE_SET\\tset=%s\\talpha=%.6f\\tkappa=%s\\tagree=%s\\tbasis=%s\\tname=%s\\n",')
+        r_lines.append('              sid, a, ifelse(is.na(k), "NA", sprintf("%.6f", k)),')
+        r_lines.append('              ifelse(is.na(ag), "NA", sprintf("%.6f", ag)), sbasis, sname))')
+        r_lines.append("}")
+        r_lines.append("")
+
     # Update required_packages based on analysis section flags
     if needs_dplyr:
         required_packages.append("dplyr")
@@ -2749,6 +2841,20 @@ def export_r_data(
         for row_id, metric_id, score in scores:
             score_pivot[row_id][metric_id] = score
 
+    # 🔴 **A SCORE COLUMN WITH NO `RowScore` ROWS EMITS AN ALL-`NA` VARIABLE, SILENTLY
+    # (#958 §6).** `factor()`'s NA trap one layer up (#765): the script runs green, the
+    # column is present, and the variable is simply absent from every analysis built on
+    # it. The section below already says so when there are no domain metrics AT ALL; this
+    # is the other case, and it is the NORMAL state of a freshly imported project now that
+    # the archive no longer carries derived per-record scores.
+    #
+    # ⚠️ The column is still emitted. Dropping it would change the data frame's SHAPE
+    # between two exports of the same project, which is worse for reproducibility than an
+    # NA column the notes explain.
+    scored_metric_ids = {mid for cols in score_pivot.values() for mid in cols}
+    for dsc in domain_score_cols:
+        dsc["has_scores"] = dsc["metric_id"] in scored_metric_ids
+
     # ── Step 5: Load row data ────────────────────────────────────────────
     qualifying_ds_ids = [ds.id for ds, _ in qualifying_datasets]
 
@@ -2909,14 +3015,33 @@ def export_r_data(
     # engaged coders). The export is deliberately POOLED — it emits what it has
     # always emitted (#402, test_export_r_irr.py) — so it takes no `source` and
     # discards both. #35 added a sixth: the per-scaled-code RATING matrices.
-    irr_coder_ids, irr_code_names, irr_per_code, _, _, irr_magnitude_all = build_irr_matrices(
-        db, project_id,
-    )
+    #
+    # ⚠️ Row 48 added a SEVENTH — the code-set matrices — emitted since #995.
+    #
+    # ✅ **A set member's binary matrix is STILL in `irr_per_code` and must stay
+    # there.** `build_irr_matrices` reports every code and `compute_irr` decides
+    # what its TABLE shows, so the app's screen narrowed and this export did not;
+    # the set block is an ADDITION beside them, never a replacement.
+    (
+        irr_coder_ids, irr_code_names, irr_per_code, _, _, irr_magnitude_all, irr_code_sets_all,
+    ) = build_irr_matrices(db, project_id)
     # A scaled code nobody has rated yet has an all-blank matrix, which is not
     # a coefficient R can compute; the app reports it as coverage (0 rated).
     # Narrowed ONCE, here, so the CSV and the R block that reads it agree.
     irr_magnitude = {
         code_id: entry for code_id, entry in irr_magnitude_all.items() if entry["n_rated"] > 0
+    }
+    # A one-value set is a binary code wearing a costume — `compute_irr` refuses
+    # it as `degenerate`, and a reproducibility script emitting a coefficient over
+    # a single-valued "variable" would be emitting a non-statistic. Narrowed ONCE,
+    # here, for the same reason as the ratings above: so the CSV and the R block
+    # that reads it cannot disagree about which sets exist.
+    # ⚠️ This is the ONLY definedness question answered here. `no_variance` and
+    # `insufficient_n` are `compute_irr`'s to report and are deliberately NOT
+    # re-derived — a second implementation of that vocabulary is the drift.
+    irr_code_sets = {
+        set_id: entry for set_id, entry in irr_code_sets_all.items()
+        if len(entry["members"]) >= 2
     }
 
     # ── Step 8: Assemble CSV ─────────────────────────────────────────────
@@ -3054,6 +3179,29 @@ def export_r_data(
                 )
         irr_magnitude_csv_content = mag_io.getvalue()
 
+    # Row 48 / #995 — the code-set matrices, same long format, its OWN file. A
+    # set's cells are member code ids and the `SET_NONE` sentinel, not 0/1, so
+    # folding them into `_irr.csv` would put two different variables under one
+    # `code_id` column. The BASIS rides every row: it decides whether a blank is
+    # missing data or the value "none of these", and therefore the number.
+    irr_code_sets_csv_content = None
+    if len(irr_coder_ids) >= 2 and irr_code_sets:
+        set_io = io.StringIO()
+        set_io.write("﻿")  # UTF-8 BOM (readr strips it)
+        set_writer = csv.writer(set_io, lineterminator="\n")
+        set_writer.writerow(
+            ["set_id", "set_label", "set_basis"]
+            + [f"coder_{cid}" for cid in irr_coder_ids]
+        )
+        for set_id, entry in irr_code_sets.items():
+            label = csv_safe(entry["label"])
+            basis = entry["basis"]
+            for row in entry["rows"]:
+                set_writer.writerow(
+                    [set_id, label, basis] + ["" if v is None else v for v in row]
+                )
+        irr_code_sets_csv_content = set_io.getvalue()
+
     # ── Step 9: Generate R script ────────────────────────────────────────
     project_slug = _slugify(project.name, max_len=40)
     n_variables = len(header) - 2  # exclude record_id and dataset
@@ -3084,6 +3232,7 @@ def export_r_data(
         irr_per_code=irr_per_code,
         irr_code_names=irr_code_names,
         irr_magnitude=irr_magnitude,
+        irr_code_sets=irr_code_sets,
         na_blanked_count=na_blanked_count,
         identifier_cols=identifier_cols,
     )
@@ -3097,6 +3246,8 @@ def export_r_data(
             zf.writestr(f"{project_slug}_irr.csv", irr_csv_content)
         if irr_magnitude_csv_content is not None:
             zf.writestr(f"{project_slug}_irr_magnitude.csv", irr_magnitude_csv_content)
+        if irr_code_sets_csv_content is not None:
+            zf.writestr(f"{project_slug}_irr_code_sets.csv", irr_code_sets_csv_content)
     zip_buffer.seek(0)
 
     date_str = datetime.now(timezone.utc).strftime("%Y%m%d")

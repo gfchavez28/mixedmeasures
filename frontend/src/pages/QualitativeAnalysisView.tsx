@@ -69,6 +69,7 @@ import { useEnsureMaterialCollection } from '@/hooks/useEnsureMaterialCollection
 import ReconciliationGrid from '@/components/qualitative-analysis/ReconciliationGrid'
 import ReliabilityTab from '@/components/qualitative-analysis/ReliabilityTab'
 import { isReconciliationTabVisible, isIrrTabVisible } from '@/lib/qual-analysis-types'
+import { availableLayerScopes, layerScopeLabel, rosterHasMachineCoders, showLayerPicker } from '@/lib/coding-layers'
 import { SELECTED_SEGMENT, SELECTED_ROW } from '@/lib/selection'
 import BlindModeToggle from '@/components/BlindModeToggle'
 import { qualChartHasEnoughToFetch, extractQualComputeParams } from '@/components/canvas/inline-chart-params'
@@ -113,7 +114,7 @@ export default function QualitativeAnalysisView() {
   const { openCodebook } = useProjectLayout()
   // #961 — where focus lands when a Retry on the coding counts succeeds.
   const activeTabRef = useRef<HTMLButtonElement>(null)
-  const { coders, coderMap, multiCoder, query: codersQuery } = useCoders()
+  const { coders, coderMap, multiCoder, multiHumanCoder, query: codersQuery } = useCoders()
   const { user } = useAuth()
   // #964: scopes key on `withholding` (fail-closed); the notices key on `blind`.
   // The page gate below also waits for the roster, and the page's own
@@ -157,16 +158,29 @@ export default function QualitativeAnalysisView() {
   // Track J · J2-5 — consensus-layer status drives the layer selector.
   const { data: consensusStatus } = useConsensusStatus(pid)
   const consensusAvailable = !!consensusStatus?.exists
+  // #989 — which layers this project can offer. `machine` appears only once a
+  // machine coder is on the roster; the picker itself renders only when there is
+  // more than one layer to choose between (`showLayerPicker`).
+  const layerAvailability = useMemo(
+    () => ({ consensusAvailable, hasMachineCoders: rosterHasMachineCoders(coders) }),
+    [consensusAvailable, coders],
+  )
   // If consensus stops existing (e.g. a coder was removed), fall back to the human
   // layer so the analysis never silently renders an empty consensus view.
+  // ⚠️ Covers EVERY non-default layer, not just consensus (#989): a machine
+  // coder can be archived out of the roster exactly as a consensus layer can
+  // stop existing, and a saved `machine` scope would then render an empty view
+  // with no control on screen to leave it — the picker hides itself once only
+  // one layer is available.
   useEffect(() => {
-    if (qa.layerScope === 'consensus' && !consensusAvailable) qa.setLayerScope('human')
-  }, [consensusAvailable, qa.layerScope, qa.setLayerScope]) // eslint-disable-line react-hooks/exhaustive-deps
+    const available = availableLayerScopes(layerAvailability)
+    if (!available.includes(qa.layerScope)) qa.setLayerScope('human')
+  }, [layerAvailability, qa.layerScope, qa.setLayerScope]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Track J · J2-5 M-1 — the Reconciliation tab is gated on multi-coder + an existing
   // consensus layer. QUAL_TABS is a module const, so the visible set is derived here.
-  const reconciliationVisible = isReconciliationTabVisible(multiCoder, consensusAvailable, blind)
-  const irrVisible = isIrrTabVisible(multiCoder, blind)
+  const reconciliationVisible = isReconciliationTabVisible(multiHumanCoder, consensusAvailable, blind)
+  const irrVisible = isIrrTabVisible(multiHumanCoder, blind)
   const visibleTabs = useMemo(
     () => QUAL_TABS.filter(t =>
       (t.id !== 'reconciliation' || reconciliationVisible) &&
@@ -1124,13 +1138,13 @@ export default function QualitativeAnalysisView() {
         <div className="flex-1" />
         {/* Coding-layer selector (Track J · J2-5) — offered only when a consensus
             layer exists for this project (DEC-A); it also surfaces which layer is active. */}
-        {multiCoder && consensusAvailable && qa.tab !== 'reconciliation' && qa.tab !== 'irr' && (
+        {showLayerPicker(layerAvailability) && qa.tab !== 'reconciliation' && qa.tab !== 'irr' && (
           <div className="flex items-center gap-2">
             <SegmentedControl
-              options={([
-                { value: 'human', label: 'Coders' },
-                { value: 'consensus', label: 'Consensus' },
-              ] as { value: 'human' | 'consensus'; label: string }[])}
+              options={availableLayerScopes(layerAvailability).map(value => ({
+                value,
+                label: layerScopeLabel(value),
+              }))}
               value={qa.layerScope}
               onChange={qa.setLayerScope}
               ariaLabel="Coding layer"
@@ -1159,7 +1173,7 @@ export default function QualitativeAnalysisView() {
         )}
         {/* Blind-mode toggle (DEC-G): while blind, analysis shows self-only + the
             comparison tabs are hidden; revealing here un-blinds everywhere + logs. */}
-        {multiCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="analysis" />}
+        {multiHumanCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="analysis" />}
         <Button variant="ghost" size="sm" className="text-mm-text-muted" onClick={openCodebook}>
           <BookOpen className="w-4 h-4 mr-1" />
           Codebook
@@ -1203,7 +1217,7 @@ export default function QualitativeAnalysisView() {
               tabIndex={isActive ? 0 : -1}
               className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px ${
                 isActive
-                  ? 'border-mm-accent text-mm-text'
+                  ? 'border-mm-blue text-mm-text'
                   : 'border-transparent text-mm-text-muted hover:text-mm-text-secondary hover:border-mm-border-subtle'
               }`}
               onClick={() => { qa.setTab(t.id); setSrAnnouncement(`${t.label} tab selected`) }}

@@ -20,8 +20,11 @@ Krippendorff's α absorbs the residual missingness. This matches NVivo / MAXQDA 
 the Krippendorff implicit-vs-explicit-absence distinction; κ/α chance-correct the
 shared-blank agreements so Option B isn't gamed by boilerplate.
 
-Raters = the roster (``coder_type NOT IN SYSTEM_CODER_TYPES`` — human + future AI,
-excluding the merged-legacy "Unattributed" bucket AND the derived consensus layer).
+Raters = the HUMAN roster coders (``auth.reliability_coder_clause()``), excluding
+the merged-legacy "Unattributed" bucket, the derived consensus layer, and — since
+#989 — MACHINE coders. A model's labels are never pooled into an agreement
+coefficient: human-vs-machine agreement describes the MODEL and is not validation
+of the coding, so it belongs in its own table, never in this one.
 Universal codes are excluded. Codes are compared by *effective code* (the D3
 equivalence-group seam), so "Positive" ≡ "POSITIVE". The gather mirrors
 ``consensus.py``'s roster-coder recipe; the math is pure (numpy-free, unit-testable)
@@ -34,7 +37,7 @@ from collections import defaultdict
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from ..auth import SYSTEM_CODER_TYPES
+from ..auth import reliability_coder_clause
 from ..models.code import Code
 from ..models.code_application import CodeApplication
 from ..models.conversation import Conversation
@@ -50,13 +53,22 @@ from .coding_layers import (
     non_consensus_filter,
     resolve_effective_code,
 )
+from .code_sets import (
+    SET_NONE,
+    build_code_set_index,
+    matrix_cell,
+)
 from .magnitude import read_scale
 from .reliability_basis import (
     ALPHA_METRIC_NOMINAL,
     MAGNITUDE_ALPHA_METRIC,
     RELIABILITY_FACET_CODERS,
 )
-from .undefined_stats import INSUFFICIENT_N, NO_VARIANCE
+# #987 — which dataset cells are CODEABLE is decided in one place (#519/#840).
+# Imported exactly as `code_analysis.py` does; no cycle (`text_analysis` reaches
+# models, `coding_layers` and `id_set`, never this module).
+from .text_analysis import substantive_text_clause, treat_as_empty_for_project
+from .undefined_stats import DEGENERATE, INSUFFICIENT_N, NO_VARIANCE
 
 
 # ── The source axis (#829) ────────────────────────────────────────────────────
@@ -327,6 +339,35 @@ def _project_to_pair(
     return [[row[idx_a], row[idx_b]] for row in units]
 
 
+def _confusion_matrix(
+    rows: list[list[int | None]], idx_a: int, idx_b: int, axis: list[int],
+) -> list[list[int]]:
+    """Counts of ``(coder A's value, coder B's value)`` over units both judged.
+
+    The artifact the review is right to call out: today a researcher can see that
+    α is low and NOT which pair of categories caused it. Square and in ``axis``
+    order both ways, so the diagonal is agreement and an off-diagonal cell names
+    exactly one confusion.
+
+    ⚠️ **It is ``n_coders`` choose 2 matrices, not one** — with three coders a
+    pooled "confusion matrix" is not defined, because a unit would have to
+    contribute to several cells at once. Rendering per pair is the only honest
+    shape. Bounded by construction: the axis is the SET's size, so unlike the
+    frequency panel (#809) this cannot grow with the corpus.
+    """
+    pos = {v: i for i, v in enumerate(axis)}
+    out = [[0] * len(axis) for _ in axis]
+    for row in rows:
+        a, b = row[idx_a], row[idx_b]
+        if a is None or b is None:
+            continue
+        ia, ib = pos.get(a), pos.get(b)
+        if ia is None or ib is None:
+            continue
+        out[ia][ib] += 1
+    return out
+
+
 def _cohens_kappa(units: list[list[int | None]]) -> float | None:
     """Cohen's unweighted κ for exactly 2 coders, over units both judged.
     Reproduces ``irr::kappa2``.
@@ -443,6 +484,11 @@ def gather_coder_applications(
       unit (D3 resolution already applied — do NOT re-resolve downstream).
     - ``unit_source[ukey]`` — the unit's source key; includes EVERY in-play unit of a
       multi-coder source, even ones no coder coded (→ real 0s under Option B).
+      ⚠️ **"In play" for a dataset value means CODEABLE, not merely non-blank
+      (#987)** — `substantive_text_clause` decides it, the same predicate the Text
+      Coding view lists by, so the reliability unit count and what a coder was
+      actually shown can never disagree. A cell the project treats as a
+      non-response is not a unit here even if somebody coded it.
     - ``engaged[source_key]`` — coders who applied ≥1 code anywhere in that source.
     - ``multi_sources`` — sources engaged by ≥2 coders (the only contributors);
       empty set when none.
@@ -459,7 +505,7 @@ def gather_coder_applications(
     four independent sequences can never collide.
     """
     coder_q = db.query(User).filter(
-        User.coder_type.notin_(SYSTEM_CODER_TYPES),
+        reliability_coder_clause(),
         User.archived == False,  # noqa: E712
     )
     if coder_ids:
@@ -468,6 +514,10 @@ def gather_coder_applications(
     if len(coder_id_list) < 2:
         return coder_id_list, {}, {}, {}, set(), {}
     eff = build_effective_code_map(db, project_id)
+    # #987 — one scalar read, AFTER the early return so a single-coder project
+    # pays nothing. NEVER cached at module scope: `treat_as_empty` is per project
+    # and editable, and a stale list would silently change a reported unit set.
+    treat_as_empty = treat_as_empty_for_project(db, project_id)
 
     # applied[unit_key][coder_id] = set of effective codes that coder put on the unit
     applied: dict[tuple, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
@@ -479,7 +529,7 @@ def gather_coder_applications(
     base_filters = [
         non_consensus_filter(),
         Code.is_universal == False,  # noqa: E712
-        User.coder_type.notin_(SYSTEM_CODER_TYPES),
+        reliability_coder_clause(),
         CodeApplication.user_id.in_(coder_id_list),
     ]
 
@@ -519,6 +569,16 @@ def gather_coder_applications(
         ratings[ukey][uid][code_id] = magnitude
 
     # Dataset-value applications (open-ended text coding).
+    #
+    # 🔴 #987 — the CODEABLE predicate rides here too, and it is not belt-and-braces.
+    # An application can sit on a cell the Text Coding view will not list: coded
+    # before the project's `treat_as_empty` was edited, or applied through the API.
+    # That coding is UI-UNREACHABLE — no chip, no row, no way to remove it — so
+    # letting it move a reliability statistic is the #500 rule reached from a
+    # second direction (`visible_target_filter` exists because a hidden original's
+    # codings must not count). ⚠️ It also governs `engaged` below: a coder whose
+    # ONLY coding in a column sits on such a cell has no reachable judgement there
+    # and must not make the column look multi-coder.
     val_app_rows = (
         db.query(DatasetValue.id, DatasetValue.column_id,
                  CodeApplication.user_id, CodeApplication.code_id,
@@ -528,7 +588,11 @@ def gather_coder_applications(
         .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
         .join(Code, CodeApplication.code_id == Code.id)
         .join(User, CodeApplication.user_id == User.id)
-        .filter(Dataset.project_id == project_id, *base_filters)
+        .filter(
+            Dataset.project_id == project_id,
+            substantive_text_clause(treat_as_empty),
+            *base_filters,
+        )
         .all()
     )
     for val_id, col_id, uid, code_id, magnitude in val_app_rows:
@@ -573,12 +637,25 @@ def gather_coder_applications(
             src = _segment_source_key(conv_id, doc_id, obs_id)
             unit_source.setdefault(("seg", seg_id), src)
     if col_ids:
+        # 🔴 #987 — `substantive_text_clause`, NEVER a hand-rolled emptiness test.
+        # This was `value_text != ""`, which differs from the codeable set TWICE:
+        # it does not STRIP (`is_empty_text` does, so "   " read as a unit) and it
+        # knows nothing of `treat_as_empty` — whose NULL state is the DEFAULTS,
+        # `["N/A", "n/a", "NA", "No response", "None", "-", "."]`, not the empty
+        # list. So a project that never touched the setting still hid those cells
+        # from its coders while counting them here, each contributing a row of
+        # fabricated agreement under Option B.
+        #
+        # MEASURED 2026-09-20 on the developer's own `dev.db`: the one multi-coder
+        # text column had 40 units here against 36 a coder could reach — 10%.
+        # ⚠️ The error has no constant direction, which is why it survived: those
+        # rows RAISE percent agreement and DEPRESS α for a low-prevalence code, and
+        # both numbers sit in the same table.
         for val_id, col_id in (
             db.query(DatasetValue.id, DatasetValue.column_id)
             .filter(
                 DatasetValue.column_id.in_(col_ids),
-                DatasetValue.value_text.isnot(None),
-                DatasetValue.value_text != "",
+                substantive_text_clause(treat_as_empty),
             ).all()
         ):
             unit_source.setdefault(("val", val_id), ("col", col_id))
@@ -591,10 +668,10 @@ def build_irr_matrices(
     source: tuple[str, int] | None = None,
 ) -> tuple[
     list[int], dict[int, str], dict[int, list[list[int | None]]],
-    set[tuple], set[int], dict[int, dict],
+    set[tuple], set[int], dict[int, dict], dict[int, dict],
 ]:
     """Return ``(coder_ids_ordered, {code_id: name}, {effective_code_id: units},
-    selectable_sources, scope_coders, magnitude)``.
+    selectable_sources, scope_coders, magnitude, code_sets)``.
 
     ``units`` is the per-code matrix (one row per in-play unit; each row a list of
     length n_coders with 0/1/None). Source-level engagement (Option B) governs
@@ -614,12 +691,27 @@ def build_irr_matrices(
     It is conditional on agreeing to apply, and the payload says so. Do not
     read an unrated application as a rating of the scale's minimum, or of zero:
     that is MAXQDA's default-stamping mistake, arriving through the statistic.
+
+    ``code_sets`` (row 48) is ``{set_id: {"label", "exhaustive", "basis",
+    "members", "member_names", "rows", "member_rows", "n_multiple_selection"}}``
+    — one MULTI-VALUED matrix per set, in the same unit order as ``units``,
+    whose cells are member code ids, the ``SET_NONE`` sentinel, or ``None``.
+
+    ⚠️ **A set's members stay in ``units``**, and their exclusion from the
+    displayed per-code table is `compute_irr`'s decision, not this function's.
+    Reporting the same coding twice under two definitions — once as k binary
+    indicators, once as one k-valued variable — is two answers to "how much did
+    they agree?" on one screen; but `per_code` also feeds the R export, so
+    dropping them HERE would stop exporting codes that have always been
+    exported. Each member's matrix is additionally offered under
+    ``member_rows``, which is the breakdown that answers *which value is
+    destroying my α*.
     """
     coder_id_list, applied, unit_source, engaged, multi_sources, ratings = gather_coder_applications(
         db, project_id, coder_ids
     )
     if len(coder_id_list) < 2 or not multi_sources:
-        return coder_id_list, {}, {}, set(), set(), {}
+        return coder_id_list, {}, {}, set(), set(), {}, {}
 
     # #829 — the SOURCE axis. `multi_sources` is the selectable set (every source
     # ≥2 coders engaged); narrowing it to one is the whole scoping mechanism,
@@ -632,7 +724,7 @@ def build_irr_matrices(
     if source is not None:
         multi_sources = {source} & multi_sources
         if not multi_sources:
-            return coder_id_list, {}, {}, selectable, set(), {}
+            return coder_id_list, {}, {}, selectable, set(), {}, {}
 
     n = len(coder_id_list)
     coder_idx = {cid: i for i, cid in enumerate(coder_id_list)}
@@ -658,6 +750,54 @@ def build_irr_matrices(
                 row[coder_idx[cid]] = 1 if code_id in applied_here.get(cid, empty) else 0
             rows.append(row)
         per_code[code_id] = rows
+
+    # ── Row 48 — the code-set matrices, and the members leaving `per_code` ────
+    #
+    # One MULTI-VALUED row per unit per set, fed to the same `_krippendorff_alpha`
+    # the binary tables use. The arithmetic needed nothing: `unit_coincidence`
+    # keys its coincidence matrix on the VALUES, so k categories cost what two do.
+    code_sets: dict[int, dict] = {}
+    set_index = build_code_set_index(db, project_id, build_effective_code_map(db, project_id))
+    for resolved in set_index.sets:
+        if not resolved.member_ids:
+            continue
+        rows_s: list[list[int | None]] = []
+        n_multiple = 0
+        for u in units:
+            src_coders = engaged[unit_source[u]]
+            row_s: list[int | None] = [None] * n
+            applied_here = applied.get(u, {})
+            for cid in src_coders:
+                cell, is_multiple = matrix_cell(applied_here.get(cid, empty), resolved)
+                row_s[coder_idx[cid]] = cell
+                if is_multiple:
+                    n_multiple += 1
+            rows_s.append(row_s)
+        # The breakdown: each member's own binary matrix, READ from the per-code
+        # table rather than recomputed, so the two can never disagree about which
+        # units a member was applied on.
+        #
+        # 🔴 **READ, NOT POPPED, AND THAT IS THE DIFFERENCE BETWEEN A DISPLAY RULE
+        # AND DATA LOSS.** Excluding members from the per-code TABLE is a
+        # decision about one screen (the same coding reported twice under two
+        # definitions is worse than once); `per_code` has a second consumer —
+        # `export_r.py` emits a coder × unit matrix per code for the researcher's
+        # reproducibility script — and removing them here would silently stop
+        # exporting codes that have always been exported. `compute_irr` skips
+        # them when it builds the table; this function keeps reporting them.
+        member_rows = {
+            cid: per_code[cid] for cid in resolved.ordered_members if cid in per_code
+        }
+        code_sets[resolved.id] = {
+            "label": resolved.label,
+            "exhaustive": resolved.exhaustive,
+            "basis": resolved.basis,
+            "members": list(resolved.ordered_members),
+            "member_names": dict(resolved.member_names),
+            "rows": rows_s,
+            "member_rows": member_rows,
+            "n_multiple_selection": n_multiple,
+        }
 
     # #35 — the RATING matrices, one per code that declares a scale. Keyed by
     # the RAW code (see `gather_coder_applications`): the instrument is the
@@ -704,7 +844,7 @@ def build_irr_matrices(
             "n_applications": n_applications,
             "n_rated": n_rated,
         }
-    return coder_id_list, code_names, per_code, selectable, scope_coders, magnitude
+    return coder_id_list, code_names, per_code, selectable, scope_coders, magnitude, code_sets
 
 
 def compute_irr(
@@ -723,9 +863,14 @@ def compute_irr(
     with seven other people's transcript work, *Curriculum fidelity* reading
     α 0.06 pooled against 0.0023 on the notes alone, under *"Overall α 0.62 ·
     unreliable"* as the largest text on screen.
+
+    ⚠️ **That 0.0023 was re-measured after #987 and is now −0.0183** (same corpus,
+    same column, 40 units → 36 once the four `N/A` cells stopped being units). The
+    illustration stands; the NUMBER is kept here only as the figure #829 was filed
+    against. **Do not quote either from this docstring** — re-measure.
     """
-    coder_id_list, code_names, per_code, selectable, scope_coders, magnitude = build_irr_matrices(
-        db, project_id, coder_ids, source
+    coder_id_list, code_names, per_code, selectable, scope_coders, magnitude, code_sets = (
+        build_irr_matrices(db, project_id, coder_ids, source)
     )
     n = len(coder_id_list)
     coders = (
@@ -736,6 +881,15 @@ def compute_irr(
     )
     thresholds = {"kappa": dict(KAPPA_THRESHOLDS), "alpha": dict(ALPHA_THRESHOLDS)}
 
+    # ⚠️ **A project whose only multi-coder codes are set MEMBERS is available,
+    # and `per_code` alone answers that — because the members stay in it.** This
+    # guard was briefly widened to `(not per_code and not code_sets)`; a planted
+    # mutant reverting the widening SURVIVED, which said the added clause never
+    # runs: `build_irr_matrices` returns an empty `per_code` only from its two
+    # early returns, and both return an empty `code_sets` with it. The clause was
+    # removed rather than kept as belt-and-braces, and the test that pins the
+    # behaviour (`test_a_project_of_ONLY_set_members_is_still_AVAILABLE`) now
+    # guards the mechanism that actually delivers it.
     if n < 2 or not per_code:
         return {
             "available": False,
@@ -751,6 +905,7 @@ def compute_irr(
             "interpretation_thresholds": thresholds,
             "reliability_facet": RELIABILITY_FACET_CODERS,
             "magnitude_per_code": [],
+            "set_agreement": [],
         }
 
     # #828 — κ belongs to a SOURCE, not to the install. The engaged pair is the
@@ -771,6 +926,13 @@ def compute_irr(
         unit_contributions,
     )
 
+    # Row 48 — the codes a set speaks for. They are reported as ONE k-valued
+    # variable in `set_agreement` below, so they do not also get a binary row
+    # here: two definitions of the same coding on one screen, with nothing
+    # saying which is which, is worse than one. They keep their matrices in
+    # `per_code` for the R export, and their binary α in each set's breakdown.
+    set_member_ids = {cid for e in code_sets.values() for cid in e["members"]}
+
     per_code_results = []
     global_rows: list[list[int | None]] = []
     # The per-code matrices pooled into the headline, kept SEPARATE from
@@ -778,6 +940,8 @@ def compute_irr(
     # (unit × code) rows — see `pooled_unit_contributions`.
     pooled_matrices: list[list[list[int | None]]] = []
     for code_id, rows in per_code.items():
+        if code_id in set_member_ids:
+            continue
         n_units = _n_comparable_units(rows)
         if n_units == 0:
             continue
@@ -915,6 +1079,138 @@ def compute_irr(
         })
     magnitude_results.sort(key=lambda r: r["code_name"].lower())
 
+    # ── Row 48 — set agreement, one α PER set, never pooled ───────────────────
+    #
+    # A binary presence/absence α and a k-valued nominal α are different
+    # instruments, so one coefficient over both would average disagreements
+    # measured on different scales — the same rule, and the same reason, as the
+    # rating table above. These rows are deliberately NOT added to `global_rows`:
+    # the headline α stays a statement about presence/absence coding.
+    #
+    # 🔴 **`_prevalence` IS NOT USED HERE AND MUST NOT BE.** It computes
+    # `ones += v` over the cells, which is the base rate of a 0/1 indicator; on a
+    # set matrix the cells are CODE IDS, so it would sum identifiers and print
+    # the mean of a primary key. The per-member breakdown carries the real base
+    # rates, one per value, which is the honest generalisation of that column.
+    set_results: list[dict] = []
+    pair_list = sorted(scope_coders, key=coder_id_list.index)
+    for set_id, entry in code_sets.items():
+        rows_s = entry["rows"]
+        members: list[int] = entry["members"]
+        member_names: dict[int, str] = entry["member_names"]
+        n_units_s = _n_comparable_units(rows_s)
+
+        # The axis carries "none of these" only when it is a VALUE. On an
+        # exhaustive set a blank is missing data and has no column.
+        axis = list(members) + ([] if entry["exhaustive"] else [SET_NONE])
+
+        # Each member's own binary α — the breakdown that answers "which value
+        # is destroying my α", and the rows the per-code table no longer shows.
+        member_results = []
+        for code_id in members:
+            m_rows = entry["member_rows"].get(code_id)
+            if m_rows is None:
+                continue
+            m_prev = _prevalence(m_rows)
+            m_no_variance = m_prev == 0.0 or m_prev == 1.0
+            m_alpha = None if m_no_variance else _krippendorff_alpha(m_rows)
+            member_results.append({
+                "code_id": code_id,
+                "code_name": member_names.get(code_id, str(code_id)),
+                "n_units": _n_comparable_units(m_rows),
+                "prevalence": m_prev,
+                "percent_agreement": _percent_agreement(m_rows),
+                "krippendorff_alpha": m_alpha,
+                "alpha_interpretation": _interpret_alpha(m_alpha),
+                "undefined_reason": NO_VARIANCE if m_no_variance else None,
+            })
+
+        confusion = [
+            {
+                "coder_a_id": a,
+                "coder_b_id": b,
+                "counts": _confusion_matrix(
+                    rows_s, coder_id_list.index(a), coder_id_list.index(b), axis,
+                ),
+            }
+            for i, a in enumerate(pair_list)
+            for b in pair_list[i + 1:]
+        ]
+        confusion = [c for c in confusion if any(any(r) for r in c["counts"])]
+
+        base = {
+            "set_id": set_id,
+            "label": entry["label"],
+            "exhaustive": entry["exhaustive"],
+            # The TWELFTH stated-basis member: the same coders on the same data
+            # produce different numbers under the two, and the reader cannot see
+            # which from the figure.
+            "set_basis": entry["basis"],
+            "alpha_metric": ALPHA_METRIC_NOMINAL,
+            "n_units": n_units_s,
+            "n_values": len(members),
+            "n_multiple_selection": entry["n_multiple_selection"],
+            "axis": axis,
+            "value_names": {
+                **{str(cid): member_names.get(cid, str(cid)) for cid in members},
+                str(SET_NONE): "None of these",
+            },
+            "members": member_results,
+            "confusion": confusion,
+            "percent_agreement": _percent_agreement(rows_s),
+        }
+
+        if len(members) < 2:
+            # One member is a binary code wearing a costume, and α over a
+            # single-valued variable answers a question nobody asked. The MODEL
+            # permits a half-built set — a researcher adds members one at a time
+            # — so the refusal belongs to the statistic, and it says why.
+            set_results.append({
+                **base, "cohens_kappa": None, "kappa_interpretation": None,
+                "krippendorff_alpha": None, "alpha_interpretation": None,
+                "undefined_reason": DEGENERATE, "kappa_ci": None, "alpha_ci": None,
+            })
+            continue
+        if n_units_s == 0:
+            set_results.append({
+                **base, "cohens_kappa": None, "kappa_interpretation": None,
+                "krippendorff_alpha": None, "alpha_interpretation": None,
+                "undefined_reason": INSUFFICIENT_N, "kappa_ci": None, "alpha_ci": None,
+            })
+            continue
+        if len(_distinct_comparable_values(rows_s)) < 2:
+            # #829's rule through sets: every comparable unit taking one value is
+            # no variance to agree about, not perfect agreement.
+            set_results.append({
+                **base, "cohens_kappa": None, "kappa_interpretation": None,
+                "krippendorff_alpha": None, "alpha_interpretation": None,
+                "undefined_reason": NO_VARIANCE, "kappa_ci": None, "alpha_ci": None,
+            })
+            continue
+
+        alpha_s = _krippendorff_alpha(rows_s)
+        # κ is k-valued by construction — `_cohens_kappa` derives its categories
+        # from the values it is given — so a set gets one on the same terms the
+        # per-code table does: exactly two engaged coders in scope.
+        pair_rows_s = _project_to_pair(rows_s, *pair_idx) if pair_idx else None
+        kappa_s = _cohens_kappa(pair_rows_s) if pair_rows_s is not None else None
+        set_results.append({
+            **base,
+            "cohens_kappa": kappa_s,
+            "kappa_interpretation": _interpret_kappa(kappa_s),
+            "krippendorff_alpha": alpha_s,
+            "alpha_interpretation": _interpret_alpha(alpha_s),
+            "undefined_reason": None,
+            "kappa_ci": kappa_interval(pair_rows_s) if kappa_s is not None else None,
+            # The interval is built from the SET's rows, never a member's — the
+            # #35 lesson exactly: for one slab the bootstrap scored every
+            # resample nominally whatever the estimate used.
+            "alpha_ci": (
+                alpha_interval(unit_contributions(rows_s)) if alpha_s is not None else None
+            ),
+        })
+    set_results.sort(key=lambda r: r["label"].lower())
+
     return {
         "available": True,
         "sources": _describe_sources(db, selectable),
@@ -936,4 +1232,6 @@ def compute_irr(
         # the client displays each and never infers either from the screen.
         "reliability_facet": RELIABILITY_FACET_CODERS,
         "magnitude_per_code": magnitude_results,
+        # Row 48 — the THIRD table. Never pooled into `overall_alpha`.
+        "set_agreement": set_results,
     }

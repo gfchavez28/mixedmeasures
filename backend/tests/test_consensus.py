@@ -659,6 +659,163 @@ def test_recompute_consensus_endpoint_drains_markers(db_session):
     assert {r.code_id for r in _consensus_rows(db, segment_id=sid)} == {901}
 
 
+# ── #1017 — one target that raises must not block the queue ───────────────────
+#
+# The recompute is made to raise for ONE segment by patching the name the sweep
+# calls. The failure #1017 actually shipped (a row for code id −2) is fixed at
+# its root and pinned in `test_code_sets.py`; these pin the CONTAINMENT, which
+# has to hold for whatever the next such failure is.
+
+
+def _poisoned_queue(db, monkeypatch):
+    """Two projects, each with a two-coder target and a marker; the FIRST marker
+    (the lower id, so the head of every batch) belongs to a target whose
+    recompute raises. Returns (bad marker id, good segment, attempts on bad)."""
+    import app.services.consensus_staleness as staleness
+
+    bad_pid, bad_sid = _conv_project(db, pid=930, sid=9300)
+    good_pid, good_sid = _conv_project(db, pid=940, sid=9400)
+    _coder(db, 2, "B")
+    for pid, sid, cid in ((bad_pid, bad_sid, 9301), (good_pid, good_sid, 9401)):
+        _code(db, cid, pid, 1)
+        _apply(db, cid, 1, segment_id=sid)
+        _apply(db, cid, 2, segment_id=sid)
+    mark_consensus_stale(db, bad_pid, segment_ids=[bad_sid])
+    mark_consensus_stale(db, good_pid, segment_ids=[good_sid])
+    db.commit()
+    bad_marker = db.query(ConsensusStaleTarget).filter(
+        ConsensusStaleTarget.segment_id == bad_sid).one().id
+
+    attempts = {"bad": 0}
+    real = staleness.recompute_consensus_for_target
+
+    def flaky(db_, project_id, *, segment_id=None, dataset_value_id=None):
+        if segment_id == bad_sid:
+            attempts["bad"] += 1
+            raise RuntimeError("simulated recompute failure")
+        return real(db_, project_id, segment_id=segment_id, dataset_value_id=dataset_value_id)
+
+    monkeypatch.setattr(staleness, "recompute_consensus_for_target", flaky)
+    return bad_marker, good_sid, attempts
+
+
+def test_drain_isolates_a_target_that_raises(db_session, monkeypatch):
+    """Before #1017's containment the batch rolled back whole, the bad marker
+    stayed at its head, and the healthy project was never written — on every
+    tick, for every project on the install."""
+    from app.services.consensus_staleness import drain_stale_consensus
+
+    db = db_session
+    bad_marker, good_sid, _attempts = _poisoned_queue(db, monkeypatch)
+
+    result = drain_stale_consensus(db, limit=500)
+
+    assert result.recomputed == 1
+    assert result.failed_marker_ids == {bad_marker}
+    assert {r.code_id for r in _consensus_rows(db, segment_id=good_sid)} == {9401}
+    remaining = [m.id for m in db.query(ConsensusStaleTarget).all()]
+    assert remaining == [bad_marker], "the failing marker stays queued; the rest drained"
+
+
+def test_a_known_failure_is_left_out_of_the_batch_and_retried_alone(db_session, monkeypatch):
+    """Carried forward, a known failure must not fail the NEXT batch: it is
+    tried exactly once, on its own, and new work drains in the batch path."""
+    import app.services.consensus_staleness as staleness
+    from app.services.consensus_staleness import drain_stale_consensus
+
+    db = db_session
+    bad_marker, _good, attempts = _poisoned_queue(db, monkeypatch)
+    first = drain_stale_consensus(db, limit=500)
+    assert attempts["bad"] == 2, "batch attempt + one isolated retry"
+
+    pid3, sid3 = _conv_project(db, pid=950, sid=9500)
+    _code(db, 9501, pid3, 1)
+    _apply(db, 9501, 1, segment_id=sid3)
+    _apply(db, 9501, 2, segment_id=sid3)
+    mark_consensus_stale(db, pid3, segment_ids=[sid3])
+    db.commit()
+
+    second = drain_stale_consensus(db, limit=500, known_failed=first.failed_marker_ids)
+    assert attempts["bad"] == 3, "left out of the batch, retried once on its own"
+    assert second.recomputed == 1 and second.failed_marker_ids == {bad_marker}
+    assert {r.code_id for r in _consensus_rows(db, segment_id=sid3)} == {9501}
+
+    # A fix (here: the failure going away) clears it on the next retry.
+    monkeypatch.setattr(staleness, "recompute_consensus_for_target", recompute_consensus_for_target)
+    third = drain_stale_consensus(db, limit=500, known_failed=second.failed_marker_ids)
+    assert third.recomputed == 1 and third.failed_marker_ids == frozenset()
+    assert db.query(ConsensusStaleTarget).count() == 0
+
+
+def test_a_database_lock_is_not_isolated(db_session, monkeypatch):
+    """`OperationalError` is SQLite's "database is locked" — a property of the
+    moment, not of a target — so it propagates exactly as before, and a marker
+    that hit it is NOT recorded as a failing target."""
+    from sqlalchemy.exc import OperationalError
+
+    import app.services.consensus_staleness as staleness
+    from app.services.consensus_staleness import drain_stale_consensus
+
+    db = db_session
+    _bad, _good, _attempts = _poisoned_queue(db, monkeypatch)
+
+    def locked(*_a, **_k):
+        raise OperationalError("UPDATE …", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(staleness, "recompute_consensus_for_target", locked)
+    with pytest.raises(OperationalError):
+        drain_stale_consensus(db, limit=500)
+    assert db.query(ConsensusStaleTarget).count() == 2, "nothing drained, nothing lost"
+
+
+def test_a_lock_during_the_isolated_retry_still_propagates(db_session, monkeypatch):
+    """The retry path's own lock arm: the batch fails on the bad target, and
+    then the database is locked while the GOOD one is retried alone. That must
+    propagate — recording the healthy target as a failure would leave it out of
+    every later batch. Found by a surviving mutant: the batch-level lock test
+    never reaches this arm."""
+    from sqlalchemy.exc import OperationalError
+
+    import app.services.consensus_staleness as staleness
+    from app.services.consensus_staleness import drain_stale_consensus
+
+    db = db_session
+    _bad, good_sid, _attempts = _poisoned_queue(db, monkeypatch)
+    flaky = staleness.recompute_consensus_for_target
+
+    def locked_on_good(db_, project_id, *, segment_id=None, dataset_value_id=None):
+        if segment_id == good_sid:
+            raise OperationalError("UPDATE …", {}, Exception("database is locked"))
+        return flaky(db_, project_id, segment_id=segment_id, dataset_value_id=dataset_value_id)
+
+    monkeypatch.setattr(staleness, "recompute_consensus_for_target", locked_on_good)
+    with pytest.raises(OperationalError):
+        drain_stale_consensus(db, limit=500)
+    assert db.query(ConsensusStaleTarget).count() == 2
+
+
+def test_the_recompute_button_survives_a_target_that_raises(db_session, monkeypatch):
+    """The M-3 button went through the same all-or-nothing sweep, so one bad
+    target made it a 500 and left the project's other markers undrained."""
+    from app.routers.code_analysis import recompute_consensus
+    from tests.conftest import mock_request
+
+    db = db_session
+    bad_marker, _good, _attempts = _poisoned_queue(db, monkeypatch)
+    # Give the poisoned PROJECT a second, healthy target so the button has
+    # something to drain beside the failure.
+    db.add(Segment(id=9301, conversation_id=930, sequence_order=1, text="more"))
+    db.flush()
+    _apply(db, 9301, 1, segment_id=9301)
+    _apply(db, 9301, 2, segment_id=9301)
+    mark_consensus_stale(db, 930, segment_ids=[9301])
+    db.commit()
+
+    resp = _run(recompute_consensus(mock_request(), 930, user=db.get(User, 1), db=db))
+    assert resp.recomputed == 1 and resp.remaining == 1
+    assert {r.code_id for r in _consensus_rows(db, segment_id=9301)} == {9301}
+
+
 # ── Slab 5b · mutation-site wiring (mark-stale + sweep) ───────────────────────
 
 
@@ -748,3 +905,362 @@ def test_segment_merge_marks_and_sweep_reconciles(db_session):
     # the soft-deleted originals get no consensus (visibility guard)
     assert _consensus_rows(db, segment_id=9051) == []
     assert _consensus_rows(db, segment_id=9052) == []
+
+
+# ── #958 · the writer's gather skips targets that cannot decide ───────────────
+#
+# The rebuild asks SQL only for targets with >= MIN_CONSENSUS_VOTERS eligible
+# voters and flushes its rows in batches. Measured on BES: import peak
+# 1,907 -> 675 MB with a byte-identical layer. BES has no code sets, ratings or
+# observations, so the equivalence is pinned HERE on a fixture that has all of
+# them — and one target per way a naive "two voters" count could be wrong.
+
+
+class TestTheWritersGatherSkipsTargetsThatCannotDecide:
+    PID = 960
+
+    def _world(self, db):
+        from datetime import datetime
+
+        from app.models.code_set import CodeSet
+        from app.models.observation import Observation
+
+        pid = self.PID
+        db.add_all([
+            Project(id=pid, name="P", user_id=1),
+            Conversation(id=pid, project_id=pid, name="C"),
+            Dataset(id=pid, project_id=pid, name="Survey"),
+            DatasetColumn(id=9600, dataset_id=pid, column_code="Q", column_name="Q",
+                          column_text="Open", column_type="open_text",
+                          sequence_order=0, display_order=0),
+            DatasetRow(id=9601, dataset_id=pid),
+            DatasetRow(id=9602, dataset_id=pid),
+            Observation(id=pid, project_id=pid, name="frozen",
+                        segmentation_frozen_at=datetime(2026, 9, 23, 12, 0, 0)),
+            Observation(id=pid + 1, project_id=pid, name="open"),
+            CodeSet(id=pid, project_id=pid, label="Stance", exhaustive=False),
+            CodeEquivalenceGroup(id=pid, project_id=pid, label="Pos", canonical_code_id=None),
+        ])
+        db.flush()
+        for vid, rid in ((96010, 9601), (96020, 9602)):
+            db.add(DatasetValue(id=vid, row_id=rid, column_id=9600, value_text="x"))
+        for i in range(1, 9):
+            db.add(Segment(id=9600 + i, conversation_id=pid, sequence_order=i, text="t"))
+        db.add(Segment(id=9611, observation_id=pid, sequence_order=0, text="clip",
+                       start_time=0.0, end_time=1.0))
+        db.add(Segment(id=9612, observation_id=pid + 1, sequence_order=0, text="clip",
+                       start_time=0.0, end_time=1.0))
+        db.flush()
+        _coder(db, 2, "B")
+        _coder(db, 3, "Model", coder_type="ai")
+        archived = _coder(db, 4, "Gone")
+        archived.archived = True
+        _code(db, 9701, pid, 1, name="A")
+        _code(db, 9702, pid, 2, name="B")
+        _code(db, 9703, pid, 3, name="Unclear", universal=True)
+        _code(db, 9704, pid, 4, name="G1", group_id=pid)
+        _code(db, 9705, pid, 5, name="G2", group_id=pid)
+        _scaled_code(db, 9706, pid, 6, name="Positive")
+        db.query(Code).filter(Code.id == 9706).update({"code_set_id": pid})
+        _code(db, 9707, pid, 7, name="Negative")
+        db.query(Code).filter(Code.id == 9707).update({"code_set_id": pid})
+        db.flush()
+
+        a, b = 9701, 9702
+        _apply(db, a, 1, segment_id=9601); _apply(db, a, 2, segment_id=9601)      # decides
+        _apply(db, a, 1, segment_id=9602); _apply(db, b, 1, segment_id=9602)      # 1 voter, 2 rows
+        _apply(db, a, 1, segment_id=9603); _apply(db, a, 3, segment_id=9603)      # + a machine
+        _apply(db, a, 1, segment_id=9604); _apply(db, a, 4, segment_id=9604)      # + archived
+        _apply(db, a, 1, segment_id=9605); _apply(db, 9703, 2, segment_id=9605)   # + universal only
+        _rate(db, 9706, 1, 9606, 0.5); _rate(db, 9706, 2, 9606, 0.0)             # set + ratings
+        _apply(db, 9704, 1, segment_id=9607); _apply(db, 9705, 2, segment_id=9607)  # equivalents
+        _apply(db, 9706, 1, segment_id=9608); _apply(db, 9707, 1, segment_id=9608)  # lone contradiction
+        _apply(db, a, 1, segment_id=9611); _apply(db, a, 2, segment_id=9611)      # frozen clip
+        _apply(db, a, 1, segment_id=9612); _apply(db, a, 2, segment_id=9612)      # open clip: out of scope
+        _apply(db, a, 1, value_id=96010); _apply(db, a, 2, value_id=96010)        # value decides
+        _apply(db, a, 1, value_id=96020)                                          # value, 1 voter
+
+    DECIDING = {("seg", 9601), ("seg", 9606), ("seg", 9607), ("seg", 9611), ("val", 96010)}
+    ONE_VOTER = {("seg", 9602), ("seg", 9603), ("seg", 9604), ("seg", 9605), ("seg", 9608),
+                 ("val", 96020)}
+
+    @staticmethod
+    def _keys(votes):
+        return {(b.kind, b.target_id) for b in votes.ballots()}
+
+    def _gather(self, db, n):
+        from app.services.consensus import (
+            SEGMENT_SCOPE_CONSENSUS_ELIGIBLE,
+            gather_target_votes,
+        )
+        return gather_target_votes(
+            db, self.PID, segment_scope=SEGMENT_SCOPE_CONSENSUS_ELIGIBLE, min_voters=n,
+        )
+
+    def test_the_filter_keeps_exactly_the_targets_that_can_decide(self, db_session):
+        """Each ONE_VOTER target is one way a naive count goes wrong — two rows
+        from one coder, a machine, an archived coder, a universal-only second
+        coder, a lone contradiction. Unfiltered they are all present (so the
+        fixture could have caught a leak); filtered, only DECIDING remains."""
+        from app.services.consensus import MIN_CONSENSUS_VOTERS
+
+        db = db_session
+        self._world(db)
+        everything = self._keys(self._gather(db, 1))
+        assert self.ONE_VOTER <= everything, "precondition: the fixture reaches every arm"
+        assert self._keys(self._gather(db, MIN_CONSENSUS_VOTERS)) == self.DECIDING
+
+    def test_a_skipped_target_decides_nothing_and_a_kept_one_is_unchanged(self, db_session):
+        """The equivalence the filter's safety rests on, asked of `decide_target`
+        directly rather than assumed from the constant."""
+        from app.services.consensus import MIN_CONSENSUS_VOTERS, decide_target
+
+        db = db_session
+        self._world(db)
+        full_votes = self._gather(db, 1)
+        full = {(b.kind, b.target_id): b for b in full_votes.ballots()}
+        kept = {(b.kind, b.target_id): b for b in self._gather(db, MIN_CONSENSUS_VOTERS).ballots()}
+        for key, ballot in full.items():
+            if key in kept:
+                assert kept[key].per_coder == ballot.per_coder
+                assert kept[key].ratings == ballot.ratings
+            else:
+                assert decide_target(ballot.per_coder, full_votes.set_index) == [], key
+
+    def test_the_rebuild_equals_a_per_target_recompute_of_every_target(self, db_session):
+        """An INDEPENDENT oracle: `recompute_consensus_for_target` has no
+        filter, so the filtered rebuild must reproduce it target for target."""
+        import json as _json
+
+        db = db_session
+        self._world(db)
+
+        def layer():
+            return sorted((
+                (r.segment_id, r.dataset_value_id, r.code_id,
+                 _json.dumps(_json.loads(r.origin_context), sort_keys=True), r.magnitude)
+                for r in db.query(CodeApplication).filter(CodeApplication.origin == "consensus")
+            ), key=repr)
+
+        materialize_consensus_for_project(db, self.PID)
+        rebuilt = layer()
+        db.query(CodeApplication).filter(CodeApplication.origin == "consensus").delete()
+        db.flush()
+        for sid in list(range(9601, 9609)) + [9611, 9612]:
+            recompute_consensus_for_target(db, self.PID, segment_id=sid)
+        for vid in (96010, 96020):
+            recompute_consensus_for_target(db, self.PID, dataset_value_id=vid)
+        assert rebuilt == layer()
+        assert len(rebuilt) == 5, "one row per DECIDING target — the oracle is not vacuous"
+
+    def test_the_rebuild_writes_as_it_streams_in_bounded_batches(self, db_session, monkeypatch):
+        """The memory half, pinned in the channel it lives in: the STATEMENTS.
+
+        Three properties, each of which a single mutant breaks: the rows go out
+        as bulk inserts of at most one batch (the ORM wrote one statement per
+        row — 169,347 on BES); the first batch is written BEFORE the value arm
+        is even read (a rebuild that gathered every ballot first would hold the
+        whole project again); and no consensus row ever waits in the session as
+        an ORM object."""
+        from sqlalchemy import event
+
+        import app.services.consensus as consensus
+
+        db = db_session
+        self._world(db)
+        monkeypatch.setattr(consensus, "CONSENSUS_REBUILD_INSERT_BATCH", 2)
+        log: list[tuple[str, int]] = []
+        pending: list[int] = []
+
+        def before_cursor_execute(_conn, _cursor, statement, parameters, _ctx, executemany):
+            sql = " ".join(statement.split())
+            if sql.startswith("INSERT INTO code_applications"):
+                log.append(("insert", len(parameters) if executemany else 1))
+            elif sql.startswith("SELECT code_applications.dataset_value_id AS"):
+                log.append(("read the value arm", 0))
+
+        def before_flush(session, _ctx, _instances):
+            pending.append(sum(
+                1 for o in session.new
+                if isinstance(o, CodeApplication) and o.origin == "consensus"
+            ))
+
+        engine = db.get_bind()
+        event.listen(engine, "before_cursor_execute", before_cursor_execute)
+        event.listen(db, "before_flush", before_flush)
+        try:
+            summary = consensus.materialize_consensus_for_project(db, self.PID)
+        finally:
+            event.remove(engine, "before_cursor_execute", before_cursor_execute)
+            event.remove(db, "before_flush", before_flush)
+
+        assert summary["created"] == 5
+        inserts = [n for kind, n in log if kind == "insert"]
+        assert inserts == [2, 2, 1], log
+        assert log.index(("insert", 2)) < log.index(("read the value arm", 0)), log
+        assert not any(pending), pending
+        # And the rebuild ASKED for the filter: its output is identical either
+        # way, so `targets` (what it gathered) is the only observable trace.
+        assert summary["targets"] == len(self.DECIDING)
+
+    def test_ballots_arrive_one_per_target_in_target_order(self, db_session, monkeypatch):
+        """The ORDER BY is what makes the grouping correct: with a fetch of ONE
+        row at a time, every row boundary is a batch boundary, and a target
+        whose rows were not contiguous would arrive as two ballots."""
+        import app.services.consensus as consensus
+
+        db = db_session
+        self._world(db)
+        monkeypatch.setattr(consensus, "GATHER_STREAM_BATCH", 1)
+        ballots = list(self._gather(db, 1).ballots())
+        keys = [(b.kind, b.target_id) for b in ballots]
+        assert len(keys) == len(set(keys)), keys
+        segs = [t for k, t in keys if k == "seg"]
+        vals = [t for k, t in keys if k == "val"]
+        assert keys == [("seg", t) for t in segs] + [("val", t) for t in vals]
+        assert segs == sorted(segs) and vals == sorted(vals)
+        # Non-vacuous: two voters' rows on one target were grouped into one.
+        assert any(len(b.per_coder) >= 2 for b in ballots)
+
+    def test_a_ballot_is_whole_whatever_order_the_plan_reads_in(self, db_session, monkeypatch):
+        """What the ORDER BY is FOR, which the gather's own queries cannot show:
+        SQLite's plans for them read each target's rows together (driven from
+        the targets), so a mutant REMOVING the ORDER BY survived every other
+        test. A bare scan of the table reads in INSERTION order, where a late
+        row splits its target — and the stream must still give it ONE ballot.
+        The ORDER BY is kept for the plan that does this to the real query:
+        SQLite promises no order without one."""
+        import app.services.consensus as consensus
+
+        db = db_session
+        self._world(db)
+        _apply(db, 9702, 2, segment_id=9601)  # a LATE second code on the first target
+        monkeypatch.setattr(consensus, "GATHER_STREAM_BATCH", 1)
+        bare = db.query(
+            CodeApplication.segment_id, CodeApplication.user_id,
+            CodeApplication.code_id, CodeApplication.magnitude,
+        ).filter(CodeApplication.id > 0)  # a rowid range: insertion order
+        # Precondition — the bare read really does split 9601, or this proves nothing.
+        order = [row[0] for row in bare]
+        first, last = order.index(9601), len(order) - 1 - order[::-1].index(9601)
+        assert any(sid != 9601 for sid in order[first:last]), order
+
+        ballots = [b for b in consensus._stream_ballots(bare, CodeApplication.segment_id, "seg", {})
+                   if b.target_id == 9601]
+        assert len(ballots) == 1, ballots
+        assert ballots[0].per_coder == {1: {9701}, 2: {9701, 9702}}
+
+    def test_min_voters_has_no_default_and_refuses_nonsense(self, db_session):
+        import inspect
+
+        from app.services.consensus import gather_target_votes
+
+        param = inspect.signature(gather_target_votes).parameters["min_voters"]
+        assert param.default is inspect.Parameter.empty
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        for bad in (0, -1, True, 1.5):
+            with pytest.raises(ValueError, match="min_voters"):
+                gather_target_votes(db_session, 1, segment_scope="project", min_voters=bad)
+
+
+# ── #958 · the shared gather STREAMS ─────────────────────────────────────────
+#
+# The gather used to read every vote of a project into nested dicts — 1,267 MB
+# on BES unfiltered. It now yields one ballot per target from an ordered,
+# batched read. The property lives in MEMORY, so it is asserted there:
+# `tracemalloc` over a corpus at two sizes ten times apart.
+
+
+class TestTheGatherStreams:
+    SMALL, LARGE = 400, 4000
+
+    @staticmethod
+    def _corpus(db, pid, n_targets):
+        """One open-text column, `n_targets` cells, two coders on every cell —
+        so every cell is a two-voter target. Core inserts: the corpus is the
+        fixture, not the subject."""
+        from sqlalchemy import insert
+
+        db.add_all([Project(id=pid, name=f"P{pid}", user_id=1),
+                    Dataset(id=pid, project_id=pid, name="Survey")])
+        db.flush()
+        db.add(DatasetColumn(id=pid, dataset_id=pid, column_code="Q", column_name="Q",
+                             column_text="Open", column_type="open_text",
+                             sequence_order=0, display_order=0))
+        _code(db, pid, pid, 1, name="A")
+        db.flush()
+        base = pid * 100_000
+        db.execute(insert(DatasetRow.__table__), [
+            {"id": base + i, "dataset_id": pid} for i in range(n_targets)
+        ])
+        db.execute(insert(DatasetValue.__table__), [
+            {"id": base + i, "row_id": base + i, "column_id": pid, "value_text": "x"}
+            for i in range(n_targets)
+        ])
+        db.execute(insert(CodeApplication.__table__), [
+            {"dataset_value_id": base + i, "code_id": pid, "user_id": uid, "origin": "human"}
+            for i in range(n_targets) for uid in (1, 2)
+        ])
+        db.flush()
+
+    @staticmethod
+    def _peak(fn):
+        import gc
+        import tracemalloc
+
+        gc.collect()
+        tracemalloc.start()
+        try:
+            fn()
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    def test_the_gathers_memory_does_not_grow_with_the_project(self, db_session, monkeypatch):
+        import app.services.consensus as consensus
+        from app.services.consensus import SEGMENT_SCOPE_PROJECT, gather_target_votes
+
+        db = db_session
+        _coder(db, 2, "B")
+        self._corpus(db, 971, self.SMALL)
+        self._corpus(db, 972, self.LARGE)
+        monkeypatch.setattr(consensus, "GATHER_STREAM_BATCH", 50)
+
+        def stream(pid):
+            votes = gather_target_votes(db, pid, segment_scope=SEGMENT_SCOPE_PROJECT, min_voters=2)
+            return lambda: sum(1 for _ in votes.ballots())
+
+        # Warm SQLAlchemy's statement caches on BOTH sizes first: they grow with
+        # the number of distinct statements run, not with the data, and are not
+        # the subject. Measured without this, a cold small run read lower.
+        stream(971)(), stream(972)()
+        small, large = self._peak(stream(971)), self._peak(stream(972))
+        held = self._peak(lambda: list(
+            gather_target_votes(db, 972, segment_scope=SEGMENT_SCOPE_PROJECT,
+                                min_voters=2).ballots()
+        ))
+        # The fixture could have disagreed: HOLDING the large project's ballots
+        # costs many times what streaming it does (#707a).
+        assert held > 5 * large, (small, large, held)
+        # Ten times the targets, and the stream's peak barely moves.
+        assert large < 2 * small, (small, large, held)
+
+    def test_the_rollups_memory_does_not_grow_with_the_project(self, db_session, monkeypatch):
+        """The rollup is the gather's other consumer, and it could hold the
+        stream again on its own — by batching a LIST, or by resolving every
+        target before scoring one (which it did until #958's last step)."""
+        import app.services.consensus as consensus
+        from app.services import magnitude_rollup as mr
+
+        db = db_session
+        _coder(db, 2, "B")
+        self._corpus(db, 973, self.SMALL)
+        self._corpus(db, 974, self.LARGE)
+        monkeypatch.setattr(consensus, "GATHER_STREAM_BATCH", 50)
+        monkeypatch.setattr(mr, "GATHER_STREAM_BATCH", 50)
+
+        # Warm the statement caches on both sizes (see the gather test above).
+        mr.compute_magnitude_rollup(db, 973), mr.compute_magnitude_rollup(db, 974)
+        small = self._peak(lambda: mr.compute_magnitude_rollup(db, 973))
+        large = self._peak(lambda: mr.compute_magnitude_rollup(db, 974))
+        assert large < 2 * small, (small, large)

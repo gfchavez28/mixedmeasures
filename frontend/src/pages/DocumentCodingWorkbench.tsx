@@ -14,6 +14,7 @@ import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
 import { ratableCodes } from '@/lib/rating-targets'
 import MagnitudeStrip from '@/components/MagnitudeStrip'
+import { CodeSetStrip } from '@/components/CodeSetStrip'
 import { codeKeyHint } from '@/lib/codeShortcuts'
 import SplitToolbar from '@/components/SplitToolbar'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
@@ -52,7 +53,7 @@ import {
   SelectItem,
   SelectTrigger,
 } from '@/components/ui/select'
-import CollapsiblePanel from '@/components/CollapsiblePanel'
+import CollapsiblePanel, { PANEL_EXPANDED, PANEL_RAIL_SCROLL } from '@/components/CollapsiblePanel'
 import CodePanel, { type CodePanelHandle } from '@/components/CodePanel'
 import { useListLoad } from '@/hooks/useListLoad'
 import type { ListStatus } from '@/lib/list-status'
@@ -143,7 +144,7 @@ export default function DocumentCodingWorkbench() {
   const queryClient = useQueryClient()
   const history = useHistory()
   // Coder roster lens (Track J · J1) — attribution badges + visibility filter, multi-coder only.
-  const { coders, coderMap, multiCoder } = useCoders()
+  const { coders, coderMap, multiCoder, multiHumanCoder } = useCoders()
   const { user } = useAuth()
   // Active coder: apply/remove + "applied" checks act on MY own layer, never any
   // coder's (#446). `selfId == null` (coder unknown) falls back to any-coder.
@@ -1499,7 +1500,7 @@ export default function DocumentCodingWorkbench() {
           <span className="text-sm font-medium">{progressPercent}%</span>
         </div>
 
-        {multiCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="document_workbench" />}
+        {multiHumanCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="document_workbench" />}
         <CoderCountBadge projectId={projectId} documentId={documentId} enabled={multiCoder} />
 
         {/* Codebook */}
@@ -1808,7 +1809,7 @@ export default function DocumentCodingWorkbench() {
           {ratingTarget && ratingTarget.code.magnitude_scale && (
             // py-1, not py-2: the vertical budget at 640×360 is 85px for the
             // whole control (measured; see MagnitudeStrip's root comment).
-            <div className="border-t border-mm-border bg-mm-surface px-3 py-1 shrink-0">
+            <div className="border-t border-border bg-mm-surface px-3 py-1 shrink-0">
               <MagnitudeStrip
                 key={`${ratingTarget.segmentId}-${ratingTarget.code.id}`}
                 codeName={ratingTarget.code.name}
@@ -1822,13 +1823,13 @@ export default function DocumentCodingWorkbench() {
         </div>
 
         {/* Right panel — fixed width (#565: the resizer never worked; removed) */}
-        <div className="relative border-l bg-mm-surface flex flex-col shrink-0 w-80">
+        <div className={`relative border-l bg-mm-surface flex flex-col shrink-0 w-80 ${PANEL_RAIL_SCROLL}`}>
           {/* Codes */}
           <CollapsiblePanel
             title="Codes"
             isCollapsed={panelStates.codes.collapsed}
             onToggle={() => togglePanel('codes')}
-            className={panelStates.codes.collapsed ? '' : 'flex-[2] min-h-0'}
+            className={panelStates.codes.collapsed ? '' : `flex-[2] ${PANEL_EXPANDED}`}
             headerExtra={
               <button
                 onClick={(e) => { e.stopPropagation(); handleJumpToNextUncoded() }}
@@ -1850,6 +1851,37 @@ export default function DocumentCodingWorkbench() {
                 onCreateCode={(name) => createCodeMutation.mutate(name)}
                 onAddCodeMemo={(codeId, codeName) => setCreateMemoForCode({ id: codeId, name: codeName })}
                 disabled={selectedSegments.length === 0}
+                codeSets={
+                  /* Row 48 — SINGLE segment only (see the conversation twin).
+                     ⚠️ This payload names a code application `{id, user_id}`
+                     where the others say `{code_id, user_id}`, so the identity
+                     is projected here rather than in the shared derivation — and
+                     the RATING rides with it, because undoing a swap re-rates the
+                     value it brings back (#1023; `magnitude` is required, so
+                     dropping it does not compile). */
+                  <CodeSetStrip
+                    projectId={projectId}
+                    target={
+                      selectedSegments.length === 1
+                        ? { kind: 'segment', segmentId: selectedSegments[0] }
+                        : null
+                    }
+                    appliedCodeDetails={
+                      selectedSegments.length === 1
+                        ? segmentMap.get(selectedSegments[0])?.codes.map(c => ({
+                            code_id: c.id, user_id: c.user_id ?? null, magnitude: c.magnitude,
+                          }))
+                        : undefined
+                    }
+                    activeCoderId={selfId}
+                    history={history}
+                    onSettled={() => {
+                      queryClient.invalidateQueries({
+                        queryKey: ['document', projectId, documentId],
+                      })
+                    }}
+                  />
+                }
                 categories={chordCategories}
                 isFocused={focusedPanel === 'codes'}
                 onFocusChange={focused => { if (focused) setFocusedPanel('codes') }}
@@ -1868,7 +1900,7 @@ export default function DocumentCodingWorkbench() {
             title="Notes"
             isCollapsed={panelStates.notes.collapsed}
             onToggle={() => togglePanel('notes')}
-            className={panelStates.notes.collapsed ? '' : 'flex-1 min-h-0'}
+            className={panelStates.notes.collapsed ? '' : `flex-1 ${PANEL_EXPANDED}`}
             headerExtra={
               <span className="text-xs text-mm-text-faint">{docNotes.length}</span>
             }
@@ -1896,7 +1928,7 @@ export default function DocumentCodingWorkbench() {
             title="Memos"
             isCollapsed={panelStates.memos.collapsed}
             onToggle={() => togglePanel('memos')}
-            className={panelStates.memos.collapsed ? '' : 'flex-1 min-h-0'}
+            className={panelStates.memos.collapsed ? '' : `flex-1 ${PANEL_EXPANDED}`}
           >
             <PageErrorBoundary>
               <MemoPanel

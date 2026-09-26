@@ -16,8 +16,10 @@ from ..schemas.auth import (
     UpdateProfileRequest,
     CoderResponse,
     CreateCoderRequest,
+    UpdateCoderRequest,
     SwitchCoderRequest,
 )
+from ..services import machine_coder
 from ..auth import (
     hash_password,
     verify_password,
@@ -30,6 +32,9 @@ from ..auth import (
     ensure_default_user,
     SESSION_COOKIE_NAME,
     SYSTEM_CODER_TYPES,
+    CODER_TYPE_MACHINE,
+    CODER_SWITCHED_ACTION,
+    selectable_coder_clause,
 )
 import json
 
@@ -366,6 +371,43 @@ async def create_user(
     )
 
 
+def coder_to_response(
+    db: Session, coder: User, *, locked_ids: set[int] | None = None,
+) -> CoderResponse:
+    """THE builder for a `CoderResponse` — five call sites, one shape (row 49).
+
+    🔴 **`CoderResponse.model_validate(coder)` cannot be used any more and the
+    failure would be loud rather than silent, which is the only reason this is a
+    note and not an incident.** `User.machine_provenance` stores JSON TEXT while
+    the wire field is a DICT, so `from_attributes` would hand a `str` to a
+    `dict | None` and raise. Routing every site through one builder is #586's
+    rule applied before it bites: this row added two fields to five construction
+    sites.
+
+    🔴 **`locked_ids=None` means COMPUTE IT, never "assume unlocked".** The lock
+    decides whether the client offers a provenance editor, so a response that
+    guessed `False` would offer an edit `PATCH /auth/coders/{id}` then refuses —
+    the #806 shape, and #974's rule in miniature (a prediction computed
+    differently from the act it predicts). The LIST endpoint passes a batch so the
+    whole roster costs one query; every other caller pays one indexed lookup.
+    """
+    locked = (
+        locked_ids
+        if locked_ids is not None
+        else machine_coder.locked_coder_ids(db, [coder.id])
+    )
+    return CoderResponse(
+        id=coder.id,
+        username=coder.username,
+        display_color=coder.display_color,
+        coder_type=coder.coder_type,
+        is_admin=bool(coder.is_admin),
+        archived=bool(coder.archived),
+        machine_provenance=machine_coder.read_provenance(coder),
+        provenance_locked=coder.id in locked,
+    )
+
+
 # ── Coder roster (Track J · J1) — passwordless, ungated local-roster endpoints ──
 # Distinct from the gated multi-user account endpoints above: these are always
 # available and carry NO security claim (local-first). The active coder is a real
@@ -391,7 +433,9 @@ async def list_coders(
     if not include_archived:
         q = q.filter(User.archived == False)
     coders = q.order_by(User.id).all()
-    return [CoderResponse.model_validate(c) for c in coders]
+    # ONE query for the whole roster's provenance lock (row 49), not one per row.
+    locked_ids = machine_coder.locked_coder_ids(db, [c.id for c in coders])
+    return [coder_to_response(db, c, locked_ids=locked_ids) for c in coders]
 
 
 @router.post("/coders", response_model=CoderResponse)
@@ -400,28 +444,173 @@ async def create_coder(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Create a passwordless roster coder."""
+    """Create a passwordless roster coder — a person, or a MACHINE coder (#989).
+
+    `coder_type` defaults to `human`, so every existing caller is unchanged. Pass
+    `ai` to register a machine: labels a model produced elsewhere, loaded in as a
+    file. It joins the roster (its codings are attributed, filterable and
+    visible) but is never selectable and never enters a reliability aggregate.
+
+    🔴 **The request schema restricts this to the ROSTER kinds.** A system coder
+    (`unattributed` / `consensus`) is find-or-created by `auth.py` and must not be
+    mintable here — a second row of either would split the layer it owns in two,
+    and nothing downstream expects more than one.
+
+    🔴 **A machine may declare its PROVENANCE here (row 49) and a person may not.**
+    Declaring a model against a person is REFUSED rather than ignored: silently
+    dropping it would leave the researcher believing the configuration was
+    recorded, which is the one thing this field exists to stop.
+    """
     name = data.username.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Coder name cannot be empty")
     if db.query(User).filter(User.username == name).first():
         raise HTTPException(status_code=409, detail=f"The name '{name}' is already taken")
+
+    provenance = None
+    if data.machine_provenance is not None:
+        if data.coder_type != CODER_TYPE_MACHINE:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Only a machine coder carries a model configuration. A person's "
+                    "coding is attributed to them by name."
+                ),
+            )
+        try:
+            provenance = machine_coder.normalize_provenance(
+                data.machine_provenance.as_payload()
+            )
+        except machine_coder.MachineCoderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     coder = User(
         username=name,
         password_hash=None,          # passwordless local roster coder
         is_admin=False,
         display_color=data.display_color,
-        coder_type="human",
+        coder_type=data.coder_type,
     )
+    machine_coder.write_provenance(coder, provenance)
     db.add(coder)
     db.commit()
     db.refresh(coder)
     db.add(AuditEntry(
         user_id=user.id, action="coder_created", entity_type="user", entity_id=coder.id,
-        details=json.dumps({"username": name}),
+        details=json.dumps({
+            "username": name,
+            "coder_type": coder.coder_type,
+            # The MODEL, never the prompt — an audit row is a log line, and a
+            # prompt is paragraphs. The full record lives on the coder.
+            "model": (provenance or {}).get("model"),
+        }),
     ))
     db.commit()
-    return CoderResponse.model_validate(coder)
+    return coder_to_response(db, coder)
+
+
+@router.patch("/coders/{coder_id}", response_model=CoderResponse)
+def update_coder(
+    coder_id: int,
+    data: UpdateCoderRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Edit a MACHINE coder's name, colour or configuration (#999, closed by row 49).
+
+    🔴 **WHY THIS EXISTS: a machine coder could not be renamed through any
+    endpoint.** `PATCH /auth/me` renames the ACTIVE coder — J1's deliberate rule
+    that only a coder edits their own name, with no edit-others door — and
+    `switch-coder` refuses a machine, so you cannot become one. A machine imported
+    under a bad name was stuck with it, and the bulk import names machines from a
+    CSV cell, so it stopped being hypothetical the day that shipped. It had to be
+    renamed in SQL during #989's own drive.
+
+    🔴 **Machines only, and that restriction is the J1 rule rather than an
+    oversight.** For PEOPLE a rename stays self-service: a name is how a colleague
+    is attributed, and nobody else gets to change it.
+
+    🔴 **The CONFIGURATION freezes once the coder holds a coding.** Two
+    configurations of one model are two coders, so editing it afterwards would
+    silently re-label work the previous configuration produced. The NAME stays
+    editable either way — a label is not an identity, and correcting a typo must
+    not require abandoning a layer.
+
+    ⚠️ Fields are read with `exclude_unset`: an omitted field is left alone, and an
+    explicit `null` on `display_color` clears it (the `/auth/me` convention, and
+    the reason a plain `is not None` could never reset a colour).
+
+    Plain `def` (#837): synchronous DB work, awaits nothing.
+    """
+    target = (
+        db.query(User)
+        .filter(User.id == coder_id, User.coder_type.notin_(SYSTEM_CODER_TYPES))
+        .first()
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Coder not found")
+    if target.coder_type != CODER_TYPE_MACHINE:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only a machine coder is edited here. A person renames themselves — "
+                "switch to that coder and use their own profile."
+            ),
+        )
+
+    fields = data.model_dump(exclude_unset=True)
+    changed: dict = {}
+
+    if "username" in fields and fields["username"] is not None:
+        new_name = fields["username"].strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="Coder name cannot be empty")
+        if new_name != target.username:
+            clash = (
+                db.query(User)
+                .filter(User.username == new_name, User.id != target.id)
+                .first()
+            )
+            if clash:
+                raise HTTPException(
+                    status_code=409, detail=f"The name '{new_name}' is already taken",
+                )
+            target.username = new_name
+            changed["username"] = new_name
+
+    if "display_color" in fields:
+        target.display_color = fields["display_color"]
+        changed["display_color"] = fields["display_color"]
+
+    if "machine_provenance" in fields:
+        if machine_coder.provenance_locked(db, target.id):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"“{target.username}” has already produced coding, so its model "
+                    "configuration is fixed. Two configurations of one model are two "
+                    "different coders — add a second machine coder for the new "
+                    "configuration, so each layer says which settings produced it."
+                ),
+            )
+        try:
+            provenance = machine_coder.normalize_provenance(
+                data.machine_provenance.as_payload()
+                if data.machine_provenance is not None else None
+            )
+        except machine_coder.MachineCoderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        machine_coder.write_provenance(target, provenance)
+        changed["model"] = (provenance or {}).get("model")
+
+    if changed:
+        db.add(AuditEntry(
+            user_id=user.id, action="coder_updated", entity_type="user",
+            entity_id=target.id, details=json.dumps(changed),
+        ))
+        db.commit()
+        db.refresh(target)
+    return coder_to_response(db, target)
 
 
 @router.post("/switch-coder", response_model=CoderResponse)
@@ -441,7 +630,12 @@ async def switch_coder(
         .filter(
             User.id == data.coder_id,
             User.archived == False,
-            User.coder_type.notin_(SYSTEM_CODER_TYPES),  # can't switch TO a system coder
+            # Can't switch TO a system coder (Unattributed / consensus) or to a
+            # MACHINE coder (#989) — every application made afterwards is
+            # server-stamped with the active identity, so becoming the model
+            # would attribute a person's coding to it, silently and
+            # irreversibly. The labels a machine holds arrive as a file.
+            selectable_coder_clause(),
         )
         .first()
     )
@@ -458,12 +652,14 @@ async def switch_coder(
     if session.user_id != target.id:
         session.user_id = target.id
         db.add(AuditEntry(
-            user_id=target.id, action="coder_switched", entity_type="user", entity_id=target.id,
+            # The entry `ensure_default_user` trusts a recency by (#1027): it names
+            # the coder switched TO, in `entity_id`.
+            user_id=target.id, action=CODER_SWITCHED_ACTION, entity_type="user", entity_id=target.id,
             details=json.dumps({"from": user.id, "to": target.id}),
         ))
     db.commit()
     db.refresh(target)
-    return CoderResponse.model_validate(target)
+    return coder_to_response(db, target)
 
 
 @router.post("/coders/{coder_id}/archive", response_model=CoderResponse)
@@ -498,7 +694,7 @@ async def archive_coder(
         ))
         db.commit()
         db.refresh(target)
-    return CoderResponse.model_validate(target)
+    return coder_to_response(db, target)
 
 
 @router.post("/coders/{coder_id}/unarchive", response_model=CoderResponse)
@@ -527,4 +723,4 @@ async def unarchive_coder(
         ))
         db.commit()
         db.refresh(target)
-    return CoderResponse.model_validate(target)
+    return coder_to_response(db, target)

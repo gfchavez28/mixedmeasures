@@ -57,6 +57,42 @@ class DatasetPreviewResponse(BaseModel):
     sheet_names: list[str] | None = None
 
 
+class DatasetColumnSummary(BaseModel):
+    """One column as the CHEAP first stage knows it (#973 c) — no statistics."""
+
+    column_index: int
+    column_name: str
+    # At most `DESCRIBE_SAMPLE_ROWS` values, so the researcher choosing columns
+    # for an over-cap file can tell `Q014` from `Q015`. EMPTY on the `.sav` arm,
+    # which answers from metadata and reads no rows at all.
+    sample_values: list[str]
+
+
+class DatasetColumnsResponse(BaseModel):
+    """What columns a file has, and how big it is, WITHOUT reading it (#973 c).
+
+    🔴 **This response is the escape hatch from the cell cap, so it is the one
+    dataset endpoint that does not apply it.** The refusal it exists to answer
+    (`cell_count_error`) is raised by every other reader on this path, upstream
+    of the wizard — so a researcher whose file is over the cap could previously
+    see only the refusal, never the column list they were being told to trim.
+    """
+
+    columns: list[DatasetColumnSummary]
+    # -1 when the format declares its row count as unknown, which SPSS legally
+    # does (#539). A client must treat a negative count as "not known" rather
+    # than as a number — `cells` below is then None for the same reason.
+    total_rows: int
+    # `total_rows * len(columns)`, or None when the row count is unknown. Computed
+    # HERE so the client cannot arrive at a different number from the refusal it
+    # is predicting (#974's rule: a disclosure that predicts a refusal must share
+    # the refusal's counter).
+    cells: int | None
+    # The cap this file is measured against, so the client carries no copy of it.
+    max_cells: int
+    sheet_names: list[str] | None = None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Import schemas
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -157,6 +193,13 @@ class DatasetImportRequest(BaseModel):
     # by (match-or-create on Participant.identifier). None = no linking.
     # Consumers MUST check `is not None` — index 0 is a valid column.
     participant_link_column_index: int | None = None
+    # #973 (c): the columns the researcher chose at the cheap first stage, as
+    # indices into the ORIGINAL file. 🔴 **It must be the SAME list the preview
+    # was given**, because the adapter narrows the file to it and every
+    # `column_index` in `column_configs` is a position in that narrowed text. A
+    # different list here would silently apply the researcher's type choices to
+    # the wrong columns. None = the whole file, which is every ordinary import.
+    source_column_indices: list[int] | None = None
 
 
 class ParticipantLinkReport(BaseModel):
@@ -845,7 +888,11 @@ class DatasetAppendPreviewResponse(BaseModel):
     unmatched_csv_columns: list[AppendUnmatchedCsvColumn]
     unmatched_columns: list[AppendUnmatchedColumn]
     total_rows: int
+    # Every record the import would skip with skip_duplicates on — whether it
+    # matches an existing record or an EARLIER record in the same file (#1014).
     duplicate_count: int
+    # The in-file part of `duplicate_count`, so the page can say which kind.
+    in_file_duplicate_count: int = 0
     preview_rows: list[AppendPreviewRow]
     next_row_id: str
     row_pad_width: int

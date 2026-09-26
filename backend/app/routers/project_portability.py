@@ -202,8 +202,14 @@ def duplicate_project_endpoint(
     try:
         with os.fdopen(tmp_fd, "wb") as f:
             f.write(buf.getvalue())
+        # #958 §6 — a duplicate is an export + import, so the copy's saved results are
+        # declared out of date exactly as an imported colleague's would be. Reported for
+        # the same reason: the researcher should not have to discover it from a blank
+        # scale-score column.
+        import_report: dict = {}
         new_id, project_name = import_project(
             db, tmp_path, docs_dir, media_dir, user_id=user.id, import_mode="new",
+            import_report=import_report,
         )
 
         # Distinguish the copy in the project list with a GUARANTEED-UNIQUE name:
@@ -235,7 +241,11 @@ def duplicate_project_endpoint(
             entity_type="project",
             entity_id=new_id,
             project_id=new_id,
-            details=json.dumps({"source_project_id": project_id, "project_name": project_name}),
+            details=json.dumps({
+                "source_project_id": project_id,
+                "project_name": project_name,
+                "metrics_marked_stale": import_report.get("metrics_marked_stale", 0),
+            }),
         )
         db.add(audit)
         db.commit()
@@ -244,6 +254,7 @@ def duplicate_project_endpoint(
             project_id=new_id,
             project_name=project_name,
             merge_report=None,
+            metrics_marked_stale=import_report.get("metrics_marked_stale", 0),
         )
     except ValueError as e:
         db.rollback()
@@ -371,6 +382,9 @@ async def import_project_endpoint(
     # when it actually took a snapshot, so "was one taken?" stays the service's answer
     # rather than a mode list this router would have to keep in step with it.
     safety_report: dict = {}
+    # #958 §6 — also every mode, for the same reason: a merge imports no metrics, so the
+    # service answers 0 there rather than this router deciding which modes can be affected.
+    import_report: dict = {}
     try:
         # 🔴 **OFF THE EVENT LOOP (#847).** `import_project` is minutes of synchronous
         # SQLite work, and this endpoint is `async def`, so it ran ON the loop — every
@@ -393,7 +407,7 @@ async def import_project_endpoint(
             db, tmp_path, docs_dir, media_dir, user_id=user.id,
             import_mode=import_mode, target_project_id=target_project_id,
             coder_mapping=parsed_mapping, code_mapping=parsed_code_mapping, report=merge_report,
-            safety_report=safety_report,
+            safety_report=safety_report, import_report=import_report,
         )
 
         # Audit
@@ -414,6 +428,10 @@ async def import_project_endpoint(
                 # seconds and the researcher who needs this file is looking hours later.
                 # The audit log is the one place that still says what happened.
                 "safety_backup_filename": safety_report.get("filename"),
+                # #958 §6 — the durable half of the same bargain as the line above: a
+                # toast says this once and the researcher meets the consequence (a blank
+                # scale-score column, an empty record × variable export) days later.
+                "metrics_marked_stale": import_report.get("metrics_marked_stale", 0),
             }),
         )
         db.add(audit)
@@ -436,6 +454,7 @@ async def import_project_endpoint(
             project_name=project_name,
             merge_report=merge_report,
             safety_backup_filename=safety_report.get("filename"),
+            metrics_marked_stale=import_report.get("metrics_marked_stale", 0),
         )
     except MergeDivergenceError as e:
         # Track J · J3-2c: structured refusal (per-source / per-code diff) for the UI.

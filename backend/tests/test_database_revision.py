@@ -120,7 +120,9 @@ def test_failed_backup_raises_and_blocks_the_migration(tmp_path, monkeypatch):
     def _enospc(*_a, **_k):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(database.shutil, "copy2", _enospc)
+    # The copy goes through `snapshot_database_file` since #1025/#1044 (the SQLite
+    # backup API); a full disk surfaces from there.
+    monkeypatch.setattr(database, "snapshot_database_file", _enospc)
 
     import alembic.command
     called = {"upgrade": False}

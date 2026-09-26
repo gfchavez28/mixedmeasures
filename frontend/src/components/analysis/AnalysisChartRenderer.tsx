@@ -216,6 +216,30 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
     m.results.some(r => (r.result_data as Record<string, unknown>).ci_method === undefined)
   )
 
+  /*
+   * 🔴 **THERE IS NO "these results are out of date" NOTICE HERE, AND THAT IS A
+   * MEASURED DECISION — do not add one back (#958 §6, removed 2026-09-21).**
+   *
+   * One shipped for half a day. It read `stale` off `selectedMetrics`, which
+   * `AnalysisView` sets to the QUICK-COMPUTE response — and `quick_compute`
+   * recomputes before it answers (`needs_compute = metric.stale or
+   * len(metric.results) == 0`, `routers/metrics.py`), clearing the flag. So the
+   * flag is false by the time anything here can read it.
+   *
+   * **Measured live on two stale GSS scale scores: each flipped to fresh on the
+   * page load that selected it, and the notice never appeared across 24 samples
+   * over 12 seconds.** The one state it could reach is a recompute that RAISED —
+   * where its sentence ("the data behind them has changed, or they were computed
+   * in another copy") would have been wrong anyway.
+   *
+   * ⚠️ **The disclosure this was built for is not missing; it is elsewhere, on the
+   * surfaces that read stored scores and never recompute:** the Data view's
+   * domain-score column and the crosswalk bracket (both render `stale`), the Excel
+   * export (a Stale column plus an amber fill), the R export (names any score
+   * column it emits with nothing behind it), the import toast and the audit entry —
+   * and, since this removal, the variable-group correlation matrix, which was
+   * reporting `insufficient_n` for scores that had simply never been computed.
+   */
   const ciNotice = ciMissing ? (
     <div className="flex items-center gap-2 px-3 py-2 mb-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded text-xs text-amber-700 dark:text-amber-300">
       <span>Recompute metrics to enable error bars</span>

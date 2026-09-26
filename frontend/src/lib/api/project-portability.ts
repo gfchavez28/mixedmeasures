@@ -206,6 +206,16 @@ export interface ProjectImportResult {
    * itself is not somewhere a researcher can reach.
    */
   safety_backup_filename: string | null
+  /**
+   * #958 §6 — how many of the imported project's saved results were declared out of
+   * date. An `.mmproject` no longer carries per-record scores, which are DERIVED: the
+   * archive holds everything needed to rebuild them, and carrying them let a number
+   * computed by some other build arrive reading as this build's current answer.
+   *
+   * `0` on a merge (which imports no metrics) and on a project that saved none — so
+   * gate any message on `> 0`, never on the field's presence.
+   */
+  metrics_marked_stale: number
 }
 
 export interface CodebookImportResult {

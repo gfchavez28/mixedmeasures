@@ -7,6 +7,400 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.4] - 2026-09-26
+
+### Added
+
+- **Import codings from a file — including labels a model produced elsewhere.**
+  Until now the only way another person's coding could reach a project was a
+  Mixed Measures project file. *Analysis → Import codings…* takes an ordinary
+  CSV — one row per coding, `unit_id, coder, code`, optionally a rating — and
+  applies it to passages you already have: transcript turns, document paragraphs,
+  observation clips or open-text survey responses.
+
+  Three things it will not do, each on purpose. It will **not guess whose coding
+  it is**: every name in the file needs an explicit answer, because a name that
+  looks like a colleague's is not evidence that it is theirs. It will **not guess
+  what your ids mean**: you say whether they name segments or records, because
+  those are different things and picking wrong would attach judgements to the
+  wrong passages. And it will **not half-apply a file**: the whole thing is
+  checked first, and anything that cannot be applied comes back with its line
+  number and a sentence saying why — a record that does not exist, a code that
+  was retired, a rating outside its scale, two rows that contradict each other.
+
+  The coded-segments export gained a **Unit ID** column so a file exported from
+  Mixed Measures can be read back into it.
+
+- **Labels a model produced are their own layer, and the layer records which
+  model: reached how, at what settings, under what prompt.** Codings imported
+  from a model sit on the roster as a machine coder — attributed, filterable and
+  permanently outside every agreement figure — and Mixed Measures keeps the
+  model's identity with them.
+
+  Recording which model is not a small matter. A 2026 review of published research using language
+  models for qualitative coding found that three quarters of studies report no
+  model settings at all, and nearly half do not say whether the model was reached
+  by an API, a web interface or a local installation — while the reported
+  agreement between those models and human coders ranges from 36% to 99%, largely
+  because nobody can tell what was actually run. Mixed Measures records it: the
+  model, how it was reached, its settings and its prompt, kept with the layer and
+  exported with the project.
+
+  Two configurations of one model are treated as **two coders**, so the
+  configuration is fixed once a layer holds any coding; the coder's name can
+  still be changed.
+
+- **A model comparison on the Reliability tab.** One figure per person, per
+  model, per code, with how many passages each side actually reached. It sits
+  below the reliability tables and outside all of them, and it says in so many
+  words what it is: a description of the model's behaviour, not inter-rater
+  reliability, and not evidence that the coding is correct. Nothing in it enters
+  the agreement figures above.
+
+- **Code sets: a group of codes a passage takes exactly ONE of.** Some codes are
+  tags — a passage either has them or it does not, and any number can apply. But
+  a great deal of coding is really a *variable*: a stance is positive, negative,
+  neutral or ambiguous, and exactly one of those is true of any given passage.
+  Until now Mixed Measures could only treat those four as four independent tags,
+  which meant the reliability tab reported four separate agreement figures plus a
+  pooled number that no content-analysis textbook names — and never the one
+  figure a methods reviewer actually asks for: *how much did the coders agree
+  about stance?*
+
+  A code set answers that. Create one from *Codebook → Sets*, add the codes that
+  are its values, and every coding surface shows them as a single-choice control
+  above the code list: choosing one value clears the one before it, and there is
+  a clear button for "none of these". The Reliability tab gains a third table
+  with one Krippendorff's α per set, a breakdown showing how each value
+  performed, and — for each pair of coders — a grid of which value one chose
+  against which the other chose, so a low figure tells you *which two categories
+  are being confused* rather than only that something is wrong.
+
+  Two things it states rather than assumes. You choose whether every passage
+  must take one of the values: if it must, a passage nobody assigned is treated
+  as missing data; if it need not, that blank is the real answer "none of
+  these". The same coding produces different agreement figures under those two
+  readings, so the table says which one it used. And where a coder has somehow
+  ended up holding two values at once — which can happen when two people's work
+  is merged, or when a set is created over coding that already exists — Mixed
+  Measures says so and leaves that passage out of the figure, rather than
+  picking one of the two on the coder's behalf. (queue row 48)
+
+- **Restore from a backup Mixed Measures made, without finding the file first.**
+  *Settings → Backup & Data → Backup history*, which already listed your
+  backups, now lets you restore, download or delete each one, and names each by
+  the exact time it was taken. Until now the only way to restore was to pick a
+  `.mmbackup` file from your disk — and that had a 500 MB limit while making a
+  backup had no limit at all, so a large project could reach a size where Mixed
+  Measures wrote backups it would then refuse to read back. Restoring from this
+  list is not held to that upload limit, because nothing is copied or uploaded. It also makes a
+  recovery instruction possible to follow: when a restore fails partway, Mixed
+  Measures saves your previous data and tells you to restore that backup — and
+  now you can, from the same list. Restoring still previews what the backup
+  contains and asks you to confirm, whichever way you reach it, and the
+  confirmation now names the backup it is about to restore. The limit for a
+  backup brought from another computer is stated on the screen instead of
+  arriving as an error after the whole file has transferred. (#971)
+
+- **A survey file too large to import is no longer a dead end.** A file over the
+  import limit of 4,000,000 values was refused with advice to skip columns in the
+  import wizard — which the file never reached, and which would not have changed
+  the size reported anyway. The import now offers a step to choose the columns
+  you need, and counts only those against the limit. When a file is still too
+  large, the message says what works: remove columns or split the rows in the
+  file before importing. (#973)
+
+- **A project now says how close it is to the limit for sharing it.**
+  Duplicating a project, exporting it and merging a colleague's coding are
+  limited to 4,000,000 stored values across the whole project — a different limit
+  from the one on a single import — so filling datasets could use it up with no
+  sign until the wall. The Overview and the export dialog now show how much of it
+  the project uses. (#974)
+
+### Changed
+
+- 🔴 **Project files (`.mmproject`) have a new layout, and older versions of
+  Mixed Measures cannot open them.** A project file used to hold all of your
+  data in one document that had to be read into memory in its entirety before
+  anything could be imported — on a large survey that was nearly 3 GB of memory
+  for a file of 24 MB on disk, and it was the single largest cost of importing,
+  duplicating or merging a project. Each kind of record now has its own section
+  inside the file, so Mixed Measures reads them a few thousand at a time instead,
+  and the file itself is no larger. **Project files you already have still open
+  normally** — nothing becomes
+  unreadable, and backups (`.mmbackup`) are not affected at all. What changes is
+  the other direction: **a project file saved by this version will not open in
+  1.5.3 or earlier.** It is refused with a message saying so, rather than
+  imported as a project that appears to have no data in it, so if you exchange
+  project files with a colleague you both need this version. (#958)
+
+- **Importing, duplicating or merging a project with a lot of coding is much
+  faster and needs far less memory.** The project file no longer has to be read
+  into memory whole, codings are now written in batches, and the agreed coding
+  that Mixed Measures rebuilds after every import is worked out a passage at a
+  time instead of all at once. Measured on a real survey project with 1.2 million
+  codings, importing it took **561 seconds and 2,969 MB of memory in 1.5.3, and
+  takes 99 seconds and 445 MB now**, and the agreed coding it rebuilds is
+  identical. A large survey dataset with no coding also imports in a fraction of
+  the memory it needed. (#958, #994)
+
+- **After importing or duplicating a project, its saved results are marked out
+  of date until you recompute them.** Project files no longer carry the
+  per-record scores behind computed results, so the numbers you see come from
+  this copy of Mixed Measures rather than from whatever the other copy last
+  computed. The import says how many saved results need recomputing. (#958)
+
+- **Checking a large project file before importing or merging it takes a moment
+  rather than up to half a minute.** Mixed Measures read the whole file just to
+  list its coders and codes — 12.5 and 15 seconds of reading on the two largest
+  test projects, behind a *Validating…* button. Files saved by this version carry
+  a short summary instead. Files from earlier versions are still checked the old
+  way, and uploading a large file still takes as long as it takes. (#860, #962)
+
+### Fixed
+
+- 🔴 **A backup now always holds your latest saved work.** A backup copied the
+  database file, and a change you make does not reach that file straight away.
+  When a backup started while something else was using the database — an export,
+  an import or a merge on a large project — it could quietly leave out the most
+  recent work, and it still looked like a good backup: it opened, and it passed
+  every check the restore preview makes. This applied to every kind of backup,
+  including the ones taken automatically before a restore or a withdrawal, and to
+  the copy Mixed Measures makes of your database before upgrading it. Backups now
+  go through SQLite's own backup mechanism, which captures everything saved even
+  while other work is running, without waiting for it and without slowing it
+  down. On macOS and Linux the old copy could also, in rare cases, let another
+  program that opened the database afterwards disrupt the running app; that is
+  gone too. If another program holds the database locked, a backup is refused
+  with a sentence saying so, rather than written incomplete. (#1025, #1044)
+
+- **Removing a participant's data now stays on screen until it has finished,
+  and can no longer report a failure that did not happen.** The confirmation
+  closed the moment *Back up and remove* was pressed, so nothing said that a
+  backup and a removal were under way — on a large project, up to a minute —
+  and the person's row invited a second press. If it took longer than 30
+  seconds, the screen also said the removal had failed and nothing had changed,
+  while it went on to finish. The confirmation now stays open, shows how long it
+  has been running, and closes when the removal is done. Downloading a backup
+  and removing a participant also no longer freeze the rest of Mixed Measures
+  while they work, and the *Backup now*, *Download Backup*, *Restore from a
+  file* and *Restart to update* buttons keep keyboard focus while they wait.
+  (#1025)
+
+- **Restoring a backup no longer risks losing work done around it, and the
+  screen now says what is happening.** A restore replaces the database file
+  underneath the running app. Anything that reached the database while it ran —
+  including Mixed Measures' own background tasks — could go on using the file
+  being replaced, so a change made during or just after a restore could be
+  silently lost. Mixed Measures now waits for work already under way to finish,
+  then holds everything else off until the restore is done; anything that tries
+  in the meantime is told a restore is in progress. The restore window used to
+  close the moment Restore was pressed and show nothing until the app reloaded.
+  It now stays open while the restore runs, and when it finishes says which
+  backup holds the data you had before — the way back if you restored the wrong
+  one — and waits for you to reload. A restore that fails keeps its explanation
+  on screen. The preview also stops warning that "0 video recordings" were left
+  out of a backup that had none to leave out. (#1024, #1037)
+
+- **Restoring a backup made by an earlier version now brings it up to date, and
+  one made by a newer version is refused before anything changes.** A backup's
+  data is stored in the form of the version that made it. Restoring one from an
+  earlier version used to install it as it was, and until Mixed Measures was
+  closed and reopened any page that relied on something newer stopped working.
+  This release changes that form, so every automatic backup taken before you
+  upgrade is one of these. The backup's data is now upgraded as part of the
+  restore — the preview says so beforehand, and the backup file itself is left
+  as it was. A backup from a newer version used to be accepted with only a note
+  that it came from a different version, after which Mixed Measures would not
+  start at all; the preview now refuses it,
+  names the version that made it, and nothing is changed. (#1026)
+
+- **The colour and Options buttons beside each code in the Codes panel now work
+  from the keyboard.** On the conversation, document and observation coding
+  screens the panel took Enter and Space for itself whenever anything inside it
+  had focus, so tabbing to a code's colour dot or its Options button and pressing
+  Enter did nothing — changing a code's colour, adding a description or a memo,
+  moving it to a category, giving it a rating scale or deactivating it all needed
+  a mouse. The panel now leaves those keys to the control that has focus; moving
+  through the code list with the arrow keys and applying a code with Enter work
+  as before. (#1041)
+
+- 🔴 **Importing a colleague's project no longer changes who your coding is
+  attributed to.** A project file carried each coder's last switch time from the
+  install it came from. When Mixed Measures next opened without a signed-in
+  session (sessions last a day), it picked the coder most recently switched to
+  — and that could be the colleague, so the app opened as them and everything
+  coded from then on was attributed to them, with nothing but the name in the
+  top bar to say so. Project files no longer carry that time, a file made by an
+  earlier version is imported without it, and Mixed Measures now only trusts a
+  switch made on this computer, which also puts right a project imported before
+  this release. Check the coder name in the top bar if you imported a project
+  from someone else since June. (#1027)
+
+- 🔴 **Quotes could be shifted onto the wrong words when a project was imported,
+  if the passage contained an emoji or certain other characters.** Mixed Measures
+  carries a repair for project files written before version 1.3.1, which stored
+  the position of a highlighted quote using a different counting rule. The repair
+  was meant to run only on those older files — and because it was looking for the
+  file's version in the wrong place inside the project file, it never found one
+  and ran on **every** import instead. On a passage containing an emoji, a flag,
+  a skin-tone modifier or a character outside the common range, an already-correct
+  quote was moved one position earlier for each such character before it, silently,
+  and again on each re-import. Only quotes on passages containing those characters
+  were affected; ordinary text was never touched. The repair now takes the version
+  from the file's manifest, where it is actually written. (#993)
+
+- 🔴 **Agreement figures for coded survey responses no longer count answers your
+  project treats as empty.** The Text Coding view leaves out answers your
+  project is set to treat as empty, but the reliability figures counted them
+  anyway, as passages every coder agreed to leave uncoded. That made coders look
+  more in agreement than they were and every code look rarer, and it moved the
+  per-code figures more than the overall one: on one test project the overall α
+  barely changed while one code's α went from just above zero to below it. The
+  passage count in the reliability table now matches what the Text Coding view
+  shows. (#987)
+
+- **Creating or refreshing the participant table no longer takes hours on a
+  large coded survey, or freezes Mixed Measures while it runs.** Working out
+  whose response each coded answer was looked through the whole project again
+  for every few thousand answers; on a survey with 843,000 coded answers one
+  refresh would have taken about six and a half hours, during which the app
+  answered nothing else. It now takes about 20 seconds, and the rest of the app
+  stays responsive while it works. The delay grew with both the size of the
+  survey and the amount of coding in it. (#1021, #1022)
+
+- **A backup that was never finished writing is no longer listed as one.** If
+  Mixed Measures was interrupted while saving a backup — the computer shut down,
+  the disk filled — it could leave behind an incomplete file that the app then
+  counted as a backup, included in the total disk space it reported, and, if it
+  was the most recent, used to tell you your data had just been backed up. One
+  such file, 88 MB and unreadable, was found on a development machine. Backups
+  are now written under a temporary name and only take a backup's name once they
+  are complete, the same way the copies taken before a merge already were. Two
+  backups made in the same second also no longer overwrite one another, and
+  *Before a restore* and *Before a withdrawal* backups are now told apart in the
+  list instead of both reading as "pre". (#981)
+
+- **Closing Mixed Measures no longer uses up one of your automatic backups.**
+  The snapshot taken when the app closes shared the same "keep the most recent
+  five" rule as the 4-hourly automatic ones, so closing and reopening five times
+  — an ordinary morning — replaced every automatic backup with five copies of the
+  same moment, and the ability to go back to yesterday was gone. **Nothing in
+  your projects was ever lost or changed by this**: what was shortened was how
+  far back the safety net reached. Snapshots taken on closing are now kept
+  separately, so the automatic ones cover the working day as they were meant
+  to. (#920)
+
+- **The backup folder no longer grows without limit.** Downloading a backup left
+  a second full copy of it on the computer — including video, which downloads
+  include by default — and nothing ever removed it; the two most recent are kept
+  now, and the rest of the folder is listed under *Backup history* where any of
+  them can be deleted. Separately, Mixed Measures saves a copy of your database
+  before it upgrades it, keeping the five most recent **of each database** — so
+  any database you have stopped using left up to five full copies behind forever.
+  Copies belonging to a database that is no longer there are now cleaned up when
+  the app starts; copies of a database you still have are never touched. (#982)
+
+- **The list of safety copies no longer slows the Settings page down.** The
+  copies saved before a merge or an overwrite were all drawn at once — on a
+  machine with 1,954 of them that was nearly 3,900 buttons inside one small
+  scrolling box, and every visit to Settings read all 1,954 files to build it.
+  The 50 most recent are shown, with a *Show all* for the rest, and the count and
+  total size above the list still describe every copy you have. (#978)
+
+- **Adding rows to a large dataset no longer takes as long as importing it, and
+  the preview's count now matches what is added.** *Append from file…* checked
+  the new rows for duplicates by reading every record already in the dataset —
+  twice, once for the preview and again for the import. Adding five responses
+  to a 40,000-row dataset took 23 seconds to preview and 28 to import, and
+  needed up to 2.6 GB of memory; it now takes about 3 seconds at each step and
+  under 100 MB. The two steps also checked separately, and did not always
+  agree. A response that appeared twice in the file was counted once by the
+  preview and skipped by the import, so the page promised one more new record
+  than it added. And a file giving number codes for a labelled question — a "6"
+  where the dataset stores "High" — was matched against existing responses by
+  the import but not by the preview. Both steps now use the same check, and the
+  preview counts repeats within the file separately from responses already in
+  the dataset. (#1014)
+
+- **The import pages say what they take before you choose a file, refuse a
+  wrong one straight away, and keep your place from the keyboard.** Every import
+  page accepted a file over the 50 MB limit, gave an estimate of how long it
+  would take to read — a 1 GB survey file was told 3,136 seconds — and refused
+  it only after *Next* was pressed. A file over the limit is now refused the
+  moment it is chosen, by name and size, and each page states the limit before
+  anything is chosen. The limit is per file, and recordings keep their own 4 GB
+  limit.
+
+  A file of the wrong kind got four different responses. The dataset,
+  transcript and document pages dropped it without a word, and the page for
+  appending to a dataset sent it off and then blamed the file's text encoding.
+  Every import page now says the file is not the kind it takes and names the
+  formats it does. Merging a colleague's project checks the file type and its
+  500 MB limit when the file is chosen, and choosing the same file again after
+  an error now works — before, nothing happened.
+
+  On the dataset, transcript, document and append pages, pressing *Next* or
+  *Back* sent keyboard focus back to the top of the page; it now moves to a
+  heading naming the new step. The observation and merge pages no longer move
+  focus when you arrive, so *Skip to main content* is the first stop again. A
+  finished dataset import is now announced to screen readers — after a long
+  one, the last thing they had said was "Still working". (#1007, #1011, #1012)
+
+- **The Conversations, Documents, Datasets and Observations lists now work the
+  same way, and their sort order can finally be reversed.** Choosing the sort
+  you already had was meant to reverse it, but the menu ignores a choice that
+  has not changed, so oldest first, Z to A and least coded could never be
+  reached. Each option now names its direction: *Newest first*, *Oldest first*,
+  *Name A–Z* and *Name Z–A*, plus *Most coded* and *Least coded* on
+  Conversations and Documents and *Most covered* and *Least covered* on
+  Observations. The Datasets and Observations lists now have the same search
+  and sort as the other two, and the Observations list takes a dropped file.
+  The Datasets list said it imported CSV files only; it now names Excel and
+  SPSS files too. A file dropped on the Documents list that belongs somewhere
+  else — a transcript or a recording — is sent to the right import page, as the
+  Conversations list already did, instead of being ignored. The search box now
+  says it searches by name, and in a narrow window the Import button no longer
+  sits past the edge of the screen. (#1008)
+
+- **Merging a colleague's project now says what it is doing while you wait.**
+  The merge showed only "Merging…" until it finished, however long that took.
+  It now says that a safety copy of your project is saved first and then the
+  codings are added, how long it has been running and how long a file of that
+  size usually takes, and says plainly when it is taking longer than usual.
+  Screen readers hear it when the merge starts and every 30 seconds after.
+  (#1015)
+
+- **Text on coloured buttons is easier to read, in light and dark mode.** White
+  text on the green and orange Import buttons fell short of the accessibility
+  guideline for readable text — a contrast of 4.5 to 1 — at 3.05 and 2.60, and
+  in dark mode every standard button and every tooltip was white on bright
+  green, at 2.92. Blue and purple had the same problem: selected filter
+  checkboxes, the selected point on a rating scale, the codebook's Save button,
+  several canvas buttons and toggles. So did uncoded clips on the observation
+  timeline. Light mode now uses deeper shades with white text, and dark mode
+  keeps the bright colours with near-black text; the new pairs measure at least
+  5.4 to 1. The Observations Import button uses the Observations teal instead
+  of borrowing green. (#1009, #1016)
+
+- **Appending rows from a file now respects the dataset's size limit.** Adding
+  one record by hand was checked against the 4,000,000-value limit, but
+  appending a whole file was not. Both the preview and the import now check
+  first — before reading the records already there — and say how many more
+  records the dataset has room for. (#972)
+
+- **A merge refused because the project is too large no longer says it was an
+  overwrite.** It read *"Overwriting was stopped because the project being
+  replaced is too large to snapshot first…"* — on a merge, which adds to a
+  project and replaces nothing — so it read as though the project might have
+  been replaced. It now describes the merge. (#977)
+
+- **In a narrow window, the Codes panel on the coding screens stays on screen.**
+  At a small window size — a 1280×720 window at 200% zoom — the conversation
+  coding screen pushed its Codes panel past the right edge with nothing to
+  scroll to, and the document and observation screens squeezed theirs to a
+  sliver. It now stays on screen, with the code list scrollable. (#998)
+
 ## [1.5.3] - 2026-09-19
 
 ### Added
@@ -1461,7 +1855,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.3...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.4...HEAD
+[1.5.4]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.3...v1.5.4
 [1.5.3]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.2...v1.5.3
 [1.5.2]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.0...v1.5.1

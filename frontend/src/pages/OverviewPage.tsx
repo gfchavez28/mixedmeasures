@@ -10,6 +10,7 @@ import { useProjectLayout } from '@/layouts/ProjectLayout'
 import InlineEditableText from '@/components/InlineEditableText'
 import { OBSERVATION_CARD_DESCRIPTION, SOURCE_KIND_ONE_LINER } from '@/lib/source-kind-copy'
 import { toastProjectExportError } from '@/lib/project-export-error'
+import { describeCeiling, hasCeilingToReport } from '@/lib/project-export-ceiling'
 
 const ACCENT = {
   green: {
@@ -97,6 +98,18 @@ export default function OverviewPage() {
   const { data: storage } = useQuery({
     queryKey: ['project-storage', projectId],
     queryFn: () => projectsApi.storage(projectId),
+    enabled: !!projectId,
+    staleTime: 60_000,
+  })
+
+  // #974: how close this project is to the limit that governs SHARING it — a
+  // different question from the disk footprint above, and the only warning
+  // before the wall (`assert_project_exportable` had one caller, inside the
+  // export). Its own query because the COUNT is ~250 ms on a 3.6M-value project
+  // and `project-summary` is fetched by TopRail on every page.
+  const { data: exportCeiling } = useQuery({
+    queryKey: ['project-export-ceiling', projectId],
+    queryFn: () => projectsApi.exportCeiling(projectId),
     enabled: !!projectId,
     staleTime: 60_000,
   })
@@ -214,7 +227,7 @@ export default function OverviewPage() {
         <button
           onClick={handleExportProject}
           disabled={exportingProject}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium border border-mm-border text-mm-text-secondary bg-mm-surface hover:bg-mm-surface-hover transition-colors disabled:opacity-50 shrink-0"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium border border-border text-mm-text-secondary bg-mm-surface hover:bg-mm-surface-hover transition-colors disabled:opacity-50 shrink-0"
         >
           <Package className="w-4 h-4" />
           {exportingProject ? 'Exporting...' : 'Export Project'}
@@ -237,14 +250,14 @@ export default function OverviewPage() {
           <div className="flex items-center justify-center gap-3 flex-wrap">
             <button
               onClick={() => navigate(`/projects/${projectId}/conversations/import`)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-green))] hover:opacity-90 transition-opacity"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-mm-on-fill bg-mm-green-fill hover:opacity-90 transition-opacity"
             >
               <FileInput className="w-4 h-4" aria-hidden="true" />
               Conversations
             </button>
             <button
               onClick={() => navigate(`/projects/${projectId}/datasets/import`)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-orange))] hover:opacity-90 transition-opacity"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-mm-on-fill bg-mm-orange-fill hover:opacity-90 transition-opacity"
             >
               <FileInput className="w-4 h-4" aria-hidden="true" />
               Datasets
@@ -258,7 +271,7 @@ export default function OverviewPage() {
             </button>
             <button
               onClick={() => navigate(`/projects/${projectId}/observations/import`)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-teal))] hover:opacity-90 transition-opacity"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-mm-on-fill bg-mm-teal-fill hover:opacity-90 transition-opacity"
             >
               <FileInput className="w-4 h-4" aria-hidden="true" />
               Observations
@@ -330,6 +343,22 @@ export default function OverviewPage() {
               {' · '}{formatBytes(storage.documents_bytes)} documents
             </p>
           )}
+          {/* #974: the SHARE ceiling, deliberately a separate line with its own
+            * condition. The disk line above renders only when there are
+            * recordings or documents — and the two projects nearest this limit
+            * have neither, so folding it in there would leave exactly the
+            * projects that need it silent. Plain text, no meter: nothing to
+            * name, nothing to announce, and it survives 640x360. */}
+          {hasCeilingToReport(exportCeiling) && (() => {
+            const { level, figure, consequence } = describeCeiling(exportCeiling)
+            return (
+              <p className={`border-t border-mm-border-subtle px-3 py-1.5 text-[11px] ${
+                level === 'fine' ? 'text-mm-text-muted' : 'text-amber-700 dark:text-amber-400'
+              }`}>
+                Share size: {figure}{consequence && <> — {consequence}</>}
+              </p>
+            )
+          })()}
         </div>
       )}
 

@@ -31,6 +31,7 @@ from ..schemas.project import (
     ProjectUpdate,
     ProjectResponse,
     ProjectListResponse,
+    ProjectExportCeilingResponse,
     ProjectStorageResponse,
     ProjectSummaryResponse,
     CodebookFreezeRequest,
@@ -38,6 +39,11 @@ from ..schemas.project import (
     RecentDataset,
     RecentDocument,
     RecentObservation,
+)
+from ..services.project_portability import (  # #974 — the disclosure shares the gate's counter
+    MAX_PROJECT_EXPORT_VALUES,
+    PROJECT_EXPORT_WARN_FRACTION,
+    project_export_value_count,
 )
 from .helpers import visible_segment_filter, _get_project_or_404
 from ..schemas.segment import SpeakerResponse, SpeakerColorUpdateRequest
@@ -289,6 +295,32 @@ async def get_project_storage(
         media_bytes=media_bytes,
         video_bytes=video_bytes,
         documents_bytes=documents_bytes,
+    )
+
+
+@router.get("/{project_id}/export-ceiling", response_model=ProjectExportCeilingResponse)
+async def get_project_export_ceiling(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """How close this project is to the limit that governs sharing it (#974).
+
+    🔴 **Before this there was NO warning before the wall.** `assert_project_exportable`
+    had exactly ONE caller, inside `export_project`, so the only signal a researcher
+    ever got was the refusal itself — at the moment they tried to export, duplicate,
+    or accept a colleague's merge. MEASURED 2026-09-20: the developer's own GSS
+    project sits at 3,633,552 of 4,000,000 (90.8%), four computed variables from
+    losing all three, with nothing on any screen saying so.
+
+    ⚠️ **Shares the gate's own counter** (`project_export_value_count`) so the figure
+    shown and the figure enforced cannot drift apart.
+    """
+    _get_project_or_404(db, project_id, user.id)
+    return ProjectExportCeilingResponse(
+        dataset_values=project_export_value_count(db, project_id),
+        limit=MAX_PROJECT_EXPORT_VALUES,
+        warn_fraction=PROJECT_EXPORT_WARN_FRACTION,
     )
 
 

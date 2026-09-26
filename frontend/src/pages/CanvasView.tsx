@@ -129,7 +129,7 @@ function OutlineSidebar({
   }
 
   return (
-    <div data-canvas-outline className="w-[220px] shrink-0 border-r border-mm-border bg-mm-surface overflow-y-auto">
+    <div data-canvas-outline className="w-[220px] shrink-0 border-r border-border bg-mm-surface overflow-y-auto">
       <div className="flex items-center justify-between px-3 py-2 border-b border-mm-border-subtle">
         <span className="text-xs font-semibold text-mm-text-secondary uppercase tracking-wide">Outline</span>
         <div className="flex items-center gap-1">
@@ -150,7 +150,7 @@ function OutlineSidebar({
                 className={cn(
                   'text-[10px] px-1.5 py-0.5 rounded font-medium transition-colors',
                   focusMode
-                    ? 'bg-[hsl(var(--mm-teal))] text-white'
+                    ? 'bg-mm-teal-fill text-mm-on-fill'
                     : 'text-mm-text-muted hover:text-mm-text',
                 )}
                 aria-pressed={focusMode}
@@ -207,7 +207,7 @@ function OutlineSidebar({
                 {isThemeType ? (
                   <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: theme.color ?? '#6366f1' }} />
                 ) : (
-                  <div className="w-1.5 h-1.5 rounded-full shrink-0 bg-mm-border" />
+                  <div className="w-1.5 h-1.5 rounded-full shrink-0 bg-mm-border-medium" />
                 )}
                 <span className={cn('truncate', isThemeType ? 'text-mm-text' : 'text-mm-text-secondary italic')}>{theme.name}</span>
                 {showIntegration && info && (
@@ -227,7 +227,7 @@ function OutlineSidebar({
                       </TooltipTrigger>
                       <TooltipContent side="bottom" className="max-w-[200px]">
                         <p className="text-xs font-medium">{info.hasQual ? 'Qualitative materials' : 'No qualitative materials'}</p>
-                        <p className="text-[11px] text-primary-foreground/70">Excerpts and memos embedded in this theme</p>
+                        <p className="text-[11px] text-primary-foreground/90">Excerpts and memos embedded in this theme</p>
                       </TooltipContent>
                     </Tooltip>
                     <Tooltip>
@@ -245,7 +245,7 @@ function OutlineSidebar({
                       </TooltipTrigger>
                       <TooltipContent side="bottom" className="max-w-[200px]">
                         <p className="text-xs font-medium">{info.hasQuant ? 'Quantitative materials' : 'No quantitative materials'}</p>
-                        <p className="text-[11px] text-primary-foreground/70">Charts and callout stats embedded in this theme</p>
+                        <p className="text-[11px] text-primary-foreground/90">Charts and callout stats embedded in this theme</p>
                       </TooltipContent>
                     </Tooltip>
                     {!info.hasAnyTag && (
@@ -257,7 +257,7 @@ function OutlineSidebar({
                         </TooltipTrigger>
                         <TooltipContent side="bottom" className="max-w-[200px]">
                           <p className="text-xs font-medium">No tags</p>
-                          <p className="text-[11px] text-primary-foreground/70">Tag items (confirms, contradicts, etc.) to track integration</p>
+                          <p className="text-[11px] text-primary-foreground/90">Tag items (confirms, contradicts, etc.) to track integration</p>
                         </TooltipContent>
                       </Tooltip>
                     )}
@@ -297,7 +297,7 @@ function OutlineSidebar({
             }}
             className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-mm-bg transition-colors"
           >
-            <div className="w-2 h-2 rounded-full shrink-0 bg-mm-border" />
+            <div className="w-2 h-2 rounded-full shrink-0 bg-mm-border-medium" />
             <span className="truncate text-mm-text-secondary">Unsorted</span>
             <span className="ml-auto text-xs text-mm-text-secondary tabular-nums shrink-0">{pendingItemCount}</span>
           </button>
@@ -1111,7 +1111,7 @@ export default function CanvasView() {
           <button
             onClick={() => { setNewCanvasName(''); setNewCanvasDialogOpen(true) }}
             disabled={createCanvasMut.isPending}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-[hsl(var(--mm-purple))] hover:opacity-90 transition-opacity disabled:opacity-50"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-mm-on-fill bg-mm-purple-fill hover:opacity-90 transition-opacity disabled:opacity-50"
           >
             <Plus className="w-4 h-4" />
             New Canvas
@@ -1213,7 +1213,7 @@ export default function CanvasView() {
         )}
 
         {/* View toggle */}
-        <div className="ml-auto flex items-center gap-0.5 bg-mm-surface-secondary rounded p-0.5 border border-mm-border-subtle">
+        <div className="ml-auto flex items-center gap-0.5 bg-mm-bg rounded p-0.5 border border-mm-border-subtle">
           <button
             onClick={() => handleSetView('writing')}
             className={cn(
@@ -1286,7 +1286,7 @@ export default function CanvasView() {
                 'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors',
                 matrixOpen
                   ? 'bg-[hsl(var(--mm-blue)/0.1)] text-[hsl(var(--mm-blue-text))]'
-                  : 'text-mm-text-muted hover:text-mm-text hover:bg-mm-surface-secondary',
+                  : 'text-mm-text-muted hover:text-mm-text hover:bg-mm-surface-hover',
               )}
               title="Convergence Matrix"
               aria-pressed={matrixOpen}
@@ -1318,7 +1318,7 @@ export default function CanvasView() {
                 'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors',
                 drawerOpen
                   ? 'bg-[hsl(var(--mm-blue)/0.1)] text-[hsl(var(--mm-blue-text))]'
-                  : 'text-mm-text-muted hover:text-mm-text hover:bg-mm-surface-secondary',
+                  : 'text-mm-text-muted hover:text-mm-text hover:bg-mm-surface-hover',
               )}
               title="Toggle materials panel (Ctrl+E)"
               aria-pressed={drawerOpen}
@@ -1397,7 +1397,7 @@ export default function CanvasView() {
                 >
                   <Camera className="w-3.5 h-3.5" />
                   {snapshots.length > 0 && (
-                    <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-[hsl(var(--mm-blue))] text-[9px] text-white flex items-center justify-center font-medium">
+                    <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-mm-blue-fill text-[9px] text-mm-on-fill flex items-center justify-center font-medium">
                       {snapshots.length}
                     </span>
                   )}
@@ -1412,14 +1412,14 @@ export default function CanvasView() {
                       value={snapshotName}
                       onChange={e => setSnapshotName(e.target.value)}
                       placeholder="Snapshot name..."
-                      className="flex-1 h-7 px-2 text-xs rounded border border-mm-border-subtle bg-transparent text-mm-text focus:outline-none focus:ring-1 focus:ring-mm-accent"
+                      className="flex-1 h-7 px-2 text-xs rounded border border-mm-border-subtle bg-transparent text-mm-text focus:outline-none focus:ring-1 focus:ring-ring"
                       aria-label="Snapshot name"
                       onKeyDown={e => { if (e.key === 'Enter' && snapshotName.trim()) createSnapshotMut.mutate(snapshotName.trim()) }}
                     />
                     <button
                       onClick={() => snapshotName.trim() && createSnapshotMut.mutate(snapshotName.trim())}
                       disabled={!snapshotName.trim() || createSnapshotMut.isPending}
-                      className="h-7 px-2.5 rounded text-xs font-medium text-white bg-[hsl(var(--mm-purple))] hover:opacity-90 disabled:opacity-40 transition-opacity"
+                      className="h-7 px-2.5 rounded text-xs font-medium text-mm-on-fill bg-mm-purple-fill hover:opacity-90 disabled:opacity-40 transition-opacity"
                     >
                       Save
                     </button>
@@ -1789,7 +1789,7 @@ export default function CanvasView() {
             <button
               type="button"
               onClick={() => applyTemplate('blank')}
-              className="flex flex-col items-center gap-2 p-4 rounded-lg border border-mm-border hover:border-mm-border-medium hover:bg-mm-bg/50 transition-colors text-center"
+              className="flex flex-col items-center gap-2 p-4 rounded-lg border border-border hover:border-mm-border-medium hover:bg-mm-bg/50 transition-colors text-center"
             >
               <FileText className="w-6 h-6 text-mm-text-muted" />
               <span className="text-sm font-medium text-mm-text">Blank canvas</span>
@@ -1798,7 +1798,7 @@ export default function CanvasView() {
             <button
               type="button"
               onClick={() => applyTemplate('from_analysis')}
-              className="flex flex-col items-center gap-2 p-4 rounded-lg border border-mm-border hover:border-mm-border-medium hover:bg-mm-bg/50 transition-colors text-center"
+              className="flex flex-col items-center gap-2 p-4 rounded-lg border border-border hover:border-mm-border-medium hover:bg-mm-bg/50 transition-colors text-center"
             >
               <BarChart3 className="w-6 h-6 text-mm-blue" />
               <span className="text-sm font-medium text-mm-text">From current analysis</span>
@@ -1807,7 +1807,7 @@ export default function CanvasView() {
             <button
               type="button"
               onClick={() => applyTemplate('comparison')}
-              className="flex flex-col items-center gap-2 p-4 rounded-lg border border-mm-border hover:border-mm-border-medium hover:bg-mm-bg/50 transition-colors text-center"
+              className="flex flex-col items-center gap-2 p-4 rounded-lg border border-border hover:border-mm-border-medium hover:bg-mm-bg/50 transition-colors text-center"
             >
               <GitCompare className="w-6 h-6 text-amber-500" />
               <span className="text-sm font-medium text-mm-text">Comparison scaffold</span>
@@ -1816,7 +1816,7 @@ export default function CanvasView() {
             <button
               type="button"
               onClick={() => applyTemplate('research_questions')}
-              className="flex flex-col items-center gap-2 p-4 rounded-lg border border-mm-border hover:border-mm-border-medium hover:bg-mm-bg/50 transition-colors text-center"
+              className="flex flex-col items-center gap-2 p-4 rounded-lg border border-border hover:border-mm-border-medium hover:bg-mm-bg/50 transition-colors text-center"
             >
               <HelpCircle className="w-6 h-6 text-purple-500" />
               <span className="text-sm font-medium text-mm-text">Research questions</span>

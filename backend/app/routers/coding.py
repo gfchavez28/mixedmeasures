@@ -7,6 +7,7 @@ from ..models.user import User
 from ..models.segment import Segment
 from ..models.code import Code
 from ..models.code_application import CodeApplication
+from ..models.code_set import CodeSet
 from ..models.conversation import Conversation
 from ..models.document import Document
 from ..models.observation import Observation
@@ -31,8 +32,12 @@ from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
 from ..services.participant_scores import mark_participant_scores_stale
 from ..services.coding_layers import project_scoped_segments
+from ..services.segment_groups import group_target_ids
 from ..services.rating_queue import DEFAULT_QUEUE_LIMIT, build_rating_queue
+from ..services import code_sets as code_set_rules
 from ..services import magnitude
+from ..services.coding_layers import build_effective_code_map
+from ..schemas.code_set import CodeSetSelectionRequest, CodeSetSelectionResponse
 from .helpers import _get_project_or_404, _verify_segment_ownership, _verify_conversation_ownership
 
 router = APIRouter(prefix="/api", tags=["coding"])
@@ -260,6 +265,87 @@ async def apply_code(
         created_at=application.created_at,
         magnitude=application.magnitude,
     )
+
+
+# This segment plus its VISIBLE group siblings — the targets one act covers.
+#
+# MOVED to `services/segment_groups.py` on 2026-09-22 (queue row 49) and
+# re-exported here under its old private name, the #578 pattern: the bulk coding
+# import writes code-set selections and a SERVICE may not import a ROUTER, while
+# `code-sets.md` §6 requires the import and the workbench to hand
+# `apply_selection` the SAME sibling ids (it does not re-derive the group,
+# precisely so two derivations cannot drift). Behaviour is unchanged and no call
+# site moved.
+_group_target_ids = group_target_ids
+
+
+@router.post(
+    "/segments/{segment_id}/code-sets/{set_id}/selection",
+    response_model=CodeSetSelectionResponse,
+)
+def set_segment_code_set_selection(
+    segment_id: int,
+    set_id: int,
+    data: CodeSetSelectionRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Choose ONE member of a code set on a segment — the row-48 write path.
+
+    One transaction: delete this coder's other members of the set on this target
+    (and its group siblings), insert the chosen one, mark staleness ONCE.
+
+    ⚠️ **A plain `def`, not `async def` (#837).** It does only synchronous DB work
+    and awaits nothing, so `async def` would run that work on the event loop. A
+    direct-call test must therefore NOT wrap it in `asyncio.run`.
+    """
+    segment = _verify_segment_ownership(db, segment_id, user.id)
+    project_id = _get_segment_project_id(db, segment)
+    if not project_id:
+        raise HTTPException(status_code=400, detail="Segment is not in a project")
+
+    code_set = db.query(CodeSet).filter(
+        CodeSet.id == set_id, CodeSet.project_id == project_id,
+    ).first()
+    if not code_set:
+        raise HTTPException(status_code=404, detail="Code set not found")
+
+    code = None
+    if data.code_id is not None:
+        code = db.query(Code).filter(
+            Code.id == data.code_id, Code.project_id == project_id,
+        ).first()
+        if not code:
+            raise HTTPException(status_code=404, detail="Code not found")
+        # A member deactivated after it joined stays a member (the historical
+        # record needs it) but cannot be CHOSEN — offering a control the server
+        # then refuses is the #806 shape, so the panel filters on the same rule.
+        if not code.is_active:
+            raise HTTPException(status_code=400, detail="Code is inactive")
+
+    index = code_set_rules.build_code_set_index(
+        db, project_id, build_effective_code_map(db, project_id),
+    )
+    resolved = index.by_id(set_id)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Code set not found")
+
+    try:
+        chosen, removed = code_set_rules.apply_selection(
+            db, resolved, user_id=user.id, code_id=data.code_id,
+            segment_ids=_group_target_ids(db, segment),
+        )
+    except code_set_rules.SetSelectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    log_action(
+        db, action="code_set_selection", entity_type="code_application",
+        entity_id=segment_id, user_id=user.id, project_id=project_id,
+        details={"segment_id": segment_id, "set_id": set_id, "code_id": chosen},
+    )
+    _mark_segment_consensus_stale(db, project_id, segment)
+    db.commit()
+    return CodeSetSelectionResponse(set_id=set_id, code_id=chosen, removed=removed)
 
 
 @router.patch("/segments/{segment_id}/codes/{code_id}/magnitude", response_model=CodeApplicationResponse)

@@ -18,7 +18,14 @@ import { useCoders, resetCoderRoster } from '@/hooks/useCoders'
 import { coderColor, coderInitials } from '@/lib/coder-color'
 import { getContrastColor, cn } from '@/lib/utils'
 import { consumePendingMerge } from '@/lib/pending-merge'
-import { MMPROJECT_ACCEPT } from '@/lib/mm-formats'
+import { MMPROJECT_ACCEPT, MMPROJECT_FORMAT_LABEL, isSupportedProjectFile } from '@/lib/mm-formats'
+import { MAX_PROJECT_FILE_BYTES, checkImportFiles } from '@/lib/upload-limits'
+import { useStepFocus } from '@/hooks/useStepFocus'
+import { useElapsedSeconds } from '@/hooks/useElapsedSeconds'
+import {
+  ANNOUNCE_EVERY_SECONDS, elapsedNote, fillFraction, isOverEstimate, stillWorkingMessage,
+} from '@/lib/elapsed-progress'
+import { estimatedMergeSeconds } from '@/lib/merge-estimate'
 import { describeScaleCrossing, scaleRange } from '@/lib/magnitude'
 import {
   defaultDecisions, decisionToValue, parseDecisionValue, buildCoderMapping, resultingCoderCount,
@@ -69,6 +76,46 @@ function Dot({ color, ring }: { color: string | null; ring?: boolean }) {
       style={{ backgroundColor: color ?? '#9ca3af' }}
       aria-hidden="true"
     />
+  )
+}
+
+/**
+ * #1015 — the wait while the merge runs. It was a spinner and "Merging…" for as
+ * long as it took (49 s on a 40,000-row dataset when filed), with nothing a
+ * screen reader could hear. Now: what is happening, a fill paced by a size-based
+ * estimate that never claims to finish, the elapsed time beside that estimate,
+ * and a status line spoken once at the start and every 30 s after
+ * (`lib/elapsed-progress.ts`, shared with the dataset import).
+ */
+export function MergingStep({ fileSizeBytes }: { fileSizeBytes: number }) {
+  const estimate = estimatedMergeSeconds(fileSizeBytes)
+  const elapsed = useElapsedSeconds(true)
+  const over = isOverEstimate(elapsed, estimate)
+  const bucket = Math.floor(elapsed / ANNOUNCE_EVERY_SECONDS)
+  // The spoken line changes only when a 30-second bucket is crossed, so the live
+  // region fires on those moments and not on every tick.
+  const spoken = bucket === 0
+    ? `Merging. This usually takes about ${estimate} seconds for a file this size.`
+    : stillWorkingMessage(bucket * ANNOUNCE_EVERY_SECONDS, over)
+  return (
+    <div className="py-12 max-w-md mx-auto space-y-3 text-center">
+      <p className="flex items-center justify-center gap-2 text-sm font-medium text-mm-text">
+        <LoaderCircle className="w-4 h-4 animate-spin" aria-hidden="true" /> Merging…
+      </p>
+      <p className="text-sm text-mm-text-muted">
+        A safety copy of your project is saved first, then the file's codings are added.
+      </p>
+      <div aria-hidden="true" className="h-2 w-full overflow-hidden rounded-full bg-primary/20">
+        <div
+          className="h-full bg-primary transition-[width] duration-500 ease-out motion-reduce:transition-none"
+          style={{ width: `${(fillFraction(elapsed, estimate) * 100).toFixed(1)}%` }}
+        />
+      </div>
+      <p className="text-xs text-mm-text-muted" aria-hidden="true">
+        {elapsedNote(elapsed, estimate, over)}
+      </p>
+      <p role="status" className="sr-only">{spoken}</p>
+    </div>
   )
 }
 
@@ -166,6 +213,17 @@ export default function MergeProject() {
   // Upload fallback: validate a freshly-dropped file and require it to match THIS project.
   const handleUpload = useCallback(async (f: File) => {
     setUploadError(null)
+    // #1012: refuse a wrong-type or over-limit file here, by name. A wrong file
+    // used to be uploaded whole and reported as "could not be read", and one over
+    // the 500 MB limit got the same sentence for a different reason.
+    const { accepted, message } = checkImportFiles([f], {
+      isSupported: isSupportedProjectFile, formatLabel: MMPROJECT_FORMAT_LABEL,
+      noun: 'project', maxBytes: MAX_PROJECT_FILE_BYTES,
+    })
+    if (accepted.length === 0) {
+      setUploadError(message)
+      return
+    }
     try {
       const v = await projectPortabilityApi.validateImport(f)
       if (v.existing_project?.id !== targetId) {
@@ -274,12 +332,12 @@ export default function MergeProject() {
    * ⚠️ Transient steps are deliberately excluded: `loading` and `merging` are
    * spinners, and moving focus onto one only to move it again a second later
    * announces nothing useful. The step AFTER them moves it.
+   *
+   * #1011: now the shared `useStepFocus`, which also stops this taking focus on
+   * ARRIVAL — the page opens on `loading`, and the step it settles on first (the
+   * upload fallback, or the handed-off confirm step) is arrival, not a change.
    */
-  const headingRef = useRef<HTMLHeadingElement>(null)
-  useEffect(() => {
-    if (TRANSIENT_STEPS.includes(step)) return
-    headingRef.current?.focus()
-  }, [step])
+  const headingRef = useStepFocus(step, TRANSIENT_STEPS)
 
   const reviewPlan = useMemo(
     () => buildMergePlan(localCodes, codesPreview, codeDecisions),
@@ -304,7 +362,7 @@ export default function MergeProject() {
             <div key={s} className="flex items-center" aria-current={stepIndex === i ? 'step' : undefined}>
               <div className={cn(
                 'w-7 h-7 rounded-full flex items-center justify-center text-sm font-medium',
-                stepIndex === i ? 'bg-primary text-white'
+                stepIndex === i ? 'bg-primary text-primary-foreground'
                   : stepIndex > i ? 'bg-primary/15 text-primary'
                   : 'bg-mm-border-subtle text-mm-text-secondary',
               )}>
@@ -355,13 +413,16 @@ export default function MergeProject() {
                 <strong> {title}</strong> — merge lines codings up by shared identity.
               </p>
               {uploadError && (
-                <div className="flex items-start gap-2 max-w-md mx-auto p-3 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 text-sm text-left">
+                // #1012: an ALERT, so a refused file is announced — it was a plain div.
+                <div role="alert" className="flex items-start gap-2 max-w-md mx-auto p-3 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 text-sm text-left">
                   <CircleAlert className="w-4 h-4 flex-none mt-0.5" /><span>{uploadError}</span>
                 </div>
               )}
               <input
                 ref={uploadRef} type="file" accept={MMPROJECT_ACCEPT} className="hidden"
-                onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f) }}
+                // #1012: reset, so choosing the SAME file again after a refusal
+                // fires onChange — without it the second attempt did nothing.
+                onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleUpload(f) }}
               />
               <div className="flex items-center justify-center gap-2">
                 <Button variant="outline" onClick={() => navigate(`/projects/${targetId}/overview`)}>Cancel</Button>
@@ -414,11 +475,7 @@ export default function MergeProject() {
           />
         )}
 
-        {step === 'merging' && (
-          <div className="flex items-center justify-center gap-2 py-16 text-mm-text-muted">
-            <LoaderCircle className="w-5 h-5 animate-spin" /> Merging…
-          </div>
-        )}
+        {step === 'merging' && <MergingStep fileSizeBytes={file?.size ?? 0} />}
 
         {step === 'report' && report && (
           <ReportStep
@@ -705,7 +762,7 @@ function ReconcileStep(p: ReconcileStepProps) {
                           onClick={() => setAction(pr, a)}
                           className={cn(
                             'px-3 py-1.5 text-xs font-medium border-r border-mm-surface-border last:border-r-0',
-                            action === a ? 'bg-primary text-white' : 'text-mm-text hover:bg-mm-surface-hover',
+                            action === a ? 'bg-primary text-primary-foreground' : 'text-mm-text hover:bg-mm-surface-hover',
                           )}
                         >
                           {a === 'new' ? 'Add as new' : a === 'collapse' ? 'Collapse' : 'Link'}

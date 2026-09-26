@@ -33,6 +33,9 @@ import {
   CUE_FILE_FORMAT_LABEL,
   isSupportedCueFile,
 } from '@/lib/observation-import-formats'
+import { checkImportFiles } from '@/lib/upload-limits'
+import { useStepFocus } from '@/hooks/useStepFocus'
+import UploadLimitNote from '@/components/UploadLimitNote'
 
 type Step = 'upload' | 'setup' | 'confirm' | 'results'
 
@@ -108,7 +111,6 @@ export default function ObservationImport() {
   const dragCounterRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cueInputRef = useRef<HTMLInputElement>(null)
-  const headingRef = useRef<HTMLHeadingElement>(null)
 
   /**
    * #543: an attach legitimately runs minutes-to-hours, and react-router keeps
@@ -155,8 +157,10 @@ export default function ObservationImport() {
 
   // Focus the step's heading on change. Otherwise the focused button unmounts,
   // focus falls to <body>, and the next Tab restarts from the top of the document
-  // — the same failure class as a recycled virtualized row (#484).
-  useEffect(() => { headingRef.current?.focus() }, [step])
+  // — the same failure class as a recycled virtualized row (#484). #1011: through
+  // the shared hook, which also stops this taking focus when the page OPENS
+  // (it ran on mount, skipping the Skip-to-main-content link).
+  const headingRef = useStepFocus(step)
 
   const stepIndex = STEPS.findIndex(s => s.key === step)
 
@@ -165,6 +169,20 @@ export default function ObservationImport() {
   // change would re-seed the file (the MergeProject lesson, one door over).
   const stagedRef = useRef<{ id: number; name: string } | null>(null)
   useEffect(() => { stagedRef.current = staged }, [staged])
+
+  // #1007: a cue file goes through the per-file import limit (`read_upload_with_limit`
+  // on the cut endpoint), unlike the recording, so it is refused here at selection.
+  // #1012: and through the one type-and-size check, whichever way it arrives.
+  const acceptCueFile = (picked: File) => {
+    const { accepted, message } = checkImportFiles([picked], {
+      isSupported: isSupportedCueFile, formatLabel: CUE_FILE_FORMAT_LABEL, noun: 'cue',
+    })
+    if (accepted.length === 0) {
+      toast.error(message)
+      return
+    }
+    setCueFile(picked)
+  }
 
   const chooseFile = useCallback((picked: File) => {
     const check = validateMediaFile(picked)
@@ -371,7 +389,7 @@ export default function ObservationImport() {
             <div className={cn(
               'w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium',
               stepIndex === i
-                ? 'bg-mm-teal text-white'
+                ? 'bg-mm-teal-fill text-mm-on-fill'
                 : stepIndex > i
                   ? 'bg-mm-teal/15 text-mm-teal-text'
                   : 'bg-mm-bg text-mm-text-faint',
@@ -414,7 +432,8 @@ export default function ObservationImport() {
               </p>
               {/* The copy renders the module's label — an empty state promising one
                 * format while the filter accepts six just relocates the lie (#552). */}
-              <p className="text-xs text-mm-text-faint mb-4">{OBSERVATION_MEDIA_FORMAT_LABEL}</p>
+              <p className="text-xs text-mm-text-faint mb-1">{OBSERVATION_MEDIA_FORMAT_LABEL}</p>
+              <UploadLimitNote className="mb-4" />
               <Button onClick={() => fileInputRef.current?.click()}>Select recording</Button>
               <input
                 ref={fileInputRef}
@@ -523,7 +542,7 @@ export default function ObservationImport() {
                       'flex items-start gap-3 p-3 rounded-md border cursor-pointer transition-colors',
                       mode === m.key
                         ? 'border-mm-teal bg-mm-teal/5'
-                        : 'border-mm-border bg-mm-surface hover:border-mm-border-strong',
+                        : 'border-border bg-mm-surface hover:border-mm-border-medium',
                     )}
                   >
                     <input
@@ -579,9 +598,8 @@ export default function ObservationImport() {
                   onDragOver={e => e.preventDefault()}
                   onDrop={e => {
                     e.preventDefault()
-                    const picked = Array.from(e.dataTransfer.files).find(f => isSupportedCueFile(f.name))
-                    if (picked) setCueFile(picked)
-                    else toast.error(`A cue file must be ${CUE_FILE_FORMAT_LABEL}.`)
+                    const picked = e.dataTransfer.files[0]
+                    if (picked) acceptCueFile(picked)
                   }}
                 >
                   {cueFile ? (
@@ -598,7 +616,8 @@ export default function ObservationImport() {
                   ) : (
                     <>
                       <FileInput className="w-8 h-8 mx-auto text-mm-text-faint mb-2" aria-hidden />
-                      <p className="text-xs text-mm-text-faint mb-3">{CUE_FILE_FORMAT_LABEL}</p>
+                      <p className="text-xs text-mm-text-faint mb-1">{CUE_FILE_FORMAT_LABEL}</p>
+                      <UploadLimitNote noun="cue files" className="mb-3" />
                       <Button variant="outline" onClick={() => cueInputRef.current?.click()}>
                         Select cue file
                       </Button>
@@ -611,7 +630,7 @@ export default function ObservationImport() {
                     className="hidden"
                     onChange={e => {
                       const picked = e.target.files?.[0]
-                      if (picked) setCueFile(picked)
+                      if (picked) acceptCueFile(picked)
                       e.target.value = ''
                     }}
                   />
@@ -680,7 +699,7 @@ export default function ObservationImport() {
 
             {preview.segments.length > 0 && (
               <div>
-                <ul className="divide-y divide-mm-border rounded-md border border-mm-border overflow-hidden">
+                <ul className="divide-y divide-border rounded-md border border-border overflow-hidden">
                   {preview.segments.map(c => (
                     <li key={c.sequence_order} className="flex items-baseline gap-3 px-3 py-1.5 text-sm">
                       <span className="font-mono text-xs text-mm-text-muted shrink-0 tabular-nums">
@@ -768,7 +787,7 @@ export default function ObservationImport() {
               * The fix is a statement, not a question, and a CTA that names the
               * act rather than a state: "Start coding". The pre-distribution
               * warning stays — it is the reason D20 puts this here at all. */}
-            <div className="rounded-lg border border-mm-border bg-mm-bg p-3">
+            <div className="rounded-lg border border-border bg-mm-bg p-3">
               <h3 className="text-sm font-medium text-mm-text">
                 One decision waits for you in the workbench
               </h3>

@@ -94,8 +94,18 @@ describe('#908 — no site carries the ineffective shape', () => {
       // ⚠️ `sourceFiles` yields ABSOLUTE paths — joining them onto SRC_DIR
       // again produced a nested path and an ENOENT that read like a missing
       // file rather than a wrong scan.
-      const src = stripComments(readFileSync(file, 'utf8'), file)
-      return INEFFECTIVE.test(src)
+      const raw = readFileSync(file, 'utf8')
+      // ⚠️ Cheap pre-filter, and it is SOUND rather than an approximation:
+      // `stripComments` only ever REMOVES text, so a file whose raw source does
+      // not contain the opening `{' '}{` cannot contain it after stripping
+      // either. Same offenders, without comment-stripping ~300 files.
+      //
+      // 🔴 It is here because this test TIMED OUT under load — 2.3s of its 5s
+      // default with the machine idle, and over it when a second suite was
+      // running, which reads as a defect in whatever was committed last. The
+      // cost grows with the file tree, so it would have kept getting worse.
+      if (!raw.includes("{' '}{")) return false
+      return INEFFECTIVE.test(stripComments(raw, file))
     })
     expect(offenders).toEqual([])
   })

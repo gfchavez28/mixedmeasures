@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { coderColor, coderInitials } from '@/lib/coder-color'
 import { getContrastColor } from '@/lib/utils'
 import type { Coder } from '@/lib/api'
+import { isMachineCoder } from '@/lib/coding-layers'
 
 interface CoderFilterPopoverProps {
   coders: Coder[]
@@ -116,7 +117,12 @@ export default function CoderFilterPopover({
                   aria-label={
                     isSelf
                       ? `${c.username} (you — always shown)`
-                      : `Show codes by ${c.username}${isExtra ? ' (archived)' : ''}${hereSr}`
+                      // #989 — a MACHINE coder says so in its NAME, not only in a
+                      // visual suffix: a reader meets this list to decide whose
+                      // codings to look at, and "is this a person?" is the first
+                      // thing that decision turns on. Same reasoning as the
+                      // "(archived)" suffix beside it.
+                      : `Show codes by ${c.username}${isMachineCoder(c) ? ' (machine coder)' : ''}${isExtra ? ' (archived)' : ''}${hereSr}`
                   }
                 />
                 <span
@@ -129,6 +135,7 @@ export default function CoderFilterPopover({
                 <Label htmlFor={`coder-filter-${c.id}`} className="text-sm cursor-pointer flex-1 truncate">
                   {c.username}
                   {isSelf && <span className="text-mm-text-muted"> (you)</span>}
+                  {isMachineCoder(c) && <span className="text-mm-text-muted"> (machine)</span>}
                   {isExtra && <span className="text-mm-text-faint"> (archived)</span>}
                 </Label>
                 {perSource && activeHere && (

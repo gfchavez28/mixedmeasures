@@ -12,6 +12,7 @@ import type {
   CodeAnalysisFilterParams,
   DemographicComparisonRequest,
 } from '@/lib/api'
+import type { LayerScope } from '@/lib/coding-layers'
 import {
   orientationFromToken,
   type QualChartType,
@@ -183,7 +184,7 @@ export interface QualComputeParams {
    * layer and refuses under consensus (DEC-6c-7) — and a dispatch input should
    * not be reachable only by digging into a request body.
    */
-  layerScope: 'human' | 'consensus'
+  layerScope: LayerScope
 }
 
 function idList(value: unknown): number[] {
@@ -394,7 +395,7 @@ export function buildQualSaturationParams(params: QualComputeParams): {
   document_ids?: string
   observation_ids?: string
   coder_ids?: string
-  layer_scope?: 'human' | 'consensus'
+  layer_scope?: LayerScope
 } {
   const req = params.request
   const csv = (ids: number[] | null | undefined) => (ids && ids.length > 0 ? ids.join(',') : undefined)

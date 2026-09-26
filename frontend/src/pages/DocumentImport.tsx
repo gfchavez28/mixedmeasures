@@ -11,7 +11,11 @@ import { Progress } from '@/components/ui/progress'
 import { cn } from '@/lib/utils'
 import { formatBytes } from '@/lib/format'
 import { consumePendingImportFiles } from '@/lib/pending-import-files'
-import { DOCUMENT_ACCEPT, isSupportedDocumentFile } from '@/lib/document-import-formats'
+import { DOCUMENT_ACCEPT, DOCUMENT_FORMAT_LABEL, isSupportedDocumentFile } from '@/lib/document-import-formats'
+import { checkImportFiles } from '@/lib/upload-limits'
+import { useStepFocus } from '@/hooks/useStepFocus'
+import UploadLimitNote from '@/components/UploadLimitNote'
+import { toast } from 'sonner'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
 
 type Step = 'upload' | 'segmentation' | 'importing' | 'results'
@@ -30,6 +34,20 @@ const FORMAT_LABELS: Record<string, string> = {
   docx: 'DOCX',
   pdf: 'PDF',
   txt: 'TXT',
+}
+
+/**
+ * #1007/#1012: keep only the files this page can import and SAY why the rest were
+ * refused — a wrong-type file used to be filtered out in silence. This page has
+ * no inline error slot, and both ways in (a hand-off from the Documents list and
+ * a pick or drop here) need the same answer, so the refusal is a toast.
+ */
+function acceptDocuments(files: File[]): File[] {
+  const { accepted, message } = checkImportFiles(files, {
+    isSupported: isSupportedDocumentFile, formatLabel: DOCUMENT_FORMAT_LABEL, noun: 'document',
+  })
+  if (message) toast.error(message)
+  return accepted
 }
 
 function getFormat(filename: string): string {
@@ -71,12 +89,13 @@ export default function DocumentImport() {
   ]
 
   const stepIndex = steps.findIndex(s => s.key === step)
+  const stepHeadingRef = useStepFocus(step)
 
   // Consume pending files on mount
   useEffect(() => {
     const pending = consumePendingImportFiles('document')
     if (pending && pending.length > 0) {
-      const valid = pending.filter(f => isSupportedDocumentFile(f.name)).slice(0, MAX_FILES)
+      const valid = acceptDocuments(pending).slice(0, MAX_FILES)
       if (valid.length > 0) {
         setFiles(valid)
         setDocumentNames(valid.map(f => f.name.replace(/\.[^/.]+$/, '')))
@@ -107,7 +126,7 @@ export default function DocumentImport() {
   }, [step, segmentationMode, files, projectId])
 
   const addFiles = useCallback((newFiles: File[]) => {
-    const valid = newFiles.filter(f => isSupportedDocumentFile(f.name))
+    const valid = acceptDocuments(newFiles)
     setFiles(prev => {
       const combined = [...prev, ...valid].slice(0, MAX_FILES)
       setDocumentNames(names => {
@@ -216,12 +235,20 @@ export default function DocumentImport() {
         ))}
       </nav>
 
+      {/* #1011: where focus lands when the step changes. A single-file import
+          passes through `importing`, which is not on the rail. */}
+      <h2 ref={stepHeadingRef} tabIndex={-1} className="sr-only">
+        {stepIndex >= 0
+          ? `Step ${stepIndex + 1} of ${steps.length}: ${steps[stepIndex].label}`
+          : step === 'importing' ? 'Importing' : ''}
+      </h2>
+
       {/* Step 1: Upload */}
       {step === 'upload' && (
         <Card>
           <CardHeader>
             <CardTitle>Upload Files</CardTitle>
-            <CardDescription>Select DOCX, PDF, or TXT files to import (max {MAX_FILES}).</CardDescription>
+            <CardDescription>Select {DOCUMENT_FORMAT_LABEL} files to import (max {MAX_FILES}).</CardDescription>
           </CardHeader>
           <CardContent>
             <div
@@ -236,6 +263,7 @@ export default function DocumentImport() {
               <p className="text-sm text-mm-text-muted mb-4">
                 Drag and drop files here, or click to browse
               </p>
+              <UploadLimitNote noun="documents" className="-mt-2 mb-4" />
               <Button
                 onClick={() => fileInputRef.current?.click()}
                 className="bg-purple-600 hover:bg-purple-700 text-white"
@@ -355,7 +383,7 @@ export default function DocumentImport() {
                       ))}
                       <div className="space-y-1 max-h-64 overflow-y-auto">
                         {preview.segments.map((seg) => (
-                          <div key={seg.sequence_order} className="flex gap-2 text-xs py-1.5 border-b border-mm-border-light last:border-0">
+                          <div key={seg.sequence_order} className="flex gap-2 text-xs py-1.5 border-b border-mm-border-subtle last:border-0">
                             <span className="text-mm-text-faint font-mono shrink-0 w-6 text-right">
                               {seg.heading_level ? `H${seg.heading_level}` : `${seg.sequence_order + 1}`}
                             </span>

@@ -21,6 +21,7 @@ export type UndefinedReason =
   | 'no_variance'
   | 'degenerate'
   | 'not_numeric'
+  | 'scores_not_computed'
 
 /** What a missing number looks like. One character, everywhere. */
 export const NO_VALUE = '—'
@@ -47,6 +48,12 @@ const REASON_TEXT: Record<UndefinedReason, string> = {
   // legitimate metric input (#371), so a researcher reaches this from an
   // ordinary selection and needs to be told which variable to change.
   not_numeric: 'This variable holds categories, not numbers, so it cannot be compared across groups.',
+  // #958 §6: a variable group's per-record scores are DERIVED and are not carried
+  // in a project file, so a freshly imported project reaches this from an ordinary
+  // selection. It used to report as `insufficient_n`, which blames the researcher's
+  // data and offers a remedy that cannot work — #830(b)'s shape one statistic over.
+  // The sentence names the act, because nothing on this surface can perform it.
+  scores_not_computed: 'This variable group’s scale score has not been computed yet, so there is nothing to correlate. Recompute it from the Analysis view.',
 }
 
 /**

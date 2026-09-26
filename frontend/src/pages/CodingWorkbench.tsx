@@ -36,6 +36,7 @@ import CoderCountBadge from '@/components/CoderCountBadge'
 import { useBlindMode } from '@/hooks/useBlindMode'
 import TranscriptPanel, { type PlaybackHandle } from '@/components/TranscriptPanel'
 import MagnitudeStrip from '@/components/MagnitudeStrip'
+import { CodeSetStrip } from '@/components/CodeSetStrip'
 import { ratableCodes } from '@/lib/rating-targets'
 import { useCollapsibleColumn } from '@/hooks/useCollapsibleColumn'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
@@ -51,7 +52,7 @@ import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
 import { useAuth } from '@/lib/auth-context'
 import CodePanel, { type CodePanelHandle } from '@/components/CodePanel'
 import { useListLoad } from '@/hooks/useListLoad'
-import CollapsiblePanel from '@/components/CollapsiblePanel'
+import CollapsiblePanel, { PANEL_EXPANDED, PANEL_RAIL_SCROLL } from '@/components/CollapsiblePanel'
 import NotesPanel, { type NotesPanelHandle } from '@/components/NotesPanel'
 import MemoPanel, { type MemoPanelHandle } from '@/components/MemoPanel'
 import { useHistory } from '@/hooks/useHistory'
@@ -77,7 +78,7 @@ export default function CodingWorkbench() {
   const cid = parseInt(conversationId || '0')
 
   // Coder roster lens (Track J · J1) — attribution badges + visibility filter only in multi-coder mode.
-  const { coders, coderMap, multiCoder } = useCoders()
+  const { coders, coderMap, multiCoder, multiHumanCoder } = useCoders()
   const { user } = useAuth()
   const [hiddenCoders, setHiddenCoders] = useState<Set<number>>(new Set())
   // #451: archived coders' chips are hidden by default; "view all coders" reveals them.
@@ -1952,7 +1953,7 @@ export default function CodingWorkbench() {
           ) : null}
         </div>
 
-        {multiCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="workbench" />}
+        {multiHumanCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="workbench" />}
         <CoderCountBadge projectId={pid} conversationId={cid} enabled={multiCoder} />
 
         {/* Codebook */}
@@ -1990,8 +1991,28 @@ export default function CodingWorkbench() {
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Panel - Transcript */}
-        <div className="flex-1 flex flex-col border-r bg-mm-surface">
+        {/* Left Panel - Transcript.
+          * 🔴 `min-w-0` is load-bearing (#998): without it this column keeps its
+          * min-content width — MEASURED 470px at a 640px viewport — and the
+          * 320px panel rail beside it is pushed to x=470, i.e. 150px past the
+          * right edge (226px in the state the a11y sweep filed), inside a parent
+          * that is `overflow-hidden`, so there is NO scroll to reach it and two
+          * of the three code-set values are simply off-screen. #937's rule:
+          * the flexible child was present and doing its job, and the question is
+          * what is INSIDE it. The document twin has carried `min-w-0` all along,
+          * which is why that page measured on-screen and this one did not.
+          *
+          * ⚠️ `overflow-x-hidden` is the OTHER half of #937's pairing — "grant
+          * the collapse AND clip the remainder". Granting it alone leaves the
+          * transcript HEADER's fixed gutters (`w-[160px]` Codes + `w-[40px]`
+          * Notes) extending to x=443 over a 320px column; the rows themselves
+          * are already clipped by their own Virtuoso scroller, so the header is
+          * the only spill, and the ONLY thing keeping it off the rail is that
+          * the rail is an opaque later sibling. Paint order is not a guarantee.
+          * MEASURED after: no vertical scrollbar appears (`scrollHeight` 134 =
+          * `clientHeight`) and the rows' own horizontal scroller is unchanged
+          * at 304/410. */}
+        <div className="flex-1 min-w-0 overflow-x-hidden flex flex-col border-r bg-mm-surface">
           <TranscriptPanel
             segments={segments}
             allSegments={allSegments}
@@ -2072,7 +2093,7 @@ export default function CodingWorkbench() {
           {ratingTarget && ratingTarget.code.magnitude_scale && (
             // py-1, not py-2: the vertical budget at 640×360 is 85px for the
             // whole control (measured on the document twin; same chrome here).
-            <div className="border-t border-mm-border bg-mm-surface px-3 py-1 shrink-0">
+            <div className="border-t border-border bg-mm-surface px-3 py-1 shrink-0">
               <MagnitudeStrip
                 // #870 (c): keyed on the TARGET, so applying a second scaled
                 // code while the strip is open remounts it — the cursor and the
@@ -2135,13 +2156,13 @@ export default function CodingWorkbench() {
             ))}
           </div>
         ) : (
-        <div className="relative flex flex-col bg-mm-surface overflow-hidden w-80 shrink-0">
+        <div className={`relative flex flex-col bg-mm-surface ${PANEL_RAIL_SCROLL} w-80 shrink-0`}>
           {/* Codes Panel */}
           <CollapsiblePanel
             title="Codes"
             isCollapsed={panelStates.codes.collapsed}
             onToggle={() => togglePanel('codes')}
-            className={panelStates.codes.collapsed ? '' : 'flex-[2] min-h-0'}
+            className={panelStates.codes.collapsed ? '' : `flex-[2] ${PANEL_EXPANDED}`}
             headerExtra={
               <span className="flex items-center gap-1.5">
                 {/* #963 — nothing to jump to until the transcript answers, and
@@ -2184,6 +2205,32 @@ export default function CodingWorkbench() {
                   setCreateMemoForCode({ id: codeId, name: codeName })
                 }}
                 disabled={selectedSegments.length === 0}
+                codeSets={
+                  /* Row 48 — SINGLE segment only, the rating strip's rule for
+                     the rating strip's reason: a set answers "which one value
+                     does THIS passage take?", and one choice standing for
+                     several selected passages is a judgement the researcher was
+                     never offered a way to make. */
+                  <CodeSetStrip
+                    projectId={pid}
+                    target={
+                      selectedSegments.length === 1
+                        ? { kind: 'segment', segmentId: selectedSegments[0] }
+                        : null
+                    }
+                    appliedCodeDetails={
+                      selectedSegments.length === 1
+                        ? segmentMap.get(selectedSegments[0])?.applied_code_details
+                        : undefined
+                    }
+                    activeCoderId={user?.id ?? null}
+                    history={history}
+                    onSettled={(saved) => {
+                      if (saved) showSaved()
+                      queryClient.invalidateQueries({ queryKey: ['segments', cid] })
+                    }}
+                  />
+                }
                 isFocused={focusedPanel === 'codes'}
                 onFocusChange={(focused) => setFocusedPanel(focused ? 'codes' : 'transcript')}
                 onNavigateToTranscript={() => setFocusedPanel('transcript')}
@@ -2201,7 +2248,7 @@ export default function CodingWorkbench() {
             title="Notes"
             isCollapsed={panelStates.notes.collapsed}
             onToggle={() => togglePanel('notes')}
-            className={panelStates.notes.collapsed ? '' : 'flex-1 min-h-0'}
+            className={panelStates.notes.collapsed ? '' : `flex-1 ${PANEL_EXPANDED}`}
           >
             <PageErrorBoundary>
               <NotesPanel
@@ -2227,7 +2274,7 @@ export default function CodingWorkbench() {
             title="Memos"
             isCollapsed={panelStates.memos.collapsed}
             onToggle={() => togglePanel('memos')}
-            className={panelStates.memos.collapsed ? '' : 'flex-1 min-h-0'}
+            className={panelStates.memos.collapsed ? '' : `flex-1 ${PANEL_EXPANDED}`}
           >
             <PageErrorBoundary>
               <MemoPanel

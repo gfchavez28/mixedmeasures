@@ -478,7 +478,7 @@ class TestPreviewEndpointSeam:
         upload = StarletteUploadFile(filename="survey.sav", file=io.BytesIO(sav_bytes))
         resp = asyncio.run(
             preview_dataset(
-                project_id=981, file=upload, encoding="utf-8", sheet_name=None, user=user, db=db,
+                project_id=981, file=upload, encoding="utf-8", sheet_name=None, column_indices=None, user=user, db=db,
             )
         )
         assert resp.sheet_names is None  # .sav has no worksheets
@@ -506,7 +506,7 @@ class TestPreviewEndpointSeam:
         with pytest.raises(HTTPException) as exc:
             asyncio.run(
                 preview_dataset(
-                    project_id=982, file=bad, encoding="utf-8", sheet_name=None, user=user, db=db,
+                    project_id=982, file=bad, encoding="utf-8", sheet_name=None, column_indices=None, user=user, db=db,
                 )
             )
         assert exc.value.status_code == 400

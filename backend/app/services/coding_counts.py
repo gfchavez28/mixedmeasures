@@ -47,7 +47,7 @@ from ..models.observation import Observation
 from ..models.segment import Segment
 from ..models.speaker import Speaker
 from ..routers.helpers import visible_segment_filter
-from .coding_layers import layer_origin_filter
+from .coding_layers import layer_scope_filter
 from .observation_segmentation import covered_seconds, union_intervals
 
 
@@ -98,7 +98,7 @@ def coded_segment_counts(
             parent_col.in_(ids),
             *visible_segment_filter(),
             Code.is_universal == False,  # noqa: E712
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
         )
     )
     query = _apply_participant_join(query, participant_only=participant_only)
@@ -147,7 +147,7 @@ def coded_segment_count_for_project(
             Conversation.project_id == project_id,
             *visible_segment_filter(),
             Code.is_universal == False,  # noqa: E712
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
         )
         query = _apply_participant_join(query, participant_only=True)
     elif source == "document":
@@ -155,14 +155,14 @@ def coded_segment_count_for_project(
             Document.project_id == project_id,
             *visible_segment_filter(),
             Code.is_universal == False,  # noqa: E712
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
         )
     elif source == "observation":
         query = query.join(Observation, Segment.observation_id == Observation.id).filter(
             Observation.project_id == project_id,
             *visible_segment_filter(),
             Code.is_universal == False,  # noqa: E712
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
         )
     else:
         raise ValueError(
@@ -241,7 +241,7 @@ def timeline_coverage_by_observation(
             Segment.observation_id.in_(ids),
             *visible_segment_filter(),
             Code.is_universal == False,  # noqa: E712
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
         )
         .distinct()
         .all()

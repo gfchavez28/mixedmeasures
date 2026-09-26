@@ -37,7 +37,11 @@ import pathlib
 
 import pytest
 
-from app.routers.dataset import append_import, import_dataset
+from app.routers.backup import backup_create
+from app.routers.participants import withdraw_participant
+from app.routers.dataset import (
+    append_import, create_participants_dataset, import_dataset, refresh_participants_dataset,
+)
 from app.routers.export_excel import export_datasets_excel, export_study_excel
 from app.routers.export_r import export_r_data
 from app.routers.metrics import get_row_matrix, get_row_matrix_csv
@@ -93,6 +97,18 @@ MUST_BE_SYNC = [
     (export_cross_analysis, "27.2s to completion on 30 waves [0.66s]"),
     (cross_tabulation, "same gather as code_density plus the participant-linked arm; BES has no "
                        "categorical column to cross it with, so its own wall time is unmeasured"),
+    # #958's last step, 2026-09-24 — the participant table runs the rating rollup over
+    # every coded target, on BES 843,408 of them. Measured over HTTP against a scratch
+    # copy, /health polled every 200 ms: async, worst concurrent /health = the whole
+    # call; as def, [in brackets]. Before #1021 each call took HOURS on the loop.
+    (refresh_participants_dataset, "19.3s frozen for a 19.4s refresh [0.14s]"),
+    (create_participants_dataset, "19.9s frozen — it refreshes on EVERY call, idempotent [0.14s]"),
+    # #1025, 2026-09-25 — the two request doors that take a whole-install backup, and
+    # since #1025 may first wait up to 20 s for the database. Measured over HTTP on a
+    # scratch copy of the scale corpus (a 546 MB database), /health every 200 ms:
+    (backup_create, "27.8s frozen for a 30.3s Download Backup (179.7 MB archive) [0.05s]"),
+    (withdraw_participant, "30.9s frozen for a 30.8s withdrawal, nearly all of it the "
+                           "backup [0.04s]"),
 ]
 
 # Endpoints that genuinely await I/O and therefore CANNOT take that treatment.

@@ -26,6 +26,7 @@ import { LoadState, LoadingNotice } from '@/components/LoadStatus'
 import { ratableCodes } from '@/lib/rating-targets'
 import MagnitudeStrip from '@/components/MagnitudeStrip'
 import { useHistory } from '@/hooks/useHistory'
+import { CodeSetStrip } from '@/components/CodeSetStrip'
 import TextCodingColumnPicker from '@/components/TextColumnPicker'
 import ByTextTable, { type ByTextTableHandle } from '@/components/ByTextTable'
 import TextPagingStatus from '@/components/TextPagingStatus'
@@ -44,7 +45,7 @@ import CoderCountBadge from '@/components/CoderCountBadge'
 import { useBlindMode } from '@/hooks/useBlindMode'
 import TextCodePanel from '@/components/TextCodePanel'
 import TextNotesPanel from '@/components/TextNotesPanel'
-import CollapsiblePanel from '@/components/CollapsiblePanel'
+import CollapsiblePanel, { PANEL_EXPANDED, PANEL_RAIL_SCROLL } from '@/components/CollapsiblePanel'
 import MemoPanel from '@/components/MemoPanel'
 import CrossAnalysisPanel from '@/components/CrossAnalysisPanel'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
@@ -79,7 +80,7 @@ export default function TextCodingView() {
   const [datasetFilterIds, setDatasetFilterIds] = useState<number[] | null>(null)
   const [randomSeed, setRandomSeed] = useState<number | null>(null)
   // Coder roster lens (Track J · J1) — visibility filter, multi-coder only.
-  const { coders, multiCoder } = useCoders()
+  const { coders, multiCoder, multiHumanCoder } = useCoders()
   const { user } = useAuth()
   const [hiddenCoders, setHiddenCoders] = useState<Set<number>>(new Set())
   // #451: archived coders' chips hidden by default; "view all coders" reveals them.
@@ -1339,7 +1340,7 @@ export default function TextCodingView() {
             <span className="sr-only">: coding progress could not be counted for the selected columns. Your coding still saves.</span>
           </span>
         ) : null}
-        {multiCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="text_workbench" />}
+        {multiHumanCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="text_workbench" />}
         <CoderCountBadge projectId={projectId} textColumnIds={focalColumnIds} enabled={multiCoder} />
         </div>
 
@@ -1730,7 +1731,7 @@ export default function TextCodingView() {
               {ratingTarget && ratingTarget.code.magnitude_scale && (
                 // py-1, not py-2: the vertical budget at 640×360 is measured on
                 // the document workbench at 85px for the whole control.
-                <div className="border-t border-mm-border bg-mm-surface px-3 py-1 shrink-0">
+                <div className="border-t border-border bg-mm-surface px-3 py-1 shrink-0">
                   <MagnitudeStrip
                     key={`${ratingTarget.valueId}-${ratingTarget.code.id}`}
                     codeName={ratingTarget.code.name}
@@ -1745,7 +1746,7 @@ export default function TextCodingView() {
 
             {/* Right panels: CodePanel + NotesPanel + MemosPanel — fixed width
               (#565: the resizer never worked; removed) */}
-            <div className="relative border-l bg-mm-surface flex flex-col shrink-0 overflow-hidden w-72">
+            <div className={`relative border-l bg-mm-surface flex flex-col shrink-0 ${PANEL_RAIL_SCROLL} w-72`}>
               <CollapsiblePanel
                 title="Codes"
                 isCollapsed={panelStates.codes.collapsed}
@@ -1758,7 +1759,7 @@ export default function TextCodingView() {
                     Jump to uncoded ⏭
                   </button>
                 }
-                className={panelStates.codes.collapsed ? '' : 'flex-[2] min-h-0'}
+                className={panelStates.codes.collapsed ? '' : `flex-[2] ${PANEL_EXPANDED}`}
               >
                 <PageErrorBoundary>
                   <TextCodePanel
@@ -1770,6 +1771,33 @@ export default function TextCodingView() {
                     onToggleCode={handleCodeToggle}
                     onCreateCode={(name) => createCodeMutation.mutate(name)}
                     selectedCount={selectedValueIds.length}
+                    codeSets={
+                      /* Row 48 — the fourth coding surface, and it keys on the
+                         CELL rather than a segment; everything else about the
+                         act is identical. SINGLE response only, for the reason
+                         its three siblings carry. */
+                      <CodeSetStrip
+                        projectId={projectId}
+                        target={
+                          selectedValueIds.length === 1
+                            ? { kind: 'text', datasetValueId: selectedValueIds[0] }
+                            : null
+                        }
+                        appliedCodeDetails={
+                          selectedValueIds.length === 1
+                            ? comments.find(
+                                cm => cm.dataset_value_id === selectedValueIds[0],
+                              )?.applied_code_details
+                            : undefined
+                        }
+                        activeCoderId={self}
+                        history={history}
+                        onSettled={() => {
+                          queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
+                          queryClient.invalidateQueries({ queryKey: ['text-progress', projectId] })
+                        }}
+                      />
+                    }
                     isFocused={focusedPanel === 'codes'}
                     onFocusChange={(f) => f && setFocusedPanel('codes')}
                   />
@@ -1779,7 +1807,7 @@ export default function TextCodingView() {
                 title="Notes"
                 isCollapsed={panelStates.notes.collapsed}
                 onToggle={() => setPanelStates(p => ({ ...p, notes: { collapsed: !p.notes.collapsed } }))}
-                className={panelStates.notes.collapsed ? '' : 'flex-1 min-h-0'}
+                className={panelStates.notes.collapsed ? '' : `flex-1 ${PANEL_EXPANDED}`}
               >
                 <PageErrorBoundary>
                   <TextNotesPanel
@@ -1794,7 +1822,7 @@ export default function TextCodingView() {
                 title="Memos"
                 isCollapsed={panelStates.memos.collapsed}
                 onToggle={() => setPanelStates(p => ({ ...p, memos: { collapsed: !p.memos.collapsed } }))}
-                className={panelStates.memos.collapsed ? '' : 'flex-1 min-h-0'}
+                className={panelStates.memos.collapsed ? '' : `flex-1 ${PANEL_EXPANDED}`}
               >
                 <PageErrorBoundary>
                   <MemoPanel

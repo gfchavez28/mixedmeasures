@@ -48,9 +48,11 @@ if config.config_file_name is not None:
 # Target metadata for 'autogenerate' support
 target_metadata = Base.metadata
 
-# Get database URL from our settings
+# Get database URL from our settings — unless the caller named another file.
+# `database.upgrade_database_file` does, to bring a restored backup's database to
+# this version in STAGING, before it replaces the running one (#1026).
 settings = get_settings()
-db_url = f"sqlite:///{settings.mm_database_path}"
+db_url = f"sqlite:///{config.attributes.get('mm_database_path') or settings.mm_database_path}"
 
 # When at-rest encryption is enabled, the migration engine must open the file
 # with the SQLCipher key. None when encryption is off (plaintext path unchanged).

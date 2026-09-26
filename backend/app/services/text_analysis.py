@@ -12,7 +12,7 @@ from ..models.code_application import CodeApplication
 from ..models.code import Code
 from ..models.text_coding_config import TextCodingConfig, is_empty_text, parse_treat_as_empty
 from ..routers.helpers import TEXT_TYPES
-from .coding_layers import LAYER_CONSENSUS, layer_origin_filter
+from .coding_layers import LAYER_CONSENSUS, layer_scope_filter
 from .id_set import in_id_set
 
 
@@ -199,7 +199,7 @@ def compute_comment_frequencies(
     # are two rows and would otherwise push the percentage past 100%.
     code_counts_q = (
         db.query(CodeApplication.code_id, func.count(func.distinct(CodeApplication.dataset_value_id)))
-        .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_origin_filter(layer_scope))
+        .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), layer_scope_filter(layer_scope))
     )
     if coder_ids and layer_scope != LAYER_CONSENSUS:
         code_counts_q = code_counts_q.filter(CodeApplication.user_id.in_(coder_ids))

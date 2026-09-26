@@ -67,6 +67,8 @@ function deriveBreadcrumbs(pathname: string, projectName: string | undefined, pr
   // Special-case label map for hyphenated routes
   const SPECIAL_LABELS: Record<string, string> = {
     'memos-notes': 'Memos & Notes',
+    // Matches the page's own <h1>; the capitalised slug read "Coding-import".
+    'coding-import': 'Import codings',
   }
 
   // Workspace-level breadcrumb

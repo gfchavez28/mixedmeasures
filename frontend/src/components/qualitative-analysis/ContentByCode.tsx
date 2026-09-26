@@ -33,6 +33,7 @@ import CodeChip from './CodeChip'
 import InlineCodeActions from './InlineCodeActions'
 import type { ListStatus } from '@/lib/list-status'
 import { highlightText } from './highlight-text'
+import type { LayerScope } from '@/lib/coding-layers'
 
 interface ContentByCodeProps {
   projectId: number
@@ -750,7 +751,7 @@ function CommentsSection({
   participantIds?: string
   textColumnIds?: string
   coderIds?: string
-  layerScope?: 'human' | 'consensus'
+  layerScope?: LayerScope
   search?: string
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void

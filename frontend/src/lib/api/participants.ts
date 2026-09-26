@@ -97,10 +97,20 @@ export const participantsApi = {
       `/projects/${projectId}/participants/${participantId}/withdrawal-report`
     ).then(res => res.data),
   /** #702(3) — honour a withdrawal: remove the person, keep everyone else's data.
-   *  Takes a full backup first and returns its filename. */
+   *  Takes a full backup first and returns its filename.
+   *
+   *  ⚠️ NO timeout (#1025), for the restore's reason (#1024): giving up does not
+   *  stop the server. The backup includes video, and a withdrawal measured 38.7 s
+   *  over HTTP (~60 s in a browser) on a 546 MB database, so the client's 30 s
+   *  default expired mid-withdrawal — and the page then said "Could not
+   *  remove this participant. Nothing was changed." about a person the server went
+   *  on to remove. The backend is on loopback: if it dies, the request fails at
+   *  once, not never. */
   withdraw: (projectId: number, participantId: number) =>
     api.post<WithdrawalOutcome>(
-      `/projects/${projectId}/participants/${participantId}/withdraw`
+      `/projects/${projectId}/participants/${participantId}/withdraw`,
+      undefined,
+      { timeout: 0 },
     ).then(res => res.data),
 
   linkDatasetRow: (projectId: number, participantId: number, datasetId: number, rowId: number) =>

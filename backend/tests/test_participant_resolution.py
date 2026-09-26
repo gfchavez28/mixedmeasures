@@ -390,6 +390,78 @@ class TestTheBatchApi:
         assert len(chunked.segments) == 8  # the foreign turn is correctly absent
 
 
+class TestTheCellLookupSeeksByKey:
+    """#1021. Joined to `Dataset` and filtered on `project_id`, the cell lookup
+    was planned FROM the project — every row of it, each probed against the id
+    list: 139.8 s for one 5,000-id chunk on BES, hours for a rollup. The cost
+    of asking about N cells must not depend on how big the project around them
+    is. Measured in the channel it lives in — SQLite's own work, counted by its
+    progress handler — so a machine's speed cannot make it pass or fail.
+
+    ⚠️ THE ID COUNT IS LOAD-BEARING. The old query's plan FLIPS with the length
+    of the id list — measured: at 50 ids SQLite still seeks each value by key,
+    from 100 up it walks the project. A first draft asked about 50 cells, and
+    the old query passed it (a surviving mutant). This asks about 200."""
+
+    N_CELLS = 200
+
+    @staticmethod
+    def _survey(db, pid, n_rows):
+        from sqlalchemy import insert
+
+        db.add(Project(id=pid, name=f"P{pid}", user_id=1))
+        db.flush()
+        db.add(Dataset(id=pid, project_id=pid, name="Survey"))
+        db.flush()
+        db.add(DatasetColumn(id=pid, dataset_id=pid, column_code="Q", column_name="Q",
+                             column_text="Open", column_type=ColumnType.OPEN_TEXT,
+                             sequence_order=0, display_order=0))
+        db.flush()
+        base = pid * 100_000
+        db.execute(insert(DatasetRow.__table__), [
+            {"id": base + i, "dataset_id": pid} for i in range(n_rows)
+        ])
+        db.execute(insert(DatasetValue.__table__), [
+            {"id": base + i, "row_id": base + i, "column_id": pid, "value_text": "x"}
+            for i in range(n_rows)
+        ])
+        db.flush()
+        step = n_rows // TestTheCellLookupSeeksByKey.N_CELLS
+        return [base + i for i in range(0, n_rows, step)]  # N_CELLS cells, spread out
+
+    @staticmethod
+    def _work(db, pid, ids):
+        conn = db.connection().connection.driver_connection
+        ticks = [0]
+
+        def tick():
+            ticks[0] += 1
+            return 0
+
+        conn.set_progress_handler(tick, 100)
+        try:
+            resolution = resolve_participants(db, pid, dataset_value_ids=ids)
+        finally:
+            conn.set_progress_handler(None, 100)
+        assert len(resolution.dataset_values) == len(ids)  # it did answer
+        return ticks[0]
+
+    def test_asking_about_cells_costs_the_same_in_a_ten_times_larger_project(self, db_session):
+        db = db_session
+        small_ids, large_ids = self._survey(db, 31, 1000), self._survey(db, 32, 10000)
+        small, large = self._work(db, 31, small_ids), self._work(db, 32, large_ids)
+        assert small > 0
+        assert large < 2 * small, (small, large)
+
+    def test_the_scoping_moved_but_did_not_loosen(self, db_session):
+        """Scoping in Python must still leave another project's cell ABSENT."""
+        db = db_session
+        ids = self._survey(db, 33, 400)
+        self._survey(db, 34, 400)
+        assert resolve_participants(db, 34, dataset_value_ids=ids).dataset_values == {}
+        assert len(resolve_participants(db, 33, dataset_value_ids=ids).dataset_values) == len(ids)
+
+
 class TestEveryParticipantFkHasARoute:
     """The enumeration, derived from the schema instead of remembered.
 

@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -11,7 +11,6 @@ import { LoadState } from '@/components/LoadStatus'
 import type { Observation } from '@/lib/api'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import {
@@ -21,13 +20,37 @@ import { formatBytes } from '@/lib/format'
 import { formatTimestamp } from '@/lib/utils'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import { SOURCE_KIND_ONE_LINER } from '@/lib/source-kind-copy'
+import { sortSources, type SortDirection, type SourceSortKey } from '@/lib/source-list-sort'
+import SourceListToolbar from '@/components/SourceListToolbar'
+import { DATE_AND_NAME_SORTS, type SortChoice } from '@/lib/source-list-toolbar'
+import { routeDroppedFiles } from '@/lib/import-routing'
+import { setPendingImportFiles } from '@/lib/pending-import-files'
+import { OBSERVATION_MEDIA_FORMAT_LABEL } from '@/lib/observation-import-formats'
+
+/**
+ * #1008 — timeline COVERAGE is this list's progress, never coded-of-marked: on an
+ * open observation the coder marks the clips, so coded-of-marked is circular (mark
+ * one, code it, read 100%). It is the figure the rows already display.
+ */
+const coverageOf = (o: Observation) =>
+  o.coverage_extent_seconds ? o.covered_seconds / o.coverage_extent_seconds : 0
+
+const OBSERVATION_SORTS: SortChoice[] = [
+  ...DATE_AND_NAME_SORTS,
+  { key: 'progress', dir: 'desc', label: 'Most covered' },
+  { key: 'progress', dir: 'asc', label: 'Least covered' },
+]
 
 export default function ObservationsListPage() {
-  const { projectId } = useProjectLayout()
+  const { projectId, openCodebook } = useProjectLayout()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [searchText, setSearchText] = useState('')
+  const [sortBy, setSortBy] = useState<SourceSortKey>('date')
+  const [sortDir, setSortDir] = useState<SortDirection>('desc')
   const [deleteId, setDeleteId] = useState<number | null>(null)
+  const [isDragOver, setIsDragOver] = useState(false)
+  const dragCounterRef = useRef(0)
 
   const observationsQuery = useQuery({
     queryKey: ['observations', projectId],
@@ -40,11 +63,11 @@ export default function ObservationsListPage() {
   const observationsLoad = useListLoad(observationsQuery)
   const mainLanding = useMainContentLanding()
 
-  const filtered = useMemo(() => {
+  const filteredAndSorted = useMemo(() => {
     const q = searchText.trim().toLowerCase()
-    if (!q) return observations
-    return observations.filter(o => o.name.toLowerCase().includes(q))
-  }, [observations, searchText])
+    const shown = q ? observations.filter(o => o.name.toLowerCase().includes(q)) : observations
+    return sortSources(shown, sortBy, sortDir, o => o.created_at, coverageOf)
+  }, [observations, searchText, sortBy, sortDir])
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => observationsApi.remove(projectId, id),
@@ -64,45 +87,107 @@ export default function ObservationsListPage() {
     onError: () => toast.error('Could not delete the observation.'),
   })
 
+  // #1008 — the drop its three siblings had. Routed by what the file IS, so a
+  // transcript or document dropped here goes where it belongs, with a word.
+  const dragHandlers = {
+    onDragOver: (e: React.DragEvent) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' },
+    onDragEnter: (e: React.DragEvent) => { e.preventDefault(); dragCounterRef.current++; setIsDragOver(true) },
+    onDragLeave: (e: React.DragEvent) => {
+      e.preventDefault()
+      dragCounterRef.current--
+      if (dragCounterRef.current <= 0) { dragCounterRef.current = 0; setIsDragOver(false) }
+    },
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault()
+      dragCounterRef.current = 0
+      setIsDragOver(false)
+      const route = routeDroppedFiles(Array.from(e.dataTransfer.files), 'observation')
+      if (route.kind === 'none') {
+        toast.error(`Drop a recording (${OBSERVATION_MEDIA_FORMAT_LABEL}) here.`)
+        return
+      }
+      if (route.kind !== 'observation') {
+        toast.info(route.kind === 'conversation'
+          ? 'That looks like a transcript — importing it as a Conversation.'
+          : 'That looks like a document — importing it as a Document.')
+      }
+      setPendingImportFiles(route.files, route.kind)
+      navigate(`/projects/${projectId}/${route.kind}s/import`)
+    },
+  }
+
   const deleteTarget = observations.find(o => o.id === deleteId)
 
-  return (
-    <div className="p-6 max-w-5xl mx-auto">
-      <header className="flex items-start justify-between gap-4 mb-6">
-        <div>
-          <h1 className="text-xl font-semibold text-mm-text">Observations</h1>
-          <p className="text-sm text-mm-text-muted mt-1">
-            A recording coded on its own timeline — mark the moments that matter.
-          </p>
-        </div>
-        <Button onClick={() => navigate(`/projects/${projectId}/observations/import`)}>
-          <FileInput className="w-4 h-4 mr-2" aria-hidden />
-          Import observation
-        </Button>
-      </header>
-
-      {observations.length > 0 && (
-        <Input
-          value={searchText}
-          onChange={e => setSearchText(e.target.value)}
-          placeholder="Search observations…"
-          aria-label="Search observations"
-          className="mb-4 max-w-sm"
-        />
-      )}
-
-      {observationsLoad.status !== 'ready' ? (
+  if (observationsLoad.status !== 'ready') {
+    return (
+      <div className="max-w-4xl mx-auto px-3.5 py-3.5">
         <LoadState
           load={observationsLoad}
           loadingLabel="Loading observations…"
           failedTitle="Your observations could not be loaded."
           landingRef={mainLanding}
         />
-      ) : observations.length === 0 ? (
-        <EmptyState projectId={projectId} />
+      </div>
+    )
+  }
+
+  return (
+    <div className="max-w-4xl mx-auto px-3.5 py-3.5">
+      <SourceListToolbar
+        title="All Observations"
+        count={observations.length}
+        accent="teal"
+        noun="observations"
+        onOpenCodebook={openCodebook}
+        showListControls={observations.length > 0}
+        searchText={searchText}
+        onSearchChange={setSearchText}
+        sortChoices={OBSERVATION_SORTS}
+        sortBy={sortBy}
+        sortDir={sortDir}
+        onSortChange={(key, dir) => { setSortBy(key); setSortDir(dir) }}
+        onImport={() => navigate(`/projects/${projectId}/observations/import`)}
+      />
+
+      {observations.length === 0 ? (
+        <div
+          className={`rounded-lg border bg-mm-surface p-12 text-center transition-colors ${
+            isDragOver ? 'border-[hsl(var(--mm-teal))] border-2' : 'border-mm-surface-border'
+          }`}
+          {...dragHandlers}
+        >
+          <Film className="w-8 h-8 mx-auto mb-4 text-mm-text-faint" aria-hidden="true" />
+          {isDragOver ? (
+            <>
+              <h2 className="text-lg font-semibold text-mm-teal-text mb-2">Drop a recording to import</h2>
+              <p className="text-sm text-mm-text-muted">Release to start importing an observation</p>
+            </>
+          ) : (
+            <>
+              <h2 className="text-lg font-semibold text-mm-text mb-2">No observations yet</h2>
+              <p className="text-sm text-mm-text-muted mb-2">
+                Import a recording to get started, or drag and drop one here — {OBSERVATION_MEDIA_FORMAT_LABEL}.
+              </p>
+              {/* The dividing line, in the words that own it — never re-typed. */}
+              <p className="text-sm text-mm-text-muted mb-6 max-w-lg mx-auto">
+                {SOURCE_KIND_ONE_LINER}
+              </p>
+              <Button asChild>
+                <Link to={`/projects/${projectId}/observations/import`}>
+                  <FileInput className="w-4 h-4 mr-2" aria-hidden />
+                  Import an observation
+                </Link>
+              </Button>
+            </>
+          )}
+        </div>
+      ) : filteredAndSorted.length === 0 ? (
+        <div className="text-center py-12 text-mm-text-muted text-sm">
+          No observations matching &lsquo;{searchText}&rsquo;
+        </div>
       ) : (
         <ul className="space-y-2">
-          {filtered.map(obs => (
+          {filteredAndSorted.map(obs => (
             <ObservationRow
               key={obs.id}
               observation={obs}
@@ -131,27 +216,6 @@ export default function ObservationsListPage() {
   )
 }
 
-function EmptyState({ projectId }: { projectId: number }) {
-  return (
-    <div className="border border-dashed border-mm-border rounded-lg p-10 text-center">
-      <Film className="w-8 h-8 mx-auto text-mm-text-faint mb-3" aria-hidden />
-      <h2 className="text-base font-medium text-mm-text">No observations yet</h2>
-      {/* The dividing line, stated where the choice is actually made. A recording
-        * can live in either place, and the difference is the unit of analysis. */}
-      {/* The dividing line, in the words that own it — never re-typed. */}
-      <p className="text-sm text-mm-text-muted mt-2 max-w-lg mx-auto">
-        {SOURCE_KIND_ONE_LINER}
-      </p>
-      <Button asChild className="mt-5">
-        <Link to={`/projects/${projectId}/observations/import`}>
-          <FileInput className="w-4 h-4 mr-2" aria-hidden />
-          Import an observation
-        </Link>
-      </Button>
-    </div>
-  )
-}
-
 function ObservationRow({
   observation: obs,
   projectId,
@@ -169,7 +233,7 @@ function ObservationRow({
         <ContextMenuTrigger asChild>
           <Link
             to={`/projects/${projectId}/observations/${obs.id}`}
-            className="flex items-center gap-3 p-3 rounded-lg border border-mm-border bg-mm-surface hover:border-mm-border-strong transition-colors"
+            className="flex items-center gap-3 p-3 rounded-lg border border-border bg-mm-surface hover:border-mm-teal/50 transition-colors"
           >
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">

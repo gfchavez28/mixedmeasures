@@ -2,14 +2,19 @@ import { useState, useCallback, useMemo, useRef, useEffect, useId } from 'react'
 import { useParams, useNavigate, Link } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert, Tags } from 'lucide-react'
-import { retryUnanswered, datasetsApi, participantsApi, type DatasetPreviewResponse, type DatasetColumnPreview, type DatasetColumnConfig, type ParticipantLinkReport } from '@/lib/api'
+import { retryUnanswered, datasetsApi, participantsApi, type DatasetPreviewResponse, type DatasetColumnPreview, type DatasetColumnsResponse, type DatasetColumnConfig, type ParticipantLinkReport } from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { DatasetColumnChooser } from '@/components/DatasetColumnChooser'
 import { Textarea } from '@/components/ui/textarea'
 import { Progress } from '@/components/ui/progress'
+import { useElapsedSeconds } from '@/hooks/useElapsedSeconds'
+import {
+  ANNOUNCE_EVERY_SECONDS, elapsedNote, fillFraction, isOverEstimate, stillWorkingMessage,
+} from '@/lib/elapsed-progress'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ValueLabelRows, buildValueLabelPayload, type ValueLabelRow } from '@/components/ValueLabelRows'
 import { cn } from '@/lib/utils'
@@ -19,6 +24,10 @@ import {
   DATASET_ACCEPT, DATASET_FORMAT_LABEL, isSupportedDatasetFile,
   describeDatasetUploadError, estimatedProcessingSeconds, SLOW_UPLOAD_THRESHOLD_BYTES,
 } from '@/lib/dataset-import-formats'
+import { checkImportFiles } from '@/lib/upload-limits'
+import { useStepFocus } from '@/hooks/useStepFocus'
+import { formatBytes } from '@/lib/format'
+import UploadLimitNote from '@/components/UploadLimitNote'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
 
 /** Human-readable labels for auto-detected column types. */
@@ -35,7 +44,9 @@ const TYPE_LABELS: Record<string, string> = {
   skip: 'Skip',
 }
 
-type Step = 'upload' | 'configure' | 'importing' | 'results'
+/** #973 (c): `choose-columns` is a RECOVERY step, reached only when a file is
+ *  over the cell cap — not a stage every import passes through. */
+type Step = 'upload' | 'choose-columns' | 'configure' | 'importing' | 'results'
 
 export interface FileConfig {
   preview: DatasetPreviewResponse | null
@@ -57,6 +68,16 @@ export interface FileConfig {
   /** #575: per-column authored value labels (code→label) for numbers-only scale
    *  columns. Keyed by column_index. Present ⇒ import as cells_are_codes. */
   valueLabels: Record<number, { type: 'ordinal' | 'nominal'; rows: ValueLabelRow[] }>
+  /** #973 (c): set when the preview was refused by the CELL CAP and the cheap
+   *  `/columns` call answered — the file's column list, so the researcher can
+   *  choose a subset. Null for every file that previews normally. */
+  columnChoice: DatasetColumnsResponse | null
+  /** #973 (c): the chosen ORIGINAL column indices, once confirmed. 🔴 Sent to
+   *  BOTH `preview` and `import`: the server narrows the file to this list, so
+   *  every `column_index` in `previewColumns` is a position in the narrowed
+   *  text and a different list at import time would move the researcher's type
+   *  choices onto other columns. */
+  sourceColumnIndices: number[] | null
 }
 
 interface ImportResult {
@@ -224,64 +245,6 @@ function ParticipantLinkNote({
 
 const MAX_FILES = 50
 const PREVIEW_CONCURRENCY = 5
-
-/**
- * Elapsed seconds while `active`, for the progress fill (#796b).
- *
- * The developer's report: *"I wonder if a time estimate is enough. I'm more
- * familiar with a progress bar that fills as a signal that some processing is
- * happening."* They are right — a static "~100 seconds" plus a frozen button is
- * indistinguishable from a hang, which is exactly how the timeout presented.
- *
- * ⚠️ **What this deliberately does NOT do is claim a percentage it cannot
- * know.** The server reports no progress (one request, one response), so any
- * "62%" here would be elapsed-over-estimate wearing a measurement's clothes —
- * and the estimate had *just* been wrong by 4x when this was written. So the
- * fill is paced by the estimate but **capped below full** and never claims
- * completion; the text beside it says *elapsed*, which is a fact, and admits it
- * when the estimate is exceeded rather than sitting silently at 99%.
- */
-function useElapsedSeconds(active: boolean): number {
-  // Stores the last TICK timestamp, not a counter. Timestamp-based, never
-  // accumulated: background tabs throttle intervals to ~1/s and an accumulating
-  // counter drifts (the #564 clock rule).
-  const [tickAt, setTickAt] = useState(0)
-  const startedAtRef = useRef(0)
-  useEffect(() => {
-    if (!active) return
-    // A ref write, deliberately — resetting STATE here would be a synchronous
-    // setState inside an effect (the react-hooks/immutability warning), and the
-    // stale-tick guard below makes the reset unnecessary anyway.
-    startedAtRef.current = Date.now()
-    const id = setInterval(() => setTickAt(Date.now()), 500)
-    return () => clearInterval(id)
-  }, [active])
-  if (!active || startedAtRef.current === 0) return 0
-  // A tick left over from a PREVIOUS run is older than this run's start, so it
-  // reads as 0 rather than flashing the last run's elapsed time.
-  return Math.max(0, tickAt - startedAtRef.current) / 1000
-}
-
-/** The fill fraction: approaches but never reaches full while work is running. */
-/**
- * The line beside the fill. Says ELAPSED (a fact) and the estimate (labelled as
- * one), and admits when the estimate has been passed rather than going quiet —
- * silence at 92% full is exactly the state that reads as a hang.
- */
-function elapsedNote(elapsed: number, estimate: number, over: boolean): string {
-  const s = Math.round(elapsed)
-  if (over) return `${s}s elapsed — longer than the usual ~${estimate}s for this size. Still working.`
-  return `${s}s elapsed — usually about ${estimate}s for a file this size.`
-}
-
-const PROGRESS_CEILING = 0.92
-function fillFraction(elapsedSeconds: number, estimateSeconds: number): number {
-  if (estimateSeconds <= 0) return 0
-  // Asymptotic rather than linear: passing the estimate slows the fill instead
-  // of pinning it, so a longer-than-expected run still visibly moves.
-  const ratio = elapsedSeconds / estimateSeconds
-  return PROGRESS_CEILING * (1 - Math.exp(-1.6 * ratio))
-}
 
 /** #575: per-column value-labels authoring in the import wizard — the cells are
  * numeric codes, so declare a code→label dictionary to substitute at import (the
@@ -499,14 +462,20 @@ export default function DatasetImport() {
 
   const handleFilesSelected = useCallback((selectedFiles: File[]) => {
     setError('')
-    const csvFiles = selectedFiles.filter(f => isSupportedDatasetFile(f.name))
-    if (csvFiles.length === 0) return
+    // #1007/#1012: refuse a wrong-type or over-limit file HERE, naming it — this
+    // page used to drop a wrong-type file in silence.
+    const { accepted: csvFiles, message } = checkImportFiles(selectedFiles, {
+      isSupported: isSupportedDatasetFile, formatLabel: DATASET_FORMAT_LABEL, noun: 'dataset',
+    })
+    const messages: string[] = message ? [message] : []
+    if (csvFiles.length === 0) { setError(messages.join(' ')); return }
 
     const newFiles = [...files, ...csvFiles].slice(0, MAX_FILES)
     const addedCount = newFiles.length - files.length
     if (addedCount < csvFiles.length) {
-      setError(`File limit is ${MAX_FILES}. Only ${addedCount} file(s) added.`)
+      messages.push(`File limit is ${MAX_FILES}. Only ${addedCount} file(s) added.`)
     }
+    setError(messages.join(' '))
 
     setFiles(newFiles)
 
@@ -527,6 +496,8 @@ export default function DatasetImport() {
         linkParticipants: true,
         linkColumnIndex: null,
         valueLabels: {},
+        columnChoice: null,
+        sourceColumnIndices: null,
       })
     }
     setFileConfigs(newConfigs)
@@ -581,7 +552,7 @@ export default function DatasetImport() {
   const elapsed = useElapsedSeconds(isLoading)
   const activeEstimate = step === 'upload' ? estimatedSeconds : estimatedImportSeconds
   const progress = fillFraction(elapsed, activeEstimate)
-  const overEstimate = elapsed > activeEstimate * 1.15
+  const overEstimate = isOverEstimate(elapsed, activeEstimate)
 
   /**
    * Announce at 30s intervals only. A live region that fires every tick would
@@ -591,14 +562,10 @@ export default function DatasetImport() {
   const lastAnnouncedRef = useRef(0)
   useEffect(() => {
     if (!isLoading) { lastAnnouncedRef.current = 0; return }
-    const bucket = Math.floor(elapsed / 30)
+    const bucket = Math.floor(elapsed / ANNOUNCE_EVERY_SECONDS)
     if (bucket > 0 && bucket !== lastAnnouncedRef.current) {
       lastAnnouncedRef.current = bucket
-      setStatusMessage(
-        `Still working — ${Math.round(elapsed)} seconds elapsed${
-          overEstimate ? '. This is taking longer than usual for this file.' : '.'
-        }`,
-      )
+      setStatusMessage(stillWorkingMessage(elapsed, overEstimate))
     }
   }, [isLoading, elapsed, overEstimate])
 
@@ -646,6 +613,15 @@ export default function DatasetImport() {
             typeOverrides: {},
             subtypeOverrides: autoSubtypes,
             previewError: null,
+            // #973 (c): this preview covered the WHOLE file, so any selection
+            // from an earlier attempt is void. ⚠️ Not clearing them is a real
+            // bug and a reachable one: cancel out of the chooser, pick a
+            // different WORKSHEET that fits, press Next — the preview succeeds
+            // and a stale `columnChoice` would route a fitting file straight
+            // back to the chooser, and a stale `sourceColumnIndices` would then
+            // narrow the IMPORT to columns the preview never described.
+            columnChoice: null,
+            sourceColumnIndices: null,
           }
         } else {
           // #797: report the reason we HAVE. The old line reduced every failure
@@ -663,8 +639,50 @@ export default function DatasetImport() {
       })
     }
 
+    // #973 (c): a preview that FAILED may have failed because the file is over
+    // the cell cap — which is recoverable, by importing fewer columns — or
+    // because it cannot be read at all, which is not. 🔴 **The two are told
+    // apart by a MEASUREMENT, never by matching the refusal's wording**: ask the
+    // cheap `/columns` endpoint, which applies no cap, and compare the size it
+    // reports against the limit it reports. A file it cannot read is genuinely
+    // unreadable and keeps its original error.
+    const failedIdx = newConfigs
+      .map((c, i) => (c.previewError ? i : -1))
+      .filter(i => i >= 0)
+    if (failedIdx.length > 0) {
+      setStatusMessage('Checking whether the file can be imported in part…')
+      const described = await Promise.allSettled(
+        failedIdx.map(i => datasetsApi.describeColumns(
+          id, files[i], 'utf-8', fileConfigs[i]?.sheetName ?? undefined,
+        )),
+      )
+      described.forEach((outcome, n) => {
+        if (outcome.status !== 'fulfilled') return
+        const summary = outcome.value
+        // Only the CAP is recoverable here. An unknown row count (-1, which SPSS
+        // may legally record — #539) cannot be compared, so it is not claimed as
+        // a cap failure: the file keeps the error it actually got.
+        if (summary.cells === null || summary.cells <= summary.max_cells) return
+        const fileIdx = failedIdx[n]
+        newConfigs[fileIdx] = { ...newConfigs[fileIdx], columnChoice: summary }
+      })
+    }
+
     setFileConfigs(newConfigs)
     setIsLoading(false)
+
+    // #973 (c): a recoverable file takes the researcher to the chooser rather
+    // than into the configure step with an error it cannot act on.
+    const needsChoice = newConfigs.some(c => c.columnChoice !== null)
+    if (needsChoice) {
+      const first = newConfigs.findIndex(c => c.columnChoice !== null)
+      setExpandedFileIndex(first)
+      setStatusMessage(
+        'This file is larger than one import can hold. Choose the columns you need.',
+      )
+      setStep('choose-columns')
+      return
+    }
 
     // Check if all files failed
     const allFailed = newConfigs.every(c => c.previewError !== null)
@@ -840,6 +858,91 @@ export default function DatasetImport() {
     })
   }, [])
 
+  // --- #973 (c): confirm a column selection and re-preview ---
+
+  /** Tick or untick one column of the file currently being chosen. */
+  const handleToggleSourceColumn = useCallback((fileIdx: number, columnIndex: number) => {
+    setFileConfigs(prev => prev.map((c, i) => {
+      if (i !== fileIdx || !c.columnChoice) return c
+      const current = c.sourceColumnIndices
+        ?? c.columnChoice.columns.map(col => col.column_index)
+      const next = current.includes(columnIndex)
+        ? current.filter(n => n !== columnIndex)
+        : [...current, columnIndex].sort((a, b) => a - b)
+      return { ...c, sourceColumnIndices: next }
+    }))
+  }, [])
+
+  const handleSetSourceColumns = useCallback((fileIdx: number, indices: number[]) => {
+    setFileConfigs(prev => prev.map((c, i) =>
+      i === fileIdx ? { ...c, sourceColumnIndices: indices } : c))
+  }, [])
+
+  /**
+   * Re-preview the chosen columns, then continue into the normal configure step.
+   *
+   * 🔴 The selection is STORED as well as sent, because the import has to send
+   * the identical list: the server narrows the file to it, so `column_index`
+   * throughout `previewColumns` is a position in the narrowed text.
+   */
+  const handleConfirmColumns = useCallback(async (fileIdx: number) => {
+    const config = fileConfigs[fileIdx]
+    const chosen = config?.sourceColumnIndices
+    if (!config || !chosen || chosen.length === 0) return
+
+    setIsLoading(true)
+    setError('')
+    setStatusMessage('Reading the selected columns…')
+    try {
+      const preview = await datasetsApi.preview(
+        id, files[fileIdx], 'utf-8', config.sheetName ?? undefined, chosen,
+      )
+      const autoSkipped = new Set<number>()
+      const autoSubtypes: Record<number, string> = {}
+      for (const col of preview.columns) {
+        if (col.suggested_type === 'skip') autoSkipped.add(col.column_index)
+        if (col.suggested_type === 'demographic' && col.suggested_demographic_subtype) {
+          autoSubtypes[col.column_index] = col.suggested_demographic_subtype
+        }
+      }
+      setFileConfigs(prev => prev.map((c, i) => i === fileIdx ? {
+        ...c,
+        preview,
+        previewColumns: preview.columns,
+        skippedIndices: autoSkipped,
+        typeOverrides: {},
+        subtypeOverrides: autoSubtypes,
+        previewError: null,
+        columnChoice: null,
+      } : c))
+      // ⚠️ This wizard imports up to MAX_FILES at once, so MORE THAN ONE file
+      // can be over the cap. Confirming one must hand over to the next rather
+      // than jumping to configure and stranding it with a choice nobody is
+      // shown — the step renders the first file that still has a `columnChoice`.
+      const othersWaiting = fileConfigs.some(
+        (c, i) => i !== fileIdx && c.columnChoice !== null,
+      )
+      if (othersWaiting) {
+        setStatusMessage(
+          `${preview.columns.length} column${preview.columns.length === 1 ? '' : 's'} selected. `
+          + 'Another file also needs columns chosen.',
+        )
+        return
+      }
+      setStatusMessage(
+        `Ready to configure. ${preview.columns.length} column${
+          preview.columns.length === 1 ? '' : 's'} selected. Review the types, then import.`,
+      )
+      setStep('configure')
+    } catch (err) {
+      const msg = describeDatasetUploadError(err)
+      setError(msg)
+      setStatusMessage('The selected columns could not be read. See the message above.')
+    } finally {
+      setIsLoading(false)
+    }
+  }, [fileConfigs, files, id])
+
   // --- Build column configs for import ---
 
   const buildColumnConfigs = useCallback((config: FileConfig): DatasetColumnConfig[] => {
@@ -926,6 +1029,8 @@ export default function DatasetImport() {
           column_configs: buildColumnConfigs(config),
           sheet_name: config.sheetName,
           participant_link_column_index: effectiveLinkColumnIndex(config),
+          // #973 (c): the SAME list the preview was narrowed by — see FileConfig.
+          source_column_indices: config.sourceColumnIndices,
         })
         queryClient.invalidateQueries({ queryKey: ['datasets', id] })
         queryClient.invalidateQueries({ queryKey: ['project', id] })
@@ -950,6 +1055,11 @@ export default function DatasetImport() {
             linkReport: result.participant_link_report,
           }],
         })
+        // #1011: announce completion — failure already announced itself below,
+        // success said nothing, so the region kept "Still working — 30 seconds…".
+        setStatusMessage(
+          `Import complete: “${config.datasetName}”, ${result.rows_created.toLocaleString()} records and ${result.columns_created} columns.`,
+        )
         setStep('results')
       } catch (err: unknown) {
         // #796/#797: the import re-runs the same parse the preview did, so it
@@ -1013,6 +1123,8 @@ export default function DatasetImport() {
           column_configs: buildColumnConfigs(config),
           sheet_name: config.sheetName,
           participant_link_column_index: effectiveLinkColumnIndex(config),
+          // #973 (c): the SAME list the preview was narrowed by — see FileConfig.
+          source_column_indices: config.sourceColumnIndices,
         })
         results.push({
           fileName: files[i].name,
@@ -1046,6 +1158,14 @@ export default function DatasetImport() {
       queryClient.invalidateQueries({ queryKey: ['participants', id] })
     }
 
+    // #1011: say it finished — the status region otherwise still holds the
+    // last "Still working" line, which is what a reader hears on the results.
+    const ok = results.filter(r => r.status === 'success').length
+    setStatusMessage(
+      ok === results.length
+        ? `Import complete: ${ok} ${ok === 1 ? 'dataset' : 'datasets'} imported.`
+        : `Import finished: ${ok} of ${results.length} datasets imported. See the results for the others.`,
+    )
     setStep('results')
   }, [files, fileConfigs, id, buildColumnConfigs, queryClient])
 
@@ -1061,14 +1181,21 @@ export default function DatasetImport() {
 
   // --- Step indicators ---
 
+  // #1011: the column chooser is on the rail while it is part of this import —
+  // it was absent, so the rail highlighted NO step while the chooser showed
+  // (`findIndex` → -1) and the step heading had nothing to say.
+  const usesColumnChooser =
+    step === 'choose-columns' || fileConfigs.some(c => c.sourceColumnIndices != null)
   const steps: { key: Step; label: string }[] = [
     { key: 'upload', label: 'Upload' },
+    ...(usesColumnChooser ? [{ key: 'choose-columns' as Step, label: 'Choose columns' }] : []),
     { key: 'configure', label: 'Configure' },
     ...(isMultiFile ? [{ key: 'importing' as Step, label: 'Import' }] : []),
     { key: 'results', label: 'Results' },
   ]
 
   const stepIndex = steps.findIndex(s => s.key === step)
+  const stepHeadingRef = useStepFocus(step)
 
   // --- Render helpers ---
 
@@ -1418,7 +1545,7 @@ export default function DatasetImport() {
                 className={cn(
                   'w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium',
                   stepIndex === i
-                    ? 'bg-[hsl(var(--mm-orange))] text-white'
+                    ? 'bg-mm-orange-fill text-mm-on-fill'
                     : stepIndex > i
                     ? 'bg-[hsl(var(--mm-orange)/0.15)] text-[hsl(var(--mm-orange-text))]'
                     : 'bg-mm-border-subtle text-mm-text-secondary'
@@ -1437,6 +1564,12 @@ export default function DatasetImport() {
             </div>
           ))}
         </nav>
+
+        {/* #1011: the element focus lands on when the step changes — visually
+            hidden, because the rail above already shows the step on screen. */}
+        <h2 ref={stepHeadingRef} tabIndex={-1} className="sr-only">
+          {stepIndex >= 0 ? `Step ${stepIndex + 1} of ${steps.length}: ${steps[stepIndex].label}` : ''}
+        </h2>
 
         {error && (
           <div role="alert" className="mb-6 p-4 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 rounded-lg flex items-start gap-2">
@@ -1468,6 +1601,7 @@ export default function DatasetImport() {
                 <p className="text-mm-text-secondary mb-4">
                   Drag and drop {DATASET_FORMAT_LABEL} file(s) here, or click to browse
                 </p>
+                <UploadLimitNote noun="dataset files" className="-mt-2 mb-4" />
                 <input
                   ref={datasetInputRef}
                   type="file"
@@ -1486,7 +1620,7 @@ export default function DatasetImport() {
                 <Button
                   onClick={() => datasetInputRef.current?.click()}
                   disabled={isLoading}
-                  className="bg-[hsl(var(--mm-orange))] hover:opacity-90 text-white"
+                  className="bg-mm-orange-fill hover:opacity-90 text-mm-on-fill"
                 >
                   {isLoading ? 'Processing...' : 'Select Files'}
                 </Button>
@@ -1503,7 +1637,7 @@ export default function DatasetImport() {
                       <FileText className="w-4 h-4 text-mm-text-faint flex-shrink-0" />
                       <span className="flex-1 truncate">{f.name}</span>
                       <span className="text-mm-text-faint flex-shrink-0">
-                        {(f.size / 1024).toFixed(1)} KB
+                        {formatBytes(f.size)}
                       </span>
                       <button
                         onClick={() => handleRemoveFile(i)}
@@ -1580,6 +1714,36 @@ export default function DatasetImport() {
           </Card>
         )}
 
+        {/* Step 1b (#973 c): choose columns — reached ONLY when the cell cap
+            refused this file, and skipped entirely by every import that fits. */}
+        {step === 'choose-columns' && (() => {
+          const fileIdx = fileConfigs.findIndex(c => c.columnChoice !== null)
+          const config = fileConfigs[fileIdx]
+          if (!config?.columnChoice) return null
+          const all = config.columnChoice.columns.map(c => c.column_index)
+          const selected = new Set(config.sourceColumnIndices ?? all)
+          return (
+            <Card>
+              <CardContent className="pt-6">
+                <DatasetColumnChooser
+                  fileName={files[fileIdx]?.name ?? ''}
+                  summary={config.columnChoice}
+                  selected={selected}
+                  busy={isLoading}
+                  onToggle={col => handleToggleSourceColumn(fileIdx, col)}
+                  onSelectAll={() => handleSetSourceColumns(fileIdx, all)}
+                  onSelectNone={() => handleSetSourceColumns(fileIdx, [])}
+                  onContinue={() => handleConfirmColumns(fileIdx)}
+                  onCancel={() => { setStep('upload'); setError('') }}
+                />
+                {error && (
+                  <p role="alert" className="mt-4 text-sm text-red-600 dark:text-red-400">{error}</p>
+                )}
+              </CardContent>
+            </Card>
+          )
+        })()}
+
         {/* Step 2: Configure */}
         {step === 'configure' && (
           <div className="space-y-6">
@@ -1602,7 +1766,7 @@ export default function DatasetImport() {
                     <Button
                       onClick={handleImport}
                       disabled={!configureStepValid || isLoading}
-                      className="bg-[hsl(var(--mm-orange))] hover:opacity-90 text-white relative overflow-hidden"
+                      className="bg-mm-orange-fill hover:opacity-90 text-mm-on-fill relative overflow-hidden"
                     >
                       {isLoading && (
                         <span
@@ -1703,7 +1867,7 @@ export default function DatasetImport() {
                     <Button
                       onClick={handleImport}
                       disabled={!configureStepValid || isLoading}
-                      className="bg-[hsl(var(--mm-orange))] hover:opacity-90 text-white relative overflow-hidden"
+                      className="bg-mm-orange-fill hover:opacity-90 text-mm-on-fill relative overflow-hidden"
                     >
                       {isLoading && (
                         <span
@@ -1948,7 +2112,7 @@ export default function DatasetImport() {
                 <Button variant="outline" onClick={handleReset}>
                   Import More
                 </Button>
-                <Button onClick={() => navigate(`/projects/${id}/datasets`)} className="bg-[hsl(var(--mm-orange))] hover:opacity-90 text-white">
+                <Button onClick={() => navigate(`/projects/${id}/datasets`)} className="bg-mm-orange-fill hover:opacity-90 text-mm-on-fill">
                   {isMultiFile ? 'Return to Project' : 'Done'}
                 </Button>
               </div>

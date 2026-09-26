@@ -63,7 +63,7 @@ export function DragPreviewTooltip({ cell, multiSelectCount }: DragPreviewToolti
       {showBadge && (
         <span
           aria-label={`Moving ${multiSelectCount} columns`}
-          className="absolute -top-2 -right-2 inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-mm-blue text-white text-[10px] font-semibold leading-none shadow"
+          className="absolute -top-2 -right-2 inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-mm-blue-fill text-mm-on-fill text-[10px] font-semibold leading-none shadow"
         >
           +{multiSelectCount - 1}
         </span>

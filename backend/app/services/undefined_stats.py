@@ -62,8 +62,24 @@ DEGENERATE = "degenerate"
 #: ordinary selection, not a misuse.
 NOT_NUMERIC = "not_numeric"
 
+#: A VARIABLE GROUP's per-record scale score has never been computed, so there is
+#: nothing to correlate — the scores are DERIVED and are rebuilt on demand (#958
+#: §6 made that the ordinary state of a freshly imported project).
+#:
+#: 🔴 **Distinct from INSUFFICIENT_N, and the distinction is the whole point.**
+#: Without it the correlation matrix reported every pair as *"Too few values to
+#: compute this, after missing data was excluded"* — a claim about the researcher's
+#: DATA, with a remedy that cannot work, for what is a claim about our own
+#: bookkeeping. Same shape as #830b one statistic over.
+#:
+#: ⚠️ **It is NOT "every score is missing".** A domain whose `RowScore` rows exist
+#: and are all NULL has been computed and genuinely has no usable values, which is
+#: what INSUFFICIENT_N is for; only the absence of the rows themselves earns this.
+SCORES_NOT_COMPUTED = "scores_not_computed"
+
 UNDEFINED_REASONS = frozenset({
     INSUFFICIENT_N, EMPTY_GROUP, NO_VARIANCE, DEGENERATE, NOT_NUMERIC,
+    SCORES_NOT_COMPUTED,
 })
 
 

@@ -23,26 +23,50 @@ landing it after would mean every surface silently inflates in the gap.
 
 ``non_consensus_filter()`` returns a clause, mirroring ``visible_segment_filter()``
 so it splats into an existing ``.filter(...)``; it keeps every real coder layer
-(human AND ai-as-coder) and drops only the derived consensus layer.
+(human AND machine) and drops only the derived consensus layer.
+
+**The machine layer (#989).** A MACHINE coder (``coder_type='ai'``) holds labels a
+model produced elsewhere and a researcher loaded in. It is a THIRD layer: excluded
+from the human default exactly as consensus is, selectable on its own, and never
+part of a reliability aggregate (that exclusion lives at the voter/roster queries —
+see ``auth.reliability_coder_clause``). 🔴 **The two reserved AI markers in this
+schema are DIFFERENT FACTS and must not be conflated.** ``User.coder_type`` says
+*what kind of agent this coder is*; ``CodeApplication.origin``'s reserved
+"ai-suggested" value says *how this row was produced*. They coincide for an
+imported machine coder and DIVERGE for a future assist mode, where a HUMAN coder
+accepts a model's suggestion (``coder_type='human'``, ``origin='ai'``). **The
+LAYER keys on the coder**, because a layer is the set of codings attributable to
+an agent and every reliability statement is over coders; ``origin`` stays free for
+per-row provenance. Overloading either would be the #780/#806 shape.
 """
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from ..auth import CODER_TYPE_MACHINE
 from ..models.code_application import CodeApplication
 from ..models.code import Code
 from ..models.code_equivalence_group import CodeEquivalenceGroup
 from ..models.segment import Segment
+from ..models.user import User
 
 # Provenance value marking the derived consensus layer (see CodeApplication.origin).
 CONSENSUS_ORIGIN = "consensus"
 
-# Layer-selection values (Track J · J2-3, Slab 7 — the J2-C single policy point).
-# Only two are needed at the FILTER level: the all-human default vs the derived
-# consensus layer. Per-coder ("show just Alice") and union ("everyone combined")
-# selection ride on the existing J1 `coder_ids`, not on this axis.
+# Layer-selection values (Track J · J2-3 Slab 7 — the J2-C single policy point;
+# the machine layer added by #989). Per-coder ("show just Alice") and union
+# ("everyone combined") selection ride on the existing J1 `coder_ids`, not on
+# this axis.
 LAYER_HUMAN = "human"
 LAYER_CONSENSUS = "consensus"
-VALID_LAYER_SCOPES = (LAYER_HUMAN, LAYER_CONSENSUS)
+LAYER_MACHINE = "machine"
+VALID_LAYER_SCOPES = (LAYER_HUMAN, LAYER_CONSENSUS, LAYER_MACHINE)
+
+#: Regex the routers declare their `layer_scope` query parameter with. Built
+#: from the tuple, never restated: it was hardcoded as `^(human|consensus)$` at
+#: TEN sites across three routers, so adding a third value by hand would have
+#: left whichever site was missed answering 422 for that value alone — one
+#: endpoint's worth of silent breakage, with every other surface working.
+LAYER_SCOPE_PATTERN = f"^({'|'.join(VALID_LAYER_SCOPES)})$"
 
 
 def build_effective_code_map(db: Session, project_id: int) -> dict[int, int]:
@@ -139,19 +163,72 @@ def non_consensus_filter():
     return CodeApplication.origin != CONSENSUS_ORIGIN
 
 
-def layer_origin_filter(layer_scope: str | None = None):
-    """Origin clause for a ``layer_scope`` (Track J · J2-3 Slab 7 — the J2-C policy
-    point). ``'consensus'`` → ONLY the derived consensus layer; anything else (the
-    ``'human'`` default, or ``None``) → exclude consensus (every real coder layer,
-    the J2-B guard). Per-coder / union selection rides on the existing ``coder_ids``,
-    not on this clause — so the only genuinely new view this enables is consensus.
+def machine_coder_ids():
+    """Scalar subquery of every MACHINE coder's ``User.id`` (#989).
 
-    Single-source this everywhere a count/frequency/usage surface needs to honor
-    the selected layer; pair with a ``coder_ids`` restriction for the human case.
+    A SUBQUERY rather than a fetched id list on purpose: these clauses splat into
+    aggregates that do not join ``User``, and the users table is tiny (coders, not
+    respondents), so SQLite evaluates it once.
+    """
+    return select(User.id).where(User.coder_type == CODER_TYPE_MACHINE)
+
+
+def without_machine_filter():
+    """Clause: drop MACHINE coders' applications, keeping everything else (#989).
+
+    🔴 **The ``user_id IS NULL`` arm is load-bearing and its absence is SILENT.**
+    ``CodeApplication.user_id`` is nullable — legacy pre-J1 rows and the merged
+    "Unattributed" bucket carry NULL — and SQL's ``NULL NOT IN (1, 2)`` evaluates
+    to NULL, i.e. the row is DROPPED. Worse, ``x NOT IN (<empty set>)`` is TRUE,
+    so a bare ``notin_`` passes every test on an install with no machine coder and
+    starts deleting every unattributed coding from every count the moment one
+    exists. Written as an explicit OR for that reason.
+    """
+    return or_(
+        CodeApplication.user_id.is_(None),
+        CodeApplication.user_id.notin_(machine_coder_ids()),
+    )
+
+
+def only_machine_filter():
+    """Clause: keep ONLY machine coders' applications (#989).
+
+    No NULL arm, and that asymmetry is correct rather than an oversight: an
+    unattributed row is not a machine's, so ``IN`` excluding NULL is the answer
+    this question wants.
+    """
+    return CodeApplication.user_id.in_(machine_coder_ids())
+
+
+def layer_scope_filter(layer_scope: str | None = None):
+    """The clause for a ``layer_scope`` (Track J · J2-3 Slab 7 — the J2-C policy
+    point; the machine arm from #989).
+
+    * ``'consensus'`` → ONLY the derived consensus layer.
+    * ``'machine'``   → ONLY machine coders' applications.
+    * anything else (the ``'human'`` default, or ``None``) → the HUMAN layer:
+      exclude consensus (the J2-B guard) AND exclude the machine.
+
+    Per-coder / union selection rides on the existing ``coder_ids``, not on this
+    clause. Single-source this everywhere a count / frequency / usage surface
+    needs to honor the selected layer; pair with a ``coder_ids`` restriction for
+    the human case.
+
+    🔴 **Renamed from ``layer_origin_filter`` by #989 and the old name is GONE, not
+    aliased.** Two of the three arms no longer test ``origin`` at all, so the old
+    name was a claim the function had stopped meeting — and an alias would have
+    let a new call site keep asking for an origin filter and receive a coder one.
+
+    ⚠️ **The default arm's machine exclusion is why a machine coder cannot inflate
+    a coverage gauge.** `services/coding_counts.py` routes every gauge and card
+    count through here, so "how much of this corpus is coded" keeps meaning *by
+    people* unless the machine layer is explicitly selected.
     """
     if layer_scope == LAYER_CONSENSUS:
         return CodeApplication.origin == CONSENSUS_ORIGIN
-    return non_consensus_filter()
+    if layer_scope == LAYER_MACHINE:
+        return and_(non_consensus_filter(), only_machine_filter())
+    return and_(non_consensus_filter(), without_machine_filter())
 
 
 # ── Consensus eligibility (D18: unit provenance, not parent type) ───────────
@@ -170,13 +247,14 @@ def consensus_eligible_segment_clause():
         again every coder codes the same ones. CONSENSUS works here unchanged:
         `_decide_consensus` is per-target and does not care whether a target is
         a transcript turn or a slice of video.
-        NOTE (slab 6b-B, not yet built): reconciliation and ordinary kappa do
-        NOT reach a frozen clip yet. `irr.py`'s gather still scopes to
-        `or_(Conversation, Document)` with `("conv"|"doc")` source keys, and
-        `reconciliation.py` consumes that same gather — so a clip is dropped
-        before either sees it. The ENGINES are parent-indifferent; only their
-        gather is not. Widening it is the work, and the source-key ternary must
-        be fixed in the same change or a clip silently becomes `("doc", None)`.
+        (Slab 6b-B SHIPPED 2026-07-19, `1ba9ad6` — #988. This note used to say
+        reconciliation and ordinary kappa did "not reach a frozen clip yet";
+        `irr.py`'s gather routes pass 1 through `consensus_scoped_segments` and
+        keys sources with the raising `_segment_source_key` map, and
+        `reconciliation.py` gained `obs` entries in all four maps. It was the
+        last surviving copy of the pre-fix state, in the module a reader opens
+        to learn the D18 rule, and it named the exact remedy that was applied —
+        so a reader trusting it would conclude the work was still owed.)
       * UNFROZEN observation clips — each coder marks their OWN time ranges, so a
         clip has exactly one voter and `_decide_consensus` returns nothing anyway
         (`n_voters < 2`). Excluded explicitly: the reliability question there is

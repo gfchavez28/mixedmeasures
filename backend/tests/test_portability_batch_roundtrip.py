@@ -115,9 +115,9 @@ def test_the_fixture_actually_crosses_both_batch_boundaries(multi_batch_archive)
     the constants above to still be right.
     """
     archive, _ = multi_batch_archive
-    import json
-    with zipfile.ZipFile(archive) as zf:
-        data = json.loads(zf.read("project.json"))
+    # v7 (#958): rows and values are their own members — read the union.
+    from tests.archive_support import archive_payload
+    data = archive_payload(archive)
     assert len(data["dataset_rows"]) > ROW_BATCH_MIRROR, (
         f"fixture has {len(data['dataset_rows'])} rows, which does not cross the "
         f"{ROW_BATCH_MIRROR}-row flush batch — the drain logic is untested"

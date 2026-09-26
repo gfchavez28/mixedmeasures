@@ -28,6 +28,7 @@ import { LoadState } from '@/components/LoadStatus'
 import CrossTabTable from './CrossTabTable'
 import CodeDensityPanel from './CodeDensityPanel'
 import ResponseLengthPanel from './ResponseLengthPanel'
+import { availableLayerScopes, layerScopeLabel, rosterHasMachineCoders, showLayerPicker, type LayerScope } from '@/lib/coding-layers'
 
 interface CrossAnalysisPanelProps {
   projectId: number
@@ -56,10 +57,15 @@ export default function CrossAnalysisPanel({
   // Offered only when a consensus layer exists for this project (DEC-A).
   const { data: consensusStatus } = useConsensusStatus(projectId)
   const consensusAvailable = !!consensusStatus?.exists
-  const [layerScopePref, setLayerScopePref] = useState<'human' | 'consensus'>('human')
+  const [layerScopePref, setLayerScopePref] = useState<LayerScope>('human')
+  // #989 — the layers this panel can offer; `machine` only once one is on the roster.
+  const layerAvailability = useMemo(
+    () => ({ consensusAvailable, hasMachineCoders: rosterHasMachineCoders(coders) }),
+    [consensusAvailable, coders],
+  )
   // Derived so the consensus layer is honored ONLY while it exists (e.g. it's hidden
   // again if a coder is archived away from the ≥2 roster) — no setState-in-effect.
-  const layerScope: 'human' | 'consensus' =
+  const layerScope: LayerScope =
     layerScopePref === 'consensus' && consensusAvailable ? 'consensus' : 'human'
   const coderInclude = useMemo(
     () => hiddenCoders.size === 0 ? undefined : coders.filter(c => !hiddenCoders.has(c.id)).map(c => c.id),
@@ -224,13 +230,13 @@ export default function CrossAnalysisPanel({
             matchCount={matchCount}
           />
         </div>
-        {multiCoder && consensusAvailable && (
+        {showLayerPicker(layerAvailability) && (
           <div className="pt-1 shrink-0 flex items-center gap-2">
             <SegmentedControl
-              options={([
-                { value: 'human', label: 'Coders' },
-                { value: 'consensus', label: 'Consensus' },
-              ] as { value: 'human' | 'consensus'; label: string }[])}
+              options={availableLayerScopes(layerAvailability).map(value => ({
+                value,
+                label: layerScopeLabel(value),
+              }))}
               value={layerScope}
               onChange={setLayerScopePref}
               ariaLabel="Coding layer"

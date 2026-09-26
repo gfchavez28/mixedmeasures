@@ -792,7 +792,7 @@ class TestReliabilityIntervals:
         db.flush()
 
         res = compute_irr(db, 7530)
-        _cids, _names, per_code, _sel, _scope, _mag = build_irr_matrices(db, 7530)
+        _cids, _names, per_code, _sel, _scope, _mag, _sets = build_irr_matrices(db, 7530)
         contributing = [
             rows for code_id, rows in per_code.items()
             if next((c for c in res["per_code"] if c["code_id"] == code_id), {})
@@ -996,7 +996,7 @@ class TestMagnitudeAlpha:
         db = db_session
         self._project(db, 7650)
         res = compute_irr(db, 7650)
-        _cids, _names, per_code, _sel, _scope, _mag = build_irr_matrices(db, 7650)
+        _cids, _names, per_code, _sel, _scope, _mag, _sets = build_irr_matrices(db, 7650)
         categorical_rows = [r for rows in per_code.values() for r in rows]
         assert res["overall_alpha"] == pytest.approx(_krippendorff_alpha(categorical_rows))
 
@@ -1021,3 +1021,138 @@ class TestMagnitudeAlpha:
         res = compute_irr(db, 7670)
         assert res["magnitude_per_code"] == []
         assert res["reliability_facet"] == "coders"
+
+
+class TestOnlyCodeableCellsAreUnits:
+    """#987 — a dataset cell is a reliability unit only if a coder could reach it.
+
+    The gather used to filter `value_text != ""`, which differs from the codeable
+    set TWICE: it does not STRIP, and it knows nothing of `treat_as_empty` — whose
+    NULL state is the DEFAULTS, not the empty list. So a project that never touched
+    the setting hid those cells from its coders while counting them here, each one
+    an all-zero row of fabricated agreement under Option B.
+
+    ⚠️ **The fixture values are chosen to separate the two clauses.** `"N/A"` is
+    only caught by the treat-as-empty arm; `"   "` is only caught by the trim. A
+    fixture with one of them cannot tell a half-fix from a whole one.
+    """
+
+    PID = 7700
+    COL = 77000
+
+    def _project(self, db, *, extra_values=()):
+        db.add_all([
+            Project(id=self.PID, name="P", user_id=1),
+            Dataset(id=self.PID, project_id=self.PID, name="Survey"),
+        ])
+        db.flush()
+        db.add(DatasetColumn(id=self.COL, dataset_id=self.PID, column_code="Q1",
+                             column_name="Q1", column_text="Open?", column_type="open_text",
+                             sequence_order=0, display_order=0))
+        db.flush()
+        values = [(77001, "great"), (77002, "bad")] + list(extra_values)
+        for vid, text in values:
+            db.add(DatasetRow(id=vid, dataset_id=self.PID))
+            db.flush()
+            db.add(DatasetValue(id=vid, row_id=vid, column_id=self.COL, value_text=text))
+        db.flush()
+        _coder(db, 2, "Bob")
+        db.add(Code(id=77090, project_id=self.PID, name="Sentiment", numeric_id=2,
+                    is_active=True, is_universal=False))
+        db.flush()
+        # Both coders engage the column, so every codeable cell is in play.
+        _apply(db, 77090, 1, value_id=77001)
+        _apply(db, 77090, 2, value_id=77001)
+
+    def test_a_default_non_response_is_not_a_unit(self, db_session):
+        """`treat_as_empty` is NULL here — the DEFAULTS apply and nobody configured
+        anything. This is the out-of-the-box case, not an edge case."""
+        db = db_session
+        self._project(db, extra_values=[(77003, "N/A")])
+        res = compute_irr(db, self.PID)
+        code = next(c for c in res["per_code"] if c["code_id"] == 77090)
+        assert code["n_units"] == 2, "the N/A cell is not codeable, so it is not a unit"
+
+    def test_a_whitespace_only_cell_is_not_a_unit(self, db_session):
+        """The trim arm, which bites with NO declaration at all — `!= ''` is true
+        of `"   "` while `is_empty_text` strips it away."""
+        db = db_session
+        self._project(db, extra_values=[(77003, "   ")])
+        res = compute_irr(db, self.PID)
+        code = next(c for c in res["per_code"] if c["code_id"] == 77090)
+        assert code["n_units"] == 2
+
+    def test_a_declared_non_response_is_not_a_unit(self, db_session):
+        """An explicit declaration REPLACES the defaults (#519's three states), so
+        a project can make a domain-specific string non-substantive."""
+        from app.models.text_coding_config import TextCodingConfig
+        import json
+
+        db = db_session
+        self._project(db, extra_values=[(77003, "no comment"), (77004, "N/A")])
+        db.add(TextCodingConfig(project_id=self.PID, treat_as_empty=json.dumps(["no comment"])))
+        db.flush()
+        res = compute_irr(db, self.PID)
+        code = next(c for c in res["per_code"] if c["code_id"] == 77090)
+        assert code["n_units"] == 3, (
+            "'no comment' is declared away; 'N/A' comes BACK because a declaration "
+            "REPLACES the defaults rather than extending them"
+        )
+
+    def test_an_ordinary_cell_is_still_a_unit(self, db_session):
+        """The positive control. A filter that dropped everything would pass every
+        assertion above."""
+        db = db_session
+        self._project(db, extra_values=[(77003, "it was fine")])
+        res = compute_irr(db, self.PID)
+        code = next(c for c in res["per_code"] if c["code_id"] == 77090)
+        assert code["n_units"] == 3
+
+    def test_a_coding_on_an_unreachable_cell_does_not_count(self, db_session):
+        """The APPLICATIONS pass, not the unit universe. A coding can sit on a cell
+        the Text Coding view will not list — coded before `treat_as_empty` was
+        edited, or applied through the API. It is UI-unreachable (no chip, no row,
+        no way to remove it), so it must not move a statistic: the #500 rule
+        reached from a second direction."""
+        db = db_session
+        self._project(db, extra_values=[(77003, "N/A")])
+        _apply(db, 77090, 1, value_id=77003)  # Alice coded the N/A cell
+        _apply(db, 77090, 2, value_id=77003)  # so did Bob — a perfect agreement
+        res = compute_irr(db, self.PID)
+        code = next(c for c in res["per_code"] if c["code_id"] == 77090)
+        assert code["n_units"] == 2, "the unreachable agreement is not counted"
+        assert code["prevalence"] == pytest.approx(0.5), (
+            "and it does not lift prevalence either — 1 of 2 codeable cells, "
+            "not 2 of 3"
+        )
+
+    def test_engagement_derives_from_reachable_codings_only(self, db_session):
+        """The consequence worth pinning: `engaged` is built from the applications
+        pass, so a coder whose ONLY coding in a column sits on an unreachable cell
+        has no reachable judgement there — and the column must not look
+        multi-coder because of it."""
+        db = db_session
+        db.add_all([
+            Project(id=7710, name="P", user_id=1),
+            Dataset(id=7710, project_id=7710, name="Survey"),
+        ])
+        db.flush()
+        db.add(DatasetColumn(id=77100, dataset_id=7710, column_code="Q1", column_name="Q1",
+                             column_text="Open?", column_type="open_text",
+                             sequence_order=0, display_order=0))
+        db.flush()
+        for vid, text in [(77101, "great"), (77102, "N/A")]:
+            db.add(DatasetRow(id=vid, dataset_id=7710))
+            db.flush()
+            db.add(DatasetValue(id=vid, row_id=vid, column_id=77100, value_text=text))
+        db.flush()
+        _coder(db, 2, "Bob")
+        db.add(Code(id=77190, project_id=7710, name="Sentiment", numeric_id=2,
+                    is_active=True, is_universal=False))
+        db.flush()
+        _apply(db, 77190, 1, value_id=77101)  # Alice: a real cell
+        _apply(db, 77190, 2, value_id=77102)  # Bob: ONLY the unreachable one
+        res = compute_irr(db, 7710)
+        assert res["available"] is False, (
+            "one reachable coder in the only source — not a multi-coder comparison"
+        )

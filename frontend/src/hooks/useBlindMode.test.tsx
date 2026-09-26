@@ -18,6 +18,11 @@ import { useCoders } from '@/hooks/useCoders'
 import { codeAnalysisApi } from '@/lib/api'
 import { isCoderVisible } from '@/lib/coder-color'
 
+/**
+ * #989 — the roster is TWO facts now and blind mode reads the HUMAN one. These
+ * helpers set both, so a test that means "two people" cannot accidentally be
+ * asserting on the any-kind count.
+ */
 const setRoster = (multiCoder: boolean, selfId: number | null = 1) => {
   (useAuth as unknown as Mock).mockReturnValue({ user: selfId == null ? null : { id: selfId } })
   ;(useCoders as unknown as Mock).mockReturnValue({
@@ -26,6 +31,27 @@ const setRoster = (multiCoder: boolean, selfId: number | null = 1) => {
       : [{ id: 1, username: 'Me' }],
     coderMap: new Map(),
     multiCoder,
+    multiHumanCoder: multiCoder,
+    machineCoders: [],
+    status: 'ready',
+  })
+}
+
+/**
+ * #989 — ONE person and ONE machine. `multiCoder` is TRUE (attribution UI is
+ * wanted: the model's codings must be distinguishable from yours) and
+ * `multiHumanCoder` is FALSE. Blind mode must stay OFF: there is no colleague
+ * whose reading could anchor yours, and "Reveal colleagues' work" would be
+ * naming a model a colleague.
+ */
+const setHumanPlusMachineRoster = (selfId: number | null = 1) => {
+  (useAuth as unknown as Mock).mockReturnValue({ user: selfId == null ? null : { id: selfId } })
+  ;(useCoders as unknown as Mock).mockReturnValue({
+    coders: [{ id: 1, username: 'Me' }, { id: 9, username: 'GPT-Coder', coder_type: 'ai' }],
+    coderMap: new Map(),
+    multiCoder: true,
+    multiHumanCoder: false,
+    machineCoders: [{ id: 9, username: 'GPT-Coder', coder_type: 'ai' }],
     status: 'ready',
   })
 }
@@ -35,7 +61,8 @@ const setRoster = (multiCoder: boolean, selfId: number | null = 1) => {
 const setUnansweredRoster = (status: 'loading' | 'failed', selfId: number | null = 1) => {
   (useAuth as unknown as Mock).mockReturnValue({ user: selfId == null ? null : { id: selfId } })
   ;(useCoders as unknown as Mock).mockReturnValue({
-    coders: [], coderMap: new Map(), multiCoder: false, status,
+    coders: [], coderMap: new Map(), multiCoder: false, multiHumanCoder: false,
+    machineCoders: [], status,
   })
 }
 
@@ -205,5 +232,30 @@ describe('readRevealed (fresh-read primitive for the TopRail switcher, #3)', () 
   it('uses an "anon" key when there is no active coder', () => {
     localStorage.setItem('mm-blind-revealed-99-anon', '1')
     expect(readRevealed(99, null)).toBe(true)
+  })
+})
+
+describe('#989 — a machine coder is not a colleague', () => {
+  it('does not turn blind mode on for a lone researcher', () => {
+    setHumanPlusMachineRoster(1)
+    const { result } = renderHook(() => useBlindMode(1))
+    expect(result.current.blind).toBe(false)
+  })
+
+  it('does not WITHHOLD either, so the machine layer is visible without a logged reveal', () => {
+    // `withholding` is the fail-closed act (#964). With the roster ANSWERED and
+    // no human colleague there is nothing to withhold — requiring a reveal here
+    // would put a research-integrity ceremony in front of a researcher's own
+    // imported model output.
+    setHumanPlusMachineRoster(1)
+    const { result } = renderHook(() => useBlindMode(1))
+    expect(result.current.withholding).toBe(false)
+    expect(result.current.settled).toBe(true)
+  })
+
+  it('still blinds once a real colleague joins — the positive control', () => {
+    setRoster(true, 1)
+    const { result } = renderHook(() => useBlindMode(1))
+    expect(result.current.blind).toBe(true)
   })
 })

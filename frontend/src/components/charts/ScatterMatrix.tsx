@@ -181,7 +181,7 @@ export default function ScatterMatrix({
   if (isLoading) {
     return (
       <div className="flex items-center justify-center p-8 text-mm-text-faint text-sm gap-2">
-        <div className="animate-spin w-4 h-4 border-2 border-mm-accent border-t-transparent rounded-full" />
+        <div className="animate-spin w-4 h-4 border-2 border-mm-text-muted border-t-transparent rounded-full" />
         Loading scatter data...
       </div>
     )

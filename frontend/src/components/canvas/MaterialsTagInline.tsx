@@ -158,7 +158,7 @@ export default function MaterialsTagInline({
         return createPortal(
         <div
           ref={popoverRef}
-          className="fixed bg-white dark:bg-mm-surface border border-mm-border shadow-lg rounded-md overflow-hidden"
+          className="fixed bg-white dark:bg-mm-surface border border-border shadow-lg rounded-md overflow-hidden"
           style={{ zIndex: 100, minWidth: 160, top, left }}
           onMouseDown={e => e.stopPropagation()}
         >
@@ -191,7 +191,7 @@ export default function MaterialsTagInline({
             )}
           </div>
 
-          <hr className="border-mm-border my-1" />
+          <hr className="border-border my-1" />
 
           {/* Custom tag input */}
           <div className="px-2 py-1.5">
@@ -205,20 +205,20 @@ export default function MaterialsTagInline({
                 if (e.key === 'Escape') setOpen(false)
               }}
               placeholder="Custom tag..."
-              className="w-full text-xs rounded border border-mm-border bg-mm-bg px-2 py-1 text-mm-text placeholder:text-mm-text-faint outline-none focus:ring-1 focus:ring-mm-accent"
+              className="w-full text-xs rounded border border-border bg-mm-bg px-2 py-1 text-mm-text placeholder:text-mm-text-faint outline-none focus:ring-1 focus:ring-ring"
             />
             <p className="text-[9px] text-mm-text-faint mt-0.5 select-none">Press Enter to add</p>
           </div>
 
           {/* Tag note */}
-          <div className="px-2 py-1.5 border-t border-mm-border">
+          <div className="px-2 py-1.5 border-t border-border">
             <input
               type="text"
               value={tagNote ?? ''}
               onChange={e => onTagNoteChange(e.target.value || null)}
               onKeyDown={e => { if (e.key === 'Escape') setOpen(false) }}
               placeholder="Note (optional)..."
-              className="w-full text-xs rounded border border-mm-border bg-mm-bg px-2 py-1 text-mm-text placeholder:text-mm-text-faint outline-none focus:ring-1 focus:ring-mm-accent"
+              className="w-full text-xs rounded border border-border bg-mm-bg px-2 py-1 text-mm-text placeholder:text-mm-text-faint outline-none focus:ring-1 focus:ring-ring"
             />
           </div>
         </div>,

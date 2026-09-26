@@ -1320,7 +1320,7 @@ export default function DatasetView() {
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-4 py-2 border-b bg-mm-surface flex-shrink-0">
         <DatasetTabs projectId={pid} datasetId={iid} variableCount={columnsKnown ? columns.length : undefined} />
-        <div className="w-px h-4 bg-mm-border" aria-hidden="true" />
+        <div className="w-px h-4 bg-mm-border-subtle" aria-hidden="true" />
         <div className="flex items-center gap-2 text-sm text-mm-text-secondary mr-auto">
           {dataset.source && <span>Source: {dataset.source}</span>}
           {/* The variable count rides the Variables tab now — repeating it here
@@ -1343,7 +1343,7 @@ export default function DatasetView() {
               tooltip is not a name. */}
           {freshness && (
             <span className="flex items-center gap-1.5">
-              <span className="w-px h-3 bg-mm-border" aria-hidden="true" />
+              <span className="w-px h-3 bg-mm-border-subtle" aria-hidden="true" />
               {/* ⚠️ The dot is DECORATIVE and the state is in the TEXT. Two
                   reasons, and the second is the one that decided it: a bare
                   `role="img"` badge trips the fail-closed scan in
@@ -1469,7 +1469,7 @@ export default function DatasetView() {
             stops for one control. The enabled arm now renders ONE anchor styled
             as a button; the disabled arm renders a real `<button>`, because
             there is nowhere for it to link to. */}
-        <div className="w-px h-4 bg-mm-border" aria-hidden="true" />
+        <div className="w-px h-4 bg-mm-border-subtle" aria-hidden="true" />
         {hasOpenText ? (
           <Button asChild variant="outline" size="sm" className="text-sm">
             <Link
@@ -1751,7 +1751,7 @@ export default function DatasetView() {
                     value={jumpValue}
                     onChange={(e) => setJumpValue(e.target.value.replace(/[^0-9]/g, ''))}
                     placeholder="Go to #"
-                    className="w-[88px] h-8 text-xs px-2 rounded-md border border-mm-border bg-mm-surface focus:outline-none focus:ring-2 focus:ring-ring"
+                    className="w-[88px] h-8 text-xs px-2 rounded-md border border-border bg-mm-surface focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                   <Button type="submit" variant="outline" size="sm" disabled={jumpValue === '' || isFetching}>
                     Go

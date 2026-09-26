@@ -1362,15 +1362,15 @@ def _rewrite_project_json(src: Path, dest: Path, mutate) -> Path:
     import json
     import zipfile
 
+    # v7 (#958): the five data-scaled entities are their own members, so the payload is
+    # read and written through `tests/archive_support`. A `mutate` that touched one of
+    # them would otherwise be written into a document nothing reads.
+    from tests.archive_support import archive_extras, archive_payload, write_archive
+
     with zipfile.ZipFile(src) as zin:
-        names = zin.namelist()
-        data = mutate(json.loads(zin.read("project.json")))
-        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zout:
-            for name in names:
-                if name == "project.json":
-                    zout.writestr(name, json.dumps(data))
-                else:
-                    zout.writestr(name, zin.read(name))
+        manifest = json.loads(zin.read("manifest.json"))
+        data = mutate(archive_payload(zin))
+        write_archive(dest, manifest, data, archive_extras(zin))
     return dest
 
 

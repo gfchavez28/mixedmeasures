@@ -9,6 +9,7 @@ import { LoadState } from '@/components/LoadStatus'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
+import { PANEL_SCROLLER } from '@/components/CollapsiblePanel'
 
 export interface NotesPanelHandle {
   focus: () => void
@@ -448,7 +449,7 @@ const NotesPanel = forwardRef<NotesPanelHandle, NotesPanelProps>(function NotesP
       </div>
 
       {/* Notes List */}
-      <div ref={listRef} className="flex-1 overflow-y-auto">
+      <div ref={listRef} className={PANEL_SCROLLER}>
         {notesLoad.status !== 'ready' ? (
           <LoadState
             load={notesLoad}

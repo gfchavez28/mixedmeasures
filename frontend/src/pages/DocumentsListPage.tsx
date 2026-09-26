@@ -1,25 +1,20 @@
 import { useState, useMemo, useRef, useCallback, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { FileInput, Trash2, Search, X, ArrowUpDown, FileText, UserRound } from 'lucide-react'
+import { FileInput, Trash2, FileText, UserRound } from 'lucide-react'
 import { documentsApi, type DocumentListItem, retryUnanswered} from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { LoadState } from '@/components/LoadStatus'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
-import { isSupportedDocumentFile } from '@/lib/document-import-formats'
+import { DOCUMENT_FORMAT_LABEL } from '@/lib/document-import-formats'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { sortSources } from '@/lib/source-list-sort'
+import SourceListToolbar from '@/components/SourceListToolbar'
+import { DATE_AND_NAME_SORTS, type SortChoice } from '@/lib/source-list-toolbar'
+import { routeDroppedFiles } from '@/lib/import-routing'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import InlineEditableText from '@/components/InlineEditableText'
-import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -43,6 +38,12 @@ const MODE_LABELS: Record<string, string> = {
   double_newline: 'By Blank Line',
 }
 
+
+const DOCUMENT_SORTS: SortChoice[] = [
+  ...DATE_AND_NAME_SORTS,
+  { key: 'progress', dir: 'desc', label: 'Most coded' },
+  { key: 'progress', dir: 'asc', label: 'Least coded' },
+]
 
 export default function DocumentsListPage() {
   const { projectId, openCodebook } = useProjectLayout()
@@ -197,11 +198,20 @@ export default function DocumentsListPage() {
       e.preventDefault()
       dragCounterRef.current = 0
       setIsDragOver(false)
-      const droppedFiles = Array.from(e.dataTransfer.files)
-      const validFiles = droppedFiles.filter(f => isSupportedDocumentFile(f.name))
-      if (validFiles.length === 0) return
-      setPendingImportFiles(validFiles, 'document')
-      navigate(`/projects/${projectId}/documents/import`)
+      // #1008: route by what the file IS, like the Conversations list — a
+      // transcript or recording dropped here used to vanish with no word.
+      const route = routeDroppedFiles(Array.from(e.dataTransfer.files), 'document')
+      if (route.kind === 'none') {
+        toast.error(`Drop a document (${DOCUMENT_FORMAT_LABEL}) here.`)
+        return
+      }
+      if (route.kind !== 'document') {
+        toast.info(route.kind === 'observation'
+          ? 'That looks like a recording — importing it as an Observation.'
+          : 'That looks like a transcript — importing it as a Conversation.')
+      }
+      setPendingImportFiles(route.files, route.kind)
+      navigate(`/projects/${projectId}/${route.kind}s/import`)
     },
   }), [projectId, navigate])
 
@@ -232,91 +242,21 @@ export default function DocumentsListPage() {
 
   return (
     <div className="max-w-4xl mx-auto px-3.5 py-3.5">
-      {/* Sub-nav row */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-1">
-          <button
-            className="px-3 py-1.5 rounded-md text-sm font-medium bg-purple-50 text-purple-700 border border-purple-200 dark:bg-purple-900/20 dark:text-purple-300 dark:border-purple-800/40"
-          >
-            All Documents
-            {documents.length > 0 && (
-              // 🔴 #908 CORRECTED 2026-09-12 — the space goes OUTSIDE the span,
-              // and the fragment is what lets it: an expression container holds
-              // ONE expression, so the space cannot simply sit beside the span
-              // inside this `&&`. MEASURED with `computeAccessibleName`: a space
-              // typed inside the span AND `<span>{' '}{n}</span>` BOTH compute
-              // "All Datasets1", because the algorithm trims each text node
-              // before joining, so only a space in the BUTTON's own child list
-              // survives (a fragment adds no node, so it flattens into one).
-              // This site carried the ineffective form from #908 until now.
-              <>{' '}<span className="ml-1.5 opacity-60">{documents.length}</span></>
-            )}
-          </button>
-          <button
-            onClick={openCodebook}
-            className="px-3 py-1.5 rounded-md text-sm font-medium text-mm-text-muted hover:text-mm-text transition-colors inline-flex items-center gap-1.5 border border-mm-surface-border hover:border-mm-text-muted"
-          >
-            Codebook
-          </button>
-        </div>
-        <div className="flex items-center gap-2">
-          {/* Search */}
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-mm-text-faint pointer-events-none" />
-            <Input
-              value={searchText}
-              onChange={(e) => setSearchText(e.target.value)}
-              placeholder="Search..."
-              className="w-44 h-8 pl-8 pr-7 text-sm"
-            />
-            {searchText && (
-              <button
-                onClick={() => setSearchText('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-mm-text-faint hover:text-mm-text transition-colors"
-                aria-label="Clear search"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-
-          {/* Sort */}
-          <Select
-            value={sortBy}
-            onValueChange={(val) => {
-              const v = val as 'name' | 'date' | 'progress'
-              if (v === sortBy) {
-                setSortDir(d => d === 'asc' ? 'desc' : 'asc')
-              } else {
-                setSortBy(v)
-                setSortDir(v === 'name' ? 'asc' : 'desc')
-              }
-            }}
-          >
-            {/* #892: see the conversations twin — the visible "Date ↓" is this
-                trigger's VALUE, and `combobox` takes no name from its contents. */}
-            <SelectTrigger className="w-[120px] h-8 text-sm" aria-label="Sort documents">
-              <ArrowUpDown className="w-3.5 h-3.5 mr-1.5 shrink-0 text-mm-text-faint" />
-              <SelectValue />
-              <span className="ml-1 text-mm-text-faint text-[11px]">{sortDir === 'asc' ? '\u2191' : '\u2193'}</span>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="date">Date</SelectItem>
-              <SelectItem value="name">Name</SelectItem>
-              <SelectItem value="progress">Progress</SelectItem>
-            </SelectContent>
-          </Select>
-
-          {/* Import */}
-          <button
-            onClick={() => navigate(`/projects/${projectId}/documents/import`)}
-            className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-md text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 transition-colors dark:bg-purple-700 dark:hover:bg-purple-600"
-          >
-            <FileInput className="w-3.5 h-3.5" />
-            Import
-          </button>
-        </div>
-      </div>
+      <SourceListToolbar
+        title="All Documents"
+        count={documents.length}
+        accent="purple"
+        noun="documents"
+        onOpenCodebook={openCodebook}
+        showListControls={documents.length > 0}
+        searchText={searchText}
+        onSearchChange={setSearchText}
+        sortChoices={DOCUMENT_SORTS}
+        sortBy={sortBy}
+        sortDir={sortDir}
+        onSortChange={(key, dir) => { setSortBy(key); setSortDir(dir) }}
+        onImport={() => navigate(`/projects/${projectId}/documents/import`)}
+      />
 
       {/* Content */}
       {documents.length === 0 ? (
@@ -328,7 +268,7 @@ export default function DocumentsListPage() {
           }`}
           {...dragHandlers()}
         >
-          <div className="text-[32px] mb-4"><FileText className="w-8 h-8 mx-auto text-purple-400" /></div>
+          <div className="text-[32px] mb-4"><FileText className="w-8 h-8 mx-auto text-purple-400" aria-hidden="true" /></div>
           {isDragOver ? (
             <>
               <h2 className="text-lg font-semibold text-purple-600 dark:text-purple-400 mb-2">Drop files to import</h2>
@@ -338,7 +278,7 @@ export default function DocumentsListPage() {
             <>
               <h2 className="text-lg font-semibold text-mm-text mb-2">No documents yet</h2>
               <p className="text-sm text-mm-text-muted mb-6">
-                Import DOCX, PDF, or TXT files to get started, or drag and drop files here.
+                Import a document to get started, or drag and drop files here — {DOCUMENT_FORMAT_LABEL}.
               </p>
               <button
                 onClick={() => navigate(`/projects/${projectId}/documents/import`)}
@@ -486,7 +426,7 @@ function DocumentCard({
 
           {/* Progress bar (a11y: explicit progressbar semantics per #351/#352) */}
           <div
-            className="mt-2 h-1 bg-mm-border-light rounded-full overflow-hidden"
+            className="mt-2 h-1 bg-mm-border-subtle rounded-full overflow-hidden"
             role="progressbar"
             aria-label="Coding progress"
             aria-valuenow={doc.coded_segment_count}

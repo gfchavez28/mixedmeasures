@@ -667,3 +667,124 @@ describe('#937 — the breadcrumb yields and clips instead of overlapping', () =
     expect(titled.length, 'each truncating crumb needs its own title').toBe(2)
   })
 })
+
+/**
+ * #998 — the panel rail at a short viewport.
+ *
+ * MEASURED on the conversation workbench at 640×360 with a code set rendered:
+ * the rail sat at x=470..790, i.e. 150px past the right edge (226px in the
+ * state the a11y sweep filed) with no scroll anywhere, and the Codes panel's
+ * code list was 0px while holding 1,563px. After: rail at 320..640, code list
+ * 180px, 0 off-screen code-set values. The stated minimum window is unchanged —
+ * at 1280×720 the panels still measure 275/138/138 with `min-height: 0px`.
+ *
+ * ⚠️ jsdom computes no layout, so every assertion here pins TECHNIQUE only.
+ * Re-drive at 640×360 AND 1280×720 after touching a rail.
+ *
+ * ⚠️ STATED RESIDUAL: the list population is derived from `ref={listRef}`, so a
+ * future rail panel that scrolls some other element escapes this scan.
+ * `TextNotesPanel` is already such a case and is safe for its own reason (an
+ * unconditional `max-h-[30vh]`), which is why it is asserted by name below.
+ */
+describe('#998 — the panel rail yields at a short viewport instead of starving', () => {
+  /** The rail pages, re-derived rather than listed (#730). */
+  const railPages = srcFilesContaining('<CollapsiblePanel')
+
+  it('the population is the four rails, found rather than assumed', () => {
+    expect(railPages.length, 'expected the four pages that render a panel rail').toBe(4)
+    for (const rel of ['pages/CodingWorkbench.tsx', 'pages/DocumentCodingWorkbench.tsx',
+      'pages/ObservationWorkbench.tsx', 'pages/TextCodingView.tsx']) {
+      expect(railPages, `${rel} renders a rail and must be scanned`).toContain(rel)
+    }
+  })
+
+  it('both halves of the height rule live in ONE constant', () => {
+    // #721/#830(a)'s rule: the base and the collapse arm cannot be separated, or
+    // one of them is edited without the other. `min-h-0` is what keeps a panel a
+    // bounded box whose list scrolls internally at a NORMAL viewport — measured
+    // at 1280×720, an unconditional floor made the column scroll 900px of content
+    // in 550px, i.e. it would regress the stated minimum window.
+    const src = stripComments(read('components/CollapsiblePanel.tsx'))
+    expect(src, 'the normal-viewport half').toMatch(/PANEL_EXPANDED = '[^']*\bmin-h-0\b/)
+    expect(src, 'the short-viewport half').toMatch(/PANEL_EXPANDED = '[^']*max-height:480px\)\]:min-h-\[auto\]/)
+    // 480px is the house short-viewport breakpoint (`LoadStatus.tsx`), reused
+    // rather than a second one invented.
+    expect(stripComments(read('components/LoadStatus.tsx')),
+      'the breakpoint this one is borrowed from has moved').toMatch(/max-height:480px/)
+  })
+
+  it('no rail re-inlines the height rule it is supposed to import', () => {
+    // THE regression this guard exists for: a page going back to a bare
+    // `min-h-0`, which reads as correct and silently restores the 0px panel.
+    for (const rel of railPages) {
+      const src = stripComments(read(rel))
+      expect(src, `${rel} must import the shared rule`).toMatch(/PANEL_EXPANDED/)
+      expect(src, `${rel} re-inlines min-h-0 instead of using PANEL_EXPANDED`)
+        .not.toMatch(/'flex-(?:\[2\]|1) min-h-0'/)
+    }
+  })
+
+  it('every rail column can scroll once its panels claim their height', () => {
+    // Three of the four were `overflow-hidden` and the document one declared no
+    // overflow at all, so the over-subscribed state was invisible or a spill.
+    //
+    // ⚠️ THE FIRST DRAFT OF THIS ASSERTION MATCHED THE WHOLE FILE AND A PLANTED
+    // MUTANT SURVIVED IT: removing `PANEL_RAIL_SCROLL` from the column left the
+    // IMPORT behind, and an import is not a use. Match the column's own line.
+    // ⚠️ The width is what identifies the column, and the first draft used
+    // `shrink-0` instead — which `flex-shrink-0` on the COLLAPSED icon rail also
+    // contains, so the count assertion failed at 2 and named the right cause.
+    for (const rel of railPages) {
+      const columns = code(rel).filter(l =>
+        l.includes('bg-mm-surface') && /\bw-(?:80|72)\b/.test(l) && l.includes('flex flex-col'))
+      expect(columns.length, `${rel}'s rail column was not found — has the rail moved?`).toBe(1)
+      expect(columns[0], `${rel}'s rail column cannot scroll`).toMatch(/PANEL_RAIL_SCROLL/)
+      expect(columns[0], `${rel}'s rail column still clips its own overflow`)
+        .not.toMatch(/\boverflow-hidden\b/)
+    }
+    expect(stripComments(read('components/CollapsiblePanel.tsx')))
+      .toMatch(/PANEL_RAIL_SCROLL = '[^']*overflow-y-auto/)
+  })
+
+  it('every growable rail list carries a height bound', () => {
+    // #894's rule: cap the thing that GROWS (the list), never the section, whose
+    // chrome is fixed. Capping the panel instead was built and measured — under a
+    // two-code-set strip the list came back at 8px.
+    const scrollers = sourceFiles({ ext: 'tsx', floor: 250 })
+      .map(srcRel)
+      .flatMap(rel => code(rel)
+        .filter(l => l.includes('ref={listRef} className='))
+        .map(line => ({ rel, line })))
+    expect(scrollers.length, 'the listRef scroller population vanished — has the pattern moved?')
+      .toBeGreaterThanOrEqual(6)
+    for (const { rel, line } of scrollers) {
+      expect(line, `${rel}'s list can be starved to 0px`)
+        .toMatch(/PANEL_SCROLLER|max-h-/)
+    }
+    // The two that solved this before #998 and are deliberately left alone: an
+    // unconditional cap is right there and wrong for the four, which would then
+    // shorten on a tall monitor where nothing is wrong.
+    expect(read('components/TextCodePanel.tsx')).toMatch(/max-h-\[50vh\]/)
+    expect(read('components/TextNotesPanel.tsx')).toMatch(/max-h-\[30vh\]/)
+  })
+
+  it('the conversation transcript column grants the collapse AND clips', () => {
+    // #937's pairing, and each half was refuted alone. Without `min-w-0` this
+    // column holds its 470px min-content and pushes the 320px rail off-screen;
+    // without the clip its header gutters run to x=443 over a 320px column, kept
+    // off the rail only by the rail being an opaque later sibling.
+    const line = code('pages/CodingWorkbench.tsx')
+      .find(l => l.includes('flex-1') && l.includes('border-r bg-mm-surface'))
+    expect(line, 'the transcript column was not found — has the workbench moved?').toBeTruthy()
+    expect(line).toMatch(/min-w-0/)
+    expect(line).toMatch(/overflow-x-hidden/)
+  })
+
+  it("the scan can still see the technique it bans", () => {
+    // A self-check per NARROWING (#814): without it a broken matcher reports zero
+    // offenders and passes by finding nothing.
+    const planted = "className={panelStates.codes.collapsed ? '' : 'flex-[2] min-h-0'}"
+    expect(planted).toMatch(/'flex-(?:\[2\]|1) min-h-0'/)
+    expect("className={cn('flex-[2]', PANEL_EXPANDED)}").not.toMatch(/'flex-(?:\[2\]|1) min-h-0'/)
+  })
+})

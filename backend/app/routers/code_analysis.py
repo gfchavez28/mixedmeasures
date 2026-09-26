@@ -15,6 +15,7 @@ from .helpers import (
     parse_int_list, _get_observation_or_404, _get_project_or_404, sanitize_csv_filename,
 )
 from .export_helpers import csv_safe
+from ..services.coding_layers import LAYER_SCOPE_PATTERN
 from ..services.code_analysis import (
     get_code_frequencies,
     get_segments_with_context,
@@ -30,6 +31,7 @@ from ..services.code_analysis import (
     _build_cooccurrence_response,
 )
 from ..services.irr import compute_irr, parse_source_token
+from ..services.machine_agreement import compute_machine_agreement
 from ..services.open_cut_reliability import (
     DEFAULT_BIN_SECONDS,
     compute_binned_kappa,
@@ -38,7 +40,7 @@ from ..services.open_cut_reliability import (
 from ..services.coding_coverage import source_coder_coverage, project_coder_coverage
 from ..services.reconciliation import RECONCILIATION_SOURCE_TYPES, build_reconciliation
 from ..services.consensus import consensus_enabled, consensus_exists_for_project
-from ..services.consensus_staleness import sweep_stale_consensus
+from ..services.consensus_staleness import drain_stale_consensus
 from ..services.audit import log_action
 from ..models.consensus_stale_target import ConsensusStaleTarget
 from ..schemas.code_analysis import (
@@ -55,6 +57,9 @@ from ..schemas.code_analysis import (
     TextColumnInfo,
     BinnedKappaResponse,
     IrrResponse,
+    MachineAgreementResponse,
+    MachineCodeAgreement,
+    MachinePairAgreementResponse,
     UnitizingAlphaResponse,
     ConsensusStatusResponse,
     ReconciliationResponse,
@@ -137,7 +142,7 @@ async def code_frequencies(
     participant_ids: str | None = Query(None, description="Comma-separated participant IDs"),
     document_ids: str | None = Query(None, description="Comma-separated document IDs"),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
-    layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default — all non-consensus coders, optionally narrowed by coder_ids) or 'consensus' (the derived consensus layer)"),
+    layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default — people's coding, optionally narrowed by coder_ids; excludes consensus AND machine), 'consensus' (the derived layer) or 'machine' (imported model output)"),
     source: str = Query("conversations", description="Source: all, conversations, or text (legacy 'comments' is coerced to 'text')"),
     # Appended LAST (bare-default convention) — 4c: observation scoping.
     observation_ids: str | None = None,
@@ -180,7 +185,7 @@ async def code_segments_with_context(
     participant_ids: str | None = Query(None, description="Comma-separated participant IDs"),
     document_ids: str | None = Query(None, description="Comma-separated document IDs"),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
-    layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default — all non-consensus coders, optionally narrowed by coder_ids) or 'consensus' (the derived consensus layer)"),
+    layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default — people's coding, optionally narrowed by coder_ids; excludes consensus AND machine), 'consensus' (the derived layer) or 'machine' (imported model output)"),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     # Appended LAST (bare-default convention) — 4c: observation scoping.
@@ -219,7 +224,7 @@ async def code_comments_with_context(
     participant_ids: str | None = Query(None, description="Comma-separated participant IDs"),
     text_column_ids: str | None = Query(None, description="Comma-separated text column IDs"),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
-    layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default — all non-consensus coders, optionally narrowed by coder_ids) or 'consensus' (the derived consensus layer)"),
+    layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default — people's coding, optionally narrowed by coder_ids; excludes consensus AND machine), 'consensus' (the derived layer) or 'machine' (imported model output)"),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     user: User = Depends(get_current_user),
@@ -255,7 +260,7 @@ async def code_cooccurrence(
     text_column_ids: str | None = Query(None, description="Comma-separated text column IDs"),
     document_ids: str | None = Query(None, description="Comma-separated document IDs"),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
-    layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default — all non-consensus coders, optionally narrowed by coder_ids) or 'consensus' (the derived consensus layer)"),
+    layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default — people's coding, optionally narrowed by coder_ids; excludes consensus AND machine), 'consensus' (the derived layer) or 'machine' (imported model output)"),
     source: str = Query("conversations", description="Source: all, conversations, or text (legacy 'comments' is coerced to 'text')"),
     level: str = Query("segment", description="Level: segment or source"),
     # Appended LAST (bare-default convention) — 4c: observation scoping.
@@ -378,7 +383,7 @@ async def saturation(
     conversation_ids: str | None = Query(None, description="Comma-separated conversation IDs"),
     document_ids: str | None = Query(None, description="Comma-separated document IDs"),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
-    layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default — all non-consensus coders, optionally narrowed by coder_ids) or 'consensus' (the derived consensus layer)"),
+    layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default — people's coding, optionally narrowed by coder_ids; excludes consensus AND machine), 'consensus' (the derived layer) or 'machine' (imported model output)"),
     # Appended LAST (bare-default convention) — 4c: observation scoping.
     observation_ids: str | None = None,
     user: User = Depends(get_current_user),
@@ -439,6 +444,70 @@ def inter_rater_reliability(
         db, project_id,
         coder_ids=parse_int_list(coder_ids),
         source=parse_source_token(source),
+    )
+
+
+@router.get("/machine-agreement", response_model=MachineAgreementResponse)
+def machine_agreement(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """How far each MACHINE coder's labels agree with each person's (row 49).
+
+    🔴 **A SEPARATE table, never pooled.** It does not contribute to the headline
+    α, it does not appear in the per-code reliability table, and there is no
+    project-level figure. One coefficient per (person × machine × code) — the
+    grain the claim is actually about.
+
+    🔴 **IT DESCRIBES THE MODEL. IT IS NOT VALIDATION OF THE CODING.** A κ between
+    a person and a model says how well the model reproduces that person's
+    judgements. It is evidence for none of Krippendorff's validity types and it is
+    not an inter-rater figure — the raters of one are people making independent
+    interpretations, which a model run is not. The copy that says so ships with
+    the table (`lib/machine-agreement-copy.ts`), and this endpoint exists in the
+    first place only because #989 made the machine layer excludable everywhere
+    else.
+
+    ⚠️ The unit rule is Option B's, the SAME one the human table uses, and each
+    side's coverage rides every row so a figure computed over a corner of the
+    corpus cannot look like one computed over all of it. The reasoning, and the
+    narrower rule that was refused, are in `services/machine_agreement.py`.
+
+    ⚠️ Plain `def` (#837): queries and pure arithmetic, no `await`.
+    """
+    _get_project_or_404(db, project_id, user.id)
+    result = compute_machine_agreement(db, project_id)
+    return MachineAgreementResponse(
+        available=result.available,
+        unavailable_reason=result.unavailable_reason,
+        pairs=[
+            MachinePairAgreementResponse(
+                human_id=p.human_id,
+                human_name=p.human_name,
+                machine_id=p.machine_id,
+                machine_name=p.machine_name,
+                machine_provenance=p.machine_provenance,
+                n_units=p.n_units,
+                per_code=[
+                    MachineCodeAgreement(
+                        code_id=c.code_id,
+                        code_name=c.code_name,
+                        n_units=c.n_units,
+                        human_applied=c.human_applied,
+                        machine_applied=c.machine_applied,
+                        both_applied=c.both_applied,
+                        percent_agreement=c.percent_agreement,
+                        kappa=c.kappa,
+                        kappa_interpretation=c.kappa_interpretation,
+                        prevalence=c.prevalence,
+                        undefined_reason=c.undefined_reason,
+                    )
+                    for c in p.per_code
+                ],
+            )
+            for p in result.pairs
+        ],
     )
 
 
@@ -593,12 +662,20 @@ async def recompute_consensus(
     this syncs the STORED layer for the other surfaces + clears the stale badge."""
     _get_project_or_404(db, project_id, user.id)
     recomputed = 0
+    failed: frozenset[int] = frozenset()
     try:
         for _ in range(20):  # cap iterations (≤10k targets/call) — runaway backstop
-            n = sweep_stale_consensus(db, project_id=project_id, limit=500)
-            db.commit()
-            recomputed += n
-            if n < 500:
+            # `drain_stale_consensus` commits and isolates a target that raises
+            # (#1017): before it, one bad target made this button a 500 and left
+            # every other marker of the project undrained. A failing marker stays
+            # queued and is counted in `remaining`.
+            result = drain_stale_consensus(
+                db, project_id=project_id, limit=500, known_failed=failed,
+            )
+            recomputed += result.recomputed
+            new_failures = result.failed_marker_ids - failed
+            failed = result.failed_marker_ids
+            if result.recomputed + len(new_failures) < 500:
                 break
     except OperationalError:
         # Two-writer lock race with the background sweep — leave the rest pending
@@ -651,7 +728,7 @@ async def source_frequencies_csv(
     participant_ids: str | None = Query(None),
     group_by_subtype: str | None = Query(None),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
-    layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default) or 'consensus'"),
+    layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default), 'consensus' or 'machine'"),
     # Appended LAST (bare-default convention) — 4c: observation scoping.
     observation_ids: str | None = None,
     user: User = Depends(get_current_user),
@@ -744,7 +821,7 @@ async def demographic_comparison_csv(
     exclude_facilitator: bool = Query(True),
     participant_ids: str | None = Query(None),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
-    layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default) or 'consensus'"),
+    layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default), 'consensus' or 'machine'"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

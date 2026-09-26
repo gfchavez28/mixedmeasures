@@ -37,6 +37,7 @@ const CanvasView = lazy(() => import('./pages/CanvasView'))
 const CanvasCompareView = lazy(() => import('./pages/CanvasCompareView'))
 const CodebookView = lazy(() => import('./pages/CodebookView'))
 const RatingSweep = lazy(() => import('./pages/RatingSweep'))
+const CodingImport = lazy(() => import('./pages/CodingImport'))
 const MergeProject = lazy(() => import('./pages/MergeProject'))
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -161,6 +162,11 @@ function AppRoutes() {
             same reason the codebook is: it is CROSS-SOURCE and code-level, so
             it belongs to no single source list. */}
         <Route path="analysis/ratings" element={<RatingSweep />} />
+        {/* Queue row 49 — bulk import of codings, including a machine
+            layer. NOT under a source tab: it reaches every kind of
+            material, so it hangs off the project rather than off one of
+            them. Entry point: the TopRail Analysis menu. */}
+        <Route path="coding-import" element={<CodingImport />} />
         <Route path="participants" element={<ParticipantsPage />} />
         <Route path="starred" element={<Navigate to="../analysis/qualitative?tab=quoteboard" replace />} />
         <Route path="memos-notes" element={<MemosNotesPage />} />

@@ -6,8 +6,9 @@ view: what each coder applied, the LIVE-derived consensus, and a disagreement fl
 Two voter models, deliberately different (the subtlety that makes the grid correct):
 
 - **Consensus column = TARGET-level voters** (the coders who coded THIS unit) via
-  ``_decide_consensus`` — byte-identical to the materialized consensus layer (same
-  DEC-D rule), just computed live so it's always fresh.
+  ``consensus.decide_target`` — the SAME per-target decision the materialized
+  layer is written from (the DEC-D rule plus the code-set decider), just computed
+  live so it's always fresh.
 - **by_coder + has_disagreement = SOURCE-level engagement** (Option B): every coder
   who coded anywhere in the unit's source, with a blank set for one who reviewed the
   source but left this unit uncoded (explicit absence) — so the grid surfaces
@@ -32,10 +33,16 @@ from ..models.dataset import DatasetValue
 from ..models.segment import Segment
 from ..models.user import User
 from .coding_layers import build_effective_code_map, resolve_effective_code
+from .code_sets import (
+    SET_MULTIPLE,
+    build_code_set_index,
+    comparable_choice,
+    selection_for,
+)
 from .consensus import (
-    _decide_consensus,
     _decide_magnitude,
     _rating_values,
+    decide_target,
     has_disagreement,
     has_rating_disagreement,
     scales_for_project,
@@ -152,11 +159,18 @@ def build_reconciliation(
     # canonical id, because that is the id the chips are keyed by and the scale
     # they would render it against (`_rating_values` states the pooling rule).
     scales = scales_for_project(db, project_id)
-    effective_map = build_effective_code_map(db, project_id) if scales else {}
+    # ⚠️ Read UNCONDITIONALLY since row 48: it used to be gated on `scales`
+    # because only the rating path needed it, and the set index needs it too —
+    # two callers, one query, rather than the same map built twice per request.
+    effective_map = build_effective_code_map(db, project_id)
     # #35 — the merge disagreement flags: applications whose merged copy carried
     # a DIFFERENT rating. Bounded by the number of unresolved conflicts, which is
     # small, so a dedicated query beats widening the shared gather's tuple again.
     conflicts = _merge_conflicts(db, project_id) if scales else {}
+
+    # Row 48 — read ONCE per call, like `scales`: the index is per project, so
+    # building it per unit would be a query per row of the grid.
+    set_index = build_code_set_index(db, project_id, effective_map)
 
     def _canonical_ratings(unit_ratings: dict[int, dict[int, float | None]], coder_ids_here) -> dict:
         out: dict[int, dict[int, float]] = {}
@@ -170,6 +184,40 @@ def build_reconciliation(
             if mine:
                 out[cid] = mine
         return out
+
+    def _set_selections(index, projection, engaged_coders) -> tuple[dict, bool]:
+        """Each engaged coder's chosen value per set, and whether they differ.
+
+        ⚠️ **A coder with NO selection on an EXHAUSTIVE set is left out**, not
+        recorded as disagreeing: on that kind of set a blank is missing data, so
+        counting it against a colleague's choice would flag every partially
+        worked unit for review. On an INCLUSIVE set the blank is the value "none
+        of these" and does count — the same rule `_decide_set_selection` votes
+        by, so the badge and the consensus column cannot tell different stories.
+        """
+        out: dict[str, dict[str, int | None]] = {}
+        disagree = False
+        for resolved in index.sets:
+            if not resolved.member_ids:
+                continue
+            per_coder: dict[str, int | None] = {}
+            comparable: list[int] = []
+            for cid in engaged_coders:
+                value = selection_for(projection.get(cid, set()), resolved)
+                if value == SET_MULTIPLE:
+                    # A contradiction is not a value — and it always needs
+                    # review, whatever the others chose.
+                    disagree = True
+                # The rule itself is `comparable_choice`'s (#1017), shared with
+                # the α matrix and the consensus decider.
+                cell = comparable_choice(value, resolved.exhaustive)
+                per_coder[str(cid)] = cell
+                if cell is not None:
+                    comparable.append(cell)
+            if len(set(comparable)) > 1:
+                disagree = True
+            out[str(resolved.id)] = per_coder
+        return out, disagree
 
     # Per-unit records (no text/labels yet — those are batched for the page only).
     records = []
@@ -190,11 +238,25 @@ def build_reconciliation(
         # re-rating, so it belongs in the review set until then.
         unit_conflicts = _canonical_ratings(conflicts.get(u, {}), engaged_coders)
         merge_conflict = bool(unit_conflicts)
-        if disagreements_only and not (disagree or rating_disagree or merge_conflict):
+        # Row 48 — a FOURTH review fact, never folded into the other three: the
+        # engaged coders chose different values of one code set. A set
+        # disagreement and a code disagreement are different things to fix, so
+        # the badge must be able to say which.
+        set_choices_by_coder, set_disagree = _set_selections(
+            set_index, projection, engaged_coders,
+        )
+        if disagreements_only and not (
+            disagree or rating_disagree or merge_conflict or set_disagree
+        ):
             continue
-        decisions = _decide_consensus(target_voters)
+        # 🔴 The SAME decision the consensus WRITER makes — `decide_target`, the
+        # one per-target decision all four consumers call (#1018). This grid
+        # derives consensus live so it is always fresh, and a live re-derivation
+        # that disagreed with the stored layer would put a different answer on
+        # the screen whose job is adjudication.
+        decisions = decide_target(target_voters, set_index)
         context: dict[str, dict] = {}
-        for eff, rule, agree, voters in decisions:
+        for eff, rule, agree, voters, _code_set in decisions:
             entry: dict = {"rule": rule, "agree": agree, "voters": voters}
             if eff in scales:
                 rating = _decide_magnitude(_rating_values(unit_ratings, target_voters, eff), scales[eff])
@@ -214,11 +276,19 @@ def build_reconciliation(
                 for cid, mine in unit_conflicts.items()
             },
             "engaged": sorted(engaged_coders),
-            "consensus": [eff for (eff, _r, _a, _v) in decisions],
+            "consensus": [d.code_id for d in decisions],
             "consensus_context": context,
             "has_disagreement": disagree,
             "has_rating_disagreement": rating_disagree,
             "has_merge_conflict": merge_conflict,
+            # Row 48 — the fourth fact and the values behind it. The grid renders
+            # a set as a SINGLE-CHOICE control rather than as chips: chips say
+            # "these applied", while a set says "this one was chosen from these",
+            # and rendering a selection as one chip among others loses the fact
+            # that the other values were on offer and were rejected — which is
+            # the whole content of the judgement being adjudicated.
+            "set_selection_by_coder": set_choices_by_coder,
+            "has_set_disagreement": set_disagree,
         })
 
     # Deterministic read order: source group, then segment sequence / value id.
@@ -305,6 +375,8 @@ def build_reconciliation(
             "has_disagreement": r["has_disagreement"],
             "has_rating_disagreement": r["has_rating_disagreement"],
             "has_merge_conflict": r["has_merge_conflict"],
+            "set_selection_by_coder": r["set_selection_by_coder"],
+            "has_set_disagreement": r["has_set_disagreement"],
         })
 
     return {

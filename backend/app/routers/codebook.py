@@ -24,7 +24,7 @@ from ..schemas.codebook import (
     CodebookCategoryNode,
     CodebookTreeResponse,
 )
-from ..services.coding_layers import layer_origin_filter
+from ..services.coding_layers import LAYER_SCOPE_PATTERN, layer_scope_filter
 from ..services import magnitude
 
 router = APIRouter(prefix="/api/projects/{project_id}/codebook", tags=["codebook"])
@@ -59,7 +59,7 @@ async def get_codebook_tree(
     include_inactive: bool = Query(False),
     min_segments: int | None = Query(None),
     max_segments: int | None = Query(None),
-    layer_scope: str | None = Query(None, pattern="^(human|consensus)$", description="Coder layer (J2 Slab 7): 'human' (default) or 'consensus'"),
+    layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default), 'consensus' or 'machine'"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -94,7 +94,7 @@ async def get_codebook_tree(
         .filter(
             CodeApplication.code_id.in_(code_ids),
             CodeApplication.segment_id.isnot(None),
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
         )
         .join(Segment, CodeApplication.segment_id == Segment.id)
         .join(Conversation, Segment.conversation_id == Conversation.id)
@@ -121,7 +121,7 @@ async def get_codebook_tree(
         .filter(
             CodeApplication.code_id.in_(code_ids),
             CodeApplication.dataset_value_id.isnot(None),
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
         )
         .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
         .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
@@ -144,7 +144,7 @@ async def get_codebook_tree(
             CodeApplication.segment_id.isnot(None),
             # J2-5 L: source_count must honor the layer too, or it diverges from
             # segment_count within one response (and inflates once consensus exists).
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
         )
         .join(Segment, CodeApplication.segment_id == Segment.id)
         .join(Conversation, Segment.conversation_id == Conversation.id)
@@ -173,7 +173,7 @@ async def get_codebook_tree(
         .filter(
             CodeApplication.code_id.in_(code_ids),
             CodeApplication.dataset_value_id.isnot(None),
-            layer_origin_filter(layer_scope),  # J2-5 L — see 2c
+            layer_scope_filter(layer_scope),  # J2-5 L — see 2c
         )
         .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
         .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
@@ -198,7 +198,7 @@ async def get_codebook_tree(
         .filter(
             CodeApplication.code_id.in_(code_ids),
             CodeApplication.segment_id.isnot(None),
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
         )
         .join(Segment, CodeApplication.segment_id == Segment.id)
         .join(Document, Segment.document_id == Document.id)
@@ -216,7 +216,7 @@ async def get_codebook_tree(
         .filter(
             CodeApplication.code_id.in_(code_ids),
             CodeApplication.segment_id.isnot(None),
-            layer_origin_filter(layer_scope),  # J2-5 L — see 2c
+            layer_scope_filter(layer_scope),  # J2-5 L — see 2c
         )
         .join(Segment, CodeApplication.segment_id == Segment.id)
         .join(Document, Segment.document_id == Document.id)
@@ -240,7 +240,7 @@ async def get_codebook_tree(
         .filter(
             CodeApplication.code_id.in_(code_ids),
             CodeApplication.segment_id.isnot(None),
-            layer_origin_filter(layer_scope),
+            layer_scope_filter(layer_scope),
         )
         .join(Segment, CodeApplication.segment_id == Segment.id)
         .join(Observation, Segment.observation_id == Observation.id)
@@ -258,7 +258,7 @@ async def get_codebook_tree(
         .filter(
             CodeApplication.code_id.in_(code_ids),
             CodeApplication.segment_id.isnot(None),
-            layer_origin_filter(layer_scope),  # J2-5 L — see 2c
+            layer_scope_filter(layer_scope),  # J2-5 L — see 2c
         )
         .join(Segment, CodeApplication.segment_id == Segment.id)
         .join(Observation, Segment.observation_id == Observation.id)
@@ -280,7 +280,7 @@ async def get_codebook_tree(
         .filter(
             CodeApplication.code_id.in_(code_ids),
             CodeApplication.segment_id.isnot(None),
-            layer_origin_filter(layer_scope),  # J2-5 L — honor the layer like every sibling count
+            layer_scope_filter(layer_scope),  # J2-5 L — honor the layer like every sibling count
         )
         .join(Excerpt, CodeApplication.segment_id == Excerpt.segment_id)
         .group_by(CodeApplication.code_id)
@@ -292,7 +292,7 @@ async def get_codebook_tree(
         .filter(
             CodeApplication.code_id.in_(code_ids),
             CodeApplication.dataset_value_id.isnot(None),
-            layer_origin_filter(layer_scope),  # J2-5 L — honor the layer like every sibling count
+            layer_scope_filter(layer_scope),  # J2-5 L — honor the layer like every sibling count
         )
         .join(Excerpt, CodeApplication.dataset_value_id == Excerpt.dataset_value_id)
         .group_by(CodeApplication.code_id)

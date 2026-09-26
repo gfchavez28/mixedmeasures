@@ -273,9 +273,10 @@ def test_join_back_export_carries_dataset_value_children(db_session, tmp_path):
 
     buf = pp.export_project(db_session, project.id, tmp_path / "docs", tmp_path / "media")
 
-    import json, zipfile
-    with zipfile.ZipFile(buf) as zf:
-        data = json.loads(zf.read("project.json"))
+    # v7 (#958): `dataset_values` and `code_applications` are their own members now.
+    # This test is about the GATHER, not the layout, so it reads the union.
+    from tests.archive_support import archive_payload
+    data = archive_payload(buf)
 
     assert len(data["dataset_values"]) == 4
     assert len(data["code_applications"]) == 4, (
@@ -292,10 +293,9 @@ def test_export_reaches_values_through_rows_not_an_id_list(db_session, tmp_path)
     other, _ = _project_with_dataset_annotations(db_session)
     db_session.commit()
 
-    import json, zipfile
+    from tests.archive_support import archive_payload
     buf = pp.export_project(db_session, project.id, tmp_path / "docs", tmp_path / "media")
-    with zipfile.ZipFile(buf) as zf:
-        data = json.loads(zf.read("project.json"))
+    data = archive_payload(buf)
 
     assert len(data["dataset_values"]) == 4, "the export leaked another project's values"
     assert len(data["code_applications"]) == 4

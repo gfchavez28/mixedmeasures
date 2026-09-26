@@ -497,7 +497,22 @@ class TestCodedSegmentsCsvCarriesTheRating:
         db.add(CodeApplication(segment_id=9000, code_id=902, user_id=1))                  # no scale
         db.flush()
         rows = self._export(db)
-        assert list(rows[0].keys())[-3:] == ["Rating", "Rating Scale", "Rating Anchor"]
+        headers = list(rows[0].keys())
+        # 🔴 The rule is "APPENDED, so every existing column keeps its
+        # POSITION" — not "these are the last three". This asserted the
+        # stronger claim and reddened the day row 49 appended a `Unit ID`
+        # column, against code that had kept #35's actual promise. Pinned as
+        # the property now: the pre-#35 columns are an unbroken PREFIX, and
+        # the three rating columns are contiguous and after them.
+        pre_35 = [
+            "Code", "Category", "Coder", "Source Type", "Source", "Speaker",
+            "Participant", "Participant Role", "Segment Text", "Other Codes",
+            "Is Quoted", "Timestamp", "End Timestamp",
+        ]
+        assert headers[:len(pre_35)] == pre_35
+        at = headers.index("Rating")
+        assert headers[at:at + 3] == ["Rating", "Rating Scale", "Rating Anchor"]
+        assert at >= len(pre_35)
         by = {(r["Code"], r["Segment Text"]): r for r in rows}
         zero = by[("District support", "a segment")]
         assert zero["Rating"] == "0" and zero["Rating Scale"] == "-1 to 1" and zero["Rating Anchor"] == "neither"

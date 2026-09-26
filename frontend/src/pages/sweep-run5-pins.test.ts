@@ -50,10 +50,13 @@ describe('#908 — a count badge is separated from its label by a TEXT space', (
   // The property itself is measured in `pages/count-badge-spacing.test.ts`
   // (both shapes, both names, plus the tell that `textContent` cannot see the
   // difference). This block stays as the per-SITE pin it was always meant to be.
+  //
+  // #1008 (2026-09-23): the four source list pages now render their count
+  // through ONE component, so the per-site pin is on that component, and the
+  // population below asserts every page reaches it — a page that went back to
+  // hand-rolling its heading would fail there rather than escape this block.
   it.each([
-    ['pages/DatasetsListPage.tsx', 'datasets.length'],
-    ['pages/ConversationsListPage.tsx', 'conversations.length'],
-    ['pages/DocumentsListPage.tsx', 'documents.length'],
+    ['components/SourceListToolbar.tsx', 'count'],
   ])('%s', (rel, expr) => {
     const src = source(rel)
     const n = expr.replace('.', '\\.')
@@ -68,6 +71,19 @@ describe('#908 — a count badge is separated from its label by a TEXT space', (
     // The space is a SIBLING of the span, inside a fragment. This positive is
     // what carries the property.
     expect(src).toMatch(new RegExp(`<>\\{' '\\}<span[^>]*opacity-60">\\{${n}\\}</span></>`))
+  })
+
+  it.each([
+    ['pages/DatasetsListPage.tsx', 'datasets.length'],
+    ['pages/ConversationsListPage.tsx', 'conversations.length'],
+    ['pages/DocumentsListPage.tsx', 'documents.length'],
+    ['pages/ObservationsListPage.tsx', 'observations.length'],
+  ])('%s renders its count through the shared toolbar', (rel, expr) => {
+    const src = source(rel)
+    expect(src).toContain('<SourceListToolbar')
+    expect(src).toContain(`count={${expr}}`)
+    // ...and carries no hand-rolled count badge of its own.
+    expect(src).not.toMatch(/opacity-60">\{[a-z]+\.length\}/)
   })
 })
 

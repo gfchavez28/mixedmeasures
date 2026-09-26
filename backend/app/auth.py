@@ -2,8 +2,10 @@ import secrets
 from datetime import datetime, timedelta, timezone
 import bcrypt
 from fastapi import HTTPException, Request, Response, Depends
+from sqlalchemy import case, exists
 from sqlalchemy.orm import Session
 from .database import get_db
+from .models.audit import AuditEntry
 from .models.user import User, Session as SessionModel
 from .config import get_settings
 
@@ -24,13 +26,96 @@ UNATTRIBUTED_CODER_NAME = "Unattributed"
 # row that holds `origin='consensus'` code applications across all projects.
 CONSENSUS_CODER_NAME = "Consensus"
 
-# Coder types that are SYSTEM/derived identities — real data owners (they can
-# hold code applications) but NOT selectable coders. Hidden from the roster, the
-# switcher, and the multi-coder gate, and never auto-selected as the active
-# coder. `coder_type='human'`/`'ai'` (D14) are the real, selectable coders.
+# The audit action `POST /auth/switch-coder` writes when the session's coder CHANGES
+# (entity_id = the coder switched TO). `ensure_default_user` reads it (#1027), so the
+# writer and the reader share this one spelling.
+CODER_SWITCHED_ACTION = "coder_switched"
+
+# ── The coder vocabulary (Track J · D14; the machine kind decided #989) ──────
+#
+# FOUR values, answering THREE different questions. They are separate tuples
+# rather than one enum because a call site asks one question, and collapsing
+# them is how `'ai'` ended up on the selectable AND the voting side at once.
+#
+#   human        — a person. Selectable, on the roster, votes.
+#   ai           — a MACHINE coder: labels produced by a model somewhere else
+#                  and loaded in as a file (queue row 49). On the roster (so its
+#                  codings are attributed, filterable and visible), NOT
+#                  selectable, and it NEVER enters a reliability aggregate.
 #   unattributed — legacy NULL-user applications (Track J · D7 backfill)
-#   consensus     — the derived consensus layer (Track J · J2-3, reserved)
-SYSTEM_CODER_TYPES = ("unattributed", "consensus")
+#   consensus    — the derived consensus layer (Track J · J2-3)
+CODER_TYPE_HUMAN = "human"
+CODER_TYPE_MACHINE = "ai"
+CODER_TYPE_UNATTRIBUTED = "unattributed"
+CODER_TYPE_CONSENSUS = "consensus"
+
+# SYSTEM/derived identities — real data owners (they can hold code applications)
+# but NOT roster coders. Hidden from the roster, the switcher and the
+# multi-coder gate, and never auto-selected as the active coder.
+SYSTEM_CODER_TYPES = (CODER_TYPE_UNATTRIBUTED, CODER_TYPE_CONSENSUS)
+
+# On the ROSTER: their codings are attributed, filterable and displayed.
+# `list_coders` returns exactly these, which is why the client's `multiCoder`
+# is a claim about ATTRIBUTION UI and never about reliability (#989).
+ROSTER_CODER_TYPES = (CODER_TYPE_HUMAN, CODER_TYPE_MACHINE)
+
+# SELECTABLE: you can become this coder, and every later application is
+# server-stamped with them. A machine is excluded because "code as the machine"
+# is not an act a researcher performs — the labels arrive as a file.
+SELECTABLE_CODER_TYPES = (CODER_TYPE_HUMAN,)
+
+# 🔴 RELIABILITY: who may vote in consensus and enter an agreement coefficient.
+# STRATEGY commits, verbatim, that "the AI layer must be excludable from every
+# reliability aggregate exactly as `origin='consensus'` already is" — this tuple
+# is that commitment, and `reliability_coder_clause()` below is its one reader.
+#
+# Deliberately a SECOND tuple with the same members as SELECTABLE_CODER_TYPES
+# today: they answer different questions ("can I act as them" vs "does their
+# judgement enter a statistic"), and a future kind — a trainee whose coding is
+# real but excluded from the headline — separates them. One tuple serving two
+# questions is the overloading shape #806 records.
+RELIABILITY_CODER_TYPES = (CODER_TYPE_HUMAN,)
+
+# Every value this build understands. `normalize_coder_type` fails CLOSED onto
+# `human` for anything else: `.mmproject` import copies `coder_type` verbatim
+# out of the archive, so a hand-edited file is the one door that can mint an
+# unknown kind, and an unknown kind would sit outside every tuple above — off
+# the roster, unselectable, and silently in no layer at all.
+KNOWN_CODER_TYPES = SYSTEM_CODER_TYPES + ROSTER_CODER_TYPES
+
+
+def normalize_coder_type(value: object) -> str:
+    """Coerce an untrusted ``coder_type`` to a value this build understands.
+
+    Fail-closed onto ``human``: an unrecognised kind is a coder nothing lists,
+    nothing can select and no layer contains, so its codings would be invisible
+    in every surface while still occupying the per-coder unique index.
+    """
+    return value if value in KNOWN_CODER_TYPES else CODER_TYPE_HUMAN
+
+
+def selectable_coder_clause():
+    """Clause: ``User`` rows a session may be re-pointed at (the switcher, the
+    Settings roster picker, ``ensure_default_user``).
+
+    Splat into a ``User`` query's ``.filter(...)``. Never hand-roll
+    ``coder_type.notin_(SYSTEM_CODER_TYPES)`` for this question — that form
+    admits a machine coder, and every application made afterwards would be
+    stamped as the model.
+    """
+    return User.coder_type.in_(SELECTABLE_CODER_TYPES)
+
+
+def reliability_coder_clause():
+    """Clause: ``User`` rows whose codings may enter consensus or an agreement
+    coefficient (#989).
+
+    Requires a ``User`` in the query. The SIX voter/roster queries that used to
+    spell this out as ``coder_type.notin_(SYSTEM_CODER_TYPES)`` all read it now
+    — five of six getting a new exclusion is the failure mode #868 records, and
+    a machine voting in consensus is the one that cannot be seen from a number.
+    """
+    return User.coder_type.in_(RELIABILITY_CODER_TYPES)
 
 
 def hash_password(password: str) -> str:
@@ -63,15 +148,41 @@ def ensure_default_user(db: Session) -> User:
     session expiry / restart instead of silently reverting to the lowest-id
     "Researcher" — the Track J · J1 misattribution fix. Falls back to id order
     when no coder has ever been switched to.
+
+    🔴 **A coder's `last_active_at` counts only if someone switched to them HERE
+    (#1027).** The value is a timestamp, and nothing in it says which install wrote
+    it: a `.mmproject` created coders with the colleague's own `last_active_at`
+    until #1027, so an install that imported a file before that fix can hold a
+    colleague whose value is newer than any local switch — and a researcher who has
+    never switched holds NULL, which sorts last. The `coder_switched` audit entry
+    CAN vouch: it is written by `switch-coder` on this install and never travels in
+    a project file (a `.mmbackup` restore brings the users and the audit log
+    together, so they agree there too). Reading it here, rather than repairing the
+    column, is what makes a file imported before the fix harmless without a data
+    migration — and it holds for any future door that copies the column.
+    ⚠️ The entry exists since the same day as `last_active_at` (J1, 2026-06-21,
+    written 1.7 h earlier). The one stamp it does not accompany is re-selecting the
+    coder you already are, which only the current default can do — it already
+    ranks first, so ignoring that stamp changes no outcome.
     """
+    switched_here = exists().where(
+        AuditEntry.action == CODER_SWITCHED_ACTION,
+        AuditEntry.entity_type == "user",
+        AuditEntry.entity_id == User.id,
+    )
+    trusted_recency = case((switched_here, User.last_active_at), else_=None)
     user = (
         db.query(User)
         # Never auto-select a system coder (Unattributed / consensus) as the
-        # active identity — they own data but are not selectable coders (D7).
-        .filter(User.coder_type.notin_(SYSTEM_CODER_TYPES))
+        # active identity — they own data but are not selectable coders (D7) —
+        # and never a MACHINE coder (#989): this runs with no session to fall
+        # back on, so on an install whose humans are all archived it is the one
+        # path that could silently make the model the active identity and stamp
+        # every subsequent application with it.
+        .filter(selectable_coder_clause())
         .order_by(
             User.archived.asc(),
-            User.last_active_at.desc().nullslast(),
+            trusted_recency.desc().nullslast(),
             User.id,
         )
         .first()
@@ -112,7 +223,7 @@ def get_or_create_consensus_user(db: Session) -> User:
     """
     consensus = (
         db.query(User)
-        .filter(User.coder_type == "consensus")
+        .filter(User.coder_type == CODER_TYPE_CONSENSUS)
         .order_by(User.id)
         .first()
     )
@@ -125,7 +236,7 @@ def get_or_create_consensus_user(db: Session) -> User:
         username=name,
         password_hash=None,
         is_admin=False,
-        coder_type="consensus",
+        coder_type=CODER_TYPE_CONSENSUS,
         archived=False,
     )
     db.add(consensus)

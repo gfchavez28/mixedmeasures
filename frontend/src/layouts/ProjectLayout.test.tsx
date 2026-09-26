@@ -40,9 +40,27 @@ describe('detectWorkspace (#428e)', () => {
   it('resolves standalone routes to "none" so Overview is not falsely lit', () => {
     expect(detectWorkspace('/projects/1/participants')).toBe('none')
     expect(detectWorkspace('/projects/1/memos-notes')).toBe('none')
+    // Both of these lit Overview (and carried its aria-current) until the
+    // default flipped — neither had been added to an opt-out list.
+    expect(detectWorkspace('/projects/1/coding-import')).toBe('none')
+    expect(detectWorkspace('/projects/1/merge')).toBe('none')
   })
 
-  it('falls back to overview only for the actual overview page', () => {
+  it('🔴 a route nobody has taught it about lights NO tab — the default is none', () => {
+    // The property that stops the next standalone page repeating #428e: an
+    // unknown route is not claimed by Overview.
+    expect(detectWorkspace('/projects/1/some-page-added-next-year')).toBe('none')
+    expect(detectWorkspace('/projects/1')).toBe('none')
+    // A segment that is an Object.prototype key must not resolve to a builtin.
+    expect(detectWorkspace('/projects/1/constructor')).toBe('none')
+  })
+
+  it('matches the FIRST segment, not a substring anywhere in the path', () => {
+    // `includes('/analysis')` would have matched a route merely containing it.
+    expect(detectWorkspace('/projects/1/merge/analysis')).toBe('none')
+  })
+
+  it('lights overview only for the actual overview page', () => {
     expect(detectWorkspace('/projects/1/overview')).toBe('overview')
   })
 })

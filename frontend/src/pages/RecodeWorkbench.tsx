@@ -2042,7 +2042,7 @@ export default function RecodeWorkbench() {
       {/* Toolbar */}
       <div className="flex items-center gap-3 px-4 py-2 border-b bg-mm-surface flex-shrink-0">
         <DatasetTabs projectId={pid} datasetId={did} variableCount={columnsKnown ? allColumns.length : undefined} />
-        <div className="w-px h-4 bg-mm-border" aria-hidden="true" />
+        <div className="w-px h-4 bg-mm-border-subtle" aria-hidden="true" />
         {dataset && <span className="text-sm text-mm-text-secondary">{dataset.name}</span>}
         <div className="flex-grow" />
         {(canUndo || canRedo) && (

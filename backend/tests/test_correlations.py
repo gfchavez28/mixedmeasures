@@ -230,3 +230,117 @@ def test_n_equals_2(db_session):
     # Distinct from the no-variance reason: "only two people answered both" and
     # "this item has one answer" are different facts and read differently.
     assert cell["undefined_reason"] != "no_variance"
+
+
+# ── A variable group whose scale score was never computed (#958 §6) ──────────
+
+
+class TestUncomputedScoresSayWhichProblemItIs:
+    """🔴 An empty vector has TWO causes with opposite remedies, and they were one.
+
+    A correlation over VARIABLE GROUPS reads `RowScore`, which is derived and is not
+    carried in a `.mmproject` since #958 §6 — so a freshly imported project reaches
+    this from an ordinary selection. Every pair came back `insufficient_n`,
+    rendered as *"Too few values to compute this, after missing data was
+    excluded"*: a claim about the researcher's DATA, with a remedy that cannot
+    work, for what is a claim about our own bookkeeping. #830(b)'s shape one
+    statistic over.
+
+    ⚠️ **The discriminating case is the second test.** A group whose scores EXIST
+    and are all NULL has been computed and genuinely has no usable values — and an
+    implementation keying on `n == 0` rather than on the rows' existence cannot
+    tell the two apart, which is the whole defect reproduced in the fix.
+    """
+
+    def _two_domains(self, db, *, with_rows):
+        """Two variable groups with a scale-score metric each.
+
+        `with_rows` decides whether `RowScore` rows exist at all — the axis the
+        reason turns on. When they do, every score is NULL, so the VECTORS are
+        empty either way and only the rows' existence differs.
+        """
+        import uuid as uuid_module
+        from app.models.project import Project
+        from app.models.dataset import Dataset, DatasetRow
+        from app.models.analysis_domain import AnalysisDomain
+        from app.models.metric import MetricDefinition
+        from app.models.row_score import RowScore
+
+        project = Project(name="Scores", user_id=1,
+                          project_uuid=str(uuid_module.uuid4()))
+        db.add(project)
+        db.flush()
+        ds = Dataset(project_id=project.id, name="D")
+        db.add(ds)
+        db.flush()
+        rows = [DatasetRow(dataset_id=ds.id, row_identifier=f"R{i}") for i in range(4)]
+        db.add_all(rows)
+        db.flush()
+
+        domain_ids = []
+        for n in ("Trust", "Efficacy"):
+            dom = AnalysisDomain(project_id=project.id, name=n, sequence_order=0)
+            db.add(dom)
+            db.flush()
+            metric = MetricDefinition(
+                project_id=project.id, name=f"{n} Score",
+                metric_type="domain_aggregate", config="{}",
+                input_source_type="dataset_domain", input_source_id=dom.id,
+                grouping_column_id=None, grouping_column_id_2=None,
+                sequence_order=0, origin="human", origin_context="crosswalk_auto",
+            )
+            db.add(metric)
+            db.flush()
+            if with_rows:
+                for row in rows:
+                    db.add(RowScore(metric_definition_id=metric.id,
+                                    dataset_row_id=row.id, score=None))
+            domain_ids.append(dom.id)
+        db.flush()
+        return project.id, domain_ids
+
+    def test_a_group_with_no_score_rows_says_they_were_never_computed(self, db_session):
+        pid, domain_ids = self._two_domains(db_session, with_rows=False)
+        result = compute_correlation_matrix(
+            db_session, pid, column_ids=[], domain_ids=domain_ids,
+            correlation_type="pearson", bonferroni=False,
+        )
+        assert len(result["labels"]) == 2, "vacuous: the groups did not resolve"
+        cell = result["matrix"][0][1]
+        assert cell["r"] is None and cell["n"] == 0
+        assert cell["undefined_reason"] == "scores_not_computed", (
+            "an uncomputed scale score is still being reported as a data problem"
+        )
+
+    def test_a_group_whose_scores_are_all_NULL_is_still_insufficient_n(self, db_session):
+        """The POSITIVE control, and the axis the fix turns on.
+
+        Same empty vector, same `n == 0` — and here the metric HAS run, so the
+        honest reason is the old one. An implementation that keyed on the vector
+        rather than on the rows would pass the test above and fail this.
+        """
+        pid, domain_ids = self._two_domains(db_session, with_rows=True)
+        result = compute_correlation_matrix(
+            db_session, pid, column_ids=[], domain_ids=domain_ids,
+            correlation_type="pearson", bonferroni=False,
+        )
+        cell = result["matrix"][0][1]
+        assert cell["n"] == 0, "vacuous: the fixture produced usable scores after all"
+        assert cell["undefined_reason"] == "insufficient_n"
+
+    def test_a_COLUMN_correlation_never_reports_it(self, mtcars_session):
+        """`unscored` is empty on the column path by construction.
+
+        A dataset column's values are the researcher's data, present or not, and
+        nothing about them is waiting to be computed — so this reason must never
+        reach a column pair however few values they share.
+        """
+        result = compute_correlation_matrix(
+            mtcars_session, 1, column_ids=[MPG_ID, HP_ID], domain_ids=[],
+            correlation_type="pearson", bonferroni=False,
+        )
+        reasons = {
+            c.get("undefined_reason")
+            for row in result["matrix"] for c in row if c
+        }
+        assert "scores_not_computed" not in reasons

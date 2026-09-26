@@ -22,7 +22,7 @@ export default function ExcerptEmbedView({ node, updateAttributes, deleteNode, s
 
   return (
     <NodeViewWrapper
-      className={`group/material relative my-3 ${selected ? 'ring-2 ring-mm-accent/30' : ''}`}
+      className={`group/material relative my-3 ${selected ? 'ring-2 ring-mm-blue/30' : ''}`}
       data-type="excerpt-embed"
       role="figure"
       aria-label={`Excerpt: ${displayText ? String(displayText).slice(0, 60) : 'empty'}${materialTag ? ` (${materialTag})` : ''}`}
@@ -61,7 +61,7 @@ export default function ExcerptEmbedView({ node, updateAttributes, deleteNode, s
               sourceHref ? (
                 <Link
                   to={sourceHref}
-                  className="text-xs text-mm-accent hover:underline mt-1.5 block"
+                  className="text-xs text-mm-blue-text hover:underline mt-1.5 block"
                 >
                   {sourceContext}
                 </Link>

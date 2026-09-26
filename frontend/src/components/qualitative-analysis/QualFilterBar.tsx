@@ -67,9 +67,9 @@ function FilterDropdown({
                 }}
               >
                 <span className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${
-                  selected ? 'bg-mm-blue border-mm-blue' : 'border-mm-border-medium'
+                  selected ? 'bg-mm-blue-fill border-mm-blue-fill' : 'border-mm-border-medium'
                 }`}>
-                  {selected && <Check className="w-3 h-3 text-white" />}
+                  {selected && <Check className="w-3 h-3 text-mm-on-fill" />}
                 </span>
                 <span className="truncate">{opt.label}</span>
               </button>

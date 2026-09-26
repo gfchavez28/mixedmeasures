@@ -165,7 +165,7 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
 
   return (
     <NodeViewWrapper
-      className={`group/material relative my-3 ${selected ? 'ring-2 ring-mm-accent/30' : ''}`}
+      className={`group/material relative my-3 ${selected ? 'ring-2 ring-mm-blue/30' : ''}`}
       data-type="chart-embed"
       data-material-id={materialId}
       role="figure"
@@ -292,7 +292,7 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
             {materialId && (
               <Link
                 to={analysisPath}
-                className="flex items-center gap-1 text-[11px] text-mm-accent hover:underline mt-1.5 py-1"
+                className="flex items-center gap-1 text-[11px] text-mm-blue-text hover:underline mt-1.5 py-1"
                 aria-label={`Open ${title || 'this chart'} in Analysis`}
               >
                 Open in Analysis <span className="text-[9px]" aria-hidden>{'\u2192'}</span>

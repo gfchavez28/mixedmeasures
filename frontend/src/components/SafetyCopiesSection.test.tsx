@@ -69,6 +69,23 @@ const DAMAGED: SafetyCopyInfo = {
   readable: false,
 }
 
+/** #978: the endpoint returns a bounded PAGE with the folder's totals beside it,
+ * so a mock that returns a bare array no longer describes the wire. `total_*`
+ * default to the page's own contents — the cases where they must DIFFER pass
+ * them explicitly, which is the property the bound turns on. */
+function page(
+  copies: SafetyCopyInfo[],
+  overrides: Partial<{ total_count: number; total_bytes: number; truncated: boolean }> = {},
+) {
+  return {
+    copies,
+    total_count: copies.length,
+    total_bytes: copies.reduce((sum, c) => sum + c.size_bytes, 0),
+    truncated: false,
+    ...overrides,
+  }
+}
+
 function renderSection() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -96,7 +113,7 @@ afterEach(cleanup)
 
 describe('SafetyCopiesSection', () => {
   it('renders nothing until a merge or an overwrite has written a copy', async () => {
-    listSafetyCopies.mockResolvedValue([])
+    listSafetyCopies.mockResolvedValue(page([]))
     const { container } = renderSection()
     await waitFor(() => expect(listSafetyCopies).toHaveBeenCalled())
     expect(container).toBeEmptyDOMElement()
@@ -109,7 +126,7 @@ describe('SafetyCopiesSection', () => {
   })
 
   it('states the count and the disk space before it is opened', async () => {
-    listSafetyCopies.mockResolvedValue([HERE, GONE])
+    listSafetyCopies.mockResolvedValue(page([HERE, GONE]))
     renderSection()
     const toggle = await screen.findByRole('button', {
       name: 'Safety copies from merges and overwrites (2 copies, 8.0 MB)',
@@ -122,7 +139,7 @@ describe('SafetyCopiesSection', () => {
   })
 
   it('lists what each copy is of, what it preceded, and how large it is', async () => {
-    listSafetyCopies.mockResolvedValue([HERE, GONE, DAMAGED])
+    listSafetyCopies.mockResolvedValue(page([HERE, GONE, DAMAGED]))
     renderSection()
     await openList()
     const items = within(screen.getByRole('list', { name: 'Safety copies' })).getAllByRole('listitem')
@@ -142,7 +159,7 @@ describe('SafetyCopiesSection', () => {
   })
 
   it('names every row control after its copy, so N rows are not N identical buttons', async () => {
-    listSafetyCopies.mockResolvedValue([HERE, DAMAGED])
+    listSafetyCopies.mockResolvedValue(page([HERE, DAMAGED]))
     renderSection()
     await openList()
     const when = formatTakenAt(HERE.taken_at)
@@ -159,7 +176,7 @@ describe('SafetyCopiesSection', () => {
   })
 
   it('downloads the copy it is on', async () => {
-    listSafetyCopies.mockResolvedValue([HERE, GONE])
+    listSafetyCopies.mockResolvedValue(page([HERE, GONE]))
     downloadSafetyCopy.mockResolvedValue(undefined)
     renderSection()
     await openList()
@@ -168,7 +185,7 @@ describe('SafetyCopiesSection', () => {
   })
 
   it('confirms before deleting, then deletes that copy and refreshes the list', async () => {
-    listSafetyCopies.mockResolvedValueOnce([HERE, GONE]).mockResolvedValue([GONE])
+    listSafetyCopies.mockResolvedValueOnce(page([HERE, GONE])).mockResolvedValue(page([GONE]))
     deleteSafetyCopy.mockResolvedValue(undefined)
     renderSection()
     await openList()
@@ -188,7 +205,7 @@ describe('SafetyCopiesSection', () => {
   })
 
   it('warns that a copy of a project no longer in the app may be its only copy', async () => {
-    listSafetyCopies.mockResolvedValue([GONE])
+    listSafetyCopies.mockResolvedValue(page([GONE]))
     renderSection()
     await openList()
     fireEvent.click(screen.getByRole('button', { name: /^Delete safety copy of Pilot interviews/ }))
@@ -203,7 +220,7 @@ describe('SafetyCopiesSection', () => {
     // children the warning was visible and SILENT — the computed description
     // stopped before it. The structure that makes it heard is that the warning
     // sits inside the element `aria-describedby` points at.
-    listSafetyCopies.mockResolvedValue([GONE])
+    listSafetyCopies.mockResolvedValue(page([GONE]))
     renderSection()
     await openList()
     fireEvent.click(screen.getByRole('button', { name: /^Delete safety copy of Pilot interviews/ }))
@@ -216,15 +233,73 @@ describe('SafetyCopiesSection', () => {
 
   it('groups a large count the way the locale does', async () => {
     const many = Array.from({ length: 1234 }, (_, i) => ({ ...HERE, filename: `pre-merge_4_20260910_09${String(i).padStart(4, '0')}.mmproject` }))
-    listSafetyCopies.mockResolvedValue(many)
+    listSafetyCopies.mockResolvedValue(page(many))
     renderSection()
     expect(await screen.findByRole('button', {
       name: new RegExp(`\\(${(1234).toLocaleString()} copies, `),
     })).toBeInTheDocument()
   })
 
+  describe('the list is bounded (#978)', () => {
+    const many = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        ...HERE,
+        filename: `pre-merge_4_20260910_09${String(i).padStart(4, '0')}.mmproject`,
+      }))
+
+    it('🔴 states the FOLDER’s totals, not the page’s', async () => {
+      // The measured shape: 50 rows returned out of 1,954. Summing the page would
+      // understate the disk cost 39×, in the one line whose job is to state that
+      // cost before the researcher pays it.
+      listSafetyCopies.mockResolvedValue(
+        page(many(50), { total_count: 1954, total_bytes: 26_861_722, truncated: true }),
+      )
+      renderSection()
+      expect(await screen.findByRole('button', {
+        name: `Safety copies from merges and overwrites (${(1954).toLocaleString()} copies, 25.6 MB)`,
+      })).toBeInTheDocument()
+    })
+
+    it('says the list is a page, above it, and offers the rest', async () => {
+      listSafetyCopies.mockResolvedValue(
+        page(many(50), { total_count: 1954, total_bytes: 26_861_722, truncated: true }),
+      )
+      renderSection()
+      await openList()
+      expect(screen.getByRole('status')).toHaveTextContent(
+        `Showing the 50 most recent of ${(1954).toLocaleString()}.`,
+      )
+      expect(screen.getAllByRole('listitem')).toHaveLength(50)
+      expect(screen.getByRole('button', { name: `Show all ${(1954).toLocaleString()}` }))
+        .toBeInTheDocument()
+    })
+
+    it('asks the server for every copy when Show all is pressed', async () => {
+      listSafetyCopies.mockResolvedValue(
+        page(many(50), { total_count: 1954, total_bytes: 26_861_722, truncated: true }),
+      )
+      renderSection()
+      await openList()
+      expect(listSafetyCopies).toHaveBeenLastCalledWith(50)
+      fireEvent.click(screen.getByRole('button', { name: /^Show all/ }))
+      // 0 means "no limit" on the wire. A client-side cap alone would leave the
+      // payload — and the 1,954 archive opens behind it — unbounded.
+      await waitFor(() => expect(listSafetyCopies).toHaveBeenLastCalledWith(0))
+    })
+
+    it('says nothing about paging when the folder fits', async () => {
+      // The POSITIVE control: a guard that passes by always showing the notice
+      // would pass every assertion above.
+      listSafetyCopies.mockResolvedValue(page([HERE, GONE]))
+      renderSection()
+      await openList()
+      expect(screen.queryByRole('status')).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /^Show all/ })).not.toBeInTheDocument()
+    })
+  })
+
   it('cancelling deletes nothing', async () => {
-    listSafetyCopies.mockResolvedValue([HERE])
+    listSafetyCopies.mockResolvedValue(page([HERE]))
     renderSection()
     await openList()
     fireEvent.click(screen.getByRole('button', { name: /^Delete safety copy of/ }))
@@ -235,7 +310,7 @@ describe('SafetyCopiesSection', () => {
   })
 
   it('reports the server’s reason when a delete is refused', async () => {
-    listSafetyCopies.mockResolvedValue([HERE])
+    listSafetyCopies.mockResolvedValue(page([HERE]))
     deleteSafetyCopy.mockRejectedValue(
       new ApiError(409, { detail: 'The safety copy could not be deleted. If it is open in another program, close it and try again.' }, {}),
     )
@@ -250,7 +325,7 @@ describe('SafetyCopiesSection', () => {
   })
 
   it('returns focus to the list header after deleting the last copy, and keeps the header', async () => {
-    listSafetyCopies.mockResolvedValueOnce([HERE]).mockResolvedValue([])
+    listSafetyCopies.mockResolvedValueOnce(page([HERE])).mockResolvedValue(page([]))
     deleteSafetyCopy.mockResolvedValue(undefined)
     renderSection()
     const toggle = await openList()

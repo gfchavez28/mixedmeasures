@@ -79,6 +79,21 @@ class SafetyCopyInfo(BaseModel):
     readable: bool
 
 
+class SafetyCopyPageResponse(BaseModel):
+    """A bounded page of safety copies plus the totals over all of them (#978).
+
+    The totals are NOT `len(copies)` / their summed sizes: the disclosure states
+    the count and the disk cost before it is opened, and that summary must stay
+    true when the page below it is shorter than the folder.
+    """
+    copies: list[SafetyCopyInfo]
+    total_count: int
+    total_bytes: int
+    # True when the folder holds more than this page. The client renders a way to
+    # ask for the rest rather than silently showing a prefix.
+    truncated: bool
+
+
 class RestorePreview(BaseModel):
     manifest: BackupManifest
     warnings: list[str]

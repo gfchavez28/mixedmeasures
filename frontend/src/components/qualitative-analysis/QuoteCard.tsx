@@ -224,7 +224,7 @@ const QuoteCard = memo(function QuoteCard({
 
   const cardContent = (
     <div
-      className={`group rounded-lg border border-mm-border-subtle bg-mm-surface p-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mm-accent${isDragging ? ' opacity-50' : ''}`}
+      className={`group rounded-lg border border-mm-border-subtle bg-mm-surface p-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring${isDragging ? ' opacity-50' : ''}`}
       tabIndex={0}
       onKeyDown={handleKeyDown}
       role="article"

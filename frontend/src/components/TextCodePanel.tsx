@@ -14,6 +14,7 @@ import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import { categoryShortcutPrefixes } from '@/lib/codeShortcuts'
 import { LoadState } from '@/components/LoadStatus'
 import type { ListLoad } from '@/lib/list-status'
+import { focusedElementOwnsKey } from '@/lib/keyboard-scope'
 
 interface TextCodePanelProps {
   codes: Code[]
@@ -34,6 +35,13 @@ interface TextCodePanelProps {
   isFocused: boolean
   onFocusChange: (focused: boolean) => void
   disabled?: boolean
+  /**
+   * Row 48 — the code-set pickers, rendered above the code list. A slot for the
+   * reason `CodePanel`'s carries one: the strip fetches its own sets and owns
+   * its own mutation, and this panel's host keys its coding on the CELL rather
+   * than a segment.
+   */
+  codeSets?: React.ReactNode
 }
 
 export default function TextCodePanel({
@@ -48,6 +56,7 @@ export default function TextCodePanel({
   isFocused,
   onFocusChange,
   disabled = false,
+  codeSets,
 }: TextCodePanelProps) {
   const queryClient = useQueryClient()
   const [searchQuery, setSearchQuery] = useState('')
@@ -152,6 +161,13 @@ export default function TextCodePanel({
       // Don't intercept when typing in the search input
       const target = e.target as HTMLElement
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
+      // 🔴 #1041 — a WINDOW listener sees keys aimed at every control on the page,
+      // so it stands down like the workbench layer (#784): a key a control already
+      // handled, and an activation key on a real control. Without them Enter on a
+      // code-set value applied the code highlighted in THIS list instead, and the
+      // picker's arrows moved this list's highlight as well as its own focus. The
+      // list's rows are `role="option"`, which owns no key, so the list is untouched.
+      if (e.defaultPrevented || focusedElementOwnsKey(e.key, target)) return
 
       if (e.key === 'ArrowDown') {
         e.preventDefault()
@@ -174,6 +190,9 @@ export default function TextCodePanel({
     const handleNKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
+      // A control that claimed the key (the code-set picker claims every
+      // printable key while focused) keeps it — #1041.
+      if (e.defaultPrevented) return
       if (e.key === 'n') {
         e.preventDefault()
         inputRef.current?.focus()
@@ -261,6 +280,9 @@ export default function TextCodePanel({
           <span className="text-[11px] text-muted-foreground">Select a text</span>
         </div>
       )}
+
+      {/* Row 48 — the variables, above the tag list (see `CodePanel`). */}
+      {codeSets}
 
       <div className="px-2 py-1.5">
         <div className="flex gap-1">

@@ -171,3 +171,92 @@ class TestExportRRunnable:
                 capture_output=True, text=True, timeout=60,
             )
             assert proc.returncode == 0, f"R failed to parse script:\n{proc.stderr}"
+
+
+async def _export_r_members(project_id, user, db) -> dict[str, str]:
+    """Every text member of the export, by name — the `.R` AND the data `.csv`.
+
+    ⚠️ The score column's R name lives in the CSV HEADER, not in the script: the script
+    references domains by slug (`domains$engagement`) and never names the column. That is
+    precisely why an all-NA score column is invisible from inside the script, and why the
+    note below has to name it.
+    """
+    resp = export_r_data(project_id=project_id, user=user, db=db)
+    chunks = [chunk async for chunk in resp.body_iterator]
+    raw = b"".join(chunks if isinstance(chunks[0], bytes) else [c.encode() for c in chunks])
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        return {n: zf.read(n).decode("utf-8") for n in zf.namelist()}
+
+
+def _csv_header(members: dict[str, str]) -> str:
+    name = next(n for n in members if n.endswith(".csv"))
+    return members[name].splitlines()[0]
+
+
+def _r_text(members: dict[str, str]) -> str:
+    return members[next(n for n in members if n.endswith(".R"))]
+
+
+class TestAnEmptyScoreColumnSaysSo:
+    """#958 §6 — a variable-group score column with no `RowScore` rows behind it.
+
+    🔴 **The silent case, and it is now the NORMAL state right after an import.** The
+    column is still emitted, so the data frame's shape does not change between two exports
+    of one project — but every cell is `NA`, the script runs green, and the variable is
+    simply absent from every analysis built on it. That is #765's `factor()` trap one layer
+    up: a correct-looking script that quietly measures nothing.
+
+    ⚠️ **The predicate is "were any scores FOUND", not `MetricDefinition.stale`.** Staleness
+    is a claim about freshness and answers a different question — a metric can be fresh and
+    scoreless (the per-record block is error-isolated, so it can fail while the main result
+    succeeds) and stale with a full set of scores.
+
+    ⚠️ **Non-vacuity is asserted from the CSV, never from the script.** The r_name appears
+    in the `.R` ONLY inside the note under test, so `"engagement_score" in r` would have
+    been satisfied by the note itself — a circular assertion, which is what the first draft
+    of this class shipped.
+
+    The shared `_seed` above is exactly this shape already: an `Engagement Score`
+    `domain_aggregate` metric, `stale=False`, and not one `RowScore`.
+    """
+
+    def _members(self, db):
+        user = _seed(db)
+        return asyncio.run(_export_r_members(760, user, db))
+
+    def test_the_column_is_still_emitted(self, db_session):
+        """Dropping it would change the data frame's SHAPE between two exports."""
+        members = self._members(db_session)
+        assert "engagement_score" in _csv_header(members)
+
+    def test_the_notes_name_the_column(self, db_session):
+        members = self._members(db_session)
+        assert "engagement_score" in _csv_header(members), "vacuous: no score column"
+        r = _r_text(members)
+        assert "entirely NA" in r, (
+            "an all-NA score column shipped with nothing in the script saying why"
+        )
+        note = r[r.index("entirely NA"):][:400]
+        assert "engagement_score" in note, "the note does not say WHICH column"
+
+    def test_it_says_what_to_do_about_it(self, db_session):
+        assert "Compute All" in _r_text(self._members(db_session))
+
+    def test_a_scored_column_gets_no_note(self, db_session):
+        """The POSITIVE control: a guard that fires on every export says nothing.
+
+        Without this, deleting the `has_scores` test and noting every column
+        unconditionally passes every assertion above.
+        """
+        from app.models.row_score import RowScore
+        db = db_session
+        user = _seed(db)
+        rows = db.query(DatasetRow).filter(DatasetRow.dataset_id == 760).all()
+        assert rows, "vacuous: the fixture has no records to score"
+        for row in rows:
+            db.add(RowScore(metric_definition_id=7600, dataset_row_id=row.id, score=3.0))
+        db.flush()
+
+        members = asyncio.run(_export_r_members(760, user, db))
+        assert "engagement_score" in _csv_header(members)
+        assert "entirely NA" not in _r_text(members)

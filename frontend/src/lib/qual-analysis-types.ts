@@ -7,21 +7,29 @@ export type QualTab = 'content' | 'descriptives' | 'relationships' | 'reconcilia
 
 /**
  * Track J · J2-5 M-1 — the Reconciliation tab/grid is offered only when the project
- * is multi-coder AND a consensus layer exists. Hidden while BLIND (DEC-G — the
+ * has ≥2 HUMAN coders AND a consensus layer exists. Hidden while BLIND (DEC-G — the
  * reconciliation grid reveals every coder side-by-side; you must Reveal first). Pure.
+ *
+ * 🔴 The parameter is `multiHumanCoder`, not `multiCoder` (#989). Both tabs are
+ * about agreement between PEOPLE: a machine coder cannot vote in consensus and is
+ * excluded from every coefficient at the server, so on a one-person-plus-machine
+ * roster the old flag offered a reconciliation grid with nothing to reconcile and
+ * a reliability table that can only ever hold one column. Naming the parameter for
+ * the question is what stops the next caller passing the wrong roster count.
  */
-export function isReconciliationTabVisible(multiCoder: boolean, consensusAvailable: boolean, blind = false): boolean {
-  return multiCoder && consensusAvailable && !blind
+export function isReconciliationTabVisible(multiHumanCoder: boolean, consensusAvailable: boolean, blind = false): boolean {
+  return multiHumanCoder && consensusAvailable && !blind
 }
 
 /**
- * Track J · J2-5 — the Reliability (IRR) tab is offered whenever the project is
- * multi-coder. Unlike Reconciliation it does NOT require a consensus layer (IRR is
- * human-roster agreement, independent of consensus). Hidden while BLIND (DEC-G — it
- * names coders + shows agreement). Pure (unit-tested).
+ * Track J · J2-5 — the Reliability (IRR) tab is offered whenever the project has
+ * ≥2 HUMAN coders. Unlike Reconciliation it does NOT require a consensus layer (IRR
+ * is human-roster agreement, independent of consensus). Hidden while BLIND (DEC-G —
+ * it names coders + shows agreement). Pure (unit-tested). See the note above on why
+ * this is the HUMAN count.
  */
-export function isIrrTabVisible(multiCoder: boolean, blind = false): boolean {
-  return multiCoder && !blind
+export function isIrrTabVisible(multiHumanCoder: boolean, blind = false): boolean {
+  return multiHumanCoder && !blind
 }
 export type QualCodeMode = 'codes' | 'categories'
 export type QualChartType = 'heatmap' | 'bar' | 'stacked_bar' | 'summary' | 'saturation' | 'timeline'

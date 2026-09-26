@@ -369,7 +369,7 @@ export default function ThemeRelationshipPopover({
               value={formLabel}
               onChange={(e) => setFormLabel(e.target.value)}
               placeholder={formType === 'custom' ? 'Connection label (required)' : 'Label (optional)'}
-              className="w-full h-7 px-2 text-xs rounded border border-mm-border-subtle bg-transparent text-mm-text focus:outline-none focus:ring-1 focus:ring-mm-accent"
+              className="w-full h-7 px-2 text-xs rounded border border-mm-border-subtle bg-transparent text-mm-text focus:outline-none focus:ring-1 focus:ring-ring"
               onKeyDown={(e) => { if (e.key === 'Enter') handleSave() }}
             />
 
@@ -384,8 +384,8 @@ export default function ThemeRelationshipPopover({
                     onClick={() => setFormDirection(opt.value)}
                     className={`h-6 flex-1 rounded text-[11px] font-medium transition-colors ${
                       formDirection === opt.value
-                        ? 'bg-[hsl(var(--mm-purple))] text-white'
-                        : 'bg-mm-bg-secondary text-mm-text-muted hover:text-mm-text hover:bg-mm-border-subtle'
+                        ? 'bg-mm-purple-fill text-mm-on-fill'
+                        : 'bg-mm-bg text-mm-text-muted hover:text-mm-text hover:bg-mm-border-subtle'
                     }`}
                     aria-pressed={formDirection === opt.value}
                     title={
@@ -412,8 +412,8 @@ export default function ThemeRelationshipPopover({
                     onClick={() => setFormStraight(straight)}
                     className={`h-6 flex-1 rounded text-[11px] font-medium transition-colors ${
                       formStraight === straight
-                        ? 'bg-[hsl(var(--mm-purple))] text-white'
-                        : 'bg-mm-bg-secondary text-mm-text-muted hover:text-mm-text hover:bg-mm-border-subtle'
+                        ? 'bg-mm-purple-fill text-mm-on-fill'
+                        : 'bg-mm-bg text-mm-text-muted hover:text-mm-text hover:bg-mm-border-subtle'
                     }`}
                     aria-pressed={formStraight === straight}
                     aria-label={straight ? 'Straight line' : 'Curved line'}
@@ -435,8 +435,8 @@ export default function ThemeRelationshipPopover({
                     onClick={() => setFormLineStyle(ls.value)}
                     className={`h-6 w-[40px] rounded flex items-center justify-center transition-colors ${
                       formLineStyle === ls.value
-                        ? 'bg-[hsl(var(--mm-purple))] text-white'
-                        : 'bg-mm-bg-secondary text-mm-text-muted hover:bg-mm-border-subtle'
+                        ? 'bg-mm-purple-fill text-mm-on-fill'
+                        : 'bg-mm-bg text-mm-text-muted hover:bg-mm-border-subtle'
                     }`}
                     aria-pressed={formLineStyle === ls.value}
                     aria-label={`${ls.value} line`}
@@ -473,8 +473,8 @@ export default function ThemeRelationshipPopover({
                       onClick={() => setFormWeight(wt.value)}
                       className={`h-6 flex-1 rounded flex items-center justify-center transition-colors ${
                         isActive
-                          ? 'bg-[hsl(var(--mm-purple))] text-white'
-                          : 'bg-mm-bg-secondary text-mm-text-muted hover:bg-mm-border-subtle'
+                          ? 'bg-mm-purple-fill text-mm-on-fill'
+                          : 'bg-mm-bg text-mm-text-muted hover:bg-mm-border-subtle'
                       }`}
                       aria-pressed={isActive}
                       aria-label={`${wt.label} weight`}
@@ -514,7 +514,7 @@ export default function ThemeRelationshipPopover({
               <button
                 onClick={handleSave}
                 disabled={(editingId == null && !formTargetId) || (formType === 'custom' && !formLabel.trim())}
-                className="flex-1 flex items-center justify-center gap-1 h-7 rounded text-xs font-medium text-white bg-[hsl(var(--mm-purple))] hover:opacity-90 disabled:opacity-40 transition-opacity"
+                className="flex-1 flex items-center justify-center gap-1 h-7 rounded text-xs font-medium text-mm-on-fill bg-mm-purple-fill hover:opacity-90 disabled:opacity-40 transition-opacity"
               >
                 <Check className="w-3 h-3" />
                 {editingId != null ? 'Update' : 'Add'}
@@ -555,7 +555,7 @@ export function RelationshipBadge({
   return (
     <button
       onClick={(e) => { e.stopPropagation(); onClick?.() }}
-      className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full bg-mm-bg-secondary text-mm-text-faint font-medium tabular-nums hover:bg-mm-border-subtle transition-colors"
+      className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full bg-mm-bg text-mm-text-faint font-medium tabular-nums hover:bg-mm-border-subtle transition-colors"
       title={`${count} relationship${count !== 1 ? 's' : ''}`}
     >
       <Link2 className="w-2.5 h-2.5 inline mr-0.5" />

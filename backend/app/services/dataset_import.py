@@ -11,6 +11,8 @@ import json
 import logging
 import math
 import re
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from itertools import islice
 from sqlalchemy import insert as sa_insert
 from sqlalchemy.orm import Session
@@ -718,6 +720,48 @@ def _strip_bom(text: str) -> str:
     return text.lstrip("\ufeff")
 
 
+def _csv_lines(text: str) -> Iterator[str]:
+    """Yield ``text`` one line at a time, without a copy of the whole file.
+
+    \ud83d\udd34 **`io.StringIO(text)` stores its buffer as UCS-4 \u2014 MEASURED at exactly
+    4.00 bytes per character**, whatever compact representation the source
+    string has. So `csv.reader(io.StringIO(text))` on a 36 MB file allocates
+    **144 MB** before a single row is read and holds it for the whole parse, and
+    every reader on this path paid it: the preview, `_scan_source_rows`, and the
+    import's own write loop \u2014 so an import paid it twice. Measured on a 160 KB
+    fixture: `io.StringIO(text)` alone is 640,224 B resident where this
+    generator is **28 B**.
+
+    \u26a0\ufe0f **It is the CONSTRUCTOR, not the class \u2014 do not "fix" the writer.**
+    Measured on the same fixture: `io.StringIO(text)` is 4.00 B/char while
+    `io.StringIO().write(text)` is **1.25 B/char**, because writing goes through
+    the compact unicode writer and only widens if the content needs it. So
+    `xlsx_to_csv_text`'s `StringIO` sink is already cheap, and replacing it with
+    a list-and-join is slightly WORSE (measured at GSS's shape: 289.4 MB vs
+    293.7 MB peak).
+
+    Each line is yielded WITH its terminator, exactly as `StringIO.readline`
+    gives it, so `csv.reader` sees byte-identical input \u2014 including a quoted
+    field spanning several lines, where the reader pulls further lines from this
+    iterator itself, and a final line with no terminator.
+
+    \u26a0\ufe0f Splitting on ``\\n`` alone is not a simplification: `io.StringIO`'s
+    default ``newline="\\n"`` does no translation either, so a ``\\r\\n`` file
+    yields lines ending ``\\r\\n`` from both and `csv.reader` strips the ``\\r``.
+    Pinned by `test_dataset_preview_streaming.py::TestCsvLinesMatchesStringIO`,
+    which compares the two readers over a corpus of awkward CSV.
+    """
+    start = 0
+    end = len(text)
+    while start < end:
+        nl = text.find("\n", start)
+        if nl < 0:
+            yield text[start:]
+            return
+        yield text[start:nl + 1]
+        start = nl + 1
+
+
 # -- N/A detection ------------------------------------------------------------
 # #592 slab 1: _NA_PREFIXES/_is_na MOVED to services/missing_values.py — the
 # declared-missing predicate module, where they are the DEFAULT rule set for
@@ -853,7 +897,55 @@ def _normalize_header_words(text: str | None) -> str:
     return re.sub(r"[_\-\.]+", " ", text).lower()
 
 
-def _is_sequential_counter(substantive_set: set[str]) -> bool:
+@dataclass(frozen=True)
+class SubstantiveValues:
+    """One column's substantive values — non-empty, and not recognised missing.
+
+    🔴 **``cell_count`` is CELLS and ``distinct`` is KINDS, and the detection
+    heuristics divide one by the other.** `_is_identifier_column` requires
+    ``len(distinct) / cell_count`` to be HIGH (an identity is near-unique per
+    record) and `_looks_like_nominal_labels` requires it to be LOW (a category
+    repeats). Passing the distinct count as the cell count makes that ratio 1.0
+    for every column, which reads every id-ish header as an identifier and every
+    repeated-label column as free prose. They are separate fields, and nothing
+    may derive one from the other.
+
+    ``distinct`` is in FIRST-SEEN order, which `suggested_scale_unmatched`
+    reports in (#364 — "preserve original casing + first-seen order"), so it is
+    a tuple rather than a set. ``unique`` is the same values as a frozenset,
+    derived once in `of` so the two cannot disagree.
+
+    ⚠️ **This carries no cell LIST, deliberately (#973 b').** `preview_dataset_csv`
+    used to hold every cell of every column at once, and nothing downstream ever
+    wanted the duplicates: the three consumers of the old list called `len()` on
+    it twice and walked it once to collect first-seen distinct values — so all
+    three are count- or distinct-derivable, which is what made the streaming
+    rewrite ONE pass rather than two. ⚠️ **Dropping the list is not by itself a
+    memory win** — see the note in `preview_dataset_csv`'s parse loop, which
+    records the measurement that refutes that reading.
+    """
+
+    distinct: tuple[str, ...]
+    unique: frozenset[str]
+    cell_count: int
+
+    @classmethod
+    def of(cls, distinct: tuple[str, ...], cell_count: int) -> "SubstantiveValues":
+        """THE constructor — `unique` is derived here and nowhere else."""
+        return cls(distinct=distinct, unique=frozenset(distinct), cell_count=cell_count)
+
+    @classmethod
+    def from_cells(cls, cells: list[str]) -> "SubstantiveValues":
+        """From a cell list, for callers that legitimately hold one.
+
+        The preview does NOT — it tallies as it streams and calls `of` — so this
+        is for tests and for any caller working from an already-materialised
+        column. It is the definition of the two fields, kept executable.
+        """
+        return cls.of(tuple(dict.fromkeys(cells)), len(cells))
+
+
+def _is_sequential_counter(substantive_set: frozenset[str] | set[str]) -> bool:
     """True when the values are a dense integer sequence starting at 0/1 —
     a platform row counter, not an identity referenced by other sources."""
     try:
@@ -866,8 +958,7 @@ def _is_sequential_counter(substantive_set: set[str]) -> bool:
 def _is_identifier_column(
     header: str,
     raw_code: str | None,
-    substantive_set: set[str],
-    substantive_list: list[str],
+    values: SubstantiveValues,
 ) -> bool:
     """#414 / DEC-9: header-hint-gated participant-identifier detection."""
     words = _normalize_header_words(header)
@@ -882,20 +973,23 @@ def _is_identifier_column(
     )
     if not (strong or weak):
         return False
-    n = len(substantive_list)
+    # CELLS, not kinds — see SubstantiveValues. An identity is near-unique per
+    # record, so this ratio is the discriminator and collapsing the two makes it
+    # 1.0 for every column.
+    n = values.cell_count
     if n < IDENTIFIER_MIN_SUBSTANTIVE:
         return False
-    unique_count = len(substantive_set)
+    unique_count = len(values.distinct)
     if (unique_count / n) < IDENTIFIER_MIN_UNIQUENESS_RATIO:
         return False
-    avg_len = sum(len(v) for v in substantive_set) / unique_count
+    avg_len = sum(len(v) for v in values.distinct) / unique_count
     if avg_len > IDENTIFIER_MAX_AVG_LEN:
         return False
-    avg_tokens = sum(len(v.split()) for v in substantive_set) / unique_count
+    avg_tokens = sum(len(v.split()) for v in values.distinct) / unique_count
     if avg_tokens > IDENTIFIER_MAX_AVG_TOKENS:
         return False
     # A bare id-word over a dense 1..N counter is platform metadata — keep skip.
-    if not strong and _is_sequential_counter(substantive_set):
+    if not strong and _is_sequential_counter(values.unique):
         return False
     return True
 
@@ -982,7 +1076,7 @@ _BOOLEAN_PAIRS = [
 ]
 
 
-def _is_boolean(values: set[str]) -> bool:
+def _is_boolean(values: frozenset[str] | set[str]) -> bool:
     if not values or len(values) > 2:
         return False
     lower = {v.lower() for v in values}
@@ -1008,7 +1102,7 @@ def _strip_numeric(value: str) -> float | None:
         return None
 
 
-def _analyze_numeric(values: list[str], header: str | None = None) -> dict | None:
+def _analyze_numeric(values: Sequence[str], header: str | None = None) -> dict | None:
     """
     Analyze values for numeric patterns.
 
@@ -1088,7 +1182,7 @@ _SCALE_MAX_UNMATCHED = 2
 
 
 def _scale_match_within_tolerance(
-    matched: set[str], unmatched: set[str],
+    matched: frozenset[str] | set[str], unmatched: frozenset[str] | set[str],
 ) -> bool:
     """Whether a column's value set matches a scale despite a few stray values.
 
@@ -1106,7 +1200,7 @@ def _scale_match_within_tolerance(
     return True
 
 
-def _match_scale(values: set[str]) -> tuple[str, list[str]] | None:
+def _match_scale(values: frozenset[str] | set[str]) -> tuple[str, list[str]] | None:
     """
     Find the best matching known scale for a set of values.
 
@@ -1243,26 +1337,27 @@ NOMINAL_MAX_UNIQUENESS_RATIO = 0.5   # unique/n must be below this (labels repea
 NOMINAL_MAX_AVG_LABEL_LEN = 30       # avg label length (chars) — prose runs longer
 
 
-def _looks_like_nominal_labels(substantive_set: set[str], substantive_list: list[str]) -> bool:
+def _looks_like_nominal_labels(values: SubstantiveValues) -> bool:
     """#380: heuristic for a high-cardinality categorical (repeated short labels)
     vs genuine free text. Caller has already ruled out numeric and <=10-unique."""
-    n = len(substantive_list)
-    unique_count = len(substantive_set)
+    # CELLS, not kinds — a category REPEATS, which is the whole signal here, and
+    # a collapsed ratio of 1.0 sends every such column to open_text.
+    n = values.cell_count
+    unique_count = len(values.distinct)
     if n == 0 or unique_count == 0:
         return False
     if unique_count > NOMINAL_MAX_CARDINALITY:
         return False
     if (unique_count / n) >= NOMINAL_MAX_UNIQUENESS_RATIO:
         return False
-    avg_label_len = sum(len(v) for v in substantive_set) / unique_count
+    avg_label_len = sum(len(v) for v in values.distinct) / unique_count
     return avg_label_len <= NOMINAL_MAX_AVG_LABEL_LEN
 
 
 def _detect_column_type(
     header: str,
     parsed: dict,
-    substantive_set: set[str],
-    substantive_list: list[str],
+    values: SubstantiveValues,
     col_idx: int,
 ) -> dict:
     """
@@ -1287,7 +1382,7 @@ def _detect_column_type(
 
     # 0. Identifier (#414) — MUST run before skip: the skip lists swallow
     # id-family headers ("id", "respondent id"), discarding the identity column.
-    if _is_identifier_column(header, parsed["raw_code"], substantive_set, substantive_list):
+    if _is_identifier_column(header, parsed["raw_code"], values):
         result["suggested_type"] = ColumnType.IDENTIFIER.value
         return result
 
@@ -1302,17 +1397,17 @@ def _detect_column_type(
         result["suggested_demographic_subtype"] = _detect_demographic_subtype(parsed["column_text"])
         return result
 
-    if not substantive_set:
+    if not values.distinct:
         return result  # defaults to open_text
 
     # 3. Binary
-    if _is_boolean(substantive_set):
+    if _is_boolean(values.unique):
         result["suggested_type"] = ColumnType.BINARY.value
         return result
 
     # 4. Small cardinality (<=10 unique): scale first, then numeric, then nominal
-    if len(substantive_set) <= 10:
-        match = _match_scale(substantive_set)
+    if len(values.distinct) <= 10:
+        match = _match_scale(values.unique)
         if match:
             result["suggested_type"] = ColumnType.ORDINAL.value
             result["suggested_scale_name"] = match[0]
@@ -1320,8 +1415,14 @@ def _detect_column_type(
             # Surface any values not in the matched scale (#364). These import
             # with value_numeric=None (blank) — the researcher should review them
             # as likely typos. Preserve original casing + first-seen order.
+            #
+            # ⚠️ Walking `distinct` rather than every cell is the SAME result:
+            # the first cell carrying a given lower-cased form is also the first
+            # DISTINCT value carrying it, because first-seen order is preserved
+            # by both. The case-fold de-dup below is still needed — "Agree" and
+            # "agree" are two distinct values and one unmatched report.
             label_lower = {l.lower() for l in match[1]}
-            unmatched = [v for v in substantive_list if v.lower() not in label_lower]
+            unmatched = [v for v in values.distinct if v.lower() not in label_lower]
             seen: set[str] = set()
             unmatched_unique = [
                 v for v in unmatched if not (v.lower() in seen or seen.add(v.lower()))
@@ -1330,7 +1431,7 @@ def _detect_column_type(
             return result
 
         # #358: pass header so the percentage keyword check can fire
-        numeric = _analyze_numeric(list(substantive_set), header=header)
+        numeric = _analyze_numeric(values.distinct, header=header)
         if numeric:
             result["suggested_type"] = numeric["column_type"].value
             result["numeric_format"] = numeric["numeric_format"]
@@ -1342,7 +1443,7 @@ def _detect_column_type(
         return result
 
     # 5. High cardinality (>10 unique)
-    numeric = _analyze_numeric(list(substantive_set), header=header)  # #358
+    numeric = _analyze_numeric(values.distinct, header=header)  # #358
     if numeric:
         result["suggested_type"] = numeric["column_type"].value
         result["numeric_format"] = numeric["numeric_format"]
@@ -1351,7 +1452,7 @@ def _detect_column_type(
         return result
 
     # 5b. High-cardinality categorical (#380): repeated short labels, not prose
-    if _looks_like_nominal_labels(substantive_set, substantive_list):
+    if _looks_like_nominal_labels(values):
         result["suggested_type"] = ColumnType.NOMINAL.value
         return result
 
@@ -1404,6 +1505,11 @@ def _detect_column_type(
 # chosen and stated here rather than discovered later.
 MAX_DATASET_CELLS = 4_000_000
 
+# #973 (c): how many rows the cheap first stage shows per column. Bounded by
+# CONSTRUCTION rather than by a cap — `DESCRIBE_SAMPLE_ROWS x n_cols` cells for
+# any file, so a 422-column workbook costs ~8,000 cells to describe.
+DESCRIBE_SAMPLE_ROWS = 5
+
 
 class DatasetTooLargeError(ValueError):
     """Refused: over `MAX_DATASET_CELLS` (#803).
@@ -1417,6 +1523,30 @@ class DatasetTooLargeError(ValueError):
     """
 
 
+# 🔴 **The remedy sentence, shared by both cap messages, and it no longer names
+# the wizard (#973 defect 1).** Both used to say *"Importing fewer columns — the
+# wizard can skip any you don't need"*, and **a researcher shown either message
+# can never reach that screen**: the cap is enforced at PREVIEW, which is
+# upstream of the wizard (`.xlsx` refuses on declared dimensions before reading a
+# cell, `.sav` on its metadata, CSV by bailing mid-stream). The tool refused a
+# file and then named an action that cannot be taken from inside it.
+#
+# ⚠️ **Skipping would not have helped even from inside the wizard**, because
+# `import_dataset_csv` measures `len(headers)` — the FILE's full width — while
+# `_scan_source_rows` beside it honours `cfg["skip"]`. That is #973 (a), it is
+# INERT until the two-stage preview (c) exists, and it is deliberately not
+# addressed by this sentence. Say only what is true today.
+#
+# ⚠️ Unlike the APPEND remedy (`append_cell_count_error`), splitting by rows DOES
+# work here: two files import as two datasets, each under the cap. The cap counts
+# one dataset, so on the append path the same advice is false.
+CELL_CAP_REMEDY = (
+    "Removing columns you do not need, or splitting the rows across more than "
+    "one file, will bring it under — both have to be done in the file itself, "
+    "before importing."
+)
+
+
 def cell_cap_exceeded_message(n_cols: int) -> str:
     """The refusal for a STREAMING path, which bails before it has counted.
 
@@ -1428,8 +1558,7 @@ def cell_cap_exceeded_message(n_cols: int) -> str:
     """
     return (
         f"This dataset is over the {MAX_DATASET_CELLS:,}-value limit at "
-        f"{n_cols:,} columns. Importing fewer columns — the wizard can skip any "
-        "you don't need — or splitting the file by rows will bring it under."
+        f"{n_cols:,} columns. {CELL_CAP_REMEDY}"
     )
 
 
@@ -1445,9 +1574,55 @@ def cell_count_error(n_rows: int, n_cols: int) -> str | None:
         return None
     return (
         f"This dataset is {n_rows:,} rows x {n_cols:,} columns = {cells:,} values, "
-        f"over the {MAX_DATASET_CELLS:,} limit. Importing fewer columns — the "
-        "wizard can skip any you don't need — or splitting the file by rows will "
-        "bring it under."
+        f"over the {MAX_DATASET_CELLS:,} limit. {CELL_CAP_REMEDY}"
+    )
+
+
+def append_cell_count_error(
+    existing_rows: int, incoming_rows: int, n_cols: int,
+) -> str | None:
+    """The refusal for an APPEND that would take a dataset over the cap (#972).
+
+    🔴 **A SEPARATE message, because `cell_count_error`'s advice cannot work on
+    this path — importing it would import the bug.** That message says *"Importing
+    fewer columns — the wizard can skip any you don't need"*, and an append maps a
+    file onto the dataset's EXISTING columns, so deselecting a file column does not
+    change the dataset's width by one cell. Its other half, *"splitting the file by
+    rows"*, is wrong here too: the cap counts the whole dataset, so two appends of
+    half the rows land at exactly the same total. That is #973's defect (a refusal
+    naming an action that cannot be taken) arriving on a second path.
+
+    🔴 **Stated as HEADROOM rather than a predicted total, which is what makes it
+    both honest and useful.** `append_import` skips duplicate rows, so the file's
+    row count is an UPPER bound on what actually lands — and finding the real
+    number means fingerprinting every existing row, i.e. the full read this
+    refusal exists to avoid. Room-for-N and this-file-has-M are each exact, so no
+    "up to" hedge is needed, and N is the number the researcher actually wants: how
+    many records they may append.
+
+    ⚠️ **`room <= 0` is reachable and needs its own sentence.** A dataset can pass
+    its import cap and grow past it afterwards, because a computed or derived
+    column adds WIDTH to every existing row. "Room for -3 more records" is nonsense
+    and the remedy is different, so it is answered separately.
+    """
+    if n_cols <= 0:
+        return None
+    if (existing_rows + incoming_rows) * n_cols <= MAX_DATASET_CELLS:
+        return None
+
+    current = existing_rows * n_cols
+    room = MAX_DATASET_CELLS // n_cols - existing_rows
+    if room <= 0:
+        return (
+            f"This dataset already holds {existing_rows:,} records x {n_cols:,} "
+            f"variables = {current:,} values, at the {MAX_DATASET_CELLS:,} limit, "
+            "so no more records can be appended. Removing variables or records "
+            "from the dataset is what brings it under."
+        )
+    return (
+        f"This dataset holds {existing_rows:,} records x {n_cols:,} variables = "
+        f"{current:,} of the {MAX_DATASET_CELLS:,}-value limit, so it has room for "
+        f"{room:,} more records. This file has {incoming_rows:,}."
     )
 
 
@@ -1496,16 +1671,8 @@ def _xlsx_cell_to_str(value) -> str:
     return str(value)
 
 
-def xlsx_to_csv_text(content: bytes, sheet_name: str | None = None) -> tuple[str, list[str]]:
-    """Convert one worksheet of a .xlsx upload into CSV text.
-
-    Returns (csv_text, sheet_names). ``sheet_name`` None selects the first sheet.
-    Formula cells carry the file's cached computed value (``data_only=True``); a
-    workbook saved without computed caches yields blanks for them.
-
-    Raises XlsxImportError for anything the user should fix (bad zip, unknown
-    sheet, empty sheet, over-cap dimensions).
-    """
+def _open_xlsx(content: bytes):
+    """Open an uploaded workbook read-only, or raise XlsxImportError."""
     import io as _io
     import zipfile
 
@@ -1513,25 +1680,110 @@ def xlsx_to_csv_text(content: bytes, sheet_name: str | None = None) -> tuple[str
     from openpyxl.utils.exceptions import InvalidFileException
 
     try:
-        wb = load_workbook(_io.BytesIO(content), read_only=True, data_only=True)
+        return load_workbook(_io.BytesIO(content), read_only=True, data_only=True)
     except (InvalidFileException, zipfile.BadZipFile, KeyError, ValueError, OSError) as e:
         raise XlsxImportError(f"Unable to read the Excel file: {e}") from e
 
+
+def _xlsx_sheet(wb, sheet_name: str | None):
+    """The requested worksheet plus the workbook's sheet names, validated."""
+    sheet_names = list(wb.sheetnames)
+    if not sheet_names:
+        raise XlsxImportError("The Excel workbook contains no worksheets.")
+    target = sheet_name or sheet_names[0]
+    if target not in sheet_names:
+        raise XlsxImportError(f'Worksheet "{target}" was not found in the workbook.')
+    return wb[target], sheet_names, target
+
+
+def describe_xlsx(content: bytes, sheet_name: str | None = None) -> dict:
+    """The cheap first stage for a workbook (#973 c) — `describe_csv_text`'s twin.
+
+    Returns ``{"headers", "row_count", "samples", "sheet_names"}``.
+
+    🔴 **MEASURED: 0.02 s and ~2 MB on the GSS workbook, against 9.3 s and 222 MB
+    for the full conversion.** That gap is what makes a two-stage preview worth
+    having at all on this format: `xlsx_to_csv_text` materialises every cell of
+    the sheet and then the whole CSV string, so an over-cap workbook costs the
+    memory the cap exists to refuse just to find out what its columns are called.
+
+    ⚠️ **Applies NO cap**, for the reason `describe_csv_text` gives.
+    ⚠️ ``row_count`` is openpyxl's DECLARED `max_row`, which can OVERCOUNT on a
+    sheet carrying formatting residue — the same figure `xlsx_to_csv_text` uses
+    for its cheap pre-check, and stated as approximate for the same reason. The
+    authoritative count comes from the narrowed conversion in stage two.
+    """
+    wb = _open_xlsx(content)
     try:
-        sheet_names = list(wb.sheetnames)
-        if not sheet_names:
-            raise XlsxImportError("The Excel workbook contains no worksheets.")
-        target = sheet_name or sheet_names[0]
-        if target not in sheet_names:
-            raise XlsxImportError(f'Worksheet "{target}" was not found in the workbook.')
-        ws = wb[target]
+        ws, sheet_names, _target = _xlsx_sheet(wb, sheet_name)
+        headers: list[str] = []
+        samples: list[list[str]] = []
+        for i, row in enumerate(ws.iter_rows(values_only=True, max_row=DESCRIBE_SAMPLE_ROWS + 1)):
+            cells = [_xlsx_cell_to_str(v) for v in row]
+            if i == 0:
+                while cells and cells[-1] == "":
+                    cells.pop()
+                headers = cells
+                samples = [[] for _ in headers]
+                continue
+            for j, sample in enumerate(samples):
+                sample.append(cells[j] if j < len(cells) else "")
+        declared_rows = max((ws.max_row or 1) - 1, 0)
+    finally:
+        wb.close()
+
+    if not headers:
+        raise XlsxImportError('The selected worksheet has no header row.')
+    return {
+        "headers": headers,
+        "row_count": declared_rows,
+        "samples": samples,
+        "sheet_names": sheet_names,
+    }
+
+
+def xlsx_to_csv_text(
+    content: bytes, sheet_name: str | None = None, columns: list[int] | None = None,
+) -> tuple[str, list[str]]:
+    """Convert one worksheet of a .xlsx upload into CSV text.
+
+    Returns (csv_text, sheet_names). ``sheet_name`` None selects the first sheet.
+    Formula cells carry the file's cached computed value (``data_only=True``); a
+    workbook saved without computed caches yields blanks for them.
+
+    ``columns`` (#973 c) narrows the conversion to those ORIGINAL column indices,
+    in order. 🔴 **It narrows while READING, not afterwards** — this function's
+    cost is one Python `str` per cell of the sheet plus the whole CSV string, so a
+    selection applied after the fact would spend exactly the memory the cell cap
+    exists to refuse. With a selection the cap is then applied to the SELECTION,
+    which is the whole of #973 (a): there is no wider file left to count.
+
+    Raises XlsxImportError for anything the user should fix (bad zip, unknown
+    sheet, empty sheet, over-cap dimensions).
+    """
+    import io as _io
+
+    wb = _open_xlsx(content)
+
+    try:
+        ws, sheet_names, target = _xlsx_sheet(wb, sheet_name)
 
         # #803: refuse on the sheet's DECLARED dimensions, before any cell is
         # read — an over-cap workbook must not cost the memory it is being
         # refused for. openpyxl's max_row/max_column can OVERCOUNT (formatting
         # residue, trimmed later), so this only ever refuses what is genuinely
         # over; the authoritative check runs on the trimmed dimensions below.
-        declared = cell_count_error(ws.max_row or 0, ws.max_column or 0)
+        # ⚠️ #973 (c): with a SELECTION the declared width is the selection's,
+        # because that is all this conversion will emit. Counting the sheet's
+        # full width here would refuse the very file the selection exists to
+        # rescue, which is the dead end (c) is fixing.
+        if columns is not None:
+            try:
+                _refuse_unknown_columns(columns, ws.max_column or 0)
+            except ColumnSelectionError as e:
+                raise XlsxImportError(str(e)) from e
+        declared_cols = len(columns) if columns is not None else (ws.max_column or 0)
+        declared = cell_count_error(ws.max_row or 0, declared_cols)
         if declared:
             raise XlsxImportError(declared)
 
@@ -1546,7 +1798,14 @@ def xlsx_to_csv_text(content: bytes, sheet_name: str | None = None) -> tuple[str
                 raise XlsxImportError(
                     f"The worksheet has more than {MAX_XLSX_COLS} columns."
                 )
-            rows.append([_xlsx_cell_to_str(v) for v in row])
+            if columns is None:
+                rows.append([_xlsx_cell_to_str(v) for v in row])
+            else:
+                # Narrow HERE: one list per row holding only the selection, so
+                # the unselected cells are never stringified and never retained.
+                rows.append([
+                    _xlsx_cell_to_str(row[c]) if c < len(row) else "" for c in columns
+                ])
     finally:
         wb.close()
 
@@ -1558,8 +1817,14 @@ def xlsx_to_csv_text(content: bytes, sheet_name: str | None = None) -> tuple[str
         raise XlsxImportError(f'Worksheet "{target}" has no data.')
 
     header = rows[0]
-    while header and header[-1] == "":
-        header.pop()
+    # ⚠️ #973 (c): only trim trailing blank headers when converting the WHOLE
+    # sheet. With a selection the width IS the selection — chosen from the header
+    # list `describe_xlsx` already trimmed — so trimming again could silently
+    # return fewer columns than were asked for, and every `column_index` the
+    # wizard holds would then point one place to the left.
+    if columns is None:
+        while header and header[-1] == "":
+            header.pop()
     if not header:
         raise XlsxImportError(f'Worksheet "{target}" has no header row.')
     width = len(header)
@@ -1578,6 +1843,114 @@ def xlsx_to_csv_text(content: bytes, sheet_name: str | None = None) -> tuple[str
         writer.writerow(sized)
 
     return out.getvalue(), sheet_names
+
+
+class ColumnSelectionError(ValueError):
+    """Refused: the selection names a column this file does not have (#973 c).
+
+    ⚠️ **A DISTINCT type, not a bare `ValueError`, for exactly `DatasetTooLargeError`'s
+    reason (#797).** The preview and import endpoints catch
+    `(ValueError, csv.Error, TypeError)` and rewrite it to "Unable to parse CSV
+    file. Check the file format" — a diagnosis that is wrong here twice over: the
+    file parses perfectly, and the fault is in the REQUEST. Both routers catch
+    this one first and show its message verbatim.
+    """
+
+
+def _refuse_unknown_columns(columns: list[int], width: int) -> None:
+    """Refuse a selection naming a column this file does not have (#973 c).
+
+    ONE message for all three formats, for the same reason `cell_count_error` is
+    one function: a selection is a claim about the file, and the three adapters
+    would otherwise disagree about what an out-of-range index means.
+    """
+    beyond = [i for i in columns if i >= width]
+    if beyond:
+        raise ColumnSelectionError(
+            f"The selection names column {beyond[0] + 1}, but this file has "
+            f"{width:,} column{'' if width == 1 else 's'}. Re-read the file's "
+            "columns and choose again."
+        )
+
+
+def describe_csv_text(text: str) -> dict:
+    """The cheap first stage (#973 c): what columns are here, and how many rows.
+
+    Returns ``{"headers": [...], "row_count": int, "samples": [[str, ...], ...]}``
+    — one sample list per column, at most `DESCRIBE_SAMPLE_ROWS` long.
+
+    🔴 **This deliberately does NOT apply `MAX_DATASET_CELLS`, and that is the
+    whole point.** It is the escape hatch FROM that refusal: a researcher whose
+    file is over the cap has to be able to see the column list in order to choose
+    a subset, and every other reader on this path refuses first — `.xlsx` on its
+    declared dimensions before reading a cell, `.sav` on its metadata,
+    `preview_dataset_csv` by bailing mid-stream. Refusing here too would make the
+    escape hatch refuse for the same reason as the wall.
+
+    ⚠️ **What bounds it instead is that it accumulates nothing**: a row counter
+    and five sample values per column, whatever the file's size. The one cost
+    that scales is the caller's whole-file `str`, which the 50 MB upload cap
+    already bounds.
+    """
+    reader = csv.reader(_csv_lines(_strip_bom(text)))
+    headers = next(reader, None) or []
+    samples: list[list[str]] = [[] for _ in headers]
+    row_count = 0
+
+    for row in reader:
+        # Blank lines are not records here, matching `preview_dataset_csv`'s own
+        # count so the two stages agree about how big the file is (#983).
+        if not row:
+            continue
+        row_count += 1
+        if row_count <= DESCRIBE_SAMPLE_ROWS:
+            for i, sample in enumerate(samples):
+                cell = row[i].strip() if i < len(row) else ""
+                sample.append(cell)
+
+    return {"headers": headers, "row_count": row_count, "samples": samples}
+
+
+def select_csv_columns(text: str, columns: list[int]) -> str:
+    """Re-emit `text` carrying only `columns`, by ORIGINAL index and in order.
+
+    🔴 **Narrowing happens at the ADAPTER — for every format — so that everything
+    downstream sees a file that IS the selection (#973 c).** The alternative,
+    threading a selection through `preview_dataset_csv` and `import_dataset_csv`
+    separately, keeps two notions of "which column is number 3": the preview's
+    `column_index` is a position in this text, and the import RE-READS the upload,
+    so a narrowing that renumbered on one path and not the other would put the
+    researcher's type choices on the wrong columns, silently.
+
+    Doing it here also makes #973 (a) fall out rather than be a second change:
+    `cell_count_error(row_count, len(headers))` is already counting the selection,
+    because the selection is all there is.
+
+    ⚠️ **A blank line is re-emitted as a blank line**, so the narrowed text has
+    exactly the record structure of the original — `csv.reader` reads `[]` back
+    as `[]`, and the two stages cannot disagree about the row count.
+
+    🔴 **An index past the last column is REFUSED, and all three adapters refuse
+    it the same way.** The router cannot check this — it does not know the file's
+    width until an adapter has read the header — so each adapter checks its own.
+    Without it the three would disagree: CSV and `.xlsx` would emit an empty
+    column (keeping the count) while `.sav` has no variable to read and would
+    return FEWER columns than were asked for, which silently shifts every
+    `column_index` the wizard holds. ⚠️ A cell absent from a SHORT ROW is still
+    an ordinary empty cell — that is a ragged record, not a bad selection.
+    """
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    reader = csv.reader(_csv_lines(_strip_bom(text)))
+    header = next(reader, None) or []
+    _refuse_unknown_columns(columns, len(header))
+    writer.writerow([header[i] for i in columns])
+    for row in reader:
+        if not row:
+            writer.writerow([])
+            continue
+        writer.writerow([row[i] if i < len(row) else "" for i in columns])
+    return out.getvalue()
 
 
 def preview_dataset_csv(
@@ -1609,37 +1982,85 @@ def preview_dataset_csv(
         suggested_type, suggested_scale_name, suggested_scale_labels,
         suggested_column_code, suggested_group_code, suggested_column_text,
         numeric_format, numeric_min, numeric_max.
+
+    🔴 **Reads POSITIONALLY, and that is load-bearing twice over (#973 b').**
+    Every other reader of this CSV text is positional — `_scan_source_rows`,
+    `import_dataset_csv`'s write loop, `append_preview` — and this function was
+    the only one keyed by header NAME. Two consequences, both reproduced before
+    the change:
+
+    * a row with FEWER cells than headers made `csv.DictReader` pad with
+      ``None``, and ``None.strip()`` raised `AttributeError` — which the preview
+      endpoint does not catch, so an ordinary ragged CSV answered **500**. The
+      import accepts the same file and stores the trailing cells as empty.
+    * two columns sharing a header collapsed in the row dict, so BOTH preview
+      columns described the second one's values and each value was tallied
+      twice — an ``empty_percent`` over 100% and, worse, a preview that
+      disagreed with what the import would store.
+
+    ⚠️ **Memory is bounded by CARDINALITY, not by rows.** Peak scales with how
+    many DISTINCT values each column holds, so a survey collapses and a column
+    of genuinely unique free text does not. The whole-file ``str`` this takes as
+    its argument is a separate cost, owned by `_upload_to_csv_text`.
     """
     text = _strip_bom(file_contents)
-    reader = csv.DictReader(io.StringIO(text))
-    headers = reader.fieldnames or []
+    reader = csv.reader(_csv_lines(text))
+    headers = next(reader, None) or []
 
-    # Collect all values per column
-    col_all_values: dict[str, list[str]] = {h: [] for h in headers}
+    # #973 (b'): ONE tally per column POSITION — {value: how many cells held it},
+    # in first-seen order. Never a cell list; no consumer ever wanted the
+    # duplicates. The blank cell rides the tally under the "" key and is popped
+    # out below, which keeps the hot loop to a single dict operation per cell.
+    #
+    # 🔴 **The dedup is NOT where the saving came from, and #973 said it was.**
+    # Measured: replacing the cell lists with these tallies and changing nothing
+    # else took the at-the-cap case from 531 MB to 644 — WORSE. The old code
+    # built its per-column sets one column at a time and discarded each; these
+    # are all live at once, and a dict entry costs ~38 B against a list slot's
+    # 8 B, so the trade loses whenever values do not repeat. What paid for the
+    # result is `_csv_lines` (read its docstring). This structure earns its place
+    # on the REAL corpora, where values repeat heavily — BES 283 → 160 MB — and
+    # on time, because `is_missing` is now asked once per distinct value.
+    tallies: list[dict[str, int]] = [{} for _ in headers]
     total_rows = 0
 
     # #803: a plain .csv declares no dimensions, so the cap can only be applied
     # while reading. Bail the MOMENT it is crossed rather than after the count —
-    # accumulating an over-cap file into `col_all_values` would spend exactly the
-    # memory the cap exists to refuse.
+    # accumulating an over-cap file would spend exactly the memory the cap exists
+    # to refuse.
     n_cols = len(headers)
     max_rows_for_cap = MAX_DATASET_CELLS // n_cols if n_cols else None
 
     for row in reader:
+        # `csv.reader` yields [] for a blank line where `DictReader` skipped it.
+        # Skipping preserves this preview's own long-standing row count. ⚠️ The
+        # IMPORT does NOT skip — `import_dataset_csv` creates an empty record for
+        # a blank line — so the two disagree by one record per blank line. That
+        # is a data question (should a blank line be a respondent?), not a memory
+        # one, so it is filed rather than decided here: ISSUES #983.
+        if not row:
+            continue
         total_rows += 1
         if max_rows_for_cap is not None and total_rows > max_rows_for_cap:
             raise DatasetTooLargeError(cell_cap_exceeded_message(n_cols))
-        for h in headers:
-            col_all_values[h].append(row.get(h, "").strip())
+        # A short row means the trailing cells are ABSENT, which is what an empty
+        # cell means — and is exactly what the import stores for them
+        # (`if col_idx >= len(data_row): continue`). Padding once per short row
+        # keeps the per-cell path branch-free; `zip` drops any surplus cells,
+        # which is what the header-keyed reader did too.
+        if len(row) < n_cols:
+            row = row + [""] * (n_cols - len(row))
+        for tally, cell in zip(tallies, row):
+            cell = cell.strip()
+            tally[cell] = tally.get(cell, 0) + 1
 
     columns = []
     for col_idx, header in enumerate(headers):
-        all_vals = col_all_values[header]
-        non_empty = [v for v in all_vals if v]
-        empty_count = len(all_vals) - len(non_empty)
-
-        # Unique values preserving first-seen order
-        unique_ordered = list(dict.fromkeys(non_empty))
+        tally = tallies[col_idx]
+        empty_count = tally.pop("", 0)
+        # Every counted row tallied exactly one cell into every column, so this
+        # needs no second walk of the tally.
+        non_empty_count = total_rows - empty_count
 
         # Substantive = non-empty AND non-missing (drives type detection,
         # na_count, and the numeric min/max below).
@@ -1648,23 +2069,32 @@ def preview_dataset_csv(
         # every text-format column, since no DatasetColumn exists to declare on
         # until import. This is the one remaining bare-`_is_na` site and it is
         # allowlisted in the fail-closed scan for exactly that reason.
+        # ⚠️ Asked once per DISTINCT value, not once per cell: `is_missing` is a
+        # pure function of (text, rules), and the per-cell form was 3.1M calls on
+        # the GSS corpus to answer a few hundred distinct questions.
         preview_rules = (missing_rules_by_column or {}).get(header)
-        substantive_list = [v for v in non_empty if not is_missing(v, preview_rules)]
-        substantive_set = set(substantive_list)
-        na_count = len(non_empty) - len(substantive_list)
+        substantive_distinct = tuple(
+            v for v in tally if not is_missing(v, preview_rules)
+        )
+        substantive_cells = sum(tally[v] for v in substantive_distinct)
+        substantive = SubstantiveValues.of(substantive_distinct, substantive_cells)
+        na_count = non_empty_count - substantive_cells
 
         # Stats
-        sample_values = unique_ordered[:5]
-        unique_count = len(set(non_empty))
+        sample_values = list(islice(tally, 5))
+        unique_count = len(tally)
         empty_percent = (
             round(empty_count / total_rows * 100, PREVIEW_STATS_PRECISION) if total_rows else 0.0
         )
-        all_numeric = bool(substantive_set) and all(
-            _strip_numeric(v) is not None for v in substantive_set
+        all_numeric = bool(substantive_distinct) and all(
+            _strip_numeric(v) is not None for v in substantive_distinct
         )
         avg_text_length = (
-            round(sum(len(v) for v in non_empty) / len(non_empty), PREVIEW_STATS_PRECISION)
-            if non_empty
+            round(
+                sum(len(v) * n for v, n in tally.items()) / non_empty_count,
+                PREVIEW_STATS_PRECISION,
+            )
+            if non_empty_count
             else 0.0
         )
 
@@ -1673,16 +2103,14 @@ def preview_dataset_csv(
         # seed every code, not just the 5 sample_values. Skip continuous measures.
         distinct_numeric_values = None
         if all_numeric and unique_count <= VALUE_LABEL_SEED_MAX_CODES:
-            parsed_codes = {_strip_numeric(v) for v in substantive_set}
+            parsed_codes = {_strip_numeric(v) for v in substantive_distinct}
             distinct_numeric_values = sorted(c for c in parsed_codes if c is not None)
 
         # Parse header
         parsed = parse_header(header)
 
         # Detect type
-        detection = _detect_column_type(
-            header, parsed, substantive_set, substantive_list, col_idx,
-        )
+        detection = _detect_column_type(header, parsed, substantive, col_idx)
 
         columns.append({
             "column_name": header,
@@ -1760,7 +2188,7 @@ def _scan_source_rows(text: str, column_configs: list[dict]) -> tuple[int, dict,
     distinct_numeric: dict[int, set] = {i: set() for i in want_numeric}
     na_values: dict[int, set] = {i: set() for i in want_na}
 
-    reader = csv.reader(io.StringIO(text))
+    reader = csv.reader(_csv_lines(text))
     next(reader, None)  # header
     row_count = 0
     for row in reader:
@@ -1820,7 +2248,7 @@ def import_dataset_csv(
         (None unless linking ran).
     """
     text = _strip_bom(file_contents)
-    headers = next(csv.reader(io.StringIO(text)))
+    headers = next(csv.reader(_csv_lines(text)))
     # #799: ONE streaming pass instead of a retained row list — see
     # `_scan_source_rows`. The list cost 288 MB on a real import and was walked
     # once per qualifying column.
@@ -2045,7 +2473,7 @@ def import_dataset_csv(
     # of the CSV text total (this and `_scan_source_rows`) replace one parse plus
     # a retained 3.1M-object list — measured at ~0.8s per parse against a ~76s
     # import, i.e. ~1% of the time for 288 MB of memory.
-    source_rows = csv.reader(io.StringIO(text))
+    source_rows = csv.reader(_csv_lines(text))
     next(source_rows, None)  # header
     batch_start = 0
     while True:

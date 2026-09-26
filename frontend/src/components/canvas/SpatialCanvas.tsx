@@ -944,7 +944,7 @@ export default function SpatialCanvas({
               aria-roledescription="draggable"
               aria-label={theme.name}
               className={cn(
-                'absolute w-[210px] bg-white dark:bg-mm-surface border border-mm-border rounded-md shadow-md select-none transition-shadow focus:outline-none focus:ring-2 focus:ring-[hsl(var(--mm-teal))]',
+                'absolute w-[210px] bg-white dark:bg-mm-surface border border-border rounded-md shadow-md select-none transition-shadow focus:outline-none focus:ring-2 focus:ring-[hsl(var(--mm-teal))]',
                 dragState?.themeId === theme.id && 'shadow-xl opacity-90 z-10',
                 connectionMode && 'cursor-pointer',
                 connectionSource === theme.id && 'ring-2 ring-[hsl(var(--mm-teal))]',
@@ -1137,7 +1137,7 @@ export default function SpatialCanvas({
         return (
           <div style={{ position: 'absolute', transformOrigin: '0 0', transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
             <div
-              className="absolute w-[210px] bg-white dark:bg-mm-surface border border-mm-border rounded-md shadow-xl opacity-80 z-20 pointer-events-none"
+              className="absolute w-[210px] bg-white dark:bg-mm-surface border border-border rounded-md shadow-xl opacity-80 z-20 pointer-events-none"
               style={{ left: ghostPos.x, top: ghostPos.y }}
             >
               <div className="h-2 rounded-t-md" style={{ backgroundColor: draggedTheme.color ?? '#6366f1' }} />
@@ -1155,7 +1155,7 @@ export default function SpatialCanvas({
             'h-[30px] px-2.5 border rounded text-[11.5px] font-medium shadow-sm transition-colors flex items-center gap-1',
             showContent
               ? 'border-[hsl(var(--mm-blue)/0.3)] bg-[hsl(var(--mm-blue)/0.08)] dark:bg-[hsl(var(--mm-blue)/0.15)] text-[hsl(var(--mm-blue-text))] dark:text-[hsl(var(--mm-blue)/0.8)]'
-              : 'border-mm-border bg-white dark:bg-mm-surface text-mm-text-faint',
+              : 'border-border bg-white dark:bg-mm-surface text-mm-text-faint',
           )}
           onClick={() => setShowContent(prev => !prev)}
           aria-pressed={showContent}
@@ -1170,7 +1170,7 @@ export default function SpatialCanvas({
             'h-[30px] px-2.5 border rounded text-[11.5px] font-medium shadow-sm transition-colors flex items-center gap-1',
             showNesting
               ? 'border-[hsl(var(--mm-blue)/0.3)] bg-[hsl(var(--mm-blue)/0.08)] dark:bg-[hsl(var(--mm-blue)/0.15)] text-[hsl(var(--mm-blue-text))] dark:text-[hsl(var(--mm-blue)/0.8)]'
-              : 'border-mm-border bg-white dark:bg-mm-surface text-mm-text-faint',
+              : 'border-border bg-white dark:bg-mm-surface text-mm-text-faint',
           )}
           onClick={() => setShowNesting(prev => !prev)}
           aria-pressed={showNesting}
@@ -1185,7 +1185,7 @@ export default function SpatialCanvas({
             'h-[30px] px-2.5 border rounded text-[11.5px] font-medium shadow-sm transition-colors flex items-center gap-1',
             showFullLabels
               ? 'border-[hsl(var(--mm-blue)/0.3)] bg-[hsl(var(--mm-blue)/0.08)] dark:bg-[hsl(var(--mm-blue)/0.15)] text-[hsl(var(--mm-blue-text))] dark:text-[hsl(var(--mm-blue)/0.8)]'
-              : 'border-mm-border bg-white dark:bg-mm-surface text-mm-text-faint',
+              : 'border-border bg-white dark:bg-mm-surface text-mm-text-faint',
           )}
           onClick={() => setShowFullLabels(prev => !prev)}
           aria-pressed={showFullLabels}
@@ -1198,7 +1198,7 @@ export default function SpatialCanvas({
           <DropdownMenuTrigger asChild>
             <button
               type="button"
-              className="h-[30px] px-2.5 border rounded text-[11.5px] font-medium shadow-sm transition-colors flex items-center gap-1 border-mm-border bg-white dark:bg-mm-surface text-mm-text-secondary hover:bg-mm-bg"
+              className="h-[30px] px-2.5 border rounded text-[11.5px] font-medium shadow-sm transition-colors flex items-center gap-1 border-border bg-white dark:bg-mm-surface text-mm-text-secondary hover:bg-mm-bg"
               disabled={topLevelThemes.length === 0}
               aria-label="Choose layout arrangement"
             >
@@ -1220,8 +1220,8 @@ export default function SpatialCanvas({
           className={cn(
             'h-[30px] px-2.5 border rounded text-[11.5px] font-medium shadow-sm transition-colors',
             connectionMode
-              ? 'bg-[hsl(var(--mm-teal))] text-white border-[hsl(var(--mm-teal))]'
-              : 'border-mm-border bg-white dark:bg-mm-surface text-mm-text-secondary hover:bg-mm-bg',
+              ? 'bg-mm-teal-fill text-mm-on-fill border-mm-teal-fill'
+              : 'border-border bg-white dark:bg-mm-surface text-mm-text-secondary hover:bg-mm-bg',
           )}
           onClick={toggleConnectionMode}
           aria-pressed={connectionMode}
@@ -1237,7 +1237,7 @@ export default function SpatialCanvas({
 
       {/* ── Connection mode instructions ───────────────────────────────── */}
       {connectionMode && (
-        <div className="absolute top-12 left-3 z-10 bg-white dark:bg-mm-surface border border-mm-border rounded px-3 py-1.5 text-xs text-mm-text-muted shadow-sm">
+        <div className="absolute top-12 left-3 z-10 bg-white dark:bg-mm-surface border border-border rounded px-3 py-1.5 text-xs text-mm-text-muted shadow-sm">
           {connectionSource == null
             ? 'Click a source theme card to start'
             : 'Now click a target theme card to create the relationship'}
@@ -1248,18 +1248,18 @@ export default function SpatialCanvas({
       <div className="absolute bottom-4 right-4 flex flex-col gap-0.5 z-10" data-spatial-zoom>
         <button
           type="button"
-          className="w-8 h-8 border border-mm-border bg-white dark:bg-mm-surface text-mm-text-secondary text-base flex items-center justify-center shadow-sm rounded-t hover:bg-mm-bg transition-colors"
+          className="w-8 h-8 border border-border bg-white dark:bg-mm-surface text-mm-text-secondary text-base flex items-center justify-center shadow-sm rounded-t hover:bg-mm-bg transition-colors"
           onClick={() => setZoom(z => Math.min(2, +(z + 0.1).toFixed(2)))}
           aria-label="Zoom in"
         >
           +
         </button>
-        <div className="text-[10px] font-mono text-mm-text-muted text-center bg-white dark:bg-mm-surface border-x border-mm-border px-1 leading-6">
+        <div className="text-[10px] font-mono text-mm-text-muted text-center bg-white dark:bg-mm-surface border-x border-border px-1 leading-6">
           {Math.round(zoom * 100)}%
         </div>
         <button
           type="button"
-          className="w-8 h-8 border border-mm-border bg-white dark:bg-mm-surface text-mm-text-secondary text-base flex items-center justify-center shadow-sm rounded-b hover:bg-mm-bg transition-colors"
+          className="w-8 h-8 border border-border bg-white dark:bg-mm-surface text-mm-text-secondary text-base flex items-center justify-center shadow-sm rounded-b hover:bg-mm-bg transition-colors"
           onClick={() => setZoom(z => Math.max(0.3, +(z - 0.1).toFixed(2)))}
           aria-label="Zoom out"
         >

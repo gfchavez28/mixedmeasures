@@ -19,19 +19,27 @@ from pathlib import Path
 
 from fastapi import HTTPException
 from sqlalchemy import (
+    bindparam,
     inspect as sa_inspect,
     func,
     insert as sa_insert,
+    or_ as sa_or,
     select as sa_select,
+    update as sa_update,
 )
 from sqlalchemy.orm import Session
 
 from . import magnitude, media_storage
 from .archive_safety import assert_expanded_size_within_limit, assert_member_within
 from .dataset_rows import materialise_manual_cells  # #897
+from .id_set import in_id_set  # #994
 from .participant_dataset import MANAGED_COLUMN_SOURCE  # #921
 from .participant_scores import build_managed_spec, parse_managed_spec  # #922
-from .safety_copies import safety_copy_filename, write_safety_copy  # #919
+from .safety_copies import (  # #919, #977
+    refusal_for_prefix,
+    safety_copy_filename,
+    write_safety_copy,
+)
 from .text_offsets import has_astral, utf16_to_codepoint
 from .text_similarity import similarity_ratio
 from .media_duration import MAX_MEDIA_OFFSET_SECONDS, sane_duration
@@ -48,6 +56,7 @@ from ..models import (
     CodeApplication,
     CodeCategory,
     CodeEquivalenceGroup,
+    CodeSet,
     TextCodingConfig,
     ComputedResult,
     Conversation,
@@ -76,7 +85,7 @@ from ..models import (
     StatisticalTest,
 )
 from ..models.user import User
-from ..auth import unique_username
+from ..auth import normalize_coder_type, unique_username
 from ..config import get_backup_dir
 from ..services.backup import APP_VERSION
 from ..services.coding_layers import CONSENSUS_ORIGIN, code_usage_count_expr, non_consensus_filter
@@ -152,7 +161,27 @@ logger = logging.getLogger(__name__)
 # test names (`project_portability.py`, the internal design notes,
 # the internal design notes) — a version whose recorded meaning is narrower than its contents is
 # how the next reader mis-scopes a compatibility question.
-CURRENT_FORMAT_VERSION = 6
+#
+# v7 = #958/#860/#962 — THE FIVE DATA-SCALED ENTITIES MOVE OUT OF `project.json` INTO
+# THEIR OWN NEWLINE-DELIMITED ENTRIES (`segments.jsonl`, `code_applications.jsonl`,
+# `dataset_rows.jsonl`, `dataset_values.jsonl`, `row_scores.jsonl`). See
+# `JSONL_ENTITY_KEYS` for the measurement and the rejected alternative.
+#
+# 🔴 A REFUSAL GATE, and the most consequential one yet. Every earlier bump asked what a
+# missing COLUMN does in an older build; this one asks what a missing KEY does. A v6 build
+# reads `data.get("dataset_values", [])`, gets `[]`, and imports the dataset with its
+# columns, its rows and NOT ONE CELL — reporting success. That is v4's silent-wrongness
+# case at the largest scale the tool has, so the gate is what makes the split safe.
+#
+# ⚠️ AND WIDENING v6 WAS NOT AVAILABLE: `CURRENT_FORMAT_VERSION = 6` landed 2026-08-31
+# (`9f7387a4`) and the PUBLIC repo carries it at v1.5.0 AND v1.5.3 — queried, not
+# inferred — so builds in the field accept a v6 file without understanding it. The
+# "v6 has never shipped" sentence that licensed the #35 widening above was true when
+# written and false for thirteen days before anyone corrected it; do not reason from it.
+#
+# ⚠️ v<=6 files still import, unchanged: `_attach_entity_rows` leaves their inline lists
+# alone, and every consumer reads whichever shape it is handed.
+CURRENT_FORMAT_VERSION = 7
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
 
 
@@ -192,13 +221,27 @@ values — with a byte-for-byte fidelity check. **Measured, same machine, before
 **The old bound was chosen on TIME and that argument is gone:** 500,000 values now import in
 roughly 20 s, and the full 3.6 M round trip is ~230 s against a 15-minute client budget.
 
-🔴 **The constraint is now MEMORY, and it is the FORMAT's, not the write path's.** Measured
-separately: `json.loads` of this archive's `project.json` alone peaks at **2,611 MB** — 92%
-of the import's total. Batching adds ~231 MB on top of that floor. So raising this bound
-further buys nothing until the format stops requiring the whole payload in memory at once
-(a streaming parse, or per-entity JSONL zip entries); the write path has no more to give.
-**4,000,000 is set just above the largest round trip actually verified** — do not raise it
-on the strength of the time numbers, which are no longer what binds.
+🔴 **The constraint was MEMORY and it WAS the FORMAT's. ✅ THAT HALF IS DONE (v7, 2026-09-21,
+#958 steps 3–5): the whole-document parse no longer exists and `project.json` is 40 KB.**
+The figure this paragraph was built on — `json.loads` of `project.json` at **2,611 MB**, 92%
+of the import's total — is history.
+
+🔴 **BUT THE BOUND MUST STILL NOT BE RAISED ON THAT NEWS, AND THE REASON IS THE MEASUREMENT.**
+The import's peak fell **2,969 → 1,790 MB on BES and 2,845 → 1,235 MB on GSS** — NOT by the
+2,611 MB the parse cost, because `ru_maxrss` is a high-water mark and the parse was HIDING
+the next cost rather than stacking on it. The `(row_id, column_id) → id` map was the value
+path's (#994 fixed it: GSS 1,235.9 → 100.9 MB). 🔴 **On a coding-heavy import the remaining peak
+is the CONSENSUS REBUILD, not the application insert — measured 2026-09-23, and #958 had
+guessed otherwise.** The applications insert in batches now (577.5 → 133.5 s on BES) and the
+peak did not move (1,846 → 1,907 MB); the same import with `materialize_consensus_for_project`
+switched off peaks at **445 MB**. That rebuild gathered every vote of the project into nested
+dicts and held one pending ORM row per consensus decision until one final flush. ✅ **Since
+2026-09-23 it gathers only targets with ≥2 eligible voters and flushes every 5,000 rows: BES
+import 1,907 → 675 MB, byte-identical layer.** What remains above 445 is that filtered gather
+read whole (`.all()`); streaming it is the separable last step of #958.
+**4,000,000 is still set just above the largest round trip actually verified** — do not raise
+it on the strength of the time numbers, which are not what binds, nor on the format fix,
+which moved the ceiling without removing it.
 
 ⚠️ **`MAX_DATASET_CELLS` is also 4,000,000 and this is NOT the same quantity.** That caps
 CELLS in ONE dataset; this caps VALUES across the whole PROJECT, and a project may hold
@@ -247,6 +290,56 @@ def project_export_size_error(n_values: int) -> str | None:
     )
 
 
+# The share of the limit at which the disclosure stops merely stating the size
+# and starts warning (#974). Declared HERE, beside the limit it is a fraction of,
+# because a threshold and the number it thresholds are two halves of one fact —
+# separated, one gets changed and the other does not.
+#
+# 0.8 leaves 800,000 values of runway, which on the GSS corpus (75,699 records) is
+# ~10 more computed variables. The remedy — removing variables or records — is not
+# a five-minute job, so the warning has to arrive while there is still room to act
+# rather than at the wall.
+PROJECT_EXPORT_WARN_FRACTION = 0.8
+
+
+def project_export_value_count(db: Session, project_id: int) -> int:
+    """The quantity `MAX_PROJECT_EXPORT_VALUES` bounds, for ONE project.
+
+    🔴 **Extracted so the REFUSAL and the DISCLOSURE count the same thing (#974).**
+    A warning that predicts a refusal must be computed the way the refusal is, or
+    the researcher is warned at one number and stopped at another — and the two
+    would drift the first time either is touched.
+
+    ⚠️ **This is the gate's quantity, NOT everything the archive carries, and
+    that is now a DECIDED proxy rather than an open gap (#974, 2026-09-20).** The
+    export streams `dataset_rows` too, and it is not counted.
+    🔴 **Counting the derived rows was measured and REFUSED: it put the real GSS
+    corpus at 4,087,746 of 4,000,000 — 102% — so a project that exports today
+    would have stopped.** The limit cannot absorb the difference either: it was
+    calibrated 2026-08-30 on a round trip carrying ~3.78M objects, and
+    `MAX_PROJECT_EXPORT_VALUES`' own docstring forbids raising it while the FORMAT
+    is what binds.
+    ✅ **THE `row_scores` HALF OF THAT UNDERCOUNT NO LONGER EXISTS (#958 §6,
+    2026-09-21): the export does not carry them at all.** The 12.5%-to-66.7% range
+    measured across four real projects was tracking how metric-heavy each was —
+    the axis that has now gone to zero, so on GSS the archive holds 454,194 fewer
+    objects than the day that range was measured. ⚠️ **The remaining undercount is
+    `dataset_rows` (plus `segments` and `code_applications` on a coded project) and
+    it is real; do not read this as "the proxy is now exact".**
+    ⚠️ The disclosure mirrors this deliberately: one that counted MORE than the
+    gate would predict a refusal that does not come.
+
+    ⚠️ MEASURED 2026-09-20 at 253 ms on 3,633,552 values. Passing the project's
+    dataset ids inline to drop the `Dataset` join was tried and is 245 ms — 3%,
+    not worth a second query shape for the same question.
+    """
+    return db.query(func.count(DatasetValue.id)).join(
+        DatasetRow, DatasetValue.row_id == DatasetRow.id
+    ).join(
+        Dataset, DatasetRow.dataset_id == Dataset.id
+    ).filter(Dataset.project_id == project_id).scalar() or 0
+
+
 def assert_project_exportable(db: Session, project_id: int) -> None:
     """Refuse an over-bound project BEFORE the gather begins.
 
@@ -255,12 +348,7 @@ def assert_project_exportable(db: Session, project_id: int) -> None:
     `_safety_export_before_overwrite`) and a router guard is not a guard on the
     operation (#589). One COUNT — it must not spend the memory it is refusing.
     """
-    n_values = db.query(func.count(DatasetValue.id)).join(
-        DatasetRow, DatasetValue.row_id == DatasetRow.id
-    ).join(
-        Dataset, DatasetRow.dataset_id == Dataset.id
-    ).filter(Dataset.project_id == project_id).scalar() or 0
-    message = project_export_size_error(n_values)
+    message = project_export_size_error(project_export_value_count(db, project_id))
     if message:
         raise ProjectTooLargeError(message)
 
@@ -341,65 +429,426 @@ class _StreamedEntity:
         self.order_by = order_by
 
 
-def _serialize_mapping(mapping, columns: list[str]) -> dict:
-    """Serialize a Core result row. Mirrors `_serialize_row` — keep the two in step."""
-    data = {"_original_id": mapping["id"]}
-    for col in columns:
-        if col == "id":
-            continue
-        val = mapping[col]
-        if isinstance(val, datetime):
-            data[col] = val.isoformat()
-        elif isinstance(val, enum.Enum):
-            data[col] = val.value
-        else:
-            data[col] = val
-    return data
+class _DroppedEntity(_StreamedEntity):
+    """A data-scaled entity whose MEMBER is still written and whose ROWS are not (#958 §6).
+
+    🔴 **THE MEMBER IS NOT OPTIONAL AND THE ROWS ARE.** `_read_manifest_and_check_format`
+    refuses a v7 archive that is missing an entity member, so "we deliberately carry none
+    of these" has to be an EMPTY member — exactly the shape an entity that simply has no
+    rows takes. Deleting the key from `JSONL_ENTITY_KEYS` instead would make a fresh export
+    and a v7 archive written last week differ in their member SET, which is the one thing
+    the presence check exists to make unambiguous.
+
+    ⚠️ **It is a TYPE rather than a `whereclause=None` argument, on purpose.** A null
+    predicate already means "this project has nothing to select" (`_stream_core_rows`
+    returns immediately on it), and the two facts must not share one value — a reader
+    meeting `_StreamedEntity(RowScore, cols, None, …)` sees a bug, and the next person to
+    "fix" it restores half a million derived rows to every archive.
+    """
+
+    __slots__ = ()
+
+    def __init__(self, model, columns):
+        super().__init__(model, columns, None, model.id)
+
+
+#: Python types a column's values are known to be when its SQL type declares one of
+#: them — none can be a `datetime` or an `enum.Enum`, so the per-value conversion check
+#: is skipped for such columns (#1015).
+_PLAIN_PYTHON_TYPES = (int, str, float, bool)
+
+
+def _is_plain_column(column) -> bool:
+    """True when a column's values can never need `_serialize_row`'s conversions."""
+    try:
+        return column.type.python_type in _PLAIN_PYTHON_TYPES
+    except NotImplementedError:  # e.g. JSON — no declared Python type, so check each value
+        return False
+
+
+def _core_row_serializer(table, columns: list[str]):
+    """Build a function serializing one Core result row of `table` (selected whole).
+
+    Mirrors `_serialize_row` — keep the two in step; `test_portability_stream_equivalence.py`
+    compares them value for value. ⚠️ **Decided once per entity, not per value (#1015):**
+    a column whose declared Python type is plain is copied as-is, and only the others
+    take the `datetime` / `Enum` checks. On a 1.2M-value export the per-value `isinstance`
+    pair was ~4 s for columns that are integers and text by construction. Values are read
+    by POSITION, which is `select(table)`'s column order.
+    """
+    position = {c.name: i for i, c in enumerate(table.columns)}
+    id_at = position["id"]
+    fields = [
+        (col, position[col], _is_plain_column(table.c[col]))
+        for col in columns if col != "id"
+    ]
+
+    def serialize(row) -> dict:
+        data = {"_original_id": row[id_at]}
+        for col, at, plain in fields:
+            val = row[at]
+            if plain:
+                data[col] = val
+            elif isinstance(val, datetime):
+                data[col] = val.isoformat()
+            elif isinstance(val, enum.Enum):
+                data[col] = val.value
+            else:
+                data[col] = val
+        return data
+
+    return serialize
 
 
 def _stream_core_rows(db: Session, spec: "_StreamedEntity"):
-    """Yield serialized dicts for one streamed entity, a partition at a time."""
+    """Yield serialized dicts for one streamed entity, a partition at a time.
+
+    ⚠️ **Through `db.connection()`, not `db.execute` (#1015).** A Core select run through
+    the SESSION still passes every row through the ORM loading layer — measured at ~13%
+    of a 1.2M-value export for rows that come out as the same `Row` either way. The
+    connection is the Session's own, so the read sees the same transaction.
+    """
     if spec.whereclause is None:
         return
+    table = spec.model.__table__
+    serialize = _core_row_serializer(table, spec.columns)
     stmt = (
-        sa_select(spec.model.__table__)
+        sa_select(table)
         .where(spec.whereclause)
         .order_by(spec.order_by)
         .execution_options(yield_per=STREAM_PARTITION_ROWS)
     )
-    for partition in db.execute(stmt).partitions():
+    for partition in db.connection().execute(stmt).partitions():
         for row in partition:
-            yield _serialize_mapping(row._mapping, spec.columns)
+            yield serialize(row)
 
 
-def _write_project_json(fh, project_data: dict, db: Session) -> dict[str, int]:
-    """Write `project.json` incrementally into an open zip entry. Returns streamed counts.
+# ── The data-scaled entities live in their OWN zip entries (format v7) ──────
+#
+# 🔴 **THE MEASUREMENT THAT DECIDED THIS: on BOTH real corpora the data-scaled arrays are
+# 100.0% of `project.json` to one decimal place** (GSS 517,678,259 of 517,777,682 B; BES
+# 427,360,177 of 427,398,554 B). Everything else — the project, the codebook, the coders,
+# the configs — is 97 KB on GSS and 37 KB on BES. So the document a reader has to parse
+# whole is ENTIRELY the part that scales with the researcher's data, and `json.loads` of
+# it was **2,611 MB, 92% of the import's peak**.
+#
+# Splitting those five keys into newline-delimited entries REMOVES that parse rather than
+# accelerating it: `for line in entry` is streaming by construction, and it mirrors the
+# write side, which has streamed since #842/#958. A streaming JSON parser (`ijson`) was
+# the alternative and was rejected — it is a new production dependency, with a C backend
+# and PyInstaller implications, solving a problem that stops existing once `project.json`
+# is 97 KB. Full evidence: the internal design notes.
+#
+# ⚠️ **THIS IS THE WHOLE REASON v7 IS A REFUSAL GATE.** A v6 build meeting a v7 file would
+# read `data.get("dataset_values", [])` as `[]` and import the dataset with NO VALUES — v4's
+# silent-wrongness case at the worst possible scale. The version bump is what turns that
+# into a clean "created by a newer version" refusal.
+#
+# 🔴 **THE SET IS DECLARED ONCE, AND THE EXPORT FAILS CLOSED AGAINST IT.** The writer emits
+# an entry for every `_StreamedEntity` in `project_data` and `_assert_entity_entries_match`
+# refuses to export if that set and this tuple disagree — in EITHER direction. A sixth
+# streamed entity that nobody registered here would otherwise be written to an entry the
+# importer never opens (silent loss), and a registered key nobody streams would make every
+# v7 archive fail the reader's presence check.
+JSONL_ENTITY_KEYS: tuple[str, ...] = (
+    "segments",
+    "code_applications",
+    "dataset_rows",
+    "dataset_values",
+    "row_scores",
+)
+
+#: The first format version that carries per-entity entries. A file at or above this
+#: MUST contain every one of them — see `_attach_entity_rows`.
+JSONL_FORMAT_VERSION = 7
+
+# ── Who asks `remap["dataset_values"]` a question (#994) ─────────────────────
+#
+# 🔴 **THE VALUE REMAP IS PARTIAL SINCE #994, AND THESE TWO TUPLES ARE WHY IT IS
+# SAFE.** It used to hold every imported value — 3.6 M entries on the GSS corpus,
+# of which ZERO were ever read, because that project codes no dataset cells. It
+# now holds exactly the ids something downstream asks for, collected from here
+# BEFORE the insert loop runs.
+#
+# 🔴 **SO A NEW CONSUMER THAT IS NOT DECLARED HERE GETS `None` AND LOSES ITS
+# TARGET, SILENTLY** — an excerpt, a coding or a note pointing at nothing. That
+# is a worse failure than the memory it saves, so it is not left to memory:
+# `tests/test_portability_value_remap.py` scans this module for every reader of
+# `remap["dataset_values"]` and fails, with instructions, on one these do not
+# cover.
+#
+# ⚠️ **The filed entry said there were THREE readers. There are FOUR** — it
+# missed `text_coding_config.starred_value_ids`, which is the JSON-id class this
+# file's own §6 rule warns about (an id inside a JSON column is invisible to both
+# the FK pass and a grep for the FK's name). Enumerate by what READS the remap.
+
+#: Entity keys whose rows carry a `dataset_value_id` FK.
+# #958 — the ORM half. Code applications import through a Core `executemany` in batches
+# of this many rows, and a MERGE resolves duplicates one batch at a time. A module
+# constant so a test can make a batch boundary fall where it wants one: the per-row loop
+# this replaced treated a duplicate of a row inserted MOMENTS earlier as a duplicate, and
+# only a boundary INSIDE a small fixture can show that still holds across batches.
+CODE_APPLICATION_IMPORT_BATCH = 5_000
+
+_VALUE_REF_FK_ENTITIES: tuple[str, ...] = ("excerpts", "notes", "code_applications")
+
+#: `(entity key, field)` for a JSON ARRAY of dataset-value ids on a singleton entity.
+_VALUE_REF_JSON_FIELDS: tuple[tuple[str, str], ...] = (
+    ("text_coding_config", "starred_value_ids"),
+)
+
+
+def _referenced_dataset_value_ids(data: dict) -> set[int]:
+    """Every ORIGINAL dataset-value id anything downstream of section n will ask for.
+
+    ⚠️ **`code_applications` is a STREAMED entity, so this costs one extra pass over
+    that entry** — the trade #994 makes, and the reason both corpus shapes were
+    measured rather than one: it is a large win where values outnumber codings and
+    roughly neutral where they do not. The other three carriers are inline and small.
+    """
+    wanted: set[int] = set()
+    for key in _VALUE_REF_FK_ENTITIES:
+        for item in data.get(key) or ():
+            value_id = item.get("dataset_value_id")
+            if isinstance(value_id, int) and not isinstance(value_id, bool):
+                wanted.add(value_id)
+    for key, field in _VALUE_REF_JSON_FIELDS:
+        entity = data.get(key)
+        if not isinstance(entity, dict):
+            continue
+        # ⚠️ **A JSON STRING, not a list.** `TextCodingConfig.starred_value_ids` is a
+        # `Text` column the router `json.dumps` into, and `_serialize_all` copies the
+        # column verbatim — so the archive carries `"[7100]"`. Iterating it as a list
+        # yields CHARACTERS, which are not ints, so the collector would have returned
+        # an empty set and every starred cell would have kept its SOURCE id
+        # (`_remap_json_id_array` falls back to the original when the remap misses).
+        raw = entity.get(field)
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if not isinstance(raw, list):
+            continue
+        for value_id in raw:
+            if isinstance(value_id, int) and not isinstance(value_id, bool):
+                wanted.add(value_id)
+    return wanted
+
+
+def _entity_entry_name(key: str) -> str:
+    """The zip member holding one entity's rows. Flat, so no `documents/`/`media/` clash."""
+    return f"{key}.jsonl"
+
+
+def _assert_entity_entries_match(project_data: dict) -> dict[str, "_StreamedEntity"]:
+    """Return the streamed specs, refusing to export if they disagree with the constant."""
+    streamed = {
+        k: v for k, v in project_data.items() if isinstance(v, _StreamedEntity)
+    }
+    if set(streamed) != set(JSONL_ENTITY_KEYS):
+        raise RuntimeError(
+            "The streamed entity set and JSONL_ENTITY_KEYS disagree "
+            f"({sorted(streamed)} vs {sorted(JSONL_ENTITY_KEYS)}). A streamed entity that "
+            "is not registered would be written to an entry the importer never opens; a "
+            "registered key that is not streamed would make every archive fail the "
+            "reader's presence check. Register it in JSONL_ENTITY_KEYS."
+        )
+    return streamed
+
+
+def _write_project_json(fh, project_data: dict, db: Session) -> None:
+    """Write `project.json` incrementally into an open zip entry.
 
     ⚠️ **Compact separators, not `indent=2`.** Measured on this corpus: pretty-printing the
     same payload is ~34% more bytes and several times the `dumps` time, for a file no human
     reads — it is machine exchange, and `json.tool` is one command away if anyone needs to
     look. This alone is a large share of the peak the old path paid.
+
+    🔴 **A STREAMED ENTITY IS SKIPPED ENTIRELY, NOT WRITTEN AS `[]` (v7).** Its rows are in
+    `{key}.jsonl`; writing an empty array here as well would give a reader two answers to
+    the same question, and the one it happened to read first would silently be the wrong
+    one. The key's ABSENCE from this document is what makes the entry the only source.
     """
-    counts: dict[str, int] = {}
     fh.write(b"{")
-    for i, (key, value) in enumerate(project_data.items()):
-        if i:
-            fh.write(b",")
-        fh.write(json.dumps(key).encode() + b":")
+    first = True
+    for key, value in project_data.items():
         if isinstance(value, _StreamedEntity):
-            fh.write(b"[")
-            n = 0
-            for item in _stream_core_rows(db, value):
-                if n:
-                    fh.write(b",")
-                fh.write(json.dumps(item, separators=(",", ":")).encode())
-                n += 1
-            fh.write(b"]")
-            counts[key] = n
-        else:
-            fh.write(json.dumps(value, separators=(",", ":")).encode())
+            continue
+        if not first:
+            fh.write(b",")
+        first = False
+        fh.write(json.dumps(key).encode() + b":")
+        fh.write(json.dumps(value, separators=(",", ":")).encode())
     fh.write(b"}")
-    return counts
+
+
+#: One compact encoder, reused. `json.dumps(..., separators=...)` builds a NEW
+#: `JSONEncoder` on every call whenever any argument differs from the defaults, which at
+#: one call per row was measurable on its own (#1015). Same settings, same bytes.
+_JSONL_ENCODER = json.JSONEncoder(separators=(",", ":"))
+
+#: Rows encoded before one write to the zip entry. Every `fh.write` is a zlib `compress`
+#: call plus a CRC update; two per row was 2.36M calls and ~12 s of a 1.2M-value export
+#: (#1015). Batching changes when bytes reach the compressor, never which bytes.
+_JSONL_WRITE_BATCH = 2_000
+
+
+def _write_entity_jsonl(fh, spec: "_StreamedEntity", db: Session) -> int:
+    """Write one entity's rows as newline-delimited JSON. Returns the row count.
+
+    One encoding per row, exactly as the inline writer did — the bytes of each row are
+    unchanged, so the only difference between a v6 and a v7 archive is where the commas
+    and the brackets went. Lines are joined and written `_JSONL_WRITE_BATCH` at a time.
+    """
+    encode = _JSONL_ENCODER.encode
+    n = 0
+    lines: list[str] = []
+    for item in _stream_core_rows(db, spec):
+        lines.append(encode(item))
+        n += 1
+        if len(lines) >= _JSONL_WRITE_BATCH:
+            fh.write(("\n".join(lines) + "\n").encode())
+            lines.clear()
+    if lines:
+        fh.write(("\n".join(lines) + "\n").encode())
+    return n
+
+
+#: The reader's twin of `_JSONL_ENCODER`: default settings, i.e. what `json.loads` uses.
+_JSONL_DECODER = json.JSONDecoder()
+
+
+class _ArchiveRows:
+    """A RE-ITERABLE view over one entity's rows inside an open archive.
+
+    🔴 **RE-ITERABLE, NOT A GENERATOR, AND THAT IS THE ENTIRE REQUIREMENT.** The import
+    makes more than one pass over four of the five: a merge reads `dataset_rows` once for
+    its uuids and once to insert; the value loop reads `dataset_values` once to insert and
+    again to rebuild the remap; `_assert_merge_compatible` and `import_project` between
+    them read `segments` four times. **A one-shot generator yields NOTHING on the second
+    pass, silently** — and on the remap rebuild that means every excerpt, note and coding
+    attached to a dataset value loses its target. Each `__iter__` opens the member afresh.
+
+    ⚠️ **NO `__len__`, deliberately.** Counting costs a full pass, so a caller that wants a
+    count must take one knowingly; without this a stray `len()` would quietly decompress
+    half a gigabyte. `bool()` is answered from the zip directory instead (`file_size` is
+    the UNCOMPRESSED size, so `> 0` is exactly "at least one row").
+    """
+
+    __slots__ = ("_zf", "_name")
+
+    def __init__(self, zf: zipfile.ZipFile, name: str):
+        self._zf = zf
+        self._name = name
+
+    def __iter__(self):
+        # ⚠️ **Two per-line costs removed (#1015), same values out.** A `ZipExtFile`'s own
+        # `readline` is Python code — a 1 MB `BufferedReader` splits lines in C. And
+        # `json.loads(bytes)` sniffs the encoding on EVERY call; the writer emits UTF-8
+        # only, so each line is decoded once and parsed as text (`utf-8-sig` so a BOM a
+        # foreign tool might add to the first line is still tolerated, as `loads` did).
+        decode = _JSONL_DECODER.decode
+        with self._zf.open(self._name) as raw, io.BufferedReader(raw, 1 << 20) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    # Only the trailing newline can produce one; a blank line in the
+                    # middle would be a damaged archive, and skipping it loses nothing
+                    # a stricter reader could have recovered.
+                    continue
+                yield decode(line.decode("utf-8-sig"))
+
+    def __bool__(self) -> bool:
+        try:
+            return self._zf.getinfo(self._name).file_size > 0
+        except KeyError:  # pragma: no cover — presence is checked at attach time
+            return False
+
+    def __repr__(self) -> str:  # pragma: no cover — diagnostics only
+        return f"<_ArchiveRows {self._name!r}>"
+
+
+def _entity_rows(zf: zipfile.ZipFile, data: dict, key: str, names: set[str] | None = None):
+    """One entity's rows: the v7 entry when present, else the v<=6 inline list.
+
+    TOLERANT by design — this is the form the merge PREVIEW's fallback wants, where a
+    missing entry means "an older archive" and nothing worse. `_attach_entity_rows` is the
+    strict form the IMPORT uses.
+    """
+    name = _entity_entry_name(key)
+    if name in (names if names is not None else set(zf.namelist())):
+        return _ArchiveRows(zf, name)
+    return data.get(key, [])
+
+
+def _attach_entity_rows(zf: zipfile.ZipFile, data: dict, file_version: int) -> None:
+    """Point `data`'s data-scaled keys at their archive entries, in place.
+
+    Injecting the readers into the parsed dict under the SAME keys is what lets every
+    consumer keep reading `data.get("segments", [])` — the alternative was threading a
+    second object through `_assert_merge_compatible` and eleven loops, where the one site
+    that kept using `data` would have been a silent no-op.
+
+    🔴 **A v7 ARCHIVE MISSING AN ENTRY IS REFUSED, NEVER READ AS EMPTY** — by
+    `_read_manifest_and_check_format`, which both doors call, so the refusal happens
+    before the in-place safety copy rather than after it. The arm below is the same
+    rule reached from the other side and cannot fire in practice; it stays because a
+    caller that reached here with a member missing would otherwise silently import an
+    empty entity, which is the one outcome this whole change must not have.
+    """
+    names = set(zf.namelist())
+    for key in JSONL_ENTITY_KEYS:
+        name = _entity_entry_name(key)
+        if name in names:
+            data[key] = _ArchiveRows(zf, name)
+        elif file_version >= JSONL_FORMAT_VERSION:  # pragma: no cover — see above
+            raise ValueError(
+                f"Invalid project file: format version {file_version} carries each "
+                f"entity in its own entry and '{name}' is missing. The archive is "
+                "incomplete — ask for a fresh export rather than importing it."
+            )
+        # v<=6: the rows are inline in `project.json` and `data[key]` already holds them.
+
+
+# ── Coders: which of a coder's fields travel (#1027) ────────────────────
+#
+# 🔴 A coder is a global `User`, and a `User` row mixes facts about the PERSON with
+# facts about the INSTALL that held them. The export used to take every column but
+# `password_hash`, and the import built the coder by reflection, so a colleague's
+# `last_active_at` ("I last switched to this coder at 14:02") arrived here as if it
+# were ours — and `auth.ensure_default_user` picks the newest one whenever a session
+# is missing. The next morning the app opened as the colleague, silently, and
+# everything coded from then on was attributed to them. Executed, 2026-09-24.
+#
+# ⚠️ NEITHER DEFAULT IS SAFE, so neither is a default. Travel-by-default is how
+# `last_active_at` leaked; stay-by-default would silently drop the next IDENTITY
+# field (as `machine_provenance` was). Every column is in exactly one of these two
+# sets, and `test_coder_import_identity.py` fails on a column in neither.
+
+#: The fields that describe the coder, and so travel with their coding.
+#: `archived` is here on purpose: DEC-F keeps an archived coder out of consensus and
+#: reliability, so it is part of the analysis the colleague saw, and the merge
+#: preview shows it. `created_at` is descriptive and read by no selection.
+CODER_PORTABLE_FIELDS: tuple[str, ...] = (
+    "username", "display_color", "coder_type", "archived", "machine_provenance",
+    "created_at",
+)
+
+#: The fields that belong to the install. Never written into a file, and never read
+#: out of one — a file exported before #1027 still carries `last_active_at` and
+#: `is_admin`, and the import must not trust them.
+CODER_INSTALL_FIELDS: tuple[str, ...] = (
+    "id", "password_hash", "is_admin", "last_active_at",
+)
+
+
+def _portable_coder_item(item: dict) -> dict:
+    """The part of an archived coder entry the import may use: its remap key and the
+    portable fields. Anything else in the entry is ignored, whatever wrote it."""
+    kept = {k: item[k] for k in CODER_PORTABLE_FIELDS if k in item}
+    kept["_original_id"] = item["_original_id"]
+    return kept
 
 
 # ── Export ──────────────────────────────────────────────────────────────
@@ -429,6 +878,7 @@ def export_project(
         for m in [
             Project, Participant, Speaker, Conversation, Document, Observation,
             SegmentGroup, Segment, CodeCategory, Code, CodeEquivalenceGroup,
+            CodeSet,
             CodeApplication,
             Note, Memo, Excerpt, Dataset, DatasetColumn, DatasetRow,
             DatasetValue, RecodeDefinition, EquivalenceGroup,
@@ -440,8 +890,9 @@ def export_project(
             CanvasThemeRelationship, CanvasPendingItem,
         ]
     }
-    # Coders are global Users (Track J · J1); export name/color/type only — NEVER password_hash.
-    cols[User] = [c for c in _get_columns(User) if c != "password_hash"]
+    # Coders are global Users (Track J · J1): the portable fields only, by explicit list
+    # (#1027) — never "every column but the password".
+    cols[User] = list(CODER_PORTABLE_FIELDS)
 
     # ── Query all entities ──────────────────────────────────────────
 
@@ -476,20 +927,34 @@ def export_project(
     # Segment parent needs a branch here. A missing one is silent data loss that
     # cascades: segment_ids below is the root of the code_applications, coders,
     # and (via segment_id) excerpt/note dependency chains.
-    segments = []
+    # #958 — the parent predicate is built ONCE and reused three ways: the streamed
+    # serialization below, the `segment_ids` list the note/excerpt chains still need,
+    # and the code-application subquery. Three copies of an `or_` over three parents is
+    # how a fourth parent gets added to two of them (the §6 rule, from the other side).
+    _seg_parent_clauses = []
     if conv_ids:
-        segments.extend(
-            db.query(Segment).filter(Segment.conversation_id.in_(conv_ids)).all()
-        )
+        _seg_parent_clauses.append(Segment.conversation_id.in_(conv_ids))
     if doc_ids:
-        segments.extend(
-            db.query(Segment).filter(Segment.document_id.in_(doc_ids)).all()
-        )
+        _seg_parent_clauses.append(Segment.document_id.in_(doc_ids))
     if obs_ids:
-        segments.extend(
-            db.query(Segment).filter(Segment.observation_id.in_(obs_ids)).all()
-        )
-    segment_ids = [s.id for s in segments]
+        _seg_parent_clauses.append(Segment.observation_id.in_(obs_ids))
+    segment_parent_clause = sa_or(*_seg_parent_clauses) if _seg_parent_clauses else None
+
+    # STREAMED (#958). Segments used to be materialised as ORM objects purely to be
+    # serialized — and a segment carries its TEXT, so a transcript-heavy project paid
+    # the whole corpus in memory before a byte was written. `Ferncrest` measured them at
+    # 40.3% of its `project.json`, the largest single key, which is why they join the
+    # streamed set alongside the three from #842.
+    segments = _StreamedEntity(
+        Segment, cols[Segment], segment_parent_clause, Segment.id,
+    )
+    # ⚠️ The ID LIST is still materialised, deliberately: the note and excerpt chains
+    # below filter on it, and those are separate queries this change does not touch.
+    # It is ints only — the text is what streaming removed.
+    segment_ids = (
+        [r[0] for r in db.query(Segment.id).filter(segment_parent_clause).all()]
+        if segment_parent_clause is not None else []
+    )
 
     code_categories = db.query(CodeCategory).filter(
         CodeCategory.project_id == project_id
@@ -501,6 +966,12 @@ def export_project(
 
     code_equivalence_groups = db.query(CodeEquivalenceGroup).filter(
         CodeEquivalenceGroup.project_id == project_id
+    ).all()
+
+    # Row 48 — code sets. Project-scoped like every other codebook entity, and
+    # gathered BEFORE codes matter because `Code.code_set_id` points at these.
+    code_sets_rows = db.query(CodeSet).filter(
+        CodeSet.project_id == project_id
     ).all()
 
     # CodeApplications: via segments or dataset values
@@ -554,31 +1025,99 @@ def export_project(
     # import via materialize_consensus_for_project (§8 decision 4 / C2). This also
     # keeps the GLOBAL consensus user out of the coder_ids derived below, so it is
     # never exported/recreated as a roster coder.
-    code_applications = []
-    if segment_ids:
-        code_applications.extend(
-            db.query(CodeApplication).filter(
-                CodeApplication.segment_id.in_(segment_ids),
-                CodeApplication.origin != CONSENSUS_ORIGIN,
-            ).all()
+    # #958 — ONE predicate for "this project's code applications", expressed as
+    # SUBQUERIES rather than id lists, then used twice: the streamed serialization and
+    # the coder-roster derivation below.
+    #
+    # 🔴 **The segment arm was a LATENT #842 site.** It read
+    # `CodeApplication.segment_id.in_(segment_ids)` — one bind parameter per segment,
+    # against SQLite's 250,000 ceiling. The dataset arm was converted to a join-back in
+    # #842; the segment arm was not, because no corpus here has that many segments.
+    # `test_portability_scale_bound.py` could not see it either: its scan is scoped to
+    # DATASET-scaled id lists. A subquery removes the ceiling rather than raising it.
+    #
+    # ⚠️ Exactly-one-target (`ck_code_application_exactly_one_target`) is what makes the
+    # `or_` a partition rather than a union with overlap, so a single `order_by(id)`
+    # emits each row once. The two arms used to be concatenated segment-first; the
+    # archive's ORDER changes here and its CONTENT does not.
+    _app_clauses = []
+    if segment_parent_clause is not None:
+        _app_clauses.append(
+            CodeApplication.segment_id.in_(
+                sa_select(Segment.id).where(segment_parent_clause)
+            )
         )
     if dataset_ids:
-        # #842 join-back — see the note on `dataset_values` above. The filter is the
-        # same predicate the id list expressed ("this project's dataset values"),
-        # reached through the FK chain instead of through 3.6 million bind parameters.
-        code_applications.extend(
-            db.query(CodeApplication).join(
-                DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id
-            ).join(
-                DatasetRow, DatasetValue.row_id == DatasetRow.id
-            ).filter(
-                DatasetRow.dataset_id.in_(dataset_ids),
-                CodeApplication.origin != CONSENSUS_ORIGIN,
-            ).order_by(CodeApplication.id).all()
+        # #842 join-back — the same predicate the id list expressed ("this project's
+        # dataset values"), reached through the FK chain instead of 3.6 million binds.
+        _app_clauses.append(
+            CodeApplication.dataset_value_id.in_(
+                sa_select(DatasetValue.id)
+                .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+                .where(DatasetRow.dataset_id.in_(dataset_ids))
+            )
         )
+    code_application_clause = (
+        sa_or(*_app_clauses) & (CodeApplication.origin != CONSENSUS_ORIGIN)
+        if _app_clauses else None
+    )
+    # STREAMED (#958). This is the entity #958 measured as the import's cost on a coded
+    # corpus — 285 MB of BES's 427 MB `project.json`, 66.8%, materialised as ORM objects
+    # on the way out.
+    code_applications = _StreamedEntity(
+        CodeApplication, cols[CodeApplication], code_application_clause, CodeApplication.id,
+    )
+
+    # Applications per coder and per code, over the SAME predicate the rows are streamed
+    # with (#860/#962, 2026-09-20). Both tallies feed `merge_preview.json` — the
+    # precomputed inputs the two merge previews read INSTEAD of parsing the whole
+    # `project.json`.
+    #
+    # 🔴 A THIRD consumer of `code_application_clause`, and that is the point. The
+    # previews tallied these by walking the EXPORTED `code_applications` array, so a
+    # count derived from any other predicate would silently disagree with the file it
+    # describes. Reusing the clause makes the agreement structural, not careful.
+    #
+    # ⚠️ The two tallies filter DIFFERENTLY, and each mirrors the walk it replaces:
+    # `build_merge_coder_preview` skipped a NULL `user_id`; `build_merge_code_preview`
+    # did not filter on the coder at all. ⚠️ **`user_id.isnot(None)` is NOT observable
+    # and is kept anyway — MEASURED, don't re-derive it.** Dropping it adds a `{None: n}`
+    # entry that nothing reads (`_merge_preview_block` looks up by `_original_id`, which
+    # is never None, and `coder_ids`' None is absorbed by SQL `IN (…, NULL)`): both
+    # exports are character-identical, and the mutant SURVIVES the whole suite. It stays
+    # because it is what the replaced `DISTINCT` did and because without it `coder_ids`
+    # contains a None — a lie about what that variable holds, waiting for a consumer
+    # that iterates it instead of passing it to `.in_()`.
+    if code_application_clause is not None:
+        # ⚠️ Both tallies are genuine ROW counts and say so on the line the grain sweep
+        # reads (`test_codeapplication_grain_sweep.py` looks one line up, no further).
+        # `file_app_count` means "this colleague brings N applications" / "this code is
+        # applied N times in the file" — it reproduces the tally the previews did by
+        # walking the exported `code_applications` array, and a merge processes ROWS,
+        # not distinct targets. That is the same reason the merge-preview count
+        # deliberately skips `visible_target_filter` (#500).
+        apps_per_coder = dict(
+            # grain-allow: rows per coder, see above.
+            db.query(CodeApplication.user_id, func.count(CodeApplication.id))
+            .filter(code_application_clause, CodeApplication.user_id.isnot(None))
+            .group_by(CodeApplication.user_id).all()
+        )
+        apps_per_code = dict(
+            # grain-allow: rows per code, see above.
+            db.query(CodeApplication.code_id, func.count(CodeApplication.id))
+            .filter(code_application_clause)
+            .group_by(CodeApplication.code_id).all()
+        )
+    else:
+        apps_per_coder, apps_per_code = {}, {}
 
     # Coders referenced by this project's code applications (Track J · J1).
-    coder_ids = {ca.user_id for ca in code_applications if ca.user_id is not None}
+    # ⚠️ Derived by QUERY now, not by walking the materialised list — that walk is what
+    # forced the applications to be materialised at all. Same predicate, so the roster
+    # cannot drift from the applications it is derived from. Since #860 it is the KEY SET
+    # of the tally above rather than a second DISTINCT over the same rows: one query
+    # fewer, and the roster and its counts can no longer disagree.
+    coder_ids = set(apps_per_coder)
     coders = db.query(User).filter(User.id.in_(coder_ids)).all() if coder_ids else []
 
     # Note has no project_id either — same rule as segments: every Note parent
@@ -642,14 +1181,28 @@ def export_project(
         ComputedResult.metric_definition_id.in_(metric_ids)
     ).all() if metric_ids else []
 
-    # STREAMED (#842) — 454,194 rows on the measured corpus, and named nowhere in that
-    # entry. `metric_ids` is bounded by the project's metric count, so it may pass by value.
-    row_scores = _StreamedEntity(
-        RowScore,
-        cols[RowScore],
-        RowScore.metric_definition_id.in_(metric_ids) if metric_ids else None,
-        RowScore.id,
-    )
+    # 🔴 **DROPPED, NOT STREAMED (#958 step 6; developer's call 2026-09-20).** A `RowScore`
+    # is a DERIVED per-record number: `compute_metric` rebuilds every one of them from the
+    # dataset values and the metric definitions that this archive already carries, and a
+    # MERGE has blanked them since J3-2.
+    #
+    # 🔴 **THE REASON IS CORRECTNESS, NOT THE SIZE.** `import_project` did not mark metrics
+    # stale, so a score computed by SOME OTHER BUILD — before #767's Cronbach fix, before
+    # #689's undefined-statistics rule, before whatever lands next — arrived reading as this
+    # build's current answer. Carrying the rows was what made that silence possible; the
+    # import marks the metrics stale instead (`_mark_imported_metrics_stale`), which is also
+    # what makes the existing recovery affordances work — `create_scale_score_metric` only
+    # retries a compute on a metric that says it is stale.
+    #
+    # ⚠️ **`ComputedResult` is deliberately still carried.** It is METRIC-scaled (10 rows on
+    # the corpus below, against 454,194 row scores), it is what the charts read, and it
+    # travels with its own `computed_at` — so the researcher opens an imported project and
+    # sees the numbers their colleague saw, marked out of date, rather than an empty screen.
+    #
+    # MEASURED on the real GSS corpus (75,699 records x 10 metrics): `row_scores.jsonl` was
+    # 58,193,017 B raw / 2,783,905 B compressed — **8.7% of a 32.14 MB archive** — and a full
+    # recompute of all ten metrics is 22.29 s behind one button (`POST …/metrics/compute-all`).
+    row_scores = _DroppedEntity(RowScore, cols[RowScore])
 
     statistical_tests = db.query(StatisticalTest).filter(
         StatisticalTest.project_id == project_id
@@ -696,6 +1249,15 @@ def export_project(
 
     # ── Serialize ───────────────────────────────────────────────────
 
+    # Hoisted out of `project_data` because `merge_preview.json` projects from the SAME
+    # dicts (#860). The reader's fallback arm projects from these three keys as they are
+    # read back out of `project.json`, so feeding the block builder anything else here —
+    # the ORM objects, say — would make the written block and the fallback two
+    # implementations of one shape, which is the drift this entry exists to remove.
+    serialized_code_categories = _serialize_all(code_categories, cols[CodeCategory])
+    serialized_codes = _serialize_all(codes, cols[Code])
+    serialized_coders = _serialize_all(coders, cols[User])
+
     project_data = {
         "project": _serialize_row(project, cols[Project]),
         "participants": _serialize_all(participants, cols[Participant]),
@@ -704,12 +1266,13 @@ def export_project(
         "documents": _serialize_all(documents, cols[Document]),
         "observations": _serialize_all(observations, cols[Observation]),
         "segment_groups": _serialize_all(segment_groups, cols[SegmentGroup]),
-        "segments": _serialize_all(segments, cols[Segment]),
-        "code_categories": _serialize_all(code_categories, cols[CodeCategory]),
-        "codes": _serialize_all(codes, cols[Code]),
+        "segments": segments,  # _StreamedEntity (#958)
+        "code_categories": serialized_code_categories,
+        "codes": serialized_codes,
         "code_equivalence_groups": _serialize_all(code_equivalence_groups, cols[CodeEquivalenceGroup]),
-        "coders": _serialize_all(coders, cols[User]),
-        "code_applications": _serialize_all(code_applications, cols[CodeApplication]),
+        "code_sets": _serialize_all(code_sets_rows, cols[CodeSet]),
+        "coders": serialized_coders,
+        "code_applications": code_applications,  # _StreamedEntity (#958)
         "notes": _serialize_all(notes, cols[Note]),
         "memos": _serialize_all(memos, cols[Memo]),
         "excerpts": _serialize_all(excerpts, cols[Excerpt]),
@@ -723,7 +1286,7 @@ def export_project(
         "analysis_domain_members": _serialize_all(analysis_domain_members, cols[AnalysisDomainMember]),
         "metric_definitions": _serialize_all(metric_definitions, cols[MetricDefinition]),
         "computed_results": _serialize_all(computed_results, cols[ComputedResult]),
-        "row_scores": row_scores,                # _StreamedEntity (#842)
+        "row_scores": row_scores,                # _DroppedEntity — empty member (#958 §6)
         "statistical_tests": _serialize_all(statistical_tests, cols[StatisticalTest]),
         "material_collections": _serialize_all(material_collections, cols[MaterialCollection]),
         "materials": _serialize_all(materials_list, cols[Material]),
@@ -780,7 +1343,16 @@ def export_project(
         },
     }
 
+    merge_preview = _merge_preview_block(
+        serialized_coders, serialized_codes, serialized_code_categories,
+        apps_per_coder, apps_per_code,
+    )
+
     # ── Write ZIP ───────────────────────────────────────────────────
+
+    # Fail closed BEFORE a byte is written: the entries the reader requires and the
+    # entities this function streams are one set, declared in one place.
+    streamed_specs = _assert_entity_entries_match(project_data)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -788,8 +1360,41 @@ def export_project(
         # `indent=2`. `project.json` is machine exchange and is written incrementally —
         # see `_write_project_json`.
         zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+        # The merge previews' inputs (#860/#962). A SIBLING ENTRY rather than a
+        # `manifest.json` key, for three reasons, the first two MEASURED: the manifest is
+        # 549 B, is human-read and is shown in the import preview, while this block is
+        # 4–9 KB on real projects (11–22x growth); it is returned straight into
+        # `ImportValidationResult`, so a new key there would have to be declared on
+        # `ProjectExportManifest` — which the test session runs under `extra='forbid'`
+        # (#855) — and would then ride the wire on every validate-import although the
+        # client already receives the COMPUTED previews; and a sibling member needs no
+        # format bump, because `_read_manifest_and_check_format` requires only that
+        # manifest.json and project.json be PRESENT and every other reader names the
+        # members it wants. An older build simply never opens this one.
+        #
+        # ⚠️ DERIVED data for a PREVIEW. The import must never read it: a disagreement
+        # with `project.json` would then be a wrong preview rather than a wrong merge —
+        # the same bargain `project_summary` already makes.
+        zf.writestr(
+            _MERGE_PREVIEW_ENTRY, json.dumps(merge_preview, separators=(",", ":"))
+        )
         with zf.open("project.json", "w") as fh:
             _write_project_json(fh, project_data, db)
+
+        # The data-scaled entities, one newline-delimited entry each (v7). Written in
+        # `JSONL_ENTITY_KEYS` order rather than `project_data` order so two exports of an
+        # unchanged project stay byte-comparable — the property the streamed keys used to
+        # get from holding their original slot in `project.json`.
+        #
+        # ⚠️ **AN ENTITY WITH NO ROWS STILL GETS ITS (EMPTY) MEMBER.** The reader refuses a
+        # v7 archive that is missing one, so "we had nothing to write" must not look like
+        # "this member was lost". ✅ **That case is live rather than hypothetical since
+        # #958's step 6: `row_scores` is a `_DroppedEntity`, so its member is written on
+        # EVERY export and is always empty.** A future change that stops exporting another
+        # entity takes the same shape, or bumps the version.
+        for key in JSONL_ENTITY_KEYS:
+            with zf.open(_entity_entry_name(key), "w") as fh:
+                _write_entity_jsonl(fh, streamed_specs[key], db)
 
         # Add document files
         project_docs_dir = docs_dir / str(project_id)
@@ -870,6 +1475,26 @@ def _read_manifest_and_check_format(zf: zipfile.ZipFile) -> dict:
             f"This file was created by a newer version of Mixed Measures "
             f"(format version {file_version}). Please update to import it."
         )
+
+    # 🔴 **A v7 ARCHIVE MUST CARRY EVERY ENTITY ENTRY, AND THE CHECK BELONGS HERE.**
+    # From v7 the data-scaled entities live in their own members, so a truncated archive
+    # would otherwise import a dataset with its columns, its rows and NOT ONE CELL — and
+    # report success. An absent member and an entity with no rows must not look alike, so
+    # the export writes an empty member rather than omitting one.
+    #
+    # ⚠️ Placed in the shared helper on purpose: it runs on `/validate-import` as well as
+    # on the import itself, so the researcher is told BEFORE the in-place safety copy is
+    # taken rather than after — and, as the docstring above says, the import still
+    # refuses on its own for the scripted callers that never validate.
+    if int(file_version or 0) >= JSONL_FORMAT_VERSION:
+        for key in JSONL_ENTITY_KEYS:
+            entry = _entity_entry_name(key)
+            if entry not in names:
+                raise ValueError(
+                    f"Invalid project file: format version {file_version} carries each "
+                    f"entity in its own entry and '{entry}' is missing. The archive is "
+                    "incomplete — ask for a fresh export rather than importing it."
+                )
     return manifest
 
 
@@ -1345,6 +1970,15 @@ def _safety_export_before_overwrite(
     rides `ProjectImportResult.safety_backup_filename` to the researcher (2026-09-09),
     and a recovery instruction that says "pre-overwrite" after a merge contradicts
     what they just did.
+    🔴 **#977: the prefix now drives the REFUSALS too, not only the filename.** The
+    2026-09-09 fix corrected the name and left the sentences beside it hardcoded to
+    the overwrite wording — the same defect, one layer down, and worse, because a
+    message saying *"Overwriting was stopped"* after a merge tells a researcher the
+    tool may have replaced their project. Both arms now take their words from
+    `safety_copies.refusal_for_prefix`.
+    ⚠️ This function's NAME is historical and says "overwrite" for both doors; it is
+    private with two call sites, and renaming it would sweep four docs (the rename
+    blast-radius rule in `import-formats.md`) for no user-visible gain.
 
     ⚠️ **`safety_report` is written HERE rather than at the call sites** — the writer
     names what it wrote, so a caller cannot save the file and forget to say where it
@@ -1361,6 +1995,12 @@ def _safety_export_before_overwrite(
     The write is atomic and never replaces an existing copy (see `write_safety_copy`).
     """
     filename = safety_copy_filename(prefix, target.id, datetime.now(timezone.utc))
+    # #977: BOTH refusals below name the act, and they get their words from the
+    # same module that names the file. Resolved before the `try` alongside the
+    # filename, and for the same reason — an unknown prefix is a programming
+    # error, and raising inside the `try` would reach the researcher as
+    # "Could not create a safety backup", diagnosing the wrong thing entirely.
+    refusal = refusal_for_prefix(prefix)
     try:
         buf = export_project(db, target.id, docs_dir, media_dir)
         path = write_safety_copy(get_backup_dir(), filename, buf)
@@ -1372,15 +2012,14 @@ def _safety_export_before_overwrite(
         # the REASON has to survive. Without this arm the generic wrapper below
         # reports "Could not create a safety backup … (too many SQL variables)",
         # which describes neither the cause nor anything the researcher can act on.
-        raise ProjectTooLargeError(
-            "Overwriting was stopped because the project being replaced is too large "
-            f"to snapshot first, and it is not overwritten without a snapshot. {e}"
-        )
+        # #977 — and the reason has to be about the act the researcher ASKED for.
+        # This said "Overwriting was stopped … the project being replaced …" on
+        # both doors: three wrong clauses on a merge, the first of them the
+        # destructive word, arriving when they are already blocked. `e` carries
+        # the size and the remedy and is act-neutral, so it is appended as-is.
+        raise ProjectTooLargeError(f"{refusal.too_large} {e}")
     except Exception as e:
-        raise ValueError(
-            "Could not create a safety backup before overwrite; aborting to protect "
-            f"your data ({e})."
-        )
+        raise ValueError(f"{refusal.write_failed} ({e}).")
 
 
 def _validate_merge_code_decisions(
@@ -1714,27 +2353,149 @@ def _assert_merge_compatible(
         )
 
 
+# ── Merge-preview inputs (#860 / #962, 2026-09-20) ──────────────────────────
+#
+# Both merge previews used to open `project.json` and parse the WHOLE document to read
+# two small arrays and tally applications over them. MEASURED on the real corpora:
+# BES 5.49 s / 2,043 MB and GSS 6.89 s / 2,611 MB **per parse**, and `/validate-import`
+# runs BOTH previews, so it paid that twice — 10.99 s and 13.79 s of parse alone. That
+# is #860, and #962 (a dead "Validating…" button for 19–32 s) is the same cost seen from
+# the UI. The GSS case is the sharpest: it holds 0 coders, 0 codes and 0 code
+# applications, so 13.79 s and 2.6 GB bought two empty lists.
+#
+# The export now precomputes exactly what the previews need into a small sibling entry;
+# reading it is a 4 KB parse (0.059 ms on BES). Old archives lack the entry and take the
+# fallback, so nothing about them changes.
+
+_MERGE_PREVIEW_ENTRY = "merge_preview.json"
+
+
+def _merge_preview_block(
+    coders: list[dict],
+    codes: list[dict],
+    code_categories: list[dict],
+    apps_per_coder: dict[int, int],
+    apps_per_code: dict[int, int],
+) -> dict:
+    """The two merge previews' inputs, projected from the exported dicts.
+
+    🔴 **ONE projection with TWO callers, and that is the whole design.** `export_project`
+    calls it to WRITE the entry; `_merge_preview_inputs` calls it to project an old
+    archive that has none. Both are handed the same three `project.json` keys in the same
+    serialized shape, so the written block and the fallback cannot be two implementations
+    of one contract — which is what a "read the entry, else do what we did before" arm in
+    each of the two builders would have been (four paths, pairwise agreement by care).
+
+    ⚠️ `category_name` is resolved HERE because it is the only thing `code_categories`
+    was ever read for — the whole key, for one string per code (R5: categories are shown
+    for context and never matched on).
+    """
+    category_names = {c["_original_id"]: c.get("name") for c in code_categories}
+    return {
+        "coders": [
+            {
+                "_original_id": c["_original_id"],
+                "username": c.get("username"),
+                # Stored RAW. `SYSTEM_CODER_TYPES` is the filter and `"human"` is the
+                # display default; both stay at the read side, where they already live.
+                "coder_type": c.get("coder_type"),
+                "archived": bool(c.get("archived", False)),
+                "app_count": apps_per_coder.get(c["_original_id"], 0),
+            }
+            for c in coders
+        ],
+        "codes": [
+            {
+                "uuid": c.get("uuid"),
+                "name": c.get("name"),
+                "description": c.get("description"),
+                "color": c.get("color"),
+                "category_name": category_names.get(c.get("category_id")),
+                "app_count": apps_per_code.get(c["_original_id"], 0),
+                # The FOUR RAW columns, never a resolved scale: `_file_code_scale` stays
+                # the single parser, so a block written by an older build is read with
+                # THIS build's understanding of the shape (#869).
+                "magnitude_min": c.get("magnitude_min"),
+                "magnitude_max": c.get("magnitude_max"),
+                "magnitude_step": c.get("magnitude_step"),
+                "magnitude_labels": c.get("magnitude_labels"),
+            }
+            for c in codes
+        ],
+    }
+
+
+def _merge_preview_inputs(zf: zipfile.ZipFile) -> dict:
+    """Read the precomputed preview inputs, falling back to parsing `project.json`.
+
+    ⚠️ The fallback is not a legacy branch to retire — it is what makes this change
+    require no format bump. An archive written before 2026-09-20 has no entry and is
+    projected here exactly as `_merge_preview_block` would have written it.
+
+    🔴 **STRICT IN, TOLERANT OUT: an unreadable or wrong-shaped entry falls back rather
+    than raising** (`parse_managed_spec`'s rule, #922). The entry is DERIVED data for a
+    preview, so a corrupt one must not be worse than not having it — and it would have
+    been: `json.JSONDecodeError` subclasses `ValueError`, which `validate_import_endpoint`
+    maps to a **400**, so a damaged few kilobytes would have refused an archive that
+    imports perfectly well and used to preview perfectly well. The shape check is what
+    makes "wrong-shaped" mean the same thing as "absent"; without it `inputs["coders"]`
+    raises a `KeyError` no caller expects.
+    """
+    if _MERGE_PREVIEW_ENTRY in zf.namelist():
+        try:
+            block = json.loads(zf.read(_MERGE_PREVIEW_ENTRY))
+        except (ValueError, OSError, zipfile.BadZipFile):
+            block = None
+        if (
+            isinstance(block, dict)
+            and isinstance(block.get("coders"), list)
+            and isinstance(block.get("codes"), list)
+        ):
+            return block
+
+    data = json.loads(zf.read("project.json"))
+    # The two walks the previews used to do, kept together so the fallback's counts and
+    # the export's two `GROUP BY`s stay the same two questions. The exported `user_id` /
+    # `code_id` are the coder's / code's `_original_id` in the same file.
+    #
+    # ⚠️ **`code_applications` comes through `_entity_rows`, NOT `data.get`.** On a v7
+    # archive the applications are not in this document at all, so a bare `.get` would
+    # tally ZERO and this fallback would answer "0 applications" for every coder and every
+    # code — the wrong-but-plausible preview the entry's own strictness rule exists to
+    # avoid. The fallback is reachable on a v7 file whenever `merge_preview.json` is
+    # damaged, which is exactly when it must still be right.
+    apps_per_coder: dict[int, int] = {}
+    apps_per_code: dict[int, int] = {}
+    for app in _entity_rows(zf, data, "code_applications"):
+        uid = app.get("user_id")
+        if uid is not None:
+            apps_per_coder[uid] = apps_per_coder.get(uid, 0) + 1
+        cid = app.get("code_id")
+        if cid is not None:
+            apps_per_code[cid] = apps_per_code.get(cid, 0) + 1
+    return _merge_preview_block(
+        data.get("coders", []),
+        data.get("codes", []),
+        data.get("code_categories", []),
+        apps_per_coder,
+        apps_per_code,
+    )
+
+
 def build_merge_coder_preview(db: Session, file_path: Path) -> list[dict]:
     """Track J · J3-2 (D8): read-only preview of an incoming merge file's coders, each
     with its local name-match candidate + application counts, so the confirm UI can
     map/override before committing. System coders (Unattributed/Consensus) are excluded —
     they own data but aren't selectable people. ``local_app_count`` is the local coder's
     total applications (global; on the common single-project install that equals the
-    project's count). Returns rows shaped for ``MergeCoderPreview``."""
+    project's count) and stays a LIVE query — it describes this install, not the file.
+    Returns rows shaped for ``MergeCoderPreview``."""
     from ..auth import SYSTEM_CODER_TYPES
     with zipfile.ZipFile(str(file_path), "r") as zf:
-        data = json.loads(zf.read("project.json"))
-
-    # File-side application count per coder (the exported user_id == the coder's
-    # _original_id in the same file).
-    file_counts: dict[int, int] = {}
-    for app in data.get("code_applications", []):
-        uid = app.get("user_id")
-        if uid is not None:
-            file_counts[uid] = file_counts.get(uid, 0) + 1
+        inputs = _merge_preview_inputs(zf)
 
     previews: list[dict] = []
-    for c in data.get("coders", []):
+    for c in inputs["coders"]:
         if c.get("coder_type") in SYSTEM_CODER_TYPES:
             continue
         name = c.get("username")
@@ -1752,9 +2513,13 @@ def build_merge_coder_preview(db: Session, file_path: Path) -> list[dict]:
         previews.append({
             "original_id": c["_original_id"],
             "username": name,
-            "coder_type": c.get("coder_type", "human"),
+            # NORMALIZED, not defaulted (#989). The preview is what the
+            # researcher decides the coder mapping from, so it must state the
+            # kind the IMPORT will land — a preview computed differently from
+            # the act it predicts is #974's rule broken in miniature.
+            "coder_type": normalize_coder_type(c.get("coder_type")),
             "archived": bool(c.get("archived", False)),
-            "file_app_count": file_counts.get(c["_original_id"], 0),
+            "file_app_count": c["app_count"],
             "local_match": local_match,
         })
     return previews
@@ -1779,9 +2544,9 @@ def build_merge_code_preview(
     shared-frozen — no divergence — which is the common case). Categories are shown
     for context only; they are never matched on (R5). Read-only — no DB writes."""
     with zipfile.ZipFile(str(file_path), "r") as zf:
-        data = json.loads(zf.read("project.json"))
+        inputs = _merge_preview_inputs(zf)
 
-    file_codes = data.get("codes", [])
+    file_codes = inputs["codes"]
     file_code_uuids = {c["uuid"] for c in file_codes if c.get("uuid")}
     if not file_code_uuids:
         return []
@@ -1793,18 +2558,6 @@ def build_merge_code_preview(
     divergent = [c for c in file_codes if c.get("uuid") and c["uuid"] not in local_uuids]
     if not divergent:
         return []
-
-    # File-side application count per code (exported code_id == the code's _original_id).
-    file_counts: dict[int, int] = {}
-    for app in data.get("code_applications", []):
-        cid = app.get("code_id")
-        if cid is not None:
-            file_counts[cid] = file_counts.get(cid, 0) + 1
-
-    # File category names by id (context only — R5).
-    file_cat_names = {
-        cat["_original_id"]: cat.get("name") for cat in data.get("code_categories", [])
-    }
 
     # Local candidate codes (target project, real codes — not universal, not inactive)
     # + their usage, in one grouped query.
@@ -1854,8 +2607,8 @@ def build_merge_code_preview(
             "name": c.get("name"),
             "description": c.get("description"),
             "color": c.get("color"),
-            "category_name": file_cat_names.get(c.get("category_id")),
-            "file_app_count": file_counts.get(c["_original_id"], 0),
+            "category_name": c.get("category_name"),
+            "file_app_count": c["app_count"],
             "candidates": candidates,
             "magnitude_scale": _file_code_scale(c),
         })
@@ -1869,6 +2622,12 @@ def _file_code_scale(file_code: dict) -> dict | None:
     carries the model's column names; `read_scale` reads attributes, so wrap the
     dict as an object rather than re-implementing the parse (and its shape
     re-check) here. Absent columns — a pre-v6 file — read as no scale.
+
+    ⚠️ Since #860 the dict usually comes from `merge_preview.json` rather than from
+    `project.json`, and **that block stores the four RAW columns under these same
+    names precisely so this stays the only parser** — a resolved scale written at
+    export time would freeze the exporting build's reading of the shape into every
+    archive. Keep the names in step if the model's ever change.
     """
     from types import SimpleNamespace
 
@@ -1882,6 +2641,7 @@ def _file_code_scale(file_code: dict) -> dict | None:
 
 def _repair_pre_v5_excerpt_offsets(
     db: Session, data: dict, remap: dict, inserted_excerpt_ids: set[int],
+    *, format_version: int,
 ) -> int:
     """Convert an old archive's UTF-16 excerpt offsets to code points (#687).
 
@@ -1907,9 +2667,21 @@ def _repair_pre_v5_excerpt_offsets(
     instead of the inserted set is what caused that, so the parameter has no default
     — a future caller has to answer the question rather than inherit a wrong answer.
 
+    🔴 **``format_version`` IS KEYWORD-ONLY AND REQUIRED, AND THAT IS THE FIX FOR A LIVE
+    DEFECT (confirmed by execution 2026-09-21).** It used to be read as
+    ``data.get("format_version")`` — off the parsed ``project.json``, which has never
+    carried that key; it lives in ``manifest.json``. So the guard below saw ``0`` on every
+    import, never fired, and this repair ran against v5 and v6 archives whose offsets were
+    ALREADY code points: an excerpt exported at offset 16 came back at 15, one place per
+    preceding astral character, compounding on every re-import. Three unit tests passed
+    throughout because each passed a hand-built ``data`` dict containing the key the real
+    caller never supplies, and the wiring test deliberately spies on the CALL rather than
+    asserting offsets. A parameter with no default is what makes the caller answer the
+    question — the same reasoning as ``inserted_excerpt_ids`` above.
+
     Returns the number of excerpts rewritten (for the import report / tests).
     """
-    if int(data.get("format_version", 0) or 0) >= 5:
+    if format_version >= 5:
         return 0
 
     excerpt_remap = remap.get("excerpts", {})
@@ -1998,6 +2770,7 @@ def import_project(
     code_mapping: dict | None = None,
     report: dict | None = None,
     safety_report: dict | None = None,
+    import_report: dict | None = None,
 ) -> tuple[int, str]:
     """Import an .mmproject ZIP.
 
@@ -2031,6 +2804,12 @@ def import_project(
     Deliberately SEPARATE from `report`, which is merge-only and whose keys are the merge
     counts — overwrite takes a snapshot too and has no merge report to carry it. Absent
     key = no snapshot was taken (import_mode "new" / "copy_for_coding").
+    `import_report` (every mode): a THIRD caller-passed dict, populated in-place with
+    `{"metrics_marked_stale": int}` — what §x.6 declared out of date because its per-record
+    scores were not carried (#958 §6). Separate from `report` for the same reason
+    `safety_report` is: `report` is merge-only and its keys are pinned, field for field,
+    against `MergeReport` by `test_trackj_j3_roundtrip.py`, while this applies to the three
+    modes that import metrics at all and to no merge.
 
     Returns (new_project_id, project_name).
     Wraps everything in the caller's transaction — caller commits or rolls back.
@@ -2058,9 +2837,19 @@ def import_project(
         assert_expanded_size_within_limit(zf)
 
         # Format gate — must run here too, not just in /validate-import (see helper docstring)
-        _read_manifest_and_check_format(zf)
+        manifest = _read_manifest_and_check_format(zf)
+        # 🔴 **THE FILE'S VERSION IS READ FROM THE MANIFEST, WHICH IS THE ONLY PLACE IT IS
+        # WRITTEN.** It is not a key of `project.json` and never has been —
+        # `_repair_pre_v5_excerpt_offsets` read it off the parsed document for a month and
+        # therefore saw `0` on EVERY import, so its `>= 5` guard could not fire and it
+        # converted already-code-point offsets on every archive carrying astral text
+        # (reproduced by execution: an excerpt exported at offset 16 imported at 15).
+        file_version = int(manifest.get("format_version", 0) or 0)
 
         data = json.loads(zf.read("project.json"))
+        # v7: the five data-scaled entities are their own entries; v<=6 leaves the inline
+        # lists in place. Every `data.get(<entity>)` below reads whichever it is.
+        _attach_entity_rows(zf, data, file_version)
 
         if import_mode == "merge":
             # Track J · J3-2: a merge imports a colleague's CODINGS + annotations on
@@ -2070,7 +2859,7 @@ def import_project(
             # guards). DatasetValue + CodeApplication are handled specially below
             # (transitive-match / dedup); equivalence-group reconciliation is J3-2b.
             for _k in (
-                "code_equivalence_groups", "equivalence_groups", "recode_definitions",
+                "code_equivalence_groups", "code_sets", "equivalence_groups", "recode_definitions",
                 "analysis_domains", "analysis_domain_members", "metric_definitions",
                 "computed_results", "row_scores", "statistical_tests",
                 "material_collections", "materials", "canvases", "canvas_themes",
@@ -2085,7 +2874,7 @@ def import_project(
             "conversations": {}, "documents": {}, "observations": {},
             "segment_groups": {},
             "segments": {}, "code_categories": {}, "codes": {},
-            "code_equivalence_groups": {},
+            "code_equivalence_groups": {}, "code_sets": {},
             "datasets": {}, "equivalence_groups": {}, "dataset_columns": {},
             "dataset_rows": {}, "dataset_values": {}, "recode_definitions": {},
             "excerpts": {}, "notes": {}, "memos": {}, "analysis_domains": {},
@@ -2269,8 +3058,13 @@ def import_project(
             elif decision and decision.get("action") == "create":
                 base = (decision.get("new_username") or name or "Coder").strip() or "Coder"
                 _add(
-                    User, item,
-                    {"username": unique_username(db, base), "password_hash": None, "is_admin": False},
+                    User, _portable_coder_item(item),
+                    {
+                        "username": unique_username(db, base),
+                        "password_hash": None,
+                        "is_admin": False,
+                        "coder_type": normalize_coder_type(item.get("coder_type")),
+                    },
                     "coders",
                 )
                 if report is not None:
@@ -2284,7 +3078,27 @@ def import_project(
                     if report is not None:
                         report["coders_matched"] += 1
                 else:
-                    _add(User, item, {"password_hash": None, "is_admin": False}, "coders")
+                    # 🔴 `coder_type` is NORMALIZED, never copied (#989). `_build_entity`
+                    # copies any column the import does not override, so before this
+                    # the archive's raw string landed in the column — and a hand-edited
+                    # file could mint a kind that sits in NO tuple: off the roster,
+                    # unselectable, in no layer, yet still holding codings and still
+                    # occupying the per-coder unique index. Fail-closed onto `human`.
+                    # ⚠️ A legitimate MACHINE coder (`ai`) survives this and SHOULD —
+                    # it is how a colleague's model-coded work arrives — it simply
+                    # lands in the machine layer rather than voting.
+                    # 🔴 `_portable_coder_item`: only the fields that describe the
+                    # coder (#1027) — a file's `last_active_at` would otherwise make
+                    # this colleague the install's default coder.
+                    _add(
+                        User, _portable_coder_item(item),
+                        {
+                            "password_hash": None,
+                            "is_admin": False,
+                            "coder_type": normalize_coder_type(item.get("coder_type")),
+                        },
+                        "coders",
+                    )
                     if report is not None:
                         report["coders_created"] += 1
 
@@ -2412,6 +3226,13 @@ def import_project(
                 "canonical_code_id": None,
             }, "code_equivalence_groups")
 
+        # ── h.6. CodeSets (BEFORE codes — codes carry the code_set_id FK,
+        # the same ordering and the same reason as the equivalence groups above).
+        # Row 48. Unlike those, a set has no plain-int back-reference to remap in
+        # a post-pass: membership lives entirely on `Code.code_set_id`.
+        for item in data.get("code_sets", []):
+            _add(CodeSet, item, {"project_id": pid}, "code_sets")
+
         # ── i. Codes ───────────────────────────────────────────────
         # Track J · J3-2b: in a merge, a code either MATCHES locally by uuid (handled by
         # _add, keeps the target's copy) or is DIVERGENT and carries a reconcile decision
@@ -2453,6 +3274,7 @@ def import_project(
                         "numeric_id": merge_next_numeric[0],
                         "category_id": _remap_id(remap, "code_categories", item.get("category_id")),
                         "code_equivalence_group_id": None,
+                        "code_set_id": None,
                     }, "codes")
                     merge_next_numeric[0] += 1
                     if action == "link":
@@ -2470,6 +3292,13 @@ def import_project(
                 "code_equivalence_group_id": _remap_id(
                     remap, "code_equivalence_groups", item.get("code_equivalence_group_id")
                 ),
+                # Row 48 — an un-remapped FK writes the SOURCE instance's raw id
+                # into this database, which under `PRAGMA foreign_keys=ON` is a
+                # cross-project attach or an opaque IntegrityError, never a
+                # harmless NULL. A MERGE blanks `code_sets` entirely (a merge
+                # imports codings, not codebook structure), so `_remap_id`
+                # answers None there, which is the intended result.
+                "code_set_id": _remap_id(remap, "code_sets", item.get("code_set_id")),
             }, "codes")
 
         # ── j–k. Datasets & EquivalenceGroups ─────────────────────
@@ -2819,17 +3648,46 @@ def import_project(
         new_dataset_ids = list(remap["datasets"].values())
 
         # A merge re-points at values that already exist in the target rather than
-        # inserting duplicates. One query builds the whole (row, column) -> id map; the old
-        # per-item `.first()` was another 3.6 million round trips.
-        existing_by_key: dict[tuple[int, int], int] = {}
+        # inserting duplicates, so it has to know which (row, column) cells exist.
+        #
+        # 🔴 **#1015 — it records WHICH cells exist, not their ids: one int bitmask per row,
+        # a bit per column.** The old `(row, column) -> id` dict was ~412 MB of a no-op
+        # merge's 1.1 GB peak on a 2.95M-value target (measured), and almost none of its ids
+        # were ever read: an id is needed only for a value something REFERENCES (a coding,
+        # quote or note on the cell), and those are resolved by the read-back below, which
+        # already looks ids up by (row, column) — a matched cell's key finds the TARGET's
+        # value there, because nothing was inserted at it. ~6 MB instead.
+        existing_cells: dict[int, int] = {}      # row_id -> bitmask over column bits
+        column_bit: dict[int, int] = {}          # column_id -> bit position
         if import_mode == "merge" and new_dataset_ids:
-            existing_by_key = {
-                (r, c): i for i, r, c in db.execute(
-                    sa_select(DatasetValue.id, DatasetValue.row_id, DatasetValue.column_id)
-                    .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-                    .where(DatasetRow.dataset_id.in_(new_dataset_ids))
-                ).all()
+            conn = db.connection()
+            column_bit = {
+                cid: bit for bit, (cid,) in enumerate(conn.execute(
+                    sa_select(DatasetColumn.id)
+                    .where(DatasetColumn.dataset_id.in_(new_dataset_ids))
+                    .order_by(DatasetColumn.id)
+                ))
             }
+            # Through the connection, and streamed: the Session's ORM result layer and an
+            # `.all()` list both cost more than the query at this size.
+            result = conn.execute(
+                sa_select(DatasetValue.row_id, DatasetValue.column_id)
+                .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+                .where(DatasetRow.dataset_id.in_(new_dataset_ids))
+            )
+            while batch := result.fetchmany(_VALUE_INSERT_BATCH):
+                for r, c in batch:
+                    existing_cells[r] = existing_cells.get(r, 0) | (1 << column_bit[c])
+
+        # #994 — the remap is built for the ids something ASKS for, and nothing else.
+        # Collected BEFORE the insert loop so the loop can record a key as it goes;
+        # see `_referenced_dataset_value_ids` for why a new consumer must be declared.
+        referenced_value_ids = _referenced_dataset_value_ids(data)
+        # The rows and columns those values live in — two small SETS, never a
+        # per-value dict. See the resolution block below for the measurement that
+        # refuted the dict.
+        wanted_rows: set[int] = set()
+        wanted_cols: set[int] = set()
 
         pending_values: list[dict] = []
         n_inserted_values = 0
@@ -2850,9 +3708,16 @@ def import_project(
             row_id = _remap_id(remap, "dataset_rows", item.get("row_id"))
             column_id = _remap_id(remap, "dataset_columns", item.get("column_id"))
             if import_mode == "merge" and row_id is not None and column_id is not None:
-                existing_id = existing_by_key.get((row_id, column_id))
-                if existing_id is not None:
-                    remap["dataset_values"][item["_original_id"]] = existing_id
+                bit = column_bit.get(column_id)
+                if bit is not None and (existing_cells.get(row_id, 0) >> bit) & 1:
+                    # The target already holds this cell: keep it (a merge never
+                    # overwrites shared data) and, only if something references the
+                    # value, have the read-back resolve its id (#994's rule, which this
+                    # branch did not follow until #1015 — 2.95M remap entries on a no-op
+                    # merge, of which none were read).
+                    if item["_original_id"] in referenced_value_ids:
+                        wanted_rows.add(row_id)
+                        wanted_cols.add(column_id)
                     continue
             payload = _entity_kwargs(DatasetValue, item, {
                 "row_id": row_id,
@@ -2860,31 +3725,79 @@ def import_project(
             }, fresh_uuid=(import_mode == "new"))
             pending_values.append(payload)
             n_inserted_values += 1
+            # Narrow the read-back to the rows and columns something will look up.
+            # Both halves must be real: a value whose row or column did not remap
+            # contributes nothing, exactly as the old whole-map lookup returned
+            # `None` for it.
+            if (
+                item["_original_id"] in referenced_value_ids
+                and row_id is not None
+                and column_id is not None
+            ):
+                wanted_rows.add(row_id)
+                wanted_cols.add(column_id)
             if len(pending_values) >= _VALUE_INSERT_BATCH:
                 _drain_values()
         _drain_values()
 
-        # Rebuild the remap in ONE query. ⚠️ It must run AFTER the final drain, and the
-        # rows it reads include any the merge matched — harmless, because the lookup below
-        # is keyed on exactly the pairs we inserted.
-        if n_inserted_values and new_dataset_ids:
+        # Resolve the remap for the values something will ASK for, and no others (#994).
+        # ⚠️ Must run AFTER the final drain.
+        #
+        # 🔴 **WHAT THIS REPLACED.** Until #994 the block read EVERY value of every
+        # imported dataset into a `(row_id, column_id) -> id` map, unconditionally. On a
+        # survey with no coded cells not one entry of it was ever read.
+        #
+        # **MEASURED on the two real corpora, one case per process, v7 archives:**
+        #
+        # | | values | referenced | peak before | peak after | wall before | after |
+        # |---|---|---|---|---|---|---|
+        # | GSS | 3,633,552 | **0** | 1,235.9 MB | **100.9 MB (−92%)** | 149.6 s | **109.6 s** |
+        # | BES | 965,917 | **843,408 (87%)** | 1,789.5 MB | **1,846.4 MB (+3.2%)** | 570.8 s | **564.0 s** |
+        #
+        # 🔴 **THE TWO CORPORA ARE THE TWO EXTREMES — 0% referenced and 87% — AND THE
+        # FIRST DESIGN WAS REFUTED BY THE SECOND.** A per-value
+        # `{original_id: (row, col)}` dict alongside the referenced SET is THREE
+        # structures where the old code held one, and on BES that measured **1,937.7 MB,
+        # 8.3% WORSE than doing nothing at all.** So the dict is gone: the loop above
+        # collects only the rows and columns (two small sets — BES's coded dataset has
+        # ~23k rows and a handful of columns), and the pass below re-reads `value_items`
+        # for the referenced ids alone. One structure again, bounded by what is
+        # REFERENCED rather than by what EXISTS.
+        #
+        # ⚠️ **The +3.2% on BES is the honest residual and is stated rather than hidden:**
+        # the referenced set is ~843k ints the old code never held, and the collector's
+        # pass over `code_applications` is time it never spent. That is the price of the
+        # GSS row. **Do not "optimise" it away by skipping the collection when the set
+        # looks large — the size is not knowable until it is built**, and a second code
+        # path in this function is a worse trade than 57 MB.
+        #
+        # ⚠️ **The read-back still JOINS BACK to `dataset_id` rather than binding row ids,
+        # and additionally narrows with `in_id_set`** — #842's 250,000-bind ceiling is the
+        # hazard a "just filter by the ids we want" rewrite walks straight into, and
+        # `in_id_set` is this codebase's answer (one bound parameter, any number of ids).
+        # The pair is deliberate: the join bounds the scan to this import's datasets, the
+        # two id sets narrow it to the rows and columns actually referenced.
+        if wanted_rows:
             db.flush()
             key_to_id = {
                 (r, c): i for i, r, c in db.execute(
                     sa_select(DatasetValue.id, DatasetValue.row_id, DatasetValue.column_id)
                     .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-                    .where(DatasetRow.dataset_id.in_(new_dataset_ids))
+                    .where(
+                        DatasetRow.dataset_id.in_(new_dataset_ids),
+                        in_id_set(DatasetValue.row_id, wanted_rows),
+                        in_id_set(DatasetValue.column_id, wanted_cols),
+                    )
                 ).all()
             }
-            # ⚠️ Re-ITERATE the parsed items rather than remembering an (original_id, key)
-            # side list. That list measured ~540 MB at 3.6 M values, for information already
-            # present in `value_items` — which the JSON parse is holding regardless. The
-            # second pass is dict lookups over data already in memory.
             value_remap = remap["dataset_values"]
             for item in value_items:
                 original_id = item["_original_id"]
-                if original_id in value_remap:
-                    continue  # merge-matched above; it already points at the target's row
+                if original_id not in referenced_value_ids:
+                    continue  # #994 — nothing downstream asks about this value
+                # A merge-matched value is NOT skipped here (#1015): it is resolved by the
+                # same (row, column) key, which finds the TARGET's value, because nothing
+                # was inserted at a cell the target already held.
                 if item.get("column_id") in skipped_column_ids:
                     continue  # #921 — never inserted; keep the two passes in step
                 key = (
@@ -2895,6 +3808,10 @@ def import_project(
                 if new_id is not None:
                     value_remap[original_id] = new_id
             del key_to_id
+        elif n_inserted_values:
+            # Nothing downstream asks about these values, but the inserts must still be
+            # visible to `materialise_manual_cells` below and to every later section.
+            db.flush()
 
         # #897 — a row this import created needs a cell for every hand-editable
         # column, and THIS PATH IS INVISIBLE to the AST scan that guards the
@@ -2917,13 +3834,17 @@ def import_project(
             materialise_manual_cells(db, _ds_id)
 
         # ⚠️ **`inserted_ids["dataset_values"]` is deliberately NOT populated, and this is a
-        # DECISION rather than an omission (#714's class).** Nothing reads it — the three
-        # consumers are `dataset_columns`, `excerpts` and `notes` — and at 3.6 M values the
-        # set costs ~200 MB for information no post-pass wants. 🔴 **If you add a post-pass
-        # that MUTATES imported dataset values, populate it in the loop above FIRST:** a
-        # post-pass reading `inserted_ids.get("dataset_values", set())` gets an empty set and
-        # silently does nothing, which is exactly how `renumber_imported_notes` renumbered
-        # nothing on every import while all three of its guards passed.
+        # DECISION rather than an omission (#714's class).** Nothing reads it, and at 3.6 M
+        # values the set costs ~200 MB for information no post-pass wants. 🔴 **If you add a
+        # post-pass that MUTATES imported dataset values, populate it in the loop above
+        # FIRST:** a post-pass reading `inserted_ids.get("dataset_values", set())` gets an
+        # empty set and silently does nothing, which is exactly how `renumber_imported_notes`
+        # renumbered nothing on every import while all three of its guards passed.
+        #
+        # ⚠️ **`remap["dataset_values"]` is now PARTIAL for the same reason (#994) and the
+        # failure is different: a post-pass looking up a value nothing else referenced gets
+        # `None` rather than an empty collection.** Declare the new reader in
+        # `_VALUE_REF_FK_ENTITIES` / `_VALUE_REF_JSON_FIELDS`; the guard names it for you.
 
         # ── o. RecodeDefinitions (topological) ─────────────────────
         _import_recodes_topological(
@@ -2945,6 +3866,7 @@ def import_project(
         # data and already speaks code points.
         _repair_pre_v5_excerpt_offsets(
             db, data, remap, inserted_ids.get("excerpts", set()),
+            format_version=file_version,
         )
 
         # ── q. CodeApplications ────────────────────────────────────
@@ -2959,6 +3881,163 @@ def import_project(
             if cid not in _target_codes:
                 _target_codes[cid] = db.get(Code, cid)
             return _target_codes[cid]
+
+        # 🔴 **BATCHED THROUGH CORE, NOT ONE `_add` PER ROW (#958's ORM half).** `_add`
+        # built an ORM instance and FLUSHED for every application — 1,208,742 round
+        # trips on the BES corpus — and in a merge it ran a SECOND query per row for the
+        # duplicate check. Nothing downstream needs these rows as ORM objects: they carry
+        # no remap key (nothing references an application id), and the consensus
+        # rebuild below re-reads them with its own query. So they insert through a
+        # Core `executemany` in batches, the `dataset_values` shape (#847).
+        #
+        # ⚠️ **ONE flush first — DEFENSIVE, and it says so.** `_add` flushed the whole
+        # session before each insert, so every coder, segment and code created above was
+        # in the database before the first application referenced it. A bulk insert does
+        # not flush, and with `PRAGMA foreign_keys=ON` an application naming a
+        # still-PENDING row would fail its FK check. Today every section above happens to
+        # end in an `_add` (which flushes), so removing this line fails no test — measured
+        # as a mutant, 2026-09-23. It stays so the insert does not depend on that.
+        db.flush()
+        app_batch_size = CODE_APPLICATION_IMPORT_BATCH
+        app_payloads: list[dict] = []
+
+        def _drain_apps() -> None:
+            # ⚠️ Rows need not share a key set: an ORM-enabled bulk insert
+            # (`sa_insert` of the MAPPED class) batches by key set itself, so a
+            # hand-edited row that omits `origin` or `created_at` takes that column's
+            # default. Pinned by `test_a_row_missing_a_column_still_imports…`; a
+            # hand-rolled grouping here was mutation-tested as redundant and removed.
+            if app_payloads:
+                db.execute(sa_insert(CodeApplication), app_payloads)
+                app_payloads.clear()
+
+        def _new_app_payload(item, seg_id, dv_id, code_id, app_user_id) -> dict:
+            # #869 (c): a NEW row's rating must fit the scale of the code it lands
+            # on. One that does not is imported UNRATED with the number kept as the
+            # row's conflict — the §6d shape (never lose the number, never store a
+            # value the instrument cannot hold) — and counted for the report. A
+            # scale-less target keeps the rating as a rating (§5's clearing rule).
+            # Non-finite values (JSON's bare `Infinity`, the #625 door) drop to None
+            # in `finite_rating`, for both columns.
+            rating = magnitude.finite_rating(item.get("magnitude"))
+            conflict = magnitude.finite_rating(item.get("magnitude_conflict"))
+            landing = _target_code(code_id) if code_id is not None else None
+            if landing is not None and magnitude.value_outside_scale(landing, rating):
+                conflict = rating
+                rating = None
+                if report is not None:
+                    report["ratings_out_of_range"] += 1
+            return _entity_kwargs(CodeApplication, item, {
+                "segment_id": seg_id,
+                "dataset_value_id": dv_id,
+                "code_id": code_id,
+                "user_id": app_user_id,
+                "magnitude": rating,
+                "magnitude_conflict": conflict,
+            })
+
+        def _apply_duplicate(item, match: dict) -> None:
+            """A matched application: count it, and settle its rating disagreement.
+
+            #35 — a matched application whose copy carries a DIFFERENT rating: keep
+            the TARGET's value, flag the disagreement with the incoming number
+            (decided 2026-09-01; never block the merge). The same coder's own two
+            copies disagree — the match is on (target, code, coder) — so nothing
+            about a colleague rides the flag. An equal rating, or a copy with no
+            rating, has nothing to say and CLEARS a stale flag from an earlier merge
+            rather than leaving it standing. An out-of-range incoming rating is STILL
+            the other number (#869 c) — the flag holds a fact to adjudicate, not a
+            value any statistic reads, so no range check applies to it.
+
+            `match` is either a row already in the database or one inserted earlier
+            in this same batch; both carry `magnitude` and `magnitude_conflict`.
+            """
+            if report is not None:
+                report["duplicates_skipped"] += 1
+            incoming = magnitude.finite_rating(item.get("magnitude"))
+            if incoming is not None and incoming != match["magnitude"]:
+                match["magnitude_conflict"] = incoming
+                if report is not None:
+                    report["magnitude_conflicts"] += 1
+            else:
+                match["magnitude_conflict"] = None
+
+        # A MERGE resolves duplicates per BATCH: one query for every existing row on
+        # the batch's targets, instead of one query per incoming row. The semantics
+        # are the per-row loop's exactly — a row already in the database, OR one this
+        # import inserted earlier (a previous batch is already in the database; the
+        # current batch is `pending`), is a duplicate, and the LOWEST id wins when
+        # legacy NULL-coder rows share a key (the old `.first()`).
+        merge_batch: list[tuple] = []
+
+        def _app_key(seg_id, dv_id, code_id, app_user_id) -> tuple:
+            return (
+                ("seg", seg_id) if seg_id is not None else ("val", dv_id),
+                code_id,
+                app_user_id,
+            )
+
+        def _flush_merge_batch() -> None:
+            if not merge_batch:
+                return
+            seg_ids = {row[1] for row in merge_batch if row[1] is not None}
+            dv_ids = {row[2] for row in merge_batch if row[2] is not None}
+            target_clauses = []
+            if seg_ids:
+                target_clauses.append(in_id_set(CodeApplication.segment_id, seg_ids))
+            if dv_ids:
+                target_clauses.append(in_id_set(CodeApplication.dataset_value_id, dv_ids))
+            existing: dict[tuple, dict] = {}
+            for row in db.execute(
+                sa_select(
+                    CodeApplication.id,
+                    CodeApplication.segment_id,
+                    CodeApplication.dataset_value_id,
+                    CodeApplication.code_id,
+                    CodeApplication.user_id,
+                    CodeApplication.magnitude,
+                    CodeApplication.magnitude_conflict,
+                )
+                .where(sa_or(*target_clauses))
+                .order_by(CodeApplication.id)
+            ):
+                key = _app_key(row.segment_id, row.dataset_value_id, row.code_id, row.user_id)
+                existing.setdefault(key, {
+                    "id": row.id,
+                    "magnitude": row.magnitude,
+                    "magnitude_conflict": row.magnitude_conflict,
+                    "stored_conflict": row.magnitude_conflict,
+                })
+            pending: dict[tuple, dict] = {}
+            for item, seg_id, dv_id, code_id, app_user_id in merge_batch:
+                key = _app_key(seg_id, dv_id, code_id, app_user_id)
+                match = existing.get(key) or pending.get(key)
+                if match is not None:
+                    _apply_duplicate(item, match)
+                    continue
+                payload = _new_app_payload(item, seg_id, dv_id, code_id, app_user_id)
+                app_payloads.append(payload)
+                pending[key] = payload
+                if report is not None:
+                    report["applications_added"] += 1
+            changed = [
+                {"_ca_id": m["id"], "_ca_conflict": m["magnitude_conflict"]}
+                for m in existing.values()
+                if m["magnitude_conflict"] != m["stored_conflict"]
+            ]
+            if changed:
+                # The TABLE, not the mapped class: an ORM `update()` handed a list of
+                # parameter sets switches to "bulk UPDATE by primary key", which does
+                # not take a WHERE clause of its own.
+                ca_table = CodeApplication.__table__
+                db.execute(
+                    sa_update(ca_table)
+                    .where(ca_table.c.id == bindparam("_ca_id"))
+                    .values(magnitude_conflict=bindparam("_ca_conflict")),
+                    changed,
+                )
+            _drain_apps()
+            merge_batch.clear()
 
         for item in data.get("code_applications", []):
             seg_id = _remap_id(remap, "segments", item.get("segment_id"))
@@ -2975,65 +4054,17 @@ def import_project(
                 # DEDUP on the effective (target, code, coder): a colleague may share
                 # codings already present (re-merge, or both coded a unit identically).
                 # The J2-0 per-coder unique indexes would IntegrityError on a duplicate,
-                # and under autoflush=False that fires mid-loop — so PRE-CHECK (this also
-                # catches NULL-user_id legacy rows, which the unique index does not).
-                dup_q = db.query(CodeApplication).filter(
-                    CodeApplication.code_id == code_id,
-                    CodeApplication.user_id == app_user_id,
-                )
-                dup_q = (
-                    dup_q.filter(CodeApplication.segment_id == seg_id)
-                    if seg_id is not None
-                    else dup_q.filter(CodeApplication.dataset_value_id == dv_id)
-                )
-                existing = dup_q.first()
-                if existing is not None:
-                    if report is not None:
-                        report["duplicates_skipped"] += 1
-                    # #35 — a matched application whose copy carries a DIFFERENT
-                    # rating: keep the TARGET's value, flag the disagreement with
-                    # the incoming number (decided 2026-09-01; never block the
-                    # merge). The same coder's own two copies disagree — the
-                    # match is on (target, code, coder) — so nothing about a
-                    # colleague rides the flag. An equal rating, or a copy with
-                    # no rating, has nothing to say and CLEARS a stale flag from
-                    # an earlier merge rather than leaving it standing.
-                    # An out-of-range incoming rating is STILL the other number
-                    # (#869 c) — the flag holds a fact to adjudicate, not a value
-                    # any statistic reads, so no range check applies to it.
-                    incoming = magnitude.finite_rating(item.get("magnitude"))
-                    if incoming is not None and incoming != existing.magnitude:
-                        existing.magnitude_conflict = incoming
-                        if report is not None:
-                            report["magnitude_conflicts"] += 1
-                    else:
-                        existing.magnitude_conflict = None
-                    continue
-            # #869 (c): a NEW row's rating must fit the scale of the code it lands
-            # on. One that does not is imported UNRATED with the number kept as the
-            # row's conflict — the §6d shape (never lose the number, never store a
-            # value the instrument cannot hold) — and counted for the report. A
-            # scale-less target keeps the rating as a rating (§5's clearing rule).
-            # Non-finite values (JSON's bare `Infinity`, the #625 door) drop to None
-            # in `finite_rating`, for both columns.
-            rating = magnitude.finite_rating(item.get("magnitude"))
-            conflict = magnitude.finite_rating(item.get("magnitude_conflict"))
-            landing = _target_code(code_id) if code_id is not None else None
-            if landing is not None and magnitude.value_outside_scale(landing, rating):
-                conflict = rating
-                rating = None
-                if report is not None:
-                    report["ratings_out_of_range"] += 1
-            _add(CodeApplication, item, {
-                "segment_id": seg_id,
-                "dataset_value_id": dv_id,
-                "code_id": code_id,
-                "user_id": app_user_id,
-                "magnitude": rating,
-                "magnitude_conflict": conflict,
-            })
-            if import_mode == "merge" and report is not None:
-                report["applications_added"] += 1
+                # so PRE-CHECK (this also catches NULL-user_id legacy rows, which the
+                # unique index does not) — per batch, in `_flush_merge_batch`.
+                merge_batch.append((item, seg_id, dv_id, code_id, app_user_id))
+                if len(merge_batch) >= app_batch_size:
+                    _flush_merge_batch()
+                continue
+            app_payloads.append(_new_app_payload(item, seg_id, dv_id, code_id, app_user_id))
+            if len(app_payloads) >= app_batch_size:
+                _drain_apps()
+        _flush_merge_batch()
+        _drain_apps()
 
         # ── r. Notes ───────────────────────────────────────────────
         for item in data.get("notes", []):
@@ -3181,27 +4212,52 @@ def import_project(
                 "metric_definition_id": _remap_id(remap, "metric_definitions", item.get("metric_definition_id")),
             })
 
-        # ── x. RowScores ────────────────────────────────────
-        # #847 — Core `executemany`. `_add` was called with NO `remap_key` here, so nothing
-        # downstream ever needed these ids or these instances; the per-entity flush was pure
-        # cost. 454,194 rows on the measured corpus (17 metrics x 75,699 records), which is
-        # ordinary the moment a researcher computes a scale score.
-        # ⚠️ `RowScore.computed_at` has a Python-side `func.now()` default; a Core insert
-        # applies column defaults, and the exported item carries its own value anyway.
-        _pending_scores: list[dict] = []
-        for item in data.get("row_scores", []):
-            payload = _entity_kwargs(RowScore, item, {
-                "metric_definition_id": _remap_id(
-                    remap, "metric_definitions", item.get("metric_definition_id")),
-                "dataset_row_id": _remap_id(
-                    remap, "dataset_rows", item.get("dataset_row_id")),
-            }, fresh_uuid=(import_mode == "new"))
-            _pending_scores.append(payload)
-            if len(_pending_scores) >= 10_000:
-                db.execute(sa_insert(RowScore), _pending_scores)
-                _pending_scores.clear()
-        if _pending_scores:
-            db.execute(sa_insert(RowScore), _pending_scores)
+        # ── x. RowScores — NOT IMPORTED, FOR ANY FORMAT VERSION (#958 §6) ──
+        #
+        # 🔴 **The rule is about the KIND of row, not about which build wrote the file.**
+        # A v7 archive carries an empty `row_scores.jsonl` (`_DroppedEntity`), but every
+        # v<=6 archive — four years of them, and a `.mmproject` is a backup as much as an
+        # exchange file — still holds the full inline list. Importing those while a fresh
+        # export carries none would make the same project behave differently depending on
+        # which build produced its file, and would land numbers of unknown provenance that
+        # `_mark_imported_metrics_stale` then has to declare stale anyway.
+        #
+        # ⚠️ **Nothing is lost that the archive does not already carry.** A `RowScore` is
+        # `compute_metric`'s output over the dataset values and metric definitions in this
+        # same file; `POST …/metrics/compute-all` rebuilds the set (22.29 s for 454,194
+        # scores on the GSS corpus). The rows the researcher AUTHORED — values, codings,
+        # quotes, notes — are untouched by this.
+        #
+        # ⚠️ The loop that used to sit here batched through a Core `executemany` (#847) and
+        # is deliberately gone rather than gated: a gated loop invites "just re-enable it
+        # for old files", which is the behaviour the first paragraph rules out.
+
+        # Every metric THIS import inserted. ⚠️ `inserted_ids`, never `remap` (#714) — see
+        # §x.6 below, which is the pass that acts on it.
+        _imported_metric_ids_all = inserted_ids.get("metric_definitions", set())
+
+        #: Of those, the ones that arrived already stale — which is exactly the condition
+        #: under which the Tier 3 backfill below RECOMPUTES rather than no-ops.
+        #:
+        #: 🔴 **"`create_scale_score_metric` returned `computed=True`" is NOT that question,
+        #: and reading it as one was a live defect in this change's first draft.** Its
+        #: fresh-existing branch returns `(existing, True)` having computed NOTHING — the
+        #: claim is inherited from the file, and since #958 §6 such a metric arrives with no
+        #: `RowScore` rows behind it at all. Excluding it from §x.6 on that return value
+        #: would leave an imported scale score saying it is current with nothing under it:
+        #: precisely the silence this change exists to remove.
+        _stale_before_backfill: set[int] = set()
+        if _imported_metric_ids_all:
+            _stale_before_backfill = {
+                row[0] for row in db.query(MetricDefinition.id).filter(
+                    MetricDefinition.id.in_(_imported_metric_ids_all),
+                    MetricDefinition.stale == True,  # noqa: E712
+                ).all()
+            }
+
+        #: Metrics the backfill genuinely recomputed HERE, from the rows that just landed.
+        #: Declared outside the backfill's `else:` so §x.6 can read it whichever branch ran.
+        _freshly_computed_metric_ids: set[int] = set()
 
         # ── x.5 Tier 3 backfill: auto scale-score metrics for legacy domains ──
         # Projects exported before the crosswalk (pre-Apr 2026) have
@@ -3247,6 +4303,13 @@ def import_project(
                         _metric, _computed = _create_scale_score_metric(db, _dom)
                         if _computed:
                             backfilled += 1
+                            # #958 §6 — the AND is load-bearing: `_computed` alone is also
+                            # true of the no-op branch, which computes nothing (see
+                            # `_stale_before_backfill` above). A metric this backfill
+                            # CREATED is not in `_imported_metric_ids_all` at all, so §x.6
+                            # never reaches it either way.
+                            if _metric.id in _stale_before_backfill:
+                                _freshly_computed_metric_ids.add(_metric.id)
                     except (ValueError, HTTPException) as _exc:
                         # Legacy domain with unpaired cross-dataset members —
                         # pre-flight validator should have caught this but
@@ -3277,6 +4340,40 @@ def import_project(
                     # Raises ValueError on mismatch — let it propagate to the
                     # import caller, which will roll back the transaction.
                     assert_equivalence_group_types_consistent(_eg)
+
+        # ── x.6 Every imported metric is of UNKNOWN freshness (#958 §6) ──
+        #
+        # 🔴 **THIS IS THE OTHER HALF OF DROPPING `row_scores`, AND IT MUST SHIP WITH IT** —
+        # a drop without this swaps one silent-wrong state for a worse one: metrics that
+        # still SAY they are current, with no per-record numbers behind them.
+        #
+        # 🔴 **PLACED AFTER x.5 DELIBERATELY.** `create_scale_score_metric` retries a compute
+        # on a metric that is already stale, so marking first would make every import with
+        # a variable group recompute every scale score INSIDE the import transaction — 22 s
+        # and 165 MB on the GSS corpus, for work the researcher has not asked for, on a path
+        # that must not `commit()` half way. The backfill's own freshly-computed metrics are
+        # excluded for the opposite reason: they were computed here, by this build.
+        #
+        # ⚠️ **`inserted_ids`, never `remap` (#714).** A merge remaps onto rows that already
+        # existed locally, so `remap` cannot tell "we wrote this" from "this was already
+        # here" — and marking the TARGET's own metrics stale because a colleague sent codings
+        # would be this pass editing data the import never touched. A merge blanks
+        # `metric_definitions` outright, so the set is empty there and this is a no-op; the
+        # scoping is what keeps that true if the blanking list ever changes.
+        _imported_metric_ids = _imported_metric_ids_all - _freshly_computed_metric_ids
+        metrics_marked_stale = 0
+        if _imported_metric_ids:
+            metrics_marked_stale = (
+                db.query(MetricDefinition)
+                .filter(
+                    MetricDefinition.id.in_(_imported_metric_ids),
+                    MetricDefinition.stale == False,  # noqa: E712
+                )
+                .update({"stale": True}, synchronize_session="fetch")
+            )
+            db.flush()
+        if import_report is not None:
+            import_report["metrics_marked_stale"] = metrics_marked_stale
 
         # ── y. StatisticalTests ────────────────────────────────────
         for item in data.get("statistical_tests", []):

@@ -6,7 +6,7 @@ from pathlib import Path
 import logging
 import os
 import re
-import shutil
+import time
 from datetime import datetime, timezone
 from .config import get_settings, get_backup_dir, resource_base
 from .startup_errors import FatalStartupError
@@ -170,9 +170,10 @@ def _get_encrypted_engine(pool_kwargs):
 def open_raw_connection(db_path):
     """Open a raw DBAPI connection to a SQLite/SQLCipher DB file — keyed when
     encryption is enabled. This is the SINGLE place raw-connect key logic lives;
-    every stdlib-``sqlite3`` site (the revision check, the pre-migration backup,
-    and the backup service's checkpoint / project-summary / restore-integrity
-    reads) must route through here so ``PRAGMA key`` is issued before any other
+    every stdlib-``sqlite3`` site (the revision check, `snapshot_database_file`
+    — which both the pre-migration copy and the backup service copy through —
+    and the backup service's project-summary / restore-integrity reads) must
+    route through here so ``PRAGMA key`` is issued before any other
     statement.
 
     Returns a DBAPI connection (stdlib ``sqlite3`` or ``sqlcipher3.dbapi2``);
@@ -188,6 +189,107 @@ def open_raw_connection(db_path):
         return conn
     import sqlite3
     return sqlite3.connect(str(db_path))
+
+
+class DatabaseBusyError(RuntimeError):
+    """No copy of the database could be taken: another connection held it LOCKED for
+    the whole wait (#1025, #1044). Nothing was written.
+
+    Since #1044 the copy reads a snapshot through SQLite's backup API, so nothing this
+    app does — an export, an import, a merge, a long write — can cause this. What can
+    is a lock taken EXCLUSIVELY, which this app never takes: in practice another
+    program holding the database file. ⚠️ And only while this process has NO
+    connection open — measured: with one idle connection open, another program cannot
+    take that lock at all. So it is reachable at startup (the pre-migration copy) and
+    during a restore (the pool is disposed first), not while the app is serving.
+
+    Callers turn this into their own sentence — what was NOT done differs per act
+    (a backup not saved, a withdrawal not started, a migration not run).
+    """
+
+    def __init__(self, waited_seconds: float):
+        super().__init__(
+            f"The database was locked for the {waited_seconds:.0f} seconds this waited, "
+            "so no copy of it could be taken."
+        )
+        self.waited_seconds = waited_seconds
+
+
+#: How long ONE step of the copy waits for a lock before the budget is checked again,
+#: and the pause between steps. Waiting for a READ lock holds nothing back from anyone.
+SNAPSHOT_ATTEMPT_WAIT_MS = 1000
+SNAPSHOT_RETRY_PAUSE_SECONDS = 1.0
+
+#: What a backup step returns while it cannot get its lock (SQLITE_BUSY, SQLITE_LOCKED).
+#: Numbers, not `sqlite3.SQLITE_BUSY`: the SQLCipher driver does not export the names.
+_STEP_STILL_WAITING = frozenset({5, 6})
+
+
+def _remove_database_file(path: Path) -> None:
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+
+def snapshot_database_file(db_path: Path, dest: Path, *, busy_wait_seconds: float) -> None:
+    """Copy the database at `db_path` to a NEW file `dest` as one consistent snapshot of
+    everything committed, or raise having left nothing at `dest` (#1025, #1044).
+
+    🔴 **Through SQLite's online backup API, never a file copy.** Two file-copy designs
+    failed, each measured:
+
+    - **#1025 — the WAL.** A committed change lives in the `-wal` file until a
+      checkpoint moves it into the main file; copying the main file lost whatever a
+      busy checkpoint left behind, and the copy still passed every integrity check
+      (the audit: live 2 projects, backup 0). The backup API reads through SQLite's
+      pager, so the WAL's committed pages are part of the snapshot — no checkpoint is
+      needed, and none is run.
+    - **#1044 — the process's locks.** A POSIX lock belongs to the PROCESS, and closing
+      ANY descriptor on a file releases every lock the process holds on it. The file
+      copy opened and closed the live database with an ordinary descriptor, so the
+      server kept running with no locks while its connections believed they held
+      them; another process could then decide it was the last connection and delete
+      the `-wal` and `-shm` under the server (reproduced: `disk I/O error`). The backup
+      API reads through the source connection's own descriptor, which SQLite manages.
+
+    ``pages=-1`` copies every page in ONE step, inside one read transaction on the
+    source: the snapshot is consistent, a writer is never held back (in WAL mode a
+    reader blocks no one), and nothing is restarted by commits made meanwhile.
+
+    ⚠️ **`dest` is opened through `open_raw_connection`, so it is KEYED when encryption
+    is on** — the copy is ciphertext under the same key. SQLCipher refuses to back up
+    into an unkeyed file (measured), so a plaintext copy cannot happen by accident.
+
+    **The only wait left** is for a lock another connection holds EXCLUSIVELY, which
+    blocks even a reader. Each step waits `SNAPSHOT_ATTEMPT_WAIT_MS`, then the driver
+    pauses and retries; `DatabaseBusyError` ends it once `busy_wait_seconds` is spent.
+    Any failure — that one, a wrong key, a full disk — removes the partial `dest` and
+    propagates.
+    """
+    started = time.monotonic()
+
+    def give_up_when_late(status: int, _remaining: int, _total: int) -> None:
+        # Called after every step; raising here aborts the backup and propagates.
+        waited = time.monotonic() - started
+        if status in _STEP_STILL_WAITING and waited + SNAPSHOT_RETRY_PAUSE_SECONDS >= busy_wait_seconds:
+            raise DatabaseBusyError(waited)
+
+    try:
+        src = open_raw_connection(db_path)
+        try:
+            src.execute(f"PRAGMA busy_timeout = {SNAPSHOT_ATTEMPT_WAIT_MS}")
+            dst = open_raw_connection(dest)
+            try:
+                src.backup(
+                    dst, pages=-1, progress=give_up_when_late,
+                    sleep=SNAPSHOT_RETRY_PAUSE_SECONDS,
+                )
+            finally:
+                dst.close()
+        finally:
+            src.close()
+    except BaseException:
+        _remove_database_file(dest)
+        raise
 
 
 def current_database_key_hex() -> str | None:
@@ -264,11 +366,101 @@ def _get_current_revision(db_path: Path) -> str | None:
         ) from e
 
 
+#: `{stem}_{YYYYMMDD}_{HHMMSS}.db` — the shape `_backup_database` writes below.
+#: Anchored, so nothing else in the backup folder can match: not a `.mmbackup`,
+#: not a `.mmproject` safety copy, not a live database anyone parked there.
+_PRE_MIGRATION_RE = re.compile(r"^(?P<stem>.+)_(?P<date>\d{8})_(?P<time>\d{6})\.db$")
+
+
+def prune_orphaned_pre_migration_backups(db_path: Path, backup_dir: Path) -> int:
+    """Delete pre-migration copies belonging to databases that no longer exist (#982).
+
+    Returns how many were deleted. Best-effort and never raises.
+
+    These copies rotate 5 deep **per database stem**, and the rotation only ever
+    looks at the stem it is currently backing up — so every database that has ever
+    run against this backup folder leaves up to five full, uncompressed copies
+    behind forever. MEASURED on the developer's machine 2026-09-20: **3.77 GB of a
+    4.60 GB folder, of which 1.42 GB belonged to six databases that were gone**
+    (`scratch`, `verify`, `vl`, `grid`, `drive`, `reverse` — throwaway corpora from
+    earlier sessions).
+
+    🔴 **THIS DELETES RECOVERY POINTS, so every uncertainty resolves toward
+    KEEPING them:**
+
+    - A file is a candidate only if it matches `_PRE_MIGRATION_RE` exactly.
+    - A stem is orphaned only if `{stem}.db` is **absent from the live database's
+      own directory**. ⚠️ If that directory cannot be listed, NOTHING is pruned —
+      an unreadable parent would otherwise make every stem look orphaned, which is
+      the fail-closed-scan trap pointing at real files.
+    - The live database's own stem is excluded explicitly, not merely by existing.
+    - Every deletion is logged by name. ⚠️ This is only safe advice because #631
+      is fixed; before it, all 31 `app.*` loggers were disabled at startup and this
+      would have been a silent deletion.
+
+    ⚠️ **In the packaged app this is a no-op by construction** — a researcher has
+    exactly one database path, so there is only ever one stem and it is never
+    orphaned. It reclaims space on a machine that has run several databases against
+    one backup folder, which is the developer's.
+    """
+    try:
+        if not backup_dir.is_dir():
+            return 0
+        db_dir = db_path.parent if str(db_path.parent) else Path(".")
+        live_stems = {p.stem for p in db_dir.glob("*.db")}
+        if not live_stems:
+            # 🔴 THE FAIL-CLOSED CASE, and it covers BOTH ways of seeing nothing.
+            # An `except OSError` around the glob above was written, and a mutant
+            # proved it DEAD: measured on 3.12, `Path.glob` on an unreadable
+            # directory returns `[]` and does NOT raise (unlike `os.listdir`), and
+            # on a missing one it does the same. So "cannot read" and "nothing
+            # there" arrive identically, and this single check is what stops an
+            # empty answer being read as "every stem is orphaned".
+            # Refusing costs disk; pruning would delete the copies of a database
+            # that is merely detached right now.
+            why = "could not be read" if not os.access(db_dir, os.R_OK) else "holds no database"
+            logger.warning(
+                "%s %s; keeping every pre-migration backup.", db_dir, why
+            )
+            return 0
+        live_stems.add(db_path.stem)
+
+        deleted = 0
+        for path in backup_dir.iterdir():
+            match = _PRE_MIGRATION_RE.match(path.name)
+            if match is None or match["stem"] in live_stems:
+                continue
+            try:
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+                path.unlink()
+            except OSError as e:
+                logger.warning("Could not remove orphaned backup %s: %s", path.name, e)
+                continue
+            deleted += 1
+            logger.info(
+                "Removed pre-migration backup %s (%.1f MB): no database named '%s' remains",
+                path.name, size / 1e6, match["stem"],
+            )
+        return deleted
+    except Exception as e:  # never let housekeeping break startup
+        logger.warning("Could not prune orphaned pre-migration backups: %s", e)
+        return 0
+
+
+#: At startup nothing in this process holds the database, so a busy one is held by
+#: another program and waiting longer rarely helps; the packaged shell's health
+#: probe allows 60 s for the whole startup (`electron/backend-process.js`).
+PRE_MIGRATION_BUSY_WAIT_SECONDS = 10.0
+
+
 def _backup_database(db_path: Path) -> Path | None:
     """Create a timestamped backup of the database before migration.
 
-    Checkpoints the WAL first so the backup is self-contained.
-    Keeps up to 5 most recent backups to limit disk usage.
+    Copies through `snapshot_database_file`, so the copy holds everything committed
+    or the migration is refused (#1025). Keeps up to 5 most recent backups to limit
+    disk usage.
 
     Returns the backup path, or ``None`` when there was nothing to back up (a new
     or empty database). **Raises ``PreMigrationBackupError`` when a backup was
@@ -290,13 +482,28 @@ def _backup_database(db_path: Path) -> Path | None:
         # situation #692 wrote actionable guidance for. Same failure, same user, and
         # the message that names the folder and the fix was one line away.
         backup_dir.mkdir(parents=True, exist_ok=True)
-        # Checkpoint WAL so the .db file is self-contained (keyed if encrypted)
-        conn = open_raw_connection(db_path)
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        conn.close()
-
-        shutil.copy2(str(db_path), str(backup_path))
+        # #1025/#1044: a consistent snapshot through SQLite's backup API. Written under
+        # a staging name and renamed into place, so a file carrying a pre-migration
+        # copy's name is always a complete one (§2 of the backup rules, for .mmbackup):
+        # the rotation below counts files by that name, and a half-written one would
+        # push out a good copy. The name cannot match `_PRE_MIGRATION_RE`.
+        staging = backup_dir / f".{backup_path.name}.partial"
+        snapshot_database_file(
+            db_path, staging, busy_wait_seconds=PRE_MIGRATION_BUSY_WAIT_SECONDS
+        )
+        os.replace(staging, backup_path)
         logger.info("Database backed up to %s", backup_path)
+    except DatabaseBusyError as e:
+        # Nothing in THIS process has the database open yet, so what holds it is
+        # another program — and "free up disk space" would send the researcher the
+        # wrong way.
+        logger.error("Pre-migration backup FAILED (%s): refusing to migrate.", e)
+        raise PreMigrationBackupError(
+            f"Mixed Measures could not back up your database before updating it, "
+            f"because another program is using {db_path}. No update was applied and "
+            f"your data is untouched. Close any other copy of Mixed Measures, and any "
+            f"program that may have that file open, then relaunch."
+        ) from e
     except Exception as e:
         # #692: the backup is the only guard on the only destructive path. Refuse
         # rather than warn — a swallowed ENOSPC here is exactly how irreplaceable
@@ -342,6 +549,69 @@ def _probe_engine_readable():
             f"by the application engine (corruption, or a wrong/missing encryption "
             f"key): {e}"
         ) from e
+
+
+def _script_only_alembic_config():
+    """An Alembic config that knows where the scripts are and nothing else.
+
+    ⚠️ **Deliberately built WITHOUT `alembic.ini`.** `env.py` runs `fileConfig` on
+    the ini whenever it has one, which resets root logging; at startup that is
+    harmless (it happens once, before serving), but these helpers run INSIDE a
+    request, where it would reconfigure a live server's logging mid-flight.
+    Nothing else in the ini matters to reading or applying revisions.
+    """
+    from alembic.config import Config
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(resource_base() / "alembic"))
+    return cfg
+
+
+def classify_revision(revision: str | None) -> str:
+    """Can THIS build open a database at `revision`? (#1026)
+
+    - ``"current"`` — it is this build's head: nothing to do.
+    - ``"older"`` — an ancestor these scripts contain: it can be brought forward.
+    - ``"unknown"`` — no revision at all, or one these scripts do not contain. That
+      is a database written by a NEWER build (the common case), or one from before
+      the 2026-06-06 squash; either way this build cannot read it, and the startup
+      migration would refuse to launch on it (`Can't locate revision`).
+    """
+    from alembic.script import ScriptDirectory
+
+    if revision is None:
+        return "unknown"
+    script = ScriptDirectory.from_config(_script_only_alembic_config())
+    if revision in set(script.get_heads()):
+        return "current"
+    known = {s.revision for s in script.walk_revisions()}
+    return "older" if revision in known else "unknown"
+
+
+def database_file_revision(db_path: Path) -> str | None:
+    """The Alembic revision recorded in a database file — one that is NOT the
+    running database, such as a backup extracted for a restore. None when the
+    file has no `alembic_version` table. Raises `DatabaseUnreadableError` when
+    the file cannot be read at all."""
+    return _get_current_revision(db_path)
+
+
+def upgrade_database_file(db_path: Path) -> str | None:
+    """Bring a database file that is NOT the running one to this build's head (#1026).
+
+    For a restore: the backup's database is migrated in STAGING, before it
+    replaces anything, so a migration that fails changes nothing and the file
+    swapped in is one this build's models can already read. No pre-migration copy
+    is taken — the backup archive it came from IS that copy.
+
+    Returns the revision the file ends at. Raises whatever the migration raised.
+    """
+    from alembic import command
+
+    cfg = _script_only_alembic_config()
+    cfg.attributes["mm_database_path"] = str(db_path)
+    command.upgrade(cfg, "head")
+    return _get_current_revision(db_path)
 
 
 def run_migrations():
@@ -414,6 +684,14 @@ def run_migrations():
                 "Pre-migration backup created (rev %s): %s",
                 current_rev, backup_path,
             )
+
+    # #982: every database that has ever run against this backup folder leaves up
+    # to five full copies behind, because the rotation above only ever looks at the
+    # stem it is backing up. Runs on EVERY startup, not only when a migration is
+    # pending — the copies it removes belong to databases that are gone, so waiting
+    # for the next migration would just hold the disk longer. Best-effort, never
+    # raises, and refuses to prune anything it is not certain about.
+    prune_orphaned_pre_migration_backups(db_path, get_backup_dir())
 
     command.upgrade(alembic_cfg, "head")
 

@@ -29,9 +29,23 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+ACT_MERGE = "merge"
+ACT_OVERWRITE = "overwrite"
+ACT_MERGE_OR_OVERWRITE = "merge_or_overwrite"
+
+# The act each prefix names, at WRITE time — where the caller has just told us which
+# door it is and there is nothing to disambiguate. `_act` below answers the same
+# question for a file already on disk, where a pre-1.5.2 `pre-overwrite` may precede
+# either act and a manifest is needed to narrow it. ONE mapping, two readers.
+_PREFIX_ACTS = {
+    "pre-merge": ACT_MERGE,
+    "pre-overwrite": ACT_OVERWRITE,
+}
+
 # The act a safety copy precedes. The writer REFUSES any other prefix, so a third
-# in-place import has to be added here — which is what puts it in the list too.
-SAFETY_COPY_PREFIXES = ("pre-merge", "pre-overwrite")
+# in-place import has to be added above — which is what puts it in the list, and
+# (since #977) forces it to decide what its own refusal calls it.
+SAFETY_COPY_PREFIXES = tuple(_PREFIX_ACTS)
 
 SAFETY_COPY_SUFFIX = ".mmproject"
 
@@ -55,9 +69,73 @@ _FIRST_VERSION_NAMING_MERGES = (1, 5, 2)
 # damaged or hostile archive make the listing slow.
 _MAX_MANIFEST_BYTES = 1024 * 1024
 
-ACT_MERGE = "merge"
-ACT_OVERWRITE = "overwrite"
-ACT_MERGE_OR_OVERWRITE = "merge_or_overwrite"
+@dataclass(frozen=True)
+class SafetyCopyRefusal:
+    """What the researcher is told when the copy could not be written (#977).
+
+    🔴 **The WHOLE sentence varies by act — it is not a verb slotted into a
+    template.** The hardcoded overwrite wording got THREE things wrong about a
+    merge, not one: the verb (*"Overwriting was stopped"*), the object (*"the
+    project being replaced"* — a merge adds to a project rather than replacing
+    it) and the consequence (*"it is not overwritten without a snapshot"*).
+    Composing those from fragments reads as though a machine wrote it, and the
+    sentences are two lines each.
+
+    ⚠️ `write_failed` carries no trailing punctuation: the caller appends the
+    underlying error in parentheses.
+    """
+    too_large: str
+    write_failed: str
+
+
+_REFUSALS = {
+    ACT_MERGE: SafetyCopyRefusal(
+        too_large=(
+            "Merging was stopped because the project you are merging into is too "
+            "large to snapshot first, and it is not changed without a snapshot."
+        ),
+        write_failed=(
+            "Could not create a safety backup before merging; aborting to protect "
+            "your data"
+        ),
+    ),
+    ACT_OVERWRITE: SafetyCopyRefusal(
+        too_large=(
+            "Overwriting was stopped because the project being replaced is too "
+            "large to snapshot first, and it is not overwritten without a snapshot."
+        ),
+        write_failed=(
+            "Could not create a safety backup before overwriting; aborting to "
+            "protect your data"
+        ),
+    ),
+}
+
+
+def act_for_prefix(prefix: str) -> str:
+    """The act a prefix names, with no archive to consult. Refuses an unknown one."""
+    try:
+        return _PREFIX_ACTS[prefix]
+    except KeyError:
+        raise ValueError(
+            f"Unknown safety copy prefix {prefix!r}; add it to _PREFIX_ACTS so the "
+            "list and the refusal can both say which act it precedes."
+        ) from None
+
+
+def refusal_for_prefix(prefix: str) -> SafetyCopyRefusal:
+    """The words a refused in-place import shows the researcher (#977).
+
+    Fail-closed on an unknown prefix for exactly the reason `safety_copy_filename`
+    is: **a third in-place import must DECIDE what to call itself rather than
+    inherit the previous door's verb.** That inheritance IS #977 — the writer was
+    already given a `prefix` to fix this same defect in the FILENAME (#919,
+    2026-09-09), and the message sitting beside it was not carried across. A
+    refusal that names the wrong act is worse than a filename that does, because
+    "overwriting" is the destructive word and it arrives at the moment the
+    researcher is already blocked.
+    """
+    return _REFUSALS[act_for_prefix(prefix)]
 
 
 class SafetyCopyNameError(ValueError):
@@ -152,8 +230,14 @@ def _read_manifest(path: Path) -> dict | None:
 
 
 def _act(prefix: str, manifest: dict | None) -> str:
-    if prefix == "pre-merge":
-        return ACT_MERGE
+    """The act a copy ALREADY ON DISK precedes: `act_for_prefix` with the pre-1.5.2
+    ambiguity added back. Only `pre-overwrite` is ambiguous — a `pre-merge` name was
+    never written by a build that used it for anything else — so the merge arm is
+    the write-time answer unchanged. The prefix reaches here from `_NAME_RE`, which
+    only matches `SAFETY_COPY_PREFIXES`, so the strict lookup cannot raise."""
+    act = act_for_prefix(prefix)
+    if act == ACT_MERGE:
+        return act
     version = _parse_version(manifest.get("app_version")) if manifest else None
     if version is not None and version >= _FIRST_VERSION_NAMING_MERGES:
         return ACT_OVERWRITE
@@ -172,16 +256,47 @@ def _taken_at(match: re.Match, path: Path) -> datetime:
         return mtime.replace(microsecond=0)
 
 
-def list_safety_copies(backup_dir: Path) -> list[SafetyCopy]:
-    """Every safety copy in the backup folder, newest first.
+@dataclass(frozen=True)
+class SafetyCopyPage:
+    """A bounded page of safety copies, with the TRUE totals beside it (#978).
+
+    The two must be reported together. The disclosure's own label announces
+    *"(N copies, X MB)"* before the list is opened, which is the good half — it
+    states the cost before it is paid — so a page that made the list shorter and
+    left the caller to count what it returned would turn a true summary into a
+    false one.
+    """
+    copies: list[SafetyCopy]
+    total_count: int
+    total_bytes: int
+
+    @property
+    def truncated(self) -> bool:
+        return len(self.copies) < self.total_count
+
+
+def list_safety_copies(backup_dir: Path, limit: int | None = None) -> SafetyCopyPage:
+    """The newest `limit` safety copies, with the totals over ALL of them (#978).
 
     A copy whose archive cannot be read is still LISTED (`readable=False`) — it
     takes disk space, and hiding it is the defect this list exists to fix.
+
+    🔴 **The limit bounds the ARCHIVES OPENED, not only the rows rendered.** Each
+    copy's project name and identity come from its manifest, and reading one means
+    opening the zip — so this walked and opened every file in the folder on every
+    request, including when the disclosure was closed (its query carries no
+    `enabled` gate). MEASURED on the developer's own folder 2026-09-20: **1,954
+    copies, 1.37 s per call.** The size and the timestamp come from the name and
+    one `stat`, so the totals stay true at negligible cost.
+
+    ⚠️ **Sorting comes BEFORE the manifests are read**, which is the only ordering
+    that makes the bound worth anything — `_taken_at` reads the name, with the
+    mtime as its fallback, and neither opens the archive.
     """
     if not backup_dir.is_dir():
-        return []
+        return SafetyCopyPage(copies=[], total_count=0, total_bytes=0)
 
-    found: list[tuple[datetime, SafetyCopy]] = []
+    found: list[tuple[datetime, str, int, re.Match, Path]] = []
     for path in backup_dir.iterdir():
         match = _NAME_RE.match(path.name)
         if match is None:
@@ -194,20 +309,28 @@ def list_safety_copies(backup_dir: Path) -> list[SafetyCopy]:
         except OSError:
             # Removed between the directory read and the stat.
             continue
+        found.append((taken_at, path.name, size, match, path))
+
+    found.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    total_count = len(found)
+    total_bytes = sum(row[2] for row in found)
+
+    page = found if limit is None else found[:max(limit, 0)]
+    copies = []
+    for taken_at, filename, size, match, path in page:
         manifest = _read_manifest(path)
         name = manifest.get("project_name") if manifest else None
         uuid = manifest.get("project_uuid") if manifest else None
-        found.append((taken_at, SafetyCopy(
-            filename=path.name,
+        copies.append(SafetyCopy(
+            filename=filename,
             act=_act(match["prefix"], manifest),
             taken_at=taken_at.isoformat(),
             size_bytes=size,
             project_name=name if isinstance(name, str) and name.strip() else None,
             project_uuid=uuid if isinstance(uuid, str) and uuid else None,
             readable=manifest is not None,
-        )))
-    found.sort(key=lambda pair: (pair[0], pair[1].filename), reverse=True)
-    return [copy for _, copy in found]
+        ))
+    return SafetyCopyPage(copies=copies, total_count=total_count, total_bytes=total_bytes)
 
 
 def find_safety_copy(backup_dir: Path, filename: str) -> Path:

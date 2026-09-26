@@ -13,7 +13,12 @@ from ..models.analysis_domain import AnalysisDomain
 from ..models.row_score import RowScore
 from ..models.metric import MetricDefinition
 from .grouping import load_grouping_values
-from .undefined_stats import INSUFFICIENT_N, NO_VARIANCE, finite_or_none
+from .undefined_stats import (
+    INSUFFICIENT_N,
+    NO_VARIANCE,
+    SCORES_NOT_COMPUTED,
+    finite_or_none,
+)
 
 
 # ── Data loading helpers ─────────────────────────────────────────────────────
@@ -77,7 +82,7 @@ def _load_domain_vectors(
     db: Session,
     domain_ids: list[int],
     project_id: int,
-) -> tuple[dict[int, dict[int, float]], list[tuple[int, str, str]]]:
+) -> tuple[dict[int, dict[int, float]], list[tuple[int, str, str]], set[int]]:
     """Load per-row domain scores for multiple domains.
 
     Uses pre-computed RowScore records (via domain_aggregate metrics).
@@ -85,6 +90,10 @@ def _load_domain_vectors(
     Returns:
         values: {domain_id: {row_id: score}}
         domain_info: [(id, short_label, full_label), ...]
+        unscored: the domain ids with NO `RowScore` rows at all — never computed,
+            as opposed to computed-and-empty. **A THIRD return value rather than
+            an inference at the caller**, because "the vector is empty" is true of
+            both and they have opposite remedies (#958 §6).
     """
     # Get domain metadata
     domains = (
@@ -105,7 +114,7 @@ def _load_domain_vectors(
 
     valid_ids = [di[0] for di in domain_info]
     if not valid_ids:
-        return {}, []
+        return {}, [], set()
 
     # Find domain_aggregate metrics for these domains (ungrouped only)
     metrics = (
@@ -122,7 +131,9 @@ def _load_domain_vectors(
 
     metric_to_domain = {m.id: m.input_source_id for m in metrics}
     if not metric_to_domain:
-        return {}, domain_info
+        # No ungrouped scale-score metric at all — nothing has been computed for
+        # any of these groups, which is the same remedy as "computed nothing".
+        return {}, domain_info, set(valid_ids)
 
     # Bulk load row scores
     scores = (
@@ -143,7 +154,27 @@ def _load_domain_vectors(
         domain_id = metric_to_domain[metric_id]
         values[domain_id][row_id] = score
 
-    return values, domain_info
+    # 🔴 **WHICH GROUPS HAVE NO `RowScore` ROWS AT ALL — a SEPARATE question from
+    # "no usable values", and asking it is the whole of #958 §6's disclosure here.**
+    # The load above filters `score IS NOT NULL`, so a group that was computed and
+    # came out entirely missing is indistinguishable from one that was never
+    # computed — and those have opposite remedies. One grouped COUNT settles it,
+    # over the same bounded metric set, so it costs no scan of the scores.
+    #
+    # ⚠️ A group whose metric exists but has produced no rows counts as NOT
+    # COMPUTED: `compute_metric` writes a `RowScore` per record, so an empty set
+    # means it has not run (or its error-isolated row-score block failed), never
+    # that every record was excluded.
+    scored_metric_ids = {
+        mid for (mid,) in db.query(RowScore.metric_definition_id)
+        .filter(RowScore.metric_definition_id.in_(list(metric_to_domain.keys())))
+        .distinct()
+        .all()
+    }
+    computed_domains = {metric_to_domain[mid] for mid in scored_metric_ids}
+    unscored = {did for did in valid_ids if did not in computed_domains}
+
+    return values, domain_info, unscored
 
 
 def _load_grouping_values(
@@ -178,11 +209,14 @@ def compute_correlation_matrix(
     """
     import numpy as np
 
-    # Load data vectors
+    # Load data vectors. ⚠️ `unscored` is EMPTY on the column path by construction:
+    # a dataset column's values are the researcher's data, present or not, and
+    # nothing about them is waiting to be computed.
+    unscored: set[int] = set()
     if column_ids:
         values, var_info = _load_column_vectors(db, column_ids, project_id)
     elif domain_ids:
-        values, var_info = _load_domain_vectors(db, domain_ids, project_id)
+        values, var_info, unscored = _load_domain_vectors(db, domain_ids, project_id)
     else:
         return {"labels": [], "full_labels": [], "matrix": [], "adjusted_alpha": None, "num_comparisons": 0}
 
@@ -215,7 +249,24 @@ def compute_correlation_matrix(
                 # #689: `r = 0.00, p = 1.00` is read as "measured, no
                 # relationship". Three shared rows is the floor for a
                 # correlation at all — say so instead.
-                cell = {"r": None, "p": None, "n": n, "undefined_reason": INSUFFICIENT_N}
+                #
+                # 🔴 **BUT SAY WHICH (#958 §6).** If either variable group's scale
+                # score was never computed there are no shared rows for a reason
+                # that has nothing to do with the researcher's data, and
+                # INSUFFICIENT_N's sentence — *"Too few values … after missing
+                # data was excluded"* — blames the data and offers a remedy that
+                # cannot work. This is the ordinary state of a freshly imported
+                # project, because the per-record scores are derived and are not
+                # carried in the archive. ⚠️ Checked against `unscored`, never
+                # against `n == 0`: a group that was computed and came out
+                # entirely missing is INSUFFICIENT_N's case, and the two are
+                # indistinguishable from the vector alone.
+                reason = (
+                    SCORES_NOT_COMPUTED
+                    if var_ids[i] in unscored or var_ids[j] in unscored
+                    else INSUFFICIENT_N
+                )
+                cell = {"r": None, "p": None, "n": n, "undefined_reason": reason}
                 matrix[i][j] = cell
                 matrix[j][i] = cell
                 continue
@@ -288,7 +339,9 @@ def compute_scatter_data(
     if id_type == "column":
         values, var_info = _load_column_vectors(db, [x_id, y_id], project_id)
     else:
-        values, var_info = _load_domain_vectors(db, [x_id, y_id], project_id)
+        # A scatter plots the points it has; with none it renders an empty plot
+        # and carries no per-cell reason to hang the third value on.
+        values, var_info, _unscored = _load_domain_vectors(db, [x_id, y_id], project_id)
 
     if len(var_info) < 2:
         return {"x_label": "", "y_label": "", "x": [], "y": [], "record_ids": [],
@@ -362,7 +415,7 @@ def compute_scatter_matrix(
     if id_type == "column":
         values, var_info = _load_column_vectors(db, source_ids, project_id)
     else:
-        values, var_info = _load_domain_vectors(db, source_ids, project_id)
+        values, var_info, _unscored = _load_domain_vectors(db, source_ids, project_id)
 
     if len(var_info) < 2:
         return {"labels": [], "full_labels": [], "pairs": [], "truncated": truncated}

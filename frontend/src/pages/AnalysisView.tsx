@@ -1337,7 +1337,7 @@ export default function AnalysisView() {
               tabIndex={isActive ? 0 : -1}
               className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px ${
                 isActive
-                  ? 'border-mm-accent text-mm-text'
+                  ? 'border-mm-blue text-mm-text'
                   : 'border-transparent text-mm-text-muted hover:text-mm-text-secondary hover:border-mm-border-subtle'
               }`}
               onClick={() => setUrlParam('tab', tab)}

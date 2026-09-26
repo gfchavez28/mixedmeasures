@@ -1,7 +1,9 @@
+import type { LayerScope } from '@/lib/coding-layers'
 import api from './client'
 import { EXPORT_TIMEOUT_MS } from './download'
 import type { ReliabilityInterval } from '../reliability-interval'
 import type { MagnitudeScale } from '../magnitude'
+import type { MachineProvenance } from '@/lib/machine-coder'
 
 // Code Analysis types
 export interface CodeFrequencyItem {
@@ -199,7 +201,7 @@ export interface CodeAnalysisFilterParams {
   /** Track J · J1 item 4 — comma-separated coder (user) IDs; omit = all coders. */
   coder_ids?: string
   /** Track J · J2-5 — analysis coding layer: 'human' (default) or 'consensus'. */
-  layer_scope?: 'human' | 'consensus'
+  layer_scope?: LayerScope
 }
 
 // Source Frequencies
@@ -216,7 +218,7 @@ export interface SourceFrequenciesRequest {
   /** Track J · J1 item 4 — coder (user) IDs to include; null/omit = all coders. */
   coder_ids?: number[] | null
   /** Track J · J2-5 — analysis coding layer: 'human' (default) or 'consensus'. */
-  layer_scope?: 'human' | 'consensus' | null
+  layer_scope?: LayerScope | null
 }
 
 export interface CodeCountEntry {
@@ -316,7 +318,7 @@ export interface DemographicComparisonRequest {
   /** Track J · J1 item 4 — coder (user) IDs to include; null/omit = all coders. */
   coder_ids?: number[] | null
   /** Track J · J2-5 — analysis coding layer: 'human' (default) or 'consensus'. */
-  layer_scope?: 'human' | 'consensus' | null
+  layer_scope?: LayerScope | null
 }
 
 export interface GroupTotal {
@@ -644,6 +646,70 @@ export interface IrrMagnitudeResult {
   alpha_ci: ReliabilityInterval | null
 }
 
+/** One VALUE of a code set, scored as the binary indicator it used to be. */
+export interface IrrSetMemberResult {
+  code_id: number
+  code_name: string
+  n_units: number
+  prevalence: number | null
+  percent_agreement: number | null
+  krippendorff_alpha: number | null
+  alpha_interpretation: string | null
+  undefined_reason: string | null
+}
+
+/**
+ * One coder PAIR's k×k confusion counts, in `axis` order both ways.
+ *
+ * ⚠️ Per pair, never pooled: with three coders a single confusion matrix is not
+ * defined, because one unit would have to contribute to several cells.
+ */
+export interface IrrSetConfusion {
+  coder_a_id: number
+  coder_b_id: number
+  counts: number[][]
+}
+
+/**
+ * Agreement on ONE code set — a k-valued nominal variable (row 48).
+ *
+ * 🔴 Never pooled into `overall_alpha`: a binary presence/absence α and a
+ * k-valued nominal α are different instruments.
+ */
+export interface IrrSetResult {
+  set_id: number
+  label: string
+  exhaustive: boolean
+  /** 🔴 `lib/code-set-basis.ts::SetBasis` — the TWELFTH stated-basis member. */
+  set_basis: string
+  /** `nominal`, always (`lib/reliability-basis.ts::AlphaMetric`). */
+  alpha_metric: string
+  n_units: number
+  /** How many values the variable has — the set's member count. */
+  n_values: number
+  /**
+   * 🔴 Occasions where a coder held TWO values at once on one unit. A
+   * contradiction, not a value: the cell is dropped and counted rather than
+   * resolved, because picking one would fabricate a judgement nobody made.
+   */
+  n_multiple_selection: number
+  /** Member code ids, then `SET_NONE` (−1) when blanks are "none of these". */
+  axis: number[]
+  /** Axis id (as a string key) → the words for it. */
+  value_names: Record<string, string>
+  percent_agreement: number | null
+  cohens_kappa: number | null
+  kappa_interpretation: string | null
+  krippendorff_alpha: number | null
+  alpha_interpretation: string | null
+  /** `degenerate` (fewer than two values) · `insufficient_n` · `no_variance` · null. */
+  undefined_reason: string | null
+  kappa_ci: ReliabilityInterval | null
+  alpha_ci: ReliabilityInterval | null
+  members: IrrSetMemberResult[]
+  confusion: IrrSetConfusion[]
+}
+
 export interface IrrThresholds {
   kappa?: Record<string, number>
   alpha?: Record<string, number>
@@ -654,6 +720,51 @@ export interface IrrSourceInfo {
   key: string
   kind: 'conv' | 'doc' | 'obs' | 'col'
   label: string
+}
+
+// ── Human-vs-machine agreement (queue row 49) ────────────────────────────────
+//
+// 🔴 A SEPARATE table, never pooled into the headline. These numbers describe a
+// MODEL; they are not reliability and they are not validation of the coding.
+// The copy that says so is `lib/machine-agreement-copy.ts`.
+
+export interface MachineCodeAgreement {
+  code_id: number
+  code_name: string
+  n_units: number
+  /**
+   * 🔴 BOTH coverage counts, on every row, and they are the disclosure: `3`
+   * against `480` is a figure about a corpus one side barely touched, and no
+   * coefficient can say so on its own.
+   */
+  human_applied: number
+  machine_applied: number
+  both_applied: number
+  percent_agreement: number | null
+  kappa: number | null
+  kappa_interpretation: string | null
+  /** The base rate, beside the coefficient — the prevalence-paradox teaching. */
+  prevalence: number | null
+  /** `no_variance` / `insufficient_n` — an undefined statistic is null WITH a reason. */
+  undefined_reason: string | null
+}
+
+export interface MachinePairAgreement {
+  human_id: number
+  human_name: string
+  machine_id: number
+  machine_name: string
+  /** Stated even when absent, so "not recorded" is visible rather than missing. */
+  machine_provenance: MachineProvenance | null
+  n_units: number
+  per_code: MachineCodeAgreement[]
+}
+
+export interface MachineAgreementResponse {
+  available: boolean
+  /** `lib/machine-agreement-copy.ts::MachineAgreementUnavailable`. */
+  unavailable_reason: string | null
+  pairs: MachinePairAgreement[]
 }
 
 export interface IrrResponse {
@@ -682,6 +793,8 @@ export interface IrrResponse {
   reliability_facet?: string | null
   /** #35 — rating agreement per scaled code; empty when none declares a scale. */
   magnitude_per_code?: IrrMagnitudeResult[]
+  /** Row 48 — the THIRD table: one α per code set, never pooled. */
+  set_agreement?: IrrSetResult[]
 }
 
 export interface IrrParams {
@@ -753,7 +866,7 @@ export const codeAnalysisApi = {
     /** Track J · J1 item 4 — comma-separated coder (user) IDs; omit = all coders. */
     coder_ids?: string
     /** Track J · J2-5 — analysis coding layer: 'human' (default) or 'consensus'. */
-    layer_scope?: 'human' | 'consensus'
+    layer_scope?: LayerScope
     limit?: number
     offset?: number
   }) =>
@@ -772,7 +885,7 @@ export const codeAnalysisApi = {
     api.post<DemographicComparisonResponse>(`/projects/${projectId}/code-analysis/demographic-comparison`, data)
       .then(r => r.data),
 
-  saturation: (projectId: number, params?: { exclude_facilitator?: boolean; category_level?: boolean; conversation_ids?: string; document_ids?: string; observation_ids?: string; coder_ids?: string; layer_scope?: 'human' | 'consensus' }) =>
+  saturation: (projectId: number, params?: { exclude_facilitator?: boolean; category_level?: boolean; conversation_ids?: string; document_ids?: string; observation_ids?: string; coder_ids?: string; layer_scope?: LayerScope }) =>
     api.get<SaturationResponse>(`/projects/${projectId}/code-analysis/saturation`, { params })
       .then(r => r.data),
 
@@ -802,6 +915,19 @@ export const codeAnalysisApi = {
   irr: (projectId: number, params?: IrrParams) =>
     api.get<IrrResponse>(`/projects/${projectId}/code-analysis/irr`, { params, timeout: EXPORT_TIMEOUT_MS })
       .then(r => r.data),
+
+  /**
+   * How far each MACHINE layer agrees with each person, per code (row 49).
+   *
+   * 🔴 Never pooled and never part of the reliability figures — it describes the
+   * model. `EXPORT_TIMEOUT_MS` for `irr`'s reason: it builds the same pooled
+   * matrices, one coder pair at a time.
+   */
+  machineAgreement: (projectId: number) =>
+    api.get<MachineAgreementResponse>(
+      `/projects/${projectId}/code-analysis/machine-agreement`,
+      { timeout: EXPORT_TIMEOUT_MS },
+    ).then(r => r.data),
 
   /** Unitizing agreement for ONE observation with open cuts (slab 6b-A). */
   unitizingAlpha: (projectId: number, observationId: number, params?: { coder_ids?: string }) =>

@@ -283,8 +283,8 @@ export default function MagnitudeStrip({
                 onClick={() => { setCursorAt(i); onCommit(tick) }}
                 className={`flex-1 h-[18px] rounded-[3px] font-mono text-[9px] leading-[18px] text-center transition-colors ${
                   selected
-                    ? 'bg-mm-blue text-white'
-                    : 'bg-mm-border text-mm-text-muted hover:bg-mm-blue/30'
+                    ? 'bg-mm-blue-fill text-mm-on-fill'
+                    : 'bg-mm-surface-hover text-mm-text-muted hover:bg-mm-blue/30'
                 } ${isCursor ? 'outline outline-1 outline-offset-1 outline-mm-green' : ''}`}
               >
                 {formatMagnitude(tick)}
@@ -318,7 +318,7 @@ export default function MagnitudeStrip({
               else setHint(`Enter a value between ${formatMagnitude(scale.min)} and ${formatMagnitude(scale.max)}.`)
             }
           }}
-          className="w-full h-7 rounded border border-mm-border bg-mm-surface px-2 text-[12px] font-mono"
+          className="w-full h-7 rounded border border-border bg-mm-surface px-2 text-[12px] font-mono"
         />
       )}
       {hint != null && (

@@ -35,7 +35,7 @@ from ..schemas.participant import (
 )
 from ..services.withdrawal_report import build_withdrawal_report
 from ..services.withdrawal_redaction import apply_withdrawal
-from ..services.backup import create_backup
+from ..services.backup import DatabaseBusyError, create_backup
 from ..config import get_documents_dir, get_media_dir, get_backup_dir, get_settings
 from ..auth import get_current_user
 from ..services.audit import log_action
@@ -662,13 +662,17 @@ async def delete_participant(
 @router.post(
     "/api/projects/{project_id}/participants/{participant_id}/withdraw",
 )
-async def withdraw_participant(
+def withdraw_participant(
     project_id: int,
     participant_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Honour a withdrawal: remove the person, keep everyone else's data — #702(3).
+
+    `def`, not `async def` (#1025): nothing here is awaited, so as `async` the full
+    backup below — and, since #1025, its wait for a busy database — ran ON the event
+    loop, and no other request was answered until it finished.
 
     Deletes the participant record and everything that is unambiguously theirs
     (their dataset rows and responses), renames their speaker to a numbered
@@ -714,6 +718,19 @@ async def withdraw_participant(
             get_media_dir(),
             get_backup_dir(),
             "pre_withdrawal",
+        )
+    except DatabaseBusyError as exc:
+        # #1025: a backup that cannot be complete is refused rather than written —
+        # and "check disk space" would send them the wrong way. Since #1044 only
+        # another program's lock causes this (`routers/backup.py::_busy_backup_refusal`).
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Could not take a backup before removing this participant, because "
+                f"another program kept the database locked for the {exc.waited_seconds:.0f} "
+                "seconds it waited. Nothing was changed. If another program has the "
+                "Mixed Measures database open, close it, then try again."
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - reported to the caller verbatim
         logger.error("Pre-withdrawal backup failed: %s", exc)

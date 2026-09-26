@@ -114,7 +114,7 @@ export default function MemosSlideOut({ projectId, onClose, defaultEntityType, d
           <div className="flex items-center gap-1">
             <button
               onClick={handleGoToPage}
-              className="text-[11px] text-mm-text-muted hover:text-mm-accent transition-colors flex items-center gap-0.5 mr-1"
+              className="text-[11px] text-mm-text-muted hover:text-mm-blue-text transition-colors flex items-center gap-0.5 mr-1"
               title="Go to Memos & Notes page"
             >
               <ArrowUpRight className="h-3 w-3" />

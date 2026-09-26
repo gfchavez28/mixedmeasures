@@ -46,6 +46,16 @@ function callSites(): { file: string; src: string }[] {
  * that is the set to scan.
  */
 const WINDOW = 600
+// ⚠️ **A CHARACTER WINDOW IS A PROXY FOR "THE HANDLER", AND COMMENTS COUNT TOWARD IT
+// (measured 2026-09-21).** `stripComments` replaces a comment with SPACES so byte offsets
+// survive — which is right for every other consumer and means two lines of prose inside
+// `duplicateMutation.onSuccess` are as expensive here as two lines of code. They pushed
+// `onError` ten characters past 600 and reddened this guard against a call site that was
+// entirely correct: a false positive naming a real line, #772's phantom shape inside a
+// guard. **Triage it by looking at the handler, not by trusting the message.** Prose that
+// belongs to a helper can move there; if a handler genuinely needs the room, widen the
+// window — ⚠️ but check first that the wider window cannot reach a NEIGHBOURING call's
+// `toastProjectExportError`, which would make this guard pass by accident.
 
 function handlersFor(src: string): string[] {
   const out: string[] = []

@@ -422,7 +422,7 @@ export function MissingValueRows({
                 type="button"
                 onClick={() => pickValue(v.value_text)}
                 data-testid={`${idPrefix}-pick`}
-                className="min-h-[24px] px-2 py-0.5 rounded border border-mm-border
+                className="min-h-[24px] px-2 py-0.5 rounded border border-border
                            bg-mm-surface hover:bg-mm-surface-hover text-xs
                            text-mm-text max-w-[16rem] truncate"
                 title={v.value_text}

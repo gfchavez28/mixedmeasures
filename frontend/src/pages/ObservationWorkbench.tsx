@@ -63,6 +63,7 @@ import {
 import { playheadRowSuffix, findClipsAtTime, recordingEndsAtTimelineTime } from '@/lib/playback-utils'
 import ClipTimeline, { type BoundaryPreview } from '@/components/observations/ClipTimeline'
 import MagnitudeStrip from '@/components/MagnitudeStrip'
+import { CodeSetStrip } from '@/components/CodeSetStrip'
 import { ratableCodes } from '@/lib/rating-targets'
 import { useHistory } from '@/hooks/useHistory'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
@@ -102,7 +103,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
-import CollapsiblePanel from '@/components/CollapsiblePanel'
+import CollapsiblePanel, { PANEL_EXPANDED, PANEL_RAIL_SCROLL, PANEL_SCROLLER } from '@/components/CollapsiblePanel'
 import { PageErrorBoundary } from '@/components/PageErrorBoundary'
 import CodePanel, { type CodePanelHandle } from '@/components/CodePanel'
 import { useListLoad } from '@/hooks/useListLoad'
@@ -266,7 +267,7 @@ export default function ObservationWorkbench() {
   // ── Coder lens (Track J · J1/J2-5) — the TranscriptPanel/DocumentSegmentRow
   // threading, verbatim (slab 4d). Blind mode forces hidden = all-but-self;
   // archived-who-coded fold into the CHIP map + default-hidden (#451).
-  const { coders, coderMap, multiCoder } = useCoders()
+  const { coders, coderMap, multiCoder, multiHumanCoder } = useCoders()
   const { user } = useAuth()
   const selfId = user?.id ?? null
   const [hiddenCoders, setHiddenCoders] = useState<Set<number>>(new Set())
@@ -2124,10 +2125,18 @@ export default function ObservationWorkbench() {
           <LocateFixed aria-hidden className="h-3.5 w-3.5 mr-1" /> Follow
         </Button>
 
+        {/* #989 — the two controls ask DIFFERENT questions and were gated together.
+            The badge counts who has coded here, machine coders included (that is
+            attribution). The blind toggle is about withholding a COLLEAGUE's
+            reading, so it needs ≥2 people; on a one-researcher-plus-machine
+            roster the shared gate offered a "Reveal colleagues' work" button
+            whose only colleague was a model. */}
         {multiCoder && (
           <>
             <span className="w-px self-stretch bg-mm-border-subtle mx-1" aria-hidden />
-            <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="observation_workbench" />
+            {multiHumanCoder && (
+              <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="observation_workbench" />
+            )}
             <CoderCountBadge projectId={projectId} observationId={observationId} enabled={multiCoder} />
           </>
         )}
@@ -2837,7 +2846,7 @@ export default function ObservationWorkbench() {
           // py-1, not py-2: the vertical budget at 640×360 is 85px for the whole
           // control on the document workbench, and this page stacks a video
           // pane and a timeline above the list (measured after mounting).
-          <div className="border-t border-mm-border bg-mm-surface px-3 py-1 shrink-0">
+          <div className="border-t border-border bg-mm-surface px-3 py-1 shrink-0">
             <MagnitudeStrip
               key={`${ratingTarget.clipId}-${ratingTarget.code.id}`}
               codeName={ratingTarget.code.name}
@@ -2895,12 +2904,12 @@ export default function ObservationWorkbench() {
           ))}
         </div>
       ) : (
-        <div className="relative flex flex-col bg-mm-surface overflow-hidden w-80 shrink-0 border-l border-mm-border-subtle">
+        <div className={`relative flex flex-col bg-mm-surface ${PANEL_RAIL_SCROLL} w-80 shrink-0 border-l border-mm-border-subtle`}>
           <CollapsiblePanel
             title="Codes"
             isCollapsed={panelStates.codes.collapsed}
             onToggle={() => togglePanel('codes')}
-            className={panelStates.codes.collapsed ? '' : 'flex-[2] min-h-0'}
+            className={panelStates.codes.collapsed ? '' : `flex-[2] ${PANEL_EXPANDED}`}
             headerExtra={
               <button
                 onClick={(e) => { e.stopPropagation(); rightColumn.collapse() }}
@@ -2931,6 +2940,31 @@ export default function ObservationWorkbench() {
                   setCreateMemoForCode({ id: codeId, name: codeName })
                 }}
                 disabled={selectedClips.length === 0}
+                codeSets={
+                  /* Row 48 — a SINGLE clip only, the same rule as the two text
+                     workbenches: one choice standing for several selected clips
+                     is a judgement the interface never offered a way to make. */
+                  <CodeSetStrip
+                    projectId={projectId}
+                    target={
+                      selectedClips.length === 1
+                        ? { kind: 'segment', segmentId: selectedClips[0] }
+                        : null
+                    }
+                    appliedCodeDetails={
+                      selectedClips.length === 1
+                        ? clipMap.get(selectedClips[0])?.applied_code_details
+                        : undefined
+                    }
+                    activeCoderId={selfId}
+                    history={history}
+                    onSettled={() => {
+                      queryClient.invalidateQueries({
+                        queryKey: ['observation-segments', projectId, observationId],
+                      })
+                    }}
+                  />
+                }
                 categories={chordCategories}
                 isFocused={focusedPanel === 'codes'}
                 onFocusChange={(focused) => setFocusedPanel(focused ? 'codes' : 'list')}
@@ -2948,7 +2982,7 @@ export default function ObservationWorkbench() {
             title="Notes"
             isCollapsed={panelStates.notes.collapsed}
             onToggle={() => togglePanel('notes')}
-            className={panelStates.notes.collapsed ? '' : 'flex-1 min-h-0'}
+            className={panelStates.notes.collapsed ? '' : `flex-1 ${PANEL_EXPANDED}`}
             headerExtra={
               <span className="text-xs text-mm-text-faint">{obsNotes.length}</span>
             }
@@ -2976,7 +3010,7 @@ export default function ObservationWorkbench() {
             title="Memos"
             isCollapsed={panelStates.memos.collapsed}
             onToggle={() => togglePanel('memos')}
-            className={panelStates.memos.collapsed ? '' : 'flex-1 min-h-0'}
+            className={panelStates.memos.collapsed ? '' : `flex-1 ${PANEL_EXPANDED}`}
           >
             <PageErrorBoundary>
               <MemoPanel
@@ -3121,12 +3155,12 @@ export default function ObservationWorkbench() {
             />
           </div>
           {quoteTarget && !clipContainsRange(quoteTarget, quoteDraft) && (
-            <p role="alert" className="text-xs text-mm-rose-text">
+            <p role="alert" className="text-xs text-rose-600 dark:text-rose-400">
               That range falls outside the clip.
             </p>
           )}
           {quoteDraft.end < quoteDraft.start && (
-            <p role="alert" className="text-xs text-mm-rose-text">
+            <p role="alert" className="text-xs text-rose-600 dark:text-rose-400">
               The end time must not come before the start time.
             </p>
           )}
@@ -3259,7 +3293,7 @@ const ObservationNotesPanel = forwardRef<ObservationNotesPanelHandle, {
       </div>
 
       {/* Notes list */}
-      <div ref={listRef} className="flex-1 overflow-y-auto">
+      <div ref={listRef} className={PANEL_SCROLLER}>
         {notes.length === 0 ? (
           <div className="p-4 text-sm text-mm-text-muted text-center">
             No notes yet

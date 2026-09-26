@@ -1,34 +1,36 @@
 import { useState, useRef } from 'react'
 import { Link } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Sun, Moon, Monitor, Download, FileInput, ChevronDown, ChevronUp, LoaderCircle, ArrowLeft, Clock, Info, Lock, Unlock, Archive, ArchiveRestore, UserPlus, Copy, Quote, Plus, Minus } from 'lucide-react'
+import { Sun, Moon, Monitor, Download, FileInput, ChevronDown, LoaderCircle, ArrowLeft, Clock, Info, Lock, Unlock, Archive, ArchiveRestore, UserPlus, Copy, Quote, Plus, Minus, Pencil } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuth } from '@/lib/auth-context'
 import { useTheme, type ThemeMode } from '@/lib/theme-context'
 import { useZoom } from '@/lib/zoom-context'
 import { formatZoom, MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM } from '@/lib/zoom'
-import { authApi, backupApi, type RestorePreview } from '@/lib/api'
+import {
+  authApi,
+  backupApi,
+  MAX_BACKUP_UPLOAD_BYTES,
+  type BackupInfo,
+  type Coder,
+  type RestorePreview,
+} from '@/lib/api'
+import { serverDetailMessage } from '@/lib/api/error-utils'
 import { formatRelativeTime, formatBytes } from '@/lib/format'
+import { formatTakenAt } from '@/lib/safety-copies'
 import MMLogo from '@/components/MMLogo'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  AlertDialog,
-  AlertDialogContent,
-  AlertDialogHeader,
-  AlertDialogFooter,
-  AlertDialogTitle,
-  AlertDialogDescription,
-  AlertDialogAction,
-  AlertDialogCancel,
-} from '@/components/ui/alert-dialog'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { ColorDotButton } from '@/components/ColorDotButton'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import SoftwareUpdateSection from '@/components/SoftwareUpdateSection'
 import SafetyCopiesSection from '@/components/SafetyCopiesSection'
+import BackupHistorySection from '@/components/BackupHistorySection'
+import RestoreBackupDialog, { type RestoreSource } from '@/components/RestoreBackupDialog'
+import { describeBackup } from '@/lib/backup-history'
 import { useCoders } from '@/hooks/useCoders'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
 import { useCreateCoder } from '@/hooks/useCreateCoder'
@@ -36,19 +38,15 @@ import { coderColor, coderInitials } from '@/lib/coder-color'
 import { getContrastColor } from '@/lib/utils'
 import { apaCitation, bibtexCitation, CITATION_LICENSE } from '@/lib/citation'
 import { MMBACKUP_ACCEPT } from '@/lib/mm-formats'
+import { isMachineCoder } from '@/lib/coding-layers'
+import { describeProvenance } from '@/lib/machine-coder'
+import MachineCoderDialog from '@/components/MachineCoderDialog'
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
   { value: 'light', label: 'Light', icon: Sun },
   { value: 'dark', label: 'Dark', icon: Moon },
   { value: 'system', label: 'System', icon: Monitor },
 ]
-
-const BACKUP_TYPE_LABELS: Record<string, string> = {
-  manual: 'Manual',
-  auto: 'Auto',
-  pre_restore: 'Pre-restore',
-  pre_migration: 'Pre-migration',
-}
 
 /**
  * Text size (#697) — the discoverable half of the zoom fix.
@@ -355,25 +353,28 @@ function SecuritySection() {
   )
 }
 
-function BackupSection() {
+/** The busy look for a button that stays focusable while it works (#1025): the
+ * `disabled:` styles cannot fire on a button that is only `aria-disabled`. The
+ * same look `CodeSetPicker` uses for its saving state. */
+const BUSY_BUTTON_CLASS = 'aria-busy:cursor-wait aria-busy:opacity-50'
+
+/** Exported for its test (`BackupSection.test.tsx`); the page is its only mount. */
+export function BackupSection() {
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const [restoreFile, setRestoreFile] = useState<File | null>(null)
+  // 🔴 What is being restored FROM is two different things, and the dialog, the
+  // confirm handler and the audit trail all need to know which. A single
+  // a `File | null` would make "no file chosen" and "restoring one of ours" the
+  // same value — the #772 shape, one variable standing for two facts. It
+  // REPLACED such a field rather than sitting beside it.
+  const [restoreSource, setRestoreSource] = useState<RestoreSource | null>(null)
   const [restorePreview, setRestorePreview] = useState<RestorePreview | null>(null)
-  const [showHistory, setShowHistory] = useState(false)
   const [includeVideo, setIncludeVideo] = useState(true)
 
   const { data: status } = useQuery({
     queryKey: ['backup-status'],
     queryFn: backupApi.status,
     staleTime: 60_000,
-  })
-
-  const { data: backups } = useQuery({
-    queryKey: ['backup-list'],
-    queryFn: backupApi.list,
-    staleTime: 60_000,
-    enabled: showHistory,
   })
 
   const createMutation = useMutation({
@@ -389,8 +390,11 @@ function BackupSection() {
       queryClient.invalidateQueries({ queryKey: ['backup-status'] })
       queryClient.invalidateQueries({ queryKey: ['backup-list'] })
     },
-    onError: () => {
-      toast.error('Failed to create backup')
+    onError: (err: Error) => {
+      // The server's sentence says what to do next — since #1025 a busy database
+      // is refused with "try again when that task has finished", and a full disk
+      // says to free space. The bare "Failed to create backup" said neither.
+      toast.error(serverDetailMessage(err) || 'The backup could not be created.', { duration: 10_000 })
     },
   })
 
@@ -405,56 +409,24 @@ function BackupSection() {
       queryClient.invalidateQueries({ queryKey: ['backup-list'] })
     },
     onError: (err: Error) => {
-      const detail = (err as unknown as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      toast.error(detail || 'Snapshot failed')
+      // Held longer than the default: it is a sentence to act on (#1025).
+      toast.error(serverDetailMessage(err) || 'The snapshot could not be taken.', { duration: 10_000 })
     },
   })
 
   const validateMutation = useMutation({
-    mutationFn: backupApi.validate,
+    mutationFn: (source: RestoreSource) =>
+      source.kind === 'upload'
+        ? backupApi.validate(source.file)
+        : backupApi.validateLocal(source.filename),
     onSuccess: (preview) => {
       setRestorePreview(preview)
     },
     onError: (err: Error) => {
-      const detail = (err as unknown as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      toast.error(detail || 'Invalid backup file')
-      setRestoreFile(null)
-    },
-  })
-
-  const restoreMutation = useMutation({
-    // The video-excluded facts ride the mutation VARIABLES, not component
-    // state: clicking the Radix AlertDialogAction closes the dialog, whose
-    // onOpenChange runs handleCancelRestore and nulls restorePreview BEFORE
-    // onSuccess fires (found live — the state read always saw null).
-    mutationFn: (vars: { file: File; videoExcluded: boolean; videoFilesExcluded: number }) =>
-      backupApi.restore(vars.file),
-    onSuccess: (_data, vars) => {
-      // #551: a video-excluded backup needs its post-restore notice to be
-      // READABLE — the default 1s reload would swallow it, so hold the
-      // reload just long enough in that case. (Local video files survive a
-      // same-machine restore; the notice matters on a new machine.)
-      if (vars.videoExcluded) {
-        const n = vars.videoFilesExcluded
-        toast.warning(
-          `Restored — but this backup did not include ${n} video recording${n === 1 ? '' : 's'}. ` +
-            'If a conversation’s video is missing on this computer, re-attach it via ' +
-            '“Replace recording” in its workbench. Reloading…',
-          { duration: 4500 },
-        )
-        setTimeout(() => {
-          window.location.href = '/'
-        }, 4500)
-      } else {
-        toast.success('Restored successfully. Reloading...')
-        setTimeout(() => {
-          window.location.href = '/'
-        }, 1000)
-      }
-    },
-    onError: (err: Error) => {
-      const detail = (err as unknown as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      toast.error(detail || 'Restore failed')
+      // Held longer than the default: since #1026 this is also where "made by a
+      // newer version — restore it with X or later" arrives, a sentence to act on.
+      toast.error(serverDetailMessage(err) || 'This backup could not be read.', { duration: 10_000 })
+      setRestoreSource(null)
     },
   })
 
@@ -462,23 +434,38 @@ function BackupSection() {
     const file = e.target.files?.[0]
     if (!file) return
     e.target.value = '' // reset so same file can be re-selected
-    setRestoreFile(file)
-    validateMutation.mutate(file)
+    // 🔴 Refused HERE, before the upload starts (#971). The cap was checked while
+    // STREAMING, so the researcher waited out the whole transfer to be told the
+    // file was too big — and the limit is named nowhere on this screen. The
+    // server still enforces it; this is only what makes the refusal immediate.
+    if (file.size > MAX_BACKUP_UPLOAD_BYTES) {
+      toast.error(
+        `“${file.name}” is ${formatBytes(file.size)}, over the ` +
+          `${formatBytes(MAX_BACKUP_UPLOAD_BYTES)} limit for a backup from another computer. ` +
+          'A backup this copy of Mixed Measures made is under Backup history below, and ' +
+          'restoring one of those has no size limit.',
+        { duration: 8000 },
+      )
+      return
+    }
+    const source: RestoreSource = { kind: 'upload', file, name: file.name }
+    setRestoreSource(source)
+    validateMutation.mutate(source)
   }
 
-  const handleConfirmRestore = () => {
-    if (restoreFile) {
-      restoreMutation.mutate({
-        file: restoreFile,
-        videoExcluded: restorePreview?.manifest.video_excluded ?? false,
-        videoFilesExcluded: restorePreview?.manifest.video_files_excluded ?? 0,
-      })
+  const handleRestoreFromHistory = (backup: BackupInfo) => {
+    const source: RestoreSource = {
+      kind: 'local',
+      filename: backup.filename,
+      name: `${describeBackup(backup).label} backup from ${formatTakenAt(backup.created_at)}`,
     }
+    setRestoreSource(source)
+    validateMutation.mutate(source)
   }
 
   const handleCancelRestore = () => {
     setRestorePreview(null)
-    setRestoreFile(null)
+    setRestoreSource(null)
   }
 
   // #357: format `next_backup_at` ISO → locale-aware short time (e.g.
@@ -511,7 +498,7 @@ function BackupSection() {
           <PopoverTrigger asChild>
             <button
               type="button"
-              className="mt-0.5 flex-none text-mm-text-faint hover:text-mm-text rounded focus:outline-none focus:ring-2 focus:ring-mm-accent/40"
+              className="mt-0.5 flex-none text-mm-text-faint hover:text-mm-text rounded focus:outline-none focus:ring-2 focus:ring-ring"
               aria-label="What's the difference between saved and backed up?"
             >
               <Info className="w-3.5 h-3.5" aria-hidden="true" />
@@ -556,7 +543,12 @@ function BackupSection() {
         )}
       </div>
 
-      {/* Actions */}
+      {/* Actions.
+        * 🔴 Busy is `aria-disabled` + a refusal in the handler, never `disabled`
+        * (#965/#959 §4): Chrome BLURS a focused button that becomes disabled, so a
+        * keyboard user pressing one of these landed on <body> for the whole wait —
+        * tens of seconds on a large project (Download Backup measured 42 s on a
+        * 546 MB database, #1025). */}
       <div className="flex items-center gap-3 mb-4">
         {/* #357: primary action — fresh snapshot without download. Resets
           * the displayed `next_backup_at` because the new file's mtime is
@@ -564,9 +556,12 @@ function BackupSection() {
         <Button
           variant="default"
           size="sm"
-          onClick={() => backupNowMutation.mutate()}
-          disabled={backupNowMutation.isPending}
-          aria-busy={backupNowMutation.isPending}
+          onClick={() => {
+            if (!backupNowMutation.isPending) backupNowMutation.mutate()
+          }}
+          aria-disabled={backupNowMutation.isPending || undefined}
+          aria-busy={backupNowMutation.isPending || undefined}
+          className={BUSY_BUTTON_CLASS}
         >
           {backupNowMutation.isPending ? (
             <LoaderCircle className="w-3.5 h-3.5 mr-1.5 animate-spin" />
@@ -579,8 +574,12 @@ function BackupSection() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => createMutation.mutate(includeVideo)}
-          disabled={createMutation.isPending}
+          onClick={() => {
+            if (!createMutation.isPending) createMutation.mutate(includeVideo)
+          }}
+          aria-disabled={createMutation.isPending || undefined}
+          aria-busy={createMutation.isPending || undefined}
+          className={BUSY_BUTTON_CLASS}
         >
           {createMutation.isPending ? (
             <LoaderCircle className="w-3.5 h-3.5 mr-1.5 animate-spin" />
@@ -604,15 +603,19 @@ function BackupSection() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={validateMutation.isPending || restoreMutation.isPending}
+          onClick={() => {
+            if (!validateMutation.isPending) fileInputRef.current?.click()
+          }}
+          aria-disabled={validateMutation.isPending || undefined}
+          aria-busy={validateMutation.isPending || undefined}
+          className={BUSY_BUTTON_CLASS}
         >
           {validateMutation.isPending ? (
             <LoaderCircle className="w-3.5 h-3.5 mr-1.5 animate-spin" />
           ) : (
             <FileInput className="w-3.5 h-3.5 mr-1.5" />
           )}
-          {validateMutation.isPending ? 'Validating...' : 'Restore from Backup'}
+          {validateMutation.isPending ? 'Validating...' : 'Restore from a file'}
         </Button>
         <input
           ref={fileInputRef}
@@ -623,126 +626,39 @@ function BackupSection() {
         />
       </div>
 
-      {/* Backup history */}
-      <button
-        onClick={() => setShowHistory(v => !v)}
-        className="flex items-center gap-1 text-xs text-mm-text-muted hover:text-mm-text transition-colors"
-      >
-        {showHistory ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-        Backup history
-      </button>
+      {/* 🔴 The limit is STATED (#971). It was named nowhere on this screen, and
+        * enforced while streaming, so a researcher learned it from an error after
+        * the whole file had transferred. The sentence also has to point at the
+        * door that has no limit, because the backup folder is not reachable from
+        * a file picker on the desktop build. */}
+      <p className="text-xs text-mm-text-muted leading-relaxed mb-4 -mt-2">
+        A backup from another computer can be up to {formatBytes(MAX_BACKUP_UPLOAD_BYTES)}.
+        Backups this copy of Mixed Measures made are listed below and can be restored
+        whatever their size.
+      </p>
 
-      {showHistory && backups && (
-        <div className="mt-2 space-y-1">
-          {backups.length === 0 ? (
-            <p className="text-xs text-mm-text-faint py-1">No backups found</p>
-          ) : (
-            backups.map(b => (
-              <div key={b.filename} className="flex items-center gap-2 text-xs text-mm-text-muted py-0.5">
-                <span className="inline-block px-1.5 py-0.5 rounded bg-mm-bg text-mm-text-faint text-[10px] font-medium min-w-[70px] text-center">
-                  {BACKUP_TYPE_LABELS[b.backup_type] || b.backup_type}
-                </span>
-                <span className="flex-1 truncate">{b.filename}</span>
-                <span className="tabular-nums shrink-0">{formatBytes(b.size_bytes)}</span>
-                <span className="tabular-nums shrink-0">{formatRelativeTime(b.created_at)}</span>
-              </div>
-            ))
-          )}
-        </div>
-      )}
+      {/* Backup history — the recovery surface (#971). Until this it listed
+        * filenames and nothing more: the only way to restore was to upload a
+        * file, capped at 500 MB, while creating one had no cap at all. Its own
+        * component, beside `SafetyCopiesSection`: the two lists are siblings, and
+        * this page was already 1,100 lines. Restore stays HERE because its
+        * preview and confirmation are shared with the upload door above. */}
+      <BackupHistorySection
+        onRestore={handleRestoreFromHistory}
+        restoreBusy={validateMutation.isPending}
+      />
 
       {/* #919: the copies taken before a merge or an overwrite. They are
         * `.mmproject` files, restored through Import rather than Restore, so
         * they are a separate list rather than rows of the history above. */}
       <SafetyCopiesSection />
 
-      {/* Restore confirmation dialog */}
-      <AlertDialog open={restorePreview !== null} onOpenChange={(open) => { if (!open) handleCancelRestore() }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Restore from Backup</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-3">
-                <p>
-                  This will replace all current data with the contents of this backup.
-                  A safety backup will be created automatically before restoring.
-                </p>
-
-                {restorePreview && (
-                  <div className="rounded-md border border-mm-border-subtle bg-mm-bg p-3 text-sm space-y-2">
-                    <div className="flex justify-between">
-                      <span className="text-mm-text-muted">Created</span>
-                      <span className="text-mm-text">
-                        {new Date(restorePreview.manifest.created_at).toLocaleString()}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-mm-text-muted">App version</span>
-                      <span className="text-mm-text">{restorePreview.manifest.app_version}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-mm-text-muted">Database size</span>
-                      <span className="text-mm-text">{formatBytes(restorePreview.manifest.db_size_bytes)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-mm-text-muted">Documents</span>
-                      <span className="text-mm-text">{restorePreview.manifest.document_count}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-mm-text-muted">Recordings</span>
-                      <span className="text-mm-text">
-                        {restorePreview.manifest.media_file_count ?? 0}
-                        {restorePreview.manifest.video_excluded &&
-                          ` (${restorePreview.manifest.video_files_excluded} video excluded)`}
-                      </span>
-                    </div>
-                    {restorePreview.manifest.project_summaries.length > 0 && (
-                      <div>
-                        <span className="text-mm-text-muted text-xs">Projects:</span>
-                        <ul className="mt-1 space-y-0.5">
-                          {restorePreview.manifest.project_summaries.map((p, i) => (
-                            <li key={i} className="text-mm-text text-xs">
-                              {p.name}
-                              <span className="text-mm-text-faint ml-1">
-                                ({p.conversation_count} conv, {p.dataset_count} ds, {p.document_count} doc, {p.observation_count} obs)
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    {restorePreview.warnings.length > 0 && (
-                      <div className="rounded border border-amber-300 dark:border-amber-600 bg-amber-50 dark:bg-amber-900/20 p-2 space-y-1">
-                        {restorePreview.warnings.map((w, i) => (
-                          <p key={i} className="text-xs text-amber-800 dark:text-amber-300">{w}</p>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={restoreMutation.isPending}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleConfirmRestore}
-              disabled={restoreMutation.isPending}
-              className="bg-red-600 hover:bg-red-700 text-white"
-            >
-              {restoreMutation.isPending ? (
-                <>
-                  <LoaderCircle className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-                  Restoring...
-                </>
-              ) : (
-                'Restore'
-              )}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {/* One dialog for both doors: confirm, the wait, and how it ended (#1037). */}
+      <RestoreBackupDialog
+        source={restoreSource}
+        preview={restorePreview}
+        onClose={handleCancelRestore}
+      />
     </section>
   )
 }
@@ -779,6 +695,10 @@ function CoderRosterManager({
 }) {
   const queryClient = useQueryClient()
   const [showArchived, setShowArchived] = useState(false)
+  // Row 49 — the machine coder whose name and configuration are being edited
+  // (#999). Null = the dialog is closed; the dialog itself renders nothing
+  // without one, so there is no second `open` flag to keep in step.
+  const [editingMachine, setEditingMachine] = useState<Coder | null>(null)
   // Full roster incl. archived (the editor/switcher elsewhere use the non-archived
   // ['coders']). Archive/unarchive/switch invalidate ['coders'], which prefix-matches
   // this key too, so the list stays fresh.
@@ -805,13 +725,41 @@ function CoderRosterManager({
 
   return (
     <div className="mb-5 space-y-2">
+      {/* ⚠️ KEYED on the coder — the dialog seeds its fields in the state
+          initialisers, so the mount IS the re-seed and opening it for a
+          second machine cannot show the first one's configuration. */}
+      <MachineCoderDialog
+        key={editingMachine?.id ?? 'none'}
+        coder={editingMachine}
+        open={!!editingMachine}
+        onOpenChange={(next) => { if (!next) setEditingMachine(null) }}
+      />
       <Label className="text-xs">Coders on this install</Label>
       <div className="rounded-md border border-mm-surface-border divide-y divide-mm-surface-border overflow-hidden">
         {activeCoders.map(c => {
           const isActive = c.id === activeId
+          // #989 — a MACHINE coder is LISTED here (this is the roster manager: you
+          // must be able to see it and archive it) but is not switchable, because
+          // `switch-coder` refuses it. The name is a plain span rather than a dead
+          // button: a permanently disabled control in a row teaches nothing and
+          // still costs a tab stop (#771/#785). The *(machine)* suffix is what
+          // says why there is no "Code as" here, matching the coder filter.
+          const machine = isMachineCoder(c)
           return (
             <div key={c.id} className="flex items-center gap-2 px-2.5 py-1.5">
               {badgeDot(c)}
+              {machine ? (
+                <span className="flex-1 text-left text-sm truncate text-mm-text">
+                  {c.username}
+                  <span className="text-mm-text-muted"> (machine)</span>
+                  {/* Row 49 — the configuration, or the fact that there is none.
+                      An undocumented model must not look like a documented one:
+                      that is the whole gap this row closes. */}
+                  <span className="block text-[11px] text-mm-text-muted truncate">
+                    {describeProvenance(c.machine_provenance)}
+                  </span>
+                </span>
+              ) : (
               <button
                 type="button"
                 disabled={isActive || switching}
@@ -822,6 +770,23 @@ function CoderRosterManager({
                 {c.username}
                 {isActive && <span className="text-mm-text-muted"> (you)</span>}
               </button>
+              )}
+              {/* 🔴 #999 — the ONLY door to a machine coder's name. `PATCH
+                  /auth/me` renames the ACTIVE coder and you cannot become a
+                  machine, so before `PATCH /auth/coders/{id}` one imported under
+                  a bad name was stuck with it. People keep the J1 rule: a rename
+                  is self-service, through the editor below. */}
+              {machine && (
+                <button
+                  type="button"
+                  onClick={() => setEditingMachine(c)}
+                  aria-label={`Edit ${c.username}`}
+                  title="Edit the name and the model configuration"
+                  className="p-1 rounded text-mm-text-muted hover:text-mm-text"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
+              )}
               {isActive ? (
                 <span className="text-[10px] text-mm-text-faint">editing below</span>
               ) : (
