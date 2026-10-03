@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { codeAnalysisApi, type Coder } from '@/lib/api'
+import { isMachineCoder } from '@/lib/coding-layers'
 
 /**
  * Track J · Group A (#3/#13) — coder coverage for ONE source (conversation /
@@ -56,4 +57,41 @@ export function useCoderCoverage(
       .map(c => ({ id: c.user_id, username: c.username, display_color: c.display_color, archived: true }))
     return { coders, count: data?.count ?? 0, activeCoderIds, extraCoders, isLoaded: data != null }
   }, [data, rosterKey])
+}
+
+/**
+ * #1030 / #1038 g — which KINDS of coder have coded THIS project, from coverage.
+ *
+ * 🔴 **Not the roster.** `GET /auth/coders` is install-wide, so a model imported
+ * into project A offered the Machine layer — and would have offered the Model
+ * comparison tab — in every other project, where each can only answer "nothing".
+ * Coverage is derived from this project's codings and carries each coder's kind.
+ *
+ * - `hasMachine`: any machine coded here, ARCHIVED included — the Machine LAYER
+ *   returns an archived model's codings (`only_machine_filter` has no archive arm).
+ * - `hasActiveMachine`: an ACTIVE machine did — the comparison excludes archived
+ *   coders on both sides (DEC-F), so only this one can fill the table.
+ * - `known`: has coverage answered? Until it has, a caller must not act on
+ *   `false` (a saved layer or a deep-linked tab would be reset on the first frame).
+ *
+ * The key is `useCoderCoverage`'s project-wide shape, so `invalidateDerivedCounts`'
+ * `['coder-coverage', pid]` refreshes it after any coding — the coding import in
+ * particular, which is how a model layer arrives.
+ */
+export function useProjectCoderKinds(projectId: number) {
+  const { data } = useQuery({
+    queryKey: ['coder-coverage', projectId, null, null, null, ''],
+    queryFn: () => codeAnalysisApi.coderCoverage(projectId),
+    enabled: !!projectId,
+    staleTime: 60_000,
+  })
+  return useMemo(() => {
+    const coders = data?.coders ?? []
+    const machines = coders.filter(isMachineCoder)
+    return {
+      known: data != null,
+      hasMachine: machines.length > 0,
+      hasActiveMachine: machines.some(c => !c.archived),
+    }
+  }, [data])
 }

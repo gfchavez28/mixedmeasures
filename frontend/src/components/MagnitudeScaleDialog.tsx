@@ -8,7 +8,10 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { codesApi, serverDetailMessage, type Code } from '@/lib/api'
-import { MAX_TICKS, isTickable, type MagnitudeAnchor, type MagnitudeScale } from '@/lib/magnitude'
+import {
+  MAX_TICKS, formatMagnitude, isScalePoint, isTickable, stepsReachMax, tickValues,
+  type MagnitudeAnchor, type MagnitudeScale,
+} from '@/lib/magnitude'
 
 /**
  * Declare a code's rating scale (#35) — the authoring half of the instrument.
@@ -48,8 +51,26 @@ export default function MagnitudeScaleDialog({ projectId, code, open, onOpenChan
   const save = useMutation({
     mutationFn: (scale: MagnitudeScale | null) =>
       codesApi.setMagnitudeScale(projectId, code.id, scale),
-    onSuccess: (_c, scale) => {
+    onSuccess: (saved, scale) => {
+      // 🔴 #1112: the saved scale goes into every cached codes list BEFORE the
+      // dialog closes — `['codes', pid]` and `['codes', pid, 'all']` both, by
+      // prefix. Invalidating alone left the old scale on screen until a refetch
+      // landed, and an open rating strip read it in the meantime. Only the
+      // scale is merged: the list computes fields (`usage_count`) this
+      // endpoint's response need not, and the refetch below brings the rest.
+      const nextScale = saved?.magnitude_scale ?? scale
+      queryClient.setQueriesData<{ codes: Code[]; total: number }>(
+        { queryKey: ['codes', projectId] },
+        (old) => old && Array.isArray(old.codes)
+          ? { ...old, codes: old.codes.map(c => (c.id === code.id ? { ...c, magnitude_scale: nextScale } : c)) }
+          : old,
+      )
       queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
+      // The other two caches that carry a scale: the Ratings page's queue (its
+      // entries carry each code's scale, and data stays fresh for 60 s) and the
+      // codebook tree (the merge dialog's scale-crossing note reads it).
+      queryClient.invalidateQueries({ queryKey: ['rating-queue', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['codebook-tree', projectId] })
       onOpenChange(false)
       toast(scale ? `Rating scale set for "${code.name}"` : `Rating scale cleared for "${code.name}"`)
     },
@@ -82,6 +103,24 @@ export default function MagnitudeScaleDialog({ projectId, code, open, onOpenChan
   // Mirrors the strip's own branch so the researcher learns the consequence while
   // declaring, not after: past this density the control becomes a number input.
   const willTick = draftScale ? isTickable(draftScale) : false
+
+  // #1114: steps that stop short of the maximum (0–10 by 4 ends at 8). The
+  // server accepts the scale, so this is said, not refused.
+  const points = draftScale && willTick ? tickValues(draftScale) : []
+  const lastPoint = draftScale && points.length > 0 && !stepsReachMax(draftScale)
+    ? points[points.length - 1]
+    : null
+  // #1113: an anchor between the points is shown on the strip but cannot be
+  // picked there — the server accepts any value in range.
+  const offPointAnchors = draftScale && willTick
+    ? draftScale.anchors.filter(a => !isScalePoint(a.value, draftScale))
+    : []
+  // A row the payload drops (no label, or a value that is not a number) used to
+  // vanish silently on Save.
+  const droppedRows = anchors
+    .map((a, i) => ({ a, n: i + 1 }))
+    .filter(({ a }) => (a.value.trim() || a.label.trim())
+      && !(a.label.trim() && a.value.trim() !== '' && Number.isFinite(Number(a.value))))
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -119,6 +158,12 @@ export default function MagnitudeScaleDialog({ projectId, code, open, onOpenChan
           <p className="text-xs text-mm-text-muted">
             That is more than {MAX_TICKS} points, so coders will type a number instead
             of picking from a row of buttons.
+          </p>
+        )}
+        {lastPoint != null && (
+          <p className="text-xs text-amber-700 dark:text-amber-300">
+            Steps of {formatMagnitude(nStep)} from {formatMagnitude(nMin)} stop at{' '}
+            {formatMagnitude(lastPoint)}, so coders cannot choose {formatMagnitude(nMax)}.
           </p>
         )}
 
@@ -166,6 +211,21 @@ export default function MagnitudeScaleDialog({ projectId, code, open, onOpenChan
                 </div>
               ))}
             </div>
+          )}
+          {offPointAnchors.length > 0 && (
+            <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">
+              {offPointAnchors.map(a => formatMagnitude(a.value)).join(', ')}{' '}
+              {offPointAnchors.length === 1 ? 'is' : 'are'} between the scale's points, so coders
+              will see {offPointAnchors.length === 1 ? 'its label' : 'those labels'} but cannot choose{' '}
+              {offPointAnchors.length === 1 ? 'it' : 'them'}.
+            </p>
+          )}
+          {droppedRows.length > 0 && (
+            <p className="mt-1.5 text-xs text-mm-text-muted">
+              {droppedRows.map(({ n }) => `Anchor ${n}`).join(', ')}{' '}
+              {droppedRows.length === 1 ? 'needs' : 'need'} both a number and a label, and will
+              not be saved as {droppedRows.length === 1 ? 'it is' : 'they are'}.
+            </p>
           )}
         </div>
 

@@ -19,7 +19,7 @@ import math
 from sqlalchemy.orm import Session
 
 from ..models.dataset import Dataset, DatasetColumn, DatasetValue
-from .missing_values import is_missing, parse_missing_rules
+from .missing_values import column_missing_rules, is_missing
 
 #: What a bucket of rows with no grouping value is CALLED, everywhere.
 #:
@@ -125,9 +125,9 @@ def load_grouping_values_for_columns(
     if not column_ids:
         return {}
     rules_by_col = {
-        cid: parse_missing_rules(mv)
-        for cid, mv in db.query(
-            DatasetColumn.id, DatasetColumn.missing_values,
+        c.id: column_missing_rules(c)
+        for c in db.query(
+            DatasetColumn.id, DatasetColumn.missing_values, DatasetColumn.column_type,
         ).filter(DatasetColumn.id.in_(column_ids)).all()
     }
     query = db.query(

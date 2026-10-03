@@ -34,6 +34,8 @@ const applyCode = vi.fn()
 const removeCode = vi.fn()
 const bulkCode = vi.fn()
 const setMagnitude = vi.fn()
+const listCodeSets = vi.fn()
+const selectOnSegment = vi.fn()
 
 vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api')
@@ -53,6 +55,11 @@ vi.mock('@/lib/api', async () => {
     authApi: { ...actual.authApi, listCoders: (...a: unknown[]) => listCoders(...a) },
     excerptsApi: { ...actual.excerptsApi, list: (...a: unknown[]) => listExcerpts(...a) },
     codeAnalysisApi: { ...actual.codeAnalysisApi, coderCoverage: (...a: unknown[]) => coderCoverage(...a) },
+    codeSetsApi: {
+      ...actual.codeSetsApi,
+      list: (...a: unknown[]) => listCodeSets(...a),
+      selectOnSegment: (...a: unknown[]) => selectOnSegment(...a),
+    },
     codingApi: {
       ...actual.codingApi,
       applyCode: (...a: unknown[]) => applyCode(...a),
@@ -175,6 +182,8 @@ beforeEach(() => {
   removeCode.mockResolvedValue({ applied: false })
   bulkCode.mockResolvedValue({ success_count: 0, error_count: 0, failed_segment_ids: [] })
   setMagnitude.mockResolvedValue({ applied: true, magnitude: 7 })
+  listCodeSets.mockResolvedValue({ sets: [] })
+  selectOnSegment.mockResolvedValue({ set_id: 3, code_id: 7, removed: 1 })
 })
 
 afterEach(cleanup)
@@ -193,6 +202,73 @@ describe('undo carries the rating (#868 f)', () => {
 
     // Fourth argument: the captured rating. `undefined` there is the old bug.
     await waitFor(() => expect(applyCode).toHaveBeenCalledWith(52, 7, undefined, 0))
+  })
+})
+
+/**
+ * #1028 — applying a value of a code set REPLACES the coder's other value, at
+ * every door, and says which in `replaced_code_ids`. The server is mocked to
+ * answer as it does for a set holding Engagement (7) and Disruption (8).
+ */
+describe('an apply that REPLACED a value, and its undo (#1028)', () => {
+  it('paints the replaced chip away, and Ctrl+Z puts it back WITH its rating — a ZERO', async () => {
+    applyCode.mockImplementation(async (_seg: number, code: number) =>
+      ({ applied: true, replaced_code_ids: code === 8 ? [7] : [] }))
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.mouseDown(rows[1], { button: 0 })   // segment 52 holds Engagement, rated 0
+    expect(within(rows[1]).getAllByText('Engagement').length).toBeGreaterThan(0)
+    fireEvent.keyDown(window, { key: '2' })         // Disruption
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(52, 8))
+    // This page never refetches the segments after an apply (#367), so the chip
+    // leaves only because the server's report is painted.
+    const row52 = () => screen.getAllByRole('option')[1]
+    await waitFor(() => expect(within(row52()).queryByText('Engagement')).toBeNull())
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+
+    // Re-applying the replaced value is the atomic swap back; the rating is a
+    // second call. Removing Disruption by itself would have left NO value.
+    await waitFor(() => expect(applyCode).toHaveBeenLastCalledWith(52, 7))
+    await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(52, 7, 0))
+    expect(removeCode).not.toHaveBeenCalled()
+    await waitFor(() => expect(within(row52()).getAllByText('Engagement').length).toBeGreaterThan(0))
+  })
+
+  it('the CONTEXT MENU applies through the shared pair — the undo restores, and a scaled code is rated', async () => {
+    // It was a private copy of the pair: no rating strip for a scaled code, and
+    // an undo that could only remove (found by a SURVIVING mutant).
+    applyCode.mockImplementation(async (_seg: number, code: number) =>
+      ({ applied: true, replaced_code_ids: code === 7 ? [8] : [] }))
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.contextMenu(rows[0])                                  // segment 51
+    fireEvent.keyDown(await screen.findByText('Apply Code'), { key: 'ArrowRight' })
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Engagement/ }))
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(51, 7))
+    expect(await screen.findByTestId('magnitude-strip')).toBeInTheDocument()
+
+    fireEvent.keyDown(screen.getByRole('radiogroup'), { key: 'Escape' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+    await waitFor(() => expect(applyCode).toHaveBeenLastCalledWith(51, 8))
+    expect(removeCode).not.toHaveBeenCalled()
+  })
+
+  it('a multi-segment apply’s undo leaves the code on a segment that ALREADY had it', async () => {
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.mouseDown(rows[0], { button: 0 })
+    fireEvent.mouseDown(rows[1], { button: 0, shiftKey: true })   // 51 (uncoded) + 52 (holds Engagement)
+    fireEvent.keyDown(window, { key: '1' })                         // not all have it → apply to both
+    await waitFor(() => expect(bulkCode).toHaveBeenCalledWith([51, 52], 7, 'apply'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+    // It used to be `([51, 52], 7, 'remove')` — deleting a coding the
+    // researcher made before the act, by undoing something else.
+    await waitFor(() => expect(bulkCode).toHaveBeenLastCalledWith([51], 7, 'remove'))
   })
 })
 
@@ -282,6 +358,138 @@ describe('#964 — an unanswered coder roster keeps colleagues hidden', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Colleagues shown' }))
     expect(await screen.findByRole('button', { name: 'Colleagues hidden' })).toBeInTheDocument()
     await waitFor(() => expect(screen.queryByText(/coded by Carla/)).not.toBeInTheDocument())
+  })
+})
+
+/**
+ * #1029 — the gauge counts PEOPLE's coding. Before the fix a turn only a model had
+ * labelled counted as coded here, while the conversation card (the server's
+ * `coding_counts`) did not. The model's chip still renders: attribution is the
+ * point of the machine layer; the COUNT is what leaves it out.
+ */
+describe('#1029 — a machine coder never makes a turn coded on the gauge', () => {
+  const MACHINE_ONLY = [
+    segment(51, 0, 'The first turn of the interview.', {
+      applied_codes: [8],
+      applied_code_details: [{ code_id: 8, user_id: 9, attribution: null, is_universal: false,
+                               magnitude: null, magnitude_conflict: null }],
+    }),
+    SEGMENTS[1],
+  ]
+
+  it('an ACTIVE machine: its turn is uncoded, and its chip still shows', async () => {
+    listCoders.mockResolvedValue([
+      { id: 1, username: 'Alice', display_color: null, archived: false },
+      { id: 9, username: 'GPT-4o', display_color: null, archived: false, coder_type: 'ai' },
+    ])
+    listSegments.mockResolvedValue({
+      segments: MACHINE_ONLY, total: 2, coded_count: 1, participant_total: 2, participant_coded: 1,
+    })
+    renderWorkbench()
+
+    const rows = await screen.findAllByRole('option')
+    await waitFor(() => expect(within(rows[0]).getByText('Disruption')).toBeInTheDocument())
+    const bar = await screen.findByRole('progressbar', { name: 'Coding progress' })
+    expect(bar).toHaveAttribute('aria-valuenow', '1')
+    expect(bar).toHaveAttribute('aria-valuetext', expect.stringContaining('1 of 2 participant segments coded'))
+  })
+
+  it('an ARCHIVED machine, which only the archive-inclusive roster names, is still left out', async () => {
+    // The ordinary roster excludes archived coders; `useMachineCoderIds` asks for
+    // them too. Without that second list this turn would count again.
+    listCoders.mockImplementation((includeArchived?: boolean) => Promise.resolve(
+      includeArchived === true
+        ? [{ id: 1, username: 'Alice', display_color: null, archived: false },
+           { id: 9, username: 'GPT-4o', display_color: null, archived: true, coder_type: 'ai' }]
+        : [{ id: 1, username: 'Alice', display_color: null, archived: false }],
+    ))
+    listSegments.mockResolvedValue({
+      segments: MACHINE_ONLY, total: 2, coded_count: 1, participant_total: 2, participant_coded: 1,
+    })
+    renderWorkbench()
+
+    await waitFor(() => expect(listCoders).toHaveBeenCalledWith(true))
+    await waitFor(() => expect(
+      screen.getByRole('progressbar', { name: 'Coding progress' }),
+    ).toHaveAttribute('aria-valuenow', '1'))
+  })
+})
+
+/**
+ * #1077 (c) — the orange "uncoded" ring on a turn marks exactly the turns `j`
+ * jumps to. It tested `applied_codes.length === 0` on the row itself, so a turn
+ * only a MODEL labelled, or only a universal marker touched, had no ring while the
+ * gauge called it uncoded — and while BLIND a turn only a colleague had coded had
+ * neither a chip nor a ring, which told the coder someone had (confirmed live by
+ * the 2026-09-28 /ux-audit).
+ */
+describe('#1077 (c) — the uncoded ring is the workbench\'s decision', () => {
+  const ringed = (row: HTMLElement) => row.className.includes('ring-orange-200')
+  const one = (codeId: number, userId: number, universal = false) => ({
+    applied_codes: [codeId],
+    applied_code_details: [{ code_id: codeId, user_id: userId, attribution: null,
+                             is_universal: universal, magnitude: null, magnitude_conflict: null }],
+  })
+
+  it('a turn only a MODEL labelled is ringed, like the gauge counts it; my turn is not', async () => {
+    listCoders.mockResolvedValue([
+      { id: 1, username: 'Alice', display_color: null, archived: false },
+      { id: 9, username: 'GPT-4o', display_color: null, archived: false, coder_type: 'ai' },
+    ])
+    listSegments.mockResolvedValue({
+      segments: [segment(51, 0, 'The first turn.', one(8, 9)), SEGMENTS[1]],
+      total: 2, coded_count: 1, participant_total: 2, participant_coded: 1,
+    })
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    await waitFor(() => expect(within(rows[0]).getByText('Disruption')).toBeInTheDocument())
+    await waitFor(() => expect(ringed(rows[0])).toBe(true))
+    expect(ringed(rows[1])).toBe(false)   // coded by me — the positive control
+  })
+
+  it('a turn carrying only a UNIVERSAL marker is ringed (#400\'s definition)', async () => {
+    const universal = makeCode(12, 3, 'Unclear', { is_universal: true })
+    listCodes.mockResolvedValue({ codes: [...CODES, universal], total: 3 })
+    listSegments.mockResolvedValue({
+      segments: [segment(51, 0, 'The first turn.', one(12, 1, true)), SEGMENTS[1]],
+      total: 2, coded_count: 1, participant_total: 2, participant_coded: 1,
+    })
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    await waitFor(() => expect(ringed(rows[0])).toBe(true))
+    expect(ringed(rows[1])).toBe(false)
+  })
+
+  it('BLIND: a turn only a colleague coded shows the ring, so its absence reveals nothing', async () => {
+    listCoders.mockResolvedValue([
+      { id: 1, username: 'Alice', display_color: null, archived: false },
+      { id: 2, username: 'Bob', display_color: null, archived: false },
+    ])
+    listSegments.mockResolvedValue({
+      segments: [segment(51, 0, 'The first turn.', one(8, 2)), SEGMENTS[1]],
+      total: 2, coded_count: 2, participant_total: 2, participant_coded: 2,
+    })
+    renderWorkbench()
+    expect(await screen.findByRole('button', { name: 'Colleagues hidden' })).toBeInTheDocument()
+    const rows = await screen.findAllByRole('option')
+    await waitFor(() => expect(ringed(rows[0])).toBe(true))
+    expect(within(rows[0]).queryByText('Disruption')).not.toBeInTheDocument()
+  })
+
+  it('REVEALED (positive control): the same colleague-coded turn is not ringed', async () => {
+    listCoders.mockResolvedValue([
+      { id: 1, username: 'Alice', display_color: null, archived: false },
+      { id: 2, username: 'Bob', display_color: null, archived: false },
+    ])
+    listSegments.mockResolvedValue({
+      segments: [segment(51, 0, 'The first turn.', one(8, 2)), SEGMENTS[1]],
+      total: 2, coded_count: 2, participant_total: 2, participant_coded: 2,
+    })
+    localStorage.setItem('mm-blind-revealed-1-1', '1')
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    await waitFor(() => expect(within(rows[0]).getByText('Disruption')).toBeInTheDocument())
+    expect(ringed(rows[0])).toBe(false)
   })
 })
 
@@ -416,5 +624,117 @@ describe('#963 — the gauge and the transcript wait for the segment list', () =
 
     const jump = await screen.findByRole('button', { name: /Jump to uncoded/ })
     await waitFor(() => expect(jump).not.toBeDisabled())
+  })
+})
+
+/**
+ * #1070 — a single act on a segment GROUP fans out to every sibling, and the
+ * siblings routinely differ (grouping does not unify codings). The undo is
+ * captured over the group and runs through the BULK door, which acts on exactly
+ * the segments it is given — never the single door, which fans out again.
+ * X = 61 is the sibling, Y = 62 the pressed segment.
+ */
+describe('undo on a segment GROUP whose siblings differ (#1070)', () => {
+  const grouped = (xDetails: Segment['applied_code_details'], yDetails: Segment['applied_code_details']) => {
+    listSegments.mockResolvedValue({
+      segments: [
+        segment(61, 0, 'The sibling.', {
+          group_id: 5, applied_codes: xDetails.map((d) => d.code_id), applied_code_details: xDetails,
+        }),
+        segment(62, 1, 'The pressed turn.', {
+          group_id: 5, applied_codes: yDetails.map((d) => d.code_id), applied_code_details: yDetails,
+        }),
+      ],
+      total: 2, coded_count: 1, participant_total: 2, participant_coded: 1,
+    })
+  }
+  const detail = (code_id: number, magnitude: number | null = null) =>
+    ({ code_id, user_id: 1, attribution: null, is_universal: false, magnitude, magnitude_conflict: null })
+
+  it('(a) the undo of an apply leaves a sibling’s EARLIER coding alone', async () => {
+    grouped([detail(8)], [])
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.mouseDown(rows[1], { button: 0 })   // Y
+    fireEvent.keyDown(window, { key: '2' })         // Disruption: Y lacks it → apply (fans out)
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(62, 8))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+    // `removeCode(62, 8)` would fan out and take X's earlier Disruption with it.
+    await waitFor(() => expect(bulkCode).toHaveBeenCalledWith([62], 8, 'remove'))
+    expect(removeCode).not.toHaveBeenCalled()
+  })
+
+  it('(b) each sibling gets back ITS OWN replaced value, with its rating', async () => {
+    grouped([detail(7, 0)], [])
+    applyCode.mockImplementation(async (_seg: number, code: number) => (code === 8
+      ? { applied: true, replaced_code_ids: [7], replaced_by_target: [{ segment_id: 61, replaced_code_ids: [7] }] }
+      : { applied: true, replaced_code_ids: [], replaced_by_target: [] }))
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.mouseDown(rows[1], { button: 0 })   // Y
+    fireEvent.keyDown(window, { key: '2' })         // Disruption replaces X's Engagement
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(62, 8))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+    await waitFor(() => expect(bulkCode).toHaveBeenCalledWith([61], 7, 'apply'))
+    await waitFor(() => expect(bulkCode).toHaveBeenCalledWith([62], 8, 'remove'))
+    await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(61, 7, 0))
+    // The old undo: `applyCode(62, 7)` — a value Y never had, fanned out, unrated.
+    expect(applyCode).toHaveBeenCalledTimes(1)
+  })
+
+  it('the undo of a REMOVE gives the code back only to the siblings that held it', async () => {
+    grouped([], [detail(7, 0)])
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.mouseDown(rows[1], { button: 0 })   // Y holds Engagement, rated 0
+    fireEvent.keyDown(window, { key: '1' })         // → remove (fans out)
+    await waitFor(() => expect(removeCode).toHaveBeenCalledWith(62, 7))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+    await waitFor(() => expect(bulkCode).toHaveBeenCalledWith([62], 7, 'apply'))
+    await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(62, 7, 0))
+    // `applyCode(62, 7, …, 0)` would fan out and give X a code it never held.
+    expect(applyCode).not.toHaveBeenCalled()
+  })
+})
+
+describe('a code-set choice on a GROUP, undone from the workbench (#1070)', () => {
+  it('hands the strip the group, so each member gets its OWN value back', async () => {
+    const member = (id: number, name: string) =>
+      ({ id, numeric_id: id, name, description: null, color: null, is_active: true, is_universal: false })
+    listCodeSets.mockResolvedValue({ sets: [{
+      id: 3, project_id: 1, label: 'Tone', description: null, exhaustive: false,
+      members: [member(7, 'Engagement'), member(8, 'Disruption')],
+      set_basis: 'inclusive_with_none', composition_warnings: [],
+      claimants: [7, 8].map((id) => ({ code_id: id, value_id: id })),
+      created_at: '', updated_at: '',
+    }] })
+    const detail = (code_id: number, magnitude: number | null = null) =>
+      ({ code_id, user_id: 1, attribution: null, is_universal: false, magnitude, magnitude_conflict: null })
+    listSegments.mockResolvedValue({
+      segments: [
+        segment(61, 0, 'The sibling.', { group_id: 5, applied_codes: [7], applied_code_details: [detail(7, 0)] }),
+        segment(62, 1, 'The pressed turn.', { group_id: 5, applied_codes: [8], applied_code_details: [detail(8)] }),
+      ],
+      total: 2, coded_count: 2, participant_total: 2, participant_coded: 2,
+    })
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.mouseDown(rows[1], { button: 0 })   // Y holds Disruption; X holds Engagement
+    fireEvent.click(await screen.findByRole('radio', { name: /Engagement/ }))
+    await waitFor(() => expect(selectOnSegment).toHaveBeenCalledWith(62, 3, 7))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+    // Y gets Disruption back; X, which already held Engagement, is left alone.
+    await waitFor(() => expect(bulkCode).toHaveBeenCalledWith([62], 8, 'apply'))
+    // Re-selecting Disruption through the set's door would fan out and take X's Engagement.
+    expect(selectOnSegment).toHaveBeenCalledTimes(1)
+    expect(bulkCode).toHaveBeenCalledTimes(1)
   })
 })

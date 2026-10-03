@@ -18,6 +18,7 @@ from ..models.conversation import Conversation
 from ..models.document import Document
 from ..models.observation import Observation
 from ..models.participant import Participant
+from ..services import material_config
 from ..schemas.materials import (
     MaterialCollectionCreate,
     MaterialCollectionUpdate,
@@ -80,19 +81,28 @@ def _get_material_or_404(db: Session, collection_id: int, material_id: int) -> M
 # qualitative kinds changed the arity at every call site. A dict makes the next
 # kind additive instead — add a row here and an existence query below, and every
 # consumer keeps working.
+#
+# 🔴 **DERIVED from `services/material_config.py::ID_KEYS` since #1086
+# (2026-09-28), never hand-listed.** The hand-listed scalar keys were the URL
+# PARAMETER names `compareBy` / `compareBy2` / `crossTabCol`, which no saved chart
+# carries (the savers write `compare_by` / `compare_by_2` / `cross_tab_column_id`),
+# so a comparison or cross-tab whose grouping variable was deleted was never
+# flagged — while the `.mmproject` import kept a THIRD list of its own (#1068).
+# The kinds checked here are the project-scoped ones an embed filters on; a coder
+# (install-global), a metric and a category (the axis ORDER, not a filter) are not.
+_CHECKED_REF_KINDS = (
+    material_config.COLUMN, material_config.DOMAIN, material_config.CODE,
+    material_config.CONVERSATION, material_config.DOCUMENT,
+    material_config.OBSERVATION, material_config.PARTICIPANT,
+)
 _MATERIAL_REF_LIST_KEYS: dict[str, tuple[str, ...]] = {
-    # `text_column_ids` are DatasetColumn ids like the others, so they resolve
-    # through the same existence query rather than needing their own.
-    "column": ("column_ids", "selected_columns", "text_column_ids"),
-    "domain": ("domain_ids", "selected_domains"),
-    "code": ("code_ids",),
-    "conversation": ("conversation_ids",),
-    "document": ("document_ids",),
-    "observation": ("observation_ids",),
-    "participant": ("participant_ids",),
+    kind: tuple(k for k, spec in material_config.ID_KEYS.items() if spec.kind == kind and spec.is_array)
+    for kind in _CHECKED_REF_KINDS
 }
 _MATERIAL_REF_SCALAR_KEYS: dict[str, tuple[str, ...]] = {
-    "column": ("grouping_column_id", "grouping_column_id_2", "compareBy", "compareBy2", "crossTabCol"),
+    kind: keys for kind in _CHECKED_REF_KINDS
+    if (keys := tuple(k for k, spec in material_config.ID_KEYS.items()
+                      if spec.kind == kind and not spec.is_array))
 }
 
 # Back-compat aliases — the original names, kept so a reader grepping the #296

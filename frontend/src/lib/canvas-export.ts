@@ -27,7 +27,9 @@ import {
   formatTimedSeconds,
   formatTimedShare,
   timedExtent,
+  timedLayerFor,
 } from '@/lib/timed-analytics'
+import type { MachineCoderIds } from '@/lib/coding-progress'
 import {
   resolveTimelineObservations,
   resolveTimelineCodes,
@@ -150,13 +152,19 @@ function walkNodes(node: TiptapNode, callback: (n: TiptapNode) => void): void {
 export interface TimelineExportLens {
   blind: boolean
   self: number | null
+  /**
+   * #1077 (b) — `useMachineCoderIds()` from the page. REQUIRED, like every other
+   * reader of the machine set: without it the exported table counted a model's
+   * marks on the Coders layer while the rendered embed (once fixed) did not.
+   */
+  machineCoderIds: MachineCoderIds
 }
 
 /** Fetch chart data for all chart-embeds and convert to tables. */
 export async function fetchChartTables(
   themes: CanvasTheme[],
   projectId: number,
-  timelineLens: TimelineExportLens = { blind: false, self: null },
+  timelineLens: TimelineExportLens,
 ): Promise<Map<number, { md: string; html: string }>> {
   const charts = collectChartEmbeds(themes)
   if (charts.length === 0) return new Map()
@@ -463,7 +471,7 @@ async function qualTimelineTable(
   params: QualComputeParams,
   lens: TimelineExportLens,
 ): Promise<{ headers: string[]; rows: string[][] } | null> {
-  // Mirrors the embed's first gate: this chart reads the human coding layer.
+  // Mirrors the embed's first gate: the clip payload has no consensus layer to draw.
   if (params.layerScope === 'consensus') return null
 
   const [observationList, codeList] = await Promise.all([
@@ -476,7 +484,10 @@ async function qualTimelineTable(
 
   // `multiCoder` is irrelevant here (no coder column), so the roster flag is
   // false; the blind arm is what matters and it ignores it.
-  const { include } = resolveTimelineCoderLens(params.request.coder_ids ?? null, lens.blind, lens.self, false)
+  const { lens: timed } = resolveTimelineCoderLens(
+    params.request.coder_ids ?? null, lens.blind, lens.self, false,
+    lens.machineCoderIds, timedLayerFor(params.layerScope) ?? 'human',
+  )
   const codeIds = codes.map(c => c.id)
 
   const clipsPerObservation = await Promise.all(
@@ -487,7 +498,7 @@ async function qualTimelineTable(
   observations.forEach((obs, i) => {
     const clips = clipsPerObservation[i] ?? []
     const { extent } = timedExtent(obs.media_duration_seconds, clips)
-    const codeRows = computeTimedRows(clips, codeIds, include, extent)
+    const codeRows = computeTimedRows(clips, codeIds, timed, extent)
     codeRows.forEach((row, j) => {
       rows.push([
         obs.name,
@@ -504,7 +515,7 @@ async function qualTimelineTable(
     // The table's footer row, flattened. Airtimes across codes do NOT sum to
     // this (codes overlap) — carrying it is what stops a reader adding the
     // column up and getting a different, wrong answer.
-    const covered = coveredTotalSeconds(clips, codeIds, include, extent)
+    const covered = coveredTotalSeconds(clips, codeIds, timed, extent)
     if (covered != null && extent != null) {
       rows.push([
         obs.name,
@@ -1025,7 +1036,7 @@ export async function exportCanvasMarkdown(
   canvas: CanvasDetail,
   themes: CanvasTheme[],
   projectId: number,
-  timelineLens?: TimelineExportLens,
+  timelineLens: TimelineExportLens,
 ): Promise<string> {
   const chartTables = await fetchChartTables(themes, projectId, timelineLens)
   const relationships = getAllRelationships(themes)
@@ -1067,7 +1078,7 @@ async function buildCanvasHtmlBody(
   themes: CanvasTheme[],
   projectId: number,
   chartPngs: Map<number, string>,
-  timelineLens?: TimelineExportLens,
+  timelineLens: TimelineExportLens,
 ): Promise<string> {
   const chartTables = await fetchChartTables(themes, projectId, timelineLens)
   const relationships = getAllRelationships(themes)
@@ -1085,8 +1096,8 @@ export async function exportCanvasHtml(
   canvas: CanvasDetail,
   themes: CanvasTheme[],
   projectId: number,
-  preCapturedPngs?: Map<number, string>,
-  timelineLens?: TimelineExportLens,
+  preCapturedPngs: Map<number, string> | undefined,
+  timelineLens: TimelineExportLens,
 ): Promise<string> {
   const chartPngs = preCapturedPngs ?? await captureCanvasChartPngs()
   const body = await buildCanvasHtmlBody(canvas, themes, projectId, chartPngs, timelineLens)
@@ -1170,8 +1181,8 @@ export async function exportCanvasPdf(
   canvas: CanvasDetail,
   themes: CanvasTheme[],
   projectId: number,
-  preCapturedPngs?: Map<number, string>,
-  timelineLens?: TimelineExportLens,
+  preCapturedPngs: Map<number, string> | undefined,
+  timelineLens: TimelineExportLens,
 ): Promise<void> {
   const chartPngs = preCapturedPngs ?? await captureCanvasChartPngs()
   const body = await buildCanvasHtmlBody(canvas, themes, projectId, chartPngs, timelineLens)

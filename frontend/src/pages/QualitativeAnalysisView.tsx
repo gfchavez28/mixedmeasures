@@ -60,7 +60,8 @@ import FocusPill from '@/components/qualitative-analysis/FocusPill'
 import SendToCanvasMenu from '@/components/canvas/SendToCanvasMenu'
 import { getCodeColor } from '@/lib/utils'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
-import { useCoders } from '@/hooks/useCoders'
+import { useCoders, useMachineCoderIds } from '@/hooks/useCoders'
+import { timedLayerFor, type TimedLens } from '@/lib/timed-analytics'
 import { useAuth } from '@/lib/auth-context'
 import CoderFilterPopover from '@/components/CoderFilterPopover'
 import SegmentedControl from '@/components/ui/segmented-control'
@@ -68,7 +69,9 @@ import { useConsensusStatus } from '@/hooks/useConsensusStatus'
 import { useEnsureMaterialCollection } from '@/hooks/useEnsureMaterialCollection'
 import ReconciliationGrid from '@/components/qualitative-analysis/ReconciliationGrid'
 import ReliabilityTab from '@/components/qualitative-analysis/ReliabilityTab'
-import { isReconciliationTabVisible, isIrrTabVisible } from '@/lib/qual-analysis-types'
+import ModelComparisonTab from '@/components/qualitative-analysis/ModelComparisonTab'
+import { useProjectCoderKinds } from '@/hooks/useCoderCoverage'
+import { isReconciliationTabVisible, isIrrTabVisible, isModelComparisonTabVisible } from '@/lib/qual-analysis-types'
 import { availableLayerScopes, layerScopeLabel, rosterHasMachineCoders, showLayerPicker } from '@/lib/coding-layers'
 import { SELECTED_SEGMENT, SELECTED_ROW } from '@/lib/selection'
 import BlindModeToggle from '@/components/BlindModeToggle'
@@ -87,6 +90,7 @@ const QUAL_TABS: { id: QualTab; label: string }[] = [
   { id: 'relationships', label: 'Relationships' },
   { id: 'reconciliation', label: 'Reconciliation' },
   { id: 'irr', label: 'Reliability' },
+  { id: 'models', label: 'Model comparison' },
   { id: 'quoteboard', label: 'Quote Board' },
 ]
 
@@ -114,7 +118,7 @@ export default function QualitativeAnalysisView() {
   const { openCodebook } = useProjectLayout()
   // #961 — where focus lands when a Retry on the coding counts succeeds.
   const activeTabRef = useRef<HTMLButtonElement>(null)
-  const { coders, coderMap, multiCoder, multiHumanCoder, query: codersQuery } = useCoders()
+  const { coders, coderMap, multiCoder, multiHumanCoder, selectableCoders, query: codersQuery } = useCoders()
   const { user } = useAuth()
   // #964: scopes key on `withholding` (fail-closed); the notices key on `blind`.
   // The page gate below also waits for the roster, and the page's own
@@ -145,6 +149,20 @@ export default function QualitativeAnalysisView() {
     () => (effectiveCoderInclude.length ? new Set(effectiveCoderInclude) : null),
     [effectiveCoderInclude],
   )
+  // #1077 (b) — the timeline's whole lens: the LAYER and the machine coders it
+  // keys on, beside that include set. With the include set alone the timeline
+  // drew a model's marks under the Coders layer, where the backend charts beside
+  // it leave them out. Under Consensus the chart is gated off (`consensusScope`),
+  // so the human arm stands in there and is never drawn.
+  const machineCoderIds = useMachineCoderIds()
+  const timedLens = useMemo<TimedLens>(
+    () => ({
+      include: effectiveCoderIncludeSet,
+      machineCoderIds,
+      layer: timedLayerFor(qa.layerScope) ?? 'human',
+    }),
+    [effectiveCoderIncludeSet, machineCoderIds, qa.layerScope],
+  )
   const hiddenCoders = useMemo(
     () => coderInclude.length
       ? new Set(coders.filter(c => !coderInclude.includes(c.id)).map(c => c.id))
@@ -161,9 +179,18 @@ export default function QualitativeAnalysisView() {
   // #989 — which layers this project can offer. `machine` appears only once a
   // machine coder is on the roster; the picker itself renders only when there is
   // more than one layer to choose between (`showLayerPicker`).
+  // #1038 g — "a machine coder EXISTS" is asked of THIS project's coverage, not the
+  // install-wide roster, which offered the Machine layer (and would have offered the
+  // Model comparison tab) in every project once any project imported a model. Until
+  // coverage answers, the roster's answer stands, so a saved `machine` layer is not
+  // reset on the first frame by the effect below.
+  const projectKinds = useProjectCoderKinds(pid)
   const layerAvailability = useMemo(
-    () => ({ consensusAvailable, hasMachineCoders: rosterHasMachineCoders(coders) }),
-    [consensusAvailable, coders],
+    () => ({
+      consensusAvailable,
+      hasMachineCoders: projectKinds.known ? projectKinds.hasMachine : rosterHasMachineCoders(coders),
+    }),
+    [consensusAvailable, coders, projectKinds.known, projectKinds.hasMachine],
   )
   // If consensus stops existing (e.g. a coder was removed), fall back to the human
   // layer so the analysis never silently renders an empty consensus view.
@@ -181,13 +208,34 @@ export default function QualitativeAnalysisView() {
   // consensus layer. QUAL_TABS is a module const, so the visible set is derived here.
   const reconciliationVisible = isReconciliationTabVisible(multiHumanCoder, consensusAvailable, blind)
   const irrVisible = isIrrTabVisible(multiHumanCoder, blind)
+  // #1030 — a model coded THIS project, and there is a person to compare it with.
+  // Not gated on two people and not hidden while blind (the tab narrows to the viewer).
+  const modelsVisible = isModelComparisonTabVisible(projectKinds.hasActiveMachine, selectableCoders.length > 0)
   const visibleTabs = useMemo(
     () => QUAL_TABS.filter(t =>
       (t.id !== 'reconciliation' || reconciliationVisible) &&
-      (t.id !== 'irr' || irrVisible),
+      (t.id !== 'irr' || irrVisible) &&
+      (t.id !== 'models' || modelsVisible),
     ),
-    [reconciliationVisible, irrVisible],
+    [reconciliationVisible, irrVisible, modelsVisible],
   )
+  // A deep link to the Model comparison on a project no model has coded bounces to
+  // Content — but only once coverage has ANSWERED, or a legitimate link would be
+  // kicked on the first frame (the irr/reconciliation bounce's settled rule).
+  useEffect(() => {
+    if (qa.tab === 'models' && projectKinds.known && coders.length > 0 && !modelsVisible) {
+      qa.setTab('content')
+    }
+  }, [qa.tab, projectKinds.known, coders.length, modelsVisible]) // eslint-disable-line react-hooks/exhaustive-deps
+  /**
+   * The tabs that show no analysis SELECTION — the comparison tabs, which read
+   * every coder and source on their own terms. The layer picker, the coder filter,
+   * the CSV export and "Add to Materials" do not apply there, and the body takes
+   * the full width (#442). ONE predicate, because it was five hand-written
+   * `!== 'reconciliation' && !== 'irr'` tests and a third such tab (#1030) would
+   * otherwise have to be remembered at each.
+   */
+  const selectionFreeTab = qa.tab === 'reconciliation' || qa.tab === 'irr' || qa.tab === 'models'
   // Reveal-requiring tabs (Reconciliation/IRR) bounce to Content when they go invisible,
   // gated so a legitimate deep link isn't kicked on the first unsettled frame
   // (reconciliation: consensus-status SETTLED; irr: coders roster loaded — coders.length>0,
@@ -966,7 +1014,19 @@ export default function QualitativeAnalysisView() {
     setSrAnnouncement(`${next.label} tab selected`)
     const target = (e.currentTarget as HTMLDivElement).querySelector(`[data-tab="${next.id}"]`) as HTMLButtonElement | null
     target?.focus()
+    // #1030 — the bar scrolls sideways once seven tabs meet 640px, and Chrome's
+    // focus scroll does NOT move a tab that is already partly in view (measured:
+    // End focused "Quote Board" at 614–715px of a 640px bar, scrollLeft 0). Ask for
+    // it; optional-called because jsdom implements no `scrollIntoView`.
+    target?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
   }, [qa.tab, qa.setTab, visibleTabs]) // eslint-disable-line react-hooks/exhaustive-deps -- qa destructured access; individual properties listed
+  // …and a tab chosen any other way (a deep link, a bounce) is brought into view too.
+  // ⚠️ Keyed on the page gate as well: the bar is not rendered until the page's
+  // lists answer, so on a deep link the ref is still null when `qa.tab` is first set
+  // (measured: `?tab=quoteboard` at 640px left the tab at 614–715px, off the bar).
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+  }, [qa.tab, pageLoad.status, visibleTabs])
 
   // Source mode keyboard nav (for sidebar segmented control)
   // qa.source/qa.setSource are stable but compiler infers full qa object
@@ -1138,7 +1198,7 @@ export default function QualitativeAnalysisView() {
         <div className="flex-1" />
         {/* Coding-layer selector (Track J · J2-5) — offered only when a consensus
             layer exists for this project (DEC-A); it also surfaces which layer is active. */}
-        {showLayerPicker(layerAvailability) && qa.tab !== 'reconciliation' && qa.tab !== 'irr' && (
+        {showLayerPicker(layerAvailability) && !selectionFreeTab && (
           <div className="flex items-center gap-2">
             <SegmentedControl
               options={availableLayerScopes(layerAvailability).map(value => ({
@@ -1163,7 +1223,7 @@ export default function QualitativeAnalysisView() {
         )}
         {/* Per-coder visibility filter (Track J · J1) — moot on the single consensus layer (UX-2)
             and on Reconciliation (which shows every coder + consensus side-by-side). */}
-        {multiCoder && !blind && qa.layerScope !== 'consensus' && qa.tab !== 'reconciliation' && qa.tab !== 'irr' && (
+        {multiCoder && !blind && qa.layerScope !== 'consensus' && !selectionFreeTab && (
           <CoderFilterPopover
             coders={coders}
             activeCoderId={user?.id ?? null}
@@ -1178,12 +1238,12 @@ export default function QualitativeAnalysisView() {
           <BookOpen className="w-4 h-4 mr-1" />
           Codebook
         </Button>
-        {qa.tab !== 'quoteboard' && qa.tab !== 'reconciliation' && qa.tab !== 'irr' && (
+        {qa.tab !== 'quoteboard' && !selectionFreeTab && (
           <Button variant="outline" size="sm" onClick={() => exportApi.codeFrequencies(pid, filterParams)} title="Export code frequencies as CSV">
             <Download className="w-3 h-3 mr-1" /> Export CSV
           </Button>
         )}
-        {qa.tab !== 'content' && qa.tab !== 'quoteboard' && qa.tab !== 'reconciliation' && qa.tab !== 'irr' && (
+        {qa.tab !== 'content' && qa.tab !== 'quoteboard' && !selectionFreeTab && (
           <Button
             size="sm"
             onClick={handleAddToMaterials}
@@ -1196,9 +1256,21 @@ export default function QualitativeAnalysisView() {
         )}
       </div>
 
-      {/* Tab bar */}
+      {/* Tab bar. ⚠️ #1030 — a SIXTH and seventh tab (Model comparison beside
+          Reconciliation and Reliability) no longer fit 640px: measured, the labels
+          wrapped onto two lines and the bar grew 38 → 58px out of a 360px height
+          budget, and seven tabs would overflow the page. So a label never wraps and
+          the BAR scrolls sideways within itself — never the page (#717/#718). A tab
+          reached by the arrow keys is focused, and focus scrolls it into view.
+          Below `md` the gutters tighten (bar px-6 → px-4, tab px-4 → px-2.5), which
+          is what lets SIX tabs fit 640px with no scrolling at all (measured: 710 →
+          ~622px against 625 available); only the seventh needs the scroll, and its
+          scrollbar is thin. `overflow-y-hidden` because `overflow-x-auto` alone makes
+          the y axis `auto`, and the active tab's `-mb-px` underline would then earn a
+          1px scrollbar. ⚠️ `md`, not `sm`: `sm` is 640px, so it applies AT the
+          minimum window and tightens nothing there. */}
       <div
-        className="bg-mm-surface border-b px-6 flex items-end gap-0 flex-shrink-0"
+        className="bg-mm-surface border-b px-4 md:px-6 flex items-end gap-0 flex-shrink-0 overflow-x-auto overflow-y-hidden [scrollbar-width:thin]"
         role="tablist"
         aria-label="Analysis view"
         onKeyDown={handleTabKeyDown}
@@ -1215,7 +1287,7 @@ export default function QualitativeAnalysisView() {
               aria-selected={isActive}
               aria-controls="qual-tabpanel"
               tabIndex={isActive ? 0 : -1}
-              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px ${
+              className={`px-2.5 md:px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px whitespace-nowrap flex-none ${
                 isActive
                   ? 'border-mm-blue text-mm-text'
                   : 'border-transparent text-mm-text-muted hover:text-mm-text-secondary hover:border-mm-border-subtle'
@@ -1235,7 +1307,7 @@ export default function QualitativeAnalysisView() {
           PanelGroup entirely on those tabs and use the full width instead of reserving
           an empty ~22% gutter (#442). Bypassing (vs conditionally dropping the sidebar
           Panel) keeps react-resizable-panels' persisted layout intact for the other tabs. */}
-      {qa.tab === 'reconciliation' || qa.tab === 'irr' ? (
+      {selectionFreeTab ? (
         <div className="flex-1 flex flex-col min-h-0">
           <div className="flex-1 overflow-y-auto p-4" role="tabpanel" id="qual-tabpanel" aria-labelledby={`tab-${qa.tab}`}>
             {qa.tab === 'reconciliation' ? (
@@ -1248,8 +1320,16 @@ export default function QualitativeAnalysisView() {
                 setSrAnnouncement={setSrAnnouncement}
                 landingRef={activeTabRef}
               />
-            ) : (
+            ) : qa.tab === 'irr' ? (
               <ReliabilityTab projectId={pid} codes={codes} />
+            ) : (
+              <ModelComparisonTab
+                projectId={pid}
+                selfId={self}
+                withholding={withholding}
+                blind={blind}
+                onReveal={toggleReveal}
+              />
             )}
           </div>
         </div>
@@ -1640,7 +1720,7 @@ export default function QualitativeAnalysisView() {
                       observationsLoad={observationsLoad}
                       timedCodes={timedCodes}
                       timedCategories={categories}
-                      coderInclude={effectiveCoderIncludeSet}
+                      timedLens={timedLens}
                       multiCoder={multiCoder}
                       coderMap={coderMap}
                     />

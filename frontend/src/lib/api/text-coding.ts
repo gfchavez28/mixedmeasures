@@ -151,6 +151,19 @@ export type TextCodingConfigUpdate =
   Partial<Omit<TextCodingViewConfig, 'treat_as_empty' | 'treat_as_empty_is_default'>>
   & { treat_as_empty?: string[] | null }
 
+/**
+ * What a single apply on a response answers — the segment twin is
+ * `lib/api/coding.ts::CodeApplyResult`, and `replaced_code_ids` (#1028) means
+ * the same thing there.
+ */
+export interface TextCodeApplyResult {
+  dataset_value_id: number
+  code_id: number
+  applied: boolean
+  magnitude: number | null
+  replaced_code_ids?: number[]
+}
+
 // API functions - Text Coding
 export const textCodingApi = {
   // Data
@@ -176,7 +189,7 @@ export const textCodingApi = {
    * captured when the entry was built (#868 f), so Ctrl+Z does not unrate.
    */
   applyCode: (pid: number, data: { dataset_value_id: number; code_id: number; magnitude?: number | null }) =>
-    api.post(
+    api.post<TextCodeApplyResult>(
       `/projects/${pid}/text-coding/code`,
       data.magnitude === undefined
         ? { dataset_value_id: data.dataset_value_id, code_id: data.code_id }

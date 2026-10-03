@@ -38,14 +38,15 @@ import pathlib
 import pytest
 
 from app.routers.backup import backup_create
-from app.routers.participants import withdraw_participant
+from app.routers.participants import list_participants, withdraw_participant
 from app.routers.dataset import (
     append_import, create_participants_dataset, import_dataset, refresh_participants_dataset,
+    update_manual_column,
 )
 from app.routers.export_excel import export_datasets_excel, export_study_excel
 from app.routers.export_r import export_r_data
 from app.routers.metrics import get_row_matrix, get_row_matrix_csv
-from app.routers.recode import apply_value_labels_endpoint, bulk_set_missing_values
+from app.routers.recode import apply_value_labels_endpoint, bulk_set_missing_values, bulk_type_update
 from app.routers.text_analysis import (
     code_density, cross_tabulation, export_cross_analysis, filtered_frequencies,
     response_length_by_code,
@@ -109,6 +110,16 @@ MUST_BE_SYNC = [
     (backup_create, "27.8s frozen for a 30.3s Download Backup (179.7 MB archive) [0.05s]"),
     (withdraw_participant, "30.9s frozen for a 30.8s withdrawal, nearly all of it the "
                            "backup [0.04s]"),
+    # #1047, 2026-09-26 — the participant list on BES's 122,382 linked participants,
+    # over HTTP on a scratch copy, /health every 200 ms. The rebuild (set-based, one
+    # validation) took it from 15.1s to 4.2-4.5s as well.
+    (list_participants, "14.9s frozen for a 15.1s list [0.72s]; a Datasets list sent "
+                        "during it waited ~21s on the developer's Windows pass [0.04s]"),
+    # #1079 (b), 2026-09-28 — a retype now re-derives every stored cell of the column
+    # it changes. Timed AT THE CALL on a file database of 122,382 rows (not over HTTP);
+    # as `async def` the whole body is the freeze.
+    (bulk_type_update, "5.15s retyping five columns, ~1.0s per column"),
+    (update_manual_column, "~1.0s retyping a 122,382-cell column (plan 0.49s + write 0.49s)"),
 ]
 
 # Endpoints that genuinely await I/O and therefore CANNOT take that treatment.

@@ -143,17 +143,23 @@ export default function InlineCodeActions({
   })
 
   const addCodeMutation = useMutation({
-    mutationFn: (codeId: number) => {
+    mutationFn: (codeId: number): Promise<{ replaced_code_ids?: number[] }> => {
       if (itemType === 'segment') {
         return codingApi.applyCode(itemId, codeId)
       }
       return textCodingApi.applyCode(projectId, { dataset_value_id: itemId, code_id: codeId })
     },
-    onSuccess: () => {
+    onSuccess: (result, codeId) => {
       setAddCodeOpen(false)
       setCodeSearch('')
       onCodeChange()
-      toast('Code applied')
+      // #1028: a value of a code set REPLACES this coder's other value of it,
+      // and these surfaces show no set control to make that visible — so the
+      // toast that already confirms the apply says what went.
+      const replaced = (result?.replaced_code_ids ?? []).map(id => `“${codeMap.get(id)?.name ?? 'a code'}”`)
+      toast(replaced.length > 0
+        ? `Applied “${codeMap.get(codeId)?.name ?? 'code'}” in place of ${replaced.join(' and ')}`
+        : 'Code applied')
     },
     onError: () => { toast.error('Failed to apply code') },
   })

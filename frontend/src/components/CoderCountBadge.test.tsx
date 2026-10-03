@@ -25,7 +25,7 @@ function renderBadge(props: Partial<ComponentProps<typeof CoderCountBadge>> = {}
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={qc}>
-      <CoderCountBadge projectId={1} conversationId={5} {...props} />
+      <CoderCountBadge projectId={1} conversationId={5} withholding={false} {...props} />
     </QueryClientProvider>,
   )
 }
@@ -71,4 +71,34 @@ it('passes text_column_ids for text-coding sources', async () => {
   renderBadge({ conversationId: undefined, textColumnIds: [7, 8] })
   await screen.findByTitle(/2 coders on this source/)
   expect(coverage).toHaveBeenCalledWith(1, expect.objectContaining({ text_column_ids: '7,8' }))
+})
+
+// ── #1078 — while colleagues' work is withheld, so are their names ──────────
+
+const THREE = {
+  count: 3,
+  coders: [
+    { user_id: 1, username: 'Alice', display_color: null, archived: false },
+    { user_id: 2, username: 'Ben', display_color: null, archived: false },
+    { user_id: 9, username: 'Kwame', display_color: null, archived: true },
+  ],
+}
+
+it('#1078: while WITHHOLDING the tooltip names nobody, keeps the count, and says why', async () => {
+  coverage.mockResolvedValue(THREE)
+  renderBadge({ withholding: true })
+  // The title IS the badge's accessible name, so this is what a screen reader reads.
+  const badge = await screen.findByTitle(/3 coders on this source/)
+  expect(badge).toHaveTextContent('3 coders')
+  const title = badge.getAttribute('title') ?? ''
+  for (const name of ['Alice', 'Ben', 'Kwame']) expect(title).not.toContain(name)
+  expect(title).toMatch(/names are hidden while colleagues' work is hidden/)
+})
+
+it('#1078 positive control: the SAME fixture names everyone when not withholding', async () => {
+  // Proves the negative assertion above could fail — the names are there to leak.
+  coverage.mockResolvedValue(THREE)
+  renderBadge({ withholding: false })
+  const badge = await screen.findByTitle(/3 coders on this source/)
+  expect(badge.getAttribute('title')).toMatch(/Alice, Ben, Kwame \(archived\)/)
 })

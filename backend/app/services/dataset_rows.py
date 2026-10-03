@@ -132,6 +132,14 @@ def materialise_manual_cells(db: Session, dataset_id: int) -> int:
             DatasetValue.column_id == columns.c.column_id,
         )))
     )
+    # 🔴 ASK before inserting (#1033). An `INSERT … SELECT` that matches nothing
+    # still begins a WRITE transaction, and the participant table's refresh calls
+    # this on every run — so a table holding one variable the researcher added
+    # took SQLite's lock here and held it through a 16–25 s rollup, and every
+    # other writer failed. The check stops at the first missing cell, so it
+    # costs a full scan only in the case it saves.
+    if not db.execute(select(missing.exists())).scalar():
+        return 0
     result = db.execute(
         insert(DatasetValue).from_select(["row_id", "column_id"], missing)
     )

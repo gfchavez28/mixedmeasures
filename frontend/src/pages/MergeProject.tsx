@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { LoadState } from '@/components/LoadStatus'
 import { useListLoad } from '@/hooks/useListLoad'
 import {
-  GitMerge, Check, ChevronRight, Users, TriangleAlert, Sparkles, Info,
+  Bot, GitMerge, Check, ChevronRight, Users, TriangleAlert, Sparkles, Info,
   CircleAlert, LoaderCircle, ArrowLeft, FileInput, Link2, ArrowRight,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -14,7 +14,9 @@ import type {
   MergeDivergenceDetail, MergeDivergenceKind, CoderMappingDecision, CodeMappingDecision, Code,
 } from '@/lib/api'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
-import { useCoders, resetCoderRoster } from '@/hooks/useCoders'
+import { resetCoderRoster } from '@/hooks/useCoders'
+import { isMachineCoder } from '@/lib/coding-layers'
+import { describeProvenance } from '@/lib/machine-coder'
 import { coderColor, coderInitials } from '@/lib/coder-color'
 import { getContrastColor, cn } from '@/lib/utils'
 import { consumePendingMerge } from '@/lib/pending-merge'
@@ -29,6 +31,7 @@ import { estimatedMergeSeconds } from '@/lib/merge-estimate'
 import { describeScaleCrossing, scaleRange } from '@/lib/magnitude'
 import {
   defaultDecisions, decisionToValue, parseDecisionValue, buildCoderMapping, resultingCoderCount,
+  newCoderCounts, nameInUseNote,
 } from '@/lib/merge-coder-mapping'
 import {
   defaultCodeDecisions, applyBulkCode, buildCodeMapping, codeDecisionSummary,
@@ -125,7 +128,6 @@ export default function MergeProject() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { project } = useProjectLayout()
-  const { coders } = useCoders()
 
   const [step, setStep] = useState<Step>('loading')
   const [file, setFile] = useState<File | null>(null)
@@ -254,10 +256,9 @@ export default function MergeProject() {
     setCodeDecisions(prev => applyBulkCode(action, codesPreview, prev, localNameById))
   }, [codesPreview, localNameById])
 
-  const newCoderCount = useMemo(
-    () => Object.values(decisions).filter(d => d.action === 'create').length,
-    [decisions],
-  )
+  // #1034 — split by kind: a new PERSON turns on consensus and agreement, a new
+  // MODEL turns on neither, and one number for both said it did.
+  const newCoders = useMemo(() => newCoderCounts(mergeCoders, decisions), [mergeCoders, decisions])
 
   // Confirm coders → reconcile codes (if any are divergent) → review.
   const afterConfirm = useCallback(() => setStep(hasCodesToReconcile ? 'reconcile' : 'review'), [hasCodesToReconcile])
@@ -436,10 +437,9 @@ export default function MergeProject() {
           <ConfirmStep
             title={title}
             mergeCoders={mergeCoders}
-            coders={coders}
             decisions={decisions}
             renames={renames}
-            newCoderCount={newCoderCount}
+            newCoders={newCoders}
             continueLabel={hasCodesToReconcile ? 'Continue to codes' : 'Continue to review'}
             onDecision={setDecision}
             onRename={(id, v) => setRenames(prev => ({ ...prev, [id]: v }))}
@@ -469,7 +469,7 @@ export default function MergeProject() {
           <ReviewStep
             plan={reviewPlan}
             incomingLabel={incomingLabel}
-            newCoderCount={newCoderCount}
+            newCoders={newCoders}
             onBack={() => setStep(hasCodesToReconcile ? 'reconcile' : 'confirm')}
             onMerge={runMerge}
           />
@@ -504,10 +504,9 @@ export default function MergeProject() {
 interface ConfirmStepProps {
   title: string
   mergeCoders: MergeCoderPreview[]
-  coders: { id: number; username: string; display_color?: string | null }[]
   decisions: Record<number, CoderMappingDecision>
   renames: Record<number, string>
-  newCoderCount: number
+  newCoders: { people: number; models: number }
   continueLabel: string
   onDecision: (originalId: number, value: string) => void
   onRename: (originalId: number, value: string) => void
@@ -516,7 +515,8 @@ interface ConfirmStepProps {
   onContinue: () => void
 }
 
-function ConfirmStep(p: ConfirmStepProps) {
+/** Exported for its test (#1034) — the step is otherwise reached only through a file. */
+export function ConfirmStep(p: ConfirmStepProps) {
   if (p.mergeCoders.length === 0) {
     return (
       <Card>
@@ -544,7 +544,8 @@ function ConfirmStep(p: ConfirmStepProps) {
     <div className="space-y-4">
       <p className="text-sm text-mm-text">
         Match each coder in the file to a coder in {p.title}, or add them as a new coder.
-        We've suggested matches by name — review before continuing.
+        We've suggested matches by name — only onto a coder of the same kind, and a model
+        only onto the same configuration. Review before continuing.
       </p>
 
       <ScrollableTable maxHeight="60vh" className="rounded-md border border-mm-surface-border bg-mm-surface">
@@ -562,9 +563,12 @@ function ConfirmStep(p: ConfirmStepProps) {
               const isCreate = d?.action === 'create'
               const matchedArchived =
                 d?.action === 'match' && c.local_match?.id === d.target_user_id && c.local_match.archived
-              const options = c.local_match && !p.coders.some(lc => lc.id === c.local_match!.id)
-                ? [{ id: c.local_match.id, username: c.local_match.username, archived: c.local_match.archived }, ...p.coders]
-                : p.coders
+              // 🔴 #1034 — the SERVER's list of coders this one may land on (same kind;
+              // for a model, the same configuration). It was the whole roster, so a
+              // model could be mapped onto a person — who would then vote with its codes.
+              const options = c.match_options
+              const machine = isMachineCoder(c)
+              const takenNote = nameInUseNote(c)
               return (
                 <tr key={c.original_id} className="border-b last:border-b-0 align-top">
                   <th scope="row" className="px-3 py-3 font-normal text-left">
@@ -573,6 +577,15 @@ function ConfirmStep(p: ConfirmStepProps) {
                       <span className="font-medium text-mm-text">{c.username}</span>
                     </div>
                     <div className="mt-1 ml-7 text-xs text-mm-text-muted">{codings(c.file_app_count)}</div>
+                    {machine && (
+                      <div className="mt-1 ml-7 inline-flex items-start gap-1 text-xs text-mm-text-muted">
+                        <Bot className="w-3.5 h-3.5 mt-px flex-none" aria-hidden="true" />
+                        <span>Machine coder · {describeProvenance(c.machine_provenance)}</span>
+                      </div>
+                    )}
+                    {takenNote && (
+                      <p className="mt-1 ml-7 text-xs text-amber-700 dark:text-amber-400 max-w-sm">{takenNote}</p>
+                    )}
                     {c.local_match && (
                       <div className="mt-1 ml-7 inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400" title={`A coder named "${c.local_match.username}" already exists here (${codings(c.local_match.local_app_count)}).`}>
                         <TriangleAlert className="w-3.5 h-3.5" aria-hidden="true" />
@@ -608,7 +621,9 @@ function ConfirmStep(p: ConfirmStepProps) {
                         <Input
                           aria-label={`New coder name for ${c.username}`}
                           className="h-8 max-w-xs"
-                          defaultValue={c.username}
+                          // #1034 — the name the import will actually give it when
+                          // this one is taken by a coder it may not land on.
+                          defaultValue={c.name_in_use?.new_username ?? c.username}
                           onChange={e => p.onRename(c.original_id, e.target.value)}
                         />
                       </div>
@@ -632,13 +647,17 @@ function ConfirmStep(p: ConfirmStepProps) {
         </table>
       </ScrollableTable>
 
-      <div className="inline-flex items-center gap-1.5 text-xs text-mm-text-muted" title="Consensus + agreement (IRR) need at least two coders. Mapping every coder onto an existing one keeps this project single-coder.">
+      {/* The tooltip counts PEOPLE, as the sentence beside it has since #1034 —
+          it still said "two coders" / "every coder", so a model read as a
+          voter here (a11y-name-sweep run 9). */}
+      <div className="inline-flex items-center gap-1.5 text-xs text-mm-text-muted" title="Consensus + agreement (IRR) need at least two people. A model coder is compared on the Model comparison tab and never counts toward them.">
         <Info className="w-3.5 h-3.5 flex-none" aria-hidden="true" />
-        {p.newCoderCount > 0
-          ? `${p.newCoderCount} new coder${p.newCoderCount === 1 ? '' : 's'} — enables consensus + agreement (IRR).`
+        {p.newCoders.people > 0
+          ? `${p.newCoders.people} new ${p.newCoders.people === 1 ? 'person' : 'people'} — enables consensus + agreement (IRR).`
           : resultingCoders >= 2
-            ? `Maps onto ${resultingCoders} existing coders — consensus + agreement (IRR) stay available.`
-            : 'Mapping every coder onto one existing coder keeps this project single-coder (no agreement stats).'}
+            ? `Maps onto ${resultingCoders} existing people — consensus + agreement (IRR) stay available.`
+            : 'Mapping every person onto one existing coder keeps this project single-coder (no agreement stats).'}
+        {p.newCoders.models > 0 && ` ${p.newCoders.models} new model coder${p.newCoders.models === 1 ? '' : 's'} — compared on the Model comparison tab, never in agreement figures.`}
       </div>
 
       <div className="flex items-center justify-end gap-2 pt-2">
@@ -876,10 +895,10 @@ function MergeReviewCell({ side }: { side: MergeReviewRow['local'] | MergeReview
   )
 }
 
-function ReviewStep({ plan, incomingLabel, newCoderCount, onBack, onMerge }: {
+function ReviewStep({ plan, incomingLabel, newCoders, onBack, onMerge }: {
   plan: MergeReviewRow[]
   incomingLabel: string
-  newCoderCount: number
+  newCoders: { people: number; models: number }
   onBack: () => void
   onMerge: () => void
 }) {
@@ -889,9 +908,12 @@ function ReviewStep({ plan, incomingLabel, newCoderCount, onBack, onMerge }: {
       <p className="text-sm text-mm-text">
         Here's how your codebook will look after merging — read each row left to right.
         {changed > 0 ? ` ${changed} code${changed === 1 ? '' : 's'} change; ` : ' No codes change; '}
-        {newCoderCount > 0
-          ? `${newCoderCount} new coder${newCoderCount === 1 ? '' : 's'} turn on agreement stats.`
-          : 'no new coders.'}
+        {newCoders.people > 0
+          ? `${newCoders.people} new ${newCoders.people === 1 ? 'person turns' : 'people turn'} on agreement stats`
+          : 'no new people'}
+        {newCoders.models > 0
+          ? `; ${newCoders.models} new model coder${newCoders.models === 1 ? '' : 's'} (never in agreement stats).`
+          : '.'}
       </p>
 
       {/* How to read */}

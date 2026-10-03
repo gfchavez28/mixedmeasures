@@ -29,7 +29,8 @@ import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { codesApi, categoriesApi, observationsApi } from '@/lib/api'
-import { useCoders } from '@/hooks/useCoders'
+import { useCoders, useMachineCoderIds } from '@/hooks/useCoders'
+import { timedLayerFor } from '@/lib/timed-analytics'
 import { useListLoad } from '@/hooks/useListLoad'
 import { useBlindMode } from '@/hooks/useBlindMode'
 import { useAuth } from '@/lib/auth-context'
@@ -64,9 +65,10 @@ export default function QualTimelineEmbed({ projectId, params, labelFontSize }: 
   // disables the chart type under consensus but never changes `qa.chartType`,
   // and "Add to Materials" is gated on nothing (#684) — so switching the layer
   // with the Timeline active and saving produces exactly this config. The
-  // Timeline reads the human coding layer (P-1), so drawing it here would put
-  // human-layer numbers under a consensus material: the silent-wrong-layer case
-  // DEC-6c-7 exists to refuse.
+  // clip payload is the working layer (P-1: no consensus rows), so drawing it
+  // here would put working-layer numbers under a consensus material: the
+  // silent-wrong-layer case DEC-6c-7 exists to refuse. (A saved MACHINE layer draws, since #1077 (b):
+  // the clip payload does carry a model's marks, and the lens keeps only those.)
   //
   // Gated via `enabled` rather than an early return so hook order never depends
   // on the config (the `InlineChartRenderer` rule).
@@ -140,16 +142,20 @@ export default function QualTimelineEmbed({ projectId, params, labelFontSize }: 
     [categoriesData?.categories],
   )
 
+  const machineCoderIds = useMachineCoderIds()
   const lens = useMemo(
-    () => resolveTimelineCoderLens(params.request.coder_ids ?? null, withholding, user?.id ?? null, rosterMultiCoder),
-    [params.request.coder_ids, withholding, user?.id, rosterMultiCoder],
+    () => resolveTimelineCoderLens(
+      params.request.coder_ids ?? null, withholding, user?.id ?? null, rosterMultiCoder,
+      machineCoderIds, timedLayerFor(params.layerScope) ?? 'human',
+    ),
+    [params.request.coder_ids, withholding, user?.id, rosterMultiCoder, machineCoderIds, params.layerScope],
   )
 
   if (isConsensus) {
     return (
       <Notice>
-        This timeline was saved with the Consensus layer selected. The timeline reads the
-        human coding layer, so there is nothing to draw.
+        This timeline was saved with the Consensus layer selected. A timeline cannot show
+        the Consensus layer, so there is nothing to draw.
       </Notice>
     )
   }
@@ -214,7 +220,7 @@ export default function QualTimelineEmbed({ projectId, params, labelFontSize }: 
         observationsLoad={observationsLoad}
         codes={codes}
         categories={categories}
-        include={lens.include}
+        lens={lens.lens}
         multiCoder={lens.multiCoder}
         coderMap={coderMap}
         consensusScope={false}

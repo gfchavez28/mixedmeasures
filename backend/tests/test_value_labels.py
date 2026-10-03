@@ -18,6 +18,7 @@ from app.services.recode import apply_definition_to_column
 from app.services.value_labels import (
     apply_value_labels,
     code_identity_violation,
+    text_code_resolver,
     ValueLabelsBlockedError,
 )
 
@@ -784,3 +785,381 @@ class TestValueLabelCeiling:
         assert MAX_VALUE_LABELS >= 250, (
             "the cap must admit a country/occupation codebook — see #588"
         )
+
+
+# ── #1104: an edit may reword a label, never change what someone answered ────
+
+
+def _library(name):
+    from app.services.dataset_import import KNOWN_SCALES
+    return next(s["labels"] for s in KNOWN_SCALES if s["name"] == name)
+
+
+class TestAnEditMustNotRewriteAnswers:
+    """#1104 — the editor's rows arrive as final `(code, label)` pairs and the
+    service reads them by CODE. On a column imported from TEXT the answer is the
+    datum, so renumbering 1–5 → 0–4 in place moved every answer up a category,
+    silently and self-consistently. Such an edit is now refused before anything
+    is written, and the refusal names the recode rule as the safe renumber.
+
+    ⚠️ **Where the claim is about what a TEXT import leaves behind, the fixture
+    enters at the pipeline's MOUTH** — CSV text → `preview_dataset_csv` →
+    `import_dataset_csv` → the edit — rather than hand-seeding cells, because the
+    defect is a property of that state. Hand-seeded fixtures are used only where
+    a message must be deterministic (the distinct-pair order is the database's).
+
+    ⚠️ **Each of the guard's two checks, its bare-code clause and its
+    old-labels clause has a fixture that ONLY it catches**, asserted as a
+    discrimination: without one, a mutant deleting that part survives.
+    """
+
+    AGREE5 = property(lambda self: _library("agreement-5pt"))
+    AGREE4 = property(lambda self: _library("agreement-4pt"))
+    MIDPOINT = "Neither agree nor disagree"
+
+    def _import_text(self, db, answers, *, scale=None):
+        from app.services.dataset_import import import_dataset_csv, preview_dataset_csv
+        db.add(Project(id=1, name="P", user_id=1)); db.flush()
+        text = "Q\n" + "\n".join(answers) + "\n"
+        suggested = preview_dataset_csv(text)["columns"][0]["suggested_scale_labels"]
+        cfg = {"column_index": 0, "column_type": "ordinal",
+               "scale_labels": scale or suggested}
+        res = import_dataset_csv(db, 1, "D", [cfg], text)
+        db.flush()
+        return db.query(DatasetColumn).filter_by(dataset_id=res["dataset_id"]).one()
+
+    def _import_codes(self, db, codes, labels):
+        """A numbers-only column labelled AT IMPORT (`cells_are_codes`)."""
+        from app.services.dataset_import import import_dataset_csv
+        db.add(Project(id=1, name="P", user_id=1)); db.flush()
+        text = "Q\n" + "\n".join(str(c) for c in codes) + "\n"
+        cfg = {"column_index": 0, "column_type": "ordinal", "cells_are_codes": True,
+               "scale_labels": labels, "scale_values": list(range(1, len(labels) + 1))}
+        res = import_dataset_csv(db, 1, "D", [cfg], text)
+        db.flush()
+        return db.query(DatasetColumn).filter_by(dataset_id=res["dataset_id"]).one()
+
+    def _seed_pairs(self, db, c, pairs):
+        for text, num in pairs:
+            r = DatasetRow(dataset_id=c.dataset_id); db.add(r); db.flush()
+            db.add(DatasetValue(row_id=r.id, column_id=c.id,
+                                value_text=text, value_numeric=num))
+        db.flush()
+
+    def _declare(self, db, c, pairs, *, rule="2-point scale"):
+        c.scale_labels = json.dumps([label for _, label in pairs])
+        c.scale_values = json.dumps([code for code, _ in pairs])
+        db.add(RecodeDefinition(
+            column_id=c.id, name=rule, recode_type=RecodeType.SCALE_MAP,
+            output_type=OutputType.NUMERIC,
+            mapping=json.dumps({label: code for code, label in pairs}),
+            is_primary=True, is_auto_detected=True, sequence_order=0,
+        ))
+        db.flush()
+
+    def _state(self, db, c):
+        """Every owner of the column's meaning, for fail-closed assertions."""
+        cells = sorted(
+            db.query(DatasetValue.value_text, DatasetValue.value_numeric)
+            .filter(DatasetValue.column_id == c.id).all(), key=repr)
+        defs = [(d.name, d.mapping, d.is_primary) for d in
+                db.query(RecodeDefinition).filter_by(column_id=c.id)
+                .order_by(RecodeDefinition.id)]
+        return cells, c.scale_labels, c.scale_values, defs
+
+    def _plan(self, db, c, pairs):
+        from app.services.value_labels import _plan_cells
+        distinct = (db.query(DatasetValue.value_text, DatasetValue.value_numeric)
+                    .filter(DatasetValue.column_id == c.id).distinct().all())
+        return _plan_cells(distinct, {float(k): v for k, v in pairs}, None)
+
+    # ── refused ────────────────────────────────────────────────────────────
+
+    def test_renumbering_a_text_column_in_place_is_refused_and_writes_nothing(self, db_session):
+        """The first drive that confirmed #1104, entered at the pipeline mouth."""
+        db = db_session
+        c = self._import_text(db, self.AGREE5 + [self.AGREE5[1], self.AGREE5[3]])
+        assert json.loads(c.scale_values) == [1, 2, 3, 4, 5]   # precondition
+        before = self._state(db, c)
+
+        with pytest.raises(ValueLabelsBlockedError) as exc:
+            apply_value_labels(db, c, list(enumerate(self.AGREE5)))   # 1–5 → 0–4
+
+        assert self._state(db, c) == before
+        message = str(exc.value)
+        assert message.startswith("Nothing was changed.")
+        # The way out, named: the rule this column actually has, and where it is.
+        assert "“5-point scale”" in message
+        assert "Recode rules" in message
+
+    def test_the_1102_repair_through_value_labels_is_refused(self, db_session):
+        """The second confirmed drive: a four-point column whose real midpoint
+        answer has no number, repaired by renumbering 3/4 → 4/5 and adding the
+        midpoint as 3. It turned every "Agree" into the midpoint."""
+        db = db_session
+        c = self._import_text(
+            db, self.AGREE4 + [self.MIDPOINT, self.AGREE4[2]], scale=self.AGREE4)
+        stray = db.query(DatasetValue).filter_by(
+            column_id=c.id, value_text=self.MIDPOINT).one()
+        assert stray.value_numeric is None                         # precondition
+        before = self._state(db, c)
+        a = self.AGREE4
+        with pytest.raises(ValueLabelsBlockedError):
+            apply_value_labels(db, c, [(1, a[0]), (2, a[1]), (3, self.MIDPOINT),
+                                       (4, a[2]), (5, a[3])])
+        assert self._state(db, c) == before
+
+    def test_the_message_names_the_answers_their_count_and_the_other_number(self, col):
+        db, c = col
+        self._declare(db, c, [(1, "A"), (2, "B")])
+        self._seed_pairs(db, c, [("A", 1.0)] * 3 + [("B", 2.0)])
+        with pytest.raises(ValueLabelsBlockedError) as exc:
+            apply_value_labels(db, c, [(1, "B"), (2, "C")])
+        message = str(exc.value)
+        assert ("every “A” answer (3 in all, stored as number 1) would read “B”, which "
+                "this variable already uses for the number 2") in message
+        assert "“2-point scale”" in message
+
+    def test_an_answer_with_no_number_is_named_as_such(self, col):
+        db, c = col
+        self._declare(db, c, [(3, "Agree")])
+        self._seed_pairs(db, c, [("Agree", 3.0), ("Agree", 3.0), ("Neither", None)])
+        with pytest.raises(ValueLabelsBlockedError) as exc:
+            apply_value_labels(db, c, [(3, "Neither")])
+        assert "already uses for answers that have no number" in str(exc.value)
+
+    def test_renumbering_to_numbers_nobody_holds_is_refused(self, db_session):
+        """The shape the review found beyond the filed entry: no text changes, but
+        the dictionary would say "Agree" = 14 beside answers stored as 4 — and the
+        #793 check would then refuse every later edit of the column."""
+        db = db_session
+        c = self._import_text(db, self.AGREE5)
+        new = [(k + 10, label) for k, label in enumerate(self.AGREE5, start=1)]
+        # DISCRIMINATION: no cell would get a new text, so only the CONTRADICTION
+        # check can refuse this — a mutant deleting it must fail here.
+        assert all(p.label is None for p in self._plan(db, c, new).pairs)
+        before = self._state(db, c)
+        with pytest.raises(ValueLabelsBlockedError) as exc:
+            apply_value_labels(db, c, new)
+        assert self._state(db, c) == before
+        assert "would disagree" in str(exc.value)
+
+    def test_swapping_labels_is_refused_on_a_numbers_column_too(self, db_session):
+        """The cost of refusing rather than guessing, pinned so it is a decision:
+        on a column imported as NUMBERS a reversed dictionary may be a genuine
+        correction ("my labels were on the wrong numbers"), but it is the same
+        edit that rewrites answers on a text column, and the data cannot tell
+        the two apart. Option C (#1104's follow-up) is where it gets a choice."""
+        db = db_session
+        c = self._import_codes(db, [1, 2, 2, 3, 4, 5], self.AGREE5)
+        reversed_ = list(zip(range(1, 6), reversed(self.AGREE5)))
+        # DISCRIMINATION: the state this edit would leave is internally
+        # consistent, so the CONTRADICTION check passes it — only the MERGE check
+        # can refuse a swap.
+        plan = self._plan(db, c, reversed_)
+        after = [(p.label if p.label is not None else p.value_text, p.code)
+                 for p in plan.pairs]
+        assert code_identity_violation(
+            c, after, None,
+            label_to_code={label: float(code) for code, label in reversed_},
+        ) is None
+        before = self._state(db, c)
+        with pytest.raises(ValueLabelsBlockedError):
+            apply_value_labels(db, c, reversed_)
+        assert self._state(db, c) == before
+
+    def test_a_shift_over_a_scale_where_one_answer_was_chosen_is_still_refused(self, db_session):
+        """The dictionary's OLD labels count as holders. Here every respondent
+        chose "Disagree", so no CELL carries the midpoint's text — judged on
+        cells alone, the shift would read as a harmless rename and every answer
+        would silently become the midpoint."""
+        db = db_session
+        c = self._import_text(db, [self.AGREE5[1]] * 3, scale=self.AGREE5)
+        # DISCRIMINATION: nobody chose the midpoint.
+        assert not db.query(DatasetValue).filter_by(
+            column_id=c.id, value_text=self.AGREE5[2]).count()
+        with pytest.raises(ValueLabelsBlockedError):
+            apply_value_labels(db, c, list(enumerate(self.AGREE5)))
+
+    def test_the_endpoint_answers_400_with_the_message(self, col):
+        from fastapi import HTTPException
+        from app.routers.recode import apply_value_labels_endpoint
+        from app.schemas.recode import ApplyValueLabelsRequest, ValueLabelPair
+        db, c = col
+        self._declare(db, c, [(1, "A"), (2, "B")])
+        self._seed_pairs(db, c, [("A", 1.0), ("B", 2.0)])
+        req = ApplyValueLabelsRequest(labels=[ValueLabelPair(value=1, label="B"),
+                                              ValueLabelPair(value=2, label="A")])
+        with pytest.raises(HTTPException) as exc:
+            apply_value_labels_endpoint(1, 1, c.id, req, user=db.get(User, 1), db=db)
+        assert exc.value.status_code == 400
+        assert exc.value.detail.startswith("Nothing was changed.")
+        assert sorted((v.value_text, v.value_numeric) for v in _vals(db, c)) == [
+            ("A", 1.0), ("B", 2.0)]
+
+    # ── still allowed (positive controls — a guard that refused everything
+    #    would pass every test above) ────────────────────────────────────────
+
+    def test_rewording_labels_still_applies(self, db_session):
+        db = db_session
+        c = self._import_text(db, self.AGREE5)
+        reworded = [(k, "Neither (neutral)" if k == 3 else label.lower())
+                    for k, label in enumerate(self.AGREE5, start=1)]
+        apply_value_labels(db, c, reworded)
+        cells = sorted((v.value_numeric, v.value_text) for v in _vals(db, c))
+        assert cells == [(float(k), label) for k, label in reworded]
+
+    def test_dropping_a_row_and_declaring_an_unchosen_level_still_applies(self, db_session):
+        db = db_session
+        c = self._import_text(db, self.AGREE5)
+        res = apply_value_labels(
+            db, c, [(k, label) for k, label in enumerate(self.AGREE5, start=1) if k != 5]
+            + [(9, "Not asked")])
+        assert res["unlabeled_codes"] == [5.0]
+        top = db.query(DatasetValue).filter_by(column_id=c.id, value_numeric=5.0).one()
+        assert top.value_text == self.AGREE5[4]      # kept as answered
+
+    def test_labelling_a_bare_code_is_never_a_merge(self, col):
+        """A cell whose text is its own number carries no wording: labelling it
+        declares what the number means (#576's whole purpose), even when the
+        label is a text other cells already hold."""
+        db, c = col
+        self._seed_pairs(db, c, [("2", 2.0), ("2", 2.0), ("Agree", None)])
+        # DISCRIMINATION: "Agree" is already an answer, held with no number — the
+        # merge check would refuse this but for the bare-code clause.
+        assert db.query(DatasetValue).filter_by(
+            column_id=c.id, value_text="Agree", value_numeric=None).count() == 1
+        apply_value_labels(db, c, [(2, "Agree")])
+        assert [(v.value_text, v.value_numeric) for v in _vals(db, c)] == [
+            ("Agree", 2.0), ("Agree", 2.0), ("Agree", None)]
+
+    def test_unifying_two_spellings_already_under_one_number_still_applies(self, col):
+        """What a recode-rule repair of #1102's misspelled midpoint leaves: two
+        spellings stored under the SAME number. Re-applying the labels unifies
+        them, which changes no one's answer."""
+        db, c = col
+        self._declare(db, c, [(3, self.MIDPOINT)], rule="1-point scale")
+        self._seed_pairs(db, c, [(self.MIDPOINT, 3.0), ("Neither agree or disagree", 3.0)])
+        # DISCRIMINATION: the label IS already held — but only under 3, the
+        # number these answers carry. Subtracting the pair's own number is what
+        # lets this through.
+        apply_value_labels(db, c, [(3, self.MIDPOINT)])
+        assert [v.value_text for v in _vals(db, c)] == [self.MIDPOINT, self.MIDPOINT]
+
+    # ── #1107: the guard reads an answer the way the import numbered it ──────
+    #
+    # Every fixture above imports the library's OWN labels as the answers, so an
+    # answer always matched its label's capitals. A survey's answers rarely do:
+    # "Strongly disagree" is numbered by the label "Strongly Disagree" (the import
+    # compares without case), and an exact-text guard saw no claim in it.
+
+    def _sentence(self, labels):
+        return [label[0] + label[1:].lower() for label in labels]
+
+    def test_1107_a_label_moved_to_an_unused_number_is_refused_on_sentence_case_answers(self, db_session):
+        """The drive that found #1107 (a11y-name-sweep run 10), at the pipeline mouth."""
+        db = db_session
+        answers = self._sentence(self.AGREE5)
+        c = self._import_text(db, answers + [answers[1], answers[3]])
+        assert json.loads(c.scale_labels) == self.AGREE5             # precondition
+        assert json.loads(c.scale_values) == [1, 2, 3, 4, 5]
+        # DISCRIMINATION: the answer differs from its label only in case, so an
+        # exact lookup finds no claim in it.
+        assert "Strongly disagree" in answers and "Strongly disagree" not in self.AGREE5
+        before = self._state(db, c)
+        moved = [(0, self.AGREE5[0])] + list(enumerate(self.AGREE5, start=1))[1:]
+        with pytest.raises(ValueLabelsBlockedError) as exc:
+            apply_value_labels(db, c, moved)
+        assert self._state(db, c) == before
+        message = str(exc.value)
+        assert ("answers “Strongly disagree” are stored as 1, but the label "
+                "“Strongly Disagree” would give them the number 0") in message
+
+    def test_1107_the_ten_point_shift_is_refused_on_lower_case_answers(self, db_session):
+        """1–5 → 11–15 was refused only because a one-word answer ("Agree")
+        matched its label exactly; on an all-lower-case file nothing did."""
+        db = db_session
+        c = self._import_text(db, [label.lower() for label in self.AGREE5])
+        # DISCRIMINATION: no answer equals any label exactly.
+        assert not {v.value_text for v in _vals(db, c)} & set(self.AGREE5)
+        before = self._state(db, c)
+        with pytest.raises(ValueLabelsBlockedError) as exc:
+            apply_value_labels(db, c, [(k + 10, label) for k, label in enumerate(self.AGREE5, start=1)])
+        assert self._state(db, c) == before
+        assert "would disagree" in str(exc.value)
+
+    def test_1107_relabelling_answers_as_an_unchosen_category_is_refused_without_case(self, db_session):
+        """The MERGE check's half: nobody chose "Agree", and the "disagree"
+        answers are relabelled "agree" — to the import, that category. Only the
+        OLD label "Agree" holds the text, so only a case-blind merge sees it."""
+        db = db_session
+        lower = [label.lower() for label in self.AGREE5]
+        c = self._import_text(db, [lower[0], lower[1], lower[1], lower[2], lower[4]],
+                              scale=self.AGREE5)
+        new = [(1, self.AGREE5[0]), (2, "agree"), (3, self.AGREE5[2]), (5, self.AGREE5[4])]
+        # DISCRIMINATION: the state this edit would leave is consistent, so the
+        # CONTRADICTION check passes it — a merge mutant without case must fail here.
+        plan = self._plan(db, c, new)
+        after = [(p.label if p.label is not None else p.value_text, p.code) for p in plan.pairs]
+        assert code_identity_violation(
+            c, after, None, label_to_code={label: float(code) for code, label in new},
+        ) is None
+        before = self._state(db, c)
+        with pytest.raises(ValueLabelsBlockedError) as exc:
+            apply_value_labels(db, c, new)
+        assert self._state(db, c) == before
+        assert "would read “agree”, which this variable already uses for the number 4" in str(exc.value)
+
+    def test_1107_the_793_check_reads_answers_without_case_too(self, col):
+        """The column as it stands: an answer whose label says 4, stored as 2."""
+        db, c = col
+        self._declare(db, c, [(2, "Disagree"), (4, "Agree")])
+        self._seed_pairs(db, c, [("agree", 2.0), ("Disagree", 2.0)])
+        with pytest.raises(ValueLabelsBlockedError) as exc:
+            apply_value_labels(db, c, [(2, "Disagree"), (4, "Agree")])
+        assert "the response 'agree' is stored as 2, not 4" in str(exc.value)
+
+    def test_1107_POSITIVE_CONTROL_reapplying_and_rewording_on_sentence_case_answers_apply(self, db_session):
+        """A case-blind guard that refused the ordinary edits would pass every
+        test above. Re-applying the labels unchanged and rewording one both go
+        through, and every answer keeps its number."""
+        db = db_session
+        answers = self._sentence(self.AGREE5)
+        c = self._import_text(db, answers + [answers[1]])
+        apply_value_labels(db, c, list(enumerate(self.AGREE5, start=1)))
+        reworded = [(k, "Neither (neutral)" if k == 3 else label)
+                    for k, label in enumerate(self.AGREE5, start=1)]
+        apply_value_labels(db, c, reworded)
+        cells = sorted((v.value_numeric, v.value_text) for v in _vals(db, c))
+        assert cells == sorted([(float(k), label) for k, label in reworded] + [(2.0, "Disagree")])
+
+
+def test_1107_text_code_resolver_reads_text_exactly_first_then_without_case():
+    resolve = text_code_resolver({"Agree": 4.0, "Yes": 1.0, "yes": 2.0, "Mid ": 3.0})
+    assert resolve("Agree") == (4.0, "Agree")
+    assert resolve("  agree ") == (4.0, "Agree")       # the writers' rule
+    assert resolve("AGREE") == (4.0, "Agree")
+    # Exact text first: a dictionary holding both spellings answers each one ...
+    assert resolve("Yes") == (1.0, "Yes")
+    assert resolve("yes") == (2.0, "yes")
+    # ... and a folded spelling two labels share names neither.
+    assert resolve("YES") is None
+    assert resolve("mid") == (3.0, "Mid ")
+    assert resolve("7") == (7.0, None)                 # a bare number is its own code
+    assert resolve("Neutral") is None
+
+
+def test_1107_the_guard_reads_a_scale_answer_as_the_import_numbered_it():
+    """The contract the fix rests on: for every spelling the import numbers by a
+    label, the guard reads the same number from it. `_compute_value_numeric` is
+    the writer; a drift between the two is #1107 again."""
+    from app.services.dataset_import import KNOWN_SCALES, _compute_value_numeric
+    labels = next(s["labels"] for s in KNOWN_SCALES if s["name"] == "agreement-5pt")
+    resolve = text_code_resolver({label: float(k) for k, label in enumerate(labels, start=1)})
+    spellings = [f(label) for label in labels
+                 for f in (str, str.lower, str.upper, lambda t: t[0] + t[1:].lower(),
+                           lambda t: f"  {t.lower()} ")]
+    for text in spellings:
+        written = _compute_value_numeric(text, ColumnType.ORDINAL.value, labels)
+        assert written is not None, text
+        assert resolve(text)[0] == written, text

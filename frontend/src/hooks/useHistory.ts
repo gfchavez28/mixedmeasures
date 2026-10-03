@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { toast } from 'sonner'
 import { serverDetailMessage, isServerRefusal } from '@/lib/api'
 
@@ -80,11 +80,25 @@ const MAX_HISTORY_SIZE = 50
  * ⚠️ **An action's `redo`/`undo` must never call back into `execute`/`undo`/
  * `redo`** — it would wait on the chain it is itself a link of, and deadlock.
  * No call site does; keep it that way.
+ *
+ * 🔴 **`scope` — a stack belongs to ONE CODER on the four coding surfaces
+ * (#1042).** Every coding endpoint acts as the SESSION coder, and a workbench
+ * stays mounted across a coder switch, so an entry made as coder A replayed as
+ * coder B: undoing A's *Pacing* removed B's *Pacing* if B had one, and silently
+ * did nothing if not; a code-set undo re-selected A's old value in B's layer.
+ * When `scope` changes both stacks are CLEARED and the researcher is told —
+ * never tagged per entry, which would leave N entries a Ctrl+Z could only
+ * refuse one at a time. ⚠️ **Omit it where the work is not per coder**: the
+ * dataset, variables and canvas stacks must keep their history across a switch.
+ * ⚠️ A step still in flight when the scope changes completed as the OLD coder,
+ * so it is not recorded into the new coder's stack (`generationRef`).
  */
-export function useHistory(): UseHistoryReturn {
+export function useHistory(scope?: string | number | null): UseHistoryReturn {
   const pastRef = useRef<HistoryAction[]>([])
   const futureRef = useRef<HistoryAction[]>([])
   const chainRef = useRef<Promise<void>>(Promise.resolve())
+  const scopeRef = useRef(scope)
+  const generationRef = useRef(0)
 
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
@@ -96,6 +110,23 @@ export function useHistory(): UseHistoryReturn {
     setCanRedo(futureRef.current.length > 0)
     setLastAction(pastRef.current[pastRef.current.length - 1] ?? null)
   }, [])
+
+  useEffect(() => {
+    if (Object.is(scopeRef.current, scope)) return
+    scopeRef.current = scope
+    generationRef.current += 1
+    const hadSteps = pastRef.current.length > 0 || futureRef.current.length > 0
+    pastRef.current = []
+    futureRef.current = []
+    sync()
+    // Only when something was actually lost: the first answer of the session
+    // (no coder → a coder) clears nothing and says nothing.
+    if (hadSteps) {
+      toast.info('Undo history cleared', {
+        description: 'Those steps were made as another coder, so undoing them now would change your codings instead.',
+      })
+    }
+  }, [scope, sync])
 
   /**
    * Run `job` after everything already queued, and resolve when IT is done.
@@ -112,8 +143,12 @@ export function useHistory(): UseHistoryReturn {
   }, [])
 
   const execute = useCallback((action: HistoryAction) => enqueue(async () => {
+    const generation = generationRef.current
     try {
       await action.redo()
+      // #1042: it ran as the coder who was active when it started; after a
+      // switch it belongs to no stack this page can replay.
+      if (generation !== generationRef.current) return
       // `.slice(-MAX)` unconditionally: on a shorter array it returns the whole
       // array, so the old length test bought nothing.
       pastRef.current = [...pastRef.current, action].slice(-MAX_HISTORY_SIZE)
@@ -149,13 +184,16 @@ export function useHistory(): UseHistoryReturn {
   const undo = useCallback(() => enqueue(async () => {
     const action = pastRef.current[pastRef.current.length - 1]
     if (!action) return
+    const generation = generationRef.current
     try {
       await action.undo()
+      // #1042: the stacks were cleared under it; its entry is already gone.
+      if (generation !== generationRef.current) return
       pastRef.current = pastRef.current.slice(0, -1)
       futureRef.current = [action, ...futureRef.current]
       sync()
     } catch (e) {
-      if (isServerRefusal(e)) {
+      if (isServerRefusal(e) && generation === generationRef.current) {
         pastRef.current = pastRef.current.slice(0, -1)
         sync()
         failureToast('Undo failed', e, DROPPED_NOTE)
@@ -169,13 +207,15 @@ export function useHistory(): UseHistoryReturn {
   const redo = useCallback(() => enqueue(async () => {
     const action = futureRef.current[0]
     if (!action) return
+    const generation = generationRef.current
     try {
       await action.redo()
+      if (generation !== generationRef.current) return
       futureRef.current = futureRef.current.slice(1)
       pastRef.current = [...pastRef.current, action].slice(-MAX_HISTORY_SIZE)
       sync()
     } catch (e) {
-      if (isServerRefusal(e)) {
+      if (isServerRefusal(e) && generation === generationRef.current) {
         futureRef.current = futureRef.current.slice(1)
         sync()
         failureToast('Redo failed', e, DROPPED_NOTE)

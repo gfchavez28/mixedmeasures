@@ -42,11 +42,34 @@ export interface DatasetColumnPreview {
   numeric_max: number | null
 }
 
+/** One record with more values than the header has columns (#985). */
+export interface OverlongRecord {
+  /** Its number in the FILE — for a new dataset, its record number there too. */
+  record: number
+  /** The line of the file it starts on (a quoted answer can span lines). */
+  line: number
+  /** How many values it has; `OverlongRecords.header_width` is how many fit. */
+  cells: number
+  /** The row it became, once an import has written it; null on a preview. */
+  row_id: number | null
+}
+
+/** Records whose extra values land in the wrong columns — usually an answer
+ *  holding an unquoted comma (#985). ALWAYS sent, with `count` 0 when there are
+ *  none; `examples` is capped, `count` is not. */
+export interface OverlongRecords {
+  count: number
+  header_width: number
+  examples: OverlongRecord[]
+}
+
 export interface DatasetPreviewResponse {
   total_rows: number
   columns: DatasetColumnPreview[]
   /** .xlsx uploads only (#523): workbook sheet names for the sheet picker. */
   sheet_names?: string[] | null
+  /** #985 — optional on the type only because an older server omits it. */
+  overlong_records?: OverlongRecords
 }
 
 /** #973 (c): one column as the CHEAP first stage knows it — no statistics. */
@@ -147,6 +170,8 @@ export interface DatasetImportResponse {
   value_label_unlabeled?: Record<number, number[]>
   /** #414: present iff the request asked for participant linking. */
   participant_link_report?: ParticipantLinkReport | null
+  /** #985: the file's too-long records, each with the row it became. */
+  overlong_records?: OverlongRecords
 }
 
 export interface Dataset {
@@ -715,6 +740,8 @@ export interface DatasetAppendPreviewResponse {
   /** #414 (DEC-7): offered when the dataset has exactly one identifier column
    *  and this file matched it. */
   participant_link_column?: { column_id: number; column_text: string } | null
+  /** #985: records whose extra values will land in the wrong columns. */
+  overlong_records?: OverlongRecords
 }
 
 export interface DatasetAppendResponse {
@@ -729,6 +756,8 @@ export interface DatasetAppendResponse {
    *  numeric code (unknown labels/typos or undeclared codes) — stored as text
    *  with value_numeric NULL. */
   unmapped_values?: string[]
+  /** #985: the file's too-long records; `row_id` set for each one appended. */
+  overlong_records?: OverlongRecords
 }
 
 // Project-wide column types
@@ -850,17 +879,28 @@ export const datasetsApi = {
   /** Create (or return) this project's participant table, filled and scored.
    *  Idempotent — a second call returns the existing one, because the button
    *  that calls it reads as "take me to my participant table" and a double
-   *  click is not an error. */
+   *  click is not an error.
+   *
+   *  ⚠️ NO timeout (#1073 b), for the withdraw's reason (#1025): giving up does
+   *  not stop the server. A first create measured 31.6–33.2 s on 122,382
+   *  participants (#1033), past the client's 30 s default — the page reported a
+   *  failure about a table the server went on to build and commit. The backend
+   *  is on loopback: if it dies, the request fails at once, not never. */
   createParticipantsDataset: (projectId: number) =>
-    api.post<Dataset>(`/projects/${projectId}/datasets/participants`).then(res => res.data),
+    api.post<Dataset>(
+      `/projects/${projectId}/datasets/participants`, undefined, { timeout: 0 },
+    ).then(res => res.data),
   /** Recompute the participant table's rows AND every score column.
    *
    *  ⚠️ On the DATASET, not the column: the rollup is ONE project-wide scan
    *  producing every score at once, so a per-column verb would re-run the whole
-   *  scan per rated code. The Data view's per-column Recompute item calls this. */
+   *  scan per rated code. The Data view's per-column Recompute item calls this.
+   *
+   *  ⚠️ NO timeout (#1073 b): a refresh measured 27–29.5 s on the same corpus,
+   *  so a larger one crosses the 30 s default with the server still writing. */
   refreshParticipantsDataset: (projectId: number) =>
     api.post<ParticipantDatasetRefresh>(
-      `/projects/${projectId}/datasets/participants/refresh`,
+      `/projects/${projectId}/datasets/participants/refresh`, undefined, { timeout: 0 },
     ).then(res => res.data),
   /** Create a dataset by hand — no file (queue row 47).
    *

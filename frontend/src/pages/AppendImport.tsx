@@ -26,6 +26,7 @@ import { describeAppendDuplicates } from '@/lib/append-duplicates'
 import { useStepFocus } from '@/hooks/useStepFocus'
 import UploadLimitNote from '@/components/UploadLimitNote'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
+import { OverlongRecordsNotice } from '@/components/OverlongRecordsNotice'
 
 type Step = 'upload' | 'review' | 'results'
 
@@ -312,7 +313,7 @@ export default function AppendImport() {
               {preview.unmatched_csv_columns.length > 0 && (
                 <span className="flex items-center gap-1.5 text-amber-600">
                   <FileQuestion className="w-3.5 h-3.5" />
-                  <strong>{preview.unmatched_csv_columns.length}</strong> unmatched CSV columns
+                  <strong>{preview.unmatched_csv_columns.length}</strong> unmatched file columns
                 </span>
               )}
               {preview.unmatched_columns.length > 0 && (
@@ -320,17 +321,22 @@ export default function AppendImport() {
                   {preview.unmatched_columns.length} columns without new data
                 </span>
               )}
+              {/* "CSV" was wrong for an .xlsx or .sav append (#1008's lesson,
+                  on the one wizard it had not reached). */}
               <span className="text-mm-text-muted ml-auto">
-                {preview.total_rows} rows in CSV
+                {preview.total_rows.toLocaleString()} records in the file
               </span>
             </div>
+
+            {/* #985: rows whose values will land in the wrong columns. */}
+            <OverlongRecordsNotice report={preview.overlong_records} stage="before" newDataset={false} />
 
             {/* Matched columns table */}
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle className="text-base">Column Matches</CardTitle>
                 <CardDescription>
-                  CSV columns matched to existing columns
+                  File columns matched to existing columns
                 </CardDescription>
               </CardHeader>
               <CardContent className="p-0">
@@ -347,10 +353,10 @@ export default function AppendImport() {
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-base text-amber-600">
-                    Unmatched CSV Columns ({preview.unmatched_csv_columns.length})
+                    Unmatched File Columns ({preview.unmatched_csv_columns.length})
                   </CardTitle>
                   <CardDescription>
-                    These CSV columns could not be matched to existing columns and will be ignored
+                    These file columns could not be matched to existing columns and will be ignored
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="p-0">
@@ -373,7 +379,7 @@ export default function AppendImport() {
 
             {/* Duplicates */}
             {preview.duplicate_count > 0 && (
-              <Card className="border-amber-200 bg-amber-50/50">
+              <Card className="border-amber-200 bg-amber-50/50 dark:border-amber-800 dark:bg-amber-950/30">
                 <CardContent className="py-4">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2 text-sm">
@@ -484,11 +490,11 @@ export default function AppendImport() {
                           {preview.matched_columns.length > 6 && <td />}
                           <td className="px-3 py-1.5">
                             {row.is_duplicate ? (
-                              <span className="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">
+                              <span className="text-xs px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300">
                                 {skipDuplicates ? 'skip' : 'duplicate'}
                               </span>
                             ) : (
-                              <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-800">new</span>
+                              <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">new</span>
                             )}
                           </td>
                         </tr>
@@ -535,15 +541,15 @@ export default function AppendImport() {
               <CardDescription>New data has been added to the dataset</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="p-4 bg-emerald-50 rounded-lg space-y-2 text-sm">
-                <div className="flex items-center gap-2 text-emerald-700 font-medium mb-3">
+              <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 rounded-lg space-y-2 text-sm">
+                <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-300 font-medium mb-3">
                   <Check className="w-5 h-5" />
                   Append successful
                 </div>
-                <div><strong>Rows added:</strong> {importResult.rows_created}</div>
-                <div><strong>Values stored:</strong> {importResult.values_created}</div>
+                <div><strong>Rows added:</strong> {importResult.rows_created.toLocaleString()}</div>
+                <div><strong>Values stored:</strong> {importResult.values_created.toLocaleString()}</div>
                 {importResult.duplicates_skipped > 0 && (
-                  <div><strong>Duplicates skipped:</strong> {importResult.duplicates_skipped}</div>
+                  <div><strong>Duplicates skipped:</strong> {importResult.duplicates_skipped.toLocaleString()}</div>
                 )}
                 {importResult.participant_link_report && (
                   <div>
@@ -563,6 +569,14 @@ export default function AppendImport() {
                 )}
                 <div className="text-xs text-mm-text-muted mt-2">Batch ID: {importResult.batch_id}</div>
               </div>
+
+              {/* #985: each appended row that had extra values, linked to it. */}
+              <OverlongRecordsNotice
+                report={importResult.overlong_records}
+                stage="after"
+                newDataset={false}
+                datasetPath={`/projects/${pid}/datasets/${did}`}
+              />
 
               {/* #575: appended values that didn't map to a scale code land NULL. */}
               {importResult.unmapped_values && importResult.unmapped_values.length > 0 && (
@@ -604,7 +618,7 @@ export default function AppendImport() {
 function MatchedColumnRow({ col }: { col: AppendMatchedColumn }) {
   return (
     <div className="flex items-center gap-3 px-4 py-2.5">
-      <span className="w-5 h-5 rounded-full bg-green-100 text-green-800 flex items-center justify-center flex-shrink-0">
+      <span className="w-5 h-5 rounded-full bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400 flex items-center justify-center flex-shrink-0">
         <Check className="w-3 h-3" />
       </span>
       <span className="flex-1 text-sm truncate">

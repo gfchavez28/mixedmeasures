@@ -37,18 +37,23 @@ import { useBlindMode } from '@/hooks/useBlindMode'
 import TranscriptPanel, { type PlaybackHandle } from '@/components/TranscriptPanel'
 import MagnitudeStrip from '@/components/MagnitudeStrip'
 import { CodeSetStrip } from '@/components/CodeSetStrip'
-import { ratableCodes } from '@/lib/rating-targets'
+import { liveRatingCode, ratableCodes } from '@/lib/rating-targets'
+import { scaleSignature } from '@/lib/magnitude'
 import { useCollapsibleColumn } from '@/hooks/useCollapsibleColumn'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
 import { codeKeyHint } from '@/lib/codeShortcuts'
-import { useCoders } from '@/hooks/useCoders'
+import { useCoders, useMachineCoderIds } from '@/hooks/useCoders'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { isSegmentCodedVisible, computeCoverage, isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
 import { lensHidesAnyCoder } from '@/lib/coder-color'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import { describeQuoteNotesStayed } from '@/lib/split-disclosure'
 import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
+import {
+  captureApply, captureRemove, mergeReplaced, planApplyUndo, replacedFromBulk, replacedFromSingle,
+  runApplyUndo, runRemoveUndo, segmentUndoApi, type ApplyCapture, type ApplyUndoPlan, type Replaced,
+} from '@/lib/apply-undo'
 import { useAuth } from '@/lib/auth-context'
 import CodePanel, { type CodePanelHandle } from '@/components/CodePanel'
 import { useListLoad } from '@/hooks/useListLoad'
@@ -90,6 +95,8 @@ export default function CodingWorkbench() {
   // unanswered); the wording below keys on `blind` (only once it is known).
   const { blind, withholding, blindLens, toggleReveal } = useBlindMode(pid)
   const effectiveHidden = withholding ? blindLens : hiddenCoders
+  // #1029 — a model's labels never count toward the gauge, the progress bar or `j`.
+  const machineCoderIds = useMachineCoderIds()
   // Group A (#457): who coded THIS conversation — drives the picklist "active here" markers.
   const coderCoverage = useCoderCoverage(
     pid, { conversationId: cid }, { enabled: multiCoder, rosterCoderIds: coders.map(c => c.id) },
@@ -161,7 +168,8 @@ export default function CodingWorkbench() {
   // Shift/arrow selection is owned by useSegmentSelection (wired below).
 
   // Undo/Redo history (Item 28)
-  const history = useHistory()
+  // #1042: the stack is this coder's — a coder switch clears it.
+  const history = useHistory(user?.id ?? null)
 
   // Fetch data
   const { data: project, isLoading: projectLoading, isError: projectError } = useQuery({
@@ -337,8 +345,21 @@ export default function CodingWorkbench() {
   // total when no coder is hidden.
   const participantSegments = useMemo(() => allSegments.filter(s => !s.is_facilitator), [allSegments])
   const coverage = useMemo(
-    () => computeCoverage(participantSegments, s => s.applied_code_details, effectiveHidden),
-    [participantSegments, effectiveHidden],
+    () => computeCoverage(participantSegments, s => s.applied_code_details, effectiveHidden, machineCoderIds),
+    [participantSegments, effectiveHidden, machineCoderIds],
+  )
+  // #1077 (c) — the participant turns still waiting for a PERSON, under the lens
+  // the gauge uses. ONE set, read by `j` (below) and by the transcript's orange
+  // "uncoded" ring, so the ring marks exactly the turns `j` walks to. The ring
+  // used to test `applied_codes.length === 0` on the row itself, which counted a
+  // model's labels and universal-only markers as coding and — while blind — left
+  // a turn only a colleague had coded with neither chip NOR ring: the missing ring
+  // said someone had coded it (measured live by the 2026-09-28 /ux-audit).
+  const uncodedSegmentIds = useMemo(
+    () => new Set(participantSegments
+      .filter(s => !isSegmentCodedVisible(s.applied_code_details, effectiveHidden, machineCoderIds))
+      .map(s => s.id)),
+    [participantSegments, effectiveHidden, machineCoderIds],
   )
   const handleInlineCodeChange = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['segments', cid] })
@@ -705,17 +726,16 @@ export default function CodingWorkbench() {
   // Run an atomic single-POST code change with an optimistic patch + snapshot rollback.
   // useHistory's execute() does NOT roll back on a thrown redo/undo — it only toasts and
   // skips the history entry — so we restore the snapshot here and re-throw to preserve both.
-  const runOptimisticCode = useCallback(
-    async (
-      segmentIds: number[],
-      codeId: number,
+  // `paint` is any optimistic patch of this page's cache; `runOptimisticCode` is the
+  // one-code case, and the #1028 undo of an apply paints several codes at once.
+  const runOptimisticPatch = useCallback(
+    async <T,>(
+      paint: () => void,
       action: 'apply' | 'remove',
-      fanOutGroups: boolean,
-      serverCall: () => Promise<unknown>,
-      magnitudeFor?: (segmentId: number) => number | null,
-    ) => {
+      serverCall: () => Promise<T>,
+    ): Promise<T> => {
       const snapshot = queryClient.getQueryData(['segments', cid])
-      patchSegmentCodes(segmentIds, codeId, action, fanOutGroups, magnitudeFor)
+      paint()
       try {
         const result = await serverCall()
         // #678: a bulk post reports a PARTIAL failure as a 200 body. The optimistic
@@ -739,18 +759,92 @@ export default function CodingWorkbench() {
         } else {
           settleAfterCodeChange()
         }
+        return result
       } catch (e) {
         queryClient.setQueryData(['segments', cid], snapshot)
         throw e
       }
     },
-    [queryClient, cid, patchSegmentCodes, settleAfterCodeChange, invalidateAfterCodeChange]
+    [queryClient, cid, settleAfterCodeChange, invalidateAfterCodeChange]
+  )
+
+  const runOptimisticCode = useCallback(
+    async (
+      segmentIds: number[],
+      codeId: number,
+      action: 'apply' | 'remove',
+      fanOutGroups: boolean,
+      serverCall: () => Promise<unknown>,
+      magnitudeFor?: (segmentId: number) => number | null,
+    ): Promise<void> => {
+      await runOptimisticPatch(
+        () => patchSegmentCodes(segmentIds, codeId, action, fanOutGroups, magnitudeFor),
+        action,
+        serverCall,
+      )
+    },
+    [runOptimisticPatch, patchSegmentCodes]
+  )
+
+  // ── #1028: an apply that REPLACED a value, and its undo ─────────────────────
+  //
+  // The server removes this coder's other value of a code set when a value of it
+  // is applied, and says which (`lib/apply-undo.ts`). This page's settle never
+  // refetches the segments (#367), so what it replaced is painted away from the
+  // report — and the undo puts back exactly that, removing the code only where
+  // the act put it.
+  const segmentDetails = useCallback(
+    (segmentId: number) =>
+      (segmentMap.get(segmentId) ?? allSegmentsMap.get(segmentId))?.applied_code_details,
+    [segmentMap, allSegmentsMap],
+  )
+
+  const paintReplaced = useCallback((replaced: Replaced, fanOutGroups: boolean) => {
+    for (const [segmentId, codeIds] of replaced) {
+      for (const codeId of codeIds) patchSegmentCodes([segmentId], codeId, 'remove', fanOutGroups)
+    }
+  }, [patchSegmentCodes])
+
+  const paintUndoPlan = useCallback((plan: ApplyUndoPlan, fanOutGroups: boolean) => {
+    if (plan.removeFrom.length > 0) patchSegmentCodes(plan.removeFrom, plan.codeId, 'remove', fanOutGroups)
+    for (const r of plan.restore) {
+      patchSegmentCodes([r.targetId], plan.codeId, 'remove', fanOutGroups)
+      patchSegmentCodes([r.targetId], r.codeId, 'apply', fanOutGroups, () => r.magnitude)
+    }
+  }, [patchSegmentCodes])
+
+  const codeName = useCallback((codeId: number) => codeMap.get(codeId)?.name ?? 'code', [codeMap])
+
+  /**
+   * Undo one or more applies from what each captured and what the server replaced.
+   *
+   * ⚠️ Several calls, so a failure part-way leaves a state no snapshot describes:
+   * it REFETCHES rather than rolling the paint back (the multi-code path's rule),
+   * and rethrows so `useHistory` keeps a transient failure for a retry.
+   */
+  const undoApplies = useCallback(
+    async (applies: readonly { capture: ApplyCapture; replaced: Replaced }[], single: boolean) => {
+      const plans = applies.map(({ capture, replaced }) => planApplyUndo(capture, replaced))
+      plans.forEach(plan => paintUndoPlan(plan, single))
+      try {
+        for (const plan of plans) await runApplyUndo(plan, segmentUndoApi(single), codeName)
+        settleAfterCodeChange()
+      } catch (e) {
+        invalidateAfterCodeChange()
+        throw e
+      }
+    },
+    [paintUndoPlan, codeName, settleAfterCodeChange, invalidateAfterCodeChange],
   )
 
   // ── #35 magnitude: rate at apply (variant A) ────────────────────────────────
   // Which application is awaiting a rating. Set after a single-segment APPLY of a
   // code that declares a scale; the strip below the transcript is the surface.
   const [ratingTarget, setRatingTarget] = useState<{ segmentId: number; code: Code } | null>(null)
+  // #1112: the strip shows the LIVE code, so a scale saved while it is open
+  // (and a rename) reaches it; the mount keys on the scale's signature so a
+  // new step remounts it with a fresh cursor (`lib/rating-targets.ts`).
+  const ratingCode = ratingTarget ? liveRatingCode(ratingTarget.code, codeMap) : null
 
   // Optimistically patch ONE coder's rating, mirroring the backend's group fan-out
   // exactly as `patchSegmentCodes` does for the code itself.
@@ -867,29 +961,86 @@ export default function CodingWorkbench() {
    * context menu and the chip's own controls (#875) share ONE implementation —
    * including the #868 (f) rating capture and the strip-on-apply.
    */
+  /**
+   * #1070 — the segments ONE single-door act covers: this segment and its group's
+   * visible siblings, the scope the server's `group_target_ids` fans out over and
+   * `patchSegmentCodes` mirrors for the paint. From the UNFILTERED list: the
+   * server fans out whatever the speaker filter shows.
+   */
+  const groupScope = useCallback((segmentId: number): number[] => {
+    const groupId = allSegmentsMap.get(segmentId)?.group_id ?? null
+    if (groupId == null) return [segmentId]
+    return [segmentId, ...allSegments.filter(s => s.group_id === groupId && s.id !== segmentId).map(s => s.id)]
+  }, [allSegments, allSegmentsMap])
+
   const removeSingle = useCallback((segmentId: number, codeId: number, codeName: string) => {
-    const previous = currentMagnitude(segmentId, codeId)
+    const scope = groupScope(segmentId)
+    if (scope.length === 1) {
+      const previous = currentMagnitude(segmentId, codeId)
+      history.execute({
+        type: 'code_remove',
+        description: `Remove code "${codeName}"`,
+        redo: () => runOptimisticCode([segmentId], codeId, 'remove', true, () => codingApi.removeCode(segmentId, codeId)),
+        undo: () => runOptimisticCode(
+          [segmentId], codeId, 'apply', true,
+          () => codingApi.applyCode(segmentId, codeId, undefined, previous),
+          () => previous,
+        ),
+      })
+      return
+    }
+    // 🔴 #1070 — on a GROUP the remove fans out, and its old inverse (the single
+    // apply, carrying this segment's rating) fanned out again: a sibling that never
+    // held the code gained it. Captured NOW per sibling; undone through the bulk
+    // door onto exactly the siblings that held it, then each one re-rated.
+    const capture = captureRemove(codeId, scope, segmentDetails, user?.id ?? null)
     history.execute({
       type: 'code_remove',
       description: `Remove code "${codeName}"`,
       redo: () => runOptimisticCode([segmentId], codeId, 'remove', true, () => codingApi.removeCode(segmentId, codeId)),
-      undo: () => runOptimisticCode(
-        [segmentId], codeId, 'apply', true,
-        () => codingApi.applyCode(segmentId, codeId, undefined, previous),
-        () => previous,
-      ),
+      undo: async () => {
+        for (const h of capture.held) {
+          patchSegmentCodes([h.targetId], codeId, 'apply', false, () => h.magnitude)
+        }
+        try {
+          await runRemoveUndo(capture, segmentUndoApi(false), (id) => codeMap.get(id)?.name ?? 'code')
+          settleAfterCodeChange()
+        } catch (e) {
+          // Several calls: a failure part-way leaves a state no snapshot describes.
+          invalidateAfterCodeChange()
+          throw e
+        }
+      },
     })
-  }, [currentMagnitude, history, runOptimisticCode])
+  }, [groupScope, currentMagnitude, history, runOptimisticCode, segmentDetails, user?.id, patchSegmentCodes, codeMap, settleAfterCodeChange, invalidateAfterCodeChange])
 
   const applySingle = useCallback((segmentId: number, code: Code) => {
+    // #1028: captured NOW — the undo removes the code only if the act put it here,
+    // and re-rates whatever the server reports it replaced.
+    // 🔴 #1070: captured over the GROUP the act fans out to, and undone through
+    // the bulk door sibling by sibling (`single` only when there is no group): the
+    // siblings routinely differ, and an inverse that fans out must capture what it
+    // fans out over.
+    const scope = groupScope(segmentId)
+    const capture = captureApply(code.id, scope, segmentDetails, user?.id ?? null)
+    let replaced: Replaced = new Map()
     history.execute({
       type: 'code_apply',
       description: `Apply code "${code.name}"`,
-      redo: () => runOptimisticCode([segmentId], code.id, 'apply', true, () => codingApi.applyCode(segmentId, code.id)),
-      undo: () => runOptimisticCode([segmentId], code.id, 'remove', true, () => codingApi.removeCode(segmentId, code.id)),
+      redo: async () => {
+        const result = await runOptimisticPatch(
+          () => patchSegmentCodes([segmentId], code.id, 'apply', true),
+          'apply',
+          () => codingApi.applyCode(segmentId, code.id),
+        )
+        // Per segment now (#1070), so the paint names each one's own.
+        replaced = replacedFromSingle(segmentId, result)
+        paintReplaced(replaced, false)
+      },
+      undo: () => undoApplies([{ capture, replaced }], scope.length === 1),
     })
     if (code.magnitude_scale) setRatingTarget({ segmentId, code })
-  }, [history, runOptimisticCode, setRatingTarget])
+  }, [groupScope, history, runOptimisticPatch, patchSegmentCodes, setRatingTarget, segmentDetails, user?.id, paintReplaced, undoApplies])
 
   /** The chip's own controls (#875) — they act on the row that owns the chip. */
   const handleChipRemove = useCallback((segmentId: number, codeId: number) => {
@@ -926,32 +1077,48 @@ export default function CodingWorkbench() {
         // nothing to rate; a multi-segment apply still opens no strip.
         if (allHaveCode) removeSingle(selectedSegments[0], codeId, codeName)
         else applySingle(selectedSegments[0], code)
+      } else if (!allHaveCode) {
+        // #1028: the undo removes the code only from segments the act put it on
+        // (it used to strip it from a segment that already had it) and puts back
+        // any code-set value the server reports it replaced.
+        const capture = captureApply(codeId, segmentIds, segmentDetails, user?.id ?? null)
+        let replaced: Replaced = new Map()
+        history.execute({
+          type: 'code_apply',
+          description: `Apply code "${codeName}" to ${segmentIds.length} segments`,
+          redo: async () => {
+            const result = await runOptimisticPatch(
+              () => patchSegmentCodes(segmentIds, codeId, 'apply', false),
+              'apply',
+              () => codingApi.bulkCode(segmentIds, codeId, 'apply'),
+            )
+            replaced = replacedFromBulk(result)
+            paintReplaced(replaced, false)
+          },
+          undo: () => undoApplies([{ capture, replaced }], false),
+        })
       } else {
-        const action = allHaveCode ? 'remove' : 'apply'
-        const inverse = action === 'apply' ? 'remove' : 'apply'
         // #868 (f), the multi-segment arm: each segment's rating is captured
         // separately (they need not agree), and the inverse re-applies per
         // segment when any was rated — the bulk endpoint carries no rating.
-        const captured = allHaveCode
-          ? new Map(segmentIds.map(id => [id, currentMagnitude(id, codeId)] as const))
-          : null
-        const anyRated = captured != null && [...captured.values()].some(v => v != null)
+        const captured = new Map(segmentIds.map(id => [id, currentMagnitude(id, codeId)] as const))
+        const anyRated = [...captured.values()].some(v => v != null)
         history.execute({
-          type: allHaveCode ? 'code_remove' : 'code_apply',
-          description: `${action === 'apply' ? 'Apply' : 'Remove'} code "${codeName}" from ${segmentIds.length} segments`,
-          redo: () => runOptimisticCode(segmentIds, codeId, action, false, () => codingApi.bulkCode(segmentIds, codeId, action)),
+          type: 'code_remove',
+          description: `Remove code "${codeName}" from ${segmentIds.length} segments`,
+          redo: () => runOptimisticCode(segmentIds, codeId, 'remove', false, () => codingApi.bulkCode(segmentIds, codeId, 'remove')),
           undo: () => runOptimisticCode(
-            segmentIds, codeId, inverse, false,
+            segmentIds, codeId, 'apply', false,
             () => anyRated
-              ? Promise.all(segmentIds.map(id => codingApi.applyCode(id, codeId, undefined, captured!.get(id) ?? null)))
-              : codingApi.bulkCode(segmentIds, codeId, inverse),
-            captured ? (id) => captured.get(id) ?? null : undefined,
+              ? Promise.all(segmentIds.map(id => codingApi.applyCode(id, codeId, undefined, captured.get(id) ?? null)))
+              : codingApi.bulkCode(segmentIds, codeId, 'apply'),
+            (id) => captured.get(id) ?? null,
           ),
         })
       }
       showSaved()
     },
-    [selectedSegments, segmentMap, history, runOptimisticCode, showSaved, user?.id, currentMagnitude, applySingle, removeSingle]
+    [selectedSegments, segmentMap, history, runOptimisticCode, runOptimisticPatch, patchSegmentCodes, showSaved, user?.id, currentMagnitude, applySingle, removeSingle, segmentDetails, paintReplaced, undoApplies]
   )
 
   // Handle toggling multiple codes at once (Item 47)
@@ -965,16 +1132,24 @@ export default function CodingWorkbench() {
       // Execute all code applications
       const codeNames = codesToToggle.map(c => c.name).join(', ')
 
+      // #1028: captured per code, so the undo removes each only where it put it
+      // and puts back any code-set value it replaced. (Two values of ONE set are
+      // refused before this is reached — `CodePanel`, `conflictingSetValues`.)
+      const captures = codesToToggle.map(code => captureApply(code.id, segmentIds, segmentDetails, user?.id ?? null))
+      let replacedByCode: Replaced[] = codesToToggle.map(() => new Map())
+
       // Apply all codes in parallel (don't toggle). Multi-code = N independent POSTs, so a
       // partial failure can leave some codes applied server-side; snapshot rollback would wrongly
       // wipe them. On error we reconcile authoritatively via the full invalidation (incl. segments)
       // instead, accepting the one expensive refetch on the rare error path.
-      const runMulti = async (action: 'apply' | 'remove') => {
-        codesToToggle.forEach(code => patchSegmentCodes(segmentIds, code.id, action, false))
+      const runApply = async () => {
+        codesToToggle.forEach(code => patchSegmentCodes(segmentIds, code.id, 'apply', false))
         try {
           const results = await Promise.all(
-            codesToToggle.map(code => codingApi.bulkCode(segmentIds, code.id, action)),
+            codesToToggle.map(code => codingApi.bulkCode(segmentIds, code.id, 'apply')),
           )
+          replacedByCode = results.map(r => replacedFromBulk(r))
+          paintReplaced(mergeReplaced(replacedByCode), false)
           // #678: same reconciliation as the thrown case below — a 200 carrying
           // skipped ids leaves the same stale paint a rejection would. Ids are
           // folded across the N per-code responses, so a segment that failed for
@@ -982,7 +1157,7 @@ export default function CodingWorkbench() {
           const outcome = collectBulkOutcome(results)
           if (outcome.hasFailures) {
             invalidateAfterCodeChange()
-            toast.warning(describeBulkFailure(outcome, 'segment', action))
+            toast.warning(describeBulkFailure(outcome, 'segment', 'apply'))
           } else {
             settleAfterCodeChange()
           }
@@ -994,12 +1169,14 @@ export default function CodingWorkbench() {
       history.execute({
         type: 'code_apply',
         description: `Apply codes "${codeNames}" to ${segmentIds.length} segment(s)`,
-        redo: () => runMulti('apply'),
-        undo: () => runMulti('remove'),
+        redo: runApply,
+        undo: () => undoApplies(
+          captures.map((capture, i) => ({ capture, replaced: replacedByCode[i] })), false,
+        ),
       })
       showSaved()
     },
-    [selectedSegments, history, patchSegmentCodes, settleAfterCodeChange, invalidateAfterCodeChange, showSaved]
+    [selectedSegments, history, patchSegmentCodes, settleAfterCodeChange, invalidateAfterCodeChange, showSaved, segmentDetails, user?.id, paintReplaced, undoApplies]
   )
 
 
@@ -1244,7 +1421,8 @@ export default function CodingWorkbench() {
   // auto-scroll always lands; skips facilitator segments (participants only) and uses
   // the non-universal definition (the prior server endpoint treated universal-only as
   // coded, disagreeing with the gauge — this also closes that gap). Refs keep the
-  // keyboard closure fresh.
+  // keyboard closure fresh. #1077 (c): membership is `uncodedSegmentIds`, the set
+  // the ring draws, so the two can never disagree about a turn.
   const handleJumpToNextUncoded = useCallback(() => {
     const pool = segmentsRef.current
     if (pool.length === 0) return
@@ -1252,14 +1430,14 @@ export default function CodingWorkbench() {
     const currentIdx = currentId != null ? pool.findIndex(s => s.id === currentId) : -1
     for (let offset = 1; offset <= pool.length; offset++) {
       const seg = pool[(currentIdx + offset) % pool.length]
-      if (!seg.is_facilitator && !isSegmentCodedVisible(seg.applied_code_details, effectiveHidden)) {
+      if (uncodedSegmentIds.has(seg.id)) {
         // Setting selection triggers auto-scroll in TranscriptPanel
         setSelectedSegments([seg.id])
         return
       }
     }
     toast('All participant segments are coded')
-  }, [effectiveHidden])
+  }, [uncodedSegmentIds])
 
   // Get codes applied to selected segments (memoized for performance)
   const selectedCodesMap = useMemo(() => {
@@ -1400,41 +1578,26 @@ export default function CodingWorkbench() {
     requestAnimationFrame(() => notesPanelRef.current?.focusNote(noteId))
   }, [expandPanelIfCollapsed])
 
-  // Context menu: apply/remove code on a specific segment
+  // Context menu: apply/remove code on a specific segment.
+  //
+  // ⚠️ Through the SHARED single pair (#875's rule), which this handler was a
+  // private copy of — so it never opened the rating strip for a scaled code,
+  // and it would have missed #1028's undo of a replaced code-set value.
   const handleContextCodeApply = useCallback(
     (segmentId: number, codeId: number) => {
       const seg = segmentMap.get(segmentId) || allSegmentsMap.get(segmentId)
-      if (!seg) return
+      const code = codeMap.get(codeId)
+      if (!seg || !code) return
 
       // INV-6 (#446): apply vs remove keys off the ACTIVE coder's own application.
-      const hasCode = isCodeAppliedByActiveCoder(seg.applied_code_details, seg.applied_codes ?? [], codeId, user?.id ?? null)
-      const code = codes.find(c => c.id === codeId)
-      const codeName = code?.name || 'code'
-
-      if (hasCode) {
-        // #868 (f): capture the rating before the removal; the inverse carries it.
-        const previous = currentMagnitude(segmentId, codeId)
-        history.execute({
-          type: 'code_remove',
-          description: `Remove code "${codeName}"`,
-          redo: () => runOptimisticCode([segmentId], codeId, 'remove', true, () => codingApi.removeCode(segmentId, codeId)),
-          undo: () => runOptimisticCode(
-            [segmentId], codeId, 'apply', true,
-            () => codingApi.applyCode(segmentId, codeId, undefined, previous),
-            () => previous,
-          ),
-        })
+      if (isCodeAppliedByActiveCoder(seg.applied_code_details, seg.applied_codes ?? [], codeId, user?.id ?? null)) {
+        removeSingle(segmentId, codeId, code.name)
       } else {
-        history.execute({
-          type: 'code_apply',
-          description: `Apply code "${codeName}"`,
-          redo: () => runOptimisticCode([segmentId], codeId, 'apply', true, () => codingApi.applyCode(segmentId, codeId)),
-          undo: () => runOptimisticCode([segmentId], codeId, 'remove', true, () => codingApi.removeCode(segmentId, codeId)),
-        })
+        applySingle(segmentId, code)
       }
       showSaved()
     },
-    [segmentMap, allSegmentsMap, codes, history, runOptimisticCode, showSaved, user?.id, currentMagnitude]
+    [segmentMap, allSegmentsMap, codeMap, showSaved, user?.id, removeSingle, applySingle]
   )
 
   // Context menu: open floating create code dialog
@@ -1945,7 +2108,7 @@ export default function CodingWorkbench() {
               >
                 {coverage.codedVisible}/{coverage.total} participant segments coded
               </span>
-              <SegmentProgressBar segments={allSegments} hiddenCoderIds={effectiveHidden} className="w-32" />
+              <SegmentProgressBar segments={allSegments} hiddenCoderIds={effectiveHidden} machineCoderIds={machineCoderIds} className="w-32" />
               <span className="text-sm font-medium font-mono tabular-nums">{progress}%</span>
             </>
           ) : segmentsLoad.status === 'failed' ? (
@@ -1954,7 +2117,7 @@ export default function CodingWorkbench() {
         </div>
 
         {multiHumanCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="workbench" />}
-        <CoderCountBadge projectId={pid} conversationId={cid} enabled={multiCoder} />
+        <CoderCountBadge projectId={pid} conversationId={cid} enabled={multiCoder} withholding={withholding} />
 
         {/* Codebook */}
         <Button variant="ghost" size="icon" onClick={openCodebook} title="Codebook" aria-label="Codebook">
@@ -2066,6 +2229,7 @@ export default function CodingWorkbench() {
             coders={coders}
             activeCoderId={user?.id ?? null}
             coderFilterHidden={effectiveHidden}
+            uncodedSegmentIds={uncodedSegmentIds}
             onCoderFilterChange={setHiddenCoders}
             coderActiveIds={coderCoverage.isLoaded ? coderCoverage.activeCoderIds : undefined}
             coderExtra={coderCoverage.extraCoders}
@@ -2090,7 +2254,7 @@ export default function CodingWorkbench() {
                 conditional child into a row risks the remount that drops DOM
                 focus to `<body>`. Outside the scroller, that cannot happen.
           */}
-          {ratingTarget && ratingTarget.code.magnitude_scale && (
+          {ratingTarget && ratingCode?.magnitude_scale && (
             // py-1, not py-2: the vertical budget at 640×360 is 85px for the
             // whole control (measured on the document twin; same chrome here).
             <div className="border-t border-border bg-mm-surface px-3 py-1 shrink-0">
@@ -2099,9 +2263,9 @@ export default function CodingWorkbench() {
                 // code while the strip is open remounts it — the cursor and the
                 // focus effect initialise once, and a swap on a live mount kept
                 // the old cursor and left focus on the button that was clicked.
-                key={`${ratingTarget.segmentId}-${ratingTarget.code.id}`}
-                codeName={ratingTarget.code.name}
-                scale={ratingTarget.code.magnitude_scale}
+                key={`${ratingTarget.segmentId}-${ratingTarget.code.id}-${scaleSignature(ratingCode.magnitude_scale)}`}
+                codeName={ratingCode.name}
+                scale={ratingCode.magnitude_scale}
                 value={currentMagnitude(ratingTarget.segmentId, ratingTarget.code.id)}
                 onCommit={commitMagnitude}
                 onSkip={() => setRatingTarget(null)}
@@ -2224,11 +2388,22 @@ export default function CodingWorkbench() {
                         : undefined
                     }
                     activeCoderId={user?.id ?? null}
+                    codes={codes}
                     history={history}
                     onSettled={(saved) => {
                       if (saved) showSaved()
                       queryClient.invalidateQueries({ queryKey: ['segments', cid] })
                     }}
+                    groupSiblings={
+                      // #1070 — the group a choice fans out to, so its undo can give
+                      // each member back its own value.
+                      selectedSegments.length === 1
+                        ? groupScope(selectedSegments[0]).slice(1).map((id) => ({
+                          segmentId: id,
+                          appliedCodeDetails: allSegmentsMap.get(id)?.applied_code_details,
+                        }))
+                        : undefined
+                    }
                   />
                 }
                 isFocused={focusedPanel === 'codes'}

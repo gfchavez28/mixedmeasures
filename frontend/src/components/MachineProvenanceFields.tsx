@@ -5,15 +5,13 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import {
-  MACHINE_ACCESS_KINDS, MACHINE_ACCESS_LABEL, unreadableParameters, type MachineAccess,
+  ACCESS_NOT_RECORDED, MACHINE_ACCESS_KINDS, MACHINE_ACCESS_LABEL, accessChoice, accessFromChoice,
+  droppedWithoutModel, unreadableParameters, type MachineProvenanceDraft,
 } from '@/lib/machine-coder'
 
-export interface MachineProvenanceValues {
-  model: string
-  access: MachineAccess | ''
-  parameters: string
-  prompt: string
-}
+/** The form's values — `lib/machine-coder.ts::MachineProvenanceDraft`, which
+ * `provenanceFromDraft` turns into what is sent. */
+export type MachineProvenanceValues = MachineProvenanceDraft
 
 /**
  * The four fields that record what produced a machine coder's labels — model,
@@ -44,6 +42,8 @@ export default function MachineProvenanceFields({
   const paramsHintId = `${idPrefix}-params-hint`
   const paramsWarnId = `${idPrefix}-params-unreadable`
   const unreadable = unreadableParameters(values.parameters)
+  const dropped = droppedWithoutModel(values)
+  const droppedId = `${idPrefix}-model-dropped`
   return (
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-2">
@@ -52,7 +52,7 @@ export default function MachineProvenanceFields({
           <Input
             id={`${idPrefix}-model`}
             placeholder="e.g. gpt-4o-2024-08-06"
-            aria-describedby={modelHintId}
+            aria-describedby={dropped.length ? `${modelHintId} ${droppedId}` : modelHintId}
             value={values.model}
             onChange={(e) => onChange({ model: e.target.value })}
           />
@@ -60,17 +60,33 @@ export default function MachineProvenanceFields({
             The exact version if you have it. Left blank, the configuration is
             recorded as not known.
           </p>
+          {/* #1038 h — a blank model sends NO configuration (the server refuses a
+              setting of nothing), so what else was filled in is dropped. Said
+              here, beside the empty field, for the reason the unreadable-settings
+              line below is: forgiving must not mean silent. Described, not live. */}
+          {dropped.length > 0 && (
+            <p id={droppedId} className="text-xs text-amber-700 dark:text-amber-300">
+              Without a model, {joinList(dropped)} will not be recorded.
+            </p>
+          )}
         </div>
         <div className="space-y-1">
           <Label htmlFor={`${idPrefix}-access`}>How it was reached</Label>
+          {/* 🔴 #1006 — *Not recorded* is a CHOICE, not only the placeholder. It
+              was the placeholder alone, so once a kind was picked nothing could
+              put it back — and the configuration FREEZES once the coder has coded,
+              so a mis-click at import time became a permanent claim about how the
+              model was reached, on the form that exists to record that truthfully.
+              The only other exit, *Other*, asserts something different again. */}
           <Select
-            value={values.access || undefined}
-            onValueChange={(v) => onChange({ access: v as MachineAccess })}
+            value={accessChoice(values.access)}
+            onValueChange={(v) => onChange({ access: accessFromChoice(v) })}
           >
             <SelectTrigger id={`${idPrefix}-access`} className="w-full">
-              <SelectValue placeholder="Not recorded" />
+              <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value={ACCESS_NOT_RECORDED}>Not recorded</SelectItem>
               {MACHINE_ACCESS_KINDS.map(kind => (
                 <SelectItem key={kind} value={kind}>{MACHINE_ACCESS_LABEL[kind]}</SelectItem>
               ))}
@@ -93,7 +109,9 @@ export default function MachineProvenanceFields({
           onChange={(e) => onChange({ parameters: e.target.value })}
         />
         <p id={paramsHintId} className="text-xs text-mm-text-muted">
-          One per <code>name=value</code>, separated by commas or new lines.
+          One per <code>name=value</code>, separated by commas or new lines. A
+          value holding a comma goes in quotes or brackets, e.g.{' '}
+          <code>stop=["END", "###"]</code>.
         </p>
         {/* Described, NOT a live region: it changes on every keystroke, and an
             alert per character would drown the field. It is read when the
@@ -101,7 +119,7 @@ export default function MachineProvenanceFields({
         {unreadable.length > 0 && (
           <p id={paramsWarnId} className="text-xs text-amber-700 dark:text-amber-300">
             Will not be recorded: {unreadable.map(u => `“${u}”`).join(', ')} — write
-            each as <code>name=value</code>.
+            each as <code>name=value</code>, and quote a value that holds a comma.
           </p>
         )}
       </div>
@@ -117,4 +135,10 @@ export default function MachineProvenanceFields({
       </div>
     </div>
   )
+}
+
+/** `['a']` → `a`, `['a','b']` → `a and b`, `['a','b','c']` → `a, b and c`. */
+function joinList(items: string[]): string {
+  if (items.length < 2) return items.join('')
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`
 }

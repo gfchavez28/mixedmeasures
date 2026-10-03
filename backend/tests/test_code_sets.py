@@ -1105,6 +1105,390 @@ class TestTheEndpoints:
         ).count() == 1
 
 
+# ── 6b. #1028 — a synonym grouped INTO a value is a CLAIMANT ─────────────────
+
+
+def _group(db, gid, pid, canonical, *codes):
+    """Group ``codes`` (canonical first) as one effective code."""
+    db.add(CodeEquivalenceGroup(
+        id=gid, project_id=pid, label=f"group {gid}", canonical_code_id=canonical.id,
+    ))
+    db.flush()
+    for code in (canonical, *codes):
+        code.code_equivalence_group_id = gid
+    db.flush()
+
+
+def _held(db, uid, segment_id):
+    return {
+        r.code_id for r in db.query(CodeApplication).filter(
+            CodeApplication.segment_id == segment_id, CodeApplication.user_id == uid,
+        ).all()
+    }
+
+
+class TestClaimants:
+    """#1028(b): "Pos" is NOT in the set, yet grouped with the member "Positive"
+    every consumer that reads the EFFECTIVE code records it as choosing
+    "Positive". The write path cleared members only, so the swap left it
+    standing — the unit read as two selections and nothing on the set said so.
+    (Executed by the audit: `selection_for` = −2, `set_composition_warnings` = [].)
+    """
+
+    def _with_synonym(self, db, pid):
+        code_set, (positive, negative, neutral) = _stance_project(db, pid)
+        synonym = _code(db, pid * 10 + 9, pid, 40, "Pos")  # NOT a member
+        _group(db, pid * 10, pid, positive, synonym)
+        return code_set, (positive, negative, neutral), synonym
+
+    def test_a_synonym_is_a_claimant_that_reads_as_its_value(self, db_session):
+        db = db_session
+        code_set, (positive, negative, _u), synonym = self._with_synonym(db, 80)
+        resolved = _index(db, 80).by_id(code_set.id)
+        assert synonym.id not in resolved.raw_member_ids  # it never joined
+        assert resolved.claimants[synonym.id] == positive.id
+        assert resolved.claimants[negative.id] == negative.id
+        assert _index(db, 80).set_claimed_by(synonym.id).id == code_set.id
+
+    def test_choosing_another_value_CLEARS_the_synonym(self, db_session):
+        db = db_session
+        code_set, (_p, negative, _u), synonym = self._with_synonym(db, 81)
+        _coder(db, 2, "alice")
+        _apply(db, synonym.id, 2, 8100)
+        resolved = _index(db, 81).by_id(code_set.id)
+        _chosen, removed = cs.apply_selection(
+            db, resolved, user_id=2, code_id=negative.id, segment_ids=[8100],
+        )
+        assert removed == 1
+        assert _held(db, 2, 8100) == {negative.id}
+        effective = build_effective_code_map(db, 81)
+        applied = {effective.get(c, c) for c in _held(db, 2, 8100)}
+        assert cs.selection_for(applied, resolved) == negative.id
+
+    def test_the_set_REPORTS_a_synonym_it_does_not_list(self, db_session):
+        db = db_session
+        _set, (positive, negative, neutral), synonym = self._with_synonym(db, 82)
+        warnings = cs.set_composition_warnings(
+            [positive, negative, neutral],
+            effective_map=build_effective_code_map(db, 82),
+            codes_by_id={c.id: c for c in (positive, negative, neutral, synonym)},
+        )
+        assert len(warnings) == 1
+        assert "“Pos”" in warnings[0] and "“Positive”" in warnings[0]
+        assert "choosing another value clears it" in warnings[0]
+
+    def test_a_member_of_one_set_claims_its_OWN_set_first(self, db_session):
+        """Reachable from the equivalence side only (the set door refuses it):
+        a member of one set grouped into a value of another claims both, and an
+        apply of it swaps in the set it was deliberately put in."""
+        db = db_session
+        stance, (positive, _n, _u) = _stance_project(db, 83)
+        tone = CodeSet(id=8301, project_id=83, label="Tone")
+        db.add(tone)
+        db.flush()
+        warm = _code(db, 8311, 83, 50, "Warm", code_set_id=tone.id)
+        _code(db, 8312, 83, 51, "Cold", code_set_id=tone.id)
+        _group(db, 8300, 83, positive, warm)
+        index = _index(db, 83)
+        assert warm.id in index.by_id(stance.id).claimants
+        assert warm.id in index.by_id(tone.id).claimants
+        assert index.set_claimed_by(warm.id).id == tone.id
+
+    def test_the_claimants_ride_the_list_payload(self, db_session):
+        from app.routers.code_sets import list_code_sets
+
+        db = db_session
+        code_set, (positive, negative, neutral), synonym = self._with_synonym(db, 84)
+        listed = list_code_sets(project_id=84, user=db.get(User, 1), db=db)
+        claimants = {c.code_id: c.value_id for c in listed.sets[0].claimants}
+        assert claimants == {
+            positive.id: positive.id, negative.id: negative.id,
+            neutral.id: neutral.id, synonym.id: positive.id,
+        }
+
+
+# ── 6c. #1028(a) — EVERY apply door is exclusive, not only the set's own ──────
+
+
+def _seg_apply(db, uid, segment_id, code_id):
+    import asyncio
+    from app.routers.coding import apply_code
+
+    return asyncio.run(apply_code(segment_id, code_id, None, user=db.get(User, uid), db=db))
+
+
+def _seg_bulk(db, uid, segment_ids, code_id, action="apply"):
+    import asyncio
+    from app.routers.coding import bulk_code
+    from app.schemas.coding import BulkCodeRequest
+
+    return asyncio.run(bulk_code(
+        BulkCodeRequest(segment_ids=segment_ids, code_id=code_id, action=action),
+        user=db.get(User, uid), db=db,
+    ))
+
+
+class TestEveryApplyDoorIsExclusive:
+    """#1028(a): only the strip swapped. A chord, a click in the code list, the
+    context menu, *+ Add code* and a bulk apply all went through `apply_code` /
+    `bulk_code`, which ADDED a second value — executed by the audit: the coder
+    held both, `selection_for` = −2, `n_multiple_selection` = 1, and no consensus
+    row was written on the unit. The rule now holds at the door they share.
+
+    ⚠️ Every endpoint here is `async def` and awaits nothing, so it is wrapped in
+    `asyncio.run` — unlike the two selection endpoints above, which are `def`.
+    """
+
+    def test_applying_a_value_REPLACES_the_coders_other_value(self, db_session):
+        db = db_session
+        code_set, (positive, negative, _u) = _stance_project(db, 90)
+        _coder(db, 2, "alice")
+        _seg_apply(db, 2, 9000, positive.id)
+        response = _seg_apply(db, 2, 9000, negative.id)
+        assert _held(db, 2, 9000) == {negative.id}
+        assert response.replaced_code_ids == [positive.id]
+        resolved = _index(db, 90).by_id(code_set.id)
+        assert cs.selection_for(_held(db, 2, 9000), resolved) == negative.id
+
+    def test_the_contradiction_no_longer_reaches_the_statistic(self, db_session):
+        """The audit's own measurement, entered at the endpoint: before the fix
+        this unit counted in `n_multiple_selection` and the coder dropped out."""
+        db = db_session
+        _set, (positive, negative, _u) = _stance_project(db, 91)
+        _coder(db, 2, "alice")
+        for seg in (9100, 9101):
+            _seg_apply(db, 1, seg, positive.id)
+            _seg_apply(db, 2, seg, positive.id)
+        _seg_apply(db, 2, 9100, negative.id)
+        row = compute_irr(db, 91)["set_agreement"][0]
+        assert row["n_multiple_selection"] == 0
+
+    def test_it_never_touches_a_COLLEAGUES_value(self, db_session):
+        """⚠️ The caller is the HIGHER id: an unscoped delete keyed on the lowest
+        user's row would pass by luck (magnitude-coding.md §4)."""
+        db = db_session
+        _set, (positive, negative, _u) = _stance_project(db, 92)
+        _coder(db, 2, "alice")
+        _apply(db, positive.id, 1, 9200)
+        _apply(db, positive.id, 2, 9200)
+        _seg_apply(db, 2, 9200, negative.id)
+        assert _held(db, 1, 9200) == {positive.id}
+        assert _held(db, 2, 9200) == {negative.id}
+
+    def test_pressing_one_of_TWO_held_values_chooses_it(self, db_session):
+        """A contradiction (a merge, legacy data) resolved by the coder pressing
+        the value they mean — the one case where re-applying is not a no-op."""
+        db = db_session
+        _set, (positive, negative, _u) = _stance_project(db, 93)
+        _coder(db, 2, "alice")
+        _apply(db, positive.id, 2, 9300)
+        _apply(db, negative.id, 2, 9300)
+        response = _seg_apply(db, 2, 9300, positive.id)
+        assert _held(db, 2, 9300) == {positive.id}
+        assert response.replaced_code_ids == [negative.id]
+
+    def test_a_replacement_on_the_ALREADY_APPLIED_path_marks_the_passage_stale(self, db_session):
+        """That path returns early, and used to write only when a rating
+        changed — a value removed there moves the consensus and the scores just
+        the same, so it must say so to both markers (the every-mutation-site
+        rule). Two roster coders, so consensus is enabled."""
+        from app.models.consensus_stale_target import ConsensusStaleTarget
+        from app.models.dataset import Dataset
+
+        db = db_session
+        _set, (positive, negative, _u) = _stance_project(db, 88)
+        _coder(db, 2, "alice")
+        table = Dataset(id=88, project_id=88, name="Participants", managed_kind="participants")
+        db.add(table)
+        db.flush()
+        _apply(db, positive.id, 2, 8800)
+        _apply(db, negative.id, 2, 8800)
+        _seg_apply(db, 2, 8800, positive.id)
+        assert db.query(ConsensusStaleTarget).filter(
+            ConsensusStaleTarget.segment_id == 8800,
+        ).count() == 1
+        db.refresh(table)
+        assert table.managed_stale is True
+
+    def test_the_swap_covers_every_sibling_of_a_GROUP(self, db_session):
+        db = db_session
+        _set, (positive, negative, _u) = _stance_project(db, 94)
+        db.add(SegmentGroup(id=9400, conversation_id=94))
+        db.flush()
+        for sid in (9400, 9401):
+            db.get(Segment, sid).group_id = 9400
+        db.flush()
+        _coder(db, 2, "alice")
+        _seg_apply(db, 2, 9400, positive.id)  # fans out to 9401
+        _seg_apply(db, 2, 9401, negative.id)
+        assert _held(db, 2, 9400) == {negative.id}
+        assert _held(db, 2, 9401) == {negative.id}
+
+    def test_a_SYNONYM_apply_replaces_the_other_value_too(self, db_session):
+        db = db_session
+        _set, (positive, negative, _u) = _stance_project(db, 95)
+        synonym = _code(db, 959, 95, 40, "Pos")
+        _group(db, 950, 95, positive, synonym)
+        _coder(db, 2, "alice")
+        _seg_apply(db, 2, 9500, negative.id)
+        response = _seg_apply(db, 2, 9500, synonym.id)
+        assert _held(db, 2, 9500) == {synonym.id}
+        assert response.replaced_code_ids == [negative.id]
+
+    def test_an_ORDINARY_code_costs_no_set_query(self, db_session, monkeypatch):
+        """The hot path: a code in no set and no group can count in no set, so
+        a chord on it must not build the index."""
+        db = db_session
+        _set, (positive, _n, _u) = _stance_project(db, 96)
+        ordinary = _code(db, 969, 96, 40, "Mentions policy")
+        _seg_apply(db, 1, 9600, positive.id)
+
+        def boom(*_a, **_k):
+            raise AssertionError("an ordinary code built the code-set index")
+
+        monkeypatch.setattr(cs, "build_code_set_index", boom)
+        response = _seg_apply(db, 1, 9600, ordinary.id)
+        assert response.replaced_code_ids == []
+        assert _held(db, 1, 9600) == {positive.id, ordinary.id}
+
+    def test_the_audit_entry_names_what_the_apply_replaced(self, db_session):
+        """Provenance (the third of the five questions): which of the coder's
+        judgements a keypress overwrote is recorded, not only the new one."""
+        import json
+        from app.models.audit import AuditEntry
+
+        db = db_session
+        _set, (positive, negative, _u) = _stance_project(db, 97)
+        _seg_apply(db, 1, 9700, positive.id)
+        _seg_apply(db, 1, 9700, negative.id)
+        details = [
+            json.loads(e.details) for e in db.query(AuditEntry).filter(
+                AuditEntry.action == "code_applied",
+            ).all()
+        ]
+        assert details[-1]["replaced_code_ids"] == [positive.id]
+        assert "replaced_code_ids" not in details[0]
+
+    def test_a_BULK_apply_replaces_per_segment_and_says_which(self, db_session):
+        db = db_session
+        _set, (positive, negative, neutral) = _stance_project(db, 98)
+        _coder(db, 2, "alice")
+        _apply(db, positive.id, 2, 9800)
+        _apply(db, negative.id, 2, 9802)  # already holds the value applied
+        _apply(db, neutral.id, 2, 9803)
+        response = _seg_bulk(db, 2, [9800, 9801, 9802, 9803], negative.id)
+        by_seg = {r.segment_id: r.replaced_code_ids for r in response.results}
+        assert by_seg == {9800: [positive.id], 9801: [], 9802: [], 9803: [neutral.id]}
+        for seg in (9800, 9801, 9802, 9803):
+            assert _held(db, 2, seg) == {negative.id}
+
+    def test_a_bulk_REMOVE_replaces_nothing(self, db_session):
+        db = db_session
+        _set, (positive, negative, _u) = _stance_project(db, 99)
+        _apply(db, positive.id, 1, 9900)
+        _seg_bulk(db, 1, [9900], negative.id, action="remove")
+        assert _held(db, 1, 9900) == {positive.id}
+
+
+def _text_cell(db, pid, n=2):
+    from app.models.dataset import (
+        ColumnType, Dataset, DatasetColumn, DatasetRow, DatasetValue,
+    )
+
+    db.add(Dataset(id=pid, project_id=pid, name="Survey"))
+    db.flush()
+    db.add(DatasetColumn(
+        id=pid, dataset_id=pid, column_code="Q1", column_name="Q1", column_text="Open",
+        column_type=ColumnType.OPEN_TEXT, sequence_order=0, display_order=0,
+    ))
+    db.flush()
+    cells = []
+    for i in range(n):
+        db.add(DatasetRow(id=pid * 10 + i, dataset_id=pid, row_identifier=f"R{i}"))
+        db.flush()
+        db.add(DatasetValue(id=pid * 100 + i, row_id=pid * 10 + i, column_id=pid, value_text="a"))
+        db.flush()
+        cells.append(pid * 100 + i)
+    return cells
+
+
+def _text_held(db, uid, cell):
+    return {
+        r.code_id for r in db.query(CodeApplication).filter(
+            CodeApplication.dataset_value_id == cell, CodeApplication.user_id == uid,
+        ).all()
+    }
+
+
+class TestTheTextCodingDoorsAreExclusive:
+    """The fourth surface's two apply doors, body-keyed on the cell."""
+
+    def test_applying_a_value_REPLACES_the_coders_other_value(self, db_session):
+        import asyncio
+        from app.routers.text_coding import apply_code
+        from app.schemas.text_coding import TextCodeRequest
+
+        db = db_session
+        _set, (positive, negative, _u) = _stance_project(db, 100)
+        _coder(db, 2, "alice")
+        (cell, _other) = _text_cell(db, 100)
+        _apply_text = lambda code: asyncio.run(apply_code(  # noqa: E731
+            100, TextCodeRequest(dataset_value_id=cell, code_id=code.id),
+            user=db.get(User, 2), db=db,
+        ))
+        _apply_text(positive)
+        response = _apply_text(negative)
+        assert _text_held(db, 2, cell) == {negative.id}
+        assert response.replaced_code_ids == [positive.id]
+
+    def test_a_replacement_on_the_ALREADY_APPLIED_path_marks_the_response_stale(self, db_session):
+        """The segment twin's rule on this door (found by a SURVIVING mutant:
+        nothing pinned it here)."""
+        import asyncio
+        from app.models.consensus_stale_target import ConsensusStaleTarget
+        from app.models.dataset import Dataset
+        from app.routers.text_coding import apply_code
+        from app.schemas.text_coding import TextCodeRequest
+
+        db = db_session
+        _set, (positive, negative, _u) = _stance_project(db, 102)
+        _coder(db, 2, "alice")
+        (cell, _other) = _text_cell(db, 102)
+        table = Dataset(id=1029, project_id=102, name="Participants", managed_kind="participants")
+        db.add(table)
+        db.add(CodeApplication(code_id=positive.id, user_id=2, dataset_value_id=cell))
+        db.add(CodeApplication(code_id=negative.id, user_id=2, dataset_value_id=cell))
+        db.flush()
+        response = asyncio.run(apply_code(
+            102, TextCodeRequest(dataset_value_id=cell, code_id=positive.id),
+            user=db.get(User, 2), db=db,
+        ))
+        assert response.replaced_code_ids == [negative.id]
+        assert db.query(ConsensusStaleTarget).filter(
+            ConsensusStaleTarget.dataset_value_id == cell,
+        ).count() == 1
+        db.refresh(table)
+        assert table.managed_stale is True
+
+    def test_a_BULK_apply_replaces_per_response(self, db_session):
+        import asyncio
+        from app.routers.text_coding import bulk_code
+        from app.schemas.text_coding import BulkCodeRequest
+
+        db = db_session
+        _set, (positive, negative, _u) = _stance_project(db, 101)
+        (a, b) = _text_cell(db, 101)
+        db.add(CodeApplication(code_id=positive.id, user_id=1, dataset_value_id=a))
+        db.flush()
+        response = asyncio.run(bulk_code(
+            101, BulkCodeRequest(dataset_value_ids=[a, b], code_id=negative.id),
+            user=db.get(User, 1), db=db,
+        ))
+        by_cell = {r.dataset_value_id: r.replaced_code_ids for r in response.results}
+        assert by_cell == {a: [positive.id], b: []}
+        assert _text_held(db, 1, a) == {negative.id}
+
+
 # ── 7. Portability — the two formats a set has to survive ────────────────────
 
 

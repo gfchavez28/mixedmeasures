@@ -195,8 +195,14 @@ export function ValueLabelRows({
                   />
                 </td>
                 <td className="py-1 px-2">
+                  {/* Named by its ROW, like the code box beside it (#1104 ⚪).
+                      "Label for code N" borrowed the row number while the code
+                      was empty — a fifth blank row read "Label for code 5" next
+                      to a real code 5 — and renamed itself as the code was
+                      typed: changing state in a name (#770). The code is the
+                      value of the box beside it. */}
                   <Input
-                    aria-label={`Label for code ${r.code || i + 1}`}
+                    aria-label={`Label for row ${i + 1}`}
                     {...rowAria(i)}
                     value={r.label}
                     placeholder="e.g. Not at all"

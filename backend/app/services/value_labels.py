@@ -12,15 +12,24 @@ changes. Declaring a level nobody chose (#577) is free: it lands in
 ``scale_labels``, which the frequency computer already zero-fills.
 
 Key on ``value_numeric`` (the code), falling back to parsing ``value_text`` — so
-re-applying (or editing a label) is robust: the code is stable, only the label
-text moves. Observed codes the user did NOT declare are left numeric+unlabelled
-and RETURNED, never destroyed (the researcher decides whether to add them).
+re-applying (or editing a label's WORDING) is robust: the code is stable, only
+the label text moves. Observed codes the user did NOT declare are left
+numeric+unlabelled and RETURNED, never destroyed (the researcher decides whether
+to add them).
+
+🔴 **Changing a NUMBER is not a wording edit (#1104).** Keyed on the code, a
+renumber of a column imported from TEXT rewrote every answer (1–5 → 0–4 moved
+each one up a category). An edit that would change what someone answered is now
+refused before anything is written — ``answer_rewrite_violation`` — and the
+safe renumber is the column's recode rule, keyed on the answer's text.
 """
 
 import json
 import logging
 import math
+from typing import NamedTuple
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..models.dataset import (
@@ -36,9 +45,10 @@ from ..services.dataset_import import (
     _compute_value_numeric,
 )
 from ..services.missing_values import (
+    column_missing_rules,
+    is_declaration,
     is_missing,
     matched_missing_label,
-    parse_missing_rules,
 )
 from ..services.recode_dependents import (
     dead_definitions_for_column,
@@ -51,13 +61,17 @@ logger = logging.getLogger(__name__)
 class ValueLabelsBlockedError(ValueError):
     """Refused: this column cannot take a declared code→label dictionary.
 
-    Two reasons today, both raised from ``apply_value_labels`` so they hold for
+    Four reasons today, all raised from ``apply_value_labels`` so they hold for
     EVERY caller rather than only the ones that pass a router:
 
     * its ``value_numeric`` is a DERIVED score, not the code — a REVERSE primary
       (#585, see ``blocking_reverse_primary``);
+    * its stored numbers are some other recode's output (#793, see
+      ``code_identity_violation``);
     * its TYPE is in ``VALUE_LABEL_INELIGIBLE_TYPES`` — open text or an
-      identifier (#589).
+      identifier (#589);
+    * the EDIT would change what someone answered (#1104, see
+      ``answer_rewrite_violation``).
 
     One class rather than two because the outcome is identical (400 with the
     message shown verbatim); the message is what distinguishes them. A
@@ -154,6 +168,62 @@ def blocking_reverse_primary(db: Session, column: DatasetColumn):
     )
 
 
+def _match_key(text: str) -> str:
+    """An answer or a label as the WRITERS compare them: stripped, lower-cased."""
+    return text.strip().lower()
+
+
+_UNSEEN = object()
+
+
+def text_code_resolver(label_to_code: dict[str, float]):
+    """How an answer's TEXT names a code under ``label_to_code`` — asked the way
+    the cells were NUMBERED, for the guards that judge them (#1107).
+
+    🔴 **The writers compare without case.** The import
+    (``dataset_import._compute_value_numeric``) and the recode rule
+    (``recode.plan_definition_over_column``) both number a cell by comparing
+    ``text.strip().lower()`` with each label lower-cased, so a survey's
+    "Strongly disagree" is stored under the library's "Strongly Disagree". A
+    guard that asks "which number does this text name?" by exact text sees no
+    claim where the writer made one: #1104's checks did, and let a renumbering
+    through on every file whose answers are not capitalised like the labels.
+
+    Three rungs, in order:
+
+      1. the exact text, then the stripped text — what the guards always asked,
+         kept first so nothing that resolved before resolves differently;
+      2. the folded text against the folded labels — the writers' rule. A folded
+         key two labels share with DIFFERENT codes (a dictionary holding both
+         "Yes" and "yes") names neither: the text does not determine a number,
+         so it makes no claim;
+      3. the text parsed as a bare number — the coded column's answer.
+
+    Returns ``(code, label)`` — ``label`` is None on the bare-number rung — or
+    None when the text makes no claim. Built once per dictionary.
+    """
+    folded: dict[str, tuple[float, str] | None] = {}
+    for label, code in label_to_code.items():
+        key = _match_key(label)
+        prev = folded.get(key, _UNSEEN)
+        if prev is _UNSEEN:
+            folded[key] = (code, label)
+        elif prev is not None and prev[0] != code:
+            folded[key] = None
+
+    def resolve(value_text: str) -> tuple[float, str | None] | None:
+        for key in (value_text, value_text.strip()):
+            if key in label_to_code:
+                return label_to_code[key], key
+        hit = folded.get(_match_key(value_text))
+        if hit is not None:
+            return hit
+        parsed = _strip_numeric(value_text)
+        return None if parsed is None else (parsed, None)
+
+    return resolve
+
+
 def column_label_to_code(column: DatasetColumn) -> dict[str, float]:
     """The column's own ``{label: code}`` dictionary, from its scale metadata.
 
@@ -183,6 +253,8 @@ def code_identity_violation(
     column: DatasetColumn,
     distinct_pairs: list,
     missing_rules: list | None,
+    *,
+    label_to_code: dict[str, float] | None = None,
 ) -> dict | None:
     """The first cell whose stored code its own TEXT does not imply, or None.
 
@@ -204,11 +276,14 @@ def code_identity_violation(
     made #585's guard miss #793.
 
     Two sources for "the code this text represents", in the order the identity
-    rule itself reaches for them:
+    rule itself reaches for them (both through ``text_code_resolver``):
 
       1. the column's declared scale metadata (label → code) — the labelled
          column's answer, and what recognises a REVERSE (its metadata stays in
-         FORWARD codes while its cells hold reflected scores);
+         FORWARD codes while its cells hold reflected scores). 🔴 **Matched the
+         way the cells were numbered — without case (#1107)**: an exact-only
+         lookup found no claim in "Strongly disagree" under the label "Strongly
+         Disagree", which is the ordinary state of a survey imported as text;
       2. the text parsed as a bare number — the coded column's answer, and what
          catches #793's flagship case (`("1", 5.0)` under a flipping primary).
 
@@ -223,25 +298,29 @@ def code_identity_violation(
     falsy-zero trap, the same one ``effective_reverse_offset`` documents.
 
     Returns the first violation as ``{"value_text", "stored_code",
-    "text_implies"}`` — the first, not all of them, because the caller refuses
-    the whole operation and one concrete example is what makes the refusal
-    legible to a researcher.
+    "text_implies", "label"}`` — the first, not all of them, because the caller
+    refuses the whole operation and one concrete example is what makes the
+    refusal legible to a researcher. ``label`` is the dictionary label the text
+    was read as (None when it was read as a bare number), so a refusal can name
+    the label even when it is capitalised differently from the answer.
+
+    ``label_to_code`` defaults to the column's OWN metadata, which is the #793
+    question: is the column sound as it stands? #1104 asks the same question of
+    the state an edit WOULD leave, so it passes the NEW dictionary instead
+    (``answer_rewrite_violation``).
     """
-    label_to_code = column_label_to_code(column)
+    if label_to_code is None:
+        label_to_code = column_label_to_code(column)
+    resolve = text_code_resolver(label_to_code)
     for value_text, value_numeric in distinct_pairs:
         if value_numeric is None or not value_text or not value_text.strip():
             continue
         if is_missing(value_text, missing_rules):
             continue
-        implied = None
-        for key in (value_text, value_text.strip()):
-            if key in label_to_code:
-                implied = label_to_code[key]
-                break
-        if implied is None:
-            implied = _strip_numeric(value_text)
-        if implied is None:
+        hit = resolve(value_text)
+        if hit is None:
             continue
+        implied, label = hit
         # Codes are exact in practice; the tolerance guards a float round-trip
         # and is far too tight to absorb a real off-by-one.
         if not math.isclose(implied, float(value_numeric), rel_tol=0.0, abs_tol=1e-9):
@@ -249,6 +328,7 @@ def code_identity_violation(
                 "value_text": value_text,
                 "stored_code": float(value_numeric),
                 "text_implies": implied,
+                "label": label,
             }
     return None
 
@@ -261,6 +341,219 @@ def _code_for_message(code: float) -> str:
     this one only ever formats prose.
     """
     return f"{code:g}"
+
+
+# ── What applying a dictionary does to each cell group (#1104) ────────────────
+
+
+class _PlannedPair(NamedTuple):
+    """One distinct ``(value_text, value_numeric)`` group the code-identity rule
+    gives a code, and the declared label it will carry (None = its code is not
+    declared: the text stays, and the number is re-stamped from it if absent)."""
+
+    value_text: str | None
+    value_numeric: float | None
+    code: float
+    label: str | None
+
+
+class _CellPlan(NamedTuple):
+    pairs: list[_PlannedPair]
+    # MISSING texts: never relabelled, never re-stamped (#592 §I.3).
+    na_texts: set[str]
+    # Every non-missing answer text → the numbers it is stored under (None =
+    # an answer with no number, e.g. the midpoint #1102 left unnumbered).
+    answer_texts: dict[str, set[float | None]]
+
+
+def _plan_cells(distinct_pairs: list, code_to_label: dict[float, str],
+                missing_rules: list | None) -> _CellPlan:
+    """What ``apply_value_labels`` will do to each distinct cell group.
+
+    🔴 **The ONE place the code-identity rule is applied.** The write loop
+    executes this plan and ``answer_rewrite_violation`` judges it, so the guard
+    can never pass or refuse a different operation from the one that runs — a
+    check computed by different code from the write is a check that can be
+    wrong (#795).
+    """
+    pairs: list[_PlannedPair] = []
+    na_texts: set[str] = set()
+    answer_texts: dict[str, set[float | None]] = {}
+    for vt, vn in distinct_pairs:
+        if vt and is_missing(vt, missing_rules):
+            # #592 §I.3 — the resurrection fix: a missing cell (declared, or
+            # the defaults when undeclared) is never re-stamped with a numeric
+            # and never relabelled. Pre-fix, a declared-missing bare-code cell
+            # ("99", vn NULL after the declare pass) had its code recovered
+            # from value_text and written back — a label re-apply silently
+            # undid the declaration.
+            na_texts.add(vt.strip())
+            continue
+        if vt and vt.strip():
+            answer_texts.setdefault(vt, set()).add(None if vn is None else float(vn))
+        # The code-identity rule (was `_code_key`): the code a cell represents
+        # is value_numeric when set (already the code after import/#580, and
+        # unchanged by a prior relabel), else the parsed text; blank /
+        # non-numeric → no identity, skip. ⚠️ Assumes value_numeric IS the raw
+        # code — a REVERSE primary breaks that (it stores the reflected
+        # score); `blocking_reverse_primary` refuses such a column before this
+        # runs. Do not relax that guard without giving this rule a way to
+        # recover the forward code (#585).
+        code = vn if vn is not None else (_strip_numeric(vt) if vt else None)
+        if code is None:
+            continue
+        code = float(code)
+        pairs.append(_PlannedPair(vt, vn, code, code_to_label.get(code)))
+    return _CellPlan(pairs, na_texts, answer_texts)
+
+
+def answer_rewrite_violation(
+    column: DatasetColumn,
+    plan: _CellPlan,
+    code_to_label: dict[float, str],
+    missing_rules: list | None,
+) -> dict | None:
+    """The first way this dictionary would change what someone ANSWERED, or None.
+
+    🔴 **#1104.** The rows arrive as final ``(code, label)`` pairs and the plan
+    reads them by CODE: "code 3 now reads …". That is right when the number is
+    the datum (a bare-code CSV, a `.sav`) and wrong when the ANSWER is — a column
+    imported from text — and the two are byte-identical at rest (#575's design),
+    so no rule the service could pick silently is safe for both. An edit that
+    could only mean one of two opposite things is REFUSED instead, and the
+    refusal names the safe way to renumber (the column's recode rule, which is
+    keyed on the answer's text). Nothing is written first.
+
+    Two checks, and neither covers the other (each has a fixture only it
+    catches):
+
+      1. **merge** — an answer's text would become a text this variable already
+         holds under a DIFFERENT number: another category's label, or an answer
+         with no number. Renumbering 1–5 → 0–4 in place is this (every
+         "Disagree", 2, would read "Neither agree nor disagree", which is 3's),
+         and so is swapping two labels. Rewording a label into NEW text is not,
+         and neither is unifying two spellings already stored under the SAME
+         number (what a recode-rule repair of #1102 leaves behind).
+      2. **contradiction** — afterwards an answer's text would name a different
+         number in the NEW dictionary from the one it is stored under.
+         Renumbering to numbers nobody holds (1–5 → 11–15) rewrites no text, so
+         check 1 cannot see it, yet it leaves "Agree" stored as 4 beside a
+         dictionary saying 14: the next label-format append stores 14 beside the
+         old 4s, and #793 then refuses every further edit of the column. This is
+         ``code_identity_violation`` asked of the state the edit would LEAVE.
+
+    ⚠️ **A cell whose text is its own number is never a merge.** A bare code
+    ("2" stored as 2) carries no wording, so labelling it declares what the
+    number means — the feature this editor exists for (#576) — even when the
+    label is a text other cells already hold.
+
+    ⚠️ **The dictionary's OLD labels count as holders even with no answers**, so
+    a shift over a scale where only one category was chosen is still refused:
+    with cells alone, the 1–5 → 0–4 shift of a column whose every answer is
+    "Disagree" would read as a harmless rename to "Neither …".
+
+    🔴 **"A text this variable already holds" is judged WITHOUT CASE (#1107)** —
+    the way the cells were numbered (``text_code_resolver``). "agree" and the
+    unchosen label "Agree" are one answer to the import, so relabelling the
+    "disagree" answers as "agree" makes them read as that category; an exact
+    comparison saw two different texts and let it through. The contradiction
+    check cannot catch that one, because no cell holds the unchosen label.
+    """
+    holders: dict[str, set[float | None]] = {}
+    for text, numbers in plan.answer_texts.items():
+        holders.setdefault(_match_key(text), set()).update(numbers)
+    for label, code in column_label_to_code(column).items():
+        holders.setdefault(_match_key(label), set()).add(float(code))
+
+    for p in plan.pairs:
+        if p.label is None or p.label == p.value_text:
+            continue
+        text = p.value_text
+        if not text or not text.strip() or _strip_numeric(text) == p.code:
+            continue
+        elsewhere = holders.get(_match_key(p.label), set()) - {p.code}
+        if elsewhere:
+            return {
+                "kind": "merge",
+                "value_text": text,
+                "value_numeric": p.value_numeric,
+                "code": p.code,
+                "label": p.label,
+                "held_under": elsewhere,
+            }
+
+    after = [(p.label if p.label is not None else p.value_text, p.code) for p in plan.pairs]
+    clash = code_identity_violation(
+        column, after, missing_rules,
+        label_to_code={label: code for code, label in code_to_label.items()},
+    )
+    if clash is not None:
+        return {"kind": "contradiction", **clash}
+    return None
+
+
+def _answer_rewrite_message(db: Session, column: DatasetColumn, found: dict) -> str:
+    """The #1104 refusal, written as guidance: it is shown to the researcher
+    verbatim, so it says what would have happened, that nothing did, and where
+    renumbering is done safely."""
+    if found["kind"] == "merge":
+        vn = found["value_numeric"]
+        count = (
+            db.query(func.count(DatasetValue.id))
+            .filter(
+                DatasetValue.column_id == column.id,
+                DatasetValue.value_text == found["value_text"],
+                (DatasetValue.value_numeric.is_(None) if vn is None
+                 else DatasetValue.value_numeric == vn),
+            )
+            .scalar()
+        )
+        numbered = sorted(n for n in found["held_under"] if n is not None)
+        if numbered:
+            where = (
+                f"the number {_code_for_message(numbered[0])}" if len(numbered) == 1
+                else "the numbers " + ", ".join(_code_for_message(n) for n in numbered)
+            )
+        else:
+            where = "answers that have no number"
+        what = (
+            f"every “{found['value_text']}” answer ({count} in all, stored as number "
+            f"{_code_for_message(found['code'])}) would read “{found['label']}”, which "
+            f"this variable already uses for {where}"
+        )
+    else:
+        text = found["value_text"]
+        # Name the label that claims the answer (#1107): it can be capitalised
+        # differently from the answer ("Strongly Disagree" for "Strongly
+        # disagree"), and a researcher looking down the rows for the answer's
+        # own spelling would not find it.
+        label = found.get("label")
+        claim = (
+            f"the label “{label}” would give them the number "
+            if label is not None
+            else f"these labels would give “{text}” the number "
+        )
+        what = (
+            f"answers “{text}” are stored as {_code_for_message(found['stored_code'])}, "
+            f"but {claim}{_code_for_message(found['text_implies'])}, so the numbers and "
+            "the labels would disagree"
+        )
+
+    primary = (
+        db.query(RecodeDefinition)
+        .filter(
+            RecodeDefinition.column_id == column.id,
+            RecodeDefinition.is_primary == True,  # noqa: E712
+        )
+        .first()
+    )
+    rule = f"its recode rule “{primary.name}”" if primary is not None else "a recode rule"
+    return (
+        f"Nothing was changed. These labels would change what people answered: {what}. "
+        f"To renumber answers, change the numbers in {rule} (under Recode rules "
+        "on this variable's page) — that keeps every answer as written. To change "
+        "what a label says, change only its wording."
+    )
 
 
 # ── Shared code↔label cell substitution (retro / import / append single-source) ──
@@ -328,7 +621,7 @@ def resolve_labelled_cell(
     """
     if not cell:
         return "", None
-    if missing_rules is not None and is_missing(cell, missing_rules):
+    if is_declaration(missing_rules) and is_missing(cell, missing_rules):
         label = matched_missing_label(cell, missing_rules)
         return (label if label is not None else cell), None
     vn = _compute_value_numeric(cell, column_type, scale_labels, scale_values,
@@ -358,10 +651,11 @@ def apply_value_labels(
     cells keep their raw value + numeric code, nothing is nulled).
 
     Raises ``ValueLabelsBlockedError`` when a REVERSE primary owns the column (see
-    ``blocking_reverse_primary``) or when the column's TYPE cannot carry labels
-    (#589). Checked HERE rather than only at the router because the router's
-    guards are bypassable — the import path calls this service directly via
-    ``cells_are_codes`` and never sees them.
+    ``blocking_reverse_primary``), when its stored numbers are another recode's
+    output (#793), when the column's TYPE cannot carry labels (#589), or when the
+    edit would change what someone answered (#1104). Checked HERE rather than
+    only at the router because the router's guards are bypassable — the import
+    path calls this service directly via ``cells_are_codes`` and never sees them.
     """
     # #589: the type gate lives on the OPERATION, not only at the router that
     # happens to be the human entry point. `import_dataset_csv`'s post-pass
@@ -409,7 +703,7 @@ def apply_value_labels(
     # arrived is not this relabel's doing.
     dead_before = dead_definitions_for_column(db, column)
 
-    missing_rules = parse_missing_rules(column.missing_values)
+    missing_rules = column_missing_rules(column)
     missing_skipped: list[float] = []
     code_to_label: dict[float, str] = {}
     for code, label in pairs:
@@ -480,6 +774,14 @@ def apply_value_labels(
             "definition primary), apply the labels, then re-apply it."
         )
 
+    # #1104: the column is sound as it stands (#793 above); now ask whether the
+    # EDIT would change what anyone answered. Judged on the same plan the loop
+    # below executes, before a single UPDATE.
+    plan = _plan_cells(distinct_pairs, code_to_label, missing_rules)
+    rewrite = answer_rewrite_violation(column, plan, code_to_label, missing_rules)
+    if rewrite is not None:
+        raise ValueLabelsBlockedError(_answer_rewrite_message(db, column, rewrite))
+
     def _pair_update(vt, vn, target: dict) -> int:
         q = db.query(DatasetValue).filter(
             DatasetValue.column_id == column.id,
@@ -492,43 +794,22 @@ def apply_value_labels(
 
     updated = 0
     unlabeled: set[float] = set()
-    na_texts: set[str] = set()
-    for vt, vn in distinct_pairs:
-        if vt and is_missing(vt, missing_rules):
-            # #592 §I.3 — the resurrection fix: a missing cell (declared, or
-            # the defaults when undeclared) is never re-stamped with a numeric
-            # and never relabelled. Pre-fix, a declared-missing bare-code cell
-            # ("99", vn NULL after the declare pass) had its code recovered
-            # from value_text and written back — a label re-apply silently
-            # undid the declaration.
-            na_texts.add(vt.strip())
-            continue
-        # The code-identity rule (was `_code_key`): the code a cell represents
-        # is value_numeric when set (already the code after import/#580, and
-        # unchanged by a prior relabel), else the parsed text; blank /
-        # non-numeric → no identity, skip. ⚠️ Assumes value_numeric IS the raw
-        # code — a REVERSE primary breaks that (it stores the reflected
-        # score); `blocking_reverse_primary` refuses such a column before this
-        # runs. Do not relax that guard without giving this rule a way to
-        # recover the forward code (#585).
-        code = vn if vn is not None else (_strip_numeric(vt) if vt else None)
-        if code is None:
-            continue
-        code = float(code)
-        label = code_to_label.get(code)
-        if label is not None:
+    na_texts = plan.na_texts
+    for p in plan.pairs:
+        if p.label is not None:
             # The code is authoritative; keep it in value_numeric.
             updated += _pair_update(
-                vt, vn,
-                {DatasetValue.value_text: label,
-                 DatasetValue.value_numeric: code},
+                p.value_text, p.value_numeric,
+                {DatasetValue.value_text: p.label,
+                 DatasetValue.value_numeric: p.code},
             )
         else:
-            unlabeled.add(code)
-            if vn != code:
+            unlabeled.add(p.code)
+            if p.value_numeric != p.code:
                 # Re-stamp the parsed code on unlabelled numeric-text cells
                 # (the per-object loop always wrote it; skip the no-op case).
-                _pair_update(vt, vn, {DatasetValue.value_numeric: code})
+                _pair_update(p.value_text, p.value_numeric,
+                             {DatasetValue.value_numeric: p.code})
 
     # Scale metadata = the DECLARED dictionary, ordered by code (the numeric-aware
     # order every consumer expects). Codes store as ints when integral (#28 parity).

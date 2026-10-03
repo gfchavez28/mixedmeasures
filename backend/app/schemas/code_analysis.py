@@ -10,6 +10,10 @@ class CoderCoverageItem(BaseModel):
     username: str
     display_color: str | None = None
     archived: bool = False
+    #: #1030 — `human` · `ai`. Lets a surface ask whether a MODEL coded this
+    #: project/source without the install-wide roster, and names an archived
+    #: machine as a machine (the roster excludes archived coders).
+    coder_type: str = "human"
 
 
 class CoderCoverageResponse(BaseModel):

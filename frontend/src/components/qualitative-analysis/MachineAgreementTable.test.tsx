@@ -25,13 +25,13 @@ import MachineAgreementTable from './MachineAgreementTable'
 
 afterEach(() => { cleanup(); machineAgreement.mockReset() })
 
-function renderTable() {
+function renderTable(humanId: number | null = null) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
   return render(
     <QueryClientProvider client={client}>
-      <MachineAgreementTable projectId={1} />
+      <MachineAgreementTable projectId={1} humanId={humanId} />
     </QueryClientProvider>,
   )
 }
@@ -178,5 +178,33 @@ describe('when there is nothing to show', () => {
     expect(
       await screen.findByText(/could not be loaded/i),
     ).toBeInTheDocument()
+  })
+})
+
+describe('#1030 — the person scope reaches the request', () => {
+  it('no scope asks for every person', async () => {
+    machineAgreement.mockResolvedValue({ available: false, unavailable_reason: 'no_shared_source', pairs: [] })
+    renderTable(null)
+    await waitFor(() => expect(machineAgreement).toHaveBeenCalledWith(1, null))
+  })
+
+  it('a scope (blind mode) asks the SERVER for that person alone', async () => {
+    machineAgreement.mockResolvedValue({ available: false, unavailable_reason: 'no_shared_source', pairs: [] })
+    renderTable(3)
+    await waitFor(() => expect(machineAgreement).toHaveBeenCalledWith(1, 3))
+  })
+
+  it('the scope rides the query KEY: turning blind on re-asks rather than serving everyone from cache (#454)', async () => {
+    machineAgreement.mockResolvedValue({ available: false, unavailable_reason: 'no_shared_source', pairs: [] })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = (humanId: number | null) => (
+      <QueryClientProvider client={client}>
+        <MachineAgreementTable projectId={1} humanId={humanId} />
+      </QueryClientProvider>
+    )
+    const { rerender } = render(view(null))
+    await waitFor(() => expect(machineAgreement).toHaveBeenCalledWith(1, null))
+    rerender(view(3))
+    await waitFor(() => expect(machineAgreement).toHaveBeenCalledWith(1, 3))
   })
 })

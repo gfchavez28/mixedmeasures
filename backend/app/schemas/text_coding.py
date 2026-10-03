@@ -265,6 +265,10 @@ class TextCodeResponse(BaseModel):
     # #35 — this coder's rating, or None for UNRATED. Never coerce a None here
     # to 0 for the wire: the client renders the two differently on purpose.
     magnitude: float | None = None
+    # #1028 — the codes this apply REMOVED on this response because the applied
+    # code is a value of a code set and this coder held another value of it
+    # (`schemas/coding.py::CodeApplicationResponse`, the segment twin).
+    replaced_code_ids: list[int] = []
 
 
 class BulkCodeResponse(BaseModel):

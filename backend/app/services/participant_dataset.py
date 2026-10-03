@@ -66,6 +66,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sqlalchemy import (
+    Integer, and_, bindparam, delete, exists, insert, literal, or_, select, update,
+)
 from sqlalchemy.orm import Session
 
 from ..models.dataset import ColumnType, Dataset, DatasetColumn, DatasetRow, DatasetValue
@@ -374,6 +377,16 @@ def sync_rows(db: Session, dataset: Dataset) -> SyncReport:
     lock races DEC-C refused for consensus, and `GET …/data` is the endpoint that
     was paginated for scale (#800). The row set is a snapshot refreshed
     deliberately, exactly as the scores are.
+
+    🔴 **SET-BASED, because it runs inside the refresh's WRITE transaction
+    (#1033).** Once a refresh has written, SQLite holds its write lock until the
+    commit, and every other writer gives up after the 5 s busy timeout. This used
+    to load every participant and every row as an ORM object, flush once PER
+    inserted row, and bind every row id into one `IN (…)` — MEASURED on 122,382
+    participants: 105 s to build a new table and 6.5 s to find nothing to do, all
+    of it inside the lock. Each step is now one statement over the whole dataset
+    (or one `executemany`), and nothing here binds a list that grows with the
+    participants (the internal design notes).
     """
     if dataset.managed_kind != MANAGED_KIND_PARTICIPANTS:
         raise ValueError(
@@ -381,27 +394,86 @@ def sync_rows(db: Session, dataset: Dataset) -> SyncReport:
             f"managed_kind={dataset.managed_kind!r}"
         )
 
-    participants = {
-        p.id: p
-        for p in db.query(Participant).filter(
-            Participant.project_id == dataset.project_id
-        )
-    }
-    rows = db.query(DatasetRow).filter(DatasetRow.dataset_id == dataset.id).all()
+    # Push the caller's pending work before the statements below read around
+    # the ORM (`autoflush=False`) — and before `expire_all` at the end, which
+    # would otherwise discard it.
+    db.flush()
 
-    # (2) reap first: a row whose participant is gone, and any row the FK's
-    # SET NULL has already orphaned. Done BEFORE inserting so a participant that
-    # somehow held two rows cannot collide on the unique index.
-    removed = 0
-    for row in rows:
-        if row.participant_id is None or row.participant_id not in participants:
-            db.delete(row)
-            removed += 1
-    if removed:
-        db.flush()
-
-    live = {r.participant_id: r for r in rows if r.participant_id in participants}
+    dataset_id = dataset.id
+    project_id = dataset.project_id
+    rows_t = DatasetRow.__table__
+    values_t = DatasetValue.__table__
     column = _identifier_column(db, dataset)
+    column_id = column.id if column is not None else None
+
+    # ── READ first: every question below is answered before anything is written.
+    # 🔴 A statement that WRITES takes SQLite's lock even when it changes nothing
+    # — a `DELETE` or an `INSERT … SELECT` matching no row still begins a write
+    # transaction — so each write is issued only when these reads found work for
+    # it. A table where nothing changed takes no lock here at all (#1033).
+
+    # (2) reap: a row whose participant is gone, and any row the FK's SET NULL
+    # has already orphaned.
+    in_project = select(Participant.id).where(Participant.project_id == project_id)
+    orphaned = and_(
+        rows_t.c.dataset_id == dataset_id,
+        or_(
+            rows_t.c.participant_id.is_(None),
+            rows_t.c.participant_id.not_in(in_project),
+        ),
+    )
+    reap = db.execute(select(exists().where(orphaned))).scalar()
+
+    # (3) an identifier can be edited on the Participants page; the row label and
+    # the cell both follow it, or the table names people by a stale code. Asked
+    # of this project's participants' existing rows — a row (1) adds is born
+    # correct, and a row the reap removes is not relabelled first — as tuples.
+    current = select(
+        rows_t.c.id, rows_t.c.row_identifier, Participant.identifier,
+    ).join(
+        Participant,
+        and_(Participant.id == rows_t.c.participant_id, Participant.project_id == project_id),
+    )
+    if column_id is not None:
+        current = current.add_columns(values_t.c.id, values_t.c.value_text).outerjoin(
+            values_t,
+            and_(values_t.c.row_id == rows_t.c.id, values_t.c.column_id == column_id),
+        )
+    relabel_rows: list[dict] = []
+    relabel_cells: list[dict] = []
+    relabelled = 0
+    cell_missing = False
+    for row_id, row_identifier, identifier, *cell in db.execute(
+        current.where(rows_t.c.dataset_id == dataset_id)
+    ):
+        touched = False
+        if row_identifier != identifier:
+            relabel_rows.append({"b_id": row_id, "b_text": identifier})
+            touched = True
+        if column_id is not None:
+            cell_id, cell_text = cell
+            if cell_id is None:
+                cell_missing = touched = True  # written by the insert below
+            elif cell_text != identifier:
+                relabel_cells.append({"b_id": cell_id, "b_text": identifier})
+                touched = True
+        relabelled += touched
+
+    # (1) the missing, in a stable order so record identifiers are deterministic
+    # across a rebuild.
+    missing = db.execute(
+        select(Participant.id, Participant.identifier)
+        .where(
+            Participant.project_id == project_id,
+            ~exists().where(
+                rows_t.c.dataset_id == dataset_id,
+                rows_t.c.participant_id == Participant.id,
+            ),
+        )
+        .order_by(Participant.id)
+    ).all()
+
+    # ── WRITE only what the reads found.
 
     # #928 — repair a table built before the heading was disambiguated. Scoped to
     # headings THIS module wrote, so a researcher who renamed the column keeps
@@ -409,68 +481,56 @@ def sync_rows(db: Session, dataset: Dataset) -> SyncReport:
     # table showing the duplicate it was filed for.
     if column is not None and column.column_text in _LEGACY_IDENTIFIER_HEADINGS:
         column.column_text = PARTICIPANT_IDENTIFIER_COLUMN
+        db.flush()
 
-    # (1) insert the missing, in a stable order so record identifiers are
-    # deterministic across a rebuild.
-    added = 0
-    for participant_id in sorted(set(participants) - set(live)):
-        row = DatasetRow(
-            dataset_id=dataset.id,
-            participant_id=participant_id,
-            row_identifier=participants[participant_id].identifier,
+    # Reap BEFORE inserting, so a participant that somehow held two rows cannot
+    # collide on the unique index. The row's cells go with it by
+    # `ON DELETE CASCADE`, as they did under the ORM delete (`DatasetRow.values`
+    # is `passive_deletes`, #802).
+    removed = (db.execute(delete(rows_t).where(orphaned)).rowcount or 0) if reap else 0
+
+    if relabel_rows:
+        db.execute(
+            update(rows_t)
+            .where(rows_t.c.id == bindparam("b_id"))
+            .values(row_identifier=bindparam("b_text")),
+            relabel_rows,
         )
-        db.add(row)
-        db.flush()
-        live[participant_id] = row
-        added += 1
-        if column is not None:
-            db.add(DatasetValue(
-                row_id=row.id,
-                column_id=column.id,
-                value_text=participants[participant_id].identifier,
-            ))
-    # ⚠️ LOAD-BEARING. Production and tests both run `autoflush=False`, so the
-    # cells added above are INVISIBLE to the query in (3) until they are
-    # flushed — and (3) would then add a SECOND cell for the same
-    # `(row_id, column_id)`, which the unique index rejects at commit time with
-    # an IntegrityError far from its cause. Found by the tests below, not by
-    # reading; it is the #439/#440 family reached from the insert side.
-    if added:
-        db.flush()
+    if relabel_cells:
+        db.execute(
+            update(values_t)
+            .where(values_t.c.id == bindparam("b_id"))
+            .values(value_text=bindparam("b_text")),
+            relabel_cells,
+        )
 
-    # (3) an identifier can be edited on the Participants page; the row label and
-    # the cell both follow it, or the table names people by a stale code.
-    relabelled = 0
-    if live:
-        cells = {}
-        if column is not None:
-            cells = {
-                v.row_id: v
-                for v in db.query(DatasetValue).filter(
-                    DatasetValue.column_id == column.id,
-                    DatasetValue.row_id.in_([r.id for r in live.values()]),
-                )
-            }
-        for participant_id, row in live.items():
-            identifier = participants[participant_id].identifier
-            touched = False
-            if row.row_identifier != identifier:
-                row.row_identifier = identifier
-                touched = True
-            if column is not None:
-                cell = cells.get(row.id)
-                if cell is None:
-                    db.add(DatasetValue(
-                        row_id=row.id, column_id=column.id, value_text=identifier,
-                    ))
-                    touched = True
-                elif cell.value_text != identifier:
-                    cell.value_text = identifier
-                    touched = True
-            if touched:
-                relabelled += 1
+    # (1) ONE `executemany`: the Table's Python-side defaults (`uuid`,
+    # `created_at`) are applied per row, as the ORM applied them.
+    if missing:
+        db.execute(insert(rows_t), [
+            {"dataset_id": dataset_id, "participant_id": pid, "row_identifier": ident}
+            for pid, ident in missing
+        ])
 
-    db.flush()
+    # The identifier cell of every row that lacks one — a row (1) just added, or
+    # an older row missing it (counted by (3)). One `INSERT … SELECT`, so it
+    # binds no row ids, and the unique `(row_id, column_id)` index is never
+    # offered a duplicate.
+    if column_id is not None and (missing or cell_missing):
+        db.execute(
+            insert(values_t).from_select(
+                ["row_id", "column_id", "value_text"],
+                select(rows_t.c.id, literal(column_id, Integer), Participant.identifier)
+                .join(Participant, Participant.id == rows_t.c.participant_id)
+                .where(
+                    rows_t.c.dataset_id == dataset_id,
+                    ~exists().where(
+                        values_t.c.row_id == rows_t.c.id,
+                        values_t.c.column_id == column_id,
+                    ),
+                ),
+            )
+        )
 
     # (4) #897 — a row the researcher can type into. A variable they added here
     # is `source="manual"`, and `create_manual_column` only ever gives a cell to
@@ -481,6 +541,13 @@ def sync_rows(db: Session, dataset: Dataset) -> SyncReport:
     # ⚠️ Deliberately scoped to EVERY row, not the ones just added: this is a
     # RECONCILE like the three steps above it, so it also repairs a table that
     # already carries the gap. Bounded by the participant count.
-    materialise_manual_cells(db, dataset.id)
+    materialise_manual_cells(db, dataset_id)
 
-    return SyncReport(added=added, removed=removed, relabelled=relabelled)
+    # ⚠️ LOAD-BEARING. The statements above went around the identity map, so a
+    # row or cell the caller had already loaded would keep reading its old value
+    # for the rest of the session — and under `autoflush=False` a later query
+    # returns that stale object rather than the row it just changed. Everything
+    # pending was flushed at the top, so expiring discards nothing.
+    db.expire_all()
+
+    return SyncReport(added=len(missing), removed=removed, relabelled=relabelled)

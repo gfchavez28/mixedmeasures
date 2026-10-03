@@ -129,6 +129,20 @@ NUMERIC_COERCIBLE_TYPES = frozenset({
 })
 
 
+# TEXT_CODEABLE_TYPES — the columns Text Coding offers, i.e. the columns whose
+# cells a coding can be made on and SEEN. It lived as a router-local list
+# (`routers/helpers.py::TEXT_TYPES`, which is now built from this) until the bulk
+# coding import needed the same answer from a SERVICE (Batch 6): the import took
+# any column id, so a file could code an identifier or a numeric column's cells —
+# codings that no screen shows and nothing can remove (#987's UI-unreachable
+# class). ⚠️ Deliberately a separate set from `missing_values.FREE_TEXT_TYPES`
+# although both hold `open_text` today: "whose non-answers are whole stock
+# phrases" and "what Text Coding shows" are different questions.
+TEXT_CODEABLE_TYPES = frozenset({
+    ColumnType.OPEN_TEXT,
+})
+
+
 class Dataset(Base):
     """A dataset within a project (e.g. 'Board 360 Assessment')."""
     __tablename__ = "datasets"

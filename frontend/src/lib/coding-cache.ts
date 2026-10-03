@@ -37,6 +37,9 @@ export function invalidateDerivedCounts(
     ['code-sample-segments', projectId],
     ['irr', projectId],
     ['reconciliation', projectId],
+    // #1030 — the model comparison is a tab of its own now, opened straight after
+    // the coding import that fills it; a coding on either side moves its figures.
+    ['machine-agreement', projectId],
     // Group A (#1/#3/#13): per-source / per-project coder coverage — a coder's
     // first (or last) code on a source changes who's "active here".
     ['coder-coverage', projectId],
@@ -47,4 +50,25 @@ export function invalidateDerivedCounts(
   for (const key of keys) {
     qc.invalidateQueries({ queryKey: key })
   }
+}
+
+/**
+ * After a BULK coding import (row 49) — every query of this project, not the list above.
+ *
+ * 🔴 **#1038 (d): the list above is the set ONE coding moves on OTHER screens; an import
+ * moves every coding surface at once** — the code list's "N uses", the qualitative
+ * analysis frequencies, Text Coding's totals and gauges, the segment lists — and the page's
+ * finish offers *Open Qualitative Analysis*, whose frequencies had been served from the
+ * cache for up to a minute showing none of what was just imported. Naming each of those
+ * keys here would be the #450 hand-list again, one surface short the day a surface is added.
+ *
+ * Cheap for the reason the helper above is: an import runs from its own page, so nearly
+ * every one of these queries is INACTIVE — marked stale at no network cost and refetched
+ * when its screen opens. `String()` because a project id reaches keys as a number from the
+ * layout and as a string from a route param.
+ */
+export function invalidateAfterCodingImport(qc: QueryClient, projectId: number | string): void {
+  invalidateDerivedCounts(qc, projectId, { metrics: true })
+  const pid = String(projectId)
+  qc.invalidateQueries({ predicate: (query) => String(query.queryKey[1]) === pid })
 }

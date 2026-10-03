@@ -26,9 +26,20 @@ address zero targets.
 """
 from __future__ import annotations
 
+from typing import Iterable
+
 from sqlalchemy.orm import Session
 
 from ..models.segment import Segment
+from .id_set import in_id_set
+
+
+def _visible_siblings():
+    """The sibling scope — ONE definition for the single and the batched form."""
+    return (
+        Segment.merged_into_id == None,  # noqa: E711
+        Segment.split_into_id == None,  # noqa: E711
+    )
 
 
 def group_target_ids(db: Session, segment: Segment) -> list[int]:
@@ -38,10 +49,46 @@ def group_target_ids(db: Session, segment: Segment) -> list[int]:
     ids = [
         r[0] for r in db.query(Segment.id).filter(
             Segment.group_id == segment.group_id,
-            Segment.merged_into_id == None,  # noqa: E711
-            Segment.split_into_id == None,  # noqa: E711
+            *_visible_siblings(),
         ).all()
     ]
     if segment.id not in ids:
         ids.append(segment.id)
     return ids
+
+
+def group_targets_by_segment(
+    db: Session, segments: Iterable[tuple[int, int | None]],
+) -> dict[int, tuple[int, ...]]:
+    """`group_target_ids` for many segments at once — `{segment_id: targets}`.
+
+    Takes `(segment_id, group_id)` pairs the caller has already read, and asks
+    ONE question per chunk of distinct groups, so a file naming 200,000 segments
+    costs a handful of queries rather than one per row (the bulk coding import,
+    Batch 6 — #1031 (a)). An ungrouped segment maps to itself.
+
+    ⚠️ **The scope and the "the segment itself is always in the result" rule are
+    `group_target_ids`' own**, through the same `_visible_siblings`, so the import
+    and the workbench cannot disagree about what "this unit" means.
+    """
+    pairs = list(segments)
+    group_ids = sorted({gid for _, gid in pairs if gid})
+    members: dict[int, list[int]] = {gid: [] for gid in group_ids}
+    if group_ids:
+        for seg_id, gid in (
+            db.query(Segment.id, Segment.group_id)
+            .filter(in_id_set(Segment.group_id, group_ids), *_visible_siblings())
+            .order_by(Segment.id)
+            .all()
+        ):
+            members[gid].append(seg_id)
+    out: dict[int, tuple[int, ...]] = {}
+    for seg_id, gid in pairs:
+        if not gid:
+            out[seg_id] = (seg_id,)
+            continue
+        ids = list(members.get(gid, ()))
+        if seg_id not in ids:
+            ids.append(seg_id)
+        out[seg_id] = tuple(ids)
+    return out

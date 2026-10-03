@@ -823,6 +823,13 @@ export interface CoderCoverageItem {
   username: string
   display_color: string | null
   archived: boolean
+  /**
+   * #1030 — `human` · `ai`. What lets a surface ask "has a MODEL coded THIS
+   * project?" of coverage rather than the install-wide roster, and names an
+   * ARCHIVED machine as one (the roster excludes archived coders). Absent reads
+   * as human (`lib/coding-layers.ts::isMachineCoder`'s client rule).
+   */
+  coder_type?: string
 }
 
 export interface CoderCoverageResponse {
@@ -923,10 +930,17 @@ export const codeAnalysisApi = {
    * model. `EXPORT_TIMEOUT_MS` for `irr`'s reason: it builds the same pooled
    * matrices, one coder pair at a time.
    */
-  machineAgreement: (projectId: number) =>
+  /**
+   * #1030 — `humanId` narrows the PEOPLE to one: blind mode's self-scope, so a
+   * colleague's comparison never reaches the wire. Omitted = every person.
+   */
+  machineAgreement: (projectId: number, humanId?: number | null) =>
     api.get<MachineAgreementResponse>(
       `/projects/${projectId}/code-analysis/machine-agreement`,
-      { timeout: EXPORT_TIMEOUT_MS },
+      {
+        timeout: EXPORT_TIMEOUT_MS,
+        ...(humanId != null ? { params: { human_id: humanId } } : {}),
+      },
     ).then(r => r.data),
 
   /** Unitizing agreement for ONE observation with open cuts (slab 6b-A). */

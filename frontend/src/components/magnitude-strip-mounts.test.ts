@@ -66,6 +66,29 @@ describe('MagnitudeStrip mounts (#870 c)', () => {
     }
   })
 
+  /**
+   * #1112 — every WORKBENCH mount shows the live code and remounts on a new
+   * scale. Each held `ratingTarget = { unit, code }` and read the scale from that
+   * copy, so a scale saved while the strip was open never reached it (measured:
+   * saved step 0.5, strip still on step 1). The sweep is exempt and says why:
+   * its scale rides each queue entry, refreshed when the dialog's save
+   * invalidates `['rating-queue', pid]`, and no scale can be edited from that page.
+   */
+  it('every workbench mount reads the LIVE code and keys on the scale signature (#1112)', () => {
+    const workbench = mounts().filter(m => m.file !== 'RatingSweep.tsx')
+    expect(workbench.length).toBe(4)
+    for (const { file, tag } of workbench) {
+      expect(tag, `${file}: the strip must not read the captured copy`).not.toMatch(/ratingTarget\.code\.(magnitude_scale|name)/)
+      expect(tag, `${file}: the scale must come from the live code`).toMatch(/scale=\{ratingCode\.magnitude_scale\}/)
+      expect(tag, `${file}: a new step must remount the strip`).toMatch(/key=\{`[^`]*\$\{scaleSignature\(ratingCode\.magnitude_scale\)\}`\}/)
+      const src = stripComments(readFileSync(
+        sourceFiles({ root: 'pages', ext: 'tsx', floor: 10, recursive: false }).find(f => basename(f) === file)!,
+        'utf-8'), file)
+      expect(src, `${file}: the live code comes from the shared helper`).toMatch(
+        /const ratingCode = ratingTarget \? liveRatingCode\(ratingTarget\.code, codeMap\) : null/)
+    }
+  })
+
   it('the entryKey escape hatch is NARROW — only that call satisfies it', () => {
     // Falsifier: without this, widening the branch to any helper call would
     // pass silently and the rule would be gone rather than widened.

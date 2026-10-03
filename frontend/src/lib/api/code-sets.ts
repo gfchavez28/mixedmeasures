@@ -19,6 +19,17 @@ export interface CodeSetMember {
   is_universal: boolean
 }
 
+/**
+ * A code whose application counts in the set, and the value it reads as
+ * (#1028). Every member is one — reading as itself unless grouped — and so is a
+ * code OUTSIDE the set grouped INTO one of its values: "Pos" grouped with
+ * "Positive" counts as choosing "Positive", and choosing another value clears it.
+ */
+export interface CodeSetClaimant {
+  code_id: number
+  value_id: number
+}
+
 export interface CodeSet {
   id: number
   project_id: number
@@ -39,6 +50,12 @@ export interface CodeSet {
    * OUTSIDE code as one effective code, so choosing it records something else.
    */
   composition_warnings: string[]
+  /**
+   * Every code whose application counts in this set. REQUIRED: deciding what a
+   * passage holds in the set from `members` alone misses a synonym, and the
+   * server clears by this list (`services/code_sets.py::set_claimants`).
+   */
+  claimants: CodeSetClaimant[]
   created_at: string
   updated_at: string
 }

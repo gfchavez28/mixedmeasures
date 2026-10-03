@@ -27,7 +27,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { describeRecoveredUnmapped, describeMissingValueChanges, describeStaledDefinitions, describeUnmatchedRules, bulkMissingOutcome } from '@/lib/missing-values-copy'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { recodeApi, datasetsApi, type DatasetColumn } from '@/lib/api'
+import { recodeApi, datasetsApi, isServerRefusal, serverDetailMessage, type DatasetColumn } from '@/lib/api'
 import { LoadState } from '@/components/LoadStatus'
 import { useListLoad } from '@/hooks/useListLoad'
 import { valueLabelBlocker } from '@/lib/value-labels-guard'
@@ -115,6 +115,21 @@ export default function ColumnDictionaryEditor({
   }, [siblingColumns])
   const [colType, setColType] = useState<TypeChoice>(null)
   const [saving, setSaving] = useState(false)
+  /**
+   * The server's refusal of the LABELS arm, shown under the rows it is about
+   * (#1104) — not in a toast. The message explains what the edit would have
+   * done to people's answers and where to renumber instead, and a researcher
+   * needs it on screen while they revise the rows; a toast is gone before that
+   * sentence can be acted on. Cleared as soon as the rows change, so it never
+   * describes an edit that is no longer the one on screen, and keyed to the
+   * variable it was about, so selecting another one does not carry it over.
+   */
+  const [labelsRefusal, setLabelsRefusal] = useState<{ columnId: number; message: string } | null>(null)
+  const refusalShown = labelsRefusal?.columnId === column.id ? labelsRefusal.message : null
+  const changeRows = (next: Row[]) => {
+    setRows(next)
+    setLabelsRefusal(null)
+  }
 
   // #585/#793: relabelling a column whose primary recode stores something other
   // than the response's own code would rewrite every response to a DIFFERENT
@@ -260,8 +275,11 @@ export default function ColumnDictionaryEditor({
   )
 
   const save = async () => {
-    if (!canApply) return
+    // `saving` is refused HERE because the button is only aria-disabled while
+    // busy (below) — aria-disabled changes what it announces, not what it does.
+    if (!canApply || saving) return
     setSaving(true)
+    setLabelsRefusal(null)
     const notes: string[] = []
     let changes: string | null = null
     try {
@@ -317,11 +335,34 @@ export default function ColumnDictionaryEditor({
         changes = describeMissingValueChanges(res)
       }
       if (labelsUsable && validation.payload) {
-        const res = await recodeApi.applyValueLabels(
-          projectId, datasetId, column.id,
-          // C5: omit column_type entirely unless the researcher chose one.
-          { labels: validation.payload, ...(colType ? { column_type: colType } : {}) },
-        )
+        let res
+        try {
+          res = await recodeApi.applyValueLabels(
+            projectId, datasetId, column.id,
+            // C5: omit column_type entirely unless the researcher chose one.
+            { labels: validation.payload, ...(colType ? { column_type: colType } : {}) },
+          )
+        } catch (e) {
+          // #1104: a REFUSAL is about the rows on screen — "these labels would
+          // change what people answered", a reverse or re-mapping recode (#585,
+          // #793), an ineligible type — so it is shown under them and the rows
+          // are kept as typed, to revise. Anything else (a timeout, a 500) is not
+          // about the rows and takes the toast in the outer catch.
+          const message = isServerRefusal(e) ? serverDetailMessage(e) : null
+          if (message === null) throw e
+          setLabelsRefusal({ columnId: column.id, message })
+          if (declaredChanged) {
+            // The missing-values half DID land, and the researcher must not
+            // read the refusal as "nothing happened".
+            const done = [...notes, changes].filter(Boolean).join(' ')
+            toast.warning(
+              `Missing values applied${done ? ` — ${done}` : '.'} The value labels were not: the reason is under Value labels.`,
+              { duration: 10_000 },
+            )
+          }
+          // No re-seed: the typed rows are what the refusal describes.
+          return
+        }
         if (res.unlabeled_codes?.length) {
           notes.push(`Codes ${res.unlabeled_codes.join(', ')} have no label yet.`)
         }
@@ -446,7 +487,7 @@ export default function ColumnDictionaryEditor({
               ) : (
                 <ValueLabelRows
                   rows={rows}
-                  onRowsChange={setRows}
+                  onRowsChange={changeRows}
                   // A null choice means "keep current type"; the toggle shows
                   // the column's own type until the researcher changes it.
                   colType={colType ?? (column.column_type === 'nominal' ? 'nominal' : 'ordinal')}
@@ -461,6 +502,15 @@ export default function ColumnDictionaryEditor({
                   // the message and the blocked button always agree.
                   showError={labelsTouched}
                 />
+              )}
+              {refusalShown && (
+                <p
+                  role="alert"
+                  data-testid="value-labels-refusal"
+                  className="mt-2 text-xs text-amber-700 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-300 rounded p-2 border border-amber-200 dark:border-amber-900/50"
+                >
+                  {refusalShown}
+                </p>
               )}
             </section>
 
@@ -507,7 +557,15 @@ export default function ColumnDictionaryEditor({
             </section>
 
             <div className="flex justify-end">
-              <Button size="sm" onClick={save} disabled={!canApply || saving}>
+              {/* Busy is `aria-disabled`, never `disabled` (#959/#965): Chrome
+                  drops focus from a focused button that becomes disabled, so
+                  every Apply put keyboard focus on <body> — and a refused Apply
+                  (#1104) then left the researcher at the top of the page, away
+                  from the rows the refusal asks them to revise. */}
+              <Button size="sm" onClick={save} disabled={!canApply}
+                      aria-disabled={saving || undefined}
+                      aria-busy={saving || undefined}
+                      className="aria-busy:cursor-wait aria-busy:opacity-50">
                 {saving ? 'Applying…' : 'Apply'}
               </Button>
             </div>

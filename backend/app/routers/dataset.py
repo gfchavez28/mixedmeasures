@@ -1,7 +1,6 @@
 """Dataset import and read endpoints."""
 
 import csv
-import io
 import json
 import logging
 import re
@@ -13,7 +12,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from pydantic import ValidationError
 from sqlalchemy import and_, case, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from ..auth import get_current_user
@@ -80,16 +81,18 @@ from ..schemas.dataset import (
 from ..models.recode import RecodeDefinition, RecodeType
 from ..services.dataset_import import (
     ColumnSelectionError,
+    CsvRecords,
     DatasetTooLargeError,
     MAX_DATASET_CELLS,
+    OverlongRecords,
     append_cell_count_error,
     cell_count_error,
     describe_csv_text,
     describe_xlsx,
     preview_dataset_csv,
     import_dataset_csv,
+    narrow_csv_columns,
     parse_header,
-    select_csv_columns,
     _strip_bom,
     _compute_value_numeric,
     is_xlsx_upload,
@@ -105,7 +108,7 @@ from ..services.sav_import import (
     SavImportError,
 )
 from ..services.value_labels import build_code_to_label, resolve_labelled_cell
-from ..services.missing_values import is_missing, parse_missing_rules  # #592
+from ..services.missing_values import column_missing_rules, is_missing, parse_missing_rules  # #592
 from ..models.equivalence_group import EquivalenceGroup
 from ..schemas.equivalence import ProjectColumnInfo, ProjectColumnListResponse
 from ..services.recode import (
@@ -120,6 +123,7 @@ from ..models.metric import MetricDefinition
 from ..models.row_score import RowScore
 from ..models.statistical_test import StatisticalTest
 from ..services.staleness import mark_metrics_stale
+from ..services.column_retype import plan_rederived_cells, write_rederived_cells  # #1079 (b)
 from ..services.append_duplicates import (  # #1014
     DuplicateCheck,
     existing_fingerprints,
@@ -143,8 +147,12 @@ from ..services.participant_dataset import (
     managed_dataset_refusal,
 )
 from ..services.participant_scores import (
+    PARTICIPANT_TABLE_BUSY_MESSAGE,
+    ParticipantTableBusy,
     parse_managed_spec,
+    participant_table_turn,
     refresh_participant_dataset,
+    wait_for_participant_table_turn,
 )
 from ..services.equivalence_validators import assert_domains_intact_for_domain_ids
 from ..services.column_cleanup import delete_column_references
@@ -230,7 +238,7 @@ def _mapping_remaps_codes(mapping_json: str | None, ranges_json: str | None = No
     return False
 
 
-def _recode_definition_summary(d, missing_values_json) -> RecodeDefinitionSummary:
+def _recode_definition_summary(d, column_rules) -> RecodeDefinitionSummary:
     """Serialize ONE recode definition. The single builder for both payloads.
 
     ⚠️ **Extracted from the `/data` loop (2026-08-31, #830f), not copied.** It
@@ -269,7 +277,7 @@ def _recode_definition_summary(d, missing_values_json) -> RecodeDefinitionSummar
         is_primary=bool(d.is_primary),
         is_auto_detected=bool(d.is_auto_detected),
         source_definition_id=d.source_definition_id,
-        reverse_offset=definition_reflection_offset(d, missing_values_json),
+        reverse_offset=definition_reflection_offset(d, column_rules),
         ranges=parse_ranges(d.ranges),
     )
 
@@ -337,8 +345,10 @@ def _column_to_response(q: DatasetColumn) -> DatasetColumnResponse:
     # #830f: the FULL list rides here too, from the same already-loaded
     # relationship. `primary_recode` stays because it carries `remaps_codes`,
     # which is computed rather than readable off a summary.
+    # #1048: the offset is computed over the column's EFFECTIVE rules, once.
+    column_rules = column_missing_rules(q)
     recode_definitions = [
-        _recode_definition_summary(d, q.missing_values) for d in q.recode_definitions
+        _recode_definition_summary(d, column_rules) for d in q.recode_definitions
     ]
 
     primary_recode = None
@@ -495,9 +505,10 @@ def _append_column_meta(column: DatasetColumn) -> dict:
         # dedup fingerprint) match the existing label rows. Empty for non-scale
         # columns → resolve_labelled_cell leaves them untouched.
         "code_to_label": build_code_to_label(scale_labels, scale_values),
-        # #592: the column's missing declaration (None = the defaults) —
-        # drives the append missing channel in resolve_labelled_cell.
-        "missing_rules": parse_missing_rules(column.missing_values),
+        # #592: the column's missing rules — its declaration drives the append
+        # missing channel in resolve_labelled_cell; #1048: with none, the
+        # defaults its TYPE calls for.
+        "missing_rules": column_missing_rules(column),
     }
 
 
@@ -638,7 +649,7 @@ async def preview_dataset(
     validate_encoding(encoding)
 
     selection = _parse_column_selection(column_indices, field="column_indices")
-    text, sheet_names, sav_meta = await _upload_to_csv_text(
+    text, sheet_names, sav_meta, narrowed_overlong = await _upload_to_csv_text(
         file, encoding, sheet_name, selection,
     )
 
@@ -685,6 +696,12 @@ async def preview_dataset(
         total_rows=result["total_rows"],
         columns=[DatasetColumnPreview(**col) for col in result["columns"]],
         sheet_names=sheet_names,
+        # #985: a narrowed file is exactly as wide as the selection, so its own
+        # read finds nothing — the ORIGINAL's report comes from the narrowing.
+        overlong_records=(
+            narrowed_overlong.as_payload() if narrowed_overlong is not None
+            else result["overlong_records"]
+        ),
     )
 
 
@@ -709,7 +726,7 @@ def _inject_sav_missing_rules(
     """
     from ..services.missing_values import normalize_missing_rules_payload
 
-    header = next(csv.reader(io.StringIO(csv_text)), [])
+    header = CsvRecords(csv_text).header
     for cfg in column_configs:
         idx = cfg.get("column_index")
         if not isinstance(idx, int) or not (0 <= idx < len(header)):
@@ -758,7 +775,7 @@ async def import_dataset(
         selection = _parse_column_selection(
             json.dumps(selection), field="source_column_indices",
         )
-    text, _sheet_names, sav_meta = await _upload_to_csv_text(
+    text, _sheet_names, sav_meta, narrowed_overlong = await _upload_to_csv_text(
         file, encoding, config.sheet_name, selection,
     )
 
@@ -788,6 +805,8 @@ async def import_dataset(
             description=config.description,
             source=config.source,
             participant_link_column_index=config.participant_link_column_index,
+            # #985: the ORIGINAL file's report when a selection narrowed it.
+            overlong=narrowed_overlong,
         )
     except DatasetTooLargeError as e:
         # #803: same reason as the preview arm — this file is fine, it is too
@@ -950,6 +969,41 @@ async def create_dataset(
 # unreachable — `participants` would be parsed as a dataset id and 422.
 
 
+#: #1073 (c) — how long a second press of *Add participant table* waits for the
+#: first. A first create measured 31.6–33.2 s on 122,382 participants (#1033);
+#: this leaves room for that and a margin, and is bounded so a hung request
+#: cannot hold a worker thread forever.
+PARTICIPANT_TABLE_WAIT_SECONDS = 120.0
+
+
+def _create_and_score_participant_table(db: Session, project_id: int, user_id: int) -> int:
+    """Create (or find) the table and refresh it — with the project's turn held."""
+    existing = get_participant_dataset(db, project_id)
+    try:
+        dataset = create_participant_dataset(db, project_id)
+    except IntegrityError:
+        # `uq_datasets_project_managed_kind`: another PROCESS created it between
+        # the read above and this insert (this process's turn rules out another
+        # request here). It is the table the researcher asked for.
+        db.rollback()
+        existing = dataset = get_participant_dataset(db, project_id)
+        if dataset is None:
+            raise
+    dataset_id = dataset.id
+    if existing is None:
+        log_action(
+            db,
+            action="participant_dataset_created",
+            entity_type="dataset",
+            entity_id=dataset_id,
+            user_id=user_id,
+            project_id=project_id,
+        )
+    refresh_participant_dataset(db, project_id)
+    db.commit()
+    return dataset_id
+
+
 @router.post("/participants", response_model=DatasetResponse, status_code=201)
 def create_participants_dataset(
     project_id: int,
@@ -972,24 +1026,37 @@ def create_participants_dataset(
 
     ⚠️ **Plain `def`, like the refresh below, and for its reason** — it runs the
     same whole-project rollup, on every call.
+
+    ⚠️ **The new table is COMMITTED before its scores are computed (#1033).**
+    `refresh_participant_dataset` commits its claim before the rollup, so the
+    table, its rows and this audit entry land first and the rollup then reads
+    with no write lock held. A refresh that fails leaves a table with rows and
+    no scores, marked stale — which the next press of this button refreshes.
+
+    🔴 **ONE create or refresh at a time (#1073 c).** Two presses used to race:
+    both inserted the table and one died on `uq_datasets_project_managed_kind` —
+    a 500, against the idempotent promise above. Creation and its refresh now
+    hold the project's `participant_table_turn`; a second press WAITS for the
+    first and returns the table it built, without a second refresh. A collision
+    on the index (another PROCESS got there first) re-reads that table.
     """
     _get_project_or_404(db, project_id, user.id)
 
-    existing = get_participant_dataset(db, project_id)
-    dataset = create_participant_dataset(db, project_id)
-    refresh_participant_dataset(db, project_id)
-
-    if existing is None:
-        log_action(
-            db,
-            action="participant_dataset_created",
-            entity_type="dataset",
-            entity_id=dataset.id,
-            user_id=user.id,
-            project_id=project_id,
-        )
-    db.commit()
-    db.refresh(dataset)
+    try:
+        with participant_table_turn(project_id):
+            dataset_id = _create_and_score_participant_table(db, project_id, user.id)
+    except ParticipantTableBusy:
+        # A double press, or a refresh already running from the Data view. End
+        # this request's read transaction before waiting, then return what the
+        # other one leaves. The wait is bounded; the client sets no timeout.
+        db.rollback()
+        dataset = None
+        if wait_for_participant_table_turn(project_id, PARTICIPANT_TABLE_WAIT_SECONDS):
+            dataset = get_participant_dataset(db, project_id)
+        if dataset is None:
+            raise HTTPException(status_code=409, detail=PARTICIPANT_TABLE_BUSY_MESSAGE)
+        dataset_id = dataset.id
+    dataset = db.get(Dataset, dataset_id)
 
     col_count = (
         db.query(func.count(DatasetColumn.id))
@@ -1027,10 +1094,19 @@ def refresh_participants_dataset(
     whole rollup ran ON the event loop** — measured on BES (843,408 coded cells),
     19.3 s with every concurrent request, `/health` included, held for 19.3 s.
     Pinned in `test_endpoint_event_loop.py::MUST_BE_SYNC`.
+
+    ⚠️ **Off the loop it runs BESIDE other writers, so its transaction shape is
+    the other half (#1033):** the service commits a claim, reads the rollup with
+    no write lock held, then writes in one short transaction that this commit
+    ends. See `refresh_participant_dataset`.
     """
     _get_project_or_404(db, project_id, user.id)
 
-    report = refresh_participant_dataset(db, project_id)
+    try:
+        report = refresh_participant_dataset(db, project_id)
+    except ParticipantTableBusy as busy:
+        # #1073 (c): a second refresh while one runs — 409, nothing touched.
+        raise HTTPException(status_code=409, detail=str(busy)) from None
     if report is None:
         raise HTTPException(
             status_code=404,
@@ -2156,9 +2232,10 @@ async def get_linkable_rows(
     # #414: identifier columns are the BEST row label — they exist to name rows.
     identifying_types = {ColumnType.IDENTIFIER, ColumnType.OPEN_TEXT, ColumnType.NOMINAL, ColumnType.DEMOGRAPHIC}
     identifying_col_ids = [c.id for c in all_cols if c.column_type in identifying_types]
-    # #592: per-column missing rules for the label skip below (parsed once)
+    # #592: per-column missing rules for the label skip below (parsed once);
+    # #1048: an open-text label is judged by the whole-answer defaults.
     linkable_rules_by_col = {
-        c.id: parse_missing_rules(c.missing_values)
+        c.id: column_missing_rules(c)
         for c in all_cols if c.column_type in identifying_types
     }
 
@@ -2557,7 +2634,7 @@ async def create_manual_column(
     "/{dataset_id}/columns/{column_id}/manual",
     response_model=DatasetColumnResponse,
 )
-async def update_manual_column(
+def update_manual_column(
     project_id: int,
     dataset_id: int,
     column_id: int,
@@ -2565,7 +2642,12 @@ async def update_manual_column(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update metadata of a manual column."""
+    """Update metadata of a manual column.
+
+    ⚠️ **Plain `def` since #1079 (b):** a retype now re-derives every stored cell,
+    MEASURED at ~1 s for a 122,382-cell column — on the event loop as `async def`.
+    Its write transaction is the metadata and those cells, planned first.
+    """
     _get_project_or_404(db, project_id, user.id)
     _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
@@ -2583,9 +2665,11 @@ async def update_manual_column(
         raise HTTPException(status_code=403, detail="Only manual columns can be edited")
 
     # Validate new type if changing
+    retyped = False
     if req.column_type is not None and req.column_type != (
         column.column_type.value
     ):
+        retyped = True
         if req.column_type not in ALLOWED_MANUAL_TYPES:
             raise HTTPException(
                 status_code=422,
@@ -2642,6 +2726,17 @@ async def update_manual_column(
         column.numeric_format = req.numeric_format
     if req.demographic_subtype is not None:
         column.demographic_subtype = req.demographic_subtype if column.column_type == ColumnType.DEMOGRAPHIC else None
+
+    # 🔴 #1079 (b) — a retype (or new scale labels) changes what every cell's
+    # text MEANS as a number and which cells are MISSING (#1048: free text judges
+    # whole answers), and neither was re-derived: a column of numbers typed
+    # nominal and retyped numeric kept NULL in every cell (measured), and nothing
+    # that reads it was marked stale. Planned from the in-memory metadata before
+    # anything is written, then written with it in one short transaction.
+    if retyped or req.scale_labels is not None:
+        write_rederived_cells(db, plan_rederived_cells(db, column))
+        db.flush()
+        mark_metrics_stale(db, project_id, column_ids=[column_id])
 
     log_action(
         db,
@@ -3305,7 +3400,7 @@ async def update_value(
         # #592: the column's missing declaration governs BOTH arms — a
         # declared "99" typed into a cell must encode NULL, and a declared-[]
         # column's "N/A" must encode as data (REPLACE semantics).
-        col_missing_rules = parse_missing_rules(value.column.missing_values)
+        col_missing_rules = column_missing_rules(value.column)
         primary_def = (
             db.query(RecodeDefinition)
             .filter(
@@ -3375,7 +3470,7 @@ async def _upload_to_csv_text(
     encoding: str,
     sheet_name: str | None = None,
     columns: list[int] | None = None,
-) -> tuple[str, list[str] | None, dict[str, SavColumnMeta] | None]:
+) -> tuple[str, list[str] | None, dict[str, SavColumnMeta] | None, OverlongRecords | None]:
     """Read a dataset upload (CSV, .xlsx, or SPSS .sav) as CSV text (#523/#28).
 
     The single format seam for ALL dataset upload endpoints (preview / import /
@@ -3383,10 +3478,13 @@ async def _upload_to_csv_text(
     and .sav through the pyreadstat adapter (both in a threadpool — untrusted
     binary parse); everything else takes the existing text-decode path.
 
-    Returns ``(csv_text, sheet_names, sav_meta)``. ``sheet_names`` is xlsx-only;
-    ``sav_meta`` is .sav-only and carries what CSV cannot express (SPSS's measure
-    and code-ordered scale points). Only the preview endpoint can act on the
-    metadata — everything downstream consumes plain CSV, unchanged.
+    Returns ``(csv_text, sheet_names, sav_meta, narrowed_overlong)``.
+    ``sheet_names`` is xlsx-only; ``sav_meta`` is .sav-only and carries what CSV
+    cannot express (SPSS's measure and code-ordered scale points). Only the
+    preview endpoint can act on the metadata — everything downstream consumes
+    plain CSV, unchanged. ``narrowed_overlong`` (#985) is the ORIGINAL file's
+    too-long records when a CSV was narrowed to ``columns``, else None: the
+    narrowed text is exactly as wide as the selection, so it cannot show them.
 
     🔴 **``columns`` (#973 c) narrows to those ORIGINAL column indices HERE, at
     the one seam every dataset upload passes through, and that placement is the
@@ -3412,21 +3510,24 @@ async def _upload_to_csv_text(
             text, sheet_names = await run_in_threadpool(
                 xlsx_to_csv_text, content, sheet_name, columns,
             )
-            return text, sheet_names, None
+            return text, sheet_names, None, None
         except XlsxImportError as e:
             logger.warning("xlsx parse failed: %s", e)
             raise HTTPException(status_code=400, detail=str(e))
     if is_sav_upload(file.filename, content):
         try:
             text, sav_meta = await run_in_threadpool(sav_to_csv_text, content, columns)
-            return text, None, sav_meta
+            return text, None, sav_meta, None
         except SavImportError as e:
             logger.warning("sav parse failed: %s", e)
             raise HTTPException(status_code=400, detail=str(e))
     text = _decode_csv(content, encoding)
+    narrowed_overlong = None
     if columns is not None:
         try:
-            text = await run_in_threadpool(select_csv_columns, text, columns)
+            text, narrowed_overlong = await run_in_threadpool(
+                narrow_csv_columns, text, columns,
+            )
         except ColumnSelectionError as e:
             # Converted HERE, like the two binary arms above: the narrowing runs
             # before either endpoint's own try block, and a bare ValueError
@@ -3435,7 +3536,7 @@ async def _upload_to_csv_text(
             # the request (#797).
             logger.warning("column selection rejected: %s", e)
             raise HTTPException(status_code=400, detail=str(e))
-    return text, None, None
+    return text, None, None, narrowed_overlong
 
 
 def _decode_csv(content: bytes, encoding: str) -> str:
@@ -3446,6 +3547,31 @@ def _decode_csv(content: bytes, encoding: str) -> str:
         logger.warning("File decode failed: %s", e)
         raise HTTPException(status_code=400, detail="Unable to decode file. Ensure it uses UTF-8 or the specified encoding.")
     return _strip_bom(text)
+
+
+def _read_append_records(text: str) -> tuple[CsvRecords, list[str], list[list[str]]]:
+    """Both append steps read the file here, through `CsvRecords` (#983/#985).
+
+    So an append counts records by the rule an import does — a blank line in a
+    two-or-more-column file is not a respondent — and reports a too-long record
+    the same way. Before it, each step read `csv.reader(io.StringIO(text))`
+    itself: the UCS-4 copy `_csv_lines` exists to avoid, and a blank line
+    became an empty record.
+
+    ⚠️ The records are still LISTED, not streamed — both steps need the count
+    before the cap refusal, and the preview a sample; that retention is #984.
+    """
+    try:
+        records = CsvRecords(text)
+        rows = list(records)
+    except (csv.Error, ValueError) as e:
+        logger.warning("CSV parse failed: %s", e)
+        raise HTTPException(status_code=400, detail="Unable to read this file. Check the file format and try again.")
+    if not records.header:
+        raise HTTPException(status_code=400, detail="This file has no column headings.")
+    if not rows:
+        raise HTTPException(status_code=400, detail="This file has no data rows.")
+    return records, records.header, rows
 
 
 @router.post(
@@ -3467,18 +3593,10 @@ async def append_preview(
     _refuse_if_managed(ds, ACTION_APPEND)
     validate_encoding(encoding)
 
-    text, sheet_names, _sav_meta = await _upload_to_csv_text(file, encoding, sheet_name)
+    text, sheet_names, _sav_meta, _narrowed = await _upload_to_csv_text(file, encoding, sheet_name)
 
-    try:
-        reader = csv.reader(io.StringIO(text))
-        csv_headers = next(reader)
-        csv_rows = list(reader)
-    except (csv.Error, StopIteration, ValueError) as e:
-        logger.warning("CSV parse failed: %s", e)
-        raise HTTPException(status_code=400, detail="Unable to parse CSV file. Check the file format and try again.")
-
-    if not csv_rows:
-        raise HTTPException(status_code=400, detail="CSV file has no data rows")
+    # `CsvRecords`: the import's record rule (#983) and its too-long report (#985).
+    records, csv_headers, csv_rows = _read_append_records(text)
 
     # #972: refuse here as well as at the import, so the wall arrives BEFORE the
     # researcher maps every column rather than after. The import keeps its own
@@ -3555,7 +3673,7 @@ async def append_preview(
     if not matched:
         raise HTTPException(
             status_code=400,
-            detail="No CSV columns matched any existing columns. Check column headers.",
+            detail="No column in this file matched a column of the dataset. Check the column headings.",
         )
 
     # Unmatched columns (existing columns not matched by any CSV column)
@@ -3629,6 +3747,7 @@ async def append_preview(
         row_pad_width=pad_width,
         sheet_names=sheet_names,
         participant_link_column=participant_link_column,
+        overlong_records=records.overlong.as_payload(),
     )
 
 
@@ -3654,49 +3773,82 @@ async def append_import(
     # Parse config
     try:
         config = DatasetAppendRequest.model_validate(json.loads(import_config))
+    except ValidationError as e:
+        # #1020: say WHICH entry is wrong — the typed mapping names it. A script is
+        # the only sender that can get here (the wizard maps the preview's own
+        # matches), and "Invalid import configuration." gave it nothing to fix.
+        logger.warning("Invalid import config: %s", e)
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid import configuration: " + "; ".join(
+                (".".join(str(p) for p in err["loc"]) + ": " if err["loc"] else "")
+                + err["msg"].removeprefix("Value error, ")
+                for err in e.errors()
+            ),
+        )
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning("Invalid import config: %s", e)
         raise HTTPException(status_code=400, detail="Invalid import configuration.")
 
-    text, _sheet_names, _sav_meta = await _upload_to_csv_text(file, encoding, config.sheet_name)
+    text, _sheet_names, _sav_meta, _narrowed = await _upload_to_csv_text(file, encoding, config.sheet_name)
 
-    try:
-        reader = csv.reader(io.StringIO(text))
-        csv_headers = next(reader)
-        csv_rows = list(reader)
-    except (csv.Error, StopIteration, ValueError) as e:
-        logger.warning("CSV parse failed: %s", e)
-        raise HTTPException(status_code=400, detail="Unable to parse CSV file. Check the file format and try again.")
-
-    if not csv_rows:
-        raise HTTPException(status_code=400, detail="CSV file has no data rows")
+    records, csv_headers, csv_rows = _read_append_records(text)
 
     # #972: BEFORE the duplicate-fingerprint read below, which reads every existing
     # value of the mapped columns (#1014). See `_refuse_oversize_append`.
     _refuse_oversize_append(db, dataset_id, len(csv_rows))
 
-    # Build column mapping: csv_col_index -> column
-    col_mapping: dict[int, DatasetColumn] = {}
-    column_ids_in_mapping: set[int] = set()
-
-    for item in config.column_mapping:
-        col_idx = item["csv_column_index"]
-        cid = item["column_id"]
-
-        q = (
-            db.query(DatasetColumn)
-            .filter(
-                DatasetColumn.id == cid,
-                DatasetColumn.dataset_id == dataset_id,
-            )
-            .first()
-        )
-        if q:
-            col_mapping[col_idx] = q
-            column_ids_in_mapping.add(q.id)
-
-    if not col_mapping:
+    # Build column mapping: csv_col_index -> column. #1020: every entry is
+    # checked against what this endpoint alone knows — the file's width and the
+    # dataset's columns — and refused by name rather than dropped or trusted.
+    if not config.column_mapping:
         raise HTTPException(status_code=400, detail="No valid column mappings provided")
+    width = len(csv_headers)
+    for m in config.column_mapping:
+        if m.csv_column_index >= width:
+            # `row[i] if i < len(row) else ""` would store NOTHING for every record,
+            # and report success.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"The column mapping names file column {m.csv_column_index + 1}, "
+                    f"but this file has {width} column{'' if width == 1 else 's'}."
+                ),
+            )
+    mapped_ids = [m.column_id for m in config.column_mapping]
+    found = {
+        q.id: q
+        for q in db.query(DatasetColumn).filter(
+            DatasetColumn.id.in_(mapped_ids),
+            DatasetColumn.dataset_id == dataset_id,
+        )
+    }
+    unknown = [cid for cid in mapped_ids if cid not in found]
+    if unknown:
+        # A column of ANOTHER dataset used to be dropped from the mapping in
+        # silence, and the append went ahead without it (#782/#783's per-entity
+        # rule: the id is checked, and a foreign one is an error, not a skip).
+        raise HTTPException(
+            status_code=400,
+            detail=f"Column {unknown[0]} is not a column of this dataset.",
+        )
+    not_imported = [q for q in found.values() if q.source != "imported"]
+    if not_imported:
+        # The preview matches IMPORTED columns only; a computed column is its
+        # formula's and a hand-made one is the researcher's, so neither takes a
+        # file's values — the import must say the same thing the preview does.
+        q = not_imported[0]
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"“{q.column_text}” is a {q.source} column. Appended data can only "
+                "go into the columns the dataset was imported with."
+            ),
+        )
+    col_mapping: dict[int, DatasetColumn] = {
+        m.csv_column_index: found[m.column_id] for m in config.column_mapping
+    }
+    column_ids_in_mapping: set[int] = set(found)
 
     # Duplicate detection — the preview's check, streamed (#1014).
     dup_check = DuplicateCheck(existing_fingerprints(db, dataset_id, column_ids_in_mapping))
@@ -3733,6 +3885,8 @@ async def append_import(
     values_created = 0
     duplicates_skipped = 0
     new_row_ids: list[int] = []
+    # #985: the row each named too-long record became, for the report's links.
+    overlong_by_record = {e["record"]: e for e in records.overlong.examples}
     # #575: value_texts of appended cells per scale column, so we can report which
     # appended values did NOT map to a numeric code (unknown labels / undeclared
     # codes → NULL) — the append analog of the wizard's unmatched-scale-values note.
@@ -3775,6 +3929,9 @@ async def append_import(
         db.flush()
         new_row_ids.append(new_row.id)
         rows_created += 1
+        named = overlong_by_record.get(row_idx + 1)
+        if named is not None:
+            named["row_id"] = new_row.id
 
         # Create values from the resolved (text, numeric) pair.
         for col_idx, q in col_mapping.items():
@@ -3917,4 +4074,5 @@ async def append_import(
         next_row_id=final_next_rid,
         participant_link_report=participant_link_report,
         unmapped_values=sorted(unmapped_values),
+        overlong_records=records.overlong.as_payload(),
     )

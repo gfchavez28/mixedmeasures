@@ -28,6 +28,12 @@ raising `MAX_CODING_IMPORT_ROWS` is raising that number with it.** ⚠️ Peak R
 that run was 482 MB, in a process that also BUILT the corpus, so it is an upper
 bound on the import's own cost and is deliberately not attributed
 (`ru_maxrss` cannot tell HELD from ONCE-ALLOCATED).
+
+🔴 **THAT FILE HAD NO CODE-SET VALUES, AND ONE THAT HAS THEM FROZE FOR ~53 s** (#1062,
+found 2026-09-27d by timing HEAD on a heavier shape: 20,000 segment groups, three
+fifths of the rows set values). Since Batch 6 the heavy shape is **9.2–9.4 s at
+314 MB peak** (a separate process, `/usr/bin/time`), against HEAD's 52.5–55.1 s at
+316 MB. Harness: the internal design notes (git-ignored).
 """
 import json
 
@@ -62,6 +68,7 @@ def _candidate(c: coding_import.CoderCandidate) -> CodingImportCoderCandidate:
     return CodingImportCoderCandidate(
         name=c.name,
         row_count=c.row_count,
+        rows_to_apply=c.rows_to_apply,
         local_user_id=c.local_user_id,
         local_coder_type=c.local_coder_type,
         local_archived=c.local_archived,
@@ -117,8 +124,11 @@ async def preview_coding_import(
         column_id=plan.column_id,
         rows_read=plan.rows_read,
         will_apply=len(plan.applications),
+        units_in_file=plan.units_in_file,
         units_matched=plan.units_matched,
+        codes_in_file=plan.codes_in_file,
         codes_matched=plan.codes_matched,
+        grouped_passages=plan.grouped_passages,
         coders=[_candidate(c) for c in plan.coders],
         problems=[_problem(p) for p in plan.problems],
         reason_counts=plan.reason_counts,
@@ -178,6 +188,7 @@ async def import_coding(
                 parsed.machine_provenance.as_payload()
                 if parsed.machine_provenance is not None else None
             ),
+            unarchive=parsed.unarchive,
         )
 
     plan = await _plan_from_upload(
@@ -207,6 +218,9 @@ async def import_coding(
             "selections": report.selections,
             "skipped": report.skipped,
             "coders_created": report.coders_created,
+            # Who was brought back from the archive, by id — a change to who
+            # votes in consensus and whose codings show, so it is on the record.
+            "unarchived_coder_ids": report.unarchived_coder_ids,
         },
     )
     db.commit()
@@ -220,6 +234,8 @@ async def import_coding(
         ratings_set=report.ratings_set,
         coders_matched=report.coders_matched,
         coders_created=report.coders_created,
+        coders_unarchived=report.coders_unarchived,
         skipped=report.skipped,
         problems=[_problem(p) for p in report.problems],
+        reason_counts=coding_import.reason_counts(report.problems),
     )

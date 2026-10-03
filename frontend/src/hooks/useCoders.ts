@@ -94,6 +94,38 @@ export function useCoders(): CoderContext {
   return { ...roster, status: listStatus(query), query }
 }
 
+/** The archive-inclusive roster's key — Settings' roster manager reads the same one. */
+export const ALL_CODERS_QUERY_KEY = [...CODERS_QUERY_KEY, 'all'] as const
+
+/**
+ * Every MACHINE coder's id, ARCHIVED ones included — the set a coverage gauge
+ * leaves out (#1029, `lib/coding-progress.ts::MachineCoderIds`).
+ *
+ * 🔴 **Not `useCoders().machineCoders`.** That roster excludes archived coders, so
+ * archiving a model coder (Settings lists it for exactly that) would have put its
+ * codings back into every gauge: its chips are hidden by default (#451), its
+ * passages counted as coded. The archive-inclusive list is `['coders', 'all']`,
+ * which Settings already fetches; every roster invalidation and
+ * `resetCoderRoster` reach it by prefix.
+ *
+ * ⚠️ Until that list answers, the set is the ACTIVE roster's machines — which is
+ * cached on every page (TopRail reads it), so the only thing a first render can
+ * miscount is an ARCHIVED model's codings, for as long as one tiny request takes.
+ * Said rather than hidden behind a loading gate on every gauge.
+ */
+export function useMachineCoderIds(): ReadonlySet<number> {
+  const { machineCoders } = useCoders()
+  const all = useQuery({
+    queryKey: ALL_CODERS_QUERY_KEY,
+    queryFn: () => authApi.listCoders(true),
+    staleTime: 60_000,
+  })
+  return useMemo(
+    () => new Set([...machineCoders, ...(all.data ?? []).filter(isMachineCoder)].map(c => c.id)),
+    [machineCoders, all.data],
+  )
+}
+
 /**
  * #964 — call after anything that may have ADDED coders to this install (a
  * project import creates the file's coders; a merge can create them too).

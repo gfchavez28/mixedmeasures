@@ -203,3 +203,94 @@ describe('MagnitudeScaleDialog — the server is the authority', () => {
     expect(setMagnitudeScale).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * #1112 — the saved scale reaches every cached codes list the moment the server
+ * answers. Invalidating alone left the old scale on screen until a refetch
+ * landed, and an open rating strip read it meanwhile: measured, the step saved
+ * as 0.5 and the strip went on offering step-1 ticks.
+ */
+describe('MagnitudeScaleDialog — the cache follows the save (#1112)', () => {
+  function seeded(code: Code) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    const other = { ...PLAIN, id: 6, name: 'Pacing', usage_count: 3 } as unknown as Code
+    const listed = { ...code, usage_count: 9 } as unknown as Code
+    qc.setQueryData(['codes', 42], { codes: [listed, other], total: 2 })
+    qc.setQueryData(['codes', 42, 'all'], { codes: [listed, other], total: 2 })
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+    render(
+      <QueryClientProvider client={qc}>
+        <MagnitudeScaleDialog projectId={42} code={code} open onOpenChange={vi.fn()} />
+      </QueryClientProvider>,
+    )
+    return { qc, invalidate }
+  }
+  const scaleOf = (qc: QueryClient, key: unknown[], id: number) =>
+    (qc.getQueryData(key) as { codes: Code[] }).codes.find(c => c.id === id)
+
+  it('writes the SERVER\'s scale into both codes lists before any refetch, and only the scale', async () => {
+    const returned = { min: -1, max: 1, step: 1, anchors: [] }
+    setMagnitudeScale.mockResolvedValue({ ...SCALED, magnitude_scale: returned, usage_count: 0 })
+    const { qc } = seeded(SCALED)
+    fireEvent.change(field('Step'), { target: { value: '1' } })
+    fireEvent.click(save())
+    await waitFor(() => expect(scaleOf(qc, ['codes', 42], 5)?.magnitude_scale).toEqual(returned))
+    expect(scaleOf(qc, ['codes', 42, 'all'], 5)?.magnitude_scale).toEqual(returned)
+    // The list's own fields are not overwritten by the endpoint's response.
+    expect(scaleOf(qc, ['codes', 42], 5)?.usage_count).toBe(9)
+    // A neighbour is untouched.
+    expect(scaleOf(qc, ['codes', 42], 6)?.magnitude_scale).toBeNull()
+  })
+
+  it('a removed scale leaves the lists with none, so an open strip closes', async () => {
+    setMagnitudeScale.mockResolvedValue({ ...SCALED, magnitude_scale: null })
+    const { qc } = seeded(SCALED)
+    fireEvent.click(screen.getByRole('button', { name: 'Remove scale' }))
+    await waitFor(() => expect(scaleOf(qc, ['codes', 42], 5)?.magnitude_scale).toBeNull())
+  })
+
+  it('refreshes the other two caches that carry a scale: the Ratings queue and the codebook tree', async () => {
+    setMagnitudeScale.mockResolvedValue({})
+    const { invalidate } = seeded(SCALED)
+    fireEvent.click(save())
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['rating-queue', 42] }))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['codebook-tree', 42] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['codes', 42] })
+  })
+})
+
+describe('MagnitudeScaleDialog — what the declaration will mean (#1113/#1114)', () => {
+  it('says when the steps stop short of the maximum (0–10 by 4 ends at 8)', () => {
+    setup()
+    fireEvent.change(field('Step'), { target: { value: '4' } })
+    expect(screen.getByText('Steps of 4 from 0 stop at 8, so coders cannot choose 10.')).toBeInTheDocument()
+    // Still saveable: the server accepts the scale; this is said, not refused.
+    expect(save()).toBeEnabled()
+    fireEvent.change(field('Step'), { target: { value: '5' } })
+    expect(screen.queryByText(/stop at/)).toBeNull()
+  })
+
+  it('says when an anchor sits between the points, and stays quiet for one on a point', () => {
+    setup()
+    fireEvent.change(field('Step'), { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add anchor' }))
+    fireEvent.change(field('Anchor 1 value'), { target: { value: '4' } })
+    fireEvent.change(field('Anchor 1 label'), { target: { value: 'some' } })
+    expect(screen.queryByText(/between the scale's points/)).toBeNull()
+    fireEvent.change(field('Anchor 1 value'), { target: { value: '5' } })
+    expect(screen.getByText(/5 is between the scale's points/)).toBeInTheDocument()
+  })
+
+  it('names an anchor row that will not be saved, rather than dropping it in silence', () => {
+    setup()
+    fireEvent.click(screen.getByRole('button', { name: 'Add anchor' }))
+    // An untouched row is not a problem worth a sentence ...
+    expect(screen.queryByText(/will not be saved/)).toBeNull()
+    // ... a row with a value and no label is.
+    fireEvent.change(field('Anchor 1 value'), { target: { value: '3' } })
+    expect(screen.getByText('Anchor 1 needs both a number and a label, and will not be saved as it is.'))
+      .toBeInTheDocument()
+    fireEvent.change(field('Anchor 1 label'), { target: { value: 'some' } })
+    expect(screen.queryByText(/will not be saved/)).toBeNull()
+  })
+})

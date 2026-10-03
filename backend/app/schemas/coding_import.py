@@ -35,6 +35,10 @@ class CodingImportCoderCandidate(BaseModel):
     #: How many rows in the file are theirs — the number that says whether a
     #: mis-mapping matters.
     row_count: int
+    #: Of those, how many would be WRITTEN. Zero means every row of this name was
+    #: refused, and the page defaults the name to "Do not import these" rather
+    #: than ask for a kind and create an empty coder.
+    rows_to_apply: int
     local_user_id: int | None = None
     local_coder_type: str | None = None
     local_archived: bool = False
@@ -59,11 +63,20 @@ class CodingImportPreviewResponse(BaseModel):
     rows_read: int
     #: Rows that WOULD be applied, assuming every coder is mapped.
     will_apply: int
-    #: Distinct units and codes the file actually reached. A file that matched
-    #: three units of five hundred was built against the wrong key, and these two
-    #: numbers are how that is visible before anything is written.
+    #: 🔴 Each HALF of the file's addressing, counted on its own (#1004): distinct
+    #: unit ids the file names and how many name a unit here; distinct code names
+    #: and how many name a code here. A file that matched three units of five
+    #: hundred was built against the wrong key — and a file whose ids are all wrong
+    #: still says which of its CODES are right, because the two halves no longer
+    #: share a denominator. (They were counted over the rows that would be
+    #: written, so a wrong key read as "Codes matched 0" too.)
+    units_in_file: int
     units_matched: int
+    codes_in_file: int
     codes_matched: int
+    #: Passages that will be coded because they are GROUPED with one the file
+    #: names — a group is coded as one unit (#1031 a).
+    grouped_passages: int
     coders: list[CodingImportCoderCandidate]
     problems: list[CodingImportProblem]
     #: `{reason: count}` — the summary, so a long problem list is scannable.
@@ -79,6 +92,10 @@ class CodingImportCoderDecision(BaseModel):
     #: `match` — an existing roster coder. A SYSTEM coder is refused at the
     #: service: "Unattributed" and "Consensus" own data and are not people.
     target_user_id: int | None = None
+    #: `match` onto an ARCHIVED coder — bring them back (#1031 c). Their codings
+    #: are otherwise hidden by default and left out of reliability, consensus and
+    #: the model comparison. Ignored for a coder who is not archived.
+    unarchive: bool = False
     #: `create` — the name to use; defaults to the file's spelling.
     new_username: str | None = Field(None, max_length=50)
     #: `create` — `human` or `ai`. A machine's codings are attributed and
@@ -105,8 +122,13 @@ class CodingImportResult(BaseModel):
     ratings_set: int
     coders_matched: int
     coders_created: int
+    #: Archived coders brought back because the researcher asked (#1031 c).
+    coders_unarchived: int
     skipped: int
     #: 🔴 The explicit failed set. Never derived from what succeeded — #678's
     #: rule, where `applied=False` means success on a remove and a skip on an
     #: apply, so a client reconciling on it reads every removal as a failure.
     problems: list[CodingImportProblem]
+    #: `{reason: count}` over `problems` — the preview's summary, on the result too,
+    #: so the finished screen can say WHY rows were left out without a long list.
+    reason_counts: dict[str, int]

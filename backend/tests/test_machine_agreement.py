@@ -290,3 +290,51 @@ class TestTheEndpoint:
         assert row.human_applied == 3
         assert row.machine_applied == 3
         assert payload.pairs[0].machine_provenance == {"model": "gpt-4o"}
+
+
+# ── 5. Blind mode's self-scope (#1030) ───────────────────────────────────────
+
+
+class TestOnePersonAgainstTheModel:
+    """While blind, the table is asked for the CALLER only. A model is not a colleague,
+    so comparing your own coding with it breaks no blindness — but a colleague's row
+    would name them, so the narrowing happens at the SERVER and their figures never
+    reach the wire."""
+
+    def _two_people_and_a_model(self, db):
+        _corpus(db)
+        alice = db.get(User, 1)
+        bob = _coder(db, 51, "Bob")
+        machine = _coder(db, 52, "GPT-4o", CODER_TYPE_MACHINE)
+        trust = PID * 100 + 1
+        _apply(db, trust, alice.id, 0, 1, 2)
+        _apply(db, trust, bob.id, 0, 3)
+        _apply(db, trust, machine.id, 0, 1, 3)
+        return alice, bob, machine
+
+    def test_with_no_scope_every_person_is_compared(self, db_session):
+        """POSITIVE CONTROL — both people have a pair, so the narrowing below is a
+        narrowing and not a fixture with one person in it."""
+        alice, bob, _ = self._two_people_and_a_model(db_session)
+        result = ma.compute_machine_agreement(db_session, PID)
+        assert sorted(p.human_id for p in result.pairs) == sorted([alice.id, bob.id])
+
+    def test_a_scoped_request_returns_only_that_person(self, db_session):
+        from app.routers.code_analysis import machine_agreement as endpoint
+
+        alice, bob, machine = self._two_people_and_a_model(db_session)
+        payload = endpoint(project_id=PID, user=alice, db=db_session, human_id=alice.id)
+        assert [(p.human_id, p.machine_id) for p in payload.pairs] == [(alice.id, machine.id)]
+        assert bob.username not in payload.model_dump_json()
+
+    def test_a_scoped_person_with_nothing_shared_says_so(self, db_session):
+        """The honest empty state, not another person's figures."""
+        db = db_session
+        _corpus(db)
+        alice = db.get(User, 1)
+        bob = _coder(db, 53, "Bob")
+        machine = _coder(db, 54, "GPT-4o", CODER_TYPE_MACHINE)
+        _apply(db, PID * 100 + 1, bob.id, 0, 1)
+        _apply(db, PID * 100 + 1, machine.id, 0, 2)
+        result = ma.compute_machine_agreement(db, PID, human_id=alice.id)
+        assert (result.available, result.unavailable_reason) == (False, ma.NO_SHARED_SOURCE)

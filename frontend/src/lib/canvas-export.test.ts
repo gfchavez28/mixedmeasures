@@ -35,6 +35,10 @@ import { codeAnalysisApi, metricsApi, codesApi, observationsApi, comparisonsApi 
 import { toPng } from 'html-to-image'
 import { fetchChartTables, captureCanvasChartPngs } from './canvas-export'
 
+/** #1077 (b) — the export lens is REQUIRED; these cases run with no machine coder. */
+const NO_MACHINES: ReadonlySet<number> = new Set()
+const LENS = { blind: false, self: null, machineCoderIds: NO_MACHINES }
+
 function qualConfig(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     tab: 'descriptives',
@@ -161,7 +165,7 @@ beforeEach(() => {
 
 describe('fetchChartTables — qualitative embeds', () => {
   it('exports a real table for a qualitative material', async () => {
-    const tables = await fetchChartTables(themeWithChart(qualConfig()), 3)
+    const tables = await fetchChartTables(themeWithChart(qualConfig()), 3, LENS)
 
     const table = tables.get(1)
     expect(table).toBeDefined()
@@ -174,7 +178,7 @@ describe('fetchChartTables — qualitative embeds', () => {
   })
 
   it('transposes to match the saved orientation', async () => {
-    const tables = await fetchChartTables(themeWithChart(qualConfig({ orientation: 'cr' })), 3)
+    const tables = await fetchChartTables(themeWithChart(qualConfig({ orientation: 'cr' })), 3, LENS)
 
     const md = tables.get(1)!.md
     expect(md.split('\n')[0]).toBe('| Code | apollo11_interview |')
@@ -185,7 +189,7 @@ describe('fetchChartTables — qualitative embeds', () => {
     // Nothing REACHABLE is left on this arm since slab 4 — `qual_content` is
     // the only kind without a case and the save gate cannot produce it. Kept
     // so a tenth kind emits nothing rather than a wrong table.
-    const tables = await fetchChartTables(themeWithChart(qualConfig({ tab: 'content' })), 3)
+    const tables = await fetchChartTables(themeWithChart(qualConfig({ tab: 'content' })), 3, LENS)
 
     expect(tables.get(1)).toBeUndefined()
     expect(codeAnalysisApi.sourceFrequencies).not.toHaveBeenCalled()
@@ -196,7 +200,7 @@ describe('fetchChartTables — qualitative embeds', () => {
     // it mounts no component, so the arithmetic has to be the renderer's. The
     // fixture makes the two answers differ — two coders mark the SAME clip, so
     // pooling gives 1:00.0 / 10% where summing would give 2:00.0 / 20%.
-    const tables = await fetchChartTables(themeWithChart(qualConfig({ chart_type: 'timeline', code_ids: [71, 70] })), 3)
+    const tables = await fetchChartTables(themeWithChart(qualConfig({ chart_type: 'timeline', code_ids: [71, 70] })), 3, LENS)
 
     const md = tables.get(1)!.md
     expect(md.split('\n')[0]).toBe(
@@ -217,7 +221,7 @@ describe('fetchChartTables — qualitative embeds', () => {
     // A blind-scoped figure that exports all-coder numbers puts colleagues'
     // work into a shareable file — the on-screen lens's whole point, undone.
     const tables = await fetchChartTables(
-      themeWithChart(qualConfig({ chart_type: 'timeline', code_ids: [71, 70] })), 3, { blind: true, self: 1 },
+      themeWithChart(qualConfig({ chart_type: 'timeline', code_ids: [71, 70] })), 3, { blind: true, self: 1, machineCoderIds: NO_MACHINES },
     )
 
     const md = tables.get(1)!.md
@@ -227,9 +231,27 @@ describe('fetchChartTables — qualitative embeds', () => {
     expect(md).toContain('| Playground morning | Silence | 0 |')
   })
 
+  it('#1077 (b): a MACHINE coder\'s marks leave the Coders layer and are all the Machine layer has', async () => {
+    // Coder 2 is a model here. Rapport: person 1 and model 2 marked the same clip;
+    // Silence: only the model did. The export resolves through the shared lens,
+    // so it must agree with the rendered embed on both layers.
+    const machine = { blind: false, self: null, machineCoderIds: new Set([2]) }
+    const human = (await fetchChartTables(
+      themeWithChart(qualConfig({ chart_type: 'timeline', code_ids: [71, 70] })), 3, machine,
+    )).get(1)!.md
+    expect(human).toContain('| Playground morning | Rapport | 1 |')
+    expect(human).toContain('| Playground morning | Silence | 0 |')
+
+    const model = (await fetchChartTables(
+      themeWithChart(qualConfig({ chart_type: 'timeline', code_ids: [71, 70], layer_scope: 'machine' })), 3, machine,
+    )).get(1)!.md
+    expect(model).toContain('| Playground morning | Rapport | 1 |')
+    expect(model).toContain('| Playground morning | Silence | 1 |')
+  })
+
   it('refuses to export a timeline saved on the consensus layer', async () => {
     const tables = await fetchChartTables(
-      themeWithChart(qualConfig({ chart_type: 'timeline', code_ids: [71, 70], layer_scope: 'consensus' })), 3,
+      themeWithChart(qualConfig({ chart_type: 'timeline', code_ids: [71, 70], layer_scope: 'consensus' })), 3, LENS,
     )
 
     expect(tables.get(1)).toBeUndefined()
@@ -237,7 +259,7 @@ describe('fetchChartTables — qualitative embeds', () => {
   })
 
   it('exports a saturation curve as a per-source table', async () => {
-    const tables = await fetchChartTables(themeWithChart(qualConfig({ chart_type: 'saturation' })), 3)
+    const tables = await fetchChartTables(themeWithChart(qualConfig({ chart_type: 'saturation' })), 3, LENS)
 
     const md = tables.get(1)!.md
     expect(md.split('\n')[0]).toBe('| # | Source | New codes | Cumulative unique codes |')
@@ -246,7 +268,7 @@ describe('fetchChartTables — qualitative embeds', () => {
 
   it('exports a co-occurrence matrix, fetched directly rather than via the component', async () => {
     const tables = await fetchChartTables(
-      themeWithChart(qualConfig({ tab: 'relationships', rel_view: 'cooccurrence' })), 3,
+      themeWithChart(qualConfig({ tab: 'relationships', rel_view: 'cooccurrence' })), 3, LENS,
     )
 
     const md = tables.get(1)!.md
@@ -260,7 +282,7 @@ describe('fetchChartTables — qualitative embeds', () => {
 
   it('exports a comparison with counts AND proportions per group', async () => {
     const tables = await fetchChartTables(
-      themeWithChart(qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: 'role' })), 3,
+      themeWithChart(qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: 'role' })), 3, LENS,
     )
 
     const md = tables.get(1)!.md
@@ -270,7 +292,7 @@ describe('fetchChartTables — qualitative embeds', () => {
 
   it('emits nothing for a comparison with no grouping variable', async () => {
     const tables = await fetchChartTables(
-      themeWithChart(qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: null })), 3,
+      themeWithChart(qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: null })), 3, LENS,
     )
 
     expect(tables.get(1)).toBeUndefined()
@@ -278,7 +300,7 @@ describe('fetchChartTables — qualitative embeds', () => {
   })
 
   it('emits nothing for an empty saved selection', async () => {
-    const tables = await fetchChartTables(themeWithChart(qualConfig({ code_ids: [] })), 3)
+    const tables = await fetchChartTables(themeWithChart(qualConfig({ code_ids: [] })), 3, LENS)
 
     expect(tables.get(1)).toBeUndefined()
     expect(codeAnalysisApi.sourceFrequencies).not.toHaveBeenCalled()
@@ -286,7 +308,7 @@ describe('fetchChartTables — qualitative embeds', () => {
 
   it('still routes a quantitative material to quickCompute', async () => {
     vi.mocked(metricsApi.quickCompute).mockResolvedValue({ metrics: [] } as never)
-    await fetchChartTables(themeWithChart({ column_ids: [7], metric_type: 'frequency_distribution' }), 3)
+    await fetchChartTables(themeWithChart({ column_ids: [7], metric_type: 'frequency_distribution' }), 3, LENS)
 
     expect(metricsApi.quickCompute).toHaveBeenCalled()
     expect(codeAnalysisApi.sourceFrequencies).not.toHaveBeenCalled()
@@ -342,7 +364,7 @@ describe('fetchChartTables — cross-tab embeds (#832)', () => {
   })
 
   it('fetches the cross-tab endpoint instead of computing a metric', async () => {
-    const tables = await fetchChartTables(themeWithChart(crossTabConfig()), 3)
+    const tables = await fetchChartTables(themeWithChart(crossTabConfig()), 3, LENS)
 
     expect(metricsApi.crossTabulation).toHaveBeenCalledWith(3, {
       row_column_id: 7, col_column_id: 12, include_chi_square: true,
@@ -353,7 +375,7 @@ describe('fetchChartTables — cross-tab embeds (#832)', () => {
   })
 
   it('exports BOTH axes, with totals — the table the canvas draws', async () => {
-    const md = (await fetchChartTables(themeWithChart(crossTabConfig()), 3)).get(1)!.md
+    const md = (await fetchChartTables(themeWithChart(crossTabConfig()), 3, LENS)).get(1)!.md
     const lines = md.split('\n')
 
     // Positive assertions, not "does not contain" — a negative here is the
@@ -367,7 +389,7 @@ describe('fetchChartTables — cross-tab embeds (#832)', () => {
 
   it('mirrors the saved display mode rather than always emitting counts', async () => {
     const md = (await fetchChartTables(
-      themeWithChart(crossTabConfig({ cross_tab_display: 'row_pct' })), 3,
+      themeWithChart(crossTabConfig({ cross_tab_display: 'row_pct' })), 3, LENS,
     )).get(1)!.md
 
     expect(md.split('\n')).toContain('| Low | 40.0% | 60.0% | 10 |')
@@ -377,7 +399,7 @@ describe('fetchChartTables — cross-tab embeds (#832)', () => {
 
   it('mirrors a reversed scale order on BOTH axes', async () => {
     const md = (await fetchChartTables(
-      themeWithChart(crossTabConfig({ scaleOrder: 'reversed' })), 3,
+      themeWithChart(crossTabConfig({ scaleOrder: 'reversed' })), 3, LENS,
     )).get(1)!.md
     const lines = md.split('\n')
 
@@ -392,7 +414,7 @@ describe('fetchChartTables — cross-tab embeds (#832)', () => {
     // nowhere to say it, so it emits nothing rather than a table of whatever
     // quickCompute would have returned.
     const tables = await fetchChartTables(
-      themeWithChart(crossTabConfig({ cross_tab_column_id: undefined })), 3,
+      themeWithChart(crossTabConfig({ cross_tab_column_id: undefined })), 3, LENS,
     )
 
     expect(tables.get(1)).toBeUndefined()
@@ -404,7 +426,7 @@ describe('fetchChartTables — cross-tab embeds (#832)', () => {
     // A cross-tab is defined over ONE row variable; `columnIds[0]` would
     // silently pick one of two.
     const tables = await fetchChartTables(
-      themeWithChart(crossTabConfig({ column_ids: [7, 8] })), 3,
+      themeWithChart(crossTabConfig({ column_ids: [7, 8] })), 3, LENS,
     )
 
     expect(tables.get(1)).toBeUndefined()
@@ -494,13 +516,13 @@ describe('#817 — a comparison exports the comparison', () => {
     // `.md` reader sees. Fixing the renderer alone would have left Markdown
     // carrying the wrong figure while HTML/PDF/docx (which capture the rendered
     // PNG) carried the right one: one material, two answers.
-    await fetchChartTables(themeWithChart(comparisonConfig), 4)
+    await fetchChartTables(themeWithChart(comparisonConfig), 4, LENS)
     expect(comparisonsApi.groupComparison).toHaveBeenCalled()
     expect(metricsApi.quickCompute).not.toHaveBeenCalled()
   })
 
   it('emits the groups and the test, not a distribution', async () => {
-    const tables = await fetchChartTables(themeWithChart(comparisonConfig), 4)
+    const tables = await fetchChartTables(themeWithChart(comparisonConfig), 4, LENS)
     const md = tables.get(1)?.md ?? ''
     expect(md).toContain('Under 45 n')
     expect(md).toContain('690.880')
@@ -518,7 +540,7 @@ describe('#817 — a comparison exports the comparison', () => {
       }],
       bonferroni_warning: false, bonferroni_threshold: null, unavailable_reason: null,
     } as never)
-    const tables = await fetchChartTables(themeWithChart(comparisonConfig), 4)
+    const tables = await fetchChartTables(themeWithChart(comparisonConfig), 4, LENS)
     expect(tables.get(1)?.md ?? '').toMatch(/Too few values/)
   })
 })
@@ -533,7 +555,7 @@ describe('#831 — a correlation material exports nothing rather than a wrong ta
    */
   it('does not call quickCompute for a marked correlation material', async () => {
     const tables = await fetchChartTables(
-      themeWithChart({ rc_view: 'correlations', column_ids: [1, 2] }), 3,
+      themeWithChart({ rc_view: 'correlations', column_ids: [1, 2] }), 3, LENS,
     )
     // The load-bearing assertion: an empty-table check alone would pass just as
     // happily if the request HAD been made and returned nothing.
@@ -542,7 +564,7 @@ describe('#831 — a correlation material exports nothing rather than a wrong ta
   })
 
   it('does not call quickCompute for a LEGACY scatter matrix either', async () => {
-    await fetchChartTables(themeWithChart({ column_ids: [1, 2], show_scatter: true }), 3)
+    await fetchChartTables(themeWithChart({ column_ids: [1, 2], show_scatter: true }), 3, LENS)
     expect(metricsApi.quickCompute).not.toHaveBeenCalled()
   })
 
@@ -550,7 +572,7 @@ describe('#831 — a correlation material exports nothing rather than a wrong ta
     // Positive control — a refusal that swallowed everything would pass both
     // assertions above while breaking the export.
     vi.mocked(metricsApi.quickCompute).mockResolvedValue({ metrics: [] } as never)
-    await fetchChartTables(themeWithChart({ column_ids: [1], metric_type: 'mean' }), 3)
+    await fetchChartTables(themeWithChart({ column_ids: [1], metric_type: 'mean' }), 3, LENS)
     expect(metricsApi.quickCompute).toHaveBeenCalled()
   })
 })

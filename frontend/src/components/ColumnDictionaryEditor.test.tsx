@@ -9,7 +9,7 @@
  */
 import { describeRecoveredUnmapped, describeMissingValueChanges, describeStaledDefinitions } from '@/lib/missing-values-copy'
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router'
@@ -30,6 +30,11 @@ vi.mock('@/lib/api', async () => {
     },
   }
 })
+// #1104: which channel a failure is reported on is part of the contract.
+const toastSpy = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn(), success: vi.fn() }))
+vi.mock('sonner', () => ({ toast: toastSpy }))
+
+import { ApiError } from '@/lib/api'
 
 import ColumnDictionaryEditor, {
   buildValueLabelPayload,
@@ -263,9 +268,9 @@ describe('ColumnDictionaryEditor (component)', () => {
         </QueryClientProvider>
       </MemoryRouter>,
     )
-    const input = await screen.findByLabelText('Label for code 1')
+    const input = await screen.findByLabelText('Label for row 1')
     fireEvent.change(input, { target: { value: 'Never' } })
-    expect((screen.getByLabelText('Label for code 1') as HTMLInputElement).value).toBe('Never')
+    expect((screen.getByLabelText('Label for row 1') as HTMLInputElement).value).toBe('Never')
 
     // ⚠️ The refetch must CHANGE an effect dependency, or neither implementation
     // does anything and the test is blind on the axis it exists to test. A bare
@@ -284,7 +289,7 @@ describe('ColumnDictionaryEditor (component)', () => {
       </MemoryRouter>,
     )
     await waitFor(() =>
-      expect((screen.getByLabelText('Label for code 1') as HTMLInputElement).value).toBe('Never'))
+      expect((screen.getByLabelText('Label for row 1') as HTMLInputElement).value).toBe('Never'))
   })
 
   it('re-seeds AFTER a save, so the editor shows what was stored and not what was typed', async () => {
@@ -305,10 +310,10 @@ describe('ColumnDictionaryEditor (component)', () => {
     const { rerender } = render(view(BASE_COLUMN))
     // BOTH seeded codes need a label — "every code needs a label" is what
     // gates Apply, so a one-label fixture never reaches the save at all.
-    fireEvent.change(await screen.findByLabelText('Label for code 1'), {
+    fireEvent.change(await screen.findByLabelText('Label for row 1'), {
       target: { value: 'Never' },
     })
-    fireEvent.change(screen.getByLabelText('Label for code 2'), {
+    fireEvent.change(screen.getByLabelText('Label for row 2'), {
       target: { value: 'Often' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
@@ -317,7 +322,7 @@ describe('ColumnDictionaryEditor (component)', () => {
     // The invalidated query comes back with what the server actually stored.
     rerender(view({ ...BASE_COLUMN, scale_labels: ['Refused', 'Often'], scale_values: [1, 2] }))
     await waitFor(() =>
-      expect((screen.getByLabelText('Label for code 1') as HTMLInputElement).value)
+      expect((screen.getByLabelText('Label for row 1') as HTMLInputElement).value)
         .toBe('Refused'))
   })
 
@@ -333,7 +338,7 @@ describe('ColumnDictionaryEditor (component)', () => {
         </QueryClientProvider>
       </MemoryRouter>,
     )
-    fireEvent.change(await screen.findByLabelText('Label for code 1'), {
+    fireEvent.change(await screen.findByLabelText('Label for row 1'), {
       target: { value: 'Never' },
     })
 
@@ -348,7 +353,7 @@ describe('ColumnDictionaryEditor (component)', () => {
       </MemoryRouter>,
     )
     await waitFor(() =>
-      expect((screen.getByLabelText('Label for code 1') as HTMLInputElement).value).toBe(''))
+      expect((screen.getByLabelText('Label for row 1') as HTMLInputElement).value).toBe(''))
   })
 
   it('#613: a frequencies refetch mid-edit does not wipe typed rows', async () => {
@@ -366,7 +371,7 @@ describe('ColumnDictionaryEditor (component)', () => {
     const { qc } = renderDialog(BASE_COLUMN)
 
     // Label rows seed from the first frequencies response.
-    const labelInput = await screen.findByLabelText('Label for code 1')
+    const labelInput = await screen.findByLabelText('Label for row 1')
     fireEvent.change(labelInput, { target: { value: 'Never' } })
     fireEvent.click(screen.getByRole('tab', { name: 'These values' }))
     fireEvent.change(screen.getByLabelText('Missing value code for row 1'), {
@@ -378,7 +383,7 @@ describe('ColumnDictionaryEditor (component)', () => {
     await qc.invalidateQueries()
     await waitFor(() => expect(getFrequencies).toHaveBeenCalledTimes(2))
 
-    expect(screen.getByLabelText('Label for code 1')).toHaveValue('Never')
+    expect(screen.getByLabelText('Label for row 1')).toHaveValue('Never')
     expect(screen.getByLabelText('Missing value code for row 1')).toHaveValue('99')
   })
 
@@ -391,7 +396,7 @@ describe('ColumnDictionaryEditor (component)', () => {
     })
     renderDialog(BASE_COLUMN)
 
-    await screen.findByLabelText('Label for code 1')
+    await screen.findByLabelText('Label for row 1')
     fireEvent.click(screen.getByRole('tab', { name: 'Nothing missing' }))
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
 
@@ -405,7 +410,7 @@ describe('ColumnDictionaryEditor (component)', () => {
     const { qc } = renderDialog(BASE_COLUMN)
     const invalidate = vi.spyOn(qc, 'invalidateQueries')
 
-    await screen.findByLabelText('Label for code 1')
+    await screen.findByLabelText('Label for row 1')
     fireEvent.click(screen.getByRole('tab', { name: 'Nothing missing' }))
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
 
@@ -448,6 +453,106 @@ describe('#637: the labels error and the Apply button must agree', () => {
 
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
     expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled()
+  })
+})
+
+describe('#1104: a refused label edit is explained under the rows, which are kept', () => {
+  const REFUSAL =
+    'Nothing was changed. These labels would change what people answered: every “Never” ' +
+    'answer (3 in all, stored as number 1) would read “Often”, which this variable already ' +
+    'uses for the number 2.'
+
+  const typeTwoLabels = async () => {
+    fireEvent.change(await screen.findByLabelText('Label for row 1'), { target: { value: 'Never' } })
+    fireEvent.change(screen.getByLabelText('Label for row 2'), { target: { value: 'Often' } })
+  }
+
+  it('shows the refusal inside Value labels, keeps the typed rows, and raises no toast', async () => {
+    getFrequencies.mockResolvedValue(FREQ(['1', '2']))
+    applyValueLabels.mockRejectedValue(new ApiError(400, { detail: REFUSAL }, {}))
+    renderDialog(BASE_COLUMN)
+    await typeTwoLabels()
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+
+    const alert = await within(screen.getByTestId('value-labels-section')).findByRole('alert')
+    expect(alert).toHaveTextContent(REFUSAL)
+    // The rows the refusal describes are still on screen to revise.
+    expect(screen.getByLabelText('Label for row 1')).toHaveValue('Never')
+    expect(screen.getByLabelText('Label for row 2')).toHaveValue('Often')
+    // One channel: a toast as well would announce the same sentence twice.
+    expect(toastSpy.error).not.toHaveBeenCalled()
+    expect(toastSpy.warning).not.toHaveBeenCalled()
+    expect(toastSpy.success).not.toHaveBeenCalled()
+  })
+
+  it('clears the refusal as soon as a row changes', async () => {
+    getFrequencies.mockResolvedValue(FREQ(['1', '2']))
+    applyValueLabels.mockRejectedValue(new ApiError(400, { detail: REFUSAL }, {}))
+    renderDialog(BASE_COLUMN)
+    await typeTwoLabels()
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+    await screen.findByTestId('value-labels-refusal')
+
+    fireEvent.change(screen.getByLabelText('Label for row 2'), { target: { value: 'Sometimes' } })
+    expect(screen.queryByTestId('value-labels-refusal')).not.toBeInTheDocument()
+  })
+
+  it('keeps the toast for a failure that is not a refusal', async () => {
+    // A 500 says nothing about the rows, so it must not be filed under them.
+    getFrequencies.mockResolvedValue(FREQ(['1', '2']))
+    applyValueLabels.mockRejectedValue(new ApiError(500, { detail: 'Internal Server Error' }, {}))
+    renderDialog(BASE_COLUMN)
+    await typeTwoLabels()
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+
+    await waitFor(() => expect(toastSpy.error).toHaveBeenCalled())
+    expect(screen.queryByTestId('value-labels-refusal')).not.toBeInTheDocument()
+  })
+
+  it('keeps Apply focusable while it runs, and a second press sends nothing (#965)', async () => {
+    // Chrome blurs a focused button that becomes `disabled`, which put focus on
+    // <body> for every Apply — and, after a refusal, away from the rows. jsdom
+    // does not blur, so this pins the STRUCTURE; the focus itself was driven live.
+    getFrequencies.mockResolvedValue(FREQ(['1', '2']))
+    let finish: (v: unknown) => void = () => {}
+    applyValueLabels.mockImplementation(() => new Promise(r => { finish = r }))
+    renderDialog(BASE_COLUMN)
+    await typeTwoLabels()
+    const apply = screen.getByRole('button', { name: 'Apply' })
+    fireEvent.click(apply)
+    const busy = await screen.findByRole('button', { name: 'Applying…' })
+    expect(busy).not.toBeDisabled()
+    expect(busy).toHaveAttribute('aria-disabled', 'true')
+    // aria-disabled changes what the button announces, not what it does — so
+    // the handler's own guard is what refuses the second press.
+    fireEvent.click(busy)
+    expect(applyValueLabels).toHaveBeenCalledTimes(1)
+    finish({ updated: 2, unlabeled_codes: [], missing_skipped: [], staled_definitions: [] })
+    await screen.findByRole('button', { name: 'Apply' })
+  })
+
+  it('says the missing values DID land when only the labels were refused', async () => {
+    getFrequencies.mockResolvedValue(FREQ(['1', '2']))
+    setMissingValues.mockResolvedValue({
+      column_id: 31, missing_values: [{ value: '99' }], nulled_rows: 0, labelled_rows: 0,
+      stripped_scale_points: 0, recovered_rows: 0, recovered_values: [], recovered_unmapped: [],
+      unmatched_rules: [],
+    })
+    applyValueLabels.mockRejectedValue(new ApiError(400, { detail: REFUSAL }, {}))
+    renderDialog(BASE_COLUMN)
+    await typeTwoLabels()
+    fireEvent.click(screen.getByRole('tab', { name: 'These values' }))
+    fireEvent.change(screen.getByLabelText('Missing value code for row 1'), {
+      target: { value: '99' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+
+    await screen.findByTestId('value-labels-refusal')
+    expect(setMissingValues).toHaveBeenCalledWith(1, 2, 31, [{ value: '99' }])
+    expect(toastSpy.warning).toHaveBeenCalledTimes(1)
+    const [message] = toastSpy.warning.mock.calls[0]
+    expect(message).toMatch(/^Missing values applied/)
+    expect(message).toContain('The value labels were not')
   })
 })
 

@@ -1051,6 +1051,34 @@ class TestMergeCoderMapping:
         db.refresh(dana)
         assert dana.archived is False
 
+    def test_unarchive_marks_EVERY_project_s_participant_scores(self, db_session, tmp_path):
+        """Batch 6: a coder brought back votes again, which moves the participant
+        scores of every project they coded in — the archive endpoint marks them for
+        that reason, and the merge's unarchive (like the endpoint's and the coding
+        import's, until Batch 6) did not. Watched on ANOTHER project, because the
+        merge's own writes could mark the target."""
+        from app.models.project import Project as _Project
+        from app.services.participant_dataset import (
+            create_participant_dataset, get_participant_dataset,
+        )
+        from app.services.participant_scores import refresh_participant_dataset
+        db = db_session
+        db.add(User(id=3, username="Dana", password_hash="x", is_admin=False,
+                    coder_type="human", archived=True))
+        db.add(_Project(id=99, name="Elsewhere", user_id=1))
+        db.flush()
+        create_participant_dataset(db, 99)
+        refresh_participant_dataset(db, 99)
+        assert get_participant_dataset(db, 99).managed_stale is False
+        p, conv, seg, code, f = _two_coder_file(db, tmp_path)
+        import_project(
+            db, f, tmp_path / "docs", user_id=1, import_mode="merge",
+            target_project_id=p.id,
+            coder_mapping={"2": {"action": "match", "target_user_id": 3, "unarchive": True}},
+        )
+        db.flush()
+        assert get_participant_dataset(db, 99).managed_stale is True
+
     def test_stale_match_target_raises(self, db_session, tmp_path):
         db = db_session
         p, conv, seg, code, f = _two_coder_file(db, tmp_path)

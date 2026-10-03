@@ -232,7 +232,14 @@ def read_provenance(user: Any) -> dict | None:
     or hand-edited, must read as "not declared" rather than raising inside
     `GET /auth/coders`, which every page loads.
     """
-    raw = getattr(user, "machine_provenance", None)
+    return parse_stored_provenance(getattr(user, "machine_provenance", None))
+
+
+def parse_stored_provenance(raw: Any) -> dict | None:
+    """The column's stored form → the provenance dict, or `None`. `read_provenance`
+    for a value that is not on a `User` — a coder entry in a `.mmproject`, which
+    carries the column verbatim (#1034). ONE parser for both, so a file's coder and
+    a local one are read the same way before they are compared."""
     if not raw:
         return None
     try:
@@ -242,6 +249,23 @@ def read_provenance(user: Any) -> dict | None:
     if not isinstance(parsed, dict) or not isinstance(parsed.get("model"), str):
         return None
     return parsed
+
+
+def same_configuration(a: dict | None, b: dict | None) -> bool:
+    """Are these ONE machine configuration — the identity of a machine coder (#1034)?
+
+    🔴 **Two configurations of one model are two coders**, so this decides whether a
+    file's machine may land on a local one. Both sides are what `normalize_provenance`
+    wrote (values are TEXT, empty fields absent), so dict equality is the comparison;
+    key order is irrelevant to it.
+
+    ⚠️ **Two UNRECORDED configurations are the same** — both `None`. The alternative
+    duplicates a machine coder on every round trip of a project whose model was never
+    documented (an overwrite, a coding copy, the colleague's merge of your own file),
+    which is the common case today. A recorded configuration and an unrecorded one are
+    NOT the same: nothing says the unrecorded one was that configuration.
+    """
+    return a == b
 
 
 def locked_coder_ids(db: Session, user_ids: list[int]) -> set[int]:

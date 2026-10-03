@@ -38,7 +38,7 @@ const onClick = vi.fn()
 function Row({ codesStatus }: { codesStatus: ListStatus }) {
   return (
     <SegmentRow
-      segment={SEGMENT} isSelected onClick={onClick} conversationId={7} codes={NO_CODES}
+      segment={SEGMENT} isSelected isUncoded={false} onClick={onClick} conversationId={7} codes={NO_CODES}
       positionInSet={1} setSize={1} projectId={1} allCodes={NO_CODES} codesStatus={codesStatus}
       codeMap={CODE_MAP} onCodeChange={onCodeChange} showCodes
     />

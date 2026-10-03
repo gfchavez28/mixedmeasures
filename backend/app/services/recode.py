@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..models.dataset import DatasetValue, DatasetColumn, ColumnType
 from ..models.recode import RecodeDefinition, RecodeType
 from ..services.dataset_import import _coerce_scale_codes
-from ..services.missing_values import is_missing, parse_missing_rules
+from ..services.missing_values import column_missing_rules, is_declaration, is_missing
 from ..services.recode_ranges import parse_ranges, resolve_range_output
 
 logger = logging.getLogger(__name__)
@@ -74,6 +74,23 @@ def reverse_offset(scale_values: list[float]) -> float:
     return min(scale_values) + max(scale_values)
 
 
+def _column_rules(db: Session, column_id: int):
+    """The rules a column's cells are judged by (`column_missing_rules`, #1048),
+    read by id.
+
+    ⚠️ **Never raises.** `apply_definition_to_column` reaches this and is on the
+    STARTUP path (`repair_reverse_recode_mappings`, #794), so a column that
+    cannot be found answers the prefix defaults — what the `.scalar()` read this
+    replaced answered — rather than a boot-time error.
+    """
+    row = (
+        db.query(DatasetColumn.missing_values, DatasetColumn.column_type)
+        .filter(DatasetColumn.id == column_id)
+        .first()
+    )
+    return column_missing_rules(row) if row is not None else None
+
+
 def _effective_null_set_hit(
     value_text: str,
     lower_excludes: set[str],
@@ -93,9 +110,11 @@ def _effective_null_set_hit(
     Shared verbatim by ``compute_value`` and ``apply_definition_to_column``
     (the #542b parity rule: the per-value and bulk paths must agree).
     """
-    if missing_rules is not None:
+    if is_declaration(missing_rules):
         return is_missing(value_text, missing_rules)
-    if is_missing(value_text, None):
+    # #1048: the defaults the column's TYPE calls for (``missing_rules`` is
+    # `None` or `FREE_TEXT_DEFAULTS` here), never a hard-coded `None`.
+    if is_missing(value_text, missing_rules):
         return True
     return value_text.strip().lower() in lower_excludes
 
@@ -188,13 +207,13 @@ def effective_reverse_offset(
 
 
 def definition_reflection_offset(
-    definition: RecodeDefinition, missing_values_json,
+    definition: RecodeDefinition, missing_rules,
 ) -> float | None:
     """The reflection offset THIS definition's mapping implies on its column.
 
     The wire-facing wrapper around ``effective_reverse_offset``: parse the def's
-    own ``exclude_values``, parse the column's declaration, ask the one function
-    that owns the rule. Shared by BOTH payloads that carry a `reverse_offset`
+    own ``exclude_values``, take the column's EFFECTIVE missing rules
+    (`column_missing_rules`, #1048), ask the one function that owns the rule. Shared by BOTH payloads that carry a `reverse_offset`
     (`/data`'s `RecodeDefinitionSummary` and the definition endpoints'
     `RecodeDefinitionResponse`) so the same field name cannot acquire two
     population rules.
@@ -214,7 +233,7 @@ def definition_reflection_offset(
     return effective_reverse_offset(
         _parse_mapping(definition),
         {v.lower() for v in _parse_exclude_values(definition)},
-        parse_missing_rules(missing_values_json),
+        missing_rules,
     )
 
 
@@ -229,9 +248,10 @@ def compute_value(
     Returns the mapped value (float for scale_map/reverse, str for category_group),
     or None if the value is excluded, missing, or unmapped.
 
-    ``missing_rules`` is the COLUMN's parsed declaration (None = undeclared —
+    ``missing_rules`` is the COLUMN's effective rules (None = undeclared —
     the defaults apply; see ``_effective_null_set_hit``). Callers with the
-    column in hand should pass ``parse_missing_rules(column.missing_values)``.
+    column in hand should pass ``column_missing_rules(column)``, which also
+    picks the defaults the column's TYPE calls for (#1048).
     """
     if not value_text or not value_text.strip():
         return None
@@ -328,11 +348,7 @@ def plan_definition_over_column(
 
     # #592: the column's missing declaration (None = undeclared → defaults +
     # the per-def exclude channel; see _effective_null_set_hit).
-    missing_rules = parse_missing_rules(
-        db.query(DatasetColumn.missing_values)
-        .filter(DatasetColumn.id == definition.column_id)
-        .scalar()
-    )
+    missing_rules = _column_rules(db, definition.column_id)
 
     # For REVERSE type, precompute the reflection offset over the mapping's
     # REAL scale points. Same helper as `compute_value` (#542b) — the two paths
@@ -516,11 +532,7 @@ def get_value_frequencies(
     wins over the recognized-N/A defaults, so the workbench's per-label
     exclude seeding agrees with what analysis treats as missing.
     """
-    missing_rules = parse_missing_rules(
-        db.query(DatasetColumn.missing_values)
-        .filter(DatasetColumn.id == column_id)
-        .scalar()
-    )
+    missing_rules = _column_rules(db, column_id)
     rows = (
         db.query(
             DatasetValue.value_text,
@@ -638,7 +650,7 @@ def write_back_scale_metadata(
     # entry the counts exclude would render a phantom zero bar, and the R
     # export would emit it as a factor level). Column-aware: the declaration
     # when present, the recognized-N/A defaults otherwise.
-    missing_rules = parse_missing_rules(column.missing_values)
+    missing_rules = column_missing_rules(column)
     pairs: list[tuple[str, float]] = []
     for label, code in mapping.items():
         if is_missing(str(label), missing_rules):

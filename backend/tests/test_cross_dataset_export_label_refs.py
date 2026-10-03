@@ -264,7 +264,14 @@ def project_with_material(db_session):
 
 def test_collect_material_refs_extracts_lists_and_scalars():
     """Helper extracts the canvas-relevant ref keys: column_ids, domain_ids,
-    and the grouping/compare scalar keys."""
+    and the grouping/compare scalar keys.
+
+    🔴 #1086: this fixture used to carry `"compareBy": 303` — the URL PARAMETER's
+    name, which is also what the collector looked for, so the two agreed and the
+    test passed while no saved chart could ever be flagged: the saver writes
+    `compare_by` / `compare_by_2` / `cross_tab_column_id`
+    (`AnalysisView::buildCurrentChartConfig`). The keys below are the saver's.
+    """
     config = {
         "column_ids": [101, 102],
         "domain_ids": [201],
@@ -272,11 +279,14 @@ def test_collect_material_refs_extracts_lists_and_scalars():
         "selected_domains": [202],
         "grouping_column_id": 301,
         "grouping_column_id_2": 302,
-        "compareBy": 303,
+        "compare_by": 303,
+        "compare_by_2": 304,
+        "cross_tab_column_id": 305,
+        "compareBy": 999,  # a URL parameter name, never a saved key: not a ref
         "metric_type": "mean",  # not a ref; should be ignored
     }
     refs = _collect_material_refs(config)
-    assert refs["column"] == {101, 102, 103, 301, 302, 303}
+    assert refs["column"] == {101, 102, 103, 301, 302, 303, 304, 305}
     assert refs["domain"] == {201, 202}
 
 

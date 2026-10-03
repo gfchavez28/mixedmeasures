@@ -8,6 +8,7 @@ import { LoadState } from '@/components/LoadStatus'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useHistory } from '@/hooks/useHistory'
 import { useBlindMode } from '@/hooks/useBlindMode'
+import { useMachineCoderIds } from '@/hooks/useCoders'
 import { useAuth } from '@/lib/auth-context'
 import {
   Select,
@@ -627,9 +628,12 @@ export default function CanvasView() {
   // are coder-scoped, and the export runs outside React, so the blind lens has
   // to be read here and handed down. Without it a blind researcher's exported
   // document would carry all-coder numbers into a shareable file.
+  // #1077 (b): and the machine coders, so the exported table leaves a model's
+  // marks off the Coders layer exactly as the rendered embed does.
+  const machineCoderIds = useMachineCoderIds()
   const timelineLens = useMemo(
-    () => ({ blind: withholding, self: user?.id ?? null }),
-    [withholding, user?.id],
+    () => ({ blind: withholding, self: user?.id ?? null, machineCoderIds }),
+    [withholding, user?.id, machineCoderIds],
   )
 
   const handleExportMarkdown = useCallback(async () => {

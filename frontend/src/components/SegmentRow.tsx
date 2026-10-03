@@ -90,6 +90,16 @@ function getSpeakerHoverColor(colorIndex: number, isFacilitator: boolean): strin
 interface SegmentRowProps {
   segment: Segment
   isSelected: boolean
+  /**
+   * #1077 (c) — draw the orange "uncoded" ring. Decided by the WORKBENCH, from the
+   * same set `j` jumps through (`isSegmentCodedVisible` under the gauge's lens,
+   * machine coders excluded, facilitator turns never), never from this row's own
+   * code list: `applied_codes.length === 0` counted a model's labels and
+   * universal-only markers as coding, and while blind it left a turn only a
+   * colleague had coded with no chip and no ring — which said someone had.
+   * The ClipTimeline `clipFill` precedent: the component cannot derive it.
+   */
+  isUncoded: boolean
   onClick: (e: React.MouseEvent) => void
   conversationId: number
   codes: Code[]
@@ -178,6 +188,7 @@ interface SegmentRowProps {
 function SegmentRow({
   segment,
   isSelected,
+  isUncoded,
   onClick,
   conversationId,
   codes,
@@ -370,15 +381,13 @@ function SegmentRow({
     if (isSelected) return SELECTED_TINT
     // Custom hex color → use inline style instead of Tailwind token
     if (hasCustomColor) {
-      const uncoded = !segment.is_facilitator && segment.applied_codes.length === 0
-        ? 'ring-1 ring-inset ring-orange-200 dark:ring-orange-800'
-        : ''
-      return uncoded
+      return isUncoded ? 'ring-1 ring-inset ring-orange-200 dark:ring-orange-800' : ''
     }
     // Use speaker color based on color_index
     const speakerBg = getSpeakerBgColor(segment.speaker_color_index || 0, segment.is_facilitator)
-    // For uncoded participant segments, add a subtle indicator
-    if (!segment.is_facilitator && segment.applied_codes.length === 0) {
+    // For uncoded participant segments, add a subtle indicator (#1077 c: the
+    // workbench's decision — see `isUncoded`).
+    if (isUncoded) {
       return `${speakerBg} ring-1 ring-inset ring-orange-200 dark:ring-orange-800`
     }
     return speakerBg

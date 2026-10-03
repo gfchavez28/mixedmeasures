@@ -3,7 +3,7 @@
 from datetime import datetime
 from .common import UTCTimestamp, strip_optional_text, strip_required_text
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -50,11 +50,41 @@ class DatasetColumnPreview(BaseModel):
     numeric_max: float | None = None
 
 
+class OverlongRecord(BaseModel):
+    """One record with more values than the header has columns (#985)."""
+
+    # Its number in the FILE — for a new dataset, its record number there too.
+    record: int
+    # The line of the file it starts on (a quoted answer can span lines).
+    line: int
+    # How many values it has; `OverlongRecords.header_width` is how many fit.
+    cells: int
+    # The row it became, once an import has written it — so the report shown
+    # AFTER the import can link to it. None on a preview.
+    row_id: int | None = None
+
+
+class OverlongRecords(BaseModel):
+    """Records with more values than there are column headings (#985).
+
+    ALWAYS present on the payloads that carry it, with ``count`` 0 when there are
+    none: an absent report and an empty one must not look alike. An .xlsx or .sav
+    file is always 0 — its adapter writes every row to the header's width.
+    """
+
+    count: int = 0
+    header_width: int = 0
+    # At most `OVERLONG_EXAMPLE_LIMIT`, in file order; `count` covers them all.
+    examples: list[OverlongRecord] = Field(default_factory=list)
+
+
 class DatasetPreviewResponse(BaseModel):
     total_rows: int
     columns: list[DatasetColumnPreview]
     # .xlsx uploads only (#523): workbook sheet names for the wizard's sheet picker.
     sheet_names: list[str] | None = None
+    # #985: records whose extra values will land in the wrong columns.
+    overlong_records: OverlongRecords = Field(default_factory=OverlongRecords)
 
 
 class DatasetColumnSummary(BaseModel):
@@ -233,6 +263,8 @@ class DatasetImportResponse(BaseModel):
     # nulled) — keyed by column_index, so the results screen can prompt to label
     # them. Empty when no value labels were authored.
     value_label_unlabeled: dict[int, list[float]] = Field(default_factory=dict)
+    # #985: the file's too-long records, each with the row it became.
+    overlong_records: OverlongRecords = Field(default_factory=OverlongRecords)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -900,10 +932,28 @@ class DatasetAppendPreviewResponse(BaseModel):
     sheet_names: list[str] | None = None
     # #414: present when append-linking is offerable (see AppendLinkColumnOffer).
     participant_link_column: AppendLinkColumnOffer | None = None
+    # #985: records whose extra values will land in the wrong columns.
+    overlong_records: OverlongRecords = Field(default_factory=OverlongRecords)
+
+
+class AppendColumnMapping(BaseModel):
+    """One file column → one existing dataset column (#1020).
+
+    Typed because the router INDEXES the file with it: as a bare dict a negative
+    index read the file's LAST column (Python counts from the end) and reported a
+    successful append of the wrong data. ``StrictInt`` refuses ``true``, which a
+    lax int field turns into column 1.
+    """
+
+    csv_column_index: StrictInt = Field(ge=0)
+    column_id: StrictInt
 
 
 class DatasetAppendRequest(BaseModel):
-    column_mapping: list[dict]  # [{csv_column_index, column_id}]
+    # The wizard maps `preview.matched_columns` one to one; a script can send
+    # anything, so the shape is checked here and the FILE's width and the
+    # dataset's columns by the endpoint, which knows them (#1020).
+    column_mapping: list[AppendColumnMapping]
     skip_duplicates: bool = True
     row_start_id: str | None = None
     # .xlsx uploads only (#523): which worksheet to append from (None = first sheet).
@@ -911,6 +961,28 @@ class DatasetAppendRequest(BaseModel):
     # #414 (DEC-7): identifier column id to link the NEW rows by (append's
     # vocabulary is column ids, unlike the initial import's column_index).
     participant_link_column_id: int | None = None
+
+    @model_validator(mode="after")
+    def _each_column_mapped_once(self):
+        """#1020: a dataset column mapped twice wrote two values into one cell —
+        an `IntegrityError` (a 500); a file column mapped twice would copy one
+        answer into two variables. Neither can come from the wizard."""
+        seen_columns: set[int] = set()
+        seen_file: set[int] = set()
+        for m in self.column_mapping:
+            if m.column_id in seen_columns:
+                raise ValueError(
+                    f"column_mapping maps dataset column {m.column_id} more than "
+                    "once; each dataset column takes one file column."
+                )
+            if m.csv_column_index in seen_file:
+                raise ValueError(
+                    f"column_mapping uses file column {m.csv_column_index + 1} more "
+                    "than once; each file column goes to one dataset column."
+                )
+            seen_columns.add(m.column_id)
+            seen_file.add(m.csv_column_index)
+        return self
 
 
 class DatasetAppendResponse(BaseModel):
@@ -925,6 +997,8 @@ class DatasetAppendResponse(BaseModel):
     # a numeric code — unknown labels/typos or codes with no declared label. They
     # store as text with value_numeric NULL; surfaced so the append isn't silent.
     unmapped_values: list[str] = Field(default_factory=list)
+    # #985: the file's too-long records; `row_id` set for each one appended.
+    overlong_records: OverlongRecords = Field(default_factory=OverlongRecords)
 
 
 class LinkByColumnRequest(BaseModel):

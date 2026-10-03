@@ -30,8 +30,9 @@
  * offers an explicit "Not about a specific subject" rather than expecting the
  * researcher to find some way to deselect.
  */
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { PARTICIPANT_LIST_LIMIT, pickerLimitNote, searchParticipants } from '@/lib/participant-search'
 import { LoadState } from '@/components/LoadStatus'
 import { useListLoad } from '@/hooks/useListLoad'
 import { Check, Search, UserRound, X } from 'lucide-react'
@@ -86,15 +87,37 @@ export default function DocumentSubjectDialog({
    */
   const participantsLoad = useListLoad(participantsQuery)
 
-  const filtered = useMemo(() => {
-    const term = search.trim().toLowerCase()
-    if (!term) return participants
-    return participants.filter(p =>
-      participantLabel(p).toLowerCase().includes(term)
-      || p.identifier.toLowerCase().includes(term)
-      || (p.role || '').toLowerCase().includes(term),
-    )
-  }, [participants, search])
+  /**
+   * #1045 — ranked and BOUNDED. A survey imported with identifier linking makes
+   * one participant per record (122,382 on BES), and this dialog rendered one
+   * button per participant. It now renders at most `PARTICIPANT_LIST_LIMIT` and
+   * says so; search reaches the rest, exact matches first
+   * (`lib/participant-search.ts`, shared with the dataset grid's link picker).
+   * The bound also keeps the list cheap while the dialog is SHUT: these JSX
+   * children are built on every render of the page that holds the dialog.
+   */
+  const searching = search.trim() !== ''
+  const matches = useMemo(() => searchParticipants(participants, search), [participants, search])
+  const shown = useMemo(() => matches.slice(0, PARTICIPANT_LIST_LIMIT), [matches])
+  const limitNote = participantsLoad.status === 'ready'
+    ? pickerLimitNote(shown.length, matches.length, searching)
+    : null
+  const limitNoteId = useId()
+
+  /**
+   * #1072 (b) — the CURRENT subject, pinned when the bounded list does not show
+   * it. At 122,382 participants the one a document is about is usually past the
+   * first `PARTICIPANT_LIST_LIMIT`, and the dialog then showed no check mark and
+   * no name anywhere: nothing said who the document was already about. Pinned as
+   * a row of the list (so it is chosen, re-chosen and announced like the others)
+   * rather than as a line above it, which would cost the dialog height a 640×360
+   * window does not have (see the list's own note).
+   */
+  const current = useMemo(
+    () => (participantId == null ? null : participants.find((p) => p.id === participantId) ?? null),
+    [participants, participantId],
+  )
+  const pinCurrent = current !== null && !shown.some((p) => p.id === current.id)
 
   const choose = (p: Participant | null) => {
     onChoose(p ? p.id : null, p ? participantLabel(p) : null)
@@ -125,6 +148,7 @@ export default function DocumentSubjectDialog({
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search participants…"
             aria-label="Search participants"
+            aria-describedby={limitNote ? limitNoteId : undefined}
             className="pl-8"
           />
         </div>
@@ -141,13 +165,22 @@ export default function DocumentSubjectDialog({
           * description and search box sit above it. `min()` keeps the desktop
           * behaviour identical (40vh exceeds 16rem above ~640px tall) and yields
           * 144px at 360px, for a 346px dialog. jsdom computes no layout, so this
-          * is unverifiable in the suite — re-drive at 640×360 after touching it. */}
-        <div className="max-h-[min(16rem,40vh)] min-h-0 overflow-y-auto -mx-1 px-1">
+          * is unverifiable in the suite — re-drive at 640×360 after touching it.
+          *
+          * ⚠️ **#1045's limit note costs the list height on a SHORT viewport.**
+          * MEASURED at 640×360 once the note shipped: 394px in a 360px viewport,
+          * 17px off each end — the note's two lines and gap are ~48px the 346px
+          * budget did not have. Below 480px tall the list gives them back
+          * (24vh = 86px at 360, for a 336px dialog); taller windows are
+          * unchanged. The short-viewport breakpoint is the house one
+          * (`CollapsiblePanel`, `LoadStatus`). */}
+        <div className="max-h-[min(16rem,40vh)] [@media(max-height:480px)]:max-h-[24vh] min-h-0 overflow-y-auto -mx-1 px-1">
           <ul className="space-y-0.5">
             <li>
               <button
                 type="button"
                 onClick={() => choose(null)}
+                aria-current={participantId === null ? 'true' : undefined}
                 className={`w-full text-left px-2 py-1.5 rounded text-sm flex items-center gap-2 hover:bg-mm-surface-hover ${
                   participantId === null ? SELECTED_ROW : ''
                 }`}
@@ -180,17 +213,36 @@ export default function DocumentSubjectDialog({
               </li>
             )}
 
-            {participantsLoad.status === 'ready' && participants.length > 0 && filtered.length === 0 && (
+            {participantsLoad.status === 'ready' && participants.length > 0 && matches.length === 0 && (
               <li className="px-2 py-3 text-sm text-mm-text-muted">
                 No participant matches “{search.trim()}”.
               </li>
             )}
 
-            {filtered.map(p => (
+            {participantsLoad.status === 'ready' && pinCurrent && current && (
+              <li key={`current-${current.id}`}>
+                <button
+                  type="button"
+                  onClick={() => choose(current)}
+                  aria-current="true"
+                  className={`w-full text-left px-2 py-1.5 rounded text-sm flex items-center gap-2 hover:bg-mm-surface-hover ${SELECTED_ROW}`}
+                >
+                  <UserRound className="w-3.5 h-3.5 text-mm-text-muted shrink-0" aria-hidden="true" />
+                  <span className="min-w-0 truncate">{participantLabel(current)}</span>
+                  <span className="text-xs text-mm-text-muted shrink-0">· current subject</span>
+                  <Check className="w-3.5 h-3.5 ml-auto shrink-0 text-mm-blue-text" aria-hidden="true" />
+                </button>
+              </li>
+            )}
+
+            {shown.map(p => (
               <li key={p.id}>
                 <button
                   type="button"
                   onClick={() => choose(p)}
+                  // #1072 (b): the state, not only the colour and an aria-hidden
+                  // check mark — #1067 (f)'s rule for the grid's picker.
+                  aria-current={participantId === p.id ? 'true' : undefined}
                   className={`w-full text-left px-2 py-1.5 rounded text-sm flex items-center gap-2 hover:bg-mm-surface-hover ${
                     participantId === p.id ? SELECTED_ROW : ''
                   }`}
@@ -208,6 +260,15 @@ export default function DocumentSubjectDialog({
             ))}
           </ul>
         </div>
+
+        {/* #1045 — outside the scroller so it reads as a statement about the
+            list rather than as one more entry in it; the search box carries it
+            as its description. */}
+        {limitNote && (
+          <p id={limitNoteId} className="text-xs text-mm-text-muted">
+            {limitNote}
+          </p>
+        )}
       </DialogContent>
     </Dialog>
   )

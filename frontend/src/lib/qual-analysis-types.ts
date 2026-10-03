@@ -3,7 +3,7 @@ export type AnalysisSource =
   | { type: 'text_column'; id: number; label: string; datasetId: number; datasetName: string; columnName: string }
   | { type: 'document'; id: number; label: string }
 
-export type QualTab = 'content' | 'descriptives' | 'relationships' | 'reconciliation' | 'irr' | 'quoteboard'
+export type QualTab = 'content' | 'descriptives' | 'relationships' | 'reconciliation' | 'irr' | 'models' | 'quoteboard'
 
 /**
  * Track J · J2-5 M-1 — the Reconciliation tab/grid is offered only when the project
@@ -30,6 +30,32 @@ export function isReconciliationTabVisible(multiHumanCoder: boolean, consensusAv
  */
 export function isIrrTabVisible(multiHumanCoder: boolean, blind = false): boolean {
   return multiHumanCoder && !blind
+}
+
+/**
+ * #1030 — the Model comparison tab is offered when a MODEL has coded this project
+ * and there is at least one PERSON to compare it with. Pure (unit-tested).
+ *
+ * 🔴 **Not gated on `multiHumanCoder`, and that is the whole defect it closes.** The
+ * comparison lived inside the Reliability tab, which needs two PEOPLE, so the
+ * researcher it exists for — one person plus an imported model layer, the default
+ * install — never saw it, while the server computed it happily with one human.
+ *
+ * 🔴 **Not hidden while blind either.** A model is not a colleague (`multicoder.md`
+ * §blind mode is about people), so a blind coder may compare their OWN coding with
+ * it: the tab narrows the request to the viewer (`MachineAgreementTable`'s
+ * `humanId`) and no colleague's row reaches the wire.
+ *
+ * ⚠️ `projectHasActiveMachine` comes from CODER COVERAGE, never the roster: the
+ * roster is install-wide, so a model imported into another project would offer a
+ * tab here that can only say "nothing shared" (#1038 g, the #806 shape). ACTIVE,
+ * because the comparison excludes an archived machine on purpose (DEC-F's roster).
+ */
+export function isModelComparisonTabVisible(
+  projectHasActiveMachine: boolean,
+  hasHumanCoder: boolean,
+): boolean {
+  return projectHasActiveMachine && hasHumanCoder
 }
 export type QualCodeMode = 'codes' | 'categories'
 export type QualChartType = 'heatmap' | 'bar' | 'stacked_bar' | 'summary' | 'saturation' | 'timeline'

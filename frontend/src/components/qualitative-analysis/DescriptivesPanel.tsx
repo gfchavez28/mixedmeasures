@@ -20,7 +20,7 @@ import SaturationCurve from '@/components/qualitative-analysis/SaturationCurve'
 import TimedAnalytics, {
   type TimedCodeLite, type TimedCoderLite, type TimedObservationLite,
 } from '@/components/qualitative-analysis/TimedAnalytics'
-import type { CoderInclude } from '@/lib/timed-analytics'
+import type { TimedLens } from '@/lib/timed-analytics'
 import type { ListLoad } from '@/lib/list-status'
 import type { QualValueMode, QualDenominatorMode } from '@/lib/qual-analysis-types'
 
@@ -142,7 +142,8 @@ export interface DescriptivesContentProps {
   observationsLoad: ListLoad
   timedCodes: TimedCodeLite[]
   timedCategories: { id: number; name: string }[]
-  coderInclude: CoderInclude
+  /** #1077 (b) — the timeline's lens: layer, machine coders, effective include. */
+  timedLens: TimedLens
   multiCoder: boolean
   coderMap: ReadonlyMap<number, TimedCoderLite>
 }
@@ -156,7 +157,7 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
     saturationData, saturationLoading,
     onChartTypeChange,
     projectId, timedObservations, observationsLoad, timedCodes, timedCategories,
-    coderInclude, multiCoder, coderMap,
+    timedLens, multiCoder, coderMap,
   } = props
 
   return (
@@ -167,7 +168,7 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
         selectedCodeCount={qa.selectedCodeIds.size > 0 ? qa.selectedCodeIds.size : codes.filter(c => c.is_active).length}
         conversationSourceCount={conversationSourceCount}
         observationSourceCount={timedObservations.length}
-        humanLayer={qa.layerScope !== 'consensus'}
+        consensusLayer={qa.layerScope === 'consensus'}
         categoryMode={qa.codeMode === 'categories'}
       />
 
@@ -213,7 +214,7 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
             observationsLoad={observationsLoad}
             codes={timedCodes}
             categories={timedCategories}
-            include={coderInclude}
+            lens={timedLens}
             multiCoder={multiCoder}
             coderMap={coderMap}
             consensusScope={qa.layerScope === 'consensus'}

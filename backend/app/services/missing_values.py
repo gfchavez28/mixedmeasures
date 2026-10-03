@@ -43,10 +43,25 @@ rule) falls back to None = "the defaults apply", with a warning — never a
 silently partial rule set (fail-open aggregation is the #552-class trap).
 Writes go through validated endpoints (slab 3/4); malformed-at-rest is a
 corruption case, and resilient-with-a-log matches ``parse_treat_as_empty``.
+
+🔴 **The DEFAULTS depend on the column's TYPE, and there are two sets (#1048).**
+A prefix is right for a closed response set — "Not enough information to say"
+on a scale item is an off-scale non-answer — and wrong for FREE TEXT, where a
+sentence can begin with the same words and be a real answer: 142 of the 172
+open-text BES answers the prefixes removed were substantive ("Not enough
+housing", "Unable to trust government"). So an undeclared ``open_text`` column
+is judged by ``FREE_TEXT_DEFAULTS`` — an answer that IS a stock phrase, whole —
+and every other undeclared column keeps the prefixes. **A column's rules come
+from ``column_missing_rules`` / ``missing_rules_for``, which know the type;**
+``parse_missing_rules`` returns only the DECLARATION, for code that reports or
+persists what the researcher declared. ``tests/test_free_text_missing.py`` scans
+for the difference.
 """
 import json
 import logging
 import math
+
+from ..models.dataset import ColumnType
 
 logger = logging.getLogger(__name__)
 
@@ -63,15 +78,134 @@ _NA_PREFIXES = [
     "i don't have enough",
 ]
 
+#: Answers that are missing WHOLE on any column — too short to be a prefix
+#: ("nation" starts with "na").
+_NA_EXACT = frozenset({"na", "n/a"})
+
+#: #1048 — the defaults for a FREE-TEXT column: the stock phrases above, as
+#: complete answers. Each entry completes one `_NA_PREFIXES` entry or is one of
+#: `_NA_EXACT`, and `tests/test_free_text_missing.py` holds the two lists to
+#: that: every phrase here is also missing under the prefix rule (the free-text
+#: rule is strictly NARROWER), and every prefix has at least one phrase here
+#: (none silently drops out of free-text coverage). A fragment prefix such as
+#: "prefer not" is completed in the one or two ways survey instruments word it;
+#: nothing is added that the prefix rule would not already have caught.
+_NA_WHOLE_ANSWERS = frozenset({
+    "na", "n/a",
+    "not applicable",
+    "don't know", "do not know", "i don't know",
+    "no answer", "no response",
+    "prefer not to say", "prefer not to answer",
+    "decline to answer", "decline to state",
+    "unable to answer", "unable to say",
+    "cannot assess",
+    "not enough information",
+    "i don't have enough information",
+})
+
+#: Typographic apostrophes a phone or word processor substitutes for `'`.
+#: Before #1048 "Don’t know" (U+2019) matched nothing, on any column — 3 BES
+#: open-text answers, and any closed-response export written by such a tool.
+_APOSTROPHES = str.maketrans({
+    "’": "'", "‘": "'", "ʼ": "'", "′": "'",
+    "´": "'", "`": "'",
+})
+
+
+def _normalize_answer(value: str) -> str:
+    """Case, apostrophe style and runs of spaces carry no meaning here."""
+    return " ".join(value.lower().translate(_APOSTROPHES).split())
+
+
+def _without_end_punctuation(text: str) -> str:
+    """"Don't know." and "N/A!" are the same answers as without the mark."""
+    return text.rstrip(".!? ")
+
+
+#: The first letter of every stock phrase, once normalised. Normalising folds
+#: case and apostrophes and collapses spaces, none of which can change the first
+#: letter, so a value starting with anything else cannot match — and most real
+#: answers are rejected here without being normalised. MEASURED on the BES file
+#: (843,535 open-text answers), together with the narrower recount in
+#: `preview_dataset_csv`: the preview went from 3.8–4.0 s back to 2.5–2.7 s,
+#: the time it took before #1048 (2.6–2.7 s). Not measured separately.
+_NA_FIRST_LETTERS = frozenset(
+    p[0] for p in (*_NA_PREFIXES, *_NA_EXACT, *_NA_WHOLE_ANSWERS)
+)
+
+
+def _could_be_na(value: str) -> bool:
+    return value.lstrip()[:1].lower() in _NA_FIRST_LETTERS
+
 
 def _is_na(value: str) -> bool:
-    """Check if a value is a Not Applicable / Don't Know response."""
-    lower = value.strip().lower()
+    """Check if a value is a Not Applicable / Don't Know response.
+
+    The PREFIX rule — the default for every column type except free text."""
+    if not _could_be_na(value):
+        return False
+    lower = _normalize_answer(value)
     if not lower:
         return False
-    if lower in ("na", "n/a"):
+    if _without_end_punctuation(lower) in _NA_EXACT:
         return True
     return any(lower.startswith(p) for p in _NA_PREFIXES)
+
+
+def _is_na_whole_answer(value: str) -> bool:
+    """#1048 — the FREE-TEXT rule: the whole answer is a stock phrase.
+
+    ⚠️ Deliberately no further normalisation than `_is_na` applies (no bracket
+    stripping, no spelling variants): whatever this accepts, the prefix rule must
+    accept too, or a free-text column would call missing an answer a closed
+    column keeps."""
+    if not _could_be_na(value):
+        return False
+    return _without_end_punctuation(_normalize_answer(value)) in _NA_WHOLE_ANSWERS
+
+
+class _FreeTextDefaults:
+    """The recognized-N/A defaults for an undeclared FREE-TEXT column (#1048).
+
+    A marker, not a rule list: it is neither ``None`` (the prefix defaults) nor a
+    declaration, and ``is_declaration`` is how a caller tells the three apart.
+    ⚠️ Deliberately not iterable and not falsy — code that treats it as a
+    declared list fails loudly instead of reading it as "nothing is missing".
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "FREE_TEXT_DEFAULTS"
+
+
+FREE_TEXT_DEFAULTS = _FreeTextDefaults()
+
+#: Column types whose undeclared cells are judged by `FREE_TEXT_DEFAULTS`.
+FREE_TEXT_TYPES = frozenset({ColumnType.OPEN_TEXT})
+
+
+def missing_rules_for(declared: list[dict] | None, column_type):
+    """THE rules a column's cells are JUDGED by (#1048).
+
+    A declaration wins whatever the type (REPLACE, #592 §I.7). With none, the
+    TYPE picks the defaults: `FREE_TEXT_DEFAULTS` for free text, ``None`` (the
+    prefix rule) for everything else. ``column_type`` may be the enum or its
+    string value (`ColumnType` is a ``str`` enum), or ``None`` when no type is
+    known yet — the import preview, before detection.
+    """
+    if declared is not None:
+        return declared
+    if column_type is not None and column_type in FREE_TEXT_TYPES:
+        return FREE_TEXT_DEFAULTS
+    return None
+
+
+def is_declaration(rules) -> bool:
+    """True when ``rules`` is a researcher's DECLARATION (a list, possibly
+    empty), as opposed to either set of defaults. Branch on this, never on
+    ``rules is not None`` — `FREE_TEXT_DEFAULTS` is not None and not declared."""
+    return isinstance(rules, list)
 
 
 # -- Declared rules ------------------------------------------------------------
@@ -219,12 +353,13 @@ def is_declared_missing(value_text: str | None, rules: list[dict]) -> bool:
     return False
 
 
-def matched_missing_label(value_text: str | None, rules: list[dict] | None) -> str | None:
+def matched_missing_label(value_text: str | None, rules) -> str | None:
     """The declared LABEL of the labelled discrete rule this text matches, if
     any — the append substitution channel (#592 §I.2b): an appended raw code
     lands with the same display text existing labelled-missing cells carry,
-    so the dedup fingerprint can match them."""
-    if not rules or value_text is None:
+    so the dedup fingerprint can match them. Only a DECLARATION carries labels;
+    either set of defaults answers None."""
+    if not is_declaration(rules) or not rules or value_text is None:
         return None
     text = value_text.strip()
     if not text:
@@ -236,11 +371,14 @@ def matched_missing_label(value_text: str | None, rules: list[dict] | None) -> s
     return None
 
 
-def is_missing(value_text: str | None, rules: list[dict] | None) -> bool:
+def is_missing(value_text: str | None, rules) -> bool:
     """THE missing decision for a cell's text (#592).
 
-    ``rules is None`` (no declaration) → the ``_is_na`` defaults; a declared
-    rule list (possibly empty) REPLACES the defaults entirely (§I.7).
+    ``rules is None`` (no declaration) → the ``_is_na`` prefix defaults;
+    `FREE_TEXT_DEFAULTS` → the whole-answer defaults (#1048); a declared rule
+    list (possibly empty) REPLACES the defaults entirely (§I.7). Take ``rules``
+    from `column_missing_rules` / `missing_rules_for`, which pick the defaults
+    by the column's type.
 
     None/blank text is never *missing-by-declaration* — blank is the separate
     "empty" concept (``treat_as_empty`` owns text-emptiness; the import
@@ -250,6 +388,8 @@ def is_missing(value_text: str | None, rules: list[dict] | None) -> bool:
         return False
     if rules is None:
         return _is_na(value_text)
+    if rules is FREE_TEXT_DEFAULTS:
+        return _is_na_whole_answer(value_text)
     return is_declared_missing(value_text, rules)
 
 
@@ -340,9 +480,17 @@ def normalize_missing_rules_payload(items: list) -> list[dict]:
     return normalized
 
 
-def column_missing_rules(column) -> list[dict] | None:
-    """The parsed declaration off a DatasetColumn (None = defaults apply)."""
-    return parse_missing_rules(getattr(column, "missing_values", None))
+def column_missing_rules(column):
+    """The rules a DatasetColumn's cells are judged by — its declaration, or the
+    defaults its TYPE calls for (#1048; see `missing_rules_for`).
+
+    ⚠️ Reads ``column.column_type`` strictly: a query row that did not select it
+    must fail here rather than fall back to the prefix defaults, which would put
+    a free-text column back on the rule #1048 took it off, silently."""
+    return missing_rules_for(
+        parse_missing_rules(getattr(column, "missing_values", None)),
+        column.column_type,
+    )
 
 
 def is_missing_for_column(column, value_text: str | None) -> bool:
@@ -350,7 +498,7 @@ def is_missing_for_column(column, value_text: str | None) -> bool:
     return is_missing(value_text, column_missing_rules(column))
 
 
-def describe_missing_rules(rules: list[dict] | None) -> str:
+def describe_missing_rules(rules) -> str:
     """One human-readable line for a column's missing declaration (#822).
 
     The vocabulary is the AUTHORING tri-state's (#609) — *Automatic* / *Nothing
@@ -358,12 +506,20 @@ def describe_missing_rules(rules: list[dict] | None) -> str:
     the researcher set it in say the same words. A fourth wording invented at
     the export would be a second definition of the same fact.
 
+    ⚠️ **One qualified form, for `FREE_TEXT_DEFAULTS` (#1048).** A free-text
+    column cannot be declared (the endpoint refuses), so no editor names its
+    state, and the dictionary is the one place a reader learns why a free-text
+    cell is blank — "Automatic" alone would claim the prefix rule every other
+    column uses.
+
     Why the export needs it at all: the R and Excel exports now agree that a
     declared-missing cell is EMPTY, which loses the DISTINCTION between "Do not
     know", "No answer" and "Inapplicable" — exactly what a survey researcher
     needs. The dictionary is what preserves it, which is why the blanking and
     this column shipped together rather than one being chosen over the other.
     """
+    if rules is FREE_TEXT_DEFAULTS:
+        return "Automatic (whole answers only)"
     if rules is None:
         return "Automatic"
     if not rules:

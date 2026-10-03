@@ -32,9 +32,9 @@ from ..models.equivalence_group import EquivalenceGroup
 from ..services.grouping import MISSING_GROUP_LABEL
 from ..services.recode import compute_value
 from ..services.missing_values import (
+    column_missing_rules,
     describe_missing_rules,
     is_missing,
-    parse_missing_rules,
 )
 from ..services.metrics import resolve_input_source_labels
 from ..services.coding_layers import (
@@ -843,9 +843,11 @@ def export_datasets_excel(
                    if col.column_type != ColumnType.SKIP]
 
         # #592: per-column missing rules for on-the-fly recode computation
-        # (parsed once, not per cell). None = the recognized-N/A defaults.
+        # (parsed once, not per cell). #1048: the EFFECTIVE rules — a
+        # declaration, or the defaults the column's type calls for — so the
+        # blanking below and the dictionary's "Missing" cell describe one rule.
         missing_rules_by_col = {
-            col.id: parse_missing_rules(col.missing_values) for col in columns
+            col.id: column_missing_rules(col) for col in columns
         }
 
         # Build column layout: for each column, determine export columns

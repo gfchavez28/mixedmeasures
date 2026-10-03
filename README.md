@@ -101,7 +101,9 @@ mean anything is wrong:
   code`, optionally a rating), applied to passages already in the project:
   transcript turns, document paragraphs, observation clips or open-text responses
   (*Analysis → Import codings…*). Every coder name in the file needs an explicit
-  answer, and nothing is applied until the whole file checks out. Labels a model
+  answer, and before anything is applied the page shows which rows will be
+  imported and why any others will not. The *Coded Segments* export imports back
+  as it is, ratings included. Labels a model
   produced elsewhere arrive the same way, as a **machine coder** that records which
   model, how it was reached, its settings and its prompt — attributed and
   filterable, and kept out of every agreement figure.
@@ -288,9 +290,10 @@ Being honest about scope:
   alpha, percent agreement — each with a **95% confidence interval**, and a stated
   reason where one cannot be computed), agreement on **code ratings** and on **code
   sets** as well as on the codes themselves, side-by-side reconciliation, and a
-  derived consensus layer. A separate **model comparison** sets a machine coder's
-  labels beside each person's, per code — a description of the model's behaviour,
-  not inter-rater reliability. Several coders can also take turns on one computer under named
+  derived consensus layer. A separate **Model comparison** tab, there for a
+  researcher coding alone as well, sets a machine coder's labels beside each
+  person's, per code — a description of the model's behaviour, not inter-rater
+  reliability. Several coders can also take turns on one computer under named
   identities. (Separate researchers with unrelated projects on a shared computer
   should still use separate operating-system accounts.)
 - **Not cloud-based.** Everything runs locally against a local database. Moving a

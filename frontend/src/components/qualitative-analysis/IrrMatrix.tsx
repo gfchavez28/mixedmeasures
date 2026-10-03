@@ -9,7 +9,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { LoadingNotice } from '@/components/LoadStatus'
 import { cn } from '@/lib/utils'
-import { describeUndefined, undefinedTooltip } from '@/lib/stat-format'
+import { describeUndefined, formatPercent, undefinedTooltip } from '@/lib/stat-format'
 import { ciCaveat, ciQualifier, ciUnavailableNote } from '@/lib/ci-label'
 import { formatMagnitude } from '@/lib/magnitude'
 import {
@@ -54,7 +54,6 @@ const BAND_CLASS: Record<string, string> = {
 }
 
 const fmt = (v: number | null | undefined, dp = 2) => (v == null ? '—' : v.toFixed(dp))
-const fmtPct = (v: number | null | undefined) => (v == null ? '—' : `${Math.round(v * 100)}%`)
 // Cutoffs print at their natural precision: 0.80 → "0.80", 0.667 → "0.667".
 const fmtThresh = (v: number) => (Number.isInteger(v * 100) ? v.toFixed(2) : v.toFixed(3))
 // Conventional Krippendorff (2004) α cutoffs — fallback only; the live payload's
@@ -94,7 +93,7 @@ function rowAriaLabel(c: IrrCodeResult, showKappa: boolean, thresholds?: IrrThre
   const parts = [`${c.code_name}:`]
   if (showKappa) parts.push(`${metricPhrase('κ', c.cohens_kappa, c.kappa_interpretation, c.undefined_reason, c.kappa_ci, thresholds?.kappa)};`)
   parts.push(`${metricPhrase('α', c.krippendorff_alpha, c.alpha_interpretation, c.undefined_reason, c.alpha_ci, thresholds?.alpha)};`)
-  parts.push(`${fmtPct(c.percent_agreement)} agreement;`)
+  parts.push(`${formatPercent(c.percent_agreement)} agreement;`)
   parts.push(`prevalence ${fmt(c.prevalence)}`)
   return parts.join(' ')
 }
@@ -137,7 +136,7 @@ function setRowAriaLabel(s: IrrSetResult, alphaThresholds?: Record<string, numbe
   const parts = [`${s.label}:`]
   parts.push(`${s.n_values} values;`)
   parts.push(`${metricPhrase('α', s.krippendorff_alpha, s.alpha_interpretation, s.undefined_reason, s.alpha_ci, alphaThresholds)};`)
-  parts.push(`${fmtPct(s.percent_agreement)} agreement over ${s.n_units} passages`)
+  parts.push(`${formatPercent(s.percent_agreement)} agreement over ${s.n_units} passages`)
   if (s.n_multiple_selection > 0) {
     parts.push(`; ${s.n_multiple_selection} left out for holding two values at once`)
   }
@@ -505,7 +504,7 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
                     </span>
                   </th>
                   <td className="px-3 py-2 text-right tabular-nums text-mm-text-muted">{c.n_units}</td>
-                  <td className="px-3 py-2 text-right tabular-nums">{fmtPct(c.percent_agreement)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatPercent(c.percent_agreement)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-mm-text-muted">{fmt(c.prevalence)}</td>
                   {showKappa && (
                     <td className="px-3 py-2 text-right tabular-nums"><BandValue value={c.cohens_kappa} band={c.kappa_interpretation} reason={c.undefined_reason} ci={c.kappa_ci} thresholds={data.interpretation_thresholds?.kappa} /></td>
@@ -627,7 +626,7 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
                     <th scope="row" className="px-3 py-2 font-normal text-left text-mm-text">{s.label}</th>
                     <td className="px-3 py-2 text-right tabular-nums text-mm-text-muted">{s.n_values}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-mm-text-muted">{s.n_units}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{fmt(s.percent_agreement)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatPercent(s.percent_agreement)}</td>
                     {showKappa && (
                       <td className="px-3 py-2 text-right tabular-nums">
                         <BandValue value={s.cohens_kappa} band={s.kappa_interpretation} reason={s.undefined_reason} ci={s.kappa_ci} thresholds={data.interpretation_thresholds?.kappa} />

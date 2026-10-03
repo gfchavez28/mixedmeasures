@@ -254,6 +254,16 @@ describe('layerScope is surfaced as a first-class param (#652 slab 4)', () => {
     expect(extractQualComputeParams(qualConfig({ layer_scope: 'consensus' })).layerScope).toBe('consensus')
     expect(extractQualComputeParams(qualConfig({ layer_scope: undefined })).layerScope).toBe('human')
   })
+
+  it('#1098: a chart saved on the MACHINE layer stays on it — the request too', () => {
+    // The ternary read anything but 'consensus' as 'human', so every kind of chart
+    // saved on the Machine layer drew PEOPLE's coding on the canvas.
+    const params = extractQualComputeParams(qualConfig({ layer_scope: 'machine' }))
+    expect(params.layerScope).toBe('machine')
+    expect(params.request.layer_scope).toBe('machine')
+    // An unknown value still falls back to people (`asLayerScope`'s rule).
+    expect(extractQualComputeParams(qualConfig({ layer_scope: 'bogus' })).layerScope).toBe('human')
+  })
 })
 
 describe('qualChartHasEnoughToFetch — the gate differs per kind', () => {

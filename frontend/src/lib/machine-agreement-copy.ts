@@ -18,12 +18,23 @@
  * a validation claim fails rather than ships.
  */
 
-/** Above the table. States what the numbers are, in the researcher's words. */
+/**
+ * Above the table. States what the numbers are, in the researcher's words.
+ *
+ * ⚠️ #1030 — it said *"Nothing here enters the agreement figures above"* while the
+ * table sat under the Reliability tab's tables. It has its own tab now, reachable
+ * by a researcher with no colleague and so no reliability figures at all, so the
+ * sentence names what it never enters rather than where that is.
+ */
 export const MACHINE_AGREEMENT_EXPLAINER =
   'How closely each imported model layer reproduces each person’s coding. '
   + 'These figures describe the MODEL — they are not inter-rater reliability, '
-  + 'and they are not evidence that the coding is correct. Nothing here enters '
-  + 'the agreement figures above.'
+  + 'and they are not evidence that the coding is correct. None of them enters '
+  + 'a reliability figure.'
+
+/** While blind (#1030): the comparison is narrowed to the viewer, and says so. */
+export const MACHINE_AGREEMENT_BLIND_SCOPE =
+  'Colleagues’ work is hidden, so this compares only your own coding with each model.'
 
 /** Beside the coverage counts, where a thin pass is what makes a figure low. */
 export const MACHINE_AGREEMENT_COVERAGE_NOTE =

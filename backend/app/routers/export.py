@@ -313,7 +313,7 @@ async def export_code_frequencies_csv(
 async def export_coded_segments_csv(
     project_id: int,
     code_ids: str | None = None,
-    exclude_facilitator: bool = True,
+    exclude_facilitator: bool = False,
     conversation_ids: str | None = None,
     participant_ids: str | None = None,
     user: User = Depends(get_current_user),
@@ -327,6 +327,15 @@ async def export_coded_segments_csv(
     pair; the Speaker/Participant columns degrade to blank for speaker-less
     parents, and ``exclude_facilitator`` no-ops there (its filter keeps
     speaker-less rows by construction).
+
+    🔴 **Interviewer turns are IN by default (#1075).** The default was True, and
+    the Export dialog passes no parameters, so every coding on a facilitator turn
+    was missing from the file — while the file's own promise (the coding import's
+    *"that export imports as it is"*, row 49) and the wide `/csv` it pairs with
+    (#650: *"same data, the other shape"*) both include them. A coding the
+    researcher made is data, whoever spoke the turn; which turns were the
+    interviewer's is now a COLUMN (`Is Facilitator`, appended), so an analysis
+    that leaves them out can do so in the file. The parameter stays, as a filter.
     """
     from sqlalchemy.orm import joinedload
 
@@ -480,10 +489,18 @@ async def export_coded_segments_csv(
     # the J3-2 spine and is stable across `.mmproject` copies — a `.mmproject`
     # round trip renumbers ids, so a file keyed on one would silently address
     # other segments after a colleague's project came back.
+    #
+    # #1075 — `Is Facilitator` is APPENDED after it, for the same reason: now that
+    # interviewer turns are in the file by default, the file must say which rows
+    # they are. Its vocabulary is the Excel Coded Data sheet's (`export_excel.py`):
+    # "Yes"/"No" on a turn with a speaker, BLANK where the question does not apply
+    # (a document paragraph, a clip, a turn with no speaker) — a "No" there would
+    # be counted as an observation by anything that tabulates the column.
     writer.writerow([
         "Code", "Category", "Coder", "Source Type", "Source", "Speaker", "Participant",
         "Participant Role", "Segment Text", "Other Codes", "Is Quoted", "Timestamp",
         "End Timestamp", "Rating", "Rating Scale", "Rating Anchor", "Unit ID",
+        "Is Facilitator",
     ])
 
     for app in apps:
@@ -533,6 +550,7 @@ async def export_coded_segments_csv(
             # user text, which is the property that makes that true. A
             # user-derived column added here WOULD need it.
             seg.uuid if seg else "",
+            ("Yes" if speaker.is_facilitator else "No") if speaker else "",
         ])
 
     output.seek(0)

@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { FileInput, ChevronRight, SlidersHorizontal, Pencil, Trash2, Palette, Package, MessageSquareText, Table2, Users, TableProperties as TablePropertiesIcon } from 'lucide-react'
+import { FileInput, ChevronRight, SlidersHorizontal, Pencil, Trash2, Palette, Package, MessageSquareText, Table2, Users, Loader2, TableProperties as TablePropertiesIcon } from 'lucide-react'
 import { datasetsApi, domainsApi, textCodingApi, extractApiError, retryUnanswered} from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
@@ -286,9 +286,24 @@ export default function DatasetsListPage() {
             }
             className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-md text-sm font-medium text-mm-text-muted hover:text-mm-text transition-colors border border-mm-surface-border hover:border-mm-text-muted disabled:opacity-50"
           >
-            <Users className="w-3.5 h-3.5" aria-hidden="true" />
-            {participantTable ? 'Participant table' : 'Add participant table'}
+            {participantTableMutation.isPending
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+              : <Users className="w-3.5 h-3.5" aria-hidden="true" />}
+            {/* #1073 (b): the call has no client timeout now, and on a large
+                project it runs ~30 s — so the button SAYS it is working rather
+                than sitting dimmed. Both sentences describe what the server is
+                doing: creating calls refresh, so an existing table is updated. */}
+            {participantTableMutation.isPending
+              ? (participantTable ? 'Updating participant table…' : 'Building participant table…')
+              : (participantTable ? 'Participant table' : 'Add participant table')}
           </button>
+          {/* The button is disabled while it runs, so its new words are not
+              announced; this says it once, and why it may take a while. */}
+          <span role="status" className="sr-only">
+            {participantTableMutation.isPending
+              ? 'Building the participant table. On a large project this can take a minute.'
+              : ''}
+          </span>
           {/* Row 47. Labelled "Blank table" and not "New table": the two
               controls beside it also produce tables, so the distinguishing fact
               is that this one starts EMPTY. */}

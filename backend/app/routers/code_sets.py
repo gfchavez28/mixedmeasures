@@ -24,6 +24,7 @@ from ..models.code_set import CodeSet
 from ..models.user import User
 from ..schemas.code_set import (
     CodeSetAddCodes,
+    CodeSetClaimant,
     CodeSetCreate,
     CodeSetListResponse,
     CodeSetMemberInfo,
@@ -69,13 +70,26 @@ def _members(db: Session, set_id: int) -> list[Code]:
     )
 
 
-def _build_response(code_set: CodeSet, db: Session) -> CodeSetResponse:
+def _project_context(db: Session, project_id: int) -> tuple[dict[int, int], dict[int, Code]]:
+    """The effective-code map and every code, read ONCE per request.
+
+    ⚠️ The list endpoint used to rebuild both per SET — a full codes read and an
+    equivalence-map build for each set in the project, on a request every coding
+    surface makes when it opens.
+    """
+    effective_map = build_effective_code_map(db, project_id)
+    codes_by_id = {c.id: c for c in db.query(Code).filter(Code.project_id == project_id).all()}
+    return effective_map, codes_by_id
+
+
+def _build_response(
+    code_set: CodeSet,
+    db: Session,
+    context: tuple[dict[int, int], dict[int, Code]] | None = None,
+) -> CodeSetResponse:
     members = _members(db, code_set.id)
-    effective_map = build_effective_code_map(db, code_set.project_id)
-    codes_by_id = {
-        c.id: c
-        for c in db.query(Code).filter(Code.project_id == code_set.project_id).all()
-    }
+    effective_map, codes_by_id = context or _project_context(db, code_set.project_id)
+    claimants = code_set_rules.set_claimants(members, effective_map=effective_map)
     return CodeSetResponse(
         id=code_set.id,
         project_id=code_set.project_id,
@@ -87,6 +101,10 @@ def _build_response(code_set: CodeSet, db: Session) -> CodeSetResponse:
         composition_warnings=code_set_rules.set_composition_warnings(
             members, effective_map=effective_map, codes_by_id=codes_by_id,
         ),
+        claimants=[
+            CodeSetClaimant(code_id=code_id, value_id=value_id)
+            for code_id, value_id in sorted(claimants.items())
+        ],
         created_at=code_set.created_at,
         updated_at=code_set.updated_at,
     )
@@ -178,8 +196,9 @@ def list_code_sets(
         .order_by(CodeSet.sequence_order.is_(None), CodeSet.sequence_order, CodeSet.id)
         .all()
     )
+    context = _project_context(db, project_id) if rows else None
     return CodeSetListResponse(
-        sets=[_build_response(s, db) for s in rows], total=len(rows),
+        sets=[_build_response(s, db, context) for s in rows], total=len(rows),
     )
 
 

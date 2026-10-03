@@ -19,8 +19,8 @@ import {
   formatTimedShare,
   timedExtent,
   type CodelineCategoryGroup,
-  type CoderInclude,
   type TimedCodeRow,
+  type TimedLens,
   type TimedCoderRow,
 } from '@/lib/timed-analytics'
 
@@ -33,10 +33,12 @@ import {
  * TABLE IS ITS ACCESSIBLE EQUIVALENT, so the two must always render together.
  *
  * All numbers are client-computed from the workbench clip payload, which is
- * human-layer-only by construction (P-1) — the toolbar gates this chart type
- * off under the consensus layer scope. The coder lens is include-list
- * semantics mirroring the backend `_coder_filter` (see lib/timed-analytics.ts)
- * so these numbers agree with the neighboring backend-computed charts.
+ * the working layer by construction (P-1: no consensus rows) — the toolbar gates
+ * this chart type off under the consensus layer scope. The lens (`TimedLens`)
+ * mirrors the backend's `layer_scope_filter` then `_coder_filter` (see
+ * lib/timed-analytics.ts) so these numbers agree with the neighboring
+ * backend-computed charts — on the Coders layer a model's marks are left out,
+ * on the Machine layer only a model's are drawn (#1077 b).
  */
 
 export interface TimedObservationLite {
@@ -76,8 +78,13 @@ interface Props {
   codes: TimedCodeLite[]
   /** Category display order (backend CodeCategory order). */
   categories: { id: number; name: string }[]
-  /** Effective coder include — blind forces self; null = no filter (#454). */
-  include: CoderInclude
+  /**
+   * Whose marks count: the layer, the machine coders it keys on, and the
+   * effective coder include (blind forces self; null = no filter, #454).
+   * REQUIRED as one object so no mount can pass an include set without the
+   * machine coders (#1077 b).
+   */
+  lens: TimedLens
   multiCoder: boolean
   coderMap: ReadonlyMap<number, TimedCoderLite>
   /**
@@ -146,7 +153,7 @@ const rate = formatTimedRate
 const secs = formatTimedSeconds
 
 export default function TimedAnalytics({
-  projectId, observations, observationsLoad, codes, categories, include, multiCoder, coderMap,
+  projectId, observations, observationsLoad, codes, categories, lens, multiCoder, coderMap,
   consensusScope = false, labelFontSize, showTableModeToggle = true,
   tableMode = 'code', onTableModeChange,
 }: Props) {
@@ -161,7 +168,7 @@ export default function TimedAnalytics({
   if (consensusScope) {
     return (
       <div className="text-center py-16 text-mm-text-muted">
-        The timeline reads the human coding layer. Switch the layer back to Coders to see it.
+        The timeline cannot show the Consensus layer. Switch the layer to Coders or Machine to see it.
       </div>
     )
   }
@@ -198,7 +205,7 @@ export default function TimedAnalytics({
           clipQuery={clipQueries[i]}
           codes={codes}
           categories={categories}
-          include={include}
+          lens={lens}
           multiCoder={multiCoder}
           coderMap={coderMap}
           labelFontSize={labelFontSize}
@@ -212,7 +219,7 @@ export default function TimedAnalytics({
 }
 
 function ObservationTimedBlock({
-  obs, clips, clipQuery, codes, categories, include, multiCoder, coderMap, labelFontSize,
+  obs, clips, clipQuery, codes, categories, lens, multiCoder, coderMap, labelFontSize,
   tableMode, onTableModeChange,
   showTableModeToggle,
 }: {
@@ -221,7 +228,7 @@ function ObservationTimedBlock({
   clipQuery: ListLoadQuery
   codes: TimedCodeLite[]
   categories: { id: number; name: string }[]
-  include: CoderInclude
+  lens: TimedLens
   multiCoder: boolean
   coderMap: ReadonlyMap<number, TimedCoderLite>
   labelFontSize?: number
@@ -245,23 +252,23 @@ function ObservationTimedBlock({
   const { extent, durationKnown } = timedExtent(obs.media_duration_seconds, clips ?? [])
 
   const rows = useMemo(
-    () => computeTimedRows(clips ?? [], codeIds, include, extent),
-    [clips, codeIds, include, extent],
+    () => computeTimedRows(clips ?? [], codeIds, lens, extent),
+    [clips, codeIds, lens, extent],
   )
   const coderRows = useMemo(
-    () => (effectiveMode === 'coder' ? computeTimedRowsByCoder(clips ?? [], codeIds, include, extent) : []),
-    [effectiveMode, clips, codeIds, include, extent],
+    () => (effectiveMode === 'coder' ? computeTimedRowsByCoder(clips ?? [], codeIds, lens, extent) : []),
+    [effectiveMode, clips, codeIds, lens, extent],
   )
   const groups = useMemo(
-    () => buildCodelineLanes(clips ?? [], codeIds, include, categories, codeToCategoryId),
-    [clips, codeIds, include, categories, codeToCategoryId],
+    () => buildCodelineLanes(clips ?? [], codeIds, lens, categories, codeToCategoryId),
+    [clips, codeIds, lens, categories, codeToCategoryId],
   )
 
   // The anchor for the don't-sum disclosure — see `coveredTotalSeconds`, which
   // the canvas export reuses.
   const coveredTotal = useMemo(
-    () => (clips ? coveredTotalSeconds(clips, codeIds, include, extent) : null),
-    [clips, codeIds, include, extent],
+    () => (clips ? coveredTotalSeconds(clips, codeIds, lens, extent) : null),
+    [clips, codeIds, lens, extent],
   )
 
   const totalMarks = rows.reduce((s, r) => s + r.marks, 0)
@@ -270,11 +277,11 @@ function ObservationTimedBlock({
     const seen = new Set<number | null>()
     for (const clip of clips ?? []) {
       for (const d of clip.applied_code_details) {
-        if (detailVisible(d.user_id, include)) seen.add(d.user_id)
+        if (detailVisible(d.user_id, lens)) seen.add(d.user_id)
       }
     }
     return seen.size
-  }, [clips, include])
+  }, [clips, lens])
 
   /**
    * #963 Tier 3 — MEASURED 2026-09-18 on three observations holding 4, 6 and 13

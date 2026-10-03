@@ -37,6 +37,24 @@ export function formatStat(value: number | null | undefined, digits = 2): string
   return value == null || !Number.isFinite(value) ? NO_VALUE : value.toFixed(digits)
 }
 
+/**
+ * A PROPORTION (0–1) as a whole percentage — "85%", or `NO_VALUE`.
+ *
+ * 🔴 **Every "% agreement" cell goes through this (#1038 a).** The code-set
+ * table printed `formatStat`'s "0.85" under a "% agreement" heading while the
+ * per-code table beside it and the row's own accessible name said "85%": three
+ * agreement tables, three private formatters, one of them wrong. Guarded by a
+ * scan (`percent-agreement-format.test.ts`) that finds every render of
+ * `percent_agreement`.
+ *
+ * ⚠️ A real 0 formats as "0%" — never `value ? … : NO_VALUE` (the falsy-zero rule).
+ */
+export function formatPercent(proportion: number | null | undefined): string {
+  return proportion == null || !Number.isFinite(proportion)
+    ? NO_VALUE
+    : `${Math.round(proportion * 100)}%`
+}
+
 const REASON_TEXT: Record<UndefinedReason, string> = {
   insufficient_n: 'Too few values to compute this, after missing data was excluded.',
   empty_group: 'No values in this group, after missing data was excluded.',

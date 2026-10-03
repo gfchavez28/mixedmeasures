@@ -12,6 +12,7 @@ import '@testing-library/jest-dom/vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import DocumentSubjectDialog from './DocumentSubjectDialog'
+import { PARTICIPANT_LIST_LIMIT } from '@/lib/participant-search'
 
 const listParticipants = vi.fn()
 
@@ -134,6 +135,48 @@ describe('DocumentSubjectDialog', () => {
     renderDialog(vi.fn(), null, [])
     expect(await screen.findByText(/no participants yet/i)).toBeInTheDocument()
     expect(screen.getByText(/Participants page/)).toBeInTheDocument()
+  })
+
+  it('#1045 renders at most PARTICIPANT_LIST_LIMIT participants, says so, and search reaches the rest', async () => {
+    // A survey imported with identifier linking makes one participant per
+    // record (122,382 on BES); this dialog rendered one button per participant.
+    const many = Array.from({ length: 600 }, (_, i) =>
+      participant(i + 1, { identifier: `R${String(i + 1).padStart(4, '0')}` }))
+    renderDialog(vi.fn(), null, many)
+    await screen.findByRole('button', { name: 'R0001' })
+    const rows = () => screen.getAllByRole('button').filter(b => /^R\d{4}$/.test(b.textContent ?? ''))
+    expect(rows()).toHaveLength(PARTICIPANT_LIST_LIMIT)
+    const note = `Showing the first ${PARTICIPANT_LIST_LIMIT} of 600 participants. Type a name or ID to find the others.`
+    expect(screen.getByText(note)).toBeInTheDocument()
+    const search = screen.getByRole('textbox', { name: 'Search participants' })
+    expect(search).toHaveAccessibleDescription(note)
+
+    fireEvent.change(search, { target: { value: 'r0599' } })
+    await waitFor(() => expect(rows().map(r => r.textContent)).toEqual(['R0599']))
+    expect(screen.queryByText(/Showing the first/)).toBeNull()
+  })
+
+  it('#1072 (b) pins the CURRENT subject when the bounded list does not show it', async () => {
+    const many = Array.from({ length: 600 }, (_, i) =>
+      participant(i + 1, { identifier: `R${String(i + 1).padStart(4, '0')}` }))
+    const onChoose = renderDialog(vi.fn(), 599, many)
+    const pinned = await screen.findByRole('button', { name: /R0599/ })
+    expect(pinned).toHaveTextContent('current subject')
+    expect(pinned).toHaveAttribute('aria-current', 'true')
+    // The bounded rows are unchanged; the pin is one extra entry.
+    const bounded = screen.getAllByRole('button').filter(b => /^R\d{4}$/.test(b.textContent ?? ''))
+    expect(bounded).toHaveLength(PARTICIPANT_LIST_LIMIT)
+    fireEvent.click(pinned)
+    expect(onChoose).toHaveBeenCalledWith(599, 'R0599')
+  })
+
+  it('#1072 (b) marks the current row by STATE, not colour alone — and pins nothing it already shows', async () => {
+    renderDialog(vi.fn(), 2)
+    const bo = await screen.findByRole('button', { name: /Bo Ruiz/ })
+    expect(bo).toHaveAttribute('aria-current', 'true')
+    expect(screen.getByRole('button', { name: /Ada Chen/ })).not.toHaveAttribute('aria-current')
+    expect(screen.getByRole('button', { name: /Not about a specific subject/ })).not.toHaveAttribute('aria-current')
+    expect(screen.queryByText('current subject', { exact: false })).toBeNull()
   })
 
   it('does not fetch participants while it is closed', () => {

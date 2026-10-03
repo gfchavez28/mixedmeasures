@@ -3,6 +3,7 @@
 // builds the `coder_mapping` wire payload is unit-testable.
 
 import type { MergeCoderPreview, CoderMapping, CoderMappingDecision } from './api'
+import { isMachineCoder, MACHINE_CODER_TYPE } from './coding-layers'
 
 /**
  * Smart default per incoming coder (R3): map onto a confident name-match, else add as
@@ -63,12 +64,18 @@ export function buildCoderMapping(
 }
 
 /**
- * How many distinct coders the file's codings will span once mapped: each `match`
+ * How many distinct PEOPLE the file's codings will span once mapped: each `match`
  * resolves to its target coder id, each `create` is a new distinct coder. Optionally
  * union in coders already known to be present (e.g. a target roster). Drives the
  * single-vs-multi-coder note on the confirm step (#444): the prior check counted only
  * NEW coders, so the default "N file coders → N distinct existing coders" mapping —
  * which preserves multi-coder — was wrongly flagged as single-coder.
+ *
+ * 🔴 **People only (#1034).** The note says consensus and agreement become available,
+ * and a MACHINE coder votes in neither — so a person and a model mapped in read as
+ * "consensus + agreement (IRR) stay available" over a project where both are off
+ * (`multiHumanCoder`'s rule, #989). A match target has the file coder's kind, because
+ * `match_options` offers no other.
  *
  * Note: this counts only what the merge reliably knows (the file side). The confirm
  * step has no project-scoped view of who already coded the target, so it deliberately
@@ -81,9 +88,48 @@ export function resultingCoderCount(
 ): number {
   const ids = new Set<string>(existingCoderIds.map(id => `u:${id}`))
   for (const c of coders) {
+    if (isMachineCoder(c)) continue
     const d = decisions[c.original_id]
     if (!d) continue
     ids.add(d.action === 'match' ? `u:${d.target_user_id}` : `new:${c.original_id}`)
   }
   return ids.size
+}
+
+/**
+ * The coders a merge will ADD, split by kind (#1034): a new PERSON is what turns on
+ * consensus and agreement; a new MODEL joins the machine layer and the Model
+ * comparison, and turns on nothing. One number for both was the claim that a model
+ * "enables consensus + agreement (IRR)".
+ */
+export function newCoderCounts(
+  coders: MergeCoderPreview[],
+  decisions: Record<number, CoderMappingDecision>,
+): { people: number; models: number } {
+  let people = 0
+  let models = 0
+  for (const c of coders) {
+    if (decisions[c.original_id]?.action !== 'create') continue
+    if (isMachineCoder(c)) models++
+    else people++
+  }
+  return { people, models }
+}
+
+/**
+ * What the confirm step says when the file coder's name is taken by a coder it may
+ * NOT land on (#1034) — so an added coder's suffixed name is explained, not a surprise.
+ */
+export function nameInUseNote(c: MergeCoderPreview): string | null {
+  const n = c.name_in_use
+  if (!n) return null
+  const self = isMachineCoder(c) ? 'this machine coder' : 'this person'
+  if (n.reason === 'configuration') {
+    return `A machine coder called “${n.username}” is already here, run with a different `
+      + `configuration — two configurations of one model are two coders, so ${self} `
+      + `joins as “${n.new_username}”.`
+  }
+  const holder = n.coder_type === MACHINE_CODER_TYPE ? 'A machine coder' : 'A person'
+  return `${holder} called “${n.username}” is already here, and a person and a model `
+    + `cannot stand in for each other — so ${self} joins as “${n.new_username}”.`
 }

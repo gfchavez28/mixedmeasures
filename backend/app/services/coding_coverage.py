@@ -47,6 +47,11 @@ class CoderCoverage:
     username: str
     display_color: str | None
     archived: bool
+    #: #1030 — a MACHINE coder is a coder here (its codings are attributed), and
+    #: this is what lets a surface ask "has a model coded THIS project?" without the
+    #: install-wide roster, which names a machine imported into any project (#1038 g).
+    #: It also names an ARCHIVED machine, which the roster cannot.
+    coder_type: str
 
 
 def _real_coding_filters():
@@ -65,7 +70,10 @@ def _real_coding_filters():
 
 def _rows_to_coverage(rows) -> list[CoderCoverage]:
     return [
-        CoderCoverage(user_id=r[0], username=r[1], display_color=r[2], archived=bool(r[3]))
+        CoderCoverage(
+            user_id=r[0], username=r[1], display_color=r[2], archived=bool(r[3]),
+            coder_type=r[4],
+        )
         for r in rows
     ]
 
@@ -84,7 +92,7 @@ def source_coder_coverage(
     alphabetical. Returns [] when no source selector is given.
     """
     q = (
-        db.query(User.id, User.username, User.display_color, User.archived)
+        db.query(User.id, User.username, User.display_color, User.archived, User.coder_type)
         .join(CodeApplication, CodeApplication.user_id == User.id)
         .join(Code, CodeApplication.code_id == Code.id)
         .filter(Code.project_id == project_id, *_real_coding_filters())
@@ -110,7 +118,7 @@ def source_coder_coverage(
 def project_coder_coverage(db: Session, project_id: int) -> list[CoderCoverage]:
     """Distinct coders with ≥1 real coding ANYWHERE in the project (active first)."""
     rows = (
-        db.query(User.id, User.username, User.display_color, User.archived)
+        db.query(User.id, User.username, User.display_color, User.archived, User.coder_type)
         .join(CodeApplication, CodeApplication.user_id == User.id)
         .join(Code, CodeApplication.code_id == Code.id)
         .filter(Code.project_id == project_id, *_real_coding_filters())

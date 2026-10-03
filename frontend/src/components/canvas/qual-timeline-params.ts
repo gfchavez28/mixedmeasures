@@ -14,7 +14,8 @@
  * the oddity is the view's and the comment says so — do not normalize it here.
  */
 import type { Code, Observation } from '@/lib/api'
-import type { CoderInclude } from '@/lib/timed-analytics'
+import type { MachineCoderIds } from '@/lib/coding-progress'
+import type { TimedLayer, TimedLens } from '@/lib/timed-analytics'
 import type {
   TimedCodeLite,
   TimedObservationLite,
@@ -87,8 +88,12 @@ export function resolveTimelineCodes(
 }
 
 export interface TimelineCoderLens {
-  /** null = no filter (all coders + unattributed); a set = ONLY these ids. */
-  include: CoderInclude
+  /**
+   * Whose marks count — the layer, the machine coders it keys on, and the
+   * include set (null = no filter; a set = ONLY these ids). One object since
+   * #1077 (b): an include set alone drew a model's marks on the Coders layer.
+   */
+  lens: TimedLens
   /** Drives per-coder affordances inside `TimedAnalytics`. */
   multiCoder: boolean
   /** True when the lens was narrowed by blind mode rather than by the config. */
@@ -141,16 +146,24 @@ export function resolveTimelineCoderLens(
   withholding: boolean,
   self: number | null,
   rosterMultiCoder: boolean,
+  /** #1077 (b) — `useMachineCoderIds()`; REQUIRED, as everywhere it is read. */
+  machineCoderIds: MachineCoderIds,
+  /** #1077 (b) — `timedLayerFor(params.layerScope)`; the caller gates consensus off. */
+  layer: TimedLayer,
 ): TimelineCoderLens {
   if (withholding) {
     return {
-      include: new Set(self != null ? [self] : []),
+      lens: { include: new Set(self != null ? [self] : []), machineCoderIds, layer },
       multiCoder: false,
       blinded: true,
     }
   }
   return {
-    include: savedCoderIds && savedCoderIds.length > 0 ? new Set(savedCoderIds) : null,
+    lens: {
+      include: savedCoderIds && savedCoderIds.length > 0 ? new Set(savedCoderIds) : null,
+      machineCoderIds,
+      layer,
+    },
     multiCoder: rosterMultiCoder,
     blinded: false,
   }

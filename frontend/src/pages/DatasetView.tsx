@@ -304,6 +304,20 @@ export default function DatasetView() {
    * the promise, where it belongs.
    */
   const pendingRevealRef = useRef<{ rowId: number; columnId: number | null } | null>(null)
+  /**
+   * Bumped each time a reveal is REQUESTED, so the reveal effect runs even when
+   * nothing it reads from `data` changes.
+   *
+   * 🔴 **Found by driving #985's record links (2026-09-27).** The effect ran off
+   * `data` alone, which is enough when the requested row is on ANOTHER page
+   * (`setPageOffset` fetches it, `data` changes, the reveal runs). When the row
+   * is on the page ALREADY showing, `setPageOffset` is a no-op and `data` never
+   * changes, so the jump was dropped: measured, a link followed from inside the
+   * Data view marked nothing, and one followed from another page worked only
+   * because the position lookup beat the page's own data by 1 ms. The pending
+   * TARGET stays a ref (see above); this is the request, a number.
+   */
+  const [revealRequest, setRevealRequest] = useState(0)
   /** Which `?row=` has already been claimed — see the run-once guard below. */
   const handledFocusRef = useRef<string | null>(null)
   /** False only after unmount, so a resolve is never cancelled by a re-render. */
@@ -646,6 +660,7 @@ export default function DatasetView() {
         setPageOffset(pos.offset)
         if (col != null) setSelectedCell({ rowId, columnId: col })
         pendingRevealRef.current = { rowId, columnId: col }
+        setRevealRequest(n => n + 1)
       })
       .catch(() => {
         if (!aliveRef.current) return
@@ -664,7 +679,7 @@ export default function DatasetView() {
     if (!cleanup) return
     pendingRevealRef.current = null
     return cleanup
-  }, [data])
+  }, [data, revealRequest])
 
   const handleColumnResizeStart = useCallback((columnId: number) => {
     const startWidth = columnWidthsRef.current[columnId] || DEFAULT_COL_WIDTH
@@ -1123,6 +1138,7 @@ export default function DatasetView() {
   const { addRecord, isAdding } = useAddRecord(pid, iid, (created) => {
     setPageOffset(created.offset)
     pendingRevealRef.current = { rowId: created.row_id, columnId: null }
+    setRevealRequest(n => n + 1)
   })
 
   const deleteResponseMutation = useMutation({
@@ -1257,8 +1273,16 @@ export default function DatasetView() {
   // `source="computed"` anyway, so an unrouted item would simply fail. Same
   // shape as #812's delete: one control, two endpoints, ONE predicate deciding.
   const handleRecompute = useCallback((q: DatasetColumn) => {
-    if (isManagedColumn(q)) refreshParticipantsMut.mutate()
-    else recomputeMut.mutate(q.id)
+    if (isManagedColumn(q)) {
+      // #1073 (c): the per-column item is not disabled while a refresh runs, and
+      // a second one used to race the first into the database. The server now
+      // refuses it (409); this spares the request and says why.
+      if (refreshParticipantsMut.isPending) {
+        toast.info('The participant scores are already being refreshed.')
+        return
+      }
+      refreshParticipantsMut.mutate()
+    } else recomputeMut.mutate(q.id)
   }, [recomputeMut, refreshParticipantsMut])
 
   const handlePopoverOpenChange = useCallback((columnId: number, open: boolean) => {

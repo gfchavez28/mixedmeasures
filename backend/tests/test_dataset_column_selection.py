@@ -295,11 +295,22 @@ class TestSelectCsvColumns:
     def test_it_keeps_the_chosen_columns_in_order(self):
         assert select_csv_columns("a,b,c\n1,2,3\n", [2, 0]) == "c,a\n3,1\n"
 
-    def test_a_blank_line_stays_a_blank_line(self):
-        """So the narrowed text has exactly the record structure of the original
-        and the two stages cannot disagree about the row count (#983)."""
+    def test_records_are_re_emitted_not_lines(self):
+        """#983: a blank line in a two-column file is not a record, so the
+        narrowed text drops it — and has the SAME records as the original, which
+        is what keeps the two stages agreeing about the row count. (It used to be
+        re-emitted as a blank line, which a one-column result would then have
+        had to call a record.)"""
         narrowed = select_csv_columns("a,b\n1,2\n\n3,4\n", [0])
-        assert narrowed == "a\n1\n\n3\n"
+        assert narrowed == "a\n1\n3\n"
+
+    def test_an_empty_answer_survives_narrowing_to_one_column(self):
+        """A record whose selected cell is empty is written `""` — csv.writer's
+        spelling of one empty field — never as a blank line, so it stays a
+        record once the text is one column wide."""
+        narrowed = select_csv_columns("a,b\n1,x\n,y\n3,z\n", [0])
+        assert narrowed == 'a\n1\n""\n3\n'
+        assert describe_csv_text(narrowed)["row_count"] == 3
 
     def test_quoting_round_trips(self):
         """The narrowed text is re-serialised, so a value carrying a separator,

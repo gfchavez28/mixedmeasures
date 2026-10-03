@@ -2460,3 +2460,24 @@ describe('#963 — the clip list says "none" only of an answered query', () => {
     expect(freezeButton()).toHaveAccessibleName('Freeze segmentation')
   })
 })
+
+/** #1028 — the server swaps a code-set value and says what it replaced; undo puts it back. */
+describe('an apply that REPLACED a value, and its undo (#1028)', () => {
+  it('Ctrl+Z re-applies the replaced value and removes nothing', async () => {
+    applyCode.mockImplementation(async (_clip: number, code: number) =>
+      ({ applied: true, replaced_code_ids: code === 8 ? [7] : [] }))
+    renderWorkbench()
+    const row = (await screen.findAllByRole('option'))[3] // clip 14, holds Engagement (unrated)
+    fireEvent.click(row)
+    await waitFor(() => expect(row).toHaveAttribute('aria-selected', 'true'))
+    fireEvent.keyDown(window, { key: '2' })  // Disruption
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(14, 8))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+    await waitFor(() => expect(applyCode).toHaveBeenLastCalledWith(14, 7))
+    // Unrated before the act, so no rating call — a null is not a rating.
+    expect(setMagnitude).not.toHaveBeenCalled()
+    expect(removeCode).not.toHaveBeenCalled()
+  })
+})

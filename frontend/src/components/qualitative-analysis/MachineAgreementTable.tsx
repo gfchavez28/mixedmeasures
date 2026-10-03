@@ -4,7 +4,7 @@ import { codeAnalysisApi, type MachinePairAgreement } from '@/lib/api'
 import { LoadState } from '@/components/LoadStatus'
 import { useListLoad } from '@/hooks/useListLoad'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
-import { formatStat } from '@/lib/stat-format'
+import { formatPercent, formatStat } from '@/lib/stat-format'
 import { describeProvenance } from '@/lib/machine-coder'
 import { bandWord } from '@/lib/reliability-band'
 import {
@@ -17,23 +17,36 @@ import {
 /**
  * How far each MACHINE layer reproduces each person's coding (queue row 49).
  *
- * 🔴 **A SEPARATE `<section>`, below the reliability tables and never inside
- * one.** These numbers describe a MODEL. They are not inter-rater reliability,
+ * 🔴 **Its own tab since #1030 (`ModelComparisonTab`), never inside a reliability
+ * table.** It sat below the Reliability tab's tables until a lone researcher with a
+ * model layer turned out never to see it: that tab needs two PEOPLE. These numbers
+ * describe a MODEL. They are not inter-rater reliability,
  * they are not evidence the coding is correct, and none of them enters the
  * headline α — which is what #989's coder-kind exclusion guarantees at the
  * server. The sentences that say so are identity-pinned in
  * `lib/machine-agreement-copy.ts`; do not paraphrase them here.
  *
- * ⚠️ **Rendered only when it can return something.** The gate is
- * `hasMachineCoders`, passed by the caller from the roster it already holds, so
- * a project with no model layer never fetches and never shows an empty section
- * (the `availableLayerScopes` rule — offering a layer that can return nothing is
- * the #806 shape).
+ * ⚠️ **Rendered only when it can return something.** The tab that mounts it is
+ * offered only when a model has coded THIS project (`isModelComparisonTabVisible`,
+ * from coder coverage — not the install-wide roster, #1038 g), so a project with
+ * no model layer never fetches and never shows an empty section (the
+ * `availableLayerScopes` rule — offering a layer that can return nothing is the
+ * #806 shape).
  */
-export default function MachineAgreementTable({ projectId }: { projectId: number }) {
+export default function MachineAgreementTable({ projectId, humanId }: {
+  projectId: number
+  /**
+   * #1030 — ONE person to compare, or `null` for every person. Blind mode passes
+   * the viewer, so a colleague's row never reaches the wire. REQUIRED: a new mount
+   * must decide, because the default that leaks is the easy one to write.
+   */
+  humanId: number | null
+}) {
   const query = useQuery({
-    queryKey: ['machine-agreement', projectId],
-    queryFn: () => codeAnalysisApi.machineAgreement(projectId),
+    // The scope rides the KEY (#454): a key without it would serve every person's
+    // rows from cache the moment blind mode turned on.
+    queryKey: ['machine-agreement', projectId, humanId],
+    queryFn: () => codeAnalysisApi.machineAgreement(projectId, humanId),
     enabled: !!projectId,
   })
   const load = useListLoad(query)
@@ -148,9 +161,7 @@ function Pair({ pair }: { pair: MachinePairAgreement }) {
                   {row.both_applied}
                 </td>
                 <td className="py-1.5 pr-3 text-right tabular-nums text-mm-text">
-                  {row.percent_agreement != null
-                    ? `${Math.round(row.percent_agreement * 100)}%`
-                    : '—'}
+                  {formatPercent(row.percent_agreement)}
                 </td>
                 <td className="py-1.5 pr-3 text-right tabular-nums text-mm-text-muted">
                   {row.prevalence != null ? formatStat(row.prevalence) : '—'}

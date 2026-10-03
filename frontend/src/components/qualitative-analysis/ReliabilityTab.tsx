@@ -9,12 +9,9 @@ import {
   SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import IrrMatrix from './IrrMatrix'
-import MachineAgreementTable from './MachineAgreementTable'
 import OpenCutReliability from './OpenCutReliability'
 import { openObservations, selectableObservations } from '@/lib/reconciliation-source'
 import { RELIABILITY_EXPLAINER_FROZEN, RELIABILITY_EXPLAINER_OPEN } from '@/lib/source-kind-copy'
-import { useCoders } from '@/hooks/useCoders'
-import { rosterHasMachineCoders } from '@/lib/coding-layers'
 
 const POOLED = '__pooled__'
 
@@ -50,18 +47,11 @@ interface ViewProps {
   /** Selected OPEN observation id, or null = the pooled matrix. */
   selectedId: number | null
   onSelect: (id: number | null) => void
-  /**
-   * Does the roster hold a machine coder (#989)? REQUIRED, like
-   * `observationsLoad`: the test view is a second mount and must decide too,
-   * and a default would let a caller ship the section un-gated.
-   */
-  hasMachineCoders: boolean
 }
 
 /** Controlled view — exported for tests (Radix Select can't be driven in jsdom). */
 export function ReliabilityTabView({
   projectId, codes, observations, observationsLoad, selectedId, onSelect,
-  hasMachineCoders,
 }: ViewProps) {
   const open = openObservations(observations)
   const frozen = selectableObservations(observations)
@@ -157,27 +147,17 @@ export function ReliabilityTabView({
         </>
       )}
 
-      {/* 🔴 Queue row 49 — BELOW everything above and outside every table on it.
-          A person-vs-model κ describes the MODEL: it is not reliability and not
-          validation, and none of it enters the figures above (#989's coder-kind
-          exclusion is what guarantees that at the server). It renders on BOTH
-          branches, because a model layer is comparable whether the pooled matrix
-          or an open-cut panel is showing.
-
-          ⚠️ Gated on the roster, not on the request: a project with no machine
-          coder never fetches and never shows an empty section — offering a
-          surface that can only return nothing is the #806 shape. */}
-      {hasMachineCoders && <MachineAgreementTable projectId={projectId} />}
+      {/* ⚠️ #1030 — the person-vs-model table USED to render here, below the
+          reliability figures. It moved to its own tab (`ModelComparisonTab`):
+          this tab needs two PEOPLE, so the researcher the table exists for — one
+          person and an imported model layer — never reached it. Do not mount it
+          back here; the tab is reachable whenever this one is. */}
     </div>
   )
 }
 
 export default function ReliabilityTab({ projectId, codes }: { projectId: number; codes?: Code[] }) {
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  // The roster is already in cache (every attribution surface reads it), so
-  // this costs no request — and it is what keeps the model section from
-  // mounting, and fetching, on a project that has no machine layer.
-  const { coders } = useCoders()
   // ⚠️ NOT `data: observations = []` — a destructuring default is a fresh array
   // on every render AND makes "no answer" indistinguishable from "none", which
   // is the whole defect (#963 §1).
@@ -196,7 +176,6 @@ export default function ReliabilityTab({ projectId, codes }: { projectId: number
       observationsLoad={observationsLoad}
       selectedId={selectedId}
       onSelect={setSelectedId}
-      hasMachineCoders={rosterHasMachineCoders(coders)}
     />
   )
 }

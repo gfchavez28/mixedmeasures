@@ -72,6 +72,7 @@ i.e. break boot on existing data.
 """
 import json
 import logging
+from collections.abc import Iterable
 
 from sqlalchemy.orm import Session
 
@@ -483,3 +484,161 @@ def _unmatched_rule_descriptions(
         # never a fourth wording invented here.
         unmatched.append(describe_missing_rules([rule]))
     return unmatched
+
+
+# ── #1069: numbers stored under a rule that has since moved ─────────────────
+
+
+def realign_undeclared_numbers(
+    db: Session, column_ids: Iterable[int] | None = None,
+) -> dict[int, list[int]]:
+    """Bring each UNDECLARED column's stored numbers back in line with its rules.
+
+    🔴 **A rule decided at READ time does not reach what was STORED under the
+    old one (#1069).** #1048 widened the recognized-N/A defaults — typographic
+    apostrophes, runs of spaces, a trailing ``.``/``!``/``?`` — and every text
+    surface followed at once. ``DatasetValue.value_numeric`` did not: it was
+    computed at import, under the rule of the day, and the readers of the stored
+    number apply no text rule (the correlation vectors behind Correlations,
+    scatter and Comparisons, the Excel ``[numeric]`` column, the R CSV). So one
+    column gave two means — measured 2.25 against 3.4 on the audit's fixture —
+    and the same file imported before and after the upgrade gave two datasets.
+
+    **The invariant this restores is the one every numeric reader assumes: a cell
+    its column calls missing carries no number.** A declaration already keeps it
+    (``apply_missing_declaration``'s NULL pass); this is the same pass for the
+    columns that declare nothing, run where a database is opened
+    (`data_repairs.run_data_repairs` — startup and a restore) and after a
+    ``.mmproject`` import, whose file may come from an older build.
+
+    ⚠️ **Only UNDECLARED columns.** A declaration's matching did not change with
+    #1048 (``_discrete_rule_match`` is byte-identical), so its cells are already in
+    step — and excluding them keeps a declared column with a labelled missing rule
+    (the ordinary shape after a `.sav` import) from being read at every boot. Free
+    text needs no exclusion: it stores no number, so it has nothing to re-align.
+
+    🔴 **Gated on the column's METADATA, because the scan it replaces measured 4 s
+    per boot on the test corpus (4.6M values) — and startup waits for it.** A
+    stored number beside a non-numeric text comes from a LABEL: an ordinal's
+    ``scale_labels`` (import, append, a cell edit — `_compute_value_numeric`),
+    a recode definition's mapping keys (the primary, and the value-label
+    dictionary, which writes one), or a derived column's own scale. A numeric
+    text never matches the N/A rule (``_strip_numeric`` refuses ``nan``/``inf``).
+    So a column is examined only when one of its labels or mapping keys is
+    missing under its rules — on a settled install, a few metadata queries.
+    ⚠️ **Such a column stays "suspect" and costs one grouped read per boot** —
+    self-limiting in WRITES (a repaired column matches and nothing is written),
+    not in reads.
+
+    🔴 **A numeric PRIMARY re-applies instead of a NULL pass, because the rule
+    also moved its REFLECTION.** A reverse recode reflects about its real scale
+    points only (`effective_reverse_offset`, #600), so a key that became missing
+    shifts EVERY stored reflected score, not just its own cell — the #603 case,
+    reached by a rule change rather than a declaration. The primary is re-applied
+    only when a stored number disagrees with what it now produces.
+
+    Returns ``{project_id: [changed column ids]}`` and marks the metrics on those
+    columns stale. Flushes, never commits; never raises for a column it cannot
+    judge (it is on the startup path — `recode.py` #794's rule).
+    """
+    from ..models.dataset import Dataset
+    from .id_set import in_id_set
+    from .missing_values import column_missing_rules
+    from .recode import _parse_mapping, plan_definition_over_column
+    from .staleness import mark_metrics_stale
+
+    query = (
+        db.query(
+            DatasetColumn.id, DatasetColumn.column_type, DatasetColumn.scale_labels,
+            DatasetColumn.missing_values, Dataset.project_id,
+        )
+        .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+        .filter(DatasetColumn.missing_values.is_(None))
+    )
+    if column_ids is not None:
+        wanted = sorted({int(c) for c in column_ids})
+        if not wanted:
+            return {}
+        query = query.filter(in_id_set(DatasetColumn.id, wanted))
+    columns = query.all()
+    if not columns:
+        return {}
+
+    definitions: dict[int, list[RecodeDefinition]] = {}
+    for d in db.query(RecodeDefinition).filter(
+        in_id_set(RecodeDefinition.column_id, [c.id for c in columns]),
+    ):
+        definitions.setdefault(d.column_id, []).append(d)
+
+    changed: dict[int, list[int]] = {}
+    for column in columns:
+        rules = column_missing_rules(column)
+        defs = definitions.get(column.id, [])
+        if not any(is_missing(key, rules) for key in _label_keys(column.scale_labels, defs, _parse_mapping)):
+            continue
+
+        pairs = (
+            db.query(DatasetValue.value_text, DatasetValue.value_numeric)
+            .filter(
+                DatasetValue.column_id == column.id,
+                DatasetValue.value_numeric.isnot(None),
+                DatasetValue.value_text.isnot(None),
+            )
+            .distinct()
+            .all()
+        )
+        stored_missing = sorted({text for text, _ in pairs if is_missing(text, rules)})
+
+        primary = next(
+            (d for d in defs if d.is_primary
+             and d.recode_type in (RecodeType.SCALE_MAP, RecodeType.REVERSE)),
+            None,
+        )
+        if primary is not None:
+            if stored_missing or (
+                primary.recode_type == RecodeType.REVERSE
+                and _reflection_drifted(pairs, plan_definition_over_column(db, primary))
+            ):
+                apply_definition_to_column(db, primary)
+                changed.setdefault(column.project_id, []).append(column.id)
+        elif stored_missing:
+            db.query(DatasetValue).filter(
+                DatasetValue.column_id == column.id,
+                DatasetValue.value_numeric.isnot(None),
+                DatasetValue.value_text.in_(stored_missing),
+            ).update({DatasetValue.value_numeric: None}, synchronize_session=False)
+            changed.setdefault(column.project_id, []).append(column.id)
+
+    for project_id, cols in changed.items():
+        mark_metrics_stale(db, project_id, column_ids=cols)
+    db.flush()
+    return changed
+
+
+def _label_keys(scale_labels_json, definitions, parse_mapping) -> list[str]:
+    """Every text a stored number beside a non-numeric cell can have come from:
+    the column's scale labels and each recode definition's mapping keys."""
+    keys: list[str] = []
+    try:
+        labels = json.loads(scale_labels_json) if scale_labels_json else []
+    except (json.JSONDecodeError, TypeError):
+        labels = []
+    if isinstance(labels, list):
+        keys.extend(str(label) for label in labels if label is not None)
+    for d in definitions:
+        keys.extend(str(k) for k in parse_mapping(d))
+    return keys
+
+
+def _reflection_drifted(pairs, plan) -> bool:
+    """Does any stored reflected score differ from what the reverse primary now
+    produces? Compared against the ONE plan the apply path writes from, so a
+    cell that re-applying would leave alone never reads as drifted."""
+    by_text = {d.value_text: d for d in plan}
+    for text, stored in pairs:
+        d = by_text.get(text)
+        if d is None or d.kind != "mapped" or isinstance(d.output, str):
+            continue  # the missing half is `stored_missing`'s question
+        if abs(float(d.output) - stored) > 1e-9:
+            return True
+    return False

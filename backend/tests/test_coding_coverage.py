@@ -182,3 +182,24 @@ def test_project_list_includes_coder_count(coverage_project):
     res = _run(list_projects(user=user, db=coverage_project))
     proj = next(p for p in res.projects if p.id == PID)
     assert proj.coder_count == 6
+
+
+def test_coverage_names_each_coders_KIND_even_archived(coverage_project):
+    """#1030 — the analysis page asks "has a MODEL coded this project?" of coverage,
+    because the roster is install-wide (a machine imported into another project
+    would offer a comparison tab here) and excludes an ARCHIVED machine. The kind
+    must therefore ride the payload, and an archived machine must read as one."""
+    from app.routers.code_analysis import coder_coverage
+    db = coverage_project
+    db.add(User(id=109, username="GPT-4o", coder_type="ai", archived=True))
+    db.flush()
+    db.add(CodeApplication(segment_id=7002, code_id=C_THEME_B, user_id=109))
+    db.flush()
+    user = db.query(User).filter(User.id == 1).one()
+    res = _run(coder_coverage(project_id=PID, user=user, db=db))
+    kinds = {c.username: (c.coder_type, c.archived) for c in res.coders}
+    assert kinds["GPT-4o"] == ("ai", True)
+    # POSITIVE CONTROL on the other kind, so a constant would fail.
+    assert kinds["Alice"] == ("human", False)
+    per_source = _run(coder_coverage(project_id=PID, conversation_id=CONV2, user=user, db=db))
+    assert {c.username: c.coder_type for c in per_source.coders}["GPT-4o"] == "ai"

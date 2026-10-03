@@ -40,6 +40,12 @@ class BulkCodeRequest(BaseModel):
         return v
 
 
+class ReplacedOnTarget(BaseModel):
+    """#1070 — the values one apply removed from ONE segment of a group."""
+    segment_id: int
+    replaced_code_ids: list[int]
+
+
 class CodeApplicationResponse(BaseModel):
     segment_id: int | None = None
     dataset_value_id: int | None = None
@@ -50,6 +56,18 @@ class CodeApplicationResponse(BaseModel):
     # 0 for the wire: the client renders the two differently on purpose, and a
     # zero is a legal rating on any scale whose range includes it.
     magnitude: float | None = None
+    # #1028 — the codes this apply REMOVED because the applied code is a value of
+    # a code set and this coder held another value of it here (a passage takes
+    # one). Empty for every ordinary code. On a single apply it covers the whole
+    # segment group; in a bulk result it is THIS segment's. A client says what
+    # was replaced, and an undo re-applies exactly these.
+    replaced_code_ids: list[int] = []
+    # #1070 — the same report PER SEGMENT, on a single apply that fanned out to a
+    # segment group. The siblings of a group routinely differ (grouping does not
+    # unify their codings), so the merged list above cannot say which passage lost
+    # which value — and an undo that put the union back everywhere gave a sibling
+    # a value it never had. Empty wherever nothing was replaced.
+    replaced_by_target: list[ReplacedOnTarget] = []
 
 
 class BulkCodeResponse(BaseModel):

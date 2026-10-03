@@ -24,6 +24,11 @@ export interface BulkCodeResponse {
   error_count: number
   /** Ids the server could not act on. Absent on a pre-#678 server → treat as none. */
   failed_segment_ids?: number[]
+  /**
+   * One row per requested id. Read here ONLY for `replaced_code_ids` (#1028) —
+   * never `applied`, whose meaning flips between apply and remove (above).
+   */
+  results?: { segment_id?: number | null; replaced_code_ids?: number[] }[]
 }
 
 /** The text-coding bulk response (`POST /projects/{id}/text-coding/bulk-code`). */
@@ -31,6 +36,8 @@ export interface BulkTextCodeResponse {
   success_count: number
   error_count: number
   failed_dataset_value_ids?: number[]
+  /** One row per requested id; read for `replaced_code_ids` only (#1028). */
+  results?: { dataset_value_id?: number | null; replaced_code_ids?: number[] }[]
 }
 
 export interface BulkOutcome {

@@ -21,9 +21,10 @@ It is READ-ONLY three ways, deliberately:
     real database;
   * nothing here issues anything but SELECT.
 
-It reuses the app's own predicates (``_strip_numeric``, ``is_missing``,
+It reuses the app's own predicates (``text_code_resolver``, ``is_missing``,
 ``build_code_to_label``) rather than re-deriving them, so the sweep and the
-operation it is auditing cannot drift apart.
+operation it is auditing cannot drift apart — it had drifted once, by carrying
+its own exact-text lookup (#1107).
 
 Usage:
     python scripts/sweep_code_identity.py [DB_PATH] [--all] [--json]
@@ -53,11 +54,11 @@ os.environ.setdefault(
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.services.dataset_import import _strip_numeric  # noqa: E402
 from app.services.missing_values import is_missing, parse_missing_rules  # noqa: E402
 from app.services.value_labels import (  # noqa: E402
     MAX_VALUE_LABELS,
     build_code_to_label,
+    text_code_resolver,
 )
 
 # A column carrying more distinct (text, code) pairs than a declared dictionary
@@ -164,6 +165,12 @@ def implied_code_resolver(scale_labels, scale_values):
 
     Returns None when neither applies: the cell makes no claim about a code, so
     relabelling would not touch it and it is not evidence either way.
+
+    ⚠️ **The lookup is the app's own ``value_labels.text_code_resolver`` (#1107).**
+    This function used to carry its own exact-text copy of it, and so shared the
+    guard's blind spot: an answer capitalised differently from its label
+    ("Strongly disagree" under "Strongly Disagree") made no claim, though the
+    import had numbered it by that label.
     """
     code_to_label = build_code_to_label(scale_labels, scale_values)
     label_to_code: dict[str, float] = {}
@@ -171,14 +178,11 @@ def implied_code_resolver(scale_labels, scale_values):
         # A duplicated label makes the inversion ambiguous; the adapter dedupes
         # labels at import (#541a), so this is defensive rather than expected.
         label_to_code.setdefault(str(label), code)
+    shared = text_code_resolver(label_to_code)
 
     def resolve(value_text: str):
-        if value_text in label_to_code:
-            return label_to_code[value_text]
-        stripped = value_text.strip()
-        if stripped in label_to_code:
-            return label_to_code[stripped]
-        return _strip_numeric(value_text)
+        hit = shared(value_text)
+        return None if hit is None else hit[0]
 
     return resolve
 

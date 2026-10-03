@@ -34,7 +34,9 @@ from .archive_safety import assert_expanded_size_within_limit, assert_member_wit
 from .dataset_rows import materialise_manual_cells  # #897
 from .id_set import in_id_set  # #994
 from .participant_dataset import MANAGED_COLUMN_SOURCE  # #921
-from .participant_scores import build_managed_spec, parse_managed_spec  # #922
+from .participant_scores import (  # #922; the unarchive mark, Batch 6
+    build_managed_spec, mark_participant_scores_stale, parse_managed_spec,
+)
 from .safety_copies import (  # #919, #977
     refusal_for_prefix,
     safety_copy_filename,
@@ -85,7 +87,9 @@ from ..models import (
     StatisticalTest,
 )
 from ..models.user import User
-from ..auth import normalize_coder_type, unique_username
+from ..auth import CODER_TYPE_MACHINE, normalize_coder_type, unique_username
+from . import machine_coder
+from . import material_config
 from ..config import get_backup_dir
 from ..services.backup import APP_VERSION
 from ..services.coding_layers import CONSENSUS_ORIGIN, code_usage_count_expr, non_consensus_filter
@@ -95,6 +99,7 @@ from ..services.canvas import (
     extract_referenced_source_ids,
     walk_tiptap_nodes,
 )
+from ..services.missing_declaration import realign_undeclared_numbers
 
 logger = logging.getLogger(__name__)
 
@@ -851,6 +856,70 @@ def _portable_coder_item(item: dict) -> dict:
     return kept
 
 
+# ── Which local coder a file coder may land on (#1034) ─────────────────────────
+#
+# A name is a string somebody typed. Matching on it ALONE let a file's MACHINE coder
+# land on a local PERSON of the same name — whose codings then VOTE in consensus and
+# enter reliability — and let two configurations of one model collapse into one coder,
+# re-labelling the imported codings with the local configuration. Both were executed
+# by the 2026-09-24 audit.
+
+#: A person and a machine are different kinds of coder; neither may stand in for the
+#: other (a machine never votes, a person's codings never join the machine layer).
+CODER_MISMATCH_KIND = "kind"
+#: Two configurations of one model are two coders (`machine_coder.py`).
+CODER_MISMATCH_CONFIGURATION = "configuration"
+
+
+def _file_coder_identity(item: dict) -> tuple[str, dict | None]:
+    """A file coder's (kind, configuration), read exactly as the import will land it:
+    the kind through `normalize_coder_type` (fail-closed onto `human`), the
+    configuration through the ONE parser a local coder's goes through."""
+    kind = normalize_coder_type(item.get("coder_type"))
+    provenance = (
+        machine_coder.parse_stored_provenance(item.get("machine_provenance"))
+        if kind == CODER_TYPE_MACHINE else None
+    )
+    return kind, provenance
+
+
+def coder_match_refusal(item: dict, local: User) -> str | None:
+    """Why this file coder may NOT be mapped onto `local`, or None when it may.
+
+    🔴 **ONE predicate for the preview AND the import** — the name-match the preview
+    proposes, the silent name-match an import without a decision falls back to, and an
+    explicit `match` decision all ask it. A preview that proposed a match the import
+    would refuse (or the reverse) is #974's rule broken in miniature.
+    """
+    kind, provenance = _file_coder_identity(item)
+    if normalize_coder_type(local.coder_type) != kind:
+        return CODER_MISMATCH_KIND
+    if kind == CODER_TYPE_MACHINE and not machine_coder.same_configuration(
+        machine_coder.read_provenance(local), provenance,
+    ):
+        return CODER_MISMATCH_CONFIGURATION
+    return None
+
+
+def _coder_mismatch_sentence(item: dict, local: User, reason: str) -> str:
+    """The refusal a direct caller gets for a `match` decision the predicate refuses.
+    The confirm screen never sends one — it offers only eligible targets."""
+    name = item.get("username") or "this coder"
+    if reason == CODER_MISMATCH_KIND:
+        file_kind = "a machine coder" if _file_coder_identity(item)[0] == CODER_TYPE_MACHINE else "a person"
+        local_kind = "a machine coder" if normalize_coder_type(local.coder_type) == CODER_TYPE_MACHINE else "a person"
+        return (
+            f"“{name}” in the file is {file_kind} and “{local.username}” here is "
+            f"{local_kind}, so one cannot stand in for the other. Add “{name}” as a new "
+            "coder instead."
+        )
+    return (
+        f"“{name}” in the file was run with a different configuration from "
+        f"“{local.username}” here — two configurations of one model are two coders. "
+        f"Add “{name}” as a new coder instead."
+    )
+
+
 # ── Export ──────────────────────────────────────────────────────────────
 
 def export_project(
@@ -1564,22 +1633,20 @@ MEMO_ENTITY_REMAP = {
     "canvas": "canvases",
 }
 
-# Material config JSON keys that contain entity IDs needing remapping
-MATERIAL_CONFIG_REMAP = {
-    # key → (remap_table_name, is_array)
-    "column_ids": ("dataset_columns", True),
-    "domain_ids": ("analysis_domains", True),
-    "grouping_column_id": ("dataset_columns", False),
-    "grouping_column_id_2": ("dataset_columns", False),
-    "cross_tab_column_id": ("dataset_columns", False),
-    "code_ids": ("codes", True),
-    "conversation_ids": ("conversations", True),
-    "document_ids": ("documents", True),
-    "text_column_ids": ("dataset_columns", True),
-    "comment_column_ids": ("dataset_columns", True),  # backward compat with old .mmproject files
-    "content_code_id": ("codes", False),
-    "participant_ids": ("participants", True),
-    "custom_order": ("codes", True),
+# A saved chart's settings name rows by id. WHICH keys, and of what kind, is
+# declared once in `services/material_config.py` (#1068) — the broken-reference
+# check reads the same declaration. This maps each KIND to its remap table.
+MATERIAL_KIND_REMAP = {
+    material_config.COLUMN: "dataset_columns",
+    material_config.DOMAIN: "analysis_domains",
+    material_config.CODE: "codes",
+    material_config.CATEGORY: "code_categories",
+    material_config.CONVERSATION: "conversations",
+    material_config.DOCUMENT: "documents",
+    material_config.OBSERVATION: "observations",
+    material_config.PARTICIPANT: "participants",
+    material_config.CODER: "coders",
+    material_config.METRIC: "metric_definitions",
 }
 
 
@@ -1668,31 +1735,83 @@ def _remap_id(remap: dict, table: str, old_id, warn_context: str = "") -> int | 
 
 
 def _remap_material_config(config_json: str | None, remap: dict) -> str | None:
-    """Remap entity IDs inside a Material config JSON string."""
+    """Remap entity ids inside a saved chart's settings (a Material's `config`, or
+    the copy a canvas chart embed carries on its node).
+
+    The key space is `services/material_config.py`'s, and three shapes need more
+    than a table lookup (#1068):
+
+    - 🔴 **`coder_ids` are INSTALL-global `users.id`s** (#1027's class through a
+      JSON config — every chart saved while blind carries one, #683). An id that
+      does not remap names SOMEONE ELSE on this install, so it is DROPPED, never
+      kept: the file's roster is every coder with a coding in the project, so an
+      unresolved id is a coder with none, and dropping it changes what the chart
+      shows only when every coder it named is dropped — a chart that showed no
+      coding at all, which then shows every coder's. Logged, and stated in
+      `backend-invariants.md` §6 as the residual.
+    - 🔴 **`custom_order` holds whatever the chart's axis holds** — METRIC ids on a
+      quantitative chart, code ids or CATEGORY ids on a qualitative one — so its
+      table is decided per config (`material_config.order_kind`). The old map sent
+      every chart's order through `codes`, rewriting a metric id that collided
+      with a code id into that code's new id.
+    - **`content_source` is a tagged id** (`"cc:45"`), remapped by its tag.
+
+    Every other unresolved id is KEPT, as before: they are project-scoped, so a
+    stale one names no row of the imported project, and the broken-reference
+    check says so.
+    """
     if not config_json:
         return config_json
     try:
         config = json.loads(config_json)
     except (json.JSONDecodeError, TypeError):
         return config_json
+    if not isinstance(config, dict):
+        return config_json
 
-    for key, (table, is_array) in MATERIAL_CONFIG_REMAP.items():
-        if key not in config or config[key] is None:
+    def _one(kind: str, old):
+        new = remap.get(MATERIAL_KIND_REMAP[kind], {}).get(old)
+        if new is None and kind == material_config.CODER:
+            logger.warning("Material config: dropped unresolved coder id %s", old)
+        return new
+
+    for key, spec in material_config.ID_KEYS.items():
+        value = config.get(key)
+        if value is None:
             continue
-        table_remap = remap.get(table, {})
-        if is_array and isinstance(config[key], list):
-            config[key] = [
-                table_remap.get(v, v) for v in config[key]
-                if isinstance(v, int)
-            ]
-        elif not is_array and isinstance(config[key], int):
-            new_val = table_remap.get(config[key])
-            if new_val is not None:
-                config[key] = new_val
+        if spec.is_array and isinstance(value, list):
+            out = []
+            for v in value:
+                if not isinstance(v, int) or isinstance(v, bool):
+                    continue
+                new = _one(spec.kind, v)
+                if new is not None:
+                    out.append(new)
+                elif spec.kind != material_config.CODER:
+                    out.append(v)
+            config[key] = out
+        elif not spec.is_array and isinstance(value, int) and not isinstance(value, bool):
+            new = _one(spec.kind, value)
+            if new is not None:
+                config[key] = new
             else:
-                logger.warning(
-                    "Material config: unmapped %s=%s", key, config[key]
-                )
+                logger.warning("Material config: unmapped %s=%s", key, value)
+
+    order = config.get(material_config.ORDER_KEY)
+    if isinstance(order, list):
+        table = remap.get(MATERIAL_KIND_REMAP[material_config.order_kind(config)], {})
+        config[material_config.ORDER_KEY] = [
+            table.get(v, v) for v in order if isinstance(v, int) and not isinstance(v, bool)
+        ]
+
+    for key, tags in material_config.TAGGED_KEYS.items():
+        parsed = material_config.parse_tagged(config.get(key))
+        if parsed is None or parsed[0] not in tags:
+            continue
+        tag, old = parsed
+        new = remap.get(MATERIAL_KIND_REMAP[tags[tag]], {}).get(old)
+        if new is not None:
+            config[key] = f"{tag}:{new}"
 
     return json.dumps(config)
 
@@ -1723,10 +1842,35 @@ def _remap_canvas_content(content_json: str | None, remap: dict) -> tuple[str | 
     except (json.JSONDecodeError, TypeError):
         return content_json, None
 
+    def _rewrite_embedded_ids(node_type: str, attrs: dict) -> None:
+        """🔴 #1068 — the ids an embed carries BESIDE its source id.
+
+        A chart embed renders from its OWN copy of the chart's settings (`config`,
+        taken when it was embedded — `ChartEmbedView` reads it so the embed
+        survives the material's deletion), so remapping `materialId` alone left
+        every canvas chart in an imported or duplicated project asking for the
+        SOURCE project's codes, sources and variables. An excerpt embed's
+        `conversationId` / `observationId` is its "open the source" link.
+        """
+        if node_type == "chart-embed":
+            config = attrs.get("config")
+            if isinstance(config, str):
+                attrs["config"] = _remap_material_config(config, remap)
+            elif isinstance(config, dict):
+                attrs["config"] = json.loads(_remap_material_config(json.dumps(config), remap))
+        elif node_type == "excerpt-embed":
+            for key, table in (("conversationId", "conversations"), ("observationId", "observations")):
+                old = attrs.get(key)
+                if isinstance(old, int) and not isinstance(old, bool):
+                    new = remap.get(table, {}).get(old)
+                    if new is not None:
+                        attrs[key] = new
+
     def _rewrite(node: dict) -> None:
         attrs = node.get("attrs")
         if not isinstance(attrs, dict):
             return
+        _rewrite_embedded_ids(node["type"], attrs)
         source_type, id_key = EMBED_TYPE_MAP[node["type"]]
         old_id = attrs.get(id_key)
         if not isinstance(old_id, int):
@@ -1764,8 +1908,8 @@ def _remap_json_id_array(
 
 
 #: `MetricDefinition.config` JSON keys that hold entity ids (#948).
-#: key → (remap_table_name, is_array), the same shape as `MATERIAL_CONFIG_REMAP`
-#: and deliberately NOT merged with it: the two entities have different key
+#: key → (remap_table_name, is_array), and deliberately NOT merged with the
+#: material key space (`services/material_config.py`): the two entities have different key
 #: spaces, and one map covering both would remap a key on an entity that never
 #: carries it (silently, since a missing key is a no-op).
 #:
@@ -1776,7 +1920,7 @@ def _remap_json_id_array(
 #: `decompose_column_ids` · `aggregation` · `metric_type`. Only the last-but-two
 #: holds ids. `column_ids` / `domain_ids` / `selected_columns` / `selected_domains`
 #: look like members of this set but are read by `canvas_export.py` off a MATERIAL
-#: config, which `MATERIAL_CONFIG_REMAP` already covers. `child_config` is a nested
+#: config, which `_remap_material_config` already covers. `child_config` is a nested
 #: config for a `proportion`/`mean` child metric and carries no ids — checked,
 #: because a nested carrier would need recursion rather than this loop.
 METRIC_CONFIG_REMAP = {
@@ -2401,6 +2545,11 @@ def _merge_preview_block(
                 "coder_type": c.get("coder_type"),
                 "archived": bool(c.get("archived", False)),
                 "app_count": apps_per_coder.get(c["_original_id"], 0),
+                # #1034 — the configuration is a machine coder's IDENTITY, so the
+                # preview needs it to say which local coder the file's may land on.
+                # The stored column, RAW: `machine_coder.parse_stored_provenance` is
+                # the one parser, on this side as on a local coder's.
+                "machine_provenance": c.get("machine_provenance"),
             }
             for c in coders
         ],
@@ -2451,6 +2600,7 @@ def _merge_preview_inputs(zf: zipfile.ZipFile) -> dict:
             and isinstance(block.get("coders"), list)
             and isinstance(block.get("codes"), list)
         ):
+            _fill_block_provenance(zf, block)
             return block
 
     data = json.loads(zf.read("project.json"))
@@ -2482,6 +2632,42 @@ def _merge_preview_inputs(zf: zipfile.ZipFile) -> dict:
     )
 
 
+def _fill_block_provenance(zf: zipfile.ZipFile, block: dict) -> None:
+    """Give an OLDER block's machine coders their configuration (#1034), in place.
+
+    `machine_provenance` joined the block on 2026-09-27; every block v1.5.4 wrote
+    lacks it. Read as "not recorded" it would make the preview offer to ADD a model
+    coder the import then name-matches (both sides recorded, equal) — a preview that
+    disagrees with the act. So a machine entry MISSING the key (absence, never a
+    stored null) takes it from `project.json`'s coders, the list the import itself
+    reads. ⚠️ Only when a machine entry needs it: a file with no model coder never
+    opens `project.json` here, and on a v7 archive that document is ~40 KB.
+    """
+    missing = [
+        c for c in block["coders"]
+        if normalize_coder_type(c.get("coder_type")) == CODER_TYPE_MACHINE
+        and "machine_provenance" not in c
+    ]
+    if not missing:
+        return
+    try:
+        coders = json.loads(zf.read("project.json")).get("coders", [])
+    except (ValueError, OSError, KeyError, zipfile.BadZipFile, AttributeError):
+        return
+    stored = {c.get("_original_id"): c.get("machine_provenance") for c in coders}
+    for c in missing:
+        c["machine_provenance"] = stored.get(c.get("_original_id"))
+
+
+def _file_coder_names(coders) -> frozenset[str]:
+    """Every username in a file's coder roster — the names a suffix must not take
+    (#1071). Each coder passes the set WITHOUT its own name: a coder may of course
+    be created under the name it arrived with."""
+    return frozenset(
+        c.get("username") for c in coders if isinstance(c.get("username"), str)
+    )
+
+
 def build_merge_coder_preview(db: Session, file_path: Path) -> list[dict]:
     """Track J · J3-2 (D8): read-only preview of an incoming merge file's coders, each
     with its local name-match candidate + application counts, so the confirm UI can
@@ -2489,27 +2675,68 @@ def build_merge_coder_preview(db: Session, file_path: Path) -> list[dict]:
     they own data but aren't selectable people. ``local_app_count`` is the local coder's
     total applications (global; on the common single-project install that equals the
     project's count) and stays a LIVE query — it describes this install, not the file.
-    Returns rows shaped for ``MergeCoderPreview``."""
+    Returns rows shaped for ``MergeCoderPreview``.
+
+    🔴 **#1034 — every proposal goes through `coder_match_refusal`, the predicate the
+    import asks.** `local_match` is the same-name coder ONLY when the file's may land on
+    it; when it may not, `name_in_use` says who holds the name and why they are not
+    offered, and the file's coder will be added under a suffixed name. `match_options`
+    is every local coder the file's may be mapped onto — the confirm screen's list, so
+    it cannot offer a person for a machine or another configuration of the model.
+    """
     from ..auth import SYSTEM_CODER_TYPES
     with zipfile.ZipFile(str(file_path), "r") as zf:
         inputs = _merge_preview_inputs(zf)
 
+    # The install's coders once, for every file coder's options (a roster, never
+    # respondents — small by construction). Archived coders are offered only when they
+    # hold the name, as before: the confirm screen lists the active roster.
+    local_coders = (
+        db.query(User).filter(User.coder_type.notin_(SYSTEM_CODER_TYPES)).order_by(User.id).all()
+    )
+
     previews: list[dict] = []
+    # #1071 — the import reserves every file coder's name before suffixing any; the
+    # preview must too, or `new_username` names a coder the import does not create.
+    file_coder_names = _file_coder_names(inputs["coders"])
     for c in inputs["coders"]:
         if c.get("coder_type") in SYSTEM_CODER_TYPES:
             continue
         name = c.get("username")
         local = db.query(User).filter(User.username == name).first() if name else None
         local_match = None
+        name_in_use = None
         if local is not None:
-            local_match = {
-                "id": local.id,
-                "username": local.username,
-                "archived": bool(local.archived),
-                "local_app_count": db.query(CodeApplication)
-                .filter(CodeApplication.user_id == local.id)
-                .count(),
-            }
+            refusal = coder_match_refusal(c, local)
+            if refusal is None:
+                local_match = {
+                    "id": local.id,
+                    "username": local.username,
+                    "archived": bool(local.archived),
+                    "local_app_count": db.query(CodeApplication)
+                    .filter(CodeApplication.user_id == local.id)
+                    .count(),
+                }
+            else:
+                name_in_use = {
+                    "username": local.username,
+                    "coder_type": normalize_coder_type(local.coder_type),
+                    "reason": refusal,
+                    # The name the import will give the file's coder instead — computed
+                    # by the helper the import calls, with the same reservation, so
+                    # the screen can say it.
+                    "new_username": unique_username(db, name, file_coder_names - {name}),
+                }
+        match_options = [
+            {"id": u.id, "username": u.username, "archived": bool(u.archived)}
+            for u in local_coders
+            if (not u.archived or (local_match and u.id == local_match["id"]))
+            and coder_match_refusal(c, u) is None
+        ]
+        # The name-match first: it is the proposal, and the list reads as "this one,
+        # or one of these".
+        match_options.sort(key=lambda o: 0 if local_match and o["id"] == local_match["id"] else 1)
+        _kind, file_provenance = _file_coder_identity(c)
         previews.append({
             "original_id": c["_original_id"],
             "username": name,
@@ -2521,6 +2748,11 @@ def build_merge_coder_preview(db: Session, file_path: Path) -> list[dict]:
             "archived": bool(c.get("archived", False)),
             "file_app_count": c["app_count"],
             "local_match": local_match,
+            "name_in_use": name_in_use,
+            "match_options": match_options,
+            # The file coder's configuration as a dict, for the screen to name it —
+            # `None` for a person and for an unrecorded model alike.
+            "machine_provenance": file_provenance,
         })
     return previews
 
@@ -3036,9 +3268,19 @@ def import_project(
         #     decisions): "match" onto a chosen local coder, or "create" a new one
         #     (suffix-on-collision). With no decision for a coder — and for every
         #     non-merge import — fall back to the legacy silent name-match.
+        #
+        # 🔴 #1071 — every name in the FILE is reserved before any coder is suffixed.
+        # A coder whose name is refused (#1034) is created under a suffix, and the
+        # suffix could equal ANOTHER file coder's name — which the silent name-match
+        # then looked up and found: the row this import had just created. Two runs of
+        # a model became one coder, or the insert died on the per-coder unique index.
+        # `_file_coder_names` is shared with the merge preview, so the name the
+        # confirm screen shows is the name the import writes.
+        file_coder_names = _file_coder_names(data.get("coders", []))
         for item in data.get("coders", []):
             oid = item["_original_id"]
             name = item.get("username")
+            reserved = file_coder_names - {name}
             decision = (coder_mapping or {}).get(str(oid)) if coder_mapping else None
 
             if decision and decision.get("action") == "match" and decision.get("target_user_id"):
@@ -3050,9 +3292,19 @@ def import_project(
                         f"Coder mapping points at a local coder (id {decision['target_user_id']}) "
                         "that no longer exists. Re-validate the import before merging."
                     )
+                # #1034: a decision is still refused across kinds or configurations —
+                # the confirm screen offers only eligible targets, so this is the net
+                # for a script or a stale screen, and it names the way out.
+                refusal = coder_match_refusal(item, target_coder)
+                if refusal is not None:
+                    raise ValueError(_coder_mismatch_sentence(item, target_coder, refusal))
                 remap["coders"][oid] = target_coder.id
                 if decision.get("unarchive") and target_coder.archived:
                     target_coder.archived = False  # DEC-F: bring a colleague back into voting
+                    # …which moves the participant scores of EVERY project they
+                    # coded in, as archiving them did (Batch 6: all three unarchive
+                    # doors — this, the endpoint and the coding import — mark now).
+                    mark_participant_scores_stale(db)
                 if report is not None:
                     report["coders_matched"] += 1
             elif decision and decision.get("action") == "create":
@@ -3060,7 +3312,7 @@ def import_project(
                 _add(
                     User, _portable_coder_item(item),
                     {
-                        "username": unique_username(db, base),
+                        "username": unique_username(db, base, reserved),
                         "password_hash": None,
                         "is_admin": False,
                         "coder_type": normalize_coder_type(item.get("coder_type")),
@@ -3073,6 +3325,12 @@ def import_project(
                 existing_coder = (
                     db.query(User).filter(User.username == name).first() if name else None
                 )
+                # 🔴 #1034: the silent name-match lands only on a coder of the SAME kind
+                # — and, for a machine, the same configuration. Every non-merge import
+                # (new, overwrite, coding copy) takes this path with no decision at all.
+                name_taken = existing_coder is not None
+                if existing_coder is not None and coder_match_refusal(item, existing_coder):
+                    existing_coder = None
                 if existing_coder:
                     remap["coders"][oid] = existing_coder.id
                     if report is not None:
@@ -3090,15 +3348,18 @@ def import_project(
                     # 🔴 `_portable_coder_item`: only the fields that describe the
                     # coder (#1027) — a file's `last_active_at` would otherwise make
                     # this colleague the install's default coder.
-                    _add(
-                        User, _portable_coder_item(item),
-                        {
-                            "password_hash": None,
-                            "is_admin": False,
-                            "coder_type": normalize_coder_type(item.get("coder_type")),
-                        },
-                        "coders",
-                    )
+                    # ⚠️ #1034: when the name IS taken — by a coder of the other kind or
+                    # another configuration — the new coder is suffixed, or the insert
+                    # would collide on `users.username`'s unique index. Before #1034 this
+                    # branch was reached only when the name was free.
+                    overrides = {
+                        "password_hash": None,
+                        "is_admin": False,
+                        "coder_type": normalize_coder_type(item.get("coder_type")),
+                    }
+                    if name_taken:
+                        overrides["username"] = unique_username(db, name, reserved)
+                    _add(User, _portable_coder_item(item), overrides, "coders")
                     if report is not None:
                         report["coders_created"] += 1
 
@@ -3691,6 +3952,9 @@ def import_project(
 
         pending_values: list[dict] = []
         n_inserted_values = 0
+        # #1069 — the columns this import wrote a value into. A column id, never a
+        # value id (`inserted_ids["dataset_values"]` stays unpopulated, below).
+        inserted_value_columns: set[int] = set()
 
         def _drain_values() -> None:
             if pending_values:
@@ -3725,6 +3989,8 @@ def import_project(
             }, fresh_uuid=(import_mode == "new"))
             pending_values.append(payload)
             n_inserted_values += 1
+            if column_id is not None:
+                inserted_value_columns.add(column_id)
             # Narrow the read-back to the rows and columns something will look up.
             # Both halves must be real: a value whose row or column did not remap
             # contributes nothing, exactly as the old whole-map lookup returned
@@ -3850,6 +4116,17 @@ def import_project(
         _import_recodes_topological(
             db, data.get("recode_definitions", []), remap, import_mode=import_mode
         )
+
+        # 🔴 #1069 — the file's stored numbers were computed by the build that WROTE
+        # it, under that build's missing rule, and are copied verbatim above; a v1.5.4
+        # file carries a number on a cell this build calls missing. Re-aligned here —
+        # after the recode definitions, because a reverse primary's reflection is part
+        # of what re-aligning means — over the columns that RECEIVED a value, never
+        # `remap` (#714): on a merge a matched column is the target's, and only the
+        # cells written into it can be out of step (startup re-aligned the rest).
+        if inserted_value_columns:
+            db.flush()
+            realign_undeclared_numbers(db, column_ids=inserted_value_columns)
 
         # ── p. Excerpts ────────────────────────────────────────────
         for item in data.get("excerpts", []):

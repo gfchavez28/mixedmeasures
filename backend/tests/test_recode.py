@@ -778,13 +778,13 @@ class TestBulkTypeUpdateGuard:
         project, user = _make_bulktype_scenario(db_session)
 
         with pytest.raises(HTTPException) as exc_info:
-            _run(bulk_type_update(
+            bulk_type_update(
                 project_id=600,
                 dataset_id=600,
                 data=BulkTypeUpdateRequest(column_ids=[6001, 6003], column_type="nominal"),
                 user=user,
                 db=db_session,
-            ))
+            )
 
         assert exc_info.value.status_code == 409
         detail = exc_info.value.detail
@@ -800,13 +800,13 @@ class TestBulkTypeUpdateGuard:
         """Columns without recode definitions still update successfully."""
         project, user = _make_bulktype_scenario(db_session)
 
-        result = _run(bulk_type_update(
+        result = bulk_type_update(
             project_id=600,
             dataset_id=600,
             data=BulkTypeUpdateRequest(column_ids=[6001, 6002], column_type="nominal"),
             user=user,
             db=db_session,
-        ))
+        )
 
         assert result["status"] == "ok"
         assert result["updated"] == 2
@@ -826,25 +826,25 @@ class TestBulkTypeUpdateGuard:
         # Update dataset 600's columns. Column 6101 (dataset 601) has a recode
         # but is not in our column_ids anyway. We should succeed regardless of
         # unrelated dataset state.
-        result = _run(bulk_type_update(
+        result = bulk_type_update(
             project_id=600,
             dataset_id=600,
             data=BulkTypeUpdateRequest(column_ids=[6001, 6002], column_type="nominal"),
             user=user,
             db=db_session,
-        ))
+        )
         assert result["updated"] == 2
 
         # Explicitly test: even if the caller passes a cross-dataset ID in
         # column_ids (which bulk_type_update silently filters out), the guard
         # should also only see the in-dataset subset, not raise on 6101.
-        result2 = _run(bulk_type_update(
+        result2 = bulk_type_update(
             project_id=600,
             dataset_id=600,
             data=BulkTypeUpdateRequest(column_ids=[6001, 6101], column_type="nominal"),
             user=user,
             db=db_session,
-        ))
+        )
         # 6001 is already nominal from the previous call, so update count depends
         # on whether the router re-updates (it does). Key assertion: no raise.
         assert result2["status"] == "ok"

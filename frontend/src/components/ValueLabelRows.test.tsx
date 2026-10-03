@@ -75,3 +75,45 @@ describe('ValueLabelRows — the marker and the message agree (#890)', () => {
     expect(invalid.length > 0).toBe(alert !== null)
   })
 })
+
+describe('ValueLabelRows — every box has its own name, and keeps it (#1104 ⚪)', () => {
+  const OK = { ok: true as const, msg: '', payload: [] }
+  const names = () =>
+    screen.getAllByRole('textbox').map(el => el.getAttribute('aria-label'))
+
+  it('a blank added row does not share a name with a real code', () => {
+    // Four seeded codes with gaps, then an added blank row: the fifth row. Its
+    // label box used to borrow the row number while the code was empty —
+    // "Label for code 5" — beside the real code 5's box of the same name.
+    render(
+      <ValueLabelRows
+        rows={[{ code: '1', label: '' }, { code: '2', label: '' }, { code: '5', label: '' },
+               { code: '7', label: '' }, { code: '', label: '' }]}
+        onRowsChange={() => {}} colType="ordinal" onColTypeChange={() => {}}
+        validation={OK} showError={false}
+      />,
+    )
+    const all = names()
+    expect(new Set(all).size).toBe(all.length)
+  })
+
+  it('a label box is not renamed by typing a code beside it', () => {
+    // A name carrying the neighbouring field's live value is changing state
+    // in a name (#770): each keystroke in the code box renamed the label box.
+    const view = (code: string) => (
+      <ValueLabelRows
+        rows={[{ code, label: '' }]}
+        onRowsChange={() => {}} colType="ordinal" onColTypeChange={() => {}}
+        validation={OK} showError={false}
+      />
+    )
+    const { rerender } = render(view(''))
+    const before = screen.getAllByRole('textbox').find(el => el.getAttribute('type') !== 'number')
+      ?.getAttribute('aria-label')
+    rerender(view('42'))
+    const after = screen.getAllByRole('textbox').find(el => el.getAttribute('type') !== 'number')
+      ?.getAttribute('aria-label')
+    expect(before).toBeTruthy()
+    expect(after).toBe(before)
+  })
+})

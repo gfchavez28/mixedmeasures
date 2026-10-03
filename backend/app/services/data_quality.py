@@ -10,7 +10,7 @@ import math
 from sqlalchemy.orm import Session
 
 from ..models.dataset import DatasetColumn, DatasetValue, DatasetRow, Dataset, VALUE_NUMERIC_TYPES
-from ..services.missing_values import is_missing, parse_missing_rules
+from ..services.missing_values import column_missing_rules, is_declaration, is_missing
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +68,10 @@ def _classify_value(
     (``_compute_value_numeric`` NULLs undeclared nominal codes by design) — the
     numeric rule there would report every response as missing.
 
-    ``missing_rules`` is the column's parsed declaration (#592; None = the
-    recognized-N/A defaults), which still classifies the text so a DECLARED
-    column reports its refusals as missing even before any recode touches them.
+    ``missing_rules`` is the column's EFFECTIVE rules from `column_missing_rules`
+    (#592 — a declaration, or the recognized-N/A defaults its type calls for,
+    #1048), which still classifies the text so a DECLARED column reports its
+    refusals as missing even before any recode touches them.
 
     🔴 **THREE DISTINCT FACTS USED TO SHARE THE CLASS ``"na"``, AND ONE UI
     TOGGLE DISCARDED ALL THREE (#819).** They are separated here because they
@@ -98,10 +99,13 @@ def _classify_value(
     """
     if value_text is None or value_text.strip() == "":
         return "empty"
-    if missing_rules is not None:
+    # #1048: `missing_rules` is the column's EFFECTIVE rules, so the defaults
+    # arm is whichever set the column's type calls for — the prefixes, or
+    # whole answers on free text. Both are the tool's guess, so both toggle.
+    if is_declaration(missing_rules):
         if is_missing(value_text, missing_rules):
             return "na_declared"
-    elif is_missing(value_text, None):
+    elif is_missing(value_text, missing_rules):
         return "na_default"
     if numeric_eligible and value_numeric is None:
         return "na_unusable"
@@ -184,8 +188,9 @@ def _load_raw_values(
                 "dataset_id": c.dataset_id,
                 "dataset_name": c.dataset_name,
                 "column_type": c.column_type,
-                # #592: parsed once here; every classify call is column-aware
-                "missing_rules": parse_missing_rules(c.missing_values),
+                # #592: parsed once here; every classify call is column-aware.
+                # #1048: and type-aware — the defaults differ for free text.
+                "missing_rules": column_missing_rules(c),
             })
             valid_ids.append(c.id)
             dataset_ids_needed.add(c.dataset_id)

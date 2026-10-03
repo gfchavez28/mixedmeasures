@@ -31,35 +31,61 @@ export interface CodeDetailLike {
 }
 
 /**
- * Coded by at least one VISIBLE coder (filter-aware). Universal-only = not coded
- * (matches `isSegmentCoded`). Your own + unattributed applications are always
- * visible (see `isCoderVisible`), so hiding a colleague reveals segments only
- * they coded as uncoded-for-you — which is exactly what `j` should jump to.
+ * The MACHINE coders whose labels never make a unit "coded" (#1029).
+ *
+ * 🔴 **Coverage means PEOPLE's coding** — the server's `coding_counts` has asked
+ * `layer_scope_filter()`'s human arm since #989, and the client gauges did not: a
+ * model that labelled a whole transcript read as fully coded here while the
+ * Overview said nothing was. A machine's chips stay (its codings must be
+ * attributable); only the COUNT leaves them out. Build it with
+ * `hooks/useCoders.ts::useMachineCoderIds`, which includes ARCHIVED machines — the
+ * roster does not, and an archived model's codings would otherwise count again.
+ *
+ * REQUIRED at every call below, never defaulted: a caller that forgets is how a
+ * gauge counts a model, and the compiler is what enumerates the callers.
  */
-export function isSegmentCodedVisible(details: readonly CodeDetailLike[], hidden?: CoderLens): boolean {
-  return details.some(d => !d.is_universal && isCoderVisible(d.user_id, hidden))
+export type MachineCoderIds = ReadonlySet<number>
+
+/**
+ * Coded by at least one VISIBLE PERSON (filter-aware). Universal-only = not coded
+ * (matches `isSegmentCoded`), and a machine coder's labels never count (#1029).
+ * Your own + unattributed applications are always visible (see `isCoderVisible`),
+ * so hiding a colleague reveals segments only they coded as uncoded-for-you —
+ * which is exactly what `j` should jump to. For the same reason a segment only a
+ * MODEL labelled is uncoded: it is still waiting for a person.
+ */
+export function isSegmentCodedVisible(
+  details: readonly CodeDetailLike[],
+  hidden: CoderLens | undefined,
+  machineCoderIds: MachineCoderIds,
+): boolean {
+  return details.some(d =>
+    !d.is_universal
+    && !(d.user_id != null && machineCoderIds.has(d.user_id))
+    && isCoderVisible(d.user_id, hidden))
 }
 
 export interface Coverage {
   /** denominator — number of items considered (e.g. participant segments). */
   total: number
-  /** coded by anyone (all-coder total; filter-independent). */
+  /** coded by any PERSON (all-coder total; filter-independent). */
   codedAny: number
-  /** coded by a visible coder (reflects the active per-coder filter). */
+  /** coded by a visible person (reflects the active per-coder filter). */
   codedVisible: number
 }
 
 export function computeCoverage<T>(
   items: readonly T[],
   getDetails: (item: T) => readonly CodeDetailLike[],
-  hidden?: CoderLens,
+  hidden: CoderLens | undefined,
+  machineCoderIds: MachineCoderIds,
 ): Coverage {
   let codedAny = 0
   let codedVisible = 0
   for (const item of items) {
     const details = getDetails(item)
-    if (details.some(d => !d.is_universal)) codedAny++
-    if (isSegmentCodedVisible(details, hidden)) codedVisible++
+    if (isSegmentCodedVisible(details, undefined, machineCoderIds)) codedAny++
+    if (isSegmentCodedVisible(details, hidden, machineCoderIds)) codedVisible++
   }
   return { total: items.length, codedAny, codedVisible }
 }

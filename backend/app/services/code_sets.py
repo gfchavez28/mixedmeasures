@@ -52,6 +52,25 @@ effective code is a different code outside that set. ⚠️ **The reverse direct
 NOT guarded here** — regrouping a code afterwards can re-open the same hole from
 the equivalence side, which is why `set_composition_warnings` exists and is
 reported on the set's own payload rather than left to be discovered in a number.
+
+## A CLAIMANT is any code whose application counts in a set (#1028)
+
+Two kinds: every MEMBER (by `Code.code_set_id`), and every code OUTSIDE the set
+that is grouped INTO one of its values — "Pos" grouped with the member
+"Positive" is recorded as choosing "Positive", so an application of it IS a
+selection even though "Pos" never joined. The write path clears by claimant, not
+by member: clearing members alone left a synonym standing beside the new value,
+and the unit read as two selections with nothing on the set saying why.
+
+## The rule holds at EVERY door, not only the set's own endpoint (#1028)
+
+`apply_selection` was the only write that knew about sets, while a chord, a click
+in the code list, the context menu, *+ Add code*, a bulk apply and the API all
+went through `apply_code` / `bulk_code` and ADDED a second value.
+`clear_rival_values` is the same exclusivity asked of an ordinary apply: applying
+a claimant removes this coder's OTHER claimants of that set on the same targets,
+and the endpoints report what they removed (`replaced_code_ids`) so a client can
+say so and an undo can put it back.
 """
 from __future__ import annotations
 
@@ -61,6 +80,7 @@ from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
 from ..models import Code, CodeApplication, CodeSet
+from .coding_layers import build_effective_code_map
 from .id_set import in_id_set
 
 # ── The sentinels ────────────────────────────────────────────────────────────
@@ -193,15 +213,52 @@ def membership_refusal(
     return None
 
 
+def set_claimants(members: list[Code], *, effective_map: dict[int, int]) -> dict[int, int]:
+    """Every code whose application counts in this set → the value it reads as.
+
+    - each MEMBER → its effective code (itself, unless it is grouped — and a
+      member grouped with an OUTSIDE code reads as that outside code, which is
+      the composition hole `set_composition_warnings` reports);
+    - each code OUTSIDE the set grouped INTO one of its values → that value.
+
+    The second kind is #1028(b): "Pos" grouped with the member "Positive" never
+    joined the set, yet every consumer that reads the EFFECTIVE code (the α
+    matrix, consensus, reconciliation) records it as choosing "Positive". A
+    write path that clears only members leaves it standing beside a new choice.
+
+    ⚠️ A code may claim TWO sets — a member of one grouped into a value of
+    another, which the set door refuses and the equivalence door does not. It
+    is a claimant of both; `CodeSetIndex.set_claimed_by` settles which set an
+    apply of it swaps in (its own set first).
+    """
+    member_ids = {c.id for c in members}
+    claimants: dict[int, int] = {
+        c.id: effective_map.get(c.id, c.id) for c in members
+    }
+    # A VALUE of the set is a member that is its own effective code; only those
+    # can be read into — a member that resolves elsewhere has left the set.
+    values = {mid for mid, value in claimants.items() if mid == value}
+    for raw, effective in effective_map.items():
+        if raw not in member_ids and effective in values:
+            claimants[raw] = effective
+    return claimants
+
+
 def set_composition_warnings(
     members: list[Code], *, effective_map: dict[int, int], codes_by_id: dict[int, Code],
 ) -> list[str]:
-    """Members whose selections would silently leave the set, as sentences.
+    """How grouping has changed what counts in this set, as sentences.
 
-    `membership_refusal` closes this at the set's own door. It cannot close the
-    OTHER door — grouping a member with an outside code afterwards re-opens it —
-    so the state is REPORTED on the set rather than left to be discovered as a
-    number that quietly stopped counting some coding.
+    Two facts, both reachable only from the EQUIVALENCE side:
+
+    - a member grouped with an OUTSIDE code leaves the set — `membership_refusal`
+      closes this at the set's own door, but regrouping afterwards re-opens it;
+    - an outside code grouped INTO a member counts as choosing that member
+      (#1028(b)). Not a defect any more — the write path clears it — but a code
+      the set's list does not show is being read as one of its values, and the
+      researcher should be able to see that without reading the α.
+
+    Reported on the set rather than left to be discovered as a number.
     """
     member_ids = {c.id for c in members}
     out: list[str] = []
@@ -215,6 +272,17 @@ def set_composition_warnings(
                 f"“{other}” is not in this set — uses of “{code.name}” are recorded as "
                 f"“{other}” and do not count as a selection here."
             )
+    claimants = set_claimants(members, effective_map=effective_map)
+    for raw in sorted(set(claimants) - member_ids):
+        code = codes_by_id.get(raw)
+        value = codes_by_id.get(claimants[raw])
+        name = code.name if code is not None else f"code {raw}"
+        value_name = value.name if value is not None else f"code {claimants[raw]}"
+        out.append(
+            f"“{name}” is not a value of this set, but it is grouped with “{value_name}” "
+            f"as one effective code — every use of “{name}” counts as choosing "
+            f"“{value_name}”, and choosing another value clears it."
+        )
     return out
 
 
@@ -233,13 +301,19 @@ class ResolvedSet:
     #: Display order for the confusion matrix's axes and the member breakdown.
     ordered_members: tuple[int, ...]
     #: 🔴 Every member's OWN id, including one that resolves to a grouped sibling.
-    #: The WRITE path needs these and `member_ids` is the wrong set for it: a
-    #: coder's row names the code they pressed, so clearing by effective id would
-    #: leave a grouped sibling's application standing and the unit would still
-    #: read as two selections. Carried on the dataclass rather than passed in,
-    #: because a parameter is something a fourth caller can forget.
+    #: What may be CHOSEN through the set's own endpoint — a code outside the set
+    #: is refused there even when it reads as one of its values. Carried on the
+    #: dataclass rather than passed in, because a parameter is something a fourth
+    #: caller can forget.
     raw_member_ids: frozenset[int]
     member_names: dict[int, str] = field(default_factory=dict)
+    #: 🔴 Every code whose application counts in this set → the value it reads as
+    #: (`set_claimants`). The WRITE path clears by these, never by `member_ids`: a
+    #: coder's row names the code they pressed, so clearing by effective id leaves
+    #: a grouped sibling standing, and clearing by member alone leaves a synonym
+    #: grouped INTO a member standing (#1028(b)) — either way the unit still reads
+    #: as two selections.
+    claimants: dict[int, int] = field(default_factory=dict)
 
     @property
     def basis(self) -> str:
@@ -250,11 +324,10 @@ class ResolvedSet:
 class CodeSetIndex:
     """Every set in a project, resolved.
 
-    ⚠️ It carried a `set_of_raw_code` reverse lookup (raw code id → set id) for
-    one draft and **nothing ever read it** — the write path is handed the SET by
-    the router, so it never needs to ask which set a code belongs to. Deleted
-    rather than kept as a convenience, on #941's rule: a field no consumer reads
-    is a claim about the design that the design does not make.
+    ⚠️ A `set_of_raw_code` reverse lookup was deleted from an early draft because
+    nothing read it (#941) — the set's own endpoint is handed the SET. #1028 gave
+    it a reader: an ordinary apply is handed a CODE and must ask which set it
+    counts in, so `set_claimed_by` exists now and has one.
     """
 
     sets: tuple[ResolvedSet, ...]
@@ -262,6 +335,21 @@ class CodeSetIndex:
     def by_id(self, set_id: int) -> ResolvedSet | None:
         for s in self.sets:
             if s.id == set_id:
+                return s
+        return None
+
+    def set_claimed_by(self, code_id: int) -> ResolvedSet | None:
+        """The set an application of ``code_id`` is a selection in, or None.
+
+        Its OWN set first: a member of one set grouped into a value of another
+        claims both (`set_claimants`), and the set it was deliberately put in is
+        the one an apply of it swaps in.
+        """
+        for s in self.sets:
+            if code_id in s.raw_member_ids:
+                return s
+        for s in self.sets:
+            if code_id in s.claimants:
                 return s
         return None
 
@@ -301,7 +389,8 @@ def build_code_set_index(
         ordered: list[int] = []
         names: dict[int, str] = {}
         raw_ids: set[int] = set()
-        for code in members_by_set.get(s.id, []):
+        members = members_by_set.get(s.id, [])
+        for code in members:
             raw_ids.add(code.id)
             effective_id = effective_map.get(code.id, code.id)
             # Only a member that IS its own effective code names a value of this
@@ -319,6 +408,7 @@ def build_code_set_index(
             ordered_members=tuple(ordered),
             raw_member_ids=frozenset(raw_ids),
             member_names=names,
+            claimants=set_claimants(members, effective_map=effective_map),
         ))
     return CodeSetIndex(sets=tuple(resolved))
 
@@ -385,6 +475,28 @@ def _target_column(dataset_value_ids: list[int] | None):
     )
 
 
+def _rival_filters(
+    resolved: ResolvedSet,
+    *,
+    user_id: int,
+    keep_code_id: int | None,
+    segment_ids: list[int] | None,
+    dataset_value_ids: list[int] | None,
+) -> list | None:
+    """The WHERE clause for this coder's other claimants of the set on these
+    targets, or None when nothing can match. One definition for the clear and
+    for the read that reports it, so the two cannot disagree about "rival"."""
+    rivals = [cid for cid in resolved.claimants if cid != keep_code_id]
+    unit_ids = dataset_value_ids if dataset_value_ids is not None else (segment_ids or [])
+    if not rivals or not unit_ids:
+        return None
+    return [
+        CodeApplication.user_id == user_id,
+        CodeApplication.code_id.in_(rivals),
+        in_id_set(_target_column(dataset_value_ids), unit_ids),
+    ]
+
+
 def clear_other_members(
     db: Session,
     resolved: ResolvedSet,
@@ -394,9 +506,11 @@ def clear_other_members(
     segment_ids: list[int] | None = None,
     dataset_value_ids: list[int] | None = None,
 ) -> int:
-    """Delete this coder's OTHER members of the set on these targets.
+    """Delete this coder's OTHER claimants of the set on these targets.
 
-    🔴 **Keyed on `raw_member_ids`, not the effective ones** — see that field.
+    🔴 **Keyed on `claimants`, not the effective ids and not the members alone**
+    — see that field. Until #1028 it was the members, which left a synonym
+    grouped into a member standing beside the new choice.
 
     ⚠️ **Both target arms take a LIST since row 49.** They were `segment_ids:
     list` and `dataset_value_id: int`, and the asymmetry made the bulk coding
@@ -406,23 +520,98 @@ def clear_other_members(
 
     Returns the number of rows removed. Flush-only; the caller commits.
     """
-    targets = [cid for cid in resolved.raw_member_ids if cid != keep_code_id]
-    if not targets:
-        return 0
-    unit_ids = dataset_value_ids if dataset_value_ids is not None else (segment_ids or [])
-    if not unit_ids:
+    filters = _rival_filters(
+        resolved, user_id=user_id, keep_code_id=keep_code_id,
+        segment_ids=segment_ids, dataset_value_ids=dataset_value_ids,
+    )
+    if filters is None:
         return 0
     removed = (
         db.query(CodeApplication)
-        .filter(
-            CodeApplication.user_id == user_id,
-            CodeApplication.code_id.in_(targets),
-            in_id_set(_target_column(dataset_value_ids), unit_ids),
-        )
+        .filter(*filters)
         .delete(synchronize_session=False)
     )
     db.flush()
     return removed
+
+
+def clear_rival_values(
+    db: Session,
+    index: CodeSetIndex,
+    *,
+    code_id: int,
+    user_id: int,
+    segment_ids: list[int] | None = None,
+    dataset_value_ids: list[int] | None = None,
+) -> dict[int, list[int]]:
+    """Before an ordinary APPLY of ``code_id``: remove this coder's other values
+    of the set it counts in, on these targets (#1028).
+
+    Returns ``{target_id: [removed code ids]}`` — only targets that lost
+    something — so the endpoint can report it: a client says what was replaced
+    and an undo puts exactly that back. Empty, with no query, when the code
+    counts in no set.
+
+    🔴 **It runs whether or not the coder already holds ``code_id``.** Holding
+    two values is a contradiction the α drops (§3); pressing one of them is the
+    coder choosing, so the other goes — the one case where re-applying a code
+    is not a no-op.
+
+    ⚠️ The same exclusivity `apply_selection` enforces, asked of a code rather
+    than a set, and built on the same `_rival_filters`. Flush-only; the caller
+    marks staleness for these targets (it already marks them for the apply) and
+    commits.
+    """
+    resolved = index.set_claimed_by(code_id)
+    if resolved is None:
+        return {}
+    filters = _rival_filters(
+        resolved, user_id=user_id, keep_code_id=code_id,
+        segment_ids=segment_ids, dataset_value_ids=dataset_value_ids,
+    )
+    if filters is None:
+        return {}
+    column = _target_column(dataset_value_ids)
+    removed: dict[int, list[int]] = {}
+    for target, rival in (
+        db.query(column, CodeApplication.code_id).filter(*filters)
+        .order_by(column, CodeApplication.code_id).all()
+    ):
+        removed.setdefault(target, []).append(rival)
+    if removed:
+        db.query(CodeApplication).filter(*filters).delete(synchronize_session=False)
+        db.flush()
+    return removed
+
+
+def clear_rivals_before_apply(
+    db: Session,
+    code: Code,
+    *,
+    user_id: int,
+    segment_ids: list[int] | None = None,
+    dataset_value_ids: list[int] | None = None,
+) -> dict[int, list[int]]:
+    """`clear_rival_values` for the four apply endpoints, which hold a CODE.
+
+    ⚠️ **A code that is neither a member of a set nor grouped with anything can
+    count in no set, so it costs no query** — the hot path of every chord press
+    on an ordinary code stays exactly what it was. Only a member or a grouped
+    code pays for the index (a synonym claims a set through its group).
+    """
+    if code.code_set_id is None and code.code_equivalence_group_id is None:
+        return {}
+    index = build_code_set_index(db, code.project_id, build_effective_code_map(db, code.project_id))
+    return clear_rival_values(
+        db, index, code_id=code.id, user_id=user_id,
+        segment_ids=segment_ids, dataset_value_ids=dataset_value_ids,
+    )
+
+
+def replaced_code_ids(removed: dict[int, list[int]]) -> list[int]:
+    """The distinct codes a swap removed, in id order — what a single-target
+    response reports (a segment GROUP's siblings lose the same values)."""
+    return sorted({cid for ids in removed.values() for cid in ids})
 
 
 class SetSelectionError(ValueError):

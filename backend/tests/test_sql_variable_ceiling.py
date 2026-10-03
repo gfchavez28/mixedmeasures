@@ -367,3 +367,26 @@ def test_merge_codes_staleness_cascade(corpus):
     assert mark_consensus_stale(db, PID, code_ids=[corpus["code"]]) == 0
     assert db.query(ConsensusStaleTarget).filter(ConsensusStaleTarget.project_id == PID).count() \
         == 2 * ROWS + SEGMENTS
+
+
+def test_the_participant_table_sync_binds_no_row_list(corpus):
+    """#1033 made `participant_dataset.sync_rows` set-based; before, its relabel
+    step bound EVERY row id into one `IN (…)` — a #960 member, reached at
+    250,000 participants. Built, relabelled, repaired and given a hand-added
+    variable's cells here with 60 participants against a limit of 40."""
+    from app.services.participant_dataset import create_participant_dataset, sync_rows
+
+    db = corpus["db"]
+    _lower_limit(db)
+    dataset = create_participant_dataset(db, PID)
+    assert db.query(DatasetRow).filter(DatasetRow.dataset_id == dataset.id).count() == ROWS
+
+    db.query(Participant).filter(Participant.identifier == "P007").one().identifier = "P999"
+    db.add(DatasetColumn(dataset_id=dataset.id, column_text="Site", column_type=ColumnType.NOMINAL,
+                         sequence_order=9, source="manual"))
+    db.flush()
+    report = sync_rows(db, dataset)
+
+    assert report.relabelled == 1
+    site = db.query(DatasetColumn).filter(DatasetColumn.column_text == "Site").one()
+    assert db.query(DatasetValue).filter(DatasetValue.column_id == site.id).count() == ROWS

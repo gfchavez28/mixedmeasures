@@ -24,7 +24,7 @@ from ..models.row_score import RowScore
 # #381: recognized N/A strings (e.g. "N/A", "Don't know") are preserved as
 # value_text but mean "missing" — exclude them from value_text-keyed computes
 # (frequency, proportion) so they match the Data Quality tab's missing handling.
-from .missing_values import is_missing, parse_missing_rules
+from .missing_values import column_missing_rules, is_missing
 # #384: shared grouping-value loader (excludes recognized N/A from group keys).
 from .grouping import (
     load_grouping_values,
@@ -562,11 +562,13 @@ def resolve_dataset_column(
     column_id = metric_def.input_source_id
 
     # #592: the column's missing declaration (None = the _is_na defaults)
-    missing_rules = parse_missing_rules(
-        db.query(DatasetColumn.missing_values)
+    # #1048: and the defaults its TYPE calls for.
+    _col = (
+        db.query(DatasetColumn.missing_values, DatasetColumn.column_type)
         .filter(DatasetColumn.id == column_id)
-        .scalar()
+        .first()
     )
+    missing_rules = column_missing_rules(_col) if _col is not None else None
 
     # Load all values for this column
     values = (
@@ -1040,9 +1042,9 @@ def resolve_dataset_domain(
     # the pooled paths below merge rows and discard col_id (C2) — the resolver
     # is the last place the right rules can be chosen.
     missing_rules_by_col = {
-        cid: parse_missing_rules(mv)
-        for cid, mv in db.query(
-            DatasetColumn.id, DatasetColumn.missing_values,
+        c.id: column_missing_rules(c)
+        for c in db.query(
+            DatasetColumn.id, DatasetColumn.missing_values, DatasetColumn.column_type,
         ).filter(DatasetColumn.id.in_(all_column_ids)).all()
     }
 

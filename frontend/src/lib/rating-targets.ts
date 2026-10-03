@@ -51,3 +51,23 @@ export function ratableCodes(
   }
   return out
 }
+
+/**
+ * The code an open rating strip should show — the LIVE one from the page's codes
+ * list, not the copy taken when the strip opened (#1112).
+ *
+ * Each workbench keeps `ratingTarget = { unit, code }`, and the strip read
+ * `code.magnitude_scale` from that copy, so a scale saved while the strip was
+ * open never reached it: measured, the step saved as 0.5 and the strip went on
+ * offering the old step-1 ticks. Reading the page's `codeMap` (which the scale
+ * dialog updates the moment the server answers) makes a rename, a new step and
+ * a removed scale all arrive.
+ *
+ * ⚠️ Falls back to the captured copy only while the list has no such code (a
+ * cold cache), never in preference to it.
+ * ⚠️ The mount must also key on `scaleSignature(scale)`: the strip sets its
+ * cursor once, so a step change has to be a remount.
+ */
+export function liveRatingCode(captured: Code, codeMap: Map<number, Code>): Code {
+  return codeMap.get(captured.id) ?? captured
+}

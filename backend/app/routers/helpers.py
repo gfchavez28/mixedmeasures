@@ -8,12 +8,15 @@ from ..models.segment import Segment
 from ..models.conversation import Conversation
 from ..models.document import Document
 from ..models.observation import Observation
-from ..models.dataset import Dataset, DatasetColumn, ColumnType
+from ..models.dataset import Dataset, DatasetColumn, TEXT_CODEABLE_TYPES
 
 # 50 MB file upload limit
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024
 
-TEXT_TYPES = [ColumnType.OPEN_TEXT]
+# The columns Text Coding offers — `models/dataset.py::TEXT_CODEABLE_TYPES`, as the
+# list these routers pass to `.in_()`. One definition, so the coding import (a
+# service) and the text-coding routers cannot disagree about what is codeable.
+TEXT_TYPES = sorted(TEXT_CODEABLE_TYPES, key=lambda t: t.value)
 
 
 def visible_segment_filter():

@@ -26,11 +26,10 @@ every other reader (`_scan_source_rows`, `import_dataset_csv`'s write loop,
   columns described the SECOND column's values and every value was tallied
   twice.
 
-⚠️ **What is deliberately NOT changed here: blank lines.** `DictReader` skipped
-them and `csv.reader` does not, so the preview's row count is preserved by an
-explicit skip. The IMPORT does not skip, and creates an empty record per blank
-line — a disagreement filed as #983 rather than decided inside a memory fix,
-because "is a blank line a respondent?" is a data question.
+⚠️ **Blank lines were deliberately NOT decided here**, and were filed as #983
+("is a blank line a respondent?" is a data question, not a memory one). #983
+decided it: every reader goes through `CsvRecords`, and a blank line is a record
+only in a one-column file — see `test_csv_records.py`.
 """
 import ast
 import csv
@@ -169,9 +168,8 @@ class TestDuplicateHeadersDescribeTheirOwnColumn:
 
 class TestBlankLinesAreStillSkipped:
     def test_a_blank_line_does_not_become_a_row(self):
-        """Pinned, not improved (#983). `csv.reader` yields `[]` where
-        `DictReader` skipped; the skip is explicit so this preview's row count
-        is unchanged by the rewrite."""
+        """In a file of two or more columns (#983 — `CsvRecords`; the import
+        now agrees, see `test_csv_records.py`)."""
         assert preview_dataset_csv("a,b\n1,2\n\n3,4\n")["total_rows"] == 2
 
     def test_a_trailing_newline_is_not_a_row(self):
@@ -206,66 +204,104 @@ AWKWARD_CSV = [
 ]
 
 
-class TestEveryReaderInTheModuleUsesCsvLines:
-    """`_csv_lines` is a chokepoint, so a fifth reader must not reintroduce the
-    4-bytes-per-character copy — silently, because nothing would fail.
+def _reader_calls_in(source: str) -> list[tuple[int, str, str]]:
+    """Every `csv.reader(X)` in ``source``, as (lineno, the callee building X,
+    the dotted name of the def/class the call sits in — "" at module level)."""
+    tree = ast.parse(source)
+    out: list[tuple[int, str, str]] = []
+
+    def visit(node, scope: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(child, f"{scope}.{child.name}" if scope else child.name)
+                continue
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and child.func.attr == "reader"
+                and isinstance(child.func.value, ast.Name)
+                and child.func.value.id == "csv"
+            ):
+                arg = child.args[0] if child.args else None
+                name = ""
+                if isinstance(arg, ast.Call):
+                    f = arg.func
+                    name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+                out.append((child.lineno, name, scope))
+            visit(child, scope)
+
+    visit(tree, "")
+    return out
+
+
+class TestOneReaderOfDatasetCsv:
+    """Every read of dataset CSV text goes through `CsvRecords`, and that one
+    reader goes through `_csv_lines`.
+
+    Two properties, one scan. `_csv_lines` exists to drop a 4-bytes-per-character
+    copy of the file (144 MB on a 36 MB upload), so a reader that bypasses it
+    costs memory silently; and since #983/#985 `CsvRecords` is what decides what a
+    RECORD is and notices a too-long one, so a reader that bypasses IT counts rows
+    by a different rule — the defect #983 was, between the preview and the import.
+    It covers the ROUTER too: both append steps read the text there, with
+    `csv.reader(io.StringIO(...))`, until #983.
 
     ⚠️ **AST, not a source scan.** `_csv_lines`'s own docstring and several
     comments write `io.StringIO(text)` in PROSE to explain why not to use it; a
-    regex would report those as violations (#772's phantom class). This asks the
-    parsed tree for `csv.reader(io.StringIO(...))` instead, so prose is invisible
-    to it and a real call cannot hide behind formatting.
+    regex would report those as violations (#772's phantom class).
     """
 
-    MODULE = pathlib.Path(di.__file__)
+    MODULES = {
+        "services/dataset_import.py": pathlib.Path(di.__file__),
+        "routers/dataset.py": pathlib.Path(di.__file__).parent.parent / "routers" / "dataset.py",
+    }
+    READER_SCOPE = "CsvRecords.__init__"
 
-    def _reader_calls(self):
-        """Every `csv.reader(X)` in the module, as (lineno, the callee's name)."""
-        tree = ast.parse(self.MODULE.read_text())
-        out = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if not (
-                isinstance(node.func, ast.Attribute)
-                and node.func.attr == "reader"
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "csv"
-            ):
-                continue
-            arg = node.args[0] if node.args else None
-            name = ""
-            if isinstance(arg, ast.Call):
-                f = arg.func
-                name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
-            out.append((node.lineno, name))
-        return out
+    def _calls(self):
+        return [
+            (name, *call)
+            for name, path in self.MODULES.items()
+            for call in _reader_calls_in(path.read_text())
+        ]
 
     def test_the_population_is_found(self):
         """A scan whose expected result is empty passes by finding nothing — so
-        this one states what it must see before it is allowed to report a pass."""
-        calls = self._reader_calls()
-        assert len(calls) >= 4, f"only {len(calls)} csv.reader calls found — the scan has rotted"
+        it names what it must see: the one reader, where it lives."""
+        calls = self._calls()
+        assert ("services/dataset_import.py", self.READER_SCOPE) in {
+            (m, scope) for m, _ln, _n, scope in calls
+        }, f"CsvRecords' own csv.reader not found in {calls} — the scan has rotted"
+
+    def test_every_reader_is_the_one(self):
+        offenders = [c for c in self._calls() if c[3] != self.READER_SCOPE]
+        assert offenders == [], (
+            f"csv.reader outside CsvRecords: {offenders}. Read dataset CSV text "
+            "through `CsvRecords` — it owns the record rule (#983), the too-long "
+            "report (#985) and the no-copy line reader."
+        )
 
     def test_no_reader_constructs_a_StringIO(self):
-        offenders = [(ln, n) for ln, n in self._reader_calls() if n == "StringIO"]
+        offenders = [c for c in self._calls() if c[2] == "StringIO"]
         assert offenders == [], (
             f"csv.reader(io.StringIO(...)) at {offenders} — that buffer is UCS-4 "
             "at 4.00 B/char (144 MB on a 36 MB file). Use _csv_lines(text)."
         )
 
     def test_the_scan_would_catch_one(self):
-        """The predicate falsifier: a matcher that never fires is a pass that
-        means nothing, and the AST shape above is easy to get subtly wrong."""
-        tree = ast.parse("import csv, io\nfor r in csv.reader(io.StringIO(t)): pass\n")
-        found = [
-            n for n in ast.walk(tree)
-            if isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Attribute) and n.func.attr == "reader"
-            and n.args and isinstance(n.args[0], ast.Call)
-            and getattr(n.args[0].func, "attr", "") == "StringIO"
+        """The predicate falsifiers: a matcher that never fires is a pass that
+        means nothing, and the AST shapes above are easy to get subtly wrong."""
+        planted = _reader_calls_in(
+            "import csv, io\n"
+            "class CsvRecords:\n"
+            "    def __init__(self, t):\n"
+            "        self.r = csv.reader(_csv_lines(t))\n"
+            "def append_preview(t):\n"
+            "    for r in csv.reader(io.StringIO(t)): pass\n"
+        )
+        assert [(n, s) for _ln, n, s in planted] == [
+            ("_csv_lines", "CsvRecords.__init__"),
+            ("StringIO", "append_preview"),
         ]
-        assert len(found) == 1
 
 
 class TestCsvLinesMatchesStringIO:
@@ -388,8 +424,8 @@ class TestTheDerivedStatisticsCountCells:
     #
     # ⚠️ A SECOND COLUMN is what makes the blank record expressible: in a
     # one-column CSV a record whose only cell is blank and a blank LINE are the
-    # same bytes, and a blank line is skipped (see TestBlankLinesAreStillSkipped
-    # — `DictReader` skipped it too).
+    # same bytes (#983 reads them as a record there — `test_csv_records.py`), so
+    # the second column keeps this fixture about the tally, not that rule.
     TEXT = (
         "val,other\n"
         ",x\naaa,x\nb,x\nb,x\nN/A,x\nb,x\nN/A,x\n"

@@ -126,6 +126,7 @@ async def coder_coverage(
                 username=c.username,
                 display_color=c.display_color,
                 archived=c.archived,
+                coder_type=c.coder_type,
             )
             for c in coverage
         ],
@@ -452,6 +453,10 @@ def machine_agreement(
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1030 — blind mode's self-scope: one PERSON against every machine. A bare
+    # default, appended last, so a direct-call test that omits it gets a real
+    # None rather than FastAPI's `Query` sentinel (tests/the internal design notes).
+    human_id: int | None = None,
 ):
     """How far each MACHINE coder's labels agree with each person's (row 49).
 
@@ -477,7 +482,7 @@ def machine_agreement(
     ⚠️ Plain `def` (#837): queries and pure arithmetic, no `await`.
     """
     _get_project_or_404(db, project_id, user.id)
-    result = compute_machine_agreement(db, project_id)
+    result = compute_machine_agreement(db, project_id, human_id=human_id)
     return MachineAgreementResponse(
         available=result.available,
         unavailable_reason=result.unavailable_reason,

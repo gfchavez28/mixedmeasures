@@ -71,7 +71,7 @@ from ..services.missing_declaration import (
     MissingRuleCollisionError,
     apply_missing_declaration,
 )
-from ..services.missing_values import parse_missing_rules
+from ..services.missing_values import column_missing_rules, parse_missing_rules
 from ..services.recode import (
     definition_reflection_offset,
     apply_definition_to_column,
@@ -92,6 +92,7 @@ from ..services.participant_dataset import (
 )
 
 from ..services.staleness import mark_metrics_stale
+from ..services.column_retype import plan_rederived_cells, write_rederived_cells  # #1079 (b)
 from .helpers import _get_project_or_404
 
 logger = logging.getLogger(__name__)
@@ -170,15 +171,15 @@ _UNSET = object()
 def _definition_to_response(
     definition: RecodeDefinition,
     db: Session,
-    column_missing_values=_UNSET,
+    column_rules=_UNSET,
 ) -> RecodeDefinitionResponse:
     """Convert a RecodeDefinition ORM object to response schema.
 
-    ``column_missing_values`` is the column's raw ``missing_values`` JSON, needed
-    for the #602 reflection offset. Pass it when the caller already has the
-    column (``list_definitions`` builds N responses for ONE column); omit it and
-    a single scalar lookup happens here. The sentinel distinguishes "not supplied"
-    from a genuine ``None``, which means "undeclared" and is NOT the same thing.
+    ``column_rules`` is the column's EFFECTIVE missing rules
+    (`column_missing_rules`, #1048), needed for the #602 reflection offset. Pass
+    it when the caller already has the column; omit it and one lookup happens
+    here. The sentinel distinguishes "not supplied" from a genuine ``None``,
+    which means "the prefix defaults apply" and is NOT the same thing.
     """
     mapping = {}
     try:
@@ -200,12 +201,13 @@ def _definition_to_response(
     # startup path.
     ranges = parse_ranges(definition.ranges)
 
-    if column_missing_values is _UNSET:
-        column_missing_values = (
-            db.query(DatasetColumn.missing_values)
+    if column_rules is _UNSET:
+        _col = (
+            db.query(DatasetColumn.missing_values, DatasetColumn.column_type)
             .filter(DatasetColumn.id == definition.column_id)
-            .scalar()
+            .first()
         )
+        column_rules = column_missing_rules(_col) if _col is not None else None
 
     return RecodeDefinitionResponse(
         id=definition.id,
@@ -223,7 +225,7 @@ def _definition_to_response(
         created_at=definition.created_at,
         updated_at=definition.updated_at,
         unmapped_values=unmapped,
-        reverse_offset=definition_reflection_offset(definition, column_missing_values),
+        reverse_offset=definition_reflection_offset(definition, column_rules),
     )
 
 
@@ -1411,14 +1413,23 @@ def bulk_set_missing_values(
 @router.patch(
     "/api/projects/{project_id}/datasets/{dataset_id}/columns/bulk-type",
 )
-async def bulk_type_update(
+def bulk_type_update(
     project_id: int,
     dataset_id: int,
     data: BulkTypeUpdateRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Bulk update column_type for multiple columns."""
+    """Bulk update column_type for multiple columns.
+
+    ⚠️ **Plain `def` since #1079 (b):** it now re-derives every stored cell of
+    every column it retypes — MEASURED at 122,382 rows, ~1 s per column and
+    5.2 s for five, all of which an `async def` body would spend ON the event
+    loop with every other request, `/health` included, held. Pinned in
+    `test_endpoint_event_loop.py::MUST_BE_SYNC`. Off the loop it runs beside
+    other writers, which is why the cells are written one column per
+    transaction (below).
+    """
     _get_project_or_404(db, project_id, user.id)
 
     try:
@@ -1521,6 +1532,7 @@ async def bulk_type_update(
         )
 
     updated = 0
+    retyped: list[DatasetColumn] = []
     for col_id in data.column_ids:
         col = (
             db.query(DatasetColumn)
@@ -1537,7 +1549,25 @@ async def bulk_type_update(
             if new_type != ColumnType.DEMOGRAPHIC:
                 col.demographic_subtype = None
             updated += 1
+            retyped.append(col)
 
+    # 🔴 #1079 (b) — the type decides every stored cell's NUMBER, and this door
+    # changed the type and left them: numbers typed as categories and retyped
+    # numeric stayed NULL in every cell (measured), so Correlations, Comparisons
+    # and both exports read an empty column while the grid showed values.
+    # Planned for EVERY column before anything is written (reads take no lock;
+    # the new type is on the unflushed objects), then written in one short
+    # transaction. Re-derived even when the type did not change, so re-applying
+    # a type repairs a column retyped before this build.
+    #
+    # ⚠️ One short transaction PER COLUMN for the cells, after the types commit:
+    # MEASURED at 122,382 rows, a column's cells take ~0.5 s to write, and this
+    # endpoint runs beside other writers (`def`, below), so five columns in one
+    # transaction held SQLite's lock ~2.5 s and ten would reach the 5 s busy
+    # timeout (#1033's class). A failure part-way leaves a column typed but not
+    # re-derived — the state every column was in before #1079 — and re-applying
+    # the type repairs it.
+    plans = [plan_rederived_cells(db, col) for col in retyped]
     db.flush()
     mark_metrics_stale(db, project_id, column_ids=data.column_ids)
 
@@ -1555,6 +1585,9 @@ async def bulk_type_update(
         },
     )
     db.commit()
+    for changes in plans:
+        write_rederived_cells(db, changes)
+        db.commit()
 
     return {"status": "ok", "updated": updated}
 

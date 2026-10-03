@@ -34,7 +34,7 @@ from ..services.subtitle_import import (
     is_subtitle_upload,
     subtitles_to_csv_bytes,
 )
-from ..services.coding_layers import non_consensus_filter
+from ..services.coding_layers import layer_scope_filter
 from ..services.coding_counts import (
     coded_segment_count as coded_segment_count_fn,
     coded_segment_counts,
@@ -124,7 +124,9 @@ def conversation_to_response(
             Segment.conversation_id == conversation.id,
             Segment.merged_into_id == None,
             Segment.split_into_id == None,
-            non_consensus_filter(),  # J2-B: the derived consensus layer must not inflate the card count
+            # #1029: PEOPLE's codes only — the human arm drops the derived consensus
+            # layer AND a machine coder's labels, as the coded count beside it does.
+            layer_scope_filter(),
         ).scalar() or 0
 
     # On-disk recording size + cache token (slab 5 storage / #549), single-
@@ -225,7 +227,9 @@ async def list_conversations(
             Segment.conversation_id.in_(conversation_ids),
             Segment.merged_into_id == None,
             Segment.split_into_id == None,
-            non_consensus_filter(),  # J2-B: the derived consensus layer must not inflate the card count
+            # #1029: PEOPLE's codes only — the human arm drops the derived consensus
+            # layer AND a machine coder's labels, as the coded count beside it does.
+            layer_scope_filter(),
         )
         .group_by(Segment.conversation_id)
         .all()

@@ -40,6 +40,21 @@ export const VALUE_NUMERIC_TYPES: readonly string[] = [
 // already sends, so there is no server gate to mirror and no backend twin.
 export const CONTINUOUS_TYPES: readonly string[] = ['numeric', 'percentage']
 
+// MATCH_KEY_COLUMN_TYPES — columns that can hold a record's OWN id, offered by the
+// coding import's "What are the ids in your file?" picker (Batch 6, #1032 b). It
+// offered only OPEN-TEXT columns, so the case the option exists for — a
+// researcher's `post_id`, which the importer types as an identifier — could not
+// be chosen at all. Identifier first in the picker; the other three are there
+// because detection types an id column by what its values look like (a number,
+// prose-length text, a short code).
+//
+// Frontend-only on purpose: the SERVER's test of a key is uniqueness, not type —
+// a value that names two records is refused row by row (`unit_ambiguous`) — so
+// there is no server gate for this set to mirror.
+export const MATCH_KEY_COLUMN_TYPES: readonly string[] = [
+  'identifier', 'numeric', 'open_text', 'nominal',
+]
+
 // CROSSWALK_INELIGIBLE_TYPES — types that can never be an equivalence-group /
 // variable-group member (#556b). Mirror of the backend frozenset of the same name
 // in models/dataset.py, which gates the suggest pools server-side; this is the

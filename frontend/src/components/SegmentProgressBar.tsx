@@ -1,13 +1,15 @@
 import { useMemo } from 'react'
 import { type Segment } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { isSegmentCodedVisible } from '@/lib/coding-progress'
+import { isSegmentCodedVisible, type MachineCoderIds } from '@/lib/coding-progress'
 import type { CoderLens } from '@/lib/coder-color'
 
 interface SegmentProgressBarProps {
   segments: Segment[]
   /** the per-coder lens (filter or blind mode) — bar/count reflect only visible coders. */
   hiddenCoderIds?: CoderLens
+  /** #1029 — REQUIRED: a model's labels never colour a turn coded, as on the gauge beside it. */
+  machineCoderIds: MachineCoderIds
   className?: string
 }
 
@@ -18,6 +20,7 @@ interface SegmentProgressBarProps {
 export default function SegmentProgressBar({
   segments,
   hiddenCoderIds,
+  machineCoderIds,
   className,
 }: SegmentProgressBarProps) {
   // Only count participant segments (non-facilitator) in the progress visualization
@@ -39,7 +42,7 @@ export default function SegmentProgressBar({
     participantSegments.forEach((segment, index) => {
       // #400/J-A: a universal-only segment is NOT coded; filter-aware so the bar
       // matches the gauge when a per-coder filter hides a colleague's codes.
-      const isCoded = isSegmentCodedVisible(segment.applied_code_details, hiddenCoderIds)
+      const isCoded = isSegmentCodedVisible(segment.applied_code_details, hiddenCoderIds, machineCoderIds)
       // coded = mm-green, uncoded = neutral; CSS vars rebalance per theme.
       const color = isCoded ? 'hsl(var(--mm-green))' : 'hsl(var(--mm-border-medium))'
       const startPercent = index * segmentWidth
@@ -53,7 +56,7 @@ export default function SegmentProgressBar({
     return {
       background: `linear-gradient(to right, ${stops.join(', ')})`,
     }
-  }, [participantSegments, hiddenCoderIds])
+  }, [participantSegments, hiddenCoderIds, machineCoderIds])
 
   return (
     <div

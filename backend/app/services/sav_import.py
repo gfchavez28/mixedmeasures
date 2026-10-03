@@ -332,9 +332,11 @@ def apply_sav_metadata(
     order), but researchers routinely leave it at whatever SPSS auto-assigned, so
     nominal/scale are left to MM's inference, which already handles them.
 
-    This is worth the threading: MM's known-scale matcher maps a 5-point agreement
-    scale onto a 4-point library entry (nulling "Neutral"), and drops an unmatched
-    0..3 scale to alphabetically-ordered nominal. SPSS knew both exactly.
+    This is worth the threading: MM's known-scale matcher can only number a scale
+    1..N (a 0-based SPSS scale would shift by one), and drops an unmatched 0..3
+    scale to alphabetically-ordered nominal. SPSS knew both exactly. (Until #1102
+    the matcher also mapped a 5-point agreement scale onto a 4-point library
+    entry, leaving the midpoint with no number; that was the ranking, now fixed.)
 
     Identity: the SPSS variable NAME is a name, so it lands in
     ``suggested_column_name`` (which the R export uses as its identifier

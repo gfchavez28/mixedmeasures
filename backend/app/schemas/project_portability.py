@@ -61,16 +61,44 @@ class MergeCoderMatch(BaseModel):
     local_app_count: int
 
 
+class MergeCoderOption(BaseModel):
+    """A local coder an incoming coder MAY be mapped onto (#1034) — same kind and, for
+    a machine, the same configuration. The confirm screen's list, decided by the
+    predicate the import enforces."""
+    id: int
+    username: str
+    archived: bool
+
+
+class MergeCoderNameInUse(BaseModel):
+    """A local coder holds the file coder's NAME but may not receive its codings
+    (#1034) — another kind of coder, or another configuration of the model. The file's
+    coder is added under ``new_username`` instead, and the screen says why."""
+    username: str
+    coder_type: str
+    #: ``kind`` · ``configuration`` (`project_portability.CODER_MISMATCH_*`).
+    reason: str
+    new_username: str
+
+
 class MergeCoderPreview(BaseModel):
     """Track J · J3-2: one coder in an incoming merge file, with its local
     name-match candidate (if any) so the UI can confirm/override the mapping
-    before committing (D8). System coders (Unattributed/Consensus) are excluded."""
+    before committing (D8). System coders (Unattributed/Consensus) are excluded.
+
+    #1034: ``local_match`` is offered only when the file's coder may land on it;
+    ``name_in_use`` says when the name is taken by a coder it may not;
+    ``match_options`` is every local coder it may be mapped onto; and
+    ``machine_provenance`` is the file machine's configuration, for the screen."""
     original_id: int
     username: str
     coder_type: str
     archived: bool
     file_app_count: int
     local_match: MergeCoderMatch | None = None
+    name_in_use: MergeCoderNameInUse | None = None
+    match_options: list[MergeCoderOption] = []
+    machine_provenance: dict | None = None
 
 
 class MergeCodeCandidate(BaseModel):

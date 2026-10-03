@@ -33,7 +33,9 @@ from ..services.audit import log_action
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
 from ..services.participant_scores import mark_participant_scores_stale
-from ..services.coding_layers import build_effective_code_map, non_consensus_filter
+from ..services.coding_layers import (
+    build_effective_code_map, layer_scope_filter, non_consensus_filter,
+)
 from ..services.id_set import in_id_set
 from ..services.text_analysis import substantive_text_clause
 from .helpers import _get_project_or_404, parse_int_list, sanitize_csv_filename, TEXT_TYPES
@@ -228,19 +230,24 @@ def list_texts(
         )
         .exists()
     )
-    # "Coded" = ≥1 NON-universal, non-consensus application — invariant J-A
+    # "Coded" = ≥1 NON-universal application BY A PERSON — invariant J-A
     # (#488), the same predicate `text_columns` and the coding gauge use. A bare
     # any-application check counts universal-only values and makes this endpoint
     # disagree with the gauge on the same screen.
+    #
+    # 🔴 `layer_scope_filter()`, the HUMAN arm — never `non_consensus_filter()`
+    # (#1029). That one drops the derived consensus layer and KEEPS a machine
+    # coder's labels, so a model that labelled a whole column made these totals
+    # read "every response coded" while the Overview (`coding_counts`, the same
+    # arm) said otherwise. The chips below still carry the machine's codings —
+    # they must be attributable; only the COUNT means people.
     coded_exists = (
         db.query(CodeApplication.id)
         .join(Code, Code.id == CodeApplication.code_id)
         .filter(
             CodeApplication.dataset_value_id == DatasetValue.id,
             Code.is_universal == False,
-            # J2-B / P-1: the workbench shows the human/working layer only;
-            # never let derived consensus rows inflate a coded count.
-            non_consensus_filter(),
+            layer_scope_filter(),
         )
         .exists()
     )
@@ -802,11 +809,12 @@ async def text_columns(
         non_empty_counts = {cid: cnt for cid, cnt in non_empty}
 
     # Coded rows per column — the J-A definition (#492): distinct NON-EMPTY
-    # values carrying ≥1 NON-UNIVERSAL, non-consensus application. This is the
+    # values carrying ≥1 NON-UNIVERSAL application by a PERSON. This is the
     # displayed "N coded" in TextColumnPicker; it previously counted universal-
     # only (and even empty/"N/A") values, disagreeing with the coding-progress
     # gauge on the same screen (7 vs 6 on the audit corpus) and breaking the
     # "N coded ⊆ y responded" reading of "x/y responded · N coded".
+    # #1029: the human arm, so a model's labels are not "coded" (see `list_texts`).
     coded_counts = {}
     if col_ids:
         coded_q = (
@@ -816,7 +824,7 @@ async def text_columns(
             .filter(
                 DatasetValue.column_id.in_(col_ids),
                 Code.is_universal == False,
-                non_consensus_filter(),
+                layer_scope_filter(),
                 substantive_text_clause(treat_as_empty),
             )
         )
@@ -883,16 +891,35 @@ async def apply_code(
         except magnitude.MagnitudeError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
+    # 🔴 #1028 — a VALUE of a code set replaces this coder's other value of that
+    # set on this response, here as at the set's own endpoint; this door is where
+    # every chord, context-menu item and chip `+` on the Text Coding view lands.
+    # Before the `existing` return: pressing one of two held values chooses it.
+    replaced = code_set_rules.replaced_code_ids(
+        code_set_rules.clear_rivals_before_apply(
+            db, code, user_id=user.id, dataset_value_ids=[data.dataset_value_id],
+        )
+    )
+    if replaced:
+        log_action(
+            db, action="code_set_selection", entity_type="code_application",
+            entity_id=data.dataset_value_id, user_id=user.id, project_id=project_id,
+            details={"dataset_value_id": data.dataset_value_id, "code_id": data.code_id,
+                     "replaced_code_ids": replaced},
+        )
+
     if existing:
         # Already applied by this coder. Re-applying is a no-op EXCEPT for a
         # rating: silently discarding the value would make the strip appear to
         # save. No group fan-out here — a dataset cell has no segment group.
-        if rating_supplied and (
+        rerated = rating_supplied and (
             existing.magnitude != rating or existing.magnitude_conflict is not None
-        ):
+        )
+        if rerated:
             existing.magnitude = rating
             # Rating it again IS the adjudication of a merge conflict (§6d).
             existing.magnitude_conflict = None
+        if rerated or replaced:
             mark_participant_scores_stale(db, project_id)
             if consensus_enabled(db):
                 mark_consensus_stale(db, project_id, dataset_value_ids=[data.dataset_value_id])
@@ -903,6 +930,7 @@ async def apply_code(
             applied=True,
             created_at=existing.created_at,
             magnitude=existing.magnitude,
+            replaced_code_ids=replaced,
         )
 
     ca = CodeApplication(
@@ -926,6 +954,7 @@ async def apply_code(
         applied=True,
         created_at=ca.created_at,
         magnitude=ca.magnitude,
+        replaced_code_ids=replaced,
     )
 
 
@@ -1169,6 +1198,22 @@ async def bulk_code(
         ).all()
     )
 
+    # 🔴 #1028 — a bulk apply of a code-set VALUE replaces this coder's other
+    # value on each valid response, exactly as the single door does.
+    replaced_by_value = code_set_rules.clear_rivals_before_apply(
+        db, code, user_id=user.id,
+        dataset_value_ids=[dv_id for dv_id in requested_ids if dv_id in valid_ids],
+    )
+    if replaced_by_value:
+        log_action(
+            db, action="code_set_selection", entity_type="code_application",
+            user_id=user.id, project_id=project_id,
+            details={"code_id": data.code_id, "bulk": True,
+                     "replaced_code_ids_by_value": {
+                         str(dv): ids for dv, ids in replaced_by_value.items()
+                     }},
+        )
+
     results = []
     success_count = 0
     error_count = 0
@@ -1185,7 +1230,8 @@ async def bulk_code(
 
         if dv_id in existing:
             results.append(TextCodeResponse(
-                dataset_value_id=dv_id, code_id=data.code_id, applied=True
+                dataset_value_id=dv_id, code_id=data.code_id, applied=True,
+                replaced_code_ids=replaced_by_value.get(dv_id, []),
             ))
             success_count += 1
             continue
@@ -1199,7 +1245,8 @@ async def bulk_code(
         )
         db.add(ca)
         results.append(TextCodeResponse(
-            dataset_value_id=dv_id, code_id=data.code_id, applied=True
+            dataset_value_id=dv_id, code_id=data.code_id, applied=True,
+            replaced_code_ids=replaced_by_value.get(dv_id, []),
         ))
         success_count += 1
 
@@ -1513,6 +1560,8 @@ def coding_progress(
     # Get coded value IDs (#400: a value counts as "coded" only when it carries
     # at least one NON-UNIVERSAL code application — a universal-only marker like
     # "Unclear" must not inflate coverage; this mirrors lib/coding-progress.ts).
+    # #1029: and only a PERSON's — the human arm of `layer_scope_filter`, as
+    # every other gauge (`coding_counts`) has used since #989.
     coded_value_ids = set()
     value_ids = [v[0] for v in values]
     if value_ids:
@@ -1524,7 +1573,7 @@ def coding_progress(
                 # 250,000-parameter ceiling as a bound list.
                 in_id_set(CodeApplication.dataset_value_id, value_ids),
                 Code.is_universal == False,
-                non_consensus_filter(),
+                layer_scope_filter(),
             )
         )
         # Blind mode (DEC-G): scope overall_* coverage to the requesting coder so the
@@ -1535,6 +1584,9 @@ def coding_progress(
 
     # Per-coder coverage breakdown (Track J · J1 item 4). Same non-universal
     # rule; only attributed applications (user_id IS NOT NULL) are counted.
+    # ⚠️ It KEEPS a machine coder's row, deliberately (#1029): this is who did
+    # what, attributed per coder, not the claim "how much is coded" that the
+    # overall figures above make — the same split as the chips vs the gauge.
     coder_value_ids: dict[int, set[int]] = defaultdict(set)
     if value_ids:
         coder_rows_q = (

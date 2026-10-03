@@ -12,7 +12,7 @@ import type {
   CodeAnalysisFilterParams,
   DemographicComparisonRequest,
 } from '@/lib/api'
-import type { LayerScope } from '@/lib/coding-layers'
+import { asLayerScope, type LayerScope } from '@/lib/coding-layers'
 import {
   orientationFromToken,
   type QualChartType,
@@ -204,7 +204,10 @@ export function extractQualComputeParams(content: Record<string, unknown>): Qual
   const chartType = (content.chart_type as QualChartType) ?? 'heatmap'
   const groupBy = (content.group_by as string) ?? null
   const categoryMode = content.code_mode === 'categories'
-  const layerScope = content.layer_scope === 'consensus' ? 'consensus' : 'human'
+  // #1098 — through the ONE narrowing, never a ternary: `=== 'consensus' ? … :
+  // 'human'` turned a chart saved on the Machine layer into a chart of PEOPLE's
+  // coding on the canvas, every kind of chart, with nothing on screen to say so.
+  const layerScope = asLayerScope(content.layer_scope)
   const tableMode: QualTimelineTableMode = content.timeline_table_mode === 'coder' ? 'coder' : 'code'
 
   const hasSourceSelection =

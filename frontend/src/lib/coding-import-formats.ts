@@ -38,3 +38,10 @@ export function isSupportedCodingImportFile(filename: string): boolean {
  */
 export const CODING_IMPORT_REQUIRED_HEADERS = ['unit_id', 'coder', 'code'] as const
 export const CODING_IMPORT_OPTIONAL_HEADERS = ['code_set', 'magnitude'] as const
+
+/**
+ * Another name a header may go by → the header it is read as — the parser's
+ * `HEADER_ALIASES`. `rating` is what the coded-segments export writes (#1032 c),
+ * which is why that file imports as it is; the drop zone says so.
+ */
+export const CODING_IMPORT_HEADER_ALIASES = { rating: 'magnitude' } as const

@@ -23,7 +23,8 @@ import {
 import { invalidateTextEmptinessReaders } from '@/lib/text-coding-cache'
 import { useListLoad } from '@/hooks/useListLoad'
 import { LoadState, LoadingNotice } from '@/components/LoadStatus'
-import { ratableCodes } from '@/lib/rating-targets'
+import { liveRatingCode, ratableCodes } from '@/lib/rating-targets'
+import { scaleSignature } from '@/lib/magnitude'
 import MagnitudeStrip from '@/components/MagnitudeStrip'
 import { useHistory } from '@/hooks/useHistory'
 import { CodeSetStrip } from '@/components/CodeSetStrip'
@@ -33,11 +34,15 @@ import TextPagingStatus from '@/components/TextPagingStatus'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
 import { codeKeyHint } from '@/lib/codeShortcuts'
 import ByRecordPanel from '@/components/ByRecordPanel'
-import { useCoders } from '@/hooks/useCoders'
+import { useCoders, useMachineCoderIds } from '@/hooks/useCoders'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { isSegmentCodedVisible, isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
+import {
+  captureApply, planApplyUndo, replacedFromBulk, replacedFromSingle, runApplyUndo,
+  textUndoApi, type Replaced,
+} from '@/lib/apply-undo'
 import { useAuth } from '@/lib/auth-context'
 import CoderFilterPopover from '@/components/CoderFilterPopover'
 import BlindModeToggle from '@/components/BlindModeToggle'
@@ -90,6 +95,8 @@ export default function TextCodingView() {
   // unanswered); the wording keys on `blind` (only once it is known).
   const { blind, withholding, settled: blindSettled, blindLens, toggleReveal } = useBlindMode(projectId)
   const effectiveHidden = withholding ? blindLens : hiddenCoders
+  // #1029 — `j` skips only what a PERSON coded, as the server's gauge counts.
+  const machineCoderIds = useMachineCoderIds()
   // #964: "View all — N archived" must not bring an archived colleague back after re-blinding.
   const chipShowArchived = showArchivedCoders && !withholding
   // Group A (#457): who coded THESE columns — drives the picklist "active here" markers.
@@ -124,7 +131,8 @@ export default function TextCodingView() {
   })
   const [activeColumnId, setActiveColumnId] = useState<number | null>(null)
 
-  const history = useHistory()
+  // #1042: the stack is this coder's — a coder switch clears it.
+  const history = useHistory(self)
   // #825: the jump handler lives here; the scroller lives in ByTextTable.
   const byTextRef = useRef<ByTextTableHandle>(null)
   // #961 — where focus lands when a Retry succeeds and the failure notice, with
@@ -497,6 +505,10 @@ export default function TextCodingView() {
   }, [codes])
 
   const [ratingTarget, setRatingTarget] = useState<{ valueId: number; code: Code } | null>(null)
+  // #1112: the strip shows the LIVE code, so a scale saved while it is open
+  // (and a rename) reaches it; the mount keys on the scale's signature so a
+  // new step remounts it with a fresh cursor (`lib/rating-targets.ts`).
+  const ratingCode = ratingTarget ? liveRatingCode(ratingTarget.code, codeMap) : null
 
   // The rating THIS coder holds on this response, read from the cache the chips
   // render from. `?? null`, never `|| null` — a stored 0 is a real rating.
@@ -654,25 +666,42 @@ export default function TextCodingView() {
         },
       })
     } else {
-      // Apply to all (bulk)
+      // Apply to all (bulk).
+      // #1028: captured NOW — the undo removes the code only from responses the
+      // act put it on (it stripped one that already had it) and puts back any
+      // code-set value the server reports it replaced (`lib/apply-undo.ts`).
+      const single = targets.length === 1
+      const capture = captureApply(
+        codeId, targets,
+        (id) => comments.find(cm => cm.dataset_value_id === id)?.applied_code_details,
+        self,
+      )
+      let replaced: Replaced = new Map()
       const run = history.execute({
         type: 'text_code_apply',
         description: `Apply code to ${targets.length} text(s)`,
         redo: async () => {
-          if (targets.length === 1) {
-            await textCodingApi.applyCode(projectId, { dataset_value_id: targets[0], code_id: codeId })
+          if (single) {
+            replaced = replacedFromSingle(
+              targets[0],
+              await textCodingApi.applyCode(projectId, { dataset_value_id: targets[0], code_id: codeId }),
+            )
           } else {
-            reportBulkOutcome(await textCodingApi.bulkCode(projectId, { dataset_value_ids: targets, code_id: codeId }))
+            const result = await textCodingApi.bulkCode(projectId, { dataset_value_ids: targets, code_id: codeId })
+            reportBulkOutcome(result)
+            replaced = replacedFromBulk(result)
           }
           settle()
         },
         undo: async () => {
-          if (targets.length === 1) {
-            await textCodingApi.removeCode(projectId, { dataset_value_id: targets[0], code_id: codeId })
-          } else {
-            await textCodingApi.bulkRemoveCode(projectId, { dataset_value_ids: targets, code_id: codeId })
+          try {
+            await runApplyUndo(
+              planApplyUndo(capture, replaced), textUndoApi(projectId, single),
+              (id) => codeMap.get(id)?.name ?? 'code',
+            )
+          } finally {
+            settle()
           }
-          settle()
         },
       })
       // #35 variant A — a scaled code applied to ONE response opens its strip
@@ -865,7 +894,7 @@ export default function TextCodingView() {
     // non-universal definition (was bare applied_code_ids.length).
     for (let offset = 1; offset <= searchPool.length; offset++) {
       const idx = (currentIdx + offset) % searchPool.length
-      if (!isSegmentCodedVisible(searchPool[idx].applied_code_details, effectiveHidden)) {
+      if (!isSegmentCodedVisible(searchPool[idx].applied_code_details, effectiveHidden, machineCoderIds)) {
         setSelectedValueIds([searchPool[idx].dataset_value_id])
         // #825: SCROLL, or the selection advances invisibly and the next chord
         // codes a record the researcher never saw (reproduced: `Curriculum
@@ -879,7 +908,7 @@ export default function TextCodingView() {
       }
     }
     toast('All texts are coded')
-  }, [viewMode, filteredComments, comments, selectedValueIds, effectiveHidden])
+  }, [viewMode, filteredComments, comments, selectedValueIds, effectiveHidden, machineCoderIds])
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────
 
@@ -1341,7 +1370,7 @@ export default function TextCodingView() {
           </span>
         ) : null}
         {multiHumanCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="text_workbench" />}
-        <CoderCountBadge projectId={projectId} textColumnIds={focalColumnIds} enabled={multiCoder} />
+        <CoderCountBadge projectId={projectId} textColumnIds={focalColumnIds} enabled={multiCoder} withholding={withholding} />
         </div>
 
         {/* Codebook */}
@@ -1728,14 +1757,14 @@ export default function TextCodingView() {
                 target (#870 c) so a second scaled apply remounts it with a fresh
                 cursor and focus.
               */}
-              {ratingTarget && ratingTarget.code.magnitude_scale && (
+              {ratingTarget && ratingCode?.magnitude_scale && (
                 // py-1, not py-2: the vertical budget at 640×360 is measured on
                 // the document workbench at 85px for the whole control.
                 <div className="border-t border-border bg-mm-surface px-3 py-1 shrink-0">
                   <MagnitudeStrip
-                    key={`${ratingTarget.valueId}-${ratingTarget.code.id}`}
-                    codeName={ratingTarget.code.name}
-                    scale={ratingTarget.code.magnitude_scale}
+                    key={`${ratingTarget.valueId}-${ratingTarget.code.id}-${scaleSignature(ratingCode.magnitude_scale)}`}
+                    codeName={ratingCode.name}
+                    scale={ratingCode.magnitude_scale}
                     value={currentMagnitude(ratingTarget.valueId, ratingTarget.code.id)}
                     onCommit={commitMagnitude}
                     onSkip={() => setRatingTarget(null)}
@@ -1791,6 +1820,7 @@ export default function TextCodingView() {
                             : undefined
                         }
                         activeCoderId={self}
+                        codes={codes}
                         history={history}
                         onSettled={() => {
                           queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })

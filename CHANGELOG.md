@@ -7,6 +7,359 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.5] - 2026-10-03
+
+### Changed
+
+- **The Coded Segments export now includes codings on interviewer turns, with an
+  *Is Facilitator* column saying which rows they are.** The export left out every
+  coding on a facilitator's turn without saying so, although the wide export
+  beside it and the Excel workbook both include them — so a project's coding
+  exported and imported back as another coder lost those codings. The new
+  column, added at the end so every existing column keeps its place, reads
+  "Yes" or "No" on a turn with a speaker and is blank for documents and
+  observation clips. An analysis that should leave interviewer turns out can
+  filter on it. (#1075)
+
+### Fixed
+
+- 🔴 **Opening a large linked survey no longer turns the window white.** After
+  importing a survey that links each record to a participant — which can mean
+  tens of thousands of participants — opening the dataset could make the window
+  stop responding and then go blank. Every participant picker on the page was
+  building its full list of participants, even while closed: in our test, opening
+  a 20,000-participant dataset took 8 seconds and 1.8 GB of memory, and at
+  122,000 the window ran out of memory. Pickers now build their list only when
+  you open one, and show the first 200 participants with a note saying how many
+  there are; typing a name or ID finds the rest, with an exact match listed
+  first. The same dataset now opens in under a second. The "Who is this document
+  about?" picker works the same way, always lists the document's current
+  subject, and marks it for screen readers. (#1045, #1072)
+- 🔴 **A five-point agree/disagree question imports as five points again.** When
+  a file is imported, a column of answers like "Agree" and "Strongly agree" is
+  matched to a known scale, and the scale decides each answer's number. Since
+  version 1.0, a column holding all five standard answers was matched to the
+  four-point scale instead. "Neither agree nor disagree" got no number, so
+  averages and every other statistic left those answers out. "Agree" and
+  "Strongly agree" scored 3 and 4 instead of 4 and 5, and the import screen
+  called the midpoint a likely typo. Eight other scales did the same, among
+  them five-point frequency ("Always" got no number), seven-point agreement and
+  two of the five-point quality scales. A column where one answer was never
+  chosen could lose another the same way. A column is now matched to a scale that numbers every answer
+  whenever one exists. "Neutral" is recognised as the midpoint of three-, five-
+  and seven-point agreement scales, and "Neither agree nor disagree" as the
+  midpoint of a three-point one. A column whose answers were all numbered
+  before is matched exactly as before. When some answers still have no number,
+  the import screen now says so plainly, without guessing that they are typos.
+  **Datasets you have already imported keep their numbers.** An affected column
+  shows its unnumbered answers as missing on the Data Quality tab. To number
+  them, open the column in the dataset's Variables view, open its recode rule
+  (for example "4-point scale"), add the answer, set each answer's number and
+  save; each answer keeps its text. Importing the file again also numbers it
+  correctly. (#1102)
+- 🔴 **Changing a number in *Value labels* can no longer change people's
+  answers.** A variable's *Value labels* list each answer beside its number. On
+  a column imported as words ("Agree", "Disagree"), changing the numbers there —
+  say from 1–5 to 0–4 — gave every answer the label of the number it held, so
+  each respondent's answer moved to another category, with no warning and
+  nothing afterwards that looked wrong. Renumbering to numbers no answer held
+  left the labels and the stored numbers disagreeing instead. Either change is
+  now refused before anything is saved: the message under the list says which
+  answers it would have changed, and points to the variable's recode rule, which
+  renumbers answers and keeps each one as written. Rewording a label, labelling
+  a column of plain numbers and adding an answer nobody chose work as before.
+  **If you renumbered a text column in *Value labels* before this version,
+  check its answers against your file** — the change left nothing in the data
+  to show it happened. (#1104)
+- **Pressing *Apply* under *Value labels & missing values* keeps keyboard focus
+  on the button** while the change is saved, instead of moving it to the top of
+  the page. (#965)
+- **The Participants page opens quickly on a large project.** It showed every
+  participant at once — at 20,000 it took about 26 seconds to open, and at survey
+  scale it could stop the window altogether. It now shows 200 at a time with a
+  count of how many there are and a *Show more* button, and has a search box for
+  name, ID or role. Selecting all selects the participants shown, and *Delete
+  selected* deletes only the selected participants on screen, naming them before
+  you confirm. (#1052, #1072)
+- **If the window does stop working, the desktop app now says so and offers a way
+  back.** A window whose page had crashed stayed blank and white until the app
+  was closed, with nothing to say whether any work was lost. It now shows a
+  message that your saved work is safe, with buttons to reload the page, open the
+  project list, or quit — and if the same page fails again straight away, it
+  recommends the project list instead of reloading into the same failure. A
+  window that stops responding offers to wait or to reload. (#1046)
+- **Coding while the participant table updates no longer fails.** Creating or
+  refreshing the participant table held the project's database for its whole
+  run, so a coding saved meanwhile could fail with an error after 5 seconds —
+  on every refresh once the table had a variable you added, and throughout the
+  first creation. The table now does its calculation first and writes the result
+  in short steps. On a project with 122,000 participants, creating the table
+  went from nearly 3 minutes to about 30 seconds, and every coding saved during
+  it went through. A rating given while the table refreshes now leaves it marked
+  as possibly out of date, where before the refresh could clear that mark over
+  the new rating. The page no longer gives up after 30 seconds while
+  a large table is still being built — it said the table could not be created
+  while the app went on to finish it — and the button says it is building.
+  Pressing *Refresh scores* while a refresh is running no longer starts a second
+  one, which could fail. (#1033, #1073)
+- **Large projects stay responsive while the participant list loads.** Loading a
+  project's participants stopped the app from answering anything else for as
+  long as it took — about 15 seconds with 122,000 participants, which is why the
+  Datasets list could look out of date right after a large linked import. It now
+  loads in about 4 to 6 seconds without holding up other screens, and the dataset
+  import no longer downloads the whole list just to check whether the project
+  already had participants. (#1047)
+- **Open-text answers that only begin with a phrase like "Not enough" or
+  "Unable to" count as answers again.** Any free-text answer starting with one
+  of the built-in non-answer phrases was treated as missing — so "Not enough
+  housing" or "Unable to trust government" left the counts, the Data Quality
+  tab and both the Excel and R exports. In one British Election Study file, 142
+  of the 172 answers treated this way were real answers. On a free-text column,
+  an answer is now a non-answer only when the whole answer is a stock phrase
+  such as "N/A" or "Don't know"; other column types are unchanged. This applies
+  to projects you have already imported. "Don’t know" typed with a curly
+  apostrophe, as phones and word processors write it, is now recognised on
+  every column. A free-text column made mostly of such answers is now
+  recognised as free text when a file is imported: it used to be suggested as a
+  list of categories, which would have treated those answers as missing
+  again. (#1048, #1079)
+- **A row with more values than the file has column headings is pointed out.**
+  An answer containing a comma that was not wrapped in quotes pushes every later
+  value in that row into the next column and drops the last one, and the import
+  used to do this without a word. Both the dataset import and the append now
+  list such rows by line and record before you import, and afterwards link to
+  each one in the data grid so you can correct it. (#985)
+- **Blank lines in a file are counted the same way before and after import.**
+  The preview skipped blank lines while the import added an empty record for
+  each, so a dataset could hold more records than the preview promised. A blank
+  line is no longer a record — except between answers in a one-column file,
+  where it is how a spreadsheet writes an empty answer. (#983)
+- **Links to a record in the data grid now always highlight it.** Following a
+  search result to a record on the page already showing moved nothing and marked
+  nothing. (#1055)
+- **A code set now keeps one value per passage however you apply it.** Choosing
+  a value in the set's own control replaced the previous one, but applying a
+  value any other way — a keyboard shortcut, a click in the code list, the
+  right-click menu, *Add code*, or several passages at once — added it beside the
+  old one. That passage then dropped out of the set's agreement figure without
+  anything saying so. Every way of applying a value now replaces the old one,
+  and undo puts the old value back with its rating. A code grouped with one of
+  the set's values now counts as that value throughout: the set's control shows
+  it chosen, choosing another value clears it, and the set's panel says it is
+  there. Applying two values of one set together is refused with a message
+  naming the set. (#1028)
+- **Undo no longer changes another coder's work after you switch coder.** Steps
+  made before a switch could be undone as the new coder, removing that coder's
+  coding or doing nothing at all. Switching coder now clears the coding pages'
+  undo history and says so. (#1042)
+- **Undoing an apply on several passages leaves alone the passages that already
+  had the code.** It used to remove the code from all of them, including coding
+  made before. (#1057)
+- **The code-set agreement table shows "% agreement" as a percentage** ("85%",
+  not "0.85"), like the tables beside it. A value renamed or switched off
+  anywhere in the app now updates in the set's control straight away, and
+  pressing the value that is already chosen no longer clears it. (#1038)
+- **Applying a code that has a rating scale from the right-click menu now opens
+  its rating bar**, as a shortcut or a click already did. (#1058)
+- 🔴 **Editing a code's rating scale no longer changes your coding.** With a
+  passage selected, a click inside the rating-scale dialog also counted as a
+  click on the code itself: one removed the code from the selected passage,
+  and its rating with it, and the next put it back unrated, on every passage
+  grouped with that one. A click on the empty edge of a code's Options menu
+  removed the code the same way. Clicks inside these menus and dialogs now act
+  only on what they are on. This is also why a new step seemed to arrive one
+  save late: putting the code back reopened the rating bar with the scale from
+  before the save. **If you have edited a rating scale while a passage was
+  selected, check that passage's codes and ratings, and those of passages
+  grouped with it.** (#1111)
+- **A rating bar that is already open shows a scale change straight away** —
+  a new step, a new name, or a removed scale (the bar closes). A rating given
+  before the step changed that now falls between the scale's points is named
+  ("rated 3, not a point on this scale") instead of looking unrated. (#1112)
+- **Every anchor label shows under the rating bar**, each beneath its own point.
+  Only the two ends were shown, so a label for a middle point was saved and
+  never seen. A scale too fine for buttons lists its anchors under the number
+  box as well. The rating-scale dialog now says when an anchor falls between
+  the scale's points, and names an anchor row that will not be saved because it
+  lacks a number or a label. (#1113)
+- **A step that does not divide the range no longer offers a point past the
+  maximum.** A 0–10 scale in steps of 4 offered 12, which could not be saved; it
+  now offers 0, 4 and 8, and the dialog says that 10 cannot be chosen. (#1114)
+- **Codings imported from a model no longer count as coded.** How much of a
+  source is coded is meant to measure people's coding, and the project overview
+  already worked that way — but the Text Coding progress bar and totals, the
+  "N coded" figures in the column picker and on the analysis page, the coding
+  bar on the conversation, document and observation pages, and *Jump to
+  uncoded* all counted a model's labels too. A model that labelled a whole
+  column made it read as fully coded. So did the "N coded" figure for a
+  document on the analysis page's Content tab, the Timeline chart for
+  observations, and the orange mark on conversation turns that no one has coded
+  yet. They now count people only; the model's codes still show on each
+  passage, attributed to it. The Timeline on the *Machine* layer now shows the
+  model's marks alone, where it showed people's and the model's together. The
+  "N codes" figure on a conversation's card counts the codes people used. With
+  blind coding on, a turn only a colleague has coded now shows the orange mark
+  too, so its absence no longer tells you someone coded it. (#1029, #1077)
+- **The comparison between people and an imported model now has its own tab,
+  *Model comparison*, and a researcher working alone can reach it.** It sat on
+  the Reliability tab, which appears only once a project has two people coding —
+  so on a one-person project with an imported model, the comparison was never
+  shown. The tab appears when a model has coded the project. With blind coding
+  on, it compares only your own coding with each model and says so. The
+  *Machine* layer choice on the analysis page now appears only when a model has
+  coded the project you are in, not whenever one exists anywhere on this
+  computer. (#1030)
+- **Bringing in a project file no longer puts a model's codings under a person
+  with the same name, or merges two runs of a model.** Coders in a file were
+  matched to coders here by name alone, so a model called "Model-1" landed on a
+  person called "Model-1" — whose codings then counted in consensus and
+  agreement — and two configurations of one model became one coder. A model now
+  matches only a model run with the same configuration, and a person only a
+  person; otherwise it is added under a numbered name that no other coder in the
+  file uses, and the merge screen shows that name and says why. The merge
+  screen also no longer says a new model coder turns on consensus and
+  agreement, and it offers only coders of the right kind to map onto. (#1034,
+  #1071)
+- **"How it was reached" for a model can be set back to *Not recorded*.** Once a
+  way of reaching the model had been picked there was no way back to "unknown",
+  and the configuration cannot be changed after the model's codings arrive — so
+  a mis-click became a permanent record. *Not recorded* is now an option. If the
+  model name is left blank, the form now says that how it was reached, the
+  settings and the prompt will not be recorded, instead of dropping them
+  silently. (#1006)
+- **Importing codings treats grouped passages as one unit, as coding does.**
+  A code or rating imported for one passage of a group reached only that
+  passage, so the group read as half coded. It now reaches every passage in the
+  group, and the check says how many extra passages that adds. A file that gives
+  one coder two different values of a code set, or two different ratings of a
+  code, for the same passage or group now has neither row imported, with a
+  sentence naming both lines — before, the later row won. A code grouped with one
+  of a set's values now replaces the coder's other value on import, as it does
+  everywhere else. (#1031)
+- **The Coded Segments export can be imported back as it is.** Its ratings were
+  dropped (the export calls the column "Rating"), a code whose name starts with
+  "@" or "=" was not recognised, and codes such as "Unclear" were refused. All
+  three now come through, so exporting a project's coding and importing it as
+  another coder reproduces it exactly. (#1032)
+- **Importing codings with your own id column works as intended.** The "ids in
+  your file" list offered only open-text columns, from every dataset, so a
+  `post_id` column could not be chosen. It now lists the columns of the dataset
+  being coded that can hold an id, identifier columns first. A column from
+  another dataset is refused, and so is coding a column that is not open text,
+  whose codings no page would show. (#1032, #1061)
+- **The check before importing codings counts ids and code names separately**,
+  as "found 3 of 500", so a file built with the wrong ids no longer also reports
+  that none of its codes matched. It now warns separately when none of the code
+  names is in the project. (#1004)
+- **A name in the file that matches an archived coder is shown as archived.**
+  The coder list left archived coders out, so such a match showed as blank, and
+  the codings went to a coder whose work is hidden and left out of agreement
+  figures. The coder is now listed and labelled, with an option — on by
+  default — to bring them back. Bringing a coder back (here, in Settings or when
+  merging a project) now marks participant scores as needing a refresh, as
+  archiving one already did. (#1031, #1063)
+- **A new coder created during a coding import must be marked as a person or a
+  model.** It defaulted to a person, and this cannot be changed afterwards — a
+  model's labels imported with one missed click counted as a colleague's in
+  agreement figures. A name whose rows all fail the check is now left out by
+  default rather than created as an empty coder. When two names in the file are
+  mapped to the same coder, the page says so, and a passage they disagree about
+  imports neither. (#1038, #1064, #1039)
+- **Model settings that contain commas are recorded whole.** A setting such as
+  `stop=["END", "###"]` was cut at its first comma. Values in brackets or quotes
+  now keep their commas. (#1038)
+- **A coding file with thousands of problems no longer freezes the page.** Every
+  row that could not be imported was listed at once — a 200,000-row file with
+  the wrong ids took 33 seconds and 1.8 GB of memory to show. The page now shows
+  the first 200 with a button to download the full list as a spreadsheet, and
+  opens in under 4 seconds. The summary of problems is written in words. (#1065)
+- **Importing a large file of codings that uses code sets is much faster.** At
+  the 200,000-row limit, checking such a file took about 50 seconds, during
+  which the app answered nothing else; the whole import now takes about 9
+  seconds. (#1062)
+- **Pages opened after a coding import show the imported codings straight
+  away**, instead of up to a minute later. Renaming a model coder or recording
+  its configuration now updates the Model comparison tab straight away too.
+  (#1038)
+- **Screen readers are told five more things the screen already showed.** A
+  machine coder whose configuration can no longer change says so when its
+  settings open, and its Edit button no longer promises a configuration change;
+  the participant picker marks which participant a record is linked to (it was
+  shown by colour alone); the Participants heading reads its count as
+  "Participants (250)" rather than "Participants(250)"; the Participants page's
+  *All* and *No linked sources* filters say which one is on (also shown by
+  colour alone); and the tooltip on the merge's coder step counts people, not
+  coders, toward agreement. (#1067, #1109)
+- 🔴 **Correlations, comparisons and the Excel and R exports agree with the rest
+  of the app about which answers are non-answers.** This release recognises
+  more ways of writing a non-answer — "Don’t know" with a curly apostrophe,
+  extra spaces, a trailing full stop — and every screen that reads answers as
+  text followed at once. But the numbers stored when a survey was imported still
+  counted those answers, so one column could give two different averages on two
+  screens. The first time the app starts after this update, it clears the stored
+  number for every such answer in a column that has no missing values of its
+  own declared, re-scores any reversed scale that included one, and marks the
+  results that used the column as needing a recompute. A project imported from
+  a file saved by an earlier version is checked the same way as it arrives.
+  (#1069)
+- 🔴 **A saved chart or canvas in an imported or duplicated project shows that
+  project's data.** A chart saved with a coder filter kept the original
+  install's coder number, so after a colleague's project was imported a "Bob
+  only" chart could show someone else's coding. Charts also kept the original
+  project's numbers for observations, a comparison's grouping variables and the
+  Content tab's chosen source, and a quantitative chart's custom order was read
+  as codes. Worst, every chart placed on a canvas carries its own copy of its
+  settings, and none of those were updated at all — a duplicated project's
+  canvas asked for the original project's codes and sources. All of them now
+  point at the imported project's own records. The correction is made as a
+  project is imported or duplicated, so a project imported or duplicated before
+  this version keeps the old references. (#1068)
+- **A chart whose comparison or cross-tab variable was deleted now says so.**
+  The warning that a saved chart refers to something deleted looked for its
+  grouping variable under the wrong names, so it never fired for comparisons
+  or cross-tabs. (#1086)
+- **Undo on grouped turns gives each turn back exactly what it had.** Coding one
+  turn of a group codes the whole group, but the turns in a group do not always
+  hold the same codes. Undoing an apply could remove a code another turn in the
+  group had before; undoing a removal could add the code to turns that never
+  held it; and undoing a choice in a code set gave every turn the selected
+  turn's old value. Each turn now gets back its own codes. Known limit: turns
+  that were rated differently before they were grouped all get back the same
+  rating, because a group is rated as one unit (#1087). (#1070)
+- **With blind coding on, the "N coders" badge no longer names your
+  colleagues.** Hovering the badge beside the blind-coding switch listed every
+  coder on the source — which is exactly what blind coding hides — and screen
+  readers read the list out. It now gives the number and says the names are
+  hidden. (#1078)
+- **Changing a variable's type now works out its numbers again.** A variable's
+  numbers are worked out from its answers when they are stored, using the type
+  it has at the time — and changing the type afterwards left them as they were.
+  A column of numbers entered or imported as categories and then changed to
+  *Numeric* kept no numbers at all, so averages, correlations, comparisons and
+  both exports treated it as empty while the grid showed the values. Changing
+  the type, or a variable's scale labels, now works out every value again and
+  marks the charts and formulas that use it as needing a recompute. A variable
+  whose type was changed before this version keeps its old numbers until its
+  type is changed again. (#1079)
+- **A chart saved on the *Machine* layer shows the model's coding wherever it
+  appears.** On a canvas it was drawn from people's coding instead, and opening
+  it again on the analysis page switched it back to the *Coders* layer, with
+  nothing on screen to say either had happened. (#1098)
+
+### Security
+
+- **Updated the desktop app's built-in browser engine** (Electron 42.8.1 →
+  42.11.8). The desktop app had fallen fifteen releases behind its Electron
+  line. The releases in between fix four published Electron security issues and
+  bring thirteen rounds of security fixes from Chromium, the engine inside
+  Electron. Of the four Electron issues, only one could apply to how this app
+  is built, and exploiting it would first need someone to run their own code
+  inside the app window. Electron's notes for these releases also fix two
+  things this app met. On Windows, pages were slower to draw and start-up was
+  slower in every release from 1.3.1 on, which all shipped the Electron version
+  that caused it. On Linux, the *Save recovery key* dialog opened in an
+  unusable folder. (#1093)
+
 ## [1.5.4] - 2026-09-26
 
 ### Added
@@ -1855,7 +2208,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.4...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.5...HEAD
+[1.5.5]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.4...v1.5.5
 [1.5.4]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.3...v1.5.4
 [1.5.3]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.2...v1.5.3
 [1.5.2]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.1...v1.5.2

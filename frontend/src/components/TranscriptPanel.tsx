@@ -208,6 +208,14 @@ interface TranscriptPanelProps {
   /** The lens the chips apply. #964: an allow-list while blind mode cannot yet
    *  name the colleagues — the filter popover only ever edits a hide SET. */
   coderFilterHidden?: CoderLens
+  /**
+   * #1077 (c) — the participant turns still waiting for a person, as the
+   * workbench's gauge and `j` count them. Each row's orange "uncoded" ring reads
+   * membership here and derives NOTHING itself. REQUIRED: a row that decided on
+   * its own (`applied_codes.length === 0`) counted a model's labels as coding and,
+   * while blind, revealed that a colleague had coded a turn by the ring's absence.
+   */
+  uncodedSegmentIds: ReadonlySet<number>
   onCoderFilterChange?: (next: Set<number>) => void
   /** Group A (#457): coder ids with codings on THIS conversation + archived-who-coded
    *  extras — drive the picklist "active here" markers (undefined = no markers). */
@@ -282,6 +290,7 @@ export default function TranscriptPanel({
   coders,
   activeCoderId,
   coderFilterHidden,
+  uncodedSegmentIds,
   onCoderFilterChange,
   coderActiveIds,
   coderExtra,
@@ -621,6 +630,7 @@ export default function TranscriptPanel({
               <SegmentRow
                 segment={segment}
                 isSelected={isSelected}
+                isUncoded={uncodedSegmentIds.has(segment.id)}
                 onClick={(e) => handleSegmentClick(segment, e)}
                 conversationId={conversationId}
                 codes={codes}
@@ -713,7 +723,7 @@ export default function TranscriptPanel({
         </div>
       )
     },
-    [segments, selectedSegments, handleSegmentClick, conversationId, codes, areSelectedAdjacent, onMergeSegments, onUnmergeSegment, onUnsplitSegment, onNoteClick, editingSegmentId, editField, onStartEdit, onCancelEdit, onSaveEdit, onToggleQuote, onSaveExcerpt, onDeleteExcerpt, onAddNoteToExcerpt, speakers, textFilter, canGroupSelected, noneSelectedGrouped, onGroupSegments, onUngroupSegments, groupMembersMap, onContextCodeApply, onContextCreateCode, onContextCreateNote, splitSelection, handleSplit, onSplitSegment, showTimestamps, showNotes, showCodes, projectId, allCodes, codesStatus, codeMap, onCodeChange, onFocusCode, onChipRemove, onChipApply, onRateCode, ratableCodesFor, chipCoderMap, chipHidden, onSelectionChange, getTextSelectionForSegment, activeCoderId]
+    [segments, selectedSegments, handleSegmentClick, conversationId, codes, areSelectedAdjacent, onMergeSegments, onUnmergeSegment, onUnsplitSegment, onNoteClick, editingSegmentId, editField, onStartEdit, onCancelEdit, onSaveEdit, onToggleQuote, onSaveExcerpt, onDeleteExcerpt, onAddNoteToExcerpt, speakers, textFilter, canGroupSelected, noneSelectedGrouped, onGroupSegments, onUngroupSegments, groupMembersMap, onContextCodeApply, onContextCreateCode, onContextCreateNote, splitSelection, handleSplit, onSplitSegment, showTimestamps, showNotes, showCodes, projectId, allCodes, codesStatus, codeMap, onCodeChange, onFocusCode, onChipRemove, onChipApply, onRateCode, ratableCodesFor, chipCoderMap, chipHidden, onSelectionChange, getTextSelectionForSegment, activeCoderId, uncodedSegmentIds]
   )
 
   // Handle scrubber position change (for live scroll during drag)

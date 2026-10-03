@@ -48,7 +48,7 @@ from ..services.coding_counts import (
     coded_segment_counts,
     timeline_coverage_by_observation,
 )
-from ..services.coding_layers import CONSENSUS_ORIGIN, non_consensus_filter
+from ..services.coding_layers import CONSENSUS_ORIGIN, layer_scope_filter, non_consensus_filter
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
 from ..services.observation_segmentation import (
@@ -135,7 +135,8 @@ def observation_to_response(
         ).filter(
             Segment.observation_id == observation.id,
             *visible_segment_filter(),
-            non_consensus_filter(),
+            # #1029: people's codes, as the coded count above (`coding_counts`).
+            layer_scope_filter(),
         ).scalar() or 0
 
     if not coverage_precomputed:
@@ -235,7 +236,7 @@ async def list_observations(
         .filter(
             Segment.observation_id.in_(ids),
             *visible_segment_filter(),
-            non_consensus_filter(),
+            layer_scope_filter(),  # #1029: people's codes, as `coded_counts` above
         )
         .group_by(Segment.observation_id)
         .all()

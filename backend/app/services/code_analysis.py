@@ -22,7 +22,7 @@ from ..models.speaker import Speaker
 from ..models.participant import Participant
 from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, ColumnType
 from ..models.excerpt import Excerpt, segment_has_any_quote_filter
-from .coding_layers import LAYER_CONSENSUS, layer_scope_filter, non_consensus_filter
+from .coding_layers import LAYER_CONSENSUS, layer_scope_filter
 from .grouping import order_value_labels
 from .missing_values import column_missing_rules, is_missing
 from .text_analysis import substantive_text_clause, treat_as_empty_for_project
@@ -3874,6 +3874,9 @@ def get_text_columns_with_coding(
     # rows), excluding the consensus layer (J2-B) AND universal-only values
     # (#492 / invariant J-A — a lone "Unclear" must not make a value "coded";
     # this badge previously disagreed with the coding-progress gauge).
+    # #1029: and a MACHINE coder's labels — the human arm of `layer_scope_filter`,
+    # the analysis page's own default layer. `non_consensus_filter()` kept the
+    # model, so the Sources list read "480 coded" beside a coding gauge at 0.
     coded_sub = (
         db.query(
             DatasetValue.column_id,
@@ -3881,7 +3884,7 @@ def get_text_columns_with_coding(
         )
         .join(CodeApplication, CodeApplication.dataset_value_id == DatasetValue.id)
         .join(Code, Code.id == CodeApplication.code_id)
-        .filter(Code.is_universal == False, non_consensus_filter())
+        .filter(Code.is_universal == False, layer_scope_filter())
         .group_by(DatasetValue.column_id)
         .subquery()
     )

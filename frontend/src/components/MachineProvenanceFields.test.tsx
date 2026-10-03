@@ -84,3 +84,48 @@ describe('the provenance form has ONE home', () => {
     }
   })
 })
+
+// #1006 — *Not recorded* is a CHOICE. It was the placeholder alone, so once a kind
+// was picked nothing could put it back, and the configuration freezes once the
+// coder has coded: a mis-click became a permanent false claim.
+describe('#1006 — "How it was reached" can go back to Not recorded', () => {
+  it('an unset access SHOWS "Not recorded" as the chosen value', () => {
+    render(<Harness />)
+    expect(screen.getByRole('combobox', { name: 'How it was reached' })).toHaveTextContent('Not recorded')
+  })
+
+  it('POSITIVE CONTROL: a set access shows its label, not "Not recorded"', () => {
+    render(<Harness initial={{ ...EMPTY, model: 'gpt-4o', access: 'api' }} />)
+    const picker = screen.getByRole('combobox', { name: 'How it was reached' })
+    expect(picker).toHaveTextContent('API')
+    expect(picker).not.toHaveTextContent('Not recorded')
+  })
+
+  it('"Not recorded" is the FIRST option, beside the four kinds (source — jsdom cannot open a Radix select)', () => {
+    const file = join(__dirname, 'MachineProvenanceFields.tsx')
+    const src = stripComments(readFileSync(file, 'utf8'), file)
+    const items = [...src.matchAll(/<SelectItem\b[^>]*value=\{([^}]+)\}/g)].map(m => m[1])
+    expect(items[0]).toBe('ACCESS_NOT_RECORDED')
+    expect(items).toContain('kind')                    // the four kinds, mapped
+    expect(src).toMatch(/onValueChange=\{\(v\) => onChange\(\{ access: accessFromChoice\(v\) \}\)\}/)
+  })
+})
+
+// #1038 h — a blank model sends NO configuration; the form says what that drops.
+describe('a blank model says what will not be recorded', () => {
+  it('names each filled field, in the model field’s description', () => {
+    render(<Harness initial={{ ...EMPTY, access: 'api', parameters: 'temperature=0' }} />)
+    const model = screen.getByLabelText('Model')
+    expect(screen.getByText('Without a model, how it was reached and the settings will not be recorded.'))
+      .toBeInTheDocument()
+    expect(model).toHaveAccessibleDescription(/Without a model, how it was reached and the settings/)
+  })
+
+  it('says nothing once a model is named, or when nothing else is filled', () => {
+    render(<Harness initial={{ ...EMPTY, model: 'gpt-4o', access: 'api' }} />)
+    expect(screen.queryByText(/Without a model/)).not.toBeInTheDocument()
+    cleanup()
+    render(<Harness />)
+    expect(screen.queryByText(/Without a model/)).not.toBeInTheDocument()
+  })
+})

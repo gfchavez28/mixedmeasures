@@ -385,3 +385,62 @@ describe('MagnitudeStrip — the sweep starts with no cursor (#35 variant B)', (
     expect(onCommit).toHaveBeenCalledWith(0)
   })
 })
+
+/**
+ * #1113 — the anchor line printed the two END labels only. BIPOLAR above has
+ * always declared a middle anchor ("neither"), and nothing asserted it was on
+ * screen: it reached the tick's accessible name and no sighted coder.
+ */
+describe('MagnitudeStrip — every anchor is on screen (#1113)', () => {
+  const line = () => screen.getByTestId('magnitude-anchors')
+
+  it('shows the middle anchor beside the two ends, in order, each with its full text as a title', () => {
+    setup(BIPOLAR)
+    const labels = [...line().querySelectorAll('span')]
+    expect(labels.map(s => s.textContent)).toEqual([
+      '−1 · strongly negative', '0 · neither', '1 · strongly positive',
+    ])
+    for (const s of labels) expect(s).toHaveAttribute('title', s.textContent)
+    // The middle label sits under the middle of five equal ticks.
+    const mid = labels[1] as HTMLElement
+    expect(parseFloat(mid.style.left) + parseFloat(mid.style.width) / 2).toBeCloseTo(50)
+  })
+
+  it('the number-input arm (a scale too dense to tick) shows its anchors too', () => {
+    setup({ min: 0, max: 100, step: 1, anchors: [{ value: 0, label: 'none' }, { value: 50, label: 'half' }, { value: 100, label: 'all' }] })
+    expect(screen.getByRole('spinbutton')).toBeInTheDocument()
+    expect([...line().querySelectorAll('span')].map(s => s.textContent)).toEqual(['0 · none', '50 · half', '100 · all'])
+  })
+
+  it('a scale with no anchors renders no anchor line at all', () => {
+    setup(ZERO_TEN)
+    expect(screen.queryByTestId('magnitude-anchors')).toBeNull()
+  })
+})
+
+/**
+ * #1112's other half: a rating given before the step changed can fall BETWEEN
+ * the points (3 on a step-2 scale). No tick is selected then, and the strip
+ * read as unrated — the header now says what is stored.
+ */
+describe('MagnitudeStrip — a rating between the points is named, not hidden (#1112)', () => {
+  it('says the stored rating when it is not one of the ticks', () => {
+    setup({ min: 0, max: 10, step: 2, anchors: [] }, 3)
+    expect(screen.getByText(/rated 3, not a point on this scale/)).toBeInTheDocument()
+    for (const tick of screen.getAllByRole('radio')) expect(tick).toHaveAttribute('aria-checked', 'false')
+  })
+
+  it('says nothing extra for a rating ON a tick, or for an unrated application', () => {
+    setup({ min: 0, max: 10, step: 2, anchors: [] }, 4)
+    expect(screen.queryByText(/not a point on this scale/)).toBeNull()
+    cleanup()
+    setup({ min: 0, max: 10, step: 2, anchors: [] }, null)
+    expect(screen.queryByText(/not a point on this scale/)).toBeNull()
+    expect(screen.getByText(/how much\?/)).toBeInTheDocument()
+  })
+
+  it('a rating of ZERO between the points is still a rating (the falsy-zero rule)', () => {
+    setup({ min: -1, max: 1, step: 2, anchors: [] }, 0)
+    expect(screen.getByText(/rated 0, not a point on this scale/)).toBeInTheDocument()
+  })
+})

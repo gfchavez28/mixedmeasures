@@ -7,6 +7,7 @@ import { useListLoad } from '@/hooks/useListLoad'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { codeAnalysisApi, retryUnanswered, type OpenCutDisclosure } from '@/lib/api'
 import { ciUnavailableNote } from '@/lib/ci-label'
+import { formatPercent } from '@/lib/stat-format'
 
 /**
  * Reliability for an observation whose clips are still OPEN (slab 6b-A).
@@ -34,10 +35,6 @@ interface Props {
   projectId: number
   observationId: number
   observationName: string
-}
-
-function pct(v: number | null | undefined): string {
-  return v == null ? '—' : `${Math.round(v * 100)}%`
 }
 
 function coef(v: number | null | undefined): string {
@@ -172,11 +169,11 @@ export default function OpenCutReliability({ projectId, observationId, observati
               {binned.data.per_code.map(row => (
                 <tr key={row.code_id} className="border-b last:border-b-0">
                   <th scope="row" className="px-3 py-2 font-normal text-left">{row.code_name}</th>
-                  <td className="px-3 py-2 text-right tabular-nums">{pct(row.percent_agreement)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatPercent(row.percent_agreement)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">
                     {coef(row.cohens_kappa ?? row.krippendorff_alpha)}
                   </td>
-                  <td className="px-3 py-2 text-right tabular-nums">{pct(row.prevalence)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatPercent(row.prevalence)}</td>
                   <td className="px-3 py-2 text-mm-text-muted">{row.interpretation ?? '—'}</td>
                 </tr>
               ))}
@@ -214,7 +211,7 @@ export default function OpenCutReliability({ projectId, observationId, observati
                     <th scope="row" className="px-3 py-2 font-normal text-left">{row.code_name}</th>
                     <td className="px-3 py-2 text-right tabular-nums">{row.n_units}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{coef(row.alpha)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{pct(row.coverage_fraction)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatPercent(row.coverage_fraction)}</td>
                     <td className="px-3 py-2 text-mm-text-muted">{row.interpretation ?? '—'}</td>
                   </tr>
                 ))}

@@ -259,8 +259,8 @@ class TestABackupThisBuildCannotRead:
         )
 
     def test_same_version_label_but_a_revision_this_build_lacks(self, install, monkeypatch):
-        """A newer DEV build still says 1.5.3 until the cut bumps it — "newer than
-        this version (1.5.3)" would be nonsense beside "made by 1.5.3"."""
+        """A newer DEV build still carries the released version label until the cut
+        bumps it — "newer than this version (X)" would be nonsense beside "made by X"."""
         archive = _newer_backup(install, app_version=APP_VERSION, revision="ffffffffffff",
                                 monkeypatch=monkeypatch)
         with pytest.raises(ValueError) as exc:

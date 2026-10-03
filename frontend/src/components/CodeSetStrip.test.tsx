@@ -38,6 +38,8 @@ const api = vi.hoisted(() => ({
   selectOnText: vi.fn(),
   rateSegment: vi.fn(),
   rateText: vi.fn(),
+  applySegment: vi.fn(),
+  applyText: vi.fn(),
   toastError: vi.fn(),
   toastWarning: vi.fn(),
 }))
@@ -51,8 +53,14 @@ vi.mock('@/lib/api', async (importOriginal) => {
       selectOnSegment: (...a: unknown[]) => api.selectOnSegment(...a),
       selectOnText: (...a: unknown[]) => api.selectOnText(...a),
     },
-    codingApi: { setMagnitude: (...a: unknown[]) => api.rateSegment(...a) },
-    textCodingApi: { setMagnitude: (...a: unknown[]) => api.rateText(...a) },
+    codingApi: {
+      setMagnitude: (...a: unknown[]) => api.rateSegment(...a),
+      applyCode: (...a: unknown[]) => api.applySegment(...a),
+    },
+    textCodingApi: {
+      setMagnitude: (...a: unknown[]) => api.rateText(...a),
+      applyCode: (...a: unknown[]) => api.applyText(...a),
+    },
   }
 })
 
@@ -78,8 +86,12 @@ const STANCE: CodeSet = {
   id: 7, project_id: 1, label: 'Stance', description: null, exhaustive: false,
   members: [member(11, 'Positive'), member(23, 'Negative'), member(47, 'Neutral')],
   set_basis: 'inclusive_with_none', composition_warnings: [],
+  claimants: [11, 23, 47].map((id) => ({ code_id: id, value_id: id })),
   created_at: '', updated_at: '',
 }
+
+/** The host's live codes list — every value active, under its set name. */
+const LIVE = STANCE.members.map(({ id, name }) => ({ id, name, is_active: true, is_universal: false }))
 
 const held = (code_id: number, magnitude: number | null = null): SelectionDetail =>
   ({ code_id, user_id: SELF, magnitude })
@@ -106,6 +118,7 @@ function Host(props: {
   details: Details
   onSettled?: (saved: boolean) => void
   withHistory: boolean
+  codes?: typeof LIVE
 }) {
   const history = useHistory()
   const [target, setTarget] = useState(props.target)
@@ -125,6 +138,7 @@ function Host(props: {
       target={target}
       appliedCodeDetails={target ? details[keyOf(target)] : undefined}
       activeCoderId={SELF}
+      codes={props.codes ?? LIVE}
       history={props.withHistory ? history : null}
       onSettled={onSettled}
     />
@@ -136,6 +150,7 @@ async function mount(opts: {
   details?: Details
   onSettled?: (saved: boolean) => void
   withHistory?: boolean
+  codes?: typeof LIVE
 }) {
   // The app's own default (`main.tsx`), so a mutation that forgets to declare
   // `onError` shows up here as a second toast.
@@ -152,6 +167,7 @@ async function mount(opts: {
         details={opts.details ?? {}}
         onSettled={opts.onSettled}
         withHistory={opts.withHistory ?? true}
+        codes={opts.codes}
       />
     </QueryClientProvider>,
   )
@@ -177,6 +193,8 @@ beforeEach(() => {
   api.selectOnText.mockResolvedValue({})
   api.rateSegment.mockResolvedValue({})
   api.rateText.mockResolvedValue({})
+  api.applySegment.mockResolvedValue({})
+  api.applyText.mockResolvedValue({})
 })
 
 describe('the entry acts on the passage the choice was MADE on (#1023)', () => {
@@ -415,5 +433,68 @@ describe('the hosts pass their STACK, not a copy of the builder', () => {
 
   it('the scan can tell a null stack from the real one (falsifier)', () => {
     expect(/\bhistory=\{history\}/.test('<CodeSetStrip history={null} />')).toBe(false)
+  })
+})
+
+describe('a RADIO has no de-select gesture (#1038 e)', () => {
+  it('pressing the checked value writes nothing and records nothing', async () => {
+    await mount({ target: seg(1), details: { s1: [held(11)] } })
+    await press('Positive')
+    expect(api.selectOnSegment).not.toHaveBeenCalled()
+    expect(ui.history.canUndo).toBe(false)
+  })
+
+  it('in a contradiction, pressing one of the two values CHOOSES it — never clears both', async () => {
+    await mount({ target: seg(1), details: { s1: [held(11), held(23)] } })
+    await press('Positive')
+    expect(api.selectOnSegment).toHaveBeenLastCalledWith(1, 7, 11)
+    expect(api.selectOnSegment).not.toHaveBeenCalledWith(1, 7, null)
+  })
+
+  it('clearing is the named control’s act', async () => {
+    await mount({ target: seg(1), details: { s1: [held(47)] } })
+    fireEvent.click(screen.getByRole('button', { name: 'None of these for Stance' }))
+    await flush()
+    expect(api.selectOnSegment).toHaveBeenLastCalledWith(1, 7, null)
+  })
+})
+
+describe('a SYNONYM grouped into a value (#1028 b)', () => {
+  const WITH_SYNONYM: CodeSet = {
+    ...STANCE, claimants: [...STANCE.claimants, { code_id: 90, value_id: 11 }],
+  }
+
+  it('shows the value it counts as, checked', async () => {
+    api.listSets.mockResolvedValue({ sets: [WITH_SYNONYM] })
+    await mount({ target: seg(1), details: { s1: [held(90)] } })
+    expect(screen.getByRole('radio', { name: 'Positive' })).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('an undo puts the SYNONYM back — through the ordinary apply, which the set’s endpoint refuses', async () => {
+    api.listSets.mockResolvedValue({ sets: [WITH_SYNONYM] })
+    await mount({ target: seg(1), details: { s1: [held(90, 0)] } })
+    await press('Negative')
+    expect(api.selectOnSegment).toHaveBeenLastCalledWith(1, 7, 23)
+    await undo()
+    expect(api.applySegment).toHaveBeenCalledWith(1, 90)
+    expect(api.selectOnSegment).not.toHaveBeenCalledWith(1, 7, 90)
+    // …with its rating, and 0 is one.
+    expect(api.rateSegment).toHaveBeenCalledWith(1, 90, 0)
+  })
+})
+
+describe('the values come from the LIVE codes list (#1038 b)', () => {
+  it('a value renamed elsewhere shows its new name; one deactivated is not offered', async () => {
+    const codes = LIVE.map((c) =>
+      c.id === 11 ? { ...c, name: 'Favourable' } : c.id === 23 ? { ...c, is_active: false } : c)
+    await mount({ target: seg(1), details: { s1: [] }, codes })
+    expect(screen.getByRole('radio', { name: 'Favourable' })).toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: 'Positive' })).toBeNull()
+    expect(screen.queryByRole('radio', { name: 'Negative' })).toBeNull()
+  })
+
+  it('a value deleted or merged away is not offered either', async () => {
+    await mount({ target: seg(1), details: { s1: [] }, codes: LIVE.filter((c) => c.id !== 47) })
+    expect(screen.queryByRole('radio', { name: 'Neutral' })).toBeNull()
   })
 })

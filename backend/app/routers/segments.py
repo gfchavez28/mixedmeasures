@@ -30,6 +30,7 @@ from ..auth import get_current_user
 from ..services.audit import log_action
 from ..services.staleness import mark_metrics_stale
 from ..services.coding_layers import CONSENSUS_ORIGIN
+from ..services.coding_counts import coded_segment_count
 from .helpers import visible_segment_filter as _visible_segment_filter, _verify_conversation_ownership
 
 router = APIRouter(prefix="/api/conversations/{conversation_id}/segments", tags=["segments"])
@@ -143,28 +144,25 @@ async def list_segments(
         selectinload(Segment.excerpts).joinedload(Excerpt.note)
     ).order_by(Segment.sequence_order).all()
 
-    # Calculate stats (relationships are pre-loaded). "Coded" excludes
-    # universal-only segments (#398 / J-A) to match the gauge + every other
-    # surface; computed in-memory here since segments are already loaded.
+    # Calculate stats. "Coded" is `coding_counts`' J-A definition — visible,
+    # ≥1 NON-universal application, by a PERSON.
+    #
+    # 🔴 Asked of the SERVICE, not re-derived over the loaded rows (#1029). This
+    # was an in-memory copy of the predicate that tested `origin` only, so a
+    # machine coder's labels made a segment "coded" here while the conversation
+    # card beside it (`coded_segment_counts`) did not — the Content-by-source
+    # reader read "40 coded" over a transcript no person had touched. A second
+    # copy of a count is how the two drifted; there is one now.
     total = len(segments)
-    coded_count = 0
-    participant_total = 0
-    participant_coded = 0
-
-    for seg in segments:
-        has_code = any(
-            ca.origin != CONSENSUS_ORIGIN
-            and ca.code is not None and not ca.code.is_universal
-            for ca in seg.code_applications
-        )
-        if has_code:
-            coded_count += 1
-
-        is_facilitator = seg.speaker and seg.speaker.is_facilitator
-        if not is_facilitator:
-            participant_total += 1
-            if has_code:
-                participant_coded += 1
+    participant_total = sum(
+        1 for seg in segments if not (seg.speaker and seg.speaker.is_facilitator)
+    )
+    coded_count = coded_segment_count(
+        db, Segment.conversation_id, conversation_id, participant_only=False,
+    )
+    participant_coded = coded_segment_count(
+        db, Segment.conversation_id, conversation_id, participant_only=True,
+    )
 
     return SegmentListResponse(
         segments=[segment_to_response(s) for s in segments],

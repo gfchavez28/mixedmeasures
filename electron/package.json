@@ -1,6 +1,6 @@
 {
   "name": "mixedmeasures-desktop",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "private": true,
   "description": "Electron desktop shell for Mixed Measures",
   "author": "George Chavez <contact@mixedmeasures.com>",
@@ -14,7 +14,7 @@
     "dist": "electron-builder"
   },
   "devDependencies": {
-    "electron": "^42.8.1",
+    "electron": "^42.11.8",
     "electron-builder": "^26.15.3"
   },
   "build": {
@@ -33,6 +33,7 @@
       "updater.js",
       "zoom.js",
       "fatal-error.js",
+      "renderer-recovery.js",
       "splash.html"
     ],
     "extraResources": [

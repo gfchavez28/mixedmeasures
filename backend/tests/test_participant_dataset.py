@@ -223,6 +223,42 @@ class TestTheSyncReconciles:
         }
         assert "E-99" in cells and "E-01" not in cells
 
+    def test_a_row_pointing_at_ANOTHER_projects_participant_is_reaped(self, project):
+        """The reap's second arm. A deleted participant is caught by the first
+        (the FK's SET NULL orphans the row), so this state needs a hand-edited
+        database or a future bug — and the table must still hold only this
+        project's people. The ORM version reaped it too (#1033 kept the rule)."""
+        project.add(Project(id=2, name="Other", user_id=1))
+        project.flush()
+        stranger = Participant(project_id=2, identifier="X-01")
+        project.add(stranger)
+        project.flush()
+        dataset = create_participant_dataset(project, 1)
+        row = project.query(DatasetRow).filter(
+            DatasetRow.dataset_id == dataset.id).first()
+        row.participant_id = stranger.id
+        project.flush()
+        report = sync_rows(project, dataset)
+        assert report.removed == 1
+        # …and the project's own participant gets a row back.
+        assert report.added == 1
+
+    def test_a_row_the_caller_already_HOLDS_reads_its_new_label(self, project):
+        """#1033 made the sync set-based, so it writes AROUND the identity map.
+        Under `autoflush=False` a held object — or a later query, which returns
+        that same object — would keep the old label for the rest of the session
+        unless the sync expires what it went around."""
+        dataset = create_participant_dataset(project, 1)
+        held = project.query(DatasetRow).filter(
+            DatasetRow.dataset_id == dataset.id,
+            DatasetRow.row_identifier == "E-01",
+        ).one()
+        project.query(Participant).filter(
+            Participant.identifier == "E-01").one().identifier = "E-99"
+        project.flush()
+        sync_rows(project, dataset)
+        assert held.row_identifier == "E-99"
+
     def test_sync_is_idempotent(self, project):
         dataset = create_participant_dataset(project, 1)
         assert sync_rows(project, dataset).changed is False
@@ -399,11 +435,11 @@ class TestTheToolsOwnColumnsAreAlsoLocked:
     def test_the_type_cannot_be_changed(self, project):
         dataset, column = self._managed_column(project)
         with pytest.raises(HTTPException) as exc:
-            _run(bulk_type_update(
+            bulk_type_update(
                 1, dataset.id,
                 BulkTypeUpdateRequest(column_ids=[column.id], column_type="open_text"),
                 _user(project), project,
-            ))
+            )
         assert exc.value.status_code == 409
         assert exc.value.detail["column_ids"] == [column.id]
         assert project.query(DatasetColumn).filter(
@@ -426,12 +462,12 @@ class TestTheToolsOwnColumnsAreAlsoLocked:
         project.add(ordinary)
         project.flush()
         with pytest.raises(HTTPException):
-            _run(bulk_type_update(
+            bulk_type_update(
                 1, dataset.id,
                 BulkTypeUpdateRequest(
                     column_ids=[ordinary.id, managed.id], column_type="nominal"),
                 _user(project), project,
-            ))
+            )
         assert project.query(DatasetColumn).filter(
             DatasetColumn.id == ordinary.id).one().column_type == ColumnType.NUMERIC
 
@@ -451,11 +487,11 @@ class TestTheToolsOwnColumnsAreAlsoLocked:
         )
         project.add(imported)
         project.flush()
-        _run(bulk_type_update(
+        bulk_type_update(
             1, dataset.id,
             BulkTypeUpdateRequest(column_ids=[imported.id], column_type="open_text"),
             _user(project), project,
-        ))
+        )
         assert project.query(DatasetColumn).filter(
             DatasetColumn.id == imported.id).one().column_type == ColumnType.OPEN_TEXT
 

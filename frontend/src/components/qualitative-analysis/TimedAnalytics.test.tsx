@@ -54,7 +54,7 @@ function renderTimed(over: Partial<React.ComponentProps<typeof TimedAnalytics>> 
         observationsLoad={READY_LOAD}
         codes={CODES}
         categories={[]}
-        include={null}
+        lens={{ include: null, machineCoderIds: new Set(), layer: 'human' }}
         multiCoder
         coderMap={CODERS}
         {...over}
@@ -132,7 +132,7 @@ describe('TimedAnalytics', () => {
     // layer numbers under a consensus banner (the DEC-6c-7 case).
     listSegments.mockResolvedValue(CLIPS)
     renderTimed({ consensusScope: true })
-    expect(screen.getByText(/reads the human coding layer/)).toBeInTheDocument()
+    expect(screen.getByText(/cannot show the Consensus layer/)).toBeInTheDocument()
     expect(screen.queryByText('Share of session')).not.toBeInTheDocument()
     expect(listSegments).not.toHaveBeenCalled() // the queries stay off too
   })
@@ -243,7 +243,7 @@ describe('#963 — the timeline waits for the observations list', () => {
     // Order matters: under the consensus layer there is nothing to draw whatever
     // the observations list says, and the clip queries are disabled there.
     renderTimed({ observations: [], observationsLoad: LOADING, consensusScope: true })
-    expect(screen.getByText(/Switch the layer back to Coders/)).toBeInTheDocument()
+    expect(screen.getByText(/cannot show the Consensus layer\. Switch the layer to Coders or Machine/)).toBeInTheDocument()
     expect(screen.queryByText('Loading observations…')).not.toBeInTheDocument()
   })
 })

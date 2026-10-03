@@ -5,10 +5,15 @@ import {
   buildCodeSetIndex,
   choosableValues,
   codeSetOf,
+  conflictingSetValues,
+  describeSetConflict,
+  heldCodeIn,
   multipleSelectionIn,
   selectionIn,
   selectionPlan,
   selectionsIn,
+  valueIn,
+  withLiveMembers,
 } from '@/lib/code-sets'
 
 /**
@@ -31,8 +36,17 @@ const STANCE: CodeSet = {
   members: [member(11, 'Positive'), member(23, 'Negative'), member(47, 'Neutral')],
   set_basis: 'inclusive_with_none',
   composition_warnings: [],
+  claimants: [
+    { code_id: 11, value_id: 11 }, { code_id: 23, value_id: 23 }, { code_id: 47, value_id: 47 },
+  ],
   created_at: '',
   updated_at: '',
+}
+
+/** "Pos" (id 90) is NOT a member, but is grouped into "Positive" (#1028 b). */
+const WITH_SYNONYM: CodeSet = {
+  ...STANCE,
+  claimants: [...STANCE.claimants, { code_id: 90, value_id: 11 }],
 }
 
 const app = (codeId: number, userId: number | null): CodeApplicationIdentity =>
@@ -114,10 +128,21 @@ describe('the plan', () => {
     expect(plan).toEqual({ setId: 7, codeId: 23, previousCodeId: 11 })
   })
 
-  it('CLEARS when the value already selected is pressed again', () => {
-    const plan = selectionPlan(STANCE, [app(11, 2)], 2, 11)
-    expect(plan.codeId).toBeNull()
-    expect(plan.previousCodeId).toBe(11)
+  it('is NOTHING when the checked value is pressed again — a radio has no de-select (#1038 e)', () => {
+    expect(selectionPlan(STANCE, [app(11, 2)], 2, 11)).toBeNull()
+  })
+
+  it('is a CHOICE when that value is one of two held — the coder resolving a contradiction', () => {
+    // The #1038 (e) defect's own state: the re-press used to CLEAR both values
+    // here, and the undo gave one back.
+    const plan = selectionPlan(STANCE, [app(11, 2), app(23, 2)], 2, 11)
+    expect(plan).toEqual({ setId: 7, codeId: 11, previousCodeId: 11 })
+  })
+
+  it('clears through the named control, and clearing nothing is nothing', () => {
+    expect(selectionPlan(STANCE, [app(23, 2)], 2, null))
+      .toEqual({ setId: 7, codeId: null, previousCodeId: 23 })
+    expect(selectionPlan(STANCE, [], 2, null)).toBeNull()
   })
 
   it('carries a null previous value on a first choice, which is a legal undo', () => {
@@ -128,6 +153,84 @@ describe('the plan', () => {
 
   it('does not read a colleague’s value as the one being replaced', () => {
     const plan = selectionPlan(STANCE, [app(47, 3)], 2, 11)
-    expect(plan.previousCodeId).toBeNull()
+    expect(plan?.previousCodeId).toBeNull()
+  })
+
+  it('remembers the RAW code held, so an undo puts back the synonym and not its value', () => {
+    const plan = selectionPlan(WITH_SYNONYM, [app(90, 2)], 2, 23)
+    expect(plan?.previousCodeId).toBe(90)
+  })
+})
+
+describe('a synonym grouped INTO a value (#1028 b)', () => {
+  it('reads as that value', () => {
+    expect(valueIn(WITH_SYNONYM, 90)).toBe(11)
+    expect(valueIn(WITH_SYNONYM, 900)).toBeUndefined()
+  })
+
+  it('shows its value as the coder’s selection, and holding both is ONE value', () => {
+    expect(selectionIn(WITH_SYNONYM, [app(90, 2)], 2)).toBe(11)
+    expect(heldCodeIn(WITH_SYNONYM, [app(90, 2)], 2)).toBe(90)
+    expect(multipleSelectionIn(WITH_SYNONYM, [app(90, 2), app(11, 2)], 2)).toBe(false)
+    expect(multipleSelectionIn(WITH_SYNONYM, [app(90, 2), app(23, 2)], 2)).toBe(true)
+  })
+
+  it('pressing its value is a no-op, as for the value itself', () => {
+    expect(selectionPlan(WITH_SYNONYM, [app(90, 2)], 2, 11)).toBeNull()
+  })
+
+  it('is indexed to its set, and a member of another set keeps its OWN', () => {
+    const TONE: CodeSet = {
+      ...STANCE, id: 8, label: 'Tone', members: [member(90, 'Pos')],
+      claimants: [{ code_id: 90, value_id: 11 }],
+    }
+    // 90 is a MEMBER of Tone and a synonym in Stance; Tone listed second on
+    // purpose, so first-wins over the list order would pick Stance.
+    const index = buildCodeSetIndex([WITH_SYNONYM, TONE])
+    expect(codeSetOf(index, 90)?.label).toBe('Tone')
+    expect(codeSetOf(buildCodeSetIndex([WITH_SYNONYM]), 90)?.label).toBe('Stance')
+  })
+})
+
+describe('live members (#1038 b)', () => {
+  const live = (over: Record<number, Partial<{ name: string; is_active: boolean; is_universal: boolean }>>) =>
+    new Map(STANCE.members.map((m) => [m.id, {
+      name: m.name, is_active: true, is_universal: false, ...(over[m.id] ?? {}),
+    }]))
+
+  it('reads a renamed or deactivated value from the codes list, not the stale set', () => {
+    const fresh = withLiveMembers(STANCE, live({ 11: { name: 'Favourable' }, 23: { is_active: false } }))
+    expect(choosableValues(fresh).map((v) => v.name)).toEqual(['Favourable', 'Neutral'])
+  })
+
+  it('offers no value the codes list no longer has — deleted or merged away', () => {
+    const map = live({})
+    map.delete(47)
+    expect(choosableValues(withLiveMembers(STANCE, map)).map((v) => v.id)).toEqual([11, 23])
+  })
+
+  it('keeps a deactivated value a MEMBER, so a coder holding it can still clear it', () => {
+    const fresh = withLiveMembers(STANCE, live({ 23: { is_active: false } }))
+    expect(fresh.members.map((m) => m.id)).toEqual([11, 23, 47])
+    expect(selectionIn(fresh, [app(23, 2)], 2)).toBe(23)
+  })
+})
+
+describe('a multi-code apply of two values of one set (#1028)', () => {
+  it('is found, and names the set and both values', () => {
+    const index = buildCodeSetIndex([WITH_SYNONYM])
+    const conflicts = conflictingSetValues(index, [11, 500, 23])
+    expect(conflicts.map((c) => c.codeIds)).toEqual([[11, 23]])
+    const names: Record<number, string> = { 11: 'Positive', 23: 'Negative' }
+    expect(describeSetConflict(conflicts, (id) => names[id]))
+      .toBe('“Positive” and “Negative” are values of “Stance”, and a passage takes only one — apply one of them.')
+  })
+
+  it('counts a synonym as its set’s value', () => {
+    expect(conflictingSetValues(buildCodeSetIndex([WITH_SYNONYM]), [90, 23])).toHaveLength(1)
+  })
+
+  it('lets one value per set through, and ordinary codes', () => {
+    expect(conflictingSetValues(buildCodeSetIndex([WITH_SYNONYM]), [11, 500, 501])).toEqual([])
   })
 })

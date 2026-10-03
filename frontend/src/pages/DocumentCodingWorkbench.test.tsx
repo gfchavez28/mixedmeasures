@@ -323,3 +323,41 @@ describe('#964 — an unanswered coder roster keeps colleagues hidden', () => {
     await waitFor(() => expect(screen.queryByText(/coded by Carla/)).not.toBeInTheDocument())
   })
 })
+
+/** #1028 — the server swaps a code-set value and says what it replaced; undo puts it back. */
+describe('an apply that REPLACED a value, and its undo (#1028)', () => {
+  it('Ctrl+Z re-applies the replaced value WITH its rating — a ZERO — and removes nothing', async () => {
+    applyCode.mockImplementation(async (_seg: number, code: number) =>
+      ({ applied: true, replaced_code_ids: code === 8 ? [7] : [] }))
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.mouseDown(rows[1], { button: 0 })  // segment 52: Engagement rated 0
+    fireEvent.keyDown(window, { key: '2' })      // Disruption
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(52, 8))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+    await waitFor(() => expect(applyCode).toHaveBeenLastCalledWith(52, 7))
+    await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(52, 7, 0))
+    expect(removeCode).not.toHaveBeenCalled()
+  })
+  it('the CONTEXT MENU applies through the shared pair — the undo restores, and a scaled code is rated', async () => {
+    // It was a private copy of the pair: no rating strip, and an undo that
+    // could only remove.
+    applyCode.mockImplementation(async (_seg: number, code: number) =>
+      ({ applied: true, replaced_code_ids: code === 7 ? [8] : [] }))
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.contextMenu(rows[0])                                  // segment 51
+    fireEvent.keyDown(await screen.findByText('Apply Code'), { key: 'ArrowRight' })
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Engagement/ }))
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(51, 7))
+    expect(await screen.findByTestId('magnitude-strip')).toBeInTheDocument()
+
+    fireEvent.keyDown(screen.getByRole('radiogroup'), { key: 'Escape' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+    await waitFor(() => expect(applyCode).toHaveBeenLastCalledWith(51, 8))
+    expect(removeCode).not.toHaveBeenCalled()
+  })
+})

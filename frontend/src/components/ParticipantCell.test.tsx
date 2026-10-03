@@ -5,8 +5,8 @@
  * duplicate identifier becomes link-to-existing, unless that participant is
  * already linked to another row in this dataset.
  */
-import { it, expect, vi, afterEach } from 'vitest'
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
@@ -33,6 +33,7 @@ vi.mock('sonner', () => ({
 }))
 
 import { ParticipantCell } from './DatasetGridComponents'
+import { PARTICIPANT_LIST_LIMIT } from '@/lib/participant-search'
 
 afterEach(() => {
   cleanup()
@@ -170,6 +171,139 @@ it('#963 after a failure: says the load failed, offers Retry, and creates nothin
   expect(createBtn).toBeDisabled()
   fireEvent.click(createBtn)
   expect(create).not.toHaveBeenCalled()
+})
+
+/**
+ * #1045 — the white window. On a page of the dataset grid all 200 cells built
+ * the picker's full option list while every picker was CLOSED, because the list
+ * was inline JSX inside the popover and its query (`enabled: open`) still
+ * RETURNED whatever another surface had cached. 20,000 participants: 1,817 MB
+ * and 8.4 s to open a page; 122,382: the renderer ran out of memory.
+ *
+ * ⚠️ The DOM cannot see this defect: a closed Radix popover mounts nothing
+ * before or after the fix, so a button count over closed cells passes either
+ * way. What CAN be seen is the cause — a closed cell subscribing to the list at
+ * all. The fixture seeds the cache WARM, because with a cold cache the old code
+ * was cheap too (that is what "after a restart it opened quickly" measured).
+ */
+describe('#1045 — a closed picker costs nothing, an open one is bounded', () => {
+  const participants = (n: number) => Array.from({ length: n }, (_, i) => ({
+    id: i + 1,
+    identifier: `P${String(i + 1).padStart(5, '0')}`,
+    display_name: null,
+    role: null,
+    linked_speakers: [],
+  }))
+
+  function renderWarmGrid(rows: number, cached: ReturnType<typeof participants>) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
+    qc.setQueryData(['participants', 1], { participants: cached, total: cached.length })
+    list.mockResolvedValue({ participants: cached, total: cached.length })
+    render(
+      <QueryClientProvider client={qc}>
+        <table>
+          <tbody>
+            {Array.from({ length: rows }, (_, i) => (
+              <tr key={i}>
+                <ParticipantCell
+                  row={{ ...ROW, id: 100 + i, row_identifier: `r${i}` }}
+                  projectId={1}
+                  linkedParticipantMap={new Map()}
+                  onLink={vi.fn()}
+                  suggestedIdentifier={null}
+                />
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </QueryClientProvider>,
+    )
+    const observers = () => qc.getQueryCache().find({ queryKey: ['participants', 1] })!.getObserversCount()
+    return { observers }
+  }
+
+  it('closed cells hold NO observer on the cached participant list', () => {
+    const { observers } = renderWarmGrid(30, participants(500))
+    expect(observers()).toBe(0)
+  })
+
+  it('POSITIVE CONTROL: opening one picker subscribes exactly one, and closing releases it', async () => {
+    const { observers } = renderWarmGrid(30, participants(500))
+    fireEvent.click(screen.getAllByRole('button', { name: /link/i })[0])
+    await screen.findByPlaceholderText('Search participants...')
+    expect(observers()).toBe(1)
+    fireEvent.keyDown(screen.getByPlaceholderText('Search participants...'), { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByPlaceholderText('Search participants...')).toBeNull())
+    expect(observers()).toBe(0)
+  })
+
+  it('renders at most PARTICIPANT_LIST_LIMIT options, and says the list stops early', async () => {
+    renderWarmGrid(1, participants(1000))
+    fireEvent.click(screen.getByRole('button', { name: /link/i }))
+    const search = await screen.findByPlaceholderText('Search participants...')
+    await screen.findByText('P00001')
+    const options = screen.getAllByRole('button').filter(b => /^P\d{5}/.test(b.textContent ?? ''))
+    expect(options).toHaveLength(PARTICIPANT_LIST_LIMIT)
+    const note = `Showing the first ${PARTICIPANT_LIST_LIMIT} of ${(1000).toLocaleString()} participants. Type a name or ID to find the others.`
+    expect(screen.getByText(note)).toBeInTheDocument()
+    // Where a keyboard user types is where they hear it.
+    expect(search).toHaveAccessibleDescription(note)
+  })
+
+  it('search reaches past the bound, exact match first, and the note goes when nothing is hidden', async () => {
+    renderWarmGrid(1, participants(1000))
+    fireEvent.click(screen.getByRole('button', { name: /link/i }))
+    const search = await screen.findByPlaceholderText('Search participants...')
+    // P00999 sits at position 999 in server order — far outside the first 200.
+    fireEvent.change(search, { target: { value: 'p00999' } })
+    await waitFor(() => {
+      const options = screen.getAllByRole('button').filter(b => /^P\d{5}/.test(b.textContent ?? ''))
+      expect(options.map(o => o.textContent)).toEqual(['P00999'])
+    })
+    expect(screen.queryByText(/Showing the first/)).toBeNull()
+    expect(search).not.toHaveAttribute('aria-describedby')
+  })
+
+  it('🔴 marks the participant this record is linked to as CURRENT — not by its tint alone', async () => {
+    // The blue tint was the only mark, so the tree could not say which one is
+    // this record's (a11y-name-sweep run 9). A state, so `aria-current`.
+    const people = participants(3)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    list.mockResolvedValue({ participants: people, total: people.length })
+    render(
+      <QueryClientProvider client={qc}>
+        <table>
+          <tbody>
+            <tr>
+              <ParticipantCell
+                row={{ ...ROW, participant_id: 2, participant_display_name: 'P00002' }}
+                projectId={1}
+                linkedParticipantMap={new Map([[2, 'r1']])}
+                onLink={vi.fn()}
+                suggestedIdentifier={null}
+              />
+            </tr>
+          </tbody>
+        </table>
+      </QueryClientProvider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Change linked participant: P00002' }))
+    await screen.findByText('P00003')
+    // Inside the picker: the TRIGGER reads "P00002" too, and comes first.
+    const picker = screen.getByRole('dialog', { name: 'Link a participant' })
+    const option = (id: string) => within(picker).getAllByRole('button').find(b => b.textContent === id)!
+    expect(option('P00002')).toHaveAttribute('aria-current', 'true')
+    expect(option('P00001')).not.toHaveAttribute('aria-current')
+    expect(option('P00003')).not.toHaveAttribute('aria-current')
+  })
+
+  it('a small list shows every participant and no note (positive control for the bound)', async () => {
+    renderWarmGrid(1, participants(12))
+    fireEvent.click(screen.getByRole('button', { name: /link/i }))
+    await screen.findByText('P00012')
+    expect(screen.getAllByRole('button').filter(b => /^P\d{5}/.test(b.textContent ?? ''))).toHaveLength(12)
+    expect(screen.queryByText(/Showing the first/)).toBeNull()
+  })
 })
 
 it('#963 POSITIVE CONTROL: an answered EMPTY list says so and still creates', async () => {

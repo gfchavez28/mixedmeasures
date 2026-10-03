@@ -206,6 +206,26 @@ describe('#963 — the import wizards gate on their checks, and split loading fr
     // The snapshot records "unknown", never a bare length-of-nothing.
     expect(code).not.toMatch(/hadParticipantsRef\.current = \(participantsData\?\./)
   })
+
+  it('#1047 — the snapshot is a COUNT taken as the import starts, never the whole list', () => {
+    // The page fetched every participant for `.length > 0`: 47 MB and 21 s after a
+    // large linked import, holding every other request. `projectHadParticipants`
+    // is tested behaviourally in `lib/participant-snapshot.test.ts`; what only
+    // the page can get wrong is WHERE it is called.
+    const code = src('pages/DatasetImport.tsx')
+    expect(code).not.toContain('participantsApi.list')
+    const at = code.indexOf('const handleImport = useCallback(')
+    const body = code.slice(at, at + 3_000)
+    const busy = body.indexOf('setIsLoading(true)')
+    const snapshot = body.indexOf('hadParticipantsRef.current = await projectHadParticipants(queryClient, id)')
+    const request = body.indexOf('datasetsApi.import(')
+    // Busy first (the Import button is disabled by it, so a second press cannot
+    // start a second import while the count is answered), then the count, then
+    // the import — which creates participants, so the count must come first.
+    expect(busy).toBeGreaterThan(-1)
+    expect(snapshot).toBeGreaterThan(busy)
+    expect(request).toBeGreaterThan(snapshot)
+  })
 })
 
 /**

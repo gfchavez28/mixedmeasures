@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   anchorLabelFor,
+  anchorLayout,
   describeMagnitude,
   formatMagnitude,
 
@@ -53,9 +54,11 @@ import { SELECTION_TEXT_FLOOR } from '@/lib/selection'
  * COMMITTED value. The DOM holds the whole tick set, so there is deliberately no
  * `aria-setsize`/`aria-posinset` (#758/#772's boundary).
  *
- * ⚠️ **Mount it with a `key` on the target** (`${segmentId}-${codeId}`, #870 c):
- * the cursor and the focus effect initialise once, so a target swap on a live
- * mount would keep the old cursor and leave focus wherever the click put it.
+ * ⚠️ **Mount it with a `key` on the target AND the scale**
+ * (`${segmentId}-${codeId}-${scaleSignature(scale)}`, #870 c / #1112): the
+ * cursor and the focus effect initialise once, so a target swap — or a new step
+ * saved while the strip is open — on a live mount would keep the old cursor.
+ * Pass the LIVE code's scale (`liveRatingCode`), never a copy taken at open.
  */
 
 export interface MagnitudeStripProps {
@@ -213,8 +216,13 @@ export default function MagnitudeStrip({
   }, [tickable, ticks, cursor, commitAt, onSkip, codeName, setCursorAt])
 
   const rangeLabel = `${formatMagnitude(scale.min)}–${formatMagnitude(scale.max)}`
-  const lowAnchor = anchorLabelFor(scale.min, scale)
-  const highAnchor = anchorLabelFor(scale.max, scale)
+  // #1113: EVERY anchor, each under its own point — the line printed only the
+  // two ends, so a middle anchor was declared, saved and never shown.
+  const anchors = useMemo(() => anchorLayout(scale, ticks.length), [scale, ticks.length])
+  // #1112: a rating given before the step changed can fall BETWEEN the points
+  // now (3 on a step-2 scale). No tick is selected then, and without a word the
+  // strip reads as unrated — the header says what is stored instead.
+  const offScaleRating = tickable && !isUnrated(value) && ticks.indexOf(value as number) < 0
 
   return (
     <div
@@ -238,7 +246,9 @@ export default function MagnitudeStrip({
       <div className="flex items-baseline justify-between gap-3 mb-1">
         <span className="text-[11px] text-mm-text-secondary min-w-0 truncate">
           <span className="font-semibold text-mm-text">{codeName}</span>
-          {' — how much?'}
+          {offScaleRating
+            ? ` — rated ${formatMagnitude(value as number)}, not a point on this scale`
+            : ' — how much?'}
         </span>
         <span className="text-[10px] text-mm-text-muted shrink-0 whitespace-nowrap">
           <span className="font-mono">{rangeLabel}</span>
@@ -327,10 +337,30 @@ export default function MagnitudeStrip({
         </p>
       )}
 
-      <div className="flex justify-between mt-0.5 text-[9.5px] text-mm-text-muted">
-        <span>{lowAnchor ? `${formatMagnitude(scale.min)} · ${lowAnchor}` : ''}</span>
-        <span>{highAnchor ? `${formatMagnitude(scale.max)} · ${highAnchor}` : ''}</span>
-      </div>
+      {/*
+        ONE line, as §11's height budget requires (84px at 640×360) — every
+        anchor shares it, each in a box that stops halfway to its neighbours so
+        no two can overlap (`lib/magnitude.ts::anchorLayout`). A label too long
+        for its box truncates; the full text is its `title`, and every anchor on
+        a tick is also in that tick's accessible name. `h-[1.5em]` holds the
+        one line the absolute boxes cannot give the row themselves.
+      */}
+      {anchors.length > 0 && (
+        <div className="relative mt-0.5 h-[1.5em] text-[9.5px] text-mm-text-muted" data-testid="magnitude-anchors">
+          {anchors.map(a => (
+            <span
+              key={a.value}
+              title={a.text}
+              className={`absolute top-0 truncate ${
+                a.align === 'left' ? 'text-left' : a.align === 'right' ? 'text-right' : 'text-center'
+              }`}
+              style={{ left: `${a.left}%`, width: `${a.width}%` }}
+            >
+              {a.text}
+            </span>
+          ))}
+        </div>
+      )}
 
       {/* The live region announces the COMMITTED state only. The cursor is
           announced by `aria-activedescendant` on the group (#870 b) — before that

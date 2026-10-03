@@ -49,9 +49,15 @@ is one. **Nothing here ever claims a score is up to date.**
 from __future__ import annotations
 
 import json
+import logging
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Iterator
 
+from sqlalchemy import bindparam, delete, insert, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..models.code import Code
@@ -69,6 +75,8 @@ from .participant_dataset import (
     get_participant_dataset,
     sync_rows,
 )
+
+logger = logging.getLogger(__name__)
 
 #: `managed_spec.kind` for the column carrying the participant score itself.
 MANAGED_SPEC_KIND_SCORE = "magnitude_score"
@@ -95,6 +103,79 @@ _SUFFIX = {
 #: from the SAME rounded number — a text/numeric pair that disagree is how an
 #: export and a chart come to show different values for one cell.
 _SCORE_DP = 3
+
+#: #1073 (a) — how many cell statements one write transaction carries. The cells
+#: are written in batches, each COMMITTED, so another writer waits at most one
+#: batch for SQLite's lock (5 s busy timeout) rather than the whole write.
+#: MEASURED on 122,382 participants × 4 rated codes (979,056 cells): the refresh
+#: that wrote them in ONE transaction held the lock 8.90 s and a competing
+#: writer failed at 5.06 s. At ~120,000 inserts a second, a batch is ~0.2 s.
+CELL_WRITE_BATCH = 25_000
+
+
+# ── One create or refresh at a time, per project (#1073 c) ───────────────────
+
+#: The sentence a second, concurrent refresh answers with (409).
+PARTICIPANT_TABLE_BUSY_MESSAGE = (
+    "The participant table is already being updated, so a second update was not "
+    "started. Its scores will be current when that one finishes."
+)
+
+
+class ParticipantTableBusy(RuntimeError):
+    """Another create or refresh of this project's participant table is running."""
+
+
+_turns = threading.Condition()
+#: project id → (the thread holding its turn, how many times it has entered).
+_turn_holders: dict[int, tuple[int, int]] = {}
+
+
+@contextmanager
+def participant_table_turn(project_id: int) -> Iterator[None]:
+    """Hold this project's participant-table turn for a block, or raise
+    `ParticipantTableBusy` without waiting.
+
+    🔴 **Why it exists (#1073 c, CONFIRMED by execution):** two refreshes whose
+    reads interleave both INSERT the same rows, and one dies on
+    `uq_dataset_rows_dataset_participant` — then marks the table stale straight
+    after the other one succeeded. Two creates die on
+    `uq_datasets_project_managed_kind` (a 500) despite the endpoint's idempotent
+    promise. Both became reachable when #1022 made the endpoints `def`: the event
+    loop had serialised them. The Data view's per-column *Refresh scores* item is
+    not disabled while a refresh runs, so one researcher can start two.
+
+    ⚠️ **Re-entrant for the thread that holds it** — the create endpoint takes the
+    turn for creation AND the refresh inside it, and the refresh takes it too,
+    because 56 direct test calls and any future caller must not be able to
+    refresh without it. A module global, for `restore_gate.db_gate`'s reason: the
+    thing it guards (this process's engine) is one too. It cannot see another
+    PROCESS; the unique indexes stay the backstop there.
+    """
+    me = threading.get_ident()
+    with _turns:
+        held = _turn_holders.get(project_id)
+        if held is not None and held[0] != me:
+            raise ParticipantTableBusy(PARTICIPANT_TABLE_BUSY_MESSAGE)
+        _turn_holders[project_id] = (me, (held[1] if held else 0) + 1)
+    try:
+        yield
+    finally:
+        with _turns:
+            ident, depth = _turn_holders[project_id]
+            if depth <= 1:
+                del _turn_holders[project_id]
+            else:
+                _turn_holders[project_id] = (ident, depth - 1)
+            _turns.notify_all()
+
+
+def wait_for_participant_table_turn(project_id: int, timeout: float) -> bool:
+    """Wait (up to `timeout` s) until nobody holds this project's turn. For the
+    create endpoint's double press: the second press waits for the first to finish
+    rather than failing, then returns the table the first one built."""
+    with _turns:
+        return _turns.wait_for(lambda: project_id not in _turn_holders, timeout)
 
 
 def build_managed_spec(kind: str, code_id: int, basis: str | None = None) -> str:
@@ -328,41 +409,68 @@ def sync_score_columns(db: Session, dataset: Dataset) -> tuple[int, int, int]:
     return added, removed, metrics_removed
 
 
-def _write_cells(
-    db: Session, dataset: Dataset, rollup: MagnitudeRollup,
-) -> tuple[int, int]:
-    """Write every score cell. Returns ``(written, cleared)``.
+@dataclass
+class _CellPlan:
+    """Every score-cell change one refresh will make, decided before any is made."""
+
+    inserts: list[dict] = field(default_factory=list)
+    updates: list[dict] = field(default_factory=list)
+    deletes: list[dict] = field(default_factory=list)
+
+
+def _plan_cells(db: Session, dataset_id: int, rollup: MagnitudeRollup) -> _CellPlan:
+    """Decide every score cell's change. READS ONLY — no write lock is taken here.
 
     Reconciles, like everything else here: a participant who no longer has a
     score has their cell DELETED rather than zeroed, because the importer stores
     no row for a blank cell and a zero would be a rating nobody gave.
+
+    🔴 **Tuples in (#1033), and read BEFORE the first write (#1073 a).** This
+    reads every managed cell — 979,056 at 122,382 participants × 4 rated codes —
+    and it used to run after `sync_rows` / `sync_score_columns` had written, i.e.
+    INSIDE the write transaction: the audit measured the lock held 9.30 s for a
+    refresh after a create, and 4.31 s (4.69 s in the audit's run) to add ONE
+    participant whose scores had not changed, with a coding saved meanwhile
+    failing at the 5 s busy timeout. The refresh now commits its row and column
+    sync first, so this read holds nothing.
     """
     columns = [
-        (parse_managed_spec(c.managed_spec), c)
-        for c in db.query(DatasetColumn).filter(DatasetColumn.dataset_id == dataset.id)
+        (parse_managed_spec(spec), column_id)
+        for column_id, spec in db.execute(
+            select(DatasetColumn.id, DatasetColumn.managed_spec)
+            .where(DatasetColumn.dataset_id == dataset_id)
+        )
     ]
-    managed = [(spec, col) for spec, col in columns if spec is not None]
+    managed = [(spec, column_id) for spec, column_id in columns if spec is not None]
+    plan = _CellPlan()
     if not managed:
-        return 0, 0
+        return plan
 
-    rows = {
-        r.participant_id: r
-        for r in db.query(DatasetRow).filter(DatasetRow.dataset_id == dataset.id)
-        if r.participant_id is not None
-    }
+    rows_t = DatasetRow.__table__
+    values_t = DatasetValue.__table__
+
+    rows = dict(db.execute(
+        select(rows_t.c.participant_id, rows_t.c.id).where(
+            rows_t.c.dataset_id == dataset_id,
+            rows_t.c.participant_id.isnot(None),
+        )
+    ).all())
     by_key = {(s.participant_id, s.code_id): s for s in rollup.scores}
 
-    column_ids = [col.id for _spec, col in managed]
+    # Bounded by the SCALED CODES (two columns each), never by the participants.
+    column_ids = [column_id for _spec, column_id in managed]
     cells = {
-        (v.row_id, v.column_id): v
-        for v in db.query(DatasetValue).filter(DatasetValue.column_id.in_(column_ids))
+        (row_id, column_id): (value_id, text, number)
+        for value_id, row_id, column_id, text, number in db.execute(
+            select(
+                values_t.c.id, values_t.c.row_id, values_t.c.column_id,
+                values_t.c.value_text, values_t.c.value_numeric,
+            ).where(values_t.c.column_id.in_(column_ids))
+        )
     }
 
-    written = 0
-    cleared = 0
-    pending: list[DatasetValue] = []
-    for spec, column in managed:
-        for participant_id, row in rows.items():
+    for spec, column_id in managed:
+        for participant_id, row_id in rows.items():
             score = by_key.get((participant_id, spec["code_id"]))
             value: float | None = None
             if score is not None:
@@ -371,13 +479,12 @@ def _write_cells(
                 else:
                     value = float(score.n_targets)
 
-            cell = cells.get((row.id, column.id))
+            cell = cells.get((row_id, column_id))
             if value is None:
                 # NULL is not zero (#35 §2). No cell at all, matching the
                 # importer's own treatment of a blank.
                 if cell is not None:
-                    db.delete(cell)
-                    cleared += 1
+                    plan.deletes.append({"b_id": cell[0]})
                 continue
 
             # #942 — a SCORE is a measurement and gets a fixed number of decimal
@@ -390,26 +497,46 @@ def _write_cells(
                 ),
             )
             if cell is None:
-                pending.append(DatasetValue(
-                    row_id=row.id, column_id=column.id,
-                    value_text=text, value_numeric=value,
-                ))
-                written += 1
-            elif cell.value_text != text or cell.value_numeric != value:
-                cell.value_text = text
-                cell.value_numeric = value
-                written += 1
+                plan.inserts.append({
+                    "row_id": row_id, "column_id": column_id,
+                    "value_text": text, "value_numeric": value,
+                })
+            elif cell[1] != text or cell[2] != value:
+                plan.updates.append({"b_id": cell[0], "b_text": text, "b_number": value})
+    return plan
 
-    if cleared:
-        db.flush()
-    if pending:
-        db.add_all(pending)
-    # ⚠️ LOAD-BEARING under `autoflush=False`, the #439/#440 family reached from
-    # the insert side: without it the rows added above are invisible to the next
-    # caller's queries, and step 3's own sync hit exactly this by writing a
-    # second cell per row.
-    db.flush()
-    return written, cleared
+
+def _write_cell_plan(db: Session, plan: _CellPlan) -> tuple[int, int]:
+    """Write a `_CellPlan` in batches of `CELL_WRITE_BATCH`, COMMITTING each.
+    Returns ``(written, cleared)``.
+
+    🔴 **Batched and committed (#1073 a):** the write itself is the long part of a
+    first scoring — 979,056 inserts — and one transaction for it held SQLite's
+    lock ~8.9 s. A batch holds it ~0.2 s, so a coding saved during a refresh waits
+    a moment instead of failing. ⚠️ Between batches a reader can see a table
+    partly updated; `managed_synced_at` still names the previous refresh until the
+    last batch lands (the caller stamps it), and a failure part-way re-marks the
+    table stale (the refresh's `except`), so neither claims more than is true.
+
+    A cleared cell's notes and codings go with it by `ON DELETE CASCADE` — the
+    database's rule, which the ORM's `delete-orphan` cascade mirrored.
+    """
+    values_t = DatasetValue.__table__
+    statements = (
+        (delete(values_t).where(values_t.c.id == bindparam("b_id")), plan.deletes),
+        (
+            update(values_t)
+            .where(values_t.c.id == bindparam("b_id"))
+            .values(value_text=bindparam("b_text"), value_numeric=bindparam("b_number")),
+            plan.updates,
+        ),
+        (insert(values_t), plan.inserts),
+    )
+    for statement, params in statements:
+        for start in range(0, len(params), CELL_WRITE_BATCH):
+            db.execute(statement, params[start:start + CELL_WRITE_BATCH])
+            db.commit()
+    return len(plan.inserts) + len(plan.updates), len(plan.deletes)
 
 
 def _format_number(value: float, *, decimals: int) -> str:
@@ -440,8 +567,7 @@ def _format_number(value: float, *, decimals: int) -> str:
 def refresh_participant_dataset(db: Session, project_id: int) -> RefreshReport | None:
     """Bring the participant dataset's rows AND scores up to date.
 
-    Returns None when the project has no participant dataset. Flushes; the
-    caller owns the transaction.
+    Returns None when the project has no participant dataset.
 
     🔴 **ONE call recomputes EVERY score column, and the endpoint is on the
     DATASET rather than the column, deliberately departing from the
@@ -454,20 +580,103 @@ def refresh_participant_dataset(db: Session, project_id: int) -> RefreshReport |
     paginated for scale): this writes. The row set and the scores are a snapshot
     refreshed deliberately, which is the decision the stale marker exists to
     make visible.
+
+    🔴 **READ, THEN WRITE — AND IT COMMITS (#1033).** SQLite has one writer, and
+    a transaction that has written holds the lock until it ends; every other
+    writer gives up after the 5 s busy timeout. This used to write first (a new
+    row, or — on EVERY refresh of a table with a variable the researcher added —
+    `materialise_manual_cells`' `INSERT … SELECT`, which takes the lock even
+    when it inserts nothing) and then run the rollup inside that transaction.
+    MEASURED on 122,382 participants: a coding click 6–31 s into a 40 s refresh
+    failed with "database is locked", and every click during a first create
+    (172 s) did. Three steps now:
+
+      1. **CLAIM** — clear `managed_stale` and COMMIT. That also ends any write
+         transaction the CALLER holds (the create endpoint's new table), which
+         is what keeps the lock out of step 2 whoever calls this.
+      2. **READ** — the rollup, the 16–25 s part, with no write transaction
+         open. Other writers commit freely meanwhile.
+      3. **STRUCTURE** — the row sync and the column reconcile, each set-based,
+         then COMMITTED (#1073 a): until then the cells were read inside this
+         transaction, so adding one participant held the lock ~4.3 s.
+      4. **CELLS** — planned with no lock held (`_plan_cells`), then written in
+         short committed batches (`_write_cell_plan`); then `managed_synced_at`,
+         flushed for the caller to commit. MEASURED on 122,382 participants × 4
+         rated codes before this: 8.90 s held for a first scoring, a competing
+         writer failing at 5.06 s.
+
+    🔴 **One refresh at a time (#1073 c).** It runs inside
+    `participant_table_turn`, so a second one — another tab, the per-column menu
+    pressed during a refresh — is refused with `ParticipantTableBusy` (409)
+    before it touches anything, instead of dying on a unique index and marking a
+    freshly refreshed table stale.
+
+    ⚠️ **The claim is what keeps a coding made DURING step 2 visible.** A
+    rating written while the rollup reads may or may not be in it, and it calls
+    `mark_participant_scores_stale` — which lands AFTER the claim, so the flag
+    it sets survives this refresh. Clearing the flag at the end instead would
+    erase it and report scores as up to date that are not. That is the same
+    positive-signal-only posture the module docstring gives the flag, and
+    `managed_synced_at` is the time the READ began for the same reason.
+
+    ⚠️ **A failure after the claim marks the table stale again** (best effort,
+    logged if even that fails): the flag was cleared and the scores never
+    written. `managed_synced_at` is untouched on failure, so the displayed time
+    stays honest either way.
     """
+    with participant_table_turn(project_id):
+        return _refresh_in_turn(db, project_id)
+
+
+def _refresh_in_turn(db: Session, project_id: int) -> RefreshReport | None:
+    """`refresh_participant_dataset`'s body, with the project's turn held."""
     dataset = get_participant_dataset(db, project_id)
     if dataset is None:
         return None
+    dataset_id = dataset.id
 
-    row_report = sync_rows(db, dataset)
-    columns_added, columns_removed, metrics_removed = sync_score_columns(db, dataset)
-    rollup = compute_magnitude_rollup(db, project_id)
-    written, cleared = _write_cells(db, dataset, rollup)
-
+    # (1) CLAIM.
+    db.query(Dataset).filter(Dataset.id == dataset_id).update(
+        {"managed_stale": False}, synchronize_session="fetch",
+    )
+    db.commit()
     synced_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    dataset.managed_synced_at = synced_at
-    dataset.managed_stale = False
-    db.flush()
+
+    try:
+        # (2) READ — nothing may write before this returns.
+        rollup = compute_magnitude_rollup(db, project_id)
+
+        # (3) STRUCTURE — rows and columns, committed on their own so the cell
+        # read below holds no lock (#1073 a).
+        dataset = db.get(Dataset, dataset_id)
+        row_report = sync_rows(db, dataset)
+        columns_added, columns_removed, metrics_removed = sync_score_columns(db, dataset)
+        db.commit()
+
+        # (4) CELLS — planned with no lock held, written in committed batches.
+        written, cleared = _write_cell_plan(db, _plan_cells(db, dataset_id, rollup))
+        dataset = db.get(Dataset, dataset_id)
+        dataset.managed_synced_at = synced_at
+        db.flush()
+    except IntegrityError:
+        # Another PROCESS updating the same table (this one's turn keeps a second
+        # refresh out of this process): its refresh is the one that lands, so
+        # this is "busy", and re-marking the table stale would mark ITS fresh
+        # scores out of date — #1073 (c)'s second half.
+        db.rollback()
+        raise ParticipantTableBusy(PARTICIPANT_TABLE_BUSY_MESSAGE) from None
+    except Exception:
+        db.rollback()
+        try:
+            mark_participant_scores_stale(db, project_id)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.warning(
+                "participant table %s: the refresh failed and the stale marker "
+                "could not be restored", dataset_id, exc_info=True,
+            )
+        raise
 
     return RefreshReport(
         rows_added=row_report.added,

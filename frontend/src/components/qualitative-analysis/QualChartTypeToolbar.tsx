@@ -21,8 +21,13 @@ interface QualChartTypeToolbarProps {
   selectedCodeCount: number
   conversationSourceCount: number
   observationSourceCount: number
-  /** false under the consensus layer scope — the timeline reads the human layer (§8q DEC-6c-7). */
-  humanLayer: boolean
+  /**
+   * True under the Consensus layer scope, where the timeline has nothing to draw:
+   * the clip payload carries no consensus rows (§8q DEC-6c-7). The Coders and
+   * Machine layers both draw it since #1077 (b) — it was named `humanLayer` while
+   * the Machine layer drew a mixed chart under it.
+   */
+  consensusLayer: boolean
   categoryMode?: boolean
 }
 
@@ -40,7 +45,7 @@ export default function QualChartTypeToolbar({
   selectedCodeCount,
   conversationSourceCount,
   observationSourceCount,
-  humanLayer,
+  consensusLayer,
   categoryMode,
 }: QualChartTypeToolbarProps) {
   const buttons: ChartTypeButton[] = useMemo(() => [
@@ -49,8 +54,8 @@ export default function QualChartTypeToolbar({
     { type: 'stacked_bar', icon: Layers, label: 'Stacked Bar', applicable: selectedCodeCount >= 2 && !categoryMode, disabledReason: categoryMode ? 'Not available for categories' : 'Select 2+ codes' },
     { type: 'summary', icon: Table2, label: 'Summary Table', applicable: true },
     { type: 'saturation', icon: TrendingUp, label: 'Saturation', applicable: conversationSourceCount >= 2, disabledReason: 'Needs 2+ conversations' },
-    { type: 'timeline', icon: GanttChart, label: 'Timeline', applicable: observationSourceCount >= 1 && humanLayer, disabledReason: !humanLayer ? 'Timeline reads the human coding layer' : 'Needs an observation' },
-  ], [selectedCodeCount, conversationSourceCount, observationSourceCount, humanLayer, categoryMode])
+    { type: 'timeline', icon: GanttChart, label: 'Timeline', applicable: observationSourceCount >= 1 && !consensusLayer, disabledReason: consensusLayer ? 'Not available for the Consensus layer' : 'Needs an observation' },
+  ], [selectedCodeCount, conversationSourceCount, observationSourceCount, consensusLayer, categoryMode])
 
   const toolbarRef = useRef<HTMLDivElement>(null)
 

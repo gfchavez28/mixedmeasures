@@ -717,6 +717,11 @@ async def unarchive_coder(
         raise HTTPException(status_code=404, detail="Coder not found")
     if target.archived:
         target.archived = False
+        # The archive path's reason, reversed (Batch 6): a coder brought back
+        # VOTES again, so every rating score on the install may move. Archiving
+        # marked them; this did not, so the table read as current after a change
+        # to who counts.
+        mark_participant_scores_stale(db)
         db.commit()
         db.add(AuditEntry(
             user_id=user.id, action="coder_unarchived", entity_type="user", entity_id=target.id,

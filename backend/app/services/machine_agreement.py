@@ -269,13 +269,20 @@ def _backfill_units(
 
 
 def compute_machine_agreement(
-    db: Session, project_id: int,
+    db: Session, project_id: int, *, human_id: int | None = None,
 ) -> MachineAgreementResult:
     """Every (person × machine) pair's per-code agreement. Never a pooled figure.
 
     ⚠️ **Archived coders are excluded on BOTH sides**, matching the DEC-F voter
     roster: an archived colleague does not vote, and comparing a model against
     somebody who has left the project is a number nobody asked for.
+
+    🔴 **`human_id` narrows the PEOPLE to one, and it is what blind mode sends (#1030).**
+    A coder working blind may compare their OWN coding with a model — the model is
+    not a colleague, and its chips are already on their screen — but a colleague's
+    row would name them and describe their coding. Narrowed HERE, not by the client
+    hiding rows, so a colleague's figures never leave the server (the coding-progress
+    `coder_id` rule). The machines are never narrowed.
     """
     machines = (
         db.query(User)
@@ -286,15 +293,13 @@ def compute_machine_agreement(
     if not machines:
         return MachineAgreementResult(available=False, unavailable_reason=NO_MACHINE_CODER)
 
-    humans = (
-        db.query(User)
-        .filter(
-            User.coder_type.in_(RELIABILITY_CODER_TYPES),
-            User.archived == False,  # noqa: E712
-        )
-        .order_by(User.id)
-        .all()
+    human_q = db.query(User).filter(
+        User.coder_type.in_(RELIABILITY_CODER_TYPES),
+        User.archived == False,  # noqa: E712
     )
+    if human_id is not None:
+        human_q = human_q.filter(User.id == human_id)
+    humans = human_q.order_by(User.id).all()
     if not humans:
         return MachineAgreementResult(available=False, unavailable_reason=NO_HUMAN_CODER)
 

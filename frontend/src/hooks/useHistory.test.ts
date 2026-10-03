@@ -11,11 +11,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 
 const toastError = vi.fn()
-vi.mock('sonner', () => ({ toast: { error: (...a: unknown[]) => toastError(...a) } }))
+const toastInfo = vi.fn()
+vi.mock('sonner', () => ({
+  toast: {
+    error: (...a: unknown[]) => toastError(...a),
+    info: (...a: unknown[]) => toastInfo(...a),
+  },
+}))
 
 import { useHistory, type HistoryAction } from './useHistory'
 
-beforeEach(() => toastError.mockClear())
+beforeEach(() => { toastError.mockClear(); toastInfo.mockClear() })
 
 /**
  * A thrown API error. `status` is OMITTED unless given, which is the shape a
@@ -308,5 +314,88 @@ describe('useHistory — a second action queues rather than vanishing (#877)', (
     })
     expect(log).toEqual(['redo:A', 'undo:A'])
     expect(result.current.canUndo).toBe(false)
+  })
+})
+
+describe('useHistory — a stack belongs to ONE coder (#1042)', () => {
+  // Every coding endpoint acts as the SESSION coder and the workbench stays
+  // mounted across a switch, so an entry made as coder A used to replay as B.
+  const ALICE = 2
+  const BOB = 3
+
+  it('a coder switch clears BOTH stacks and says so', async () => {
+    const log: string[] = []
+    const { result, rerender } = renderHook(({ scope }) => useHistory(scope), {
+      initialProps: { scope: ALICE as number | null },
+    })
+    await act(async () => { await result.current.execute(recorded(log, 'a')) })
+    await act(async () => { await result.current.execute(recorded(log, 'b')) })
+    await act(async () => { await result.current.undo() })
+    expect(result.current.canUndo).toBe(true)
+    expect(result.current.canRedo).toBe(true)
+
+    rerender({ scope: BOB })
+    expect(result.current.canUndo).toBe(false)
+    expect(result.current.canRedo).toBe(false)
+    expect(toastInfo).toHaveBeenCalledTimes(1)
+    expect(toastInfo.mock.calls[0][0]).toBe('Undo history cleared')
+  })
+
+  it('an undo after the switch never replays the old coder’s entry', async () => {
+    const log: string[] = []
+    const { result, rerender } = renderHook(({ scope }) => useHistory(scope), {
+      initialProps: { scope: ALICE as number | null },
+    })
+    await act(async () => { await result.current.execute(recorded(log, 'pacing')) })
+    rerender({ scope: BOB })
+    await act(async () => { await result.current.undo() })
+    await act(async () => { await result.current.redo() })
+    expect(log).toEqual(['redo:pacing'])
+  })
+
+  it('a step still in flight at the switch is not recorded into the new coder’s stack', async () => {
+    const log: string[] = []
+    let finish!: () => void
+    const { result, rerender } = renderHook(({ scope }) => useHistory(scope), {
+      initialProps: { scope: ALICE as number | null },
+    })
+    let pending!: Promise<void>
+    await act(async () => {
+      pending = result.current.execute(recorded(log, 'slow', {
+        redo: () => new Promise<void>((resolve) => { finish = () => { log.push('redo:slow'); resolve() } }),
+      }))
+      // Let the queued job START, so the switch lands while it is in flight.
+      await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    })
+    rerender({ scope: BOB })
+    await act(async () => { finish(); await pending })
+    expect(log).toEqual(['redo:slow'])
+    expect(result.current.canUndo).toBe(false)
+  })
+
+  it('the first answer of the session — no coder, then a coder — clears nothing and says nothing', () => {
+    const { result, rerender } = renderHook(({ scope }) => useHistory(scope), {
+      initialProps: { scope: null as number | null },
+    })
+    rerender({ scope: ALICE })
+    expect(result.current.canUndo).toBe(false)
+    expect(toastInfo).not.toHaveBeenCalled()
+  })
+
+  it('the same coder re-rendering keeps the stack', async () => {
+    const { result, rerender } = renderHook(({ scope }) => useHistory(scope), {
+      initialProps: { scope: ALICE as number | null },
+    })
+    await act(async () => { await result.current.execute(recorded([], 'a')) })
+    rerender({ scope: ALICE })
+    expect(result.current.canUndo).toBe(true)
+    expect(toastInfo).not.toHaveBeenCalled()
+  })
+
+  it('WITHOUT a scope — the dataset, variables and canvas stacks — nothing is cleared', async () => {
+    const { result, rerender } = renderHook(() => useHistory())
+    await act(async () => { await result.current.execute(recorded([], 'a')) })
+    rerender()
+    expect(result.current.canUndo).toBe(true)
   })
 })

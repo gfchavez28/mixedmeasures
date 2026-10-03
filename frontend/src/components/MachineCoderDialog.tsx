@@ -12,7 +12,7 @@ import MachineProvenanceFields, {
   type MachineProvenanceValues,
 } from '@/components/MachineProvenanceFields'
 import {
-  formatParameters, parseParameters, provenanceLockReason,
+  formatParameters, provenanceFromDraft, provenanceLockReason,
 } from '@/lib/machine-coder'
 import { serverDetailMessage } from '@/lib/api/error-utils'
 
@@ -60,32 +60,24 @@ export default function MachineCoderDialog({
   const save = useMutation({
     mutationFn: async () => {
       if (!coder) return
-      const { model, access, prompt, parameters } = fields
-      const trimmedModel = model.trim()
-      const params = parseParameters(parameters)
       return authApi.updateCoder(coder.id, {
         username: username.trim(),
         // 🔴 Omitted while LOCKED, rather than sent unchanged: an unchanged
         // value would still be a provenance CHANGE to the endpoint, which
         // refuses one — so the researcher could not rename a coder that has
         // coded, which is exactly what #999 is about.
-        ...(locked
-          ? {}
-          : {
-            machine_provenance: trimmedModel
-              ? {
-                model: trimmedModel,
-                ...(access ? { access } : {}),
-                ...(prompt.trim() ? { prompt: prompt.trim() } : {}),
-                ...(Object.keys(params).length ? { parameters: params } : {}),
-              }
-              : null,
-          }),
+        // #1006 — the ONE draft → provenance builder the coding import uses too.
+        ...(locked ? {} : { machine_provenance: provenanceFromDraft(fields) }),
       })
     },
     onSuccess: () => {
       // Prefix-matched, so Settings' `['coders', 'all']` refreshes too.
       queryClient.invalidateQueries({ queryKey: ['coders'] })
+      // #1038 (d): the Model comparison table carries the model's NAME and
+      // configuration in its own payload, so a rename or a newly recorded
+      // configuration read stale there until the cache aged out. A coder is
+      // install-wide, hence every project's (the key's prefix).
+      queryClient.invalidateQueries({ queryKey: ['machine-agreement'] })
       onOpenChange(false)
     },
     onError: (err) => toast.error(
@@ -100,10 +92,27 @@ export default function MachineCoderDialog({
       <DialogContent className="sm:max-w-[520px]">
         <DialogHeader>
           <DialogTitle>Machine coder — {coder.username}</DialogTitle>
-          <DialogDescription>
-            Which model produced these labels, how it was reached, and under what
-            instructions. Recording it is what makes the coding citable; without
-            it nobody, including you later, can say what produced these codes.
+          {/* 🔴 The lock is IN the description (`asChild` onto a div — a warning
+              box is block content a <p> may not hold). It sat between the Name
+              field and the fields it explains, attached to nothing, and those
+              fields are disabled — so a keyboard user tabbed Name → Cancel →
+              Save and never learned the configuration exists, let alone why it
+              cannot change (a11y-name-sweep run 9). */}
+          <DialogDescription asChild>
+            <div className="space-y-2">
+              <p>
+                Which model produced these labels, how it was reached, and under what
+                instructions. Recording it is what makes the coding citable; without
+                it nobody, including you later, can say what produced these codes.
+              </p>
+              {locked && (
+                <p
+                  className="text-xs rounded-md border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/40 px-2.5 py-2 text-amber-900 dark:text-amber-100"
+                >
+                  {locked}
+                </p>
+              )}
+            </div>
           </DialogDescription>
         </DialogHeader>
 
@@ -116,14 +125,6 @@ export default function MachineCoderDialog({
               onChange={e => setUsername(e.target.value)}
             />
           </div>
-
-          {locked && (
-            <p
-              className="text-xs rounded-md border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/40 px-2.5 py-2 text-amber-900 dark:text-amber-100"
-            >
-              {locked}
-            </p>
-          )}
 
           <fieldset disabled={!!locked}>
             <MachineProvenanceFields

@@ -20,6 +20,7 @@ from ..schemas.coding import (
     MagnitudeValueUpdate,
     RatingQueueCodeCountResponse,
     RatingQueueEntryResponse,
+    ReplacedOnTarget,
     RatingQueueResponse,
 )
 from ..auth import get_current_user
@@ -170,6 +171,24 @@ async def apply_code(
         except magnitude.MagnitudeError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
+    # 🔴 #1028 — a VALUE of a code set replaces this coder's other value of that
+    # set, here as at the set's own endpoint. This door is where a chord, a click
+    # in the code list, the context menu and *+ Add code* all land, and it used to
+    # ADD a second value: the coder dropped out of the set's α on that passage and
+    # no consensus row was written, with nothing on screen saying so. Across the
+    # segment GROUP, because the apply below fans out to it. Before the `existing`
+    # return: a coder holding two values who presses one of them is choosing it.
+    removed = code_set_rules.clear_rivals_before_apply(
+        db, code, user_id=user.id, segment_ids=group_target_ids(db, segment),
+    )
+    replaced = code_set_rules.replaced_code_ids(removed)
+    # #1070 — per SEGMENT as well: a group's siblings can lose different values,
+    # and the undo has to put back each one's own.
+    replaced_by_target = [
+        ReplacedOnTarget(segment_id=sid, replaced_code_ids=sorted(set(ids)))
+        for sid, ids in sorted(removed.items()) if ids
+    ]
+
     if existing:
         # Already applied by this coder. Re-applying is a no-op EXCEPT for a
         # rating: variant A's flow can arrive here when a coder re-rates, and
@@ -178,15 +197,24 @@ async def apply_code(
         # door that updated a single row. It runs whenever the segment is grouped,
         # not only when THIS row changed, because a sibling may carry a stale
         # value or a merge flag this row does not.
-        if rating_supplied and (
+        rerated = rating_supplied and (
             existing.magnitude != rating
             or existing.magnitude_conflict is not None
             or segment.group_id
-        ):
+        )
+        if rerated:
             existing.magnitude = rating
             # #35 — rating it again IS the adjudication of a merge conflict.
             existing.magnitude_conflict = None
             _fan_out_rating(db, segment, code_id, user.id, rating)
+        if replaced:
+            log_action(
+                db, action="code_set_selection", entity_type="code_application",
+                entity_id=existing.id, user_id=user.id, project_id=project_id,
+                details={"segment_id": segment_id, "code_id": code_id,
+                         "replaced_code_ids": replaced},
+            )
+        if rerated or replaced:
             _mark_segment_consensus_stale(db, project_id, segment)
             db.commit()
         return CodeApplicationResponse(
@@ -195,6 +223,8 @@ async def apply_code(
             applied=True,
             created_at=existing.created_at,
             magnitude=existing.magnitude,
+            replaced_code_ids=replaced,
+            replaced_by_target=replaced_by_target,
         )
 
     # Apply code
@@ -253,7 +283,12 @@ async def apply_code(
         entity_id=application.id,
         user_id=user.id,
         project_id=project_id,
-        details={"segment_id": segment_id, "code_id": code_id}
+        details={
+            "segment_id": segment_id, "code_id": code_id,
+            # #1028 — provenance of the swap: which of this coder's values the
+            # apply removed. Only present when it removed something.
+            **({"replaced_code_ids": replaced} if replaced else {}),
+        },
     )
     _mark_segment_consensus_stale(db, project_id, segment)
     db.commit()
@@ -264,6 +299,8 @@ async def apply_code(
         applied=True,
         created_at=application.created_at,
         magnitude=application.magnitude,
+        replaced_code_ids=replaced,
+        replaced_by_target=replaced_by_target,
     )
 
 
@@ -578,6 +615,17 @@ async def bulk_code(
     ).all()
     existing_set = {ca.segment_id for ca in existing_apps}
 
+    # 🔴 #1028 — a bulk apply of a code-set VALUE replaces this coder's other
+    # value on each listed segment, exactly as the single door does. Only the
+    # LISTED segments: this endpoint has never fanned out to a group, and the
+    # swap must cover what the apply covers and nothing else.
+    replaced_by_segment: dict[int, list[int]] = {}
+    if data.action == "apply":
+        replaced_by_segment = code_set_rules.clear_rivals_before_apply(
+            db, code, user_id=user.id,
+            segment_ids=[sid for sid in requested_ids if sid in segment_map],
+        )
+
     results = []
     success_count = 0
     error_count = 0
@@ -610,7 +658,8 @@ async def bulk_code(
             results.append(CodeApplicationResponse(
                 segment_id=segment_id,
                 code_id=data.code_id,
-                applied=True
+                applied=True,
+                replaced_code_ids=replaced_by_segment.get(segment_id, []),
             ))
         else:  # remove
             # For remove, we still need to delete but can do it in batch after the loop
@@ -653,7 +702,13 @@ async def bulk_code(
             entity_type="code_application",
             user_id=user.id,
             project_id=code.project_id,
-            details={"code_id": data.code_id, "segment_ids": affected_ids, "bulk": True},
+            details={
+                "code_id": data.code_id, "segment_ids": affected_ids, "bulk": True,
+                # #1028 — which of this coder's values each segment lost.
+                **({"replaced_code_ids_by_segment": {
+                    str(sid): ids for sid, ids in replaced_by_segment.items()
+                }} if replaced_by_segment else {}),
+            },
         )
 
     db.commit()

@@ -710,7 +710,11 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
       if (config.coder_ids?.length > 0) next.set('coders', config.coder_ids.join(','))
       else next.delete('coders')
 
-      if (config.layer_scope === 'consensus') next.set('layer', 'consensus')
+      // #1098 — every layer the saver writes, not only consensus: a material
+      // saved on the Machine layer reopened on the Coders layer, a different
+      // chart under the same name. `asLayerScope` is the one narrowing (#989).
+      const savedLayer = asLayerScope(config.layer_scope)
+      if (savedLayer !== 'human') next.set('layer', savedLayer)
       else next.delete('layer')
 
       // Descriptives

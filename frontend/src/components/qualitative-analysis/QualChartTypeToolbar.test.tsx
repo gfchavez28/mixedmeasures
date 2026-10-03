@@ -22,7 +22,7 @@ function renderToolbar(over: Partial<React.ComponentProps<typeof QualChartTypeTo
         selectedCodeCount={3}
         conversationSourceCount={2}
         observationSourceCount={1}
-        humanLayer
+        consensusLayer={false}
         {...over}
       />
     </TooltipProvider>,
@@ -41,7 +41,7 @@ describe('the Timeline chart-type gate', () => {
   })
 
   it('disables under the consensus layer scope', () => {
-    renderToolbar({ humanLayer: false })
+    renderToolbar({ consensusLayer: true })
     expect(screen.getByRole('button', { name: 'Timeline' })).toBeDisabled()
   })
 })

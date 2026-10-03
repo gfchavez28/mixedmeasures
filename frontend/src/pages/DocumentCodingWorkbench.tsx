@@ -12,7 +12,8 @@ import { useTextSplitSelection } from '@/hooks/useTextSplitSelection'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import { useCodeChordShortcuts } from '@/hooks/useCodeChordShortcuts'
-import { ratableCodes } from '@/lib/rating-targets'
+import { liveRatingCode, ratableCodes } from '@/lib/rating-targets'
+import { scaleSignature } from '@/lib/magnitude'
 import MagnitudeStrip from '@/components/MagnitudeStrip'
 import { CodeSetStrip } from '@/components/CodeSetStrip'
 import { codeKeyHint } from '@/lib/codeShortcuts'
@@ -39,6 +40,10 @@ import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import { describeQuoteNotesStayed } from '@/lib/split-disclosure'
 import { optionOrdinals, optionPositionAria } from '@/lib/listbox-aria'
 import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
+import {
+  captureApply, planApplyUndo, replacedFromBulk, replacedFromSingle, runApplyUndo,
+  segmentUndoApi, type ApplyCapture, type Replaced,
+} from '@/lib/apply-undo'
 import { isSegmentCodedVisible, computeCoverage } from '@/lib/coding-progress'
 import BlindModeToggle from '@/components/BlindModeToggle'
 import CoderCountBadge from '@/components/CoderCountBadge'
@@ -59,7 +64,7 @@ import { useListLoad } from '@/hooks/useListLoad'
 import type { ListStatus } from '@/lib/list-status'
 import MemoPanel, { type MemoPanelHandle } from '@/components/MemoPanel'
 import InlineCodeActions from '@/components/qualitative-analysis/InlineCodeActions'
-import { useCoders } from '@/hooks/useCoders'
+import { useCoders, useMachineCoderIds } from '@/hooks/useCoders'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { useAuth } from '@/lib/auth-context'
 import CoderFilterPopover from '@/components/CoderFilterPopover'
@@ -142,13 +147,14 @@ export default function DocumentCodingWorkbench() {
   const documentId = Number(documentIdStr)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const history = useHistory()
   // Coder roster lens (Track J · J1) — attribution badges + visibility filter, multi-coder only.
   const { coders, coderMap, multiCoder, multiHumanCoder } = useCoders()
   const { user } = useAuth()
   // Active coder: apply/remove + "applied" checks act on MY own layer, never any
   // coder's (#446). `selfId == null` (coder unknown) falls back to any-coder.
   const selfId = user?.id ?? null
+  // #1042: the stack is this coder's — a coder switch clears it.
+  const history = useHistory(selfId)
   const [hiddenCoders, setHiddenCoders] = useState<Set<number>>(new Set())
   // #451: archived coders' chips hidden by default; "view all coders" reveals them.
   const [showArchivedCoders, setShowArchivedCoders] = useState(false)
@@ -157,6 +163,8 @@ export default function DocumentCodingWorkbench() {
   // unanswered); the wording keys on `blind` (only once it is known).
   const { blind, withholding, blindLens, toggleReveal } = useBlindMode(projectId)
   const effectiveHidden = withholding ? blindLens : hiddenCoders
+  // #1029 — a model's labels never count toward the gauge, the bar or `j`.
+  const machineCoderIds = useMachineCoderIds()
   // Group A (#457): who coded THIS document — drives the picklist "active here" markers.
   const coderCoverage = useCoderCoverage(
     projectId, { documentId }, { enabled: multiCoder, rosterCoderIds: coders.map(c => c.id) },
@@ -500,6 +508,10 @@ export default function DocumentCodingWorkbench() {
   // `CodingWorkbench` against THIS page's cache shape: the document detail's
   // `segments[].codes[]`, one entry per (code, coder), each carrying `magnitude`.
   const [ratingTarget, setRatingTarget] = useState<{ segmentId: number; code: Code } | null>(null)
+  // #1112: the strip shows the LIVE code, so a scale saved while it is open
+  // (and a rename) reaches it; the mount keys on the scale's signature so a
+  // new step remounts it with a fresh cursor (`lib/rating-targets.ts`).
+  const ratingCode = ratingTarget ? liveRatingCode(ratingTarget.code, codeMap) : null
 
   // The rating THIS coder currently holds, read from the cache the chips render
   // from, so the strip opens showing what is actually stored. `?? null`, never
@@ -661,18 +673,53 @@ export default function DocumentCodingWorkbench() {
     })
   }, [currentMagnitude, history, invalidateAfterCodeChange])
 
+  /**
+   * This page names a code application `{id, user_id}` where the others say
+   * `{code_id, user_id}`; projected ONCE here, for the set strip and for the
+   * apply entries' capture, with the rating (#1023, #1028).
+   */
+  const segmentDetails = useCallback(
+    (segmentId: number) => segmentMap.get(segmentId)?.codes.map(c => ({
+      code_id: c.id, user_id: c.user_id ?? null, magnitude: c.magnitude,
+    })),
+    [segmentMap],
+  )
+
+  const codeName = useCallback((codeId: number) => codeMap.get(codeId)?.name ?? 'code', [codeMap])
+
+  /**
+   * #1028: the undo of one or more applies — remove each code only where the act
+   * put it, and put back any code-set value the server reports it replaced
+   * (`lib/apply-undo.ts`). This page refetches after every change, so there is
+   * nothing to paint.
+   */
+  const undoApplies = useCallback(
+    async (applies: readonly { capture: ApplyCapture; replaced: Replaced }[], single: boolean) => {
+      for (const { capture, replaced } of applies) {
+        await runApplyUndo(planApplyUndo(capture, replaced), segmentUndoApi(single), codeName)
+      }
+      invalidateAfterCodeChange()
+    },
+    [codeName, invalidateAfterCodeChange],
+  )
+
   const applySingle = useCallback((segmentId: number, code: Code) => {
+    const capture = captureApply(code.id, [segmentId], segmentDetails, selfId)
+    let replaced: Replaced = new Map()
     history.execute({
       type: 'code_apply',
       description: `Apply code "${code.name}"`,
-      redo: async () => { await codingApi.applyCode(segmentId, code.id); invalidateAfterCodeChange() },
-      undo: async () => { await codingApi.removeCode(segmentId, code.id); invalidateAfterCodeChange() },
+      redo: async () => {
+        replaced = replacedFromSingle(segmentId, await codingApi.applyCode(segmentId, code.id))
+        invalidateAfterCodeChange()
+      },
+      undo: () => undoApplies([{ capture, replaced }], true),
     })
     // #35 variant A — a scaled code opens its strip straight after applying, so
     // the judgement is made with the anchors on screen. Now true of EVERY
     // single-segment apply door, not only the chord (#868 e).
     if (code.magnitude_scale) setRatingTarget({ segmentId, code })
-  }, [history, invalidateAfterCodeChange, setRatingTarget])
+  }, [history, invalidateAfterCodeChange, setRatingTarget, segmentDetails, selfId, undoApplies])
 
   /**
    * The chip's own controls (#875). They act on the row that owns the chip,
@@ -708,6 +755,22 @@ export default function DocumentCodingWorkbench() {
       // rating standing in for several judgements is not a rating.
       if (allHaveCode) removeSingle(selectedSegments[0], codeId, codeName)
       else applySingle(selectedSegments[0], code)
+    } else if (!allHaveCode) {
+      // #1028: the undo removes the code only from segments the act put it on
+      // and puts back any code-set value the server reports it replaced.
+      const capture = captureApply(codeId, segmentIds, segmentDetails, selfId)
+      let replaced: Replaced = new Map()
+      history.execute({
+        type: 'code_apply',
+        description: `Apply code "${codeName}" to ${segmentIds.length} segments`,
+        redo: async () => {
+          const result = await codingApi.bulkCode(segmentIds, codeId, 'apply')
+          reportBulkOutcome(result, 'apply')
+          replaced = replacedFromBulk(result)
+          invalidateAfterCodeChange()
+        },
+        undo: () => undoApplies([{ capture, replaced }], false),
+      })
     } else {
       const action = allHaveCode ? 'remove' : 'apply'
       // #868 (f), the multi-segment arm: one captured rating per segment; the
@@ -733,26 +796,29 @@ export default function DocumentCodingWorkbench() {
       })
     }
     showSaved()
-  }, [selectedSegments, segmentMap, history, invalidateAfterCodeChange, reportBulkOutcome, showSaved, selfId, currentMagnitude, applySingle, removeSingle])
+  }, [selectedSegments, segmentMap, history, invalidateAfterCodeChange, reportBulkOutcome, showSaved, selfId, currentMagnitude, applySingle, removeSingle, segmentDetails, undoApplies])
 
   const handleMultiCodeToggle = useCallback((codesToToggle: Code[]) => {
     if (selectedSegments.length === 0 || codesToToggle.length === 0) return
     const segmentIds = [...selectedSegments]
     const codeNames = codesToToggle.map(c => c.name).join(', ')
+    // #1028: captured per code — the undo removes each only where it put it
+    // (it stripped one a segment already had) and puts back a replaced value.
+    const captures = codesToToggle.map(code => captureApply(code.id, segmentIds, segmentDetails, selfId))
+    let replacedByCode: Replaced[] = codesToToggle.map(() => new Map())
     history.execute({
       type: 'code_apply',
       description: `Apply codes "${codeNames}" to ${segmentIds.length} segment(s)`,
       redo: async () => {
-        reportBulkOutcome(await Promise.all(codesToToggle.map(code => codingApi.bulkCode(segmentIds, code.id, 'apply'))), 'apply')
+        const results = await Promise.all(codesToToggle.map(code => codingApi.bulkCode(segmentIds, code.id, 'apply')))
+        reportBulkOutcome(results, 'apply')
+        replacedByCode = results.map(r => replacedFromBulk(r))
         invalidateAfterCodeChange()
       },
-      undo: async () => {
-        reportBulkOutcome(await Promise.all(codesToToggle.map(code => codingApi.bulkCode(segmentIds, code.id, 'remove'))), 'remove')
-        invalidateAfterCodeChange()
-      },
+      undo: () => undoApplies(captures.map((capture, i) => ({ capture, replaced: replacedByCode[i] })), false),
     })
     showSaved()
-  }, [selectedSegments, history, invalidateAfterCodeChange, reportBulkOutcome, showSaved])
+  }, [selectedSegments, history, invalidateAfterCodeChange, reportBulkOutcome, showSaved, segmentDetails, selfId, undoApplies])
 
   // ── Quote toggle (with history) ──
 
@@ -928,7 +994,7 @@ export default function DocumentCodingWorkbench() {
     for (let offset = 1; offset <= filteredSegments.length; offset++) {
       const idx = (currentIdx + offset) % filteredSegments.length
       const seg = filteredSegments[idx]
-      if (!isSegmentCodedVisible(seg.codes, effectiveHidden)) {
+      if (!isSegmentCodedVisible(seg.codes, effectiveHidden, machineCoderIds)) {
         setSelectedSegments([seg.id])
         const listIdx = segIdToListIndex.get(seg.id)
         if (listIdx != null) virtuosoRef.current?.scrollToIndex({ index: listIdx, align: 'center', behavior: 'smooth' })
@@ -936,7 +1002,7 @@ export default function DocumentCodingWorkbench() {
       }
     }
     toast('All segments are coded')
-  }, [selectedSegments, filteredSegments, segIdToListIndex, effectiveHidden])
+  }, [selectedSegments, filteredSegments, segIdToListIndex, effectiveHidden, machineCoderIds])
 
   // ── Selection helpers ──
 
@@ -1221,8 +1287,8 @@ export default function DocumentCodingWorkbench() {
   // visible coders. Documents have no facilitator, so visible segments are the denominator.
 
   const codedCount = useMemo(() =>
-    computeCoverage(visibleSegments, s => s.codes, effectiveHidden).codedVisible
-  , [visibleSegments, effectiveHidden])
+    computeCoverage(visibleSegments, s => s.codes, effectiveHidden, machineCoderIds).codedVisible
+  , [visibleSegments, effectiveHidden, machineCoderIds])
 
   const progressPercent = visibleSegments.length > 0
     ? Math.round((codedCount / visibleSegments.length) * 100)
@@ -1235,11 +1301,11 @@ export default function DocumentCodingWorkbench() {
     const w = 100 / visibleSegments.length
     visibleSegments.forEach((seg, i) => {
       // coded = mm-purple (document codes), uncoded = neutral; CSS vars rebalance per theme.
-      const color = isSegmentCodedVisible(seg.codes, effectiveHidden) ? 'hsl(var(--mm-purple))' : 'hsl(var(--mm-border-medium))'
+      const color = isSegmentCodedVisible(seg.codes, effectiveHidden, machineCoderIds) ? 'hsl(var(--mm-purple))' : 'hsl(var(--mm-border-medium))'
       stops.push(`${color} ${i * w}%`, `${color} ${(i + 1) * w}%`)
     })
     return { background: `linear-gradient(to right, ${stops.join(', ')})` }
-  }, [visibleSegments, effectiveHidden])
+  }, [visibleSegments, effectiveHidden, machineCoderIds])
 
   // ── Context menu code apply (from right-click) ──
 
@@ -1250,27 +1316,16 @@ export default function DocumentCodingWorkbench() {
     if (!selectedSegments.includes(segmentId)) {
       setSelectedSegments([segmentId])
     }
-    // Then toggle via normal path — but since selection updates async, call directly
+    // Acts on `segmentId` directly — the selection above updates async.
+    // ⚠️ Through the SHARED single pair (#875's rule), which this handler was a
+    // private copy of: it never opened the rating strip for a scaled code, and it
+    // would have missed #1028's undo of a replaced code-set value.
     const seg = segmentMap.get(segmentId)
     const has = seg?.codes?.some(c => c.id === codeId && (selfId == null || c.user_id === selfId)) ?? false
-    // #868 (f): the inverse of a removal re-applies with the captured rating.
-    const previous = has ? currentMagnitude(segmentId, codeId) : null
-    history.execute({
-      type: has ? 'code_remove' : 'code_apply',
-      description: `${has ? 'Remove' : 'Apply'} code "${code.name}"`,
-      redo: async () => {
-        if (has) await codingApi.removeCode(segmentId, codeId)
-        else await codingApi.applyCode(segmentId, codeId)
-        invalidateAfterCodeChange()
-      },
-      undo: async () => {
-        if (has) await codingApi.applyCode(segmentId, codeId, undefined, previous)
-        else await codingApi.removeCode(segmentId, codeId)
-        invalidateAfterCodeChange()
-      },
-    })
+    if (has) removeSingle(segmentId, codeId, code.name)
+    else applySingle(segmentId, code)
     showSaved()
-  }, [codeMap, selectedSegments, segmentMap, history, invalidateAfterCodeChange, showSaved, selfId, currentMagnitude])
+  }, [codeMap, selectedSegments, segmentMap, showSaved, selfId, removeSingle, applySingle])
 
   // ── Render ──
 
@@ -1501,7 +1556,7 @@ export default function DocumentCodingWorkbench() {
         </div>
 
         {multiHumanCoder && <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="document_workbench" />}
-        <CoderCountBadge projectId={projectId} documentId={documentId} enabled={multiCoder} />
+        <CoderCountBadge projectId={projectId} documentId={documentId} enabled={multiCoder} withholding={withholding} />
 
         {/* Codebook */}
         <Button variant="ghost" size="icon" onClick={openCodebook} title="Codebook" aria-label="Codebook">
@@ -1806,14 +1861,14 @@ export default function DocumentCodingWorkbench() {
             can happen. Keyed on the target (#870 c) so a second scaled apply
             remounts it with a fresh cursor and focus.
           */}
-          {ratingTarget && ratingTarget.code.magnitude_scale && (
+          {ratingTarget && ratingCode?.magnitude_scale && (
             // py-1, not py-2: the vertical budget at 640×360 is 85px for the
             // whole control (measured; see MagnitudeStrip's root comment).
             <div className="border-t border-border bg-mm-surface px-3 py-1 shrink-0">
               <MagnitudeStrip
-                key={`${ratingTarget.segmentId}-${ratingTarget.code.id}`}
-                codeName={ratingTarget.code.name}
-                scale={ratingTarget.code.magnitude_scale}
+                key={`${ratingTarget.segmentId}-${ratingTarget.code.id}-${scaleSignature(ratingCode.magnitude_scale)}`}
+                codeName={ratingCode.name}
+                scale={ratingCode.magnitude_scale}
                 value={currentMagnitude(ratingTarget.segmentId, ratingTarget.code.id)}
                 onCommit={commitMagnitude}
                 onSkip={() => setRatingTarget(null)}
@@ -1854,11 +1909,10 @@ export default function DocumentCodingWorkbench() {
                 codeSets={
                   /* Row 48 — SINGLE segment only (see the conversation twin).
                      ⚠️ This payload names a code application `{id, user_id}`
-                     where the others say `{code_id, user_id}`, so the identity
-                     is projected here rather than in the shared derivation — and
-                     the RATING rides with it, because undoing a swap re-rates the
-                     value it brings back (#1023; `magnitude` is required, so
-                     dropping it does not compile). */
+                     where the others say `{code_id, user_id}`; `segmentDetails`
+                     projects it ONCE, WITH the rating, because undoing a swap
+                     re-rates the value it brings back (#1023; `magnitude` is
+                     required, so dropping it does not compile). */
                   <CodeSetStrip
                     projectId={projectId}
                     target={
@@ -1867,13 +1921,10 @@ export default function DocumentCodingWorkbench() {
                         : null
                     }
                     appliedCodeDetails={
-                      selectedSegments.length === 1
-                        ? segmentMap.get(selectedSegments[0])?.codes.map(c => ({
-                            code_id: c.id, user_id: c.user_id ?? null, magnitude: c.magnitude,
-                          }))
-                        : undefined
+                      selectedSegments.length === 1 ? segmentDetails(selectedSegments[0]) : undefined
                     }
                     activeCoderId={selfId}
+                    codes={codes}
                     history={history}
                     onSettled={() => {
                       queryClient.invalidateQueries({

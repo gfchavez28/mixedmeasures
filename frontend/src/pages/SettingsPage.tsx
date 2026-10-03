@@ -39,7 +39,7 @@ import { getContrastColor } from '@/lib/utils'
 import { apaCitation, bibtexCitation, CITATION_LICENSE } from '@/lib/citation'
 import { MMBACKUP_ACCEPT } from '@/lib/mm-formats'
 import { isMachineCoder } from '@/lib/coding-layers'
-import { describeProvenance } from '@/lib/machine-coder'
+import { describeProvenance, editMachineCoderHint } from '@/lib/machine-coder'
 import MachineCoderDialog from '@/components/MachineCoderDialog'
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
@@ -781,7 +781,7 @@ function CoderRosterManager({
                   type="button"
                   onClick={() => setEditingMachine(c)}
                   aria-label={`Edit ${c.username}`}
-                  title="Edit the name and the model configuration"
+                  title={editMachineCoderHint(c)}
                   className="p-1 rounded text-mm-text-muted hover:text-mm-text"
                 >
                   <Pencil className="w-3.5 h-3.5" />

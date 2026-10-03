@@ -1,4 +1,5 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
+import { PARTICIPANT_LIST_LIMIT, searchParticipants, shownOfTotal } from '@/lib/participant-search'
 import { Link } from 'react-router'
 import { SELECTED_ROW } from '@/lib/selection'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -14,6 +15,7 @@ import {
   CircleAlert,
   ExternalLink,
   ChevronRight,
+  Search,
 } from 'lucide-react'
 import {
   participantsApi,
@@ -60,7 +62,9 @@ export default function ParticipantsPage() {
     staleTime: 30_000,
   })
 
-  const participants = participantsData?.participants || []
+  // Memoised so it is the SAME array between renders — the search index in
+  // `lib/participant-search.ts` is cached per array (#1052).
+  const participants = useMemo(() => participantsData?.participants ?? [], [participantsData])
   const datasets = datasetsData?.datasets || []
 
   // Add participant form state
@@ -195,20 +199,95 @@ export default function ParticipantsPage() {
   })
 
   const orphanCount = participants.filter(isOrphanedParticipant).length
-  const visibleParticipants = showOrphansOnly
-    ? participants.filter(isOrphanedParticipant)
-    : participants
+
+  /**
+   * #1052 — the table renders at most `shownLimit` rows, and search reaches the
+   * rest. It rendered one row per participant, and a survey imported with
+   * identifier linking makes one participant per record: MEASURED at 20,000
+   * participants, 25.9 s to open and 640,162 DOM nodes; the BES file's 122,382
+   * would be six times that, the renderer-out-of-memory shape of #1045. The
+   * count line says the table stops early (#844's rule), and "Show more" widens
+   * it on request. Search and ranking are `lib/participant-search.ts`, shared
+   * with the two participant pickers.
+   *
+   * ⚠️ Select-all acts on the rows SHOWN, and says so when that is not all of
+   * them: selecting thousands of rows nobody can see, for a bulk delete that
+   * issues one request per participant, is not a gesture a checkbox should make.
+   */
+  const [search, setSearch] = useState('')
+  const [shownLimit, setShownLimit] = useState(PARTICIPANT_LIST_LIMIT)
+  const filterBase = useMemo(
+    () => (showOrphansOnly ? participants.filter(isOrphanedParticipant) : participants),
+    [participants, showOrphansOnly],
+  )
+  const visibleParticipants = useMemo(() => searchParticipants(filterBase, search), [filterBase, search])
+  const renderedParticipants = useMemo(
+    () => visibleParticipants.slice(0, shownLimit),
+    [visibleParticipants, shownLimit],
+  )
+  const hiddenCount = visibleParticipants.length - renderedParticipants.length
+  const tableNote = shownOfTotal(renderedParticipants.length, visibleParticipants.length, search.trim() !== '')
+  const changeSearch = (value: string) => {
+    setSearch(value)
+    setShownLimit(PARTICIPANT_LIST_LIMIT)
+  }
+
+  // "Show more" unmounts itself when it reveals the last rows, which would drop
+  // a keyboard user's focus to <body> (#955's class). Every press therefore
+  // moves focus to the FIRST row it revealed — where reading continues anyway.
+  const tableBodyRef = useRef<HTMLTableSectionElement>(null)
+  const focusRowAfterReveal = useRef<number | null>(null)
+  useEffect(() => {
+    const index = focusRowAfterReveal.current
+    if (index === null) return
+    focusRowAfterReveal.current = null
+    const row = tableBodyRef.current?.querySelectorAll<HTMLTableRowElement>('tr[data-participant-row]')[index]
+    row?.focus()
+  }, [shownLimit])
+  const showMore = () => {
+    focusRowAfterReveal.current = renderedParticipants.length
+    setShownLimit((n) => n + PARTICIPANT_LIST_LIMIT)
+  }
+
+  /**
+   * 🔴 #1072 — THE selection every act reads: the checked rows that are SHOWN.
+   *
+   * `selectedIds` survives a search (so a row checked, hidden and shown again is
+   * still checked), and it used to be what *Delete selected* deleted — so after
+   * select-all on the first rows and a search that hid them, the bar still said
+   * "20 selected" over one unchecked row and the delete removed twenty people
+   * nobody could see: irreversible, and it makes a later withdrawal request
+   * harder (`backend-invariants.md` §5). Deriving it here, rather than pruning the
+   * state on each way a row can disappear (a search, a filter, a refresh after a
+   * delete elsewhere), is what keeps it true of every one of them.
+   */
+  const selectedShownIds = useMemo(
+    () => renderedParticipants.filter((p) => selectedIds.has(p.id)).map((p) => p.id),
+    [renderedParticipants, selectedIds],
+  )
+  const selectedCount = selectedShownIds.length
+  // The confirm NAMES who it deletes — a count alone ties the act to nothing a
+  // reader can check against the table.
+  const selectedNames = useMemo(() => {
+    const labels = renderedParticipants
+      .filter((p) => selectedIds.has(p.id))
+      .map((p) => p.display_name || p.identifier)
+    return labels.length <= 3
+      ? labels.join(', ')
+      : `${labels.slice(0, 3).join(', ')} and ${(labels.length - 3).toLocaleString()} more`
+  }, [renderedParticipants, selectedIds])
+
   const allVisibleSelected =
-    visibleParticipants.length > 0 &&
-    visibleParticipants.every((p) => selectedIds.has(p.id))
+    renderedParticipants.length > 0 &&
+    renderedParticipants.every((p) => selectedIds.has(p.id))
   const toggleSelectAll = () => {
     setSelectedIds((prev) => {
       if (allVisibleSelected) {
         const next = new Set(prev)
-        visibleParticipants.forEach((p) => next.delete(p.id))
+        renderedParticipants.forEach((p) => next.delete(p.id))
         return next
       }
-      return new Set([...prev, ...visibleParticipants.map((p) => p.id)])
+      return new Set([...prev, ...renderedParticipants.map((p) => p.id)])
     })
   }
 
@@ -253,8 +332,11 @@ export default function ParticipantsPage() {
         <div className="flex items-center justify-between">
           <h1 className="text-lg font-semibold text-mm-text">
             Participants
+            {/* #908's rule: the space is a text node in the HEADING's own child
+                list — a margin is not a space, so the name computed as
+                "Participants(250)" (a11y-name-sweep run 9). */}
             {participants.length > 0 && (
-              <span className="text-mm-text-muted font-normal ml-2">({participants.length})</span>
+              <>{' '}<span className="text-mm-text-muted font-normal ml-1">({participants.length.toLocaleString()})</span></>
             )}
           </h1>
           <Button onClick={() => setIsAddingParticipant(true)} size="sm">
@@ -372,23 +454,43 @@ export default function ParticipantsPage() {
           </div>
         ) : participants.length > 0 && (
           <div className="space-y-3">
+            {/* #1052 — what reaches a participant the bounded table does not
+                show. Named for what it matches (#1008: a bare "Search…" was
+                read as searching more than it did). */}
+            <div className="relative max-w-xs">
+              <Search
+                className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-mm-text-muted"
+                aria-hidden="true"
+              />
+              <Input
+                value={search}
+                onChange={(e) => changeSearch(e.target.value)}
+                placeholder="Search by name, ID or role…"
+                aria-label="Search participants by name, ID or role"
+                className="pl-8 h-8 text-sm"
+              />
+            </div>
             {/* Orphan filter + bulk actions */}
-            {(orphanCount > 0 || selectedIds.size > 0) && (
+            {(orphanCount > 0 || selectedCount > 0) && (
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div className="flex items-center gap-1.5">
+                  {/* a11y-name-sweep run 10: which filter is on was shown by
+                      colour alone; `aria-pressed` says it to a screen reader. */}
                   <button
-                    onClick={() => { setShowOrphansOnly(false); setSelectedIds(new Set()) }}
+                    onClick={() => { setShowOrphansOnly(false); setSelectedIds(new Set()); setShownLimit(PARTICIPANT_LIST_LIMIT) }}
+                    aria-pressed={!showOrphansOnly}
                     className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
                       !showOrphansOnly
                         ? 'bg-mm-text text-mm-bg border-mm-text'
                         : 'border-mm-border-subtle text-mm-text-muted hover:text-mm-text'
                     }`}
                   >
-                    All ({participants.length})
+                    All ({participants.length.toLocaleString()})
                   </button>
                   {orphanCount > 0 && (
                     <button
-                      onClick={() => { setShowOrphansOnly(true); setSelectedIds(new Set()) }}
+                      onClick={() => { setShowOrphansOnly(true); setSelectedIds(new Set()); setShownLimit(PARTICIPANT_LIST_LIMIT) }}
+                      aria-pressed={showOrphansOnly}
                       className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
                         showOrphansOnly
                           ? 'bg-mm-text text-mm-bg border-mm-text'
@@ -400,9 +502,9 @@ export default function ParticipantsPage() {
                     </button>
                   )}
                 </div>
-                {selectedIds.size > 0 && (
+                {selectedCount > 0 && (
                   <div className="flex items-center gap-2">
-                    <span className="text-sm text-mm-text-muted">{selectedIds.size} selected</span>
+                    <span className="text-sm text-mm-text-muted">{selectedCount.toLocaleString()} selected</span>
                     <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>
                       Clear
                     </Button>
@@ -428,9 +530,15 @@ export default function ParticipantsPage() {
                   <tr>
                     <th className="px-4 py-3 w-10">
                       <Checkbox
-                        checked={allVisibleSelected ? true : selectedIds.size > 0 && visibleParticipants.some(p => selectedIds.has(p.id)) ? 'indeterminate' : false}
+                        checked={allVisibleSelected ? true : selectedCount > 0 ? 'indeterminate' : false}
                         onCheckedChange={toggleSelectAll}
-                        aria-label="Select all participants"
+                        // a11y-name-sweep run 10: "all" only when the table shows
+                        // everyone. A search or the filter that leaves the rest
+                        // unshown is not the page's cap (`hiddenCount`), and the
+                        // box still selects only the rows on screen.
+                        aria-label={renderedParticipants.length < participants.length
+                          ? `Select the ${renderedParticipants.length.toLocaleString()} participant${renderedParticipants.length === 1 ? '' : 's'} shown`
+                          : 'Select all participants'}
                       />
                     </th>
                     <th className="px-4 py-3 text-left text-sm font-medium text-mm-text-secondary">Name</th>
@@ -440,15 +548,17 @@ export default function ParticipantsPage() {
                     <th className="px-4 py-3 text-right text-sm font-medium text-mm-text-secondary w-24">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-mm-border-subtle">
+                <tbody ref={tableBodyRef} className="divide-y divide-mm-border-subtle">
                   {visibleParticipants.length === 0 && (
                     <tr>
                       <td colSpan={6} className="px-4 py-8 text-center text-sm text-mm-text-muted">
-                        No participants without linked sources.
+                        {search.trim()
+                          ? `No participants match “${search.trim()}”.`
+                          : 'No participants without linked sources.'}
                       </td>
                     </tr>
                   )}
-                  {visibleParticipants.map((participant) => (
+                  {renderedParticipants.map((participant) => (
                     <ParticipantRow
                       key={participant.id}
                       participant={participant}
@@ -471,6 +581,17 @@ export default function ParticipantsPage() {
                   ))}
                 </tbody>
               </table>
+              {/* #1052 — the table stops early, and says so. */}
+              {tableNote && (
+                <div className="flex items-center justify-between gap-3 flex-wrap px-4 py-3 border-t border-mm-border-subtle">
+                  <p className="text-sm text-mm-text-muted">
+                    {tableNote}.{search.trim() ? '' : ' Search to find a particular person.'}
+                  </p>
+                  <Button size="sm" variant="outline" onClick={showMore}>
+                    Show {Math.min(PARTICIPANT_LIST_LIMIT, hiddenCount).toLocaleString()} more
+                  </Button>
+                </div>
+              )}
             </div>
 
             {/* Detail panel */}
@@ -532,11 +653,11 @@ export default function ParticipantsPage() {
       <ConfirmDialog
         open={bulkDeleteOpen}
         onOpenChange={(open) => { if (!open) setBulkDeleteOpen(false) }}
-        title={`Delete ${selectedIds.size} participant${selectedIds.size === 1 ? '' : 's'}`}
-        description={`Permanently delete ${selectedIds.size} selected participant${selectedIds.size === 1 ? '' : 's'}? Any remaining speaker or dataset-row links will be cleared. This cannot be undone.`}
+        title={`Delete ${selectedCount} participant${selectedCount === 1 ? '' : 's'}`}
+        description={`Permanently delete ${selectedCount} selected participant${selectedCount === 1 ? '' : 's'} (${selectedNames})? Any remaining speaker or dataset-row links will be cleared. This cannot be undone.`}
         confirmLabel="Delete"
         onConfirm={() => {
-          bulkDeleteMutation.mutate([...selectedIds])
+          bulkDeleteMutation.mutate(selectedShownIds)
           setBulkDeleteOpen(false)
         }}
         destructive
@@ -621,6 +742,8 @@ function ParticipantRow({
 
   return (
     <tr
+      // #1052 — "Show more" moves focus to the first row it revealed.
+      data-participant-row=""
       className={`hover:bg-mm-surface-hover cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset ${isSelected ? SELECTED_ROW : ''}`}
       onClick={() => onSelect?.()}
       // #353 — keyboard + screen-reader affordance for row expansion

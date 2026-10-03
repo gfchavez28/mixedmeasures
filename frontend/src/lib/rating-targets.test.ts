@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { ratableCodes } from './rating-targets'
+import { liveRatingCode, ratableCodes } from './rating-targets'
 import type { Code } from '@/lib/api'
 
 const scale = { min: 0, max: 10, step: 1, anchors: [] } as unknown as Code['magnitude_scale']
@@ -59,5 +59,23 @@ describe('ratableCodes — the ONE answer the `r` verb and the menu share (#868 
     // rating we could not attribute is one the server would not write.
     expect(ratableCodes([{ code_id: 1, user_id: 7 }], codes, null)).toEqual([])
     expect(ratableCodes([{ code_id: 1, user_id: null }], codes, null).map(c => c.id)).toEqual([1])
+  })
+})
+
+describe('liveRatingCode — an open strip shows the code as it is NOW (#1112)', () => {
+  it('prefers the codes list over the copy taken when the strip opened', () => {
+    const captured = code({ id: 1, name: 'Old name' })
+    const live = code({ id: 1, name: 'New name', magnitude_scale: { min: 0, max: 4, step: 2, anchors: [] } as unknown as Code['magnitude_scale'] })
+    expect(liveRatingCode(captured, mapOf(live))).toBe(live)
+  })
+
+  it('a removed scale arrives too — the strip closes rather than offering a dead instrument', () => {
+    const captured = code({ id: 1 })
+    expect(liveRatingCode(captured, mapOf(code({ id: 1, magnitude_scale: null })))?.magnitude_scale).toBeNull()
+  })
+
+  it('falls back to the captured copy only while the list has no such code', () => {
+    const captured = code({ id: 9 })
+    expect(liveRatingCode(captured, mapOf(code({ id: 1 })))).toBe(captured)
   })
 })

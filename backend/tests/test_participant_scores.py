@@ -331,6 +331,30 @@ class TestIdempotenceAndReconcile:
         assert report.cells_cleared == 2  # the score and its n
         assert _cells(db, dataset, ps.MANAGED_SPEC_KIND_SCORE) == {}
 
+    def test_a_score_that_CHANGES_is_rewritten_in_the_SAME_cell(self, world):
+        """The third arm of the reconcile, which no test reached until #1033's
+        rewrite made it a separate statement: a re-rated passage moves the score,
+        and the cell is UPDATED — its id kept, because a note on the cell hangs
+        off that id — rather than deleted and written again. Re-rated to a
+        NEGATIVE value on the -2..+2 fixture, so the text's sign is checked too."""
+        db = world["db"]
+        seg = world["rate"]("E-01", 2.0)
+        create_participant_dataset(db, 1)
+        ps.refresh_participant_dataset(db, 1)
+        dataset = get_participant_dataset(db, 1)
+        column_id = _score_column(db, dataset).id
+        before = db.query(DatasetValue).filter(DatasetValue.column_id == column_id).one()
+        cell_id = before.id
+
+        db.query(CodeApplication).filter(
+            CodeApplication.segment_id == seg.id).one().magnitude = -1.0
+        db.flush()
+        report = ps.refresh_participant_dataset(db, 1)
+
+        after = db.query(DatasetValue).filter(DatasetValue.column_id == column_id).one()
+        assert (after.id, after.value_numeric, after.value_text) == (cell_id, -1.0, "-1.000")
+        assert (report.cells_written, report.cells_cleared) == (1, 0)
+
     def test_a_new_participant_gets_a_row_on_refresh(self, world):
         db = world["db"]
         create_participant_dataset(db, 1)
@@ -441,6 +465,24 @@ class TestFreshness:
             for d in db.query(Dataset).filter(Dataset.managed_kind.isnot(None))
         }
         assert stale == {1: True, 2: True}
+
+    def test_UNARCHIVING_a_coder_marks_the_scores_as_archiving_does(self, world):
+        """Batch 6: the archive endpoint marked every score stale and the unarchive
+        endpoint did not — the same change to who votes, in the other direction,
+        leaving the table reading as current."""
+        import asyncio
+        from app.models.user import User
+        from app.routers.auth import unarchive_coder
+        db = world["db"]
+        create_participant_dataset(db, 1)
+        ps.refresh_participant_dataset(db, 1)
+        db.add(User(id=90, username="Returning", password_hash=None, archived=True))
+        db.flush()
+        assert get_participant_dataset(db, 1).managed_stale is False
+
+        asyncio.run(unarchive_coder(coder_id=90, user=db.get(User, 1), db=db))
+
+        assert get_participant_dataset(db, 1).managed_stale is True
 
     def test_an_ordinary_project_with_no_managed_table_reports_nothing_marked(self, world):
         assert ps.mark_participant_scores_stale(world["db"], 1) is False
@@ -554,14 +596,16 @@ class TestTheReapCleansUpAfterItself:
         create_participant_dataset(db, 1)
         ps.refresh_participant_dataset(db, 1)
         dataset = get_participant_dataset(db, 1)
-        metric = _metric_on(db, _score_column(db, dataset).id)
+        # Read the id NOW: the refresh commits (#1033), which expires every
+        # loaded object, and this one's row is what the refresh deletes.
+        metric_id = _metric_on(db, _score_column(db, dataset).id).id
 
         db.delete(world["code"])
         db.flush()
         ps.refresh_participant_dataset(db, 1)
 
         assert db.query(MetricDefinition).filter(
-            MetricDefinition.id == metric.id,
+            MetricDefinition.id == metric_id,
         ).count() == 0
 
     def test_a_statistical_test_on_that_metric_goes_with_it(self, world):
@@ -579,13 +623,14 @@ class TestTheReapCleansUpAfterItself:
         )
         db.add(test)
         db.flush()
+        test_id = test.id  # before the refresh commits — see the test above
 
         db.delete(world["code"])
         db.flush()
         ps.refresh_participant_dataset(db, 1)
 
         assert db.query(StatisticalTest).filter(
-            StatisticalTest.id == test.id,
+            StatisticalTest.id == test_id,
         ).count() == 0
 
     def test_the_domain_membership_goes_too(self, world):

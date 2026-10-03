@@ -37,7 +37,11 @@ vi.mock('@/lib/api', () => ({
 // The Timeline embed reads the coder roster and the blind lens. Both are
 // exercised properly in `QualTimelineEmbed.test.tsx`; here they only need to
 // resolve so the MOUNT can be asserted.
+/** #1077 (b) — mutable, so a case can name a machine coder. */
+const MACHINE_IDS = vi.hoisted(() => new Set<number>())
 vi.mock('@/hooks/useCoders', () => ({
+  // #1077 (b): the timeline's lens needs the machine coders too.
+  useMachineCoderIds: () => MACHINE_IDS,
   useCoders: () => ({ coders: [], coderMap: new Map(), multiCoder: false, status: 'ready' }),
 }))
 vi.mock('@/hooks/useBlindMode', () => ({

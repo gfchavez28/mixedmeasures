@@ -64,18 +64,23 @@ import { playheadRowSuffix, findClipsAtTime, recordingEndsAtTimelineTime } from 
 import ClipTimeline, { type BoundaryPreview } from '@/components/observations/ClipTimeline'
 import MagnitudeStrip from '@/components/MagnitudeStrip'
 import { CodeSetStrip } from '@/components/CodeSetStrip'
-import { ratableCodes } from '@/lib/rating-targets'
+import { liveRatingCode, ratableCodes } from '@/lib/rating-targets'
+import { scaleSignature } from '@/lib/magnitude'
 import { useHistory } from '@/hooks/useHistory'
 import { useSegmentSelection } from '@/hooks/useSegmentSelection'
 import { useCodeChordShortcuts, type UseCodeChordShortcutsResult } from '@/hooks/useCodeChordShortcuts'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import { useCollapsibleColumn } from '@/hooks/useCollapsibleColumn'
-import { useCoders } from '@/hooks/useCoders'
+import { useCoders, useMachineCoderIds } from '@/hooks/useCoders'
 import { useBlindMode } from '@/hooks/useBlindMode'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import { optionPositionAria } from '@/lib/listbox-aria'
 import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
+import {
+  captureApply, planApplyUndo, replacedFromBulk, replacedFromSingle, runApplyUndo,
+  segmentUndoApi, type ApplyCapture, type Replaced,
+} from '@/lib/apply-undo'
 import {
   computeCoverage, distinctVisibleCodeIds, isCodeAppliedByActiveCoder,
   isSegmentCodedVisible, visibleCodeChipRows,
@@ -276,6 +281,8 @@ export default function ObservationWorkbench() {
   // unanswered); the wording keys on `blind` (only once it is known).
   const { blind, withholding, blindLens, toggleReveal } = useBlindMode(projectId)
   const effectiveHidden = withholding ? blindLens : hiddenCoders
+  // #1029 — a model's labels never count toward the coverage gauge or `u`.
+  const machineCoderIds = useMachineCoderIds()
   const coderCoverage = useCoderCoverage(
     projectId, { observationId }, { enabled: multiCoder, rosterCoderIds: coders.map(c => c.id) },
   )
@@ -429,7 +436,8 @@ export default function ObservationWorkbench() {
   const [noteInput, setNoteInput] = useState('')
   const [createMemoForCode, setCreateMemoForCode] = useState<{ id: number; name: string } | null>(null)
 
-  const history = useHistory()
+  // #1042: the stack is this coder's — a coder switch clears it.
+  const history = useHistory(selfId)
   const mediaElementRef = useRef<HTMLMediaElement | null>(null)
   const videoPaneHandleRef = useRef<VideoPaneHandle | null>(null)
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
@@ -792,14 +800,14 @@ export default function ObservationWorkbench() {
 
   // Optimistic patch + snapshot rollback around one server call. useHistory's
   // execute() does NOT roll back a thrown redo/undo — restore here and re-throw.
-  const runOptimisticCode = useCallback(
-    async (
+  const runOptimisticCall = useCallback(
+    async <T,>(
       clipIds: number[],
       codeId: number,
       action: 'apply' | 'remove',
-      serverCall: () => Promise<unknown>,
+      serverCall: () => Promise<T>,
       magnitude: number | null | ((clipId: number) => number | null) = null,
-    ) => {
+    ): Promise<T> => {
       const snapshot = queryClient.getQueryData(['observation-segments', projectId, observationId])
       patchClipCodes(clipIds, codeId, action, magnitude)
       try {
@@ -813,12 +821,52 @@ export default function ObservationWorkbench() {
         // applied=False inside a 200 and nothing said so.
         const outcome = collectBulkOutcome(result as Parameters<typeof collectBulkOutcome>[0])
         if (outcome.hasFailures) toast.warning(describeBulkFailure(outcome, 'clip', action))
+        return result
       } catch (e) {
         queryClient.setQueryData(['observation-segments', projectId, observationId], snapshot)
         throw e
       }
     },
     [queryClient, projectId, observationId, patchClipCodes, settleAfterCodeChange],
+  )
+
+  const runOptimisticCode = useCallback(
+    async (
+      clipIds: number[],
+      codeId: number,
+      action: 'apply' | 'remove',
+      serverCall: () => Promise<unknown>,
+      magnitude: number | null | ((clipId: number) => number | null) = null,
+    ): Promise<void> => {
+      await runOptimisticCall(clipIds, codeId, action, serverCall, magnitude)
+    },
+    [runOptimisticCall],
+  )
+
+  // ── #1028: an apply that REPLACED a value, and its undo ─────────────────────
+  // The server removes this coder's other value of a code set when a value of it
+  // is applied and says which; the undo puts back exactly that and removes the
+  // code only where the act put it (`lib/apply-undo.ts`). This page's settle IS
+  // the full refetch, so the chips it replaced leave with it — nothing to paint.
+  const clipDetails = useCallback(
+    (clipId: number) => clipMap.get(clipId)?.applied_code_details,
+    [clipMap],
+  )
+
+  const codeName = useCallback((codeId: number) => codeMap.get(codeId)?.name ?? 'code', [codeMap])
+
+  const undoApplies = useCallback(
+    async (applies: readonly { capture: ApplyCapture; replaced: Replaced }[], single: boolean) => {
+      try {
+        for (const { capture, replaced } of applies) {
+          await runApplyUndo(planApplyUndo(capture, replaced), segmentUndoApi(single), codeName)
+        }
+      } finally {
+        // A partial undo still changed clips, so the list refetches either way.
+        settleAfterCodeChange()
+      }
+    },
+    [codeName, settleAfterCodeChange],
   )
 
   // ── #35 magnitude: rate at apply (variant A) — the OBSERVATION strip (#868 c) ──
@@ -830,6 +878,10 @@ export default function ObservationWorkbench() {
   // segmentation, so it stays legal on a FROZEN observation exactly like a
   // label edit or a quote (D22/D29) — no `refuseFrozen()` anywhere below.
   const [ratingTarget, setRatingTarget] = useState<{ clipId: number; code: Code } | null>(null)
+  // #1112: the strip shows the LIVE code, so a scale saved while it is open
+  // (and a rename) reaches it; the mount keys on the scale's signature so a
+  // new step remounts it with a fresh cursor (`lib/rating-targets.ts`).
+  const ratingCode = ratingTarget ? liveRatingCode(ratingTarget.code, codeMap) : null
 
   // The rating THIS coder holds on this clip, read from the cache the chips
   // render from. `?? null`, never `|| null` — a stored 0 is a real rating.
@@ -960,17 +1012,24 @@ export default function ObservationWorkbench() {
   }, [currentMagnitude, history, runOptimisticCode])
 
   const applySingle = useCallback((clipId: number, code: Code) => {
+    // #1028: captured NOW — the undo removes the code only if the act put it on
+    // this clip, and puts back whatever the server reports it replaced.
+    const capture = captureApply(code.id, [clipId], clipDetails, selfId)
+    let replaced: Replaced = new Map()
     history.execute({
       type: 'code_apply',
       description: `Apply code "${code.name}"`,
-      redo: () => runOptimisticCode([clipId], code.id, 'apply', () => codingApi.applyCode(clipId, code.id)),
-      undo: () => runOptimisticCode([clipId], code.id, 'remove', () => codingApi.removeCode(clipId, code.id)),
+      redo: async () => {
+        const result = await runOptimisticCall([clipId], code.id, 'apply', () => codingApi.applyCode(clipId, code.id))
+        replaced = replacedFromSingle(clipId, result)
+      },
+      undo: () => undoApplies([{ capture, replaced }], true),
     })
     // #35 variant A — a scaled code opens its strip straight after applying, so
     // the judgement is made with the anchors on screen. True of EVERY
     // single-clip apply door: the chord, the row menu and the chip's `+`.
     if (code.magnitude_scale) setRatingTarget({ clipId, code })
-  }, [history, runOptimisticCode, setRatingTarget])
+  }, [history, runOptimisticCall, setRatingTarget, clipDetails, selfId, undoApplies])
 
   const handleCodeToggle = useCallback((code: Code) => {
     if (selectedClips.length === 0) return
@@ -993,34 +1052,46 @@ export default function ObservationWorkbench() {
       // in for several judgements is not a rating.
       if (allHaveCode) removeSingle(clipIds[0], code)
       else applySingle(clipIds[0], code)
+    } else if (!allHaveCode) {
+      // D23: the multi-clip commit is ONE bulk call (atomic, audit-logged).
+      // #1028: the undo removes the code only from clips the act put it on and
+      // puts back any code-set value the server reports it replaced.
+      const capture = captureApply(codeId, clipIds, clipDetails, selfId)
+      let replaced: Replaced = new Map()
+      history.execute({
+        type: 'code_apply',
+        description: `Apply code "${codeName}" on ${clipIds.length} clips`,
+        redo: async () => {
+          replaced = replacedFromBulk(await runOptimisticCall(
+            clipIds, codeId, 'apply', () => codingApi.bulkCode(clipIds, codeId, 'apply'),
+          ))
+        },
+        undo: () => undoApplies([{ capture, replaced }], false),
+      })
     } else {
       // D23: the multi-clip commit is ONE bulk call (atomic, audit-logged).
-      const action = allHaveCode ? 'remove' : 'apply'
-      const inverse = action === 'apply' ? 'remove' : 'apply'
       // #876 — the SIXTH arm of #868 (f), and the one it missed: this arm
       // re-applied BARE, so undoing a multi-clip removal unrated every clip
       // silently. One captured rating per clip; the inverse re-applies per
       // clip whenever any was rated, because the bulk endpoint carries none.
-      const captured = allHaveCode
-        ? new Map(clipIds.map(id => [id, currentMagnitude(id, codeId)] as const))
-        : null
-      const anyRated = captured != null && [...captured.values()].some(v => v != null)
+      const captured = new Map(clipIds.map(id => [id, currentMagnitude(id, codeId)] as const))
+      const anyRated = [...captured.values()].some(v => v != null)
       history.execute({
-        type: allHaveCode ? 'code_remove' : 'code_apply',
-        description: `${action === 'apply' ? 'Apply' : 'Remove'} code "${codeName}" on ${clipIds.length} clips`,
-        redo: () => runOptimisticCode(clipIds, codeId, action, () => codingApi.bulkCode(clipIds, codeId, action)),
+        type: 'code_remove',
+        description: `Remove code "${codeName}" on ${clipIds.length} clips`,
+        redo: () => runOptimisticCode(clipIds, codeId, 'remove', () => codingApi.bulkCode(clipIds, codeId, 'remove')),
         undo: () => runOptimisticCode(
-          clipIds, codeId, inverse,
+          clipIds, codeId, 'apply',
           // The bulk endpoint carries no rating, so a rated restore goes per clip.
-          inverse === 'apply' && anyRated
+          anyRated
             ? () => Promise.all(clipIds.map(id =>
-                codingApi.applyCode(id, codeId, undefined, captured!.get(id) ?? null)))
-            : () => codingApi.bulkCode(clipIds, codeId, inverse),
-          captured ? (id: number) => captured.get(id) ?? null : null,
+                codingApi.applyCode(id, codeId, undefined, captured.get(id) ?? null)))
+            : () => codingApi.bulkCode(clipIds, codeId, 'apply'),
+          (id: number) => captured.get(id) ?? null,
         ),
       })
     }
-  }, [selectedClips, clipMap, selfId, history, runOptimisticCode, currentMagnitude, applySingle, removeSingle])
+  }, [selectedClips, clipMap, selfId, history, runOptimisticCode, runOptimisticCall, currentMagnitude, applySingle, removeSingle, clipDetails, undoApplies])
 
   /**
    * The chip's own controls (#875) — they act on the clip that owns the chip,
@@ -1042,18 +1113,23 @@ export default function ObservationWorkbench() {
     if (selectedClips.length === 0 || codesToToggle.length === 0) return
     const clipIds = [...selectedClips]
     const codeNames = codesToToggle.map(c => c.name).join(', ')
-    const runBatch = async (action: 'apply' | 'remove') => {
+    // #1028: captured per code — the undo removes each only where it put it and
+    // puts back any code-set value it replaced.
+    const captures = codesToToggle.map(code => captureApply(code.id, clipIds, clipDetails, selfId))
+    let replacedByCode: Replaced[] = codesToToggle.map(() => new Map())
+    const runApply = async () => {
       const snapshot = queryClient.getQueryData(['observation-segments', projectId, observationId])
-      codesToToggle.forEach(code => patchClipCodes(clipIds, code.id, action))
+      codesToToggle.forEach(code => patchClipCodes(clipIds, code.id, 'apply'))
       try {
         const results = await Promise.all(
-          codesToToggle.map(code => codingApi.bulkCode(clipIds, code.id, action)),
+          codesToToggle.map(code => codingApi.bulkCode(clipIds, code.id, 'apply')),
         )
+        replacedByCode = results.map(r => replacedFromBulk(r))
         settleAfterCodeChange()
         // #678: fold the N per-code responses so a clip skipped for every code is
         // reported once rather than N times.
         const outcome = collectBulkOutcome(results)
-        if (outcome.hasFailures) toast.warning(describeBulkFailure(outcome, 'clip', action))
+        if (outcome.hasFailures) toast.warning(describeBulkFailure(outcome, 'clip', 'apply'))
       } catch (e) {
         queryClient.setQueryData(['observation-segments', projectId, observationId], snapshot)
         throw e
@@ -1062,10 +1138,10 @@ export default function ObservationWorkbench() {
     history.execute({
       type: 'code_apply',
       description: `Apply codes "${codeNames}" to ${clipIds.length} clip(s)`,
-      redo: () => runBatch('apply'),
-      undo: () => runBatch('remove'),
+      redo: runApply,
+      undo: () => undoApplies(captures.map((capture, i) => ({ capture, replaced: replacedByCode[i] })), false),
     })
-  }, [selectedClips, history, queryClient, projectId, observationId, patchClipCodes, settleAfterCodeChange])
+  }, [selectedClips, history, queryClient, projectId, observationId, patchClipCodes, settleAfterCodeChange, clipDetails, selfId, undoApplies])
 
   const createCodeMutation = useMutation({
     mutationFn: (name: string) => codesApi.create(projectId, { name }),
@@ -1703,9 +1779,9 @@ export default function ObservationWorkbench() {
   // coder's work as coded — only the CHIPS hide it.
   const codedIntervals = useMemo<Interval[]>(
     () => clips
-      .filter(c => isSegmentCodedVisible(c.applied_code_details, effectiveHidden))
+      .filter(c => isSegmentCodedVisible(c.applied_code_details, effectiveHidden, machineCoderIds))
       .map(c => ({ start: c.start_time, end: c.end_time })),
-    [clips, effectiveHidden],
+    [clips, effectiveHidden, machineCoderIds],
   )
   const coverageUnion = useMemo(() => unionIntervals(codedIntervals), [codedIntervals])
   const coverageGaps = useMemo(
@@ -1719,8 +1795,8 @@ export default function ObservationWorkbench() {
   // FROZEN: plain N-of-M, and NOT circular — M was fixed by the freeze, before
   // any coding (§8d's table). The conversation gauge's own helper, verbatim.
   const frozenCoverage = useMemo(
-    () => computeCoverage(clips, c => c.applied_code_details, effectiveHidden),
-    [clips, effectiveHidden],
+    () => computeCoverage(clips, c => c.applied_code_details, effectiveHidden, machineCoderIds),
+    [clips, effectiveHidden, machineCoderIds],
   )
   const durationIsKnown = effectiveDuration != null
 
@@ -1773,7 +1849,7 @@ export default function ObservationWorkbench() {
       for (let offset = 1; offset <= pool.length; offset++) {
         const index = (currentIdx + offset) % pool.length
         const clip = pool[index]
-        if (!isSegmentCodedVisible(clip.applied_code_details, effectiveHidden)) {
+        if (!isSegmentCodedVisible(clip.applied_code_details, effectiveHidden, machineCoderIds)) {
           setFollowOn(false) // a jump is a manual selection (D14)
           setSelectedClips([clip.id])
           virtuosoRef.current?.scrollIntoView({ index, behavior: 'auto' })
@@ -2137,7 +2213,7 @@ export default function ObservationWorkbench() {
             {multiHumanCoder && (
               <BlindModeToggle blind={blind} onToggle={toggleReveal} surface="observation_workbench" />
             )}
-            <CoderCountBadge projectId={projectId} observationId={observationId} enabled={multiCoder} />
+            <CoderCountBadge projectId={projectId} observationId={observationId} enabled={multiCoder} withholding={withholding} />
           </>
         )}
 
@@ -2842,15 +2918,15 @@ export default function ObservationWorkbench() {
           that drops DOM focus to <body> (#826). Keyed on the target (#870 c) so
           a second scaled apply remounts it with a fresh cursor and focus.
         */}
-        {ratingTarget && ratingTarget.code.magnitude_scale && (
+        {ratingTarget && ratingCode?.magnitude_scale && (
           // py-1, not py-2: the vertical budget at 640×360 is 85px for the whole
           // control on the document workbench, and this page stacks a video
           // pane and a timeline above the list (measured after mounting).
           <div className="border-t border-border bg-mm-surface px-3 py-1 shrink-0">
             <MagnitudeStrip
-              key={`${ratingTarget.clipId}-${ratingTarget.code.id}`}
-              codeName={ratingTarget.code.name}
-              scale={ratingTarget.code.magnitude_scale}
+              key={`${ratingTarget.clipId}-${ratingTarget.code.id}-${scaleSignature(ratingCode.magnitude_scale)}`}
+              codeName={ratingCode.name}
+              scale={ratingCode.magnitude_scale}
               value={currentMagnitude(ratingTarget.clipId, ratingTarget.code.id)}
               onCommit={commitMagnitude}
               onSkip={() => setRatingTarget(null)}
@@ -2957,6 +3033,7 @@ export default function ObservationWorkbench() {
                         : undefined
                     }
                     activeCoderId={selfId}
+                    codes={codes}
                     history={history}
                     onSettled={() => {
                       queryClient.invalidateQueries({

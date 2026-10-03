@@ -59,6 +59,7 @@ const STANCE: CodeSet = {
   id: 7, project_id: 1, label: 'Stance', description: null, exhaustive: false,
   members: [member(21, 'Positive'), member(22, 'Negative')],
   set_basis: 'inclusive_with_none', composition_warnings: [], created_at: '', updated_at: '',
+  claimants: [21, 22].map((id) => ({ code_id: id, value_id: id })),
 }
 
 function wrap(ui: ReactElement) {

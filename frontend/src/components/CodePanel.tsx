@@ -32,6 +32,9 @@ import { useListLoad } from '@/hooks/useListLoad'
 import type { ListLoad } from '@/lib/list-status'
 import { focusedElementOwnsKey } from '@/lib/keyboard-scope'
 import { PANEL_SCROLLER } from '@/components/CollapsiblePanel'
+import { toast } from 'sonner'
+import { useCodeSets } from '@/hooks/useCodeSets'
+import { buildCodeSetIndex, conflictingSetValues, describeSetConflict } from '@/lib/code-sets'
 
 export interface CodePanelHandle {
   focus: () => void
@@ -120,6 +123,10 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
   const listRef = useRef<HTMLDivElement>(null)
   const shiftAnchorRef = useRef<number | null>(null)
   const skipFocusResetRef = useRef(false) // Prevents onFocus from resetting after focusLastItem
+  // #1028: which codes are values of one set — read only to refuse a multi-code
+  // apply of two of them.
+  const codeSetsQuery = useCodeSets(projectId)
+  const setIndex = useMemo(() => buildCodeSetIndex(codeSetsQuery.data?.sets), [codeSetsQuery.data])
 
 
   // Build abbreviated parent path map from categories prop
@@ -382,7 +389,16 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
           const selectedCodes = Array.from(selectedCodeIndices)
             .map(idx => allDisplayedCodes[idx])
             .filter(code => code && code.is_active)
-          if (selectedCodes.length > 0) {
+          // 🔴 #1028: two values of ONE code set cannot both apply — each goes
+          // out as its own request, the server keeps whichever lands last, and
+          // nothing in the gesture says which was meant. Refused with the set's
+          // name here, the one door every multi-code apply comes through. ⚠️
+          // With the sets not yet answered this lets the apply through: the
+          // server still keeps the passage to one value, only not a chosen one.
+          const conflicts = conflictingSetValues(setIndex, selectedCodes.map(c => c.id))
+          if (conflicts.length > 0) {
+            toast.error(describeSetConflict(conflicts, id => codes.find(c => c.id === id)?.name ?? 'code'))
+          } else if (selectedCodes.length > 0) {
             onMultiCodeToggle(selectedCodes)
           }
         } else if (focusedIndex >= 0 && focusedIndex < allDisplayedCodes.length) {
@@ -411,7 +427,7 @@ const CodePanel = forwardRef<CodePanelHandle, CodePanelProps>(function CodePanel
         containerRef.current?.blur()
       }
     }
-  }, [isFocused, allDisplayedCodes, focusedIndex, selectedCodeIndices, disabled, onCodeToggle, onMultiCodeToggle, pendingApplyCodeId, onNavigateToTranscript, onNavigateToNextPanel])
+  }, [isFocused, allDisplayedCodes, focusedIndex, selectedCodeIndices, disabled, onCodeToggle, onMultiCodeToggle, pendingApplyCodeId, onNavigateToTranscript, onNavigateToNextPanel, setIndex, codes])
 
   const handleInputKeyDown = useCallback((e: React.KeyboardEvent) => {
     // Tab is claimed ONLY when it creates — while the list is still loading it
@@ -901,7 +917,19 @@ function CodeItem({
       // is faux-disabled — convey it to AT so the low-contrast text falls under
       // WCAG 1.4.3's disabled-component exemption instead of failing contrast.
       aria-disabled={disabled || !code.is_active}
-      onClick={() => !disabled && code.is_active && onToggle()}
+      onClick={(e) => {
+        // 🔴 #1111: only a click ON THIS ROW toggles the code. React delivers a
+        // PORTAL's events through its React ancestors, so an overlay this row
+        // mounts reached this handler. Measured with a segment selected: two
+        // clicks inside the rating-scale dialog removed the code (and its rating)
+        // and re-applied it unrated across the group, and ONE click on the Options
+        // menu's own padding removed it. (The Deactivate dialog's backdrop did
+        // not: it unmounts on press, so the click lands elsewhere.) A portal's
+        // content is not a DOM descendant of the row, so DOM containment covers
+        // every overlay, present and future, in one place.
+        if (!e.currentTarget.contains(e.target as Node)) return
+        if (!disabled && code.is_active) onToggle()
+      }}
     >
       <Popover open={colorPickerOpen} onOpenChange={setColorPickerOpen}>
         <PopoverTrigger asChild>

@@ -32,24 +32,52 @@ describe('isSegmentCoded', () => {
 // applying coder (null = legacy/unattributed). The visibility filter is a screen
 // lens: your own + unattributed codes are never hidden.
 const d = (user_id: number | null, is_universal = false) => ({ user_id, is_universal })
+/** No machine coder on this install — the lens cases above #1029 are about people. */
+const NONE: ReadonlySet<number> = new Set()
 
 describe('isSegmentCodedVisible', () => {
   it('no filter: any non-universal code counts', () => {
-    expect(isSegmentCodedVisible([d(2)])).toBe(true)
-    expect(isSegmentCodedVisible([d(2, true)])).toBe(false)
-    expect(isSegmentCodedVisible([])).toBe(false)
+    expect(isSegmentCodedVisible([d(2)], undefined, NONE)).toBe(true)
+    expect(isSegmentCodedVisible([d(2, true)], undefined, NONE)).toBe(false)
+    expect(isSegmentCodedVisible([], undefined, NONE)).toBe(false)
   })
   it('coded only by a hidden coder reads as uncoded-for-me', () => {
-    expect(isSegmentCodedVisible([d(2)], new Set([2]))).toBe(false)
+    expect(isSegmentCodedVisible([d(2)], new Set([2]), NONE)).toBe(false)
   })
   it('your own (unattributed/null) codes are never hidden', () => {
-    expect(isSegmentCodedVisible([d(null)], new Set([2]))).toBe(true)
+    expect(isSegmentCodedVisible([d(null)], new Set([2]), NONE)).toBe(true)
   })
   it('coded by both a hidden and a visible coder still counts', () => {
-    expect(isSegmentCodedVisible([d(2), d(3)], new Set([2]))).toBe(true)
+    expect(isSegmentCodedVisible([d(2), d(3)], new Set([2]), NONE)).toBe(true)
   })
   it('universal-only by a visible coder does not count', () => {
-    expect(isSegmentCodedVisible([d(3, true)], new Set([2]))).toBe(false)
+    expect(isSegmentCodedVisible([d(3, true)], new Set([2]), NONE)).toBe(false)
+  })
+})
+
+// #1029 — coverage means PEOPLE's coding. Coder 9 is a machine: its labels are
+// VISIBLE (no lens hides it — its chips must be attributable) and still never make
+// a unit coded, exactly as the server's `layer_scope_filter()` human arm decides.
+describe('#1029 — a machine coder never makes a unit coded', () => {
+  const MACHINE = new Set([9])
+  it('a unit only the model labelled is uncoded, with or without a lens', () => {
+    expect(isSegmentCodedVisible([d(9)], undefined, MACHINE)).toBe(false)
+    expect(isSegmentCodedVisible([d(9)], new Set([2]), MACHINE)).toBe(false)
+  })
+  it('POSITIVE CONTROL: the same unit is coded once the machine set is empty', () => {
+    expect(isSegmentCodedVisible([d(9)], undefined, NONE)).toBe(true)
+  })
+  it('a person beside the model still counts', () => {
+    expect(isSegmentCodedVisible([d(9), d(2)], undefined, MACHINE)).toBe(true)
+  })
+  it('an UNATTRIBUTED application still counts — the null arm the server keeps', () => {
+    expect(isSegmentCodedVisible([d(null)], undefined, MACHINE)).toBe(true)
+  })
+  it('both coverage figures leave the model out', () => {
+    const items = [{ codes: [d(9)] }, { codes: [d(2)] }, { codes: [d(9), d(3)] }]
+    const cov = computeCoverage(items, i => i.codes, new Set([3]), MACHINE)
+    // codedAny: people coded items 1 and 2; codedVisible: only item 1 (3 is hidden).
+    expect([cov.codedAny, cov.codedVisible, cov.total]).toEqual([2, 1, 3])
   })
 })
 
@@ -64,15 +92,15 @@ describe('computeCoverage', () => {
   const get = (i: { codes: ReturnType<typeof d>[] }) => i.codes
 
   it('codedAny is filter-independent', () => {
-    expect(computeCoverage(items, get).codedAny).toBe(3)
-    expect(computeCoverage(items, get, new Set([3])).codedAny).toBe(3)
+    expect(computeCoverage(items, get, undefined, NONE).codedAny).toBe(3)
+    expect(computeCoverage(items, get, new Set([3]), NONE).codedAny).toBe(3)
   })
   it('codedVisible drops segments coded only by a hidden coder', () => {
     // hiding 3: item[1] (only 3) becomes uncoded; item[2] (2 and 3) stays.
-    expect(computeCoverage(items, get, new Set([3])).codedVisible).toBe(2)
+    expect(computeCoverage(items, get, new Set([3]), NONE).codedVisible).toBe(2)
   })
   it('total counts all items', () => {
-    expect(computeCoverage(items, get).total).toBe(5)
+    expect(computeCoverage(items, get, undefined, NONE).total).toBe(5)
   })
 })
 

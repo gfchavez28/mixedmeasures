@@ -1,5 +1,6 @@
-import { useState, useMemo, useCallback, memo } from 'react'
+import { useState, useMemo, useCallback, useId, memo } from 'react'
 import { useListKeyboardNav } from '@/hooks/useListKeyboardNav'
+import { PARTICIPANT_LIST_LIMIT, pickerLimitNote, searchParticipants } from '@/lib/participant-search'
 import { useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -693,114 +694,7 @@ export function ParticipantCell({
   linkRefusal?: string | null
 }) {
   const [open, setOpen] = useState(false)
-  const [search, setSearch] = useState('')
-  const [creating, setCreating] = useState(false)
-  const queryClient = useQueryClient()
-
-  const participantsQuery = useQuery({
-    queryKey: ['participants', projectId],
-    queryFn: () => participantsApi.list(projectId),
-    enabled: open,
-    retry: retryUnanswered,
-  })
-
-  const participants = useMemo(() => participantsQuery.data?.participants ?? [], [participantsQuery.data?.participants])
-  /**
-   * #963 — whether the participant list is an ANSWER.
-   *
-   * Fetched on OPEN, so EVERY cold open of this picker showed "No participants
-   * found" beside an enabled *New participant "R00001"* — driven on the running
-   * app against a project with 30 participants.
-   *
-   * ⚠️ Unlike the code/category pickers, the SERVER refuses a duplicate
-   * identifier (409, `routers/participants.py`), so no twin can be created.
-   * What the unanswered list breaks is the RECOVERY below: `handleCreateFromRow`
-   * resolves that 409 by finding the existing participant and linking to it,
-   * and over an empty list it falls to the last arm — "already exists — pick it
-   * from the list" — pointing at a list with nothing in it. Hence this is about
-   * the words and the wasted round trip, not about data.
-   *
-   * ⚠️ Asking `listStatus` of a DISABLED query would read `loading` forever
-   * (§1 of the internal design notes); safe here because the popover
-   * CONTENT that reads it mounts only while `open`, the same condition that
-   * enables the query.
-   */
-  const participantsLoad = useListLoad(participantsQuery)
-  const participantsKnown = participantsLoad.status === 'ready'
-
-  const filtered = useMemo(() => {
-    if (!search.trim()) return participants
-    const term = search.trim().toLowerCase()
-    return participants.filter(p => {
-      const name = (p.display_name || p.identifier).toLowerCase()
-      const role = (p.role || '').toLowerCase()
-      return name.includes(term) || role.includes(term) || p.identifier.toLowerCase().includes(term)
-    })
-  }, [participants, search])
-
   const isLinked = row.participant_id != null
-
-  const handleSelect = (participant: Participant) => {
-    const name = participant.display_name || participant.identifier
-    onLink(row.id, participant.id, name)
-    setOpen(false)
-    setSearch('')
-  }
-
-  // #532: create a participant FROM this row (identifier = the row's
-  // identifier-column value, falling back to row_identifier) and link it in one
-  // gesture. The backend's 409-on-duplicate-identifier becomes "link to that
-  // existing participant instead" — unless it is already linked to another row
-  // in this dataset (one row per participant per dataset).
-  const handleCreateFromRow = async () => {
-    // #963 — `participantsKnown` is checked here as well as on the button
-    // because the 409 recovery reads `participants`, and this is the one place
-    // that can state WHY it is refusing rather than silently doing nothing.
-    if (!suggestedIdentifier || creating || !participantsKnown) return
-    setCreating(true)
-    try {
-      const created = await participantsApi.create(projectId, { identifier: suggestedIdentifier })
-      queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
-      toast.success(`Created participant "${created.display_name || created.identifier}"`)
-      handleSelect(created)
-    } catch (err) {
-      if ((err as { status?: number })?.status === 409) {
-        const existing = participants.find(p => p.identifier === suggestedIdentifier)
-        const linkedElsewhere = existing
-          && linkedParticipantMap.has(existing.id)
-          && existing.id !== row.participant_id
-        if (existing && !linkedElsewhere) {
-          toast.success(
-            `"${suggestedIdentifier}" already existed — linked to that participant`,
-          )
-          handleSelect(existing)
-        } else if (existing) {
-          toast.error(
-            `Participant "${suggestedIdentifier}" is already linked to record ${linkedParticipantMap.get(existing.id)}.`,
-          )
-        } else {
-          // Popover list is stale (created elsewhere) — refresh so it appears.
-          queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
-          toast.error(
-            `A participant with ID "${suggestedIdentifier}" already exists — pick it from the list.`,
-          )
-        }
-      } else {
-        toast.error('Could not create participant.')
-      }
-    } finally {
-      setCreating(false)
-    }
-  }
-
-  const { focusedIndex, getItemProps, listProps } = useListKeyboardNav({
-    itemCount: filtered.length,
-    onSelect: (i) => {
-      const p = filtered[i]
-      if (p && !linkedParticipantMap.has(p.id) || p?.id === row.participant_id) handleSelect(p)
-    },
-    enabled: open,
-  })
 
   const handleUnlink = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -817,11 +711,11 @@ export function ParticipantCell({
           affordance that never existed. */}
       {linkRefusal ? (
         <span className="text-sm font-medium text-mm-text" title={linkRefusal}>
-          {row.participant_display_name ?? '\u2014'}
+          {row.participant_display_name ?? '—'}
           <span className="sr-only"> — {linkRefusal}</span>
         </span>
       ) : (
-      <Popover open={open} onOpenChange={(o) => { setOpen(o); if (!o) setSearch('') }}>
+      <Popover open={open} onOpenChange={setOpen}>
         {/* The linked shape needs an ANCHOR rather than a trigger-as-wrapper,
             for #931's reason one cell over: the Unlink button must stay a
             SIBLING of the opener, never nested inside it. The unlinked shape is
@@ -875,122 +769,306 @@ export function ParticipantCell({
           )}
           </div>
         </PopoverAnchor>
-        <PopoverContent className="w-64 p-0" align="start" aria-label="Link a participant">
-          <div className="p-2 border-b">
-            <Input
-              placeholder="Search participants..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={listProps.onKeyDown}
-              className="h-8 text-sm"
-              autoFocus
-            />
-          </div>
-
-          {isLinked && (
-            <div className="px-3 py-2 border-b bg-mm-bg">
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-mm-text-muted">
-                  Current: <span className="font-medium text-mm-text">{row.participant_display_name}</span>
-                </span>
-                <button
-                  onClick={(e) => { handleUnlink(e); setOpen(false) }}
-                  className="text-xs text-red-500 hover:text-red-700"
-                >
-                  Remove link
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* #963 — the load state is not a participant, so it sits outside the
-              scroller the keyboard nav owns. */}
-          {!participantsKnown && (
-            <LoadState
-              load={participantsLoad}
-              size="panel"
-              loadingLabel="Loading participants…"
-              failedTitle="The participants could not be loaded."
-            />
-          )}
-          <div ref={listProps.ref} className="max-h-[240px] overflow-y-auto">
-            {!participantsKnown ? null : filtered.length === 0 ? (
-              <div className="px-3 py-4 text-center text-xs text-mm-text-faint">No participants found</div>
-            ) : (
-              filtered.map((p, i) => {
-                const name = p.display_name || p.identifier
-                const alreadyLinkedTo = linkedParticipantMap.get(p.id)
-                const isCurrentRow = p.id === row.participant_id
-                const isDisabled = !!alreadyLinkedTo && !isCurrentRow
-                const itemProps = getItemProps(i)
-
-                return (
-                  <button
-                    key={p.id}
-                    onClick={() => !isDisabled && handleSelect(p)}
-                    disabled={isDisabled}
-                    data-focused={itemProps['data-focused']}
-                    onMouseEnter={itemProps.onMouseEnter}
-                    className={`w-full text-left px-3 py-2 text-sm border-b last:border-b-0 ${
-                      isCurrentRow
-                        ? 'bg-mm-blue/12 text-mm-blue-text'
-                        : isDisabled
-                          ? 'opacity-50 cursor-not-allowed bg-mm-bg'
-                          : focusedIndex === i
-                            ? 'bg-accent text-accent-foreground'
-                            : 'hover:bg-mm-surface-hover'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium">{name}</span>
-                      {p.role && <span className="text-xs text-mm-text-faint">{p.role}</span>}
-                    </div>
-                    {p.linked_speakers.length > 0 && (
-                      <div className="text-[11px] text-mm-text-faint">
-                        {p.linked_speakers.length} conversation{p.linked_speakers.length !== 1 ? 's' : ''}
-                      </div>
-                    )}
-                    {isDisabled && alreadyLinkedTo && (
-                      <div className="text-[11px] text-amber-600">Already linked to {alreadyLinkedTo}</div>
-                    )}
-                  </button>
-                )
-              })
-            )}
-          </div>
-
-          {suggestedIdentifier && (
-            <div className="p-1.5 border-t">
-              <button
-                onClick={() => void handleCreateFromRow()}
-                // #963 — a transient precondition, so native `disabled`
-                // (`lib/mode-disabled.ts`): the 409 recovery this button relies
-                // on cannot work against an unanswered list.
-                disabled={creating || !participantsKnown}
-                title={
-                  !participantsKnown
-                    ? (participantsLoad.status === 'failed'
-                      ? 'The participants could not be loaded'
-                      : 'Still loading the participants')
-                    : undefined
-                }
-                className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-sm text-mm-green-text hover:bg-mm-surface-hover disabled:opacity-50"
-              >
-                {creating ? (
-                  <LoaderCircle className="w-3.5 h-3.5 shrink-0 animate-spin" aria-hidden="true" />
-                ) : (
-                  <UserPlus className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                )}
-                <span className="truncate">
-                  New participant &ldquo;{suggestedIdentifier}&rdquo;
-                </span>
-              </button>
-            </div>
-          )}
+        <PopoverContent
+          // #929's remedy, for the reason #929 found it: at 640×360 (a 1280×720
+          // window at 200% zoom) this ran 265px off the top of the viewport
+          // with its search box out of reach — MEASURED at 436px tall, and it
+          // was ~370px before #1045's note joined it, so over already.
+          // `avoidCollisions` only FLIPS. So: cap it at the space Radix
+          // reports, make it a column in which the option list is the one
+          // child that shrinks, and let the whole popover scroll as the last
+          // resort when even its fixed parts do not fit.
+          className="w-64 p-0 flex flex-col max-h-[var(--radix-popover-content-available-height)] overflow-y-auto overscroll-contain"
+          align="start"
+          collisionPadding={8}
+          aria-label="Link a participant"
+        >
+          {/* 🔴 #1045 — EVERYTHING the picker needs lives in a component that
+              exists only while the picker is open. The option list used to be
+              written inline here, and JSX children are evaluated when the PARENT
+              renders — whether or not a closed popover ever mounts them — so all
+              200 cells of a page built one button per participant while every
+              picker was shut. The query it read was `enabled: open`, but a
+              disabled observer still RETURNS what another surface cached (the
+              import page, the Participants page, one opened picker), so the full
+              list was in hand on every row: 1,817 MB and 8.4 s to open a page of
+              a 20,000-participant dataset, and a renderer out of memory — a
+              white window — at 122,382. Closed cells now hold no query observer
+              at all, which is what `ParticipantCell.test.tsx` asserts. */}
+          <ParticipantPicker
+            row={row}
+            projectId={projectId}
+            linkedParticipantMap={linkedParticipantMap}
+            onLink={onLink}
+            suggestedIdentifier={suggestedIdentifier}
+            onClose={() => setOpen(false)}
+          />
         </PopoverContent>
       </Popover>
       )}
     </td>
+  )
+}
+
+/**
+ * The open link picker — mounted by `ParticipantCell`'s popover only while it
+ * is open, so its query, its search and its list cost nothing on a closed row.
+ * Closing unmounts it, which is also what clears the search.
+ */
+function ParticipantPicker({
+  row,
+  projectId,
+  linkedParticipantMap,
+  onLink,
+  suggestedIdentifier,
+  onClose,
+}: {
+  row: DatasetDataRow
+  projectId: number
+  linkedParticipantMap: Map<number, string>
+  onLink: (rowId: number, participantId: number | null, participantName: string | null) => void
+  suggestedIdentifier: string | null
+  onClose: () => void
+}) {
+  const [search, setSearch] = useState('')
+  const [creating, setCreating] = useState(false)
+  const queryClient = useQueryClient()
+  const limitNoteId = useId()
+
+  const participantsQuery = useQuery({
+    queryKey: ['participants', projectId],
+    queryFn: () => participantsApi.list(projectId),
+    retry: retryUnanswered,
+  })
+
+  const participants = useMemo(() => participantsQuery.data?.participants ?? [], [participantsQuery.data?.participants])
+  /**
+   * #963 — whether the participant list is an ANSWER.
+   *
+   * Fetched on OPEN, so EVERY cold open of this picker showed "No participants
+   * found" beside an enabled *New participant "R00001"* — driven on the running
+   * app against a project with 30 participants.
+   *
+   * ⚠️ Unlike the code/category pickers, the SERVER refuses a duplicate
+   * identifier (409, `routers/participants.py`), so no twin can be created.
+   * What the unanswered list breaks is the RECOVERY below: `handleCreateFromRow`
+   * resolves that 409 by finding the existing participant and linking to it,
+   * and over an empty list it falls to the last arm — "already exists — pick it
+   * from the list" — pointing at a list with nothing in it. Hence this is about
+   * the words and the wasted round trip, not about data.
+   *
+   * ✅ The disabled-query trap (§1 of the internal design notes) cannot
+   * arise here: this component mounts only while the picker is open, so its
+   * query is never disabled (#1045 moved it out of the always-mounted cell).
+   */
+  const participantsLoad = useListLoad(participantsQuery)
+  const participantsKnown = participantsLoad.status === 'ready'
+
+  // #1045 — ranked (exact → prefix → contains) and BOUNDED: one open picker
+  // rendering 122,382 buttons is itself a freeze. The note below says the list
+  // stops early; search is what reaches the rest (`lib/participant-search.ts`).
+  const searching = search.trim() !== ''
+  const matches = useMemo(() => searchParticipants(participants, search), [participants, search])
+  const shown = useMemo(() => matches.slice(0, PARTICIPANT_LIST_LIMIT), [matches])
+  const limitNote = participantsKnown ? pickerLimitNote(shown.length, matches.length, searching) : null
+
+  const isLinked = row.participant_id != null
+
+  const handleSelect = (participant: Participant) => {
+    const name = participant.display_name || participant.identifier
+    onLink(row.id, participant.id, name)
+    onClose()
+  }
+
+  // #532: create a participant FROM this row (identifier = the row's
+  // identifier-column value, falling back to row_identifier) and link it in one
+  // gesture. The backend's 409-on-duplicate-identifier becomes "link to that
+  // existing participant instead" — unless it is already linked to another row
+  // in this dataset (one row per participant per dataset).
+  const handleCreateFromRow = async () => {
+    // #963 — `participantsKnown` is checked here as well as on the button
+    // because the 409 recovery reads `participants`, and this is the one place
+    // that can state WHY it is refusing rather than silently doing nothing.
+    if (!suggestedIdentifier || creating || !participantsKnown) return
+    setCreating(true)
+    try {
+      const created = await participantsApi.create(projectId, { identifier: suggestedIdentifier })
+      queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
+      toast.success(`Created participant "${created.display_name || created.identifier}"`)
+      handleSelect(created)
+    } catch (err) {
+      if ((err as { status?: number })?.status === 409) {
+        const existing = participants.find(p => p.identifier === suggestedIdentifier)
+        const linkedElsewhere = existing
+          && linkedParticipantMap.has(existing.id)
+          && existing.id !== row.participant_id
+        if (existing && !linkedElsewhere) {
+          toast.success(
+            `"${suggestedIdentifier}" already existed — linked to that participant`,
+          )
+          handleSelect(existing)
+        } else if (existing) {
+          toast.error(
+            `Participant "${suggestedIdentifier}" is already linked to record ${linkedParticipantMap.get(existing.id)}.`,
+          )
+        } else {
+          // Popover list is stale (created elsewhere) — refresh so it appears.
+          queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
+          toast.error(
+            `A participant with ID "${suggestedIdentifier}" already exists — pick it from the list.`,
+          )
+        }
+      } else {
+        toast.error('Could not create participant.')
+      }
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const { focusedIndex, getItemProps, listProps } = useListKeyboardNav({
+    itemCount: shown.length,
+    onSelect: (i) => {
+      const p = shown[i]
+      if (p && (!linkedParticipantMap.has(p.id) || p.id === row.participant_id)) handleSelect(p)
+    },
+  })
+
+  return (
+    <>
+      {/* In `ParticipantCell`'s capped column only the option list shrinks
+          (down to `min-h-20`, so a few options always show); every other part
+          is `shrink-0`, so a short viewport scrolls the popover rather than
+          squeezing the search box or the create button to nothing. */}
+      <div className="p-2 border-b shrink-0">
+        <Input
+          placeholder="Search participants..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={listProps.onKeyDown}
+          aria-describedby={limitNote ? limitNoteId : undefined}
+          className="h-8 text-sm"
+          autoFocus
+        />
+      </div>
+
+      {isLinked && (
+        <div className="px-3 py-2 border-b bg-mm-bg shrink-0">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-mm-text-muted">
+              Current: <span className="font-medium text-mm-text">{row.participant_display_name}</span>
+            </span>
+            <button
+              onClick={(e) => { e.stopPropagation(); onLink(row.id, null, null); onClose() }}
+              className="text-xs text-red-500 hover:text-red-700"
+            >
+              Remove link
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* #963 — the load state is not a participant, so it sits outside the
+          scroller the keyboard nav owns. */}
+      {!participantsKnown && (
+        <LoadState
+          load={participantsLoad}
+          size="panel"
+          loadingLabel="Loading participants…"
+          failedTitle="The participants could not be loaded."
+        />
+      )}
+      {/* A floor of ~2½ options only when there are more than that to show; a
+          shorter list is its own size and never shrinks, so one result is not
+          padded out with an empty band. */}
+      <div ref={listProps.ref} className={`max-h-[240px] overflow-y-auto ${shown.length > 2 ? 'min-h-20' : 'shrink-0'}`}>
+        {!participantsKnown ? null : shown.length === 0 ? (
+          <div className="px-3 py-4 text-center text-xs text-mm-text-faint">No participants found</div>
+        ) : (
+          shown.map((p, i) => {
+            const name = p.display_name || p.identifier
+            const alreadyLinkedTo = linkedParticipantMap.get(p.id)
+            const isCurrentRow = p.id === row.participant_id
+            const isDisabled = !!alreadyLinkedTo && !isCurrentRow
+            const itemProps = getItemProps(i)
+
+            return (
+              <button
+                key={p.id}
+                onClick={() => !isDisabled && handleSelect(p)}
+                disabled={isDisabled}
+                // The linked participant was marked by its tint alone, so the
+                // tree could not say which one is this record's (a11y-name-sweep
+                // run 9). A STATE, so `aria-current` — never folded into the name.
+                aria-current={isCurrentRow ? 'true' : undefined}
+                data-focused={itemProps['data-focused']}
+                onMouseEnter={itemProps.onMouseEnter}
+                className={`w-full text-left px-3 py-2 text-sm border-b last:border-b-0 ${
+                  isCurrentRow
+                    ? 'bg-mm-blue/12 text-mm-blue-text'
+                    : isDisabled
+                      ? 'opacity-50 cursor-not-allowed bg-mm-bg'
+                      : focusedIndex === i
+                        ? 'bg-accent text-accent-foreground'
+                        : 'hover:bg-mm-surface-hover'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-medium">{name}</span>
+                  {p.role && <span className="text-xs text-mm-text-faint">{p.role}</span>}
+                </div>
+                {p.linked_speakers.length > 0 && (
+                  <div className="text-[11px] text-mm-text-faint">
+                    {p.linked_speakers.length} conversation{p.linked_speakers.length !== 1 ? 's' : ''}
+                  </div>
+                )}
+                {isDisabled && alreadyLinkedTo && (
+                  <div className="text-[11px] text-amber-600">Already linked to {alreadyLinkedTo}</div>
+                )}
+              </button>
+            )
+          })
+        )}
+      </div>
+
+      {/* #1045 — the bounded list says it is bounded. Outside the scroller so
+          it is not taken for an option, and tied to the search box as its
+          description so a keyboard user hears it where they type. */}
+      {limitNote && (
+        <p id={limitNoteId} className="px-3 py-2 border-t text-[11px] text-mm-text-muted shrink-0">
+          {limitNote}
+        </p>
+      )}
+
+      {suggestedIdentifier && (
+        <div className="p-1.5 border-t shrink-0">
+          <button
+            onClick={() => void handleCreateFromRow()}
+            // #963 — a transient precondition, so native `disabled`
+            // (`lib/mode-disabled.ts`): the 409 recovery this button relies
+            // on cannot work against an unanswered list.
+            disabled={creating || !participantsKnown}
+            title={
+              !participantsKnown
+                ? (participantsLoad.status === 'failed'
+                  ? 'The participants could not be loaded'
+                  : 'Still loading the participants')
+                : undefined
+            }
+            className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-sm text-mm-green-text hover:bg-mm-surface-hover disabled:opacity-50"
+          >
+            {creating ? (
+              <LoaderCircle className="w-3.5 h-3.5 shrink-0 animate-spin" aria-hidden="true" />
+            ) : (
+              <UserPlus className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+            )}
+            <span className="truncate">
+              New participant &ldquo;{suggestedIdentifier}&rdquo;
+            </span>
+          </button>
+        </div>
+      )}
+    </>
   )
 }
 

@@ -23,6 +23,7 @@ const {
 const { resolveKey, saveRecoveryKeyToFile } = require('./key-manager')
 const { clampZoomFactor } = require('./zoom')
 const { createFatalLineCollector, crashDialogText, crashDialogClipboardText } = require('./fatal-error')
+const { attachRendererRecovery } = require('./renderer-recovery')
 const {
   canAutoUpdate,
   readAutoCheck,
@@ -280,6 +281,20 @@ function createMainWindow(port) {
   mainWindow.once('ready-to-show', () => {
     closeSplash()
     mainWindow.show()
+  })
+
+  // #1046: a page that crashes or hangs gets a native dialog and a way back
+  // (reload it, open the project list, or quit), instead of the white window
+  // Electron leaves behind a dead renderer. The backend is unaffected by
+  // either, which is why this never routes through reportCrash (that one is
+  // for the BACKEND, and quits).
+  attachRendererRecovery({
+    win: mainWindow,
+    dialog,
+    appUrl: appOrigin,
+    isQuitting: () => isQuitting,
+    quit: () => app.quit(),
+    log: (msg) => console.log(msg),
   })
 
   return mainWindow.loadURL(`http://127.0.0.1:${port}/`)

@@ -82,9 +82,11 @@ def coded_segment_counts(
     Parents with zero coded segments are omitted from the dict (callers use
     ``.get(id, 0)``). Pass ``participant_only=False`` for document sources.
 
-    ``layer_scope`` (J2 Slab 7) is resolver-ready: ``None``/``'human'`` keeps the
-    current all-non-consensus default; ``'consensus'`` counts the consensus layer.
-    Gauge callers don't pass it yet — the frontend election lands in J2-5.
+    ``layer_scope`` (J2 Slab 7) is resolver-ready: ``None``/``'human'`` counts
+    PEOPLE's coding — the consensus layer AND a machine coder's labels are both
+    excluded (#989; this said "all-non-consensus" until #1029 found the sentence
+    stale) — and ``'consensus'`` counts the consensus layer. Gauge callers don't
+    pass it yet — the frontend election lands in J2-5.
     """
     ids = list(parent_ids)
     if not ids:

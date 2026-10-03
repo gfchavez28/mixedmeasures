@@ -26,6 +26,7 @@ describe('invalidateDerivedCounts (#450)', () => {
       'code-sample-segments',
       'irr',
       'reconciliation',
+      'machine-agreement', // #1030 — a coding on either side moves the model comparison
       'coder-coverage',
     ])
   })
@@ -52,6 +53,28 @@ describe('invalidateDerivedCounts (#450)', () => {
     const keys = invalidatedKeys(invalidateQueries)
     expect(keys).toContain('metrics')
     expect(keys).toContain('canvas-chart')
-    expect(keys).toHaveLength(10)
+    expect(keys).toHaveLength(11)
+  })
+})
+
+describe('invalidateAfterCodingImport (#1038 d)', () => {
+  it('🔴 stales EVERY query of the project — a number or a string id — and no other project', async () => {
+    const { QueryClient: RealClient } = await import('@tanstack/react-query')
+    const { invalidateAfterCodingImport } = await import('./coding-cache')
+    const qc = new RealClient()
+    qc.setQueryData(['code-frequencies', 7, { coder: 'x' }], 1)
+    qc.setQueryData(['text-coding-texts', '7'], 1)     // a route param reaches keys as text
+    qc.setQueryData(['codes', 7], 1)
+    qc.setQueryData(['codes', 8], 1)                   // another project
+    qc.setQueryData(['coders'], 1)                     // the roster: reset by the page itself
+
+    invalidateAfterCodingImport(qc, 7)
+
+    const stale = (key: unknown[]) => qc.getQueryState(key)?.isInvalidated
+    expect(stale(['code-frequencies', 7, { coder: 'x' }])).toBe(true)
+    expect(stale(['text-coding-texts', '7'])).toBe(true)
+    expect(stale(['codes', 7])).toBe(true)
+    expect(stale(['codes', 8])).toBe(false)
+    expect(stale(['coders'])).toBe(false)
   })
 })

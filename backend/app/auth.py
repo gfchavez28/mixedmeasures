@@ -1,4 +1,5 @@
 import secrets
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 import bcrypt
 from fastapi import HTTPException, Request, Response, Depends
@@ -123,14 +124,19 @@ def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
-def unique_username(db: Session, base: str) -> str:
+def unique_username(db: Session, base: str, reserved: Collection[str] = ()) -> str:
     """Return ``base`` or, if taken, ``base (2)`` / ``base (3)`` / … — the first
     free username. ``User.username`` is globally UNIQUE; this is the single home
     for collision-suffixing (the consensus system coder and the Track J · J3-2
-    merge coder-create path both use it instead of hand-rolling the loop)."""
+    merge coder-create path both use it instead of hand-rolling the loop).
+
+    ``reserved`` names are treated as taken though no row holds them yet — the
+    `.mmproject` import passes the OTHER coders of the same file (#1071): a suffix
+    that equals one of them is a name the import is about to look up for THAT
+    coder, and the silent name-match then put two file coders on one row."""
     name = base
     suffix = 2
-    while db.query(User).filter(User.username == name).first():
+    while name in reserved or db.query(User).filter(User.username == name).first():
         name = f"{base} ({suffix})"
         suffix += 1
     return name

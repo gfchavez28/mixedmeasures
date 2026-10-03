@@ -15,6 +15,7 @@ const STANCE: CodeSet = {
   id: 7, project_id: 1, label: 'Stance', description: null, exhaustive: false,
   members: [member(11, 'Positive'), member(23, 'Negative'), member(47, 'Neutral')],
   set_basis: 'inclusive_with_none', composition_warnings: [],
+  claimants: [11, 23, 47].map((id) => ({ code_id: id, value_id: id })),
   created_at: '', updated_at: '',
 }
 
@@ -106,10 +107,14 @@ describe('choosing', () => {
     expect(onSelect).toHaveBeenCalledWith(47)
   })
 
-  it('clears when the selected value is pressed again', () => {
+  it('never CLEARS from a value — a radio has no de-select gesture (#1038 e)', () => {
+    // It passes the value; the caller's plan makes a re-press a no-op, and in a
+    // contradiction the same press is how the coder chooses. Before the fix the
+    // picker sent `null`, which cleared BOTH values of a contradiction.
     const { onSelect } = setup({ selectedCodeId: 47 })
     fireEvent.click(screen.getByRole('radio', { name: 'Neutral' }))
-    expect(onSelect).toHaveBeenCalledWith(null)
+    expect(onSelect).toHaveBeenCalledWith(47)
+    expect(onSelect).not.toHaveBeenCalledWith(null)
   })
 })
 

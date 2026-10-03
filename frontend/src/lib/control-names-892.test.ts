@@ -13,8 +13,8 @@ import { stripComments } from './strip-comments'
  * WHOLE POINT.** #888 established by trying that no static scan can own the
  * naming class: an accessible name arrives at least four ways, so a discovery
  * scan needs an exemption per legitimately-named site and the narrowing attempt
- * was defeated by a template literal inside a `title`. **The sweep
- * (`.claude/skills/a11y-name-sweep/`) is the guard for that class.** What a scan
+ * was defeated by a template literal inside a `title`. **The manual name sweep
+ * over Chrome's accessibility tree is the guard for that class.** What a scan
  * CAN do is hold a site that was measured nameless to the fix it received —
  * exactly the shape of `pages/panel-separators-named.test.ts`.
  *

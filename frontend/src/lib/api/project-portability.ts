@@ -1,6 +1,7 @@
 import api from './client'
 import { downloadBlob, extractFilename, EXPORT_TIMEOUT_MS } from './download'
 import type { MagnitudeScale } from '../magnitude'
+import type { MachineProvenance } from '@/lib/machine-coder'
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -56,6 +57,26 @@ export interface MergeCoderMatch {
   local_app_count: number
 }
 
+/**
+ * #1034 — a local coder an incoming coder MAY be mapped onto: the same kind and,
+ * for a machine, the same configuration. The server decides it with the predicate
+ * the import enforces, so the confirm screen cannot offer what the merge refuses.
+ */
+export interface MergeCoderOption {
+  id: number
+  username: string
+  archived: boolean
+}
+
+/** #1034 — why a same-name local coder is NOT proposed, and the name used instead. */
+export interface MergeCoderNameInUse {
+  username: string
+  coder_type: string
+  /** `kind` (a person vs a machine) · `configuration` (another run of the model). */
+  reason: 'kind' | 'configuration'
+  new_username: string
+}
+
 /** Track J · J3-2: one coder in an incoming merge file + its local match candidate. */
 export interface MergeCoderPreview {
   original_id: number
@@ -64,6 +85,11 @@ export interface MergeCoderPreview {
   archived: boolean
   file_app_count: number
   local_match: MergeCoderMatch | null
+  /** #1034 — REQUIRED: a fixture that omits them does not compile. */
+  name_in_use: MergeCoderNameInUse | null
+  match_options: MergeCoderOption[]
+  /** The file machine's configuration — the thing that makes it THIS coder. */
+  machine_provenance: MachineProvenance | null
 }
 
 /** Track J · J3-2b: a local code a divergent file code could collapse onto / link with.

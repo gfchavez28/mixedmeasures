@@ -52,6 +52,27 @@ export interface RatingQueueResponse {
   per_code: RatingQueueCodeCount[]
 }
 
+/**
+ * What a single apply answers. ⚠️ `replaced_code_ids` (#1028) is the codes the
+ * server REMOVED because the applied code is a value of a code set and this
+ * coder held another value of it here — across the whole segment group. An
+ * undo re-applies exactly these (`lib/apply-undo.ts`).
+ */
+export interface CodeApplyResult {
+  segment_id: number | null
+  code_id: number
+  applied: boolean
+  magnitude: number | null
+  replaced_code_ids?: number[]
+  /**
+   * #1070 — the same report PER SEGMENT. A single apply fans out to a segment
+   * group whose siblings can lose different values; the merged list above cannot
+   * say which, and an undo that put the union back everywhere gave a sibling a
+   * value it never had.
+   */
+  replaced_by_target?: { segment_id: number; replaced_code_ids: number[] }[]
+}
+
 // API functions - Coding
 export const codingApi = {
   /**
@@ -76,7 +97,7 @@ export const codingApi = {
    * rating captured when the entry was built, so Ctrl+Z no longer unrates.
    */
   applyCode: (segmentId: number, codeId: number, attribution?: string, magnitude?: number | null) =>
-    api.post(
+    api.post<CodeApplyResult>(
       `/segments/${segmentId}/codes/${codeId}`,
       magnitude === undefined ? { attribution } : { attribution, magnitude },
     ).then(res => res.data),

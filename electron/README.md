@@ -39,6 +39,19 @@ the single-page app that the backend serves same-origin at
   prefix is a contract **mirrored by hand in two languages with no codegen**, so each
   side's suite can stay green while the two drift.
 - `fatal-error.test.js` — `node --test` suite for the above.
+- `renderer-recovery.js` — what the window does when its PAGE crashes or hangs
+  (#1046): a native dialog that says saved work is safe and offers *Reload this
+  page · Open the project list · Quit* (or *Wait · Reload the window* for a hang),
+  instead of the white window a dead renderer leaves. Same Electron-free split:
+  the window, `webContents` and `dialog` are injected. ⚠️ Not `fatal-error.js`'s
+  channel — that one is the BACKEND failing to start, and it quits. Three of its
+  rules came from driving a real Electron, not from the docs: the documented
+  `forcefullyCrashRenderer()` can leave a hung renderer stuck in crash handling,
+  so it is followed by a kill by process id; the reload after that kill runs on
+  the NEXT tick, because inside `render-process-gone` it froze the main process;
+  and `unresponsive` fires only when input goes unanswered.
+- `renderer-recovery.test.js` — `node --test` suite for the above, including a
+  source scan that `main.js` wires it onto the main window.
 - `packaged-files.test.js` — the guard on `build.files` (#761). See below.
 - `build-config.test.js` — the guard on the rest of `build` (#759). Validates the
   config against the **installed** `app-builder-lib/scheme.json`, so a key the next
@@ -46,6 +59,12 @@ the single-page app that the backend serves same-origin at
   failing config validation mid-release. Also pins the publisher-name invariants
   that now straddle two files (see Auto-update below), since `release.yml` is
   otherwise outside everything `npm test` can see.
+- `runtime-floor.test.js` — the floor on the shipped Electron runtime (#1093).
+  `electron` is a devDependency, so no production audit gate sees it, and its own
+  advisories have been missing from GitHub's advisory database. This test holds
+  `FLOOR`, the version last taken on purpose. It fails if the lock goes below it
+  or onto another major, or if the declared range admits anything lower. **A major
+  move must set `FLOOR` again**, because a patched version is per line.
 - `preload.js` — minimal hardened context bridge (`window.mmDesktop`).
 - `splash.html` — shown while the backend starts.
 - `scripts/update-manifest.js` — release-pipeline tool: re-patches
@@ -160,15 +179,28 @@ patch/merge tool (round-trip fidelity, hash recomputation, arch-merge dedup,
 version-mismatch refusal), and the updater state machine (offline is swallowed,
 a periodic check never interrupts an in-flight download, install refuses unless an
 update is staged, and the auto-check preference defaults on even when its config
-file is missing or corrupt), and the fatal-startup reader (#716 — a marker split
+file is missing or corrupt), the fatal-startup reader (#716 — a marker split
 across two stderr chunks is still collected, developer noise and tracebacks never
-reach the dialog, and the body is capped).
+reach the dialog, and the body is capped), and renderer recovery (#1046 — one
+dialog per crash, a repeat recommends the project list, a hang dialog withdrawn
+when the page recovers, and a deliberate kill never reported as a crash), and the
+runtime floor (#1093 — the locked Electron and the declared range at or above `FLOOR`).
 
 ⚠️ **What the headless suite cannot prove: that the crash dialog appears.** The
 backend is only a spawned child in a packaged build, so #716's last mile is a
 packaged-build check — it is on the RELEASING §4b list and #716 stays open until it
 passes. In dev the backend's stderr goes to the terminal and looks fine, which is
-how the original gap survived.
+how the original gap survived. **The same is true of the renderer-recovery dialogs
+(#1046):** the suite drives every rule through fakes. A throwaway harness has driven
+them in a real Electron on Linux: 42.3.3 (2026-09-26), then 42.11.8 at the runtime
+bump (2026-09-28). Whether they appear on the packaged Windows build, and whether
+the hang path's kill behaves the same there, is a §4b check. **Re-run that harness in
+the new binary whenever the runtime moves**
+(the internal design notes, git-ignored; run steps in its
+header), and drive the real shell per the internal design notes
+(also git-ignored). ⚠️ When driving the real shell, give `window.open` a same-origin URL: an
+off-origin `https://` URL is handed to `shell.openExternal`, which opens the
+desktop's own browser.
 
 CI runs this suite as `npm ci && npm test` on **Node 24** (#635 — Node 20 went EOL
 2026-04-30). Local development may be on a different Node; validate the lockfile
@@ -192,4 +224,10 @@ and confirm the backend process exits and a shutdown backup is written.
 - On Windows, process teardown uses `taskkill /T /F`, so the graceful-shutdown
   backup does not run on a Windows quit; the periodic auto-backup is the
   mitigation. POSIX platforms get a clean `SIGTERM` shutdown.
-- The shipped Electron runtime is pinned to a security-supported release.
+- The shipped Electron runtime is locked to a release on a supported line (42.11.8,
+  taken on 2026-09-28 as the head of the 42 line), with a floor guarded by
+  `runtime-floor.test.js`. **Supported is dated:** Electron supports the latest
+  three majors, and the 42 line reaches end of life on 2026-10-20 (#1100).
+  RELEASING §1b's `/security-audit` step compares the lock with the line at every cut.
+  **The move to 44 is decided (2026-09-29) as the first job after the v1.5.5 cut** —
+  plan: the internal design notes.

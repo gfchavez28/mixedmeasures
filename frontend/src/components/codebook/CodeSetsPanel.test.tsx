@@ -36,6 +36,7 @@ const SET = {
     { id: 23, numeric_id: 23, name: 'Negative', description: null, color: null, is_active: true, is_universal: false },
   ],
   set_basis: 'inclusive_with_none', composition_warnings: [],
+  claimants: [{ code_id: 11, value_id: 11 }, { code_id: 23, value_id: 23 }],
   created_at: '', updated_at: '',
 }
 

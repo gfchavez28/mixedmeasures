@@ -12,7 +12,7 @@ import logging
 import math
 import re
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice
 from sqlalchemy import insert as sa_insert
 from sqlalchemy.orm import Session
@@ -30,6 +30,7 @@ from .missing_values import (  # noqa: F401 — _NA_PREFIXES/_is_na re-export (#
     _is_na,
     is_missing,
     matched_missing_label,
+    missing_rules_for,
 )
 from .dataset_rows import materialise_manual_cells  # #897
 
@@ -59,14 +60,14 @@ Each entry:
   - labels: ordered list, low-to-high (1 = first label, N = last label)
   - canonical: True for the most standard version of each construct type
 
-Matching rules (in priority order):
-  1. Case-insensitive subset: all unique substantive values must be in the scale
-  2. Minimum 2 unique substantive values required
-  3. Minimum 50% coverage: data values must cover >= 50% of scale labels
-  4. Tightest fit: fewest labels wins
-  5. Best coverage: highest % of labels present in data wins
-  6. Canonical preference: canonical=True wins over canonical=False
-  7. Alphabetical tiebreaker on name
+A spelling of a scale point is its own entry (``agreement-5pt`` and
+``agreement-5pt-neutral`` differ only in the midpoint), because the labels a
+column is matched to are the labels its cells are numbered by.
+
+Matching rules: `_match_scale` owns them. Two library-wide properties are
+pinned by `tests/test_dataset_import_scale_ranking.py`: every scale, given
+exactly its own labels, is recognised as itself, and no two entries share a
+label set (the numbering would then depend on a tiebreak).
 """
 
 KNOWN_SCALES: list[dict] = [
@@ -79,6 +80,19 @@ KNOWN_SCALES: list[dict] = [
     {
         "name": "agreement-3pt",
         "labels": ["Disagree", "Undecided", "Agree"],
+        "canonical": False,
+    },
+    # #1102: the midpoint spelled "Neutral" or "Neither agree nor disagree".
+    # Without these, a column using either spelling matched a smaller scale
+    # and its midpoint answers imported with no number.
+    {
+        "name": "agreement-3pt-neutral",
+        "labels": ["Disagree", "Neutral", "Agree"],
+        "canonical": False,
+    },
+    {
+        "name": "agreement-3pt-neither",
+        "labels": ["Disagree", "Neither Agree nor Disagree", "Agree"],
         "canonical": False,
     },
     {
@@ -94,6 +108,14 @@ KNOWN_SCALES: list[dict] = [
             "Agree", "Strongly Agree",
         ],
         "canonical": True,
+    },
+    {
+        "name": "agreement-5pt-neutral",
+        "labels": [
+            "Strongly Disagree", "Disagree", "Neutral",
+            "Agree", "Strongly Agree",
+        ],
+        "canonical": False,
     },
     {
         "name": "agreement-5pt-undecided",
@@ -143,6 +165,15 @@ KNOWN_SCALES: list[dict] = [
             "Somewhat Agree", "Agree", "Strongly Agree",
         ],
         "canonical": True,
+    },
+    {
+        "name": "agreement-7pt-neutral",
+        "labels": [
+            "Strongly Disagree", "Disagree", "Somewhat Disagree",
+            "Neutral",
+            "Somewhat Agree", "Agree", "Strongly Agree",
+        ],
+        "canonical": False,
     },
 
     # ── Satisfaction ─────────────────────────────────────────────────────
@@ -762,6 +793,114 @@ def _csv_lines(text: str) -> Iterator[str]:
         start = nl + 1
 
 
+#: How many malformed records a report names (#985). The count covers them all;
+#: past a handful the fault is the file's convention, not a few rows.
+OVERLONG_EXAMPLE_LIMIT = 10
+
+
+@dataclass
+class OverlongRecords:
+    """Records with MORE values than the header has columns (#985).
+
+    The surplus is the signature of a quoting fault — an answer holding a comma
+    that nobody wrapped in quotes — and every value after that comma sits one
+    column to the right of where it belongs, with the last one dropped. Silent
+    before this: the preview `zip`ped the surplus away and the import never read
+    past the header's width, so the two agreed with each other and not with the
+    file.
+
+    ⚠️ **A SHORT record is not reported, deliberately.** A trailing cell left off
+    means "no answer" in hand-edited CSV and imports correctly; it is also
+    indistinguishable from a missing comma, so flagging it would cry wolf on the
+    most common malformation there is.
+    ⚠️ **Empty surplus is not reported either** — ``1,2,3,`` under a three-column
+    header is a trailing-comma export artefact, and nothing is displaced.
+
+    ``record`` is the record's number in the FILE (for a new dataset, its record
+    number there too); ``line`` is where it starts, which is what a text editor
+    or a spreadsheet shows. ``row_id`` is filled in by an import once the record
+    has a row, so a report written after the fact can link to it.
+    """
+
+    header_width: int
+    count: int = 0
+    examples: list[dict] = field(default_factory=list)
+
+    def note(self, record: int, line: int, cells: int) -> None:
+        self.count += 1
+        if len(self.examples) < OVERLONG_EXAMPLE_LIMIT:
+            self.examples.append(
+                {"record": record, "line": line, "cells": cells, "row_id": None},
+            )
+
+    def as_payload(self) -> dict:
+        return {
+            "count": self.count,
+            "header_width": self.header_width,
+            "examples": [dict(e) for e in self.examples],
+        }
+
+
+class CsvRecords:
+    """THE reader of dataset CSV text: its header, then its RECORDS (#983, #985).
+
+    Every reader of the text — the import preview, the column describer and
+    narrower, the import's scan and write passes, both append steps — iterates
+    this, so they cannot disagree about what a record is or how many there are.
+    Before it, the preview skipped a blank line and the import made a respondent
+    of it (#983), and nothing noticed a row that was too long (#985).
+
+    🔴 **What a record is.** A blank LINE (no delimiter at all) is not one in a
+    file with two or more columns: a record whose answers are all empty is
+    written ``,,`` and still counts. In a ONE-column file the two are the same
+    bytes, and a blank line is how a spreadsheet writes an empty answer, so a
+    blank line BETWEEN records is a record there — skipping it would shrink the
+    base a response rate is computed on. Blank lines after the last record are
+    dropped in both cases (a file's trailing newlines are not respondents).
+
+    ⚠️ **Single-pass**, like the reader underneath it. ``overlong`` is complete
+    only once the records have been read to the end.
+    """
+
+    def __init__(self, text: str):
+        self._reader = csv.reader(_csv_lines(_strip_bom(text)))
+        self.header: list[str] = next(self._reader, None) or []
+        self.width = len(self.header)
+        self.overlong = OverlongRecords(header_width=self.width)
+        self._started = False
+
+    def __iter__(self) -> Iterator[list[str]]:
+        if self._started:
+            raise RuntimeError("CsvRecords can be read once")
+        self._started = True
+        return self._records()
+
+    def _records(self) -> Iterator[list[str]]:
+        reader = self._reader
+        width = self.width
+        pending_blank_lines = 0
+        record = 0
+        previous_line = reader.line_num
+        for cells in reader:
+            # `line_num` counts physical lines consumed, so a quoted answer
+            # spanning three lines moves it by three; the record STARTS on the
+            # line after the previous record ended.
+            line = previous_line + 1
+            previous_line = reader.line_num
+            if not cells:
+                if width == 1:
+                    pending_blank_lines += 1
+                continue
+            for _ in range(pending_blank_lines):
+                record += 1
+                yield [""]
+            pending_blank_lines = 0
+            record += 1
+            if len(cells) > width > 0 and any(c.strip() for c in cells[width:]):
+                self.overlong.note(record, line, len(cells))
+            yield cells
+
+
 # -- N/A detection ------------------------------------------------------------
 # #592 slab 1: _NA_PREFIXES/_is_na MOVED to services/missing_values.py — the
 # declared-missing predicate module, where they are the DEFAULT rule set for
@@ -1204,22 +1343,35 @@ def _match_scale(values: frozenset[str] | set[str]) -> tuple[str, list[str]] | N
     """
     Find the best matching known scale for a set of values.
 
-    Matching rules (in priority order):
-      1. Tolerant match: most data values must appear in the scale, allowing a
-         small number of stray values (typos) — see `_scale_match_within_tolerance`
-      2. Minimum 2 unique substantive values required
-      3. Minimum 50% coverage: matched data values must cover >= 50% of scale labels
-      4. Tightest fit: fewest labels wins
-      5. Best coverage: highest percentage of labels present in data wins
-      6. Canonical preference: canonical=True wins over canonical=False
-      7. Alphabetical tiebreaker on name
+    Which scales qualify:
+      - At least 2 distinct substantive values.
+      - Tolerant match: most data values must appear in the scale, allowing a
+        small number of stray values (typos) — see `_scale_match_within_tolerance`.
+      - Coverage: the matched values cover >= 50% of the scale's labels.
+
+    Which qualifying scale wins (in priority order):
+      1. Fewest unmatched values — a scale that numbers every answer beats one
+         that leaves an answer out
+      2. Tightest fit: fewest labels
+      3. Best coverage: highest percentage of labels present in the data
+      4. Canonical preference: canonical=True wins over canonical=False
+      5. Alphabetical tiebreaker on name
+
+    🔴 **Rule 1 is what #364's tolerance needs, and it was missing until #1102.**
+    Before the tolerance, every qualifying scale held every value, so "fewest
+    labels" alone picked the tightest correct scale. After it, a smaller scale
+    could qualify with a real answer counted as a stray, and "fewest labels" then
+    preferred it: `agreement-5pt`'s own five labels matched `agreement-4pt`, so
+    the midpoint imported with no number and Agree/Strongly agree scored 3/4.
+    Nine of the library's scales failed to recognise their own labels that way
+    (measured). A stray is now only ever what no qualifying scale accounts for.
 
     Returns (scale_name, ordered_labels) or None.
     """
     if not values or len(values) < 2:
         return None
     lower_vals = {v.lower() for v in values}
-    matches: list[tuple[dict, float]] = []
+    matches: list[tuple[dict, float, int]] = []
     for scale in KNOWN_SCALES:
         lower_labels = {label.lower() for label in scale["labels"]}
         matched = lower_vals & lower_labels
@@ -1230,10 +1382,11 @@ def _match_scale(values: frozenset[str] | set[str]) -> tuple[str, list[str]] | N
         # (in-scale) data — stray values don't count toward or against it.
         coverage = len(matched) / len(scale["labels"])
         if coverage >= 0.5:
-            matches.append((scale, coverage))
+            matches.append((scale, coverage, len(unmatched)))
     if not matches:
         return None
     matches.sort(key=lambda x: (
+        x[2],                      # fewest unmatched values (#1102)
         len(x[0]["labels"]),       # tightest fit (fewest labels)
         -x[1],                     # best coverage (highest %)
         not x[0]["canonical"],     # canonical preference (True first)
@@ -1412,9 +1565,12 @@ def _detect_column_type(
             result["suggested_type"] = ColumnType.ORDINAL.value
             result["suggested_scale_name"] = match[0]
             result["suggested_scale_labels"] = match[1]
-            # Surface any values not in the matched scale (#364). These import
-            # with value_numeric=None (blank) — the researcher should review them
-            # as likely typos. Preserve original casing + first-seen order.
+            # Surface any values not in the matched scale (#364). These keep
+            # their text but import with value_numeric=None, so every statistic
+            # leaves them out. Since #1102 they are values NO qualifying scale
+            # accounts for — a typo, or a spelling the library does not know —
+            # never a point of a larger scale. Preserve original casing +
+            # first-seen order.
             #
             # ⚠️ Walking `distinct` rather than every cell is the SAME result:
             # the first cell carrying a given lower-cased form is also the first
@@ -1892,16 +2048,14 @@ def describe_csv_text(text: str) -> dict:
     that scales is the caller's whole-file `str`, which the 50 MB upload cap
     already bounds.
     """
-    reader = csv.reader(_csv_lines(_strip_bom(text)))
-    headers = next(reader, None) or []
+    records = CsvRecords(text)
+    headers = records.header
     samples: list[list[str]] = [[] for _ in headers]
     row_count = 0
 
-    for row in reader:
-        # Blank lines are not records here, matching `preview_dataset_csv`'s own
-        # count so the two stages agree about how big the file is (#983).
-        if not row:
-            continue
+    # `CsvRecords` decides what a record is (#983), for this stage and every
+    # later one, so the two stages agree about how big the file is.
+    for row in records:
         row_count += 1
         if row_count <= DESCRIBE_SAMPLE_ROWS:
             for i, sample in enumerate(samples):
@@ -1912,7 +2066,17 @@ def describe_csv_text(text: str) -> dict:
 
 
 def select_csv_columns(text: str, columns: list[int]) -> str:
+    """The narrowed text alone — see `narrow_csv_columns`."""
+    return narrow_csv_columns(text, columns)[0]
+
+
+def narrow_csv_columns(text: str, columns: list[int]) -> tuple[str, OverlongRecords]:
     """Re-emit `text` carrying only `columns`, by ORIGINAL index and in order.
+
+    Returns the narrowed text AND the ORIGINAL file's `OverlongRecords` (#985):
+    the narrowed text is exactly as wide as the selection by construction, so the
+    evidence of a too-long record exists only here, and a preview of the
+    narrowed text alone could never report it.
 
     🔴 **Narrowing happens at the ADAPTER — for every format — so that everything
     downstream sees a file that IS the selection (#973 c).** The alternative,
@@ -1926,9 +2090,11 @@ def select_csv_columns(text: str, columns: list[int]) -> str:
     `cell_count_error(row_count, len(headers))` is already counting the selection,
     because the selection is all there is.
 
-    ⚠️ **A blank line is re-emitted as a blank line**, so the narrowed text has
-    exactly the record structure of the original — `csv.reader` reads `[]` back
-    as `[]`, and the two stages cannot disagree about the row count.
+    ⚠️ **Records are re-emitted, not lines (#983).** A blank line that is not a
+    record is dropped, and a one-column file's empty-answer record is written
+    ``""`` — `csv.writer`'s spelling of a single empty field — so the narrowed
+    text holds no blank line at all and reads back as the same records whatever
+    width the selection is.
 
     🔴 **An index past the last column is REFUSED, and all three adapters refuse
     it the same way.** The router cannot check this — it does not know the file's
@@ -1941,16 +2107,13 @@ def select_csv_columns(text: str, columns: list[int]) -> str:
     """
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
-    reader = csv.reader(_csv_lines(_strip_bom(text)))
-    header = next(reader, None) or []
+    records = CsvRecords(text)
+    header = records.header
     _refuse_unknown_columns(columns, len(header))
     writer.writerow([header[i] for i in columns])
-    for row in reader:
-        if not row:
-            writer.writerow([])
-            continue
+    for row in records:
         writer.writerow([row[i] if i < len(row) else "" for i in columns])
-    return out.getvalue()
+    return out.getvalue(), records.overlong
 
 
 def preview_dataset_csv(
@@ -1976,7 +2139,8 @@ def preview_dataset_csv(
             persists into the imported column.
 
     Returns:
-        Dict with ``total_rows`` and ``columns`` list.  Each column entry
+        Dict with ``total_rows``, ``columns`` and ``overlong_records`` (#985,
+        `OverlongRecords.as_payload`).  Each column entry
         contains: column_name, column_index, sample_values, unique_count,
         empty_count, empty_percent, na_count, all_numeric, avg_text_length,
         suggested_type, suggested_scale_name, suggested_scale_labels,
@@ -2003,9 +2167,8 @@ def preview_dataset_csv(
     of genuinely unique free text does not. The whole-file ``str`` this takes as
     its argument is a separate cost, owned by `_upload_to_csv_text`.
     """
-    text = _strip_bom(file_contents)
-    reader = csv.reader(_csv_lines(text))
-    headers = next(reader, None) or []
+    records = CsvRecords(file_contents)
+    headers = records.header
 
     # #973 (b'): ONE tally per column POSITION — {value: how many cells held it},
     # in first-seen order. Never a cell list; no consumer ever wanted the
@@ -2031,15 +2194,10 @@ def preview_dataset_csv(
     n_cols = len(headers)
     max_rows_for_cap = MAX_DATASET_CELLS // n_cols if n_cols else None
 
-    for row in reader:
-        # `csv.reader` yields [] for a blank line where `DictReader` skipped it.
-        # Skipping preserves this preview's own long-standing row count. ⚠️ The
-        # IMPORT does NOT skip — `import_dataset_csv` creates an empty record for
-        # a blank line — so the two disagree by one record per blank line. That
-        # is a data question (should a blank line be a respondent?), not a memory
-        # one, so it is filed rather than decided here: ISSUES #983.
-        if not row:
-            continue
+    for row in records:
+        # `CsvRecords` decides what a record is — a blank line is not one in a
+        # file of two or more columns — and the import reads through the same
+        # class, so the two cannot disagree about the count (#983).
         total_rows += 1
         if max_rows_for_cap is not None and total_rows > max_rows_for_cap:
             raise DatasetTooLargeError(cell_cap_exceeded_message(n_cols))
@@ -2047,7 +2205,7 @@ def preview_dataset_csv(
         # cell means — and is exactly what the import stores for them
         # (`if col_idx >= len(data_row): continue`). Padding once per short row
         # keeps the per-cell path branch-free; `zip` drops any surplus cells,
-        # which is what the header-keyed reader did too.
+        # which is what the import does too — `CsvRecords` REPORTS them (#985).
         if len(row) < n_cols:
             row = row + [""] * (n_cols - len(row))
         for tally, cell in zip(tallies, row):
@@ -2067,15 +2225,16 @@ def preview_dataset_csv(
         # #592 slab 5: column-aware when the FORMAT carried a declaration
         # (.sav's user-missing), else the recognized-N/A defaults — which is
         # every text-format column, since no DatasetColumn exists to declare on
-        # until import. This is the one remaining bare-`_is_na` site and it is
-        # allowlisted in the fail-closed scan for exactly that reason.
+        # until import. (It no longer calls `_is_na` bare — the scan's allowlist
+        # emptied with slab 5 — and the defaults are the TYPE-free prefix rule
+        # here because no type is known until detection; #1048 recounts below.)
         # ⚠️ Asked once per DISTINCT value, not once per cell: `is_missing` is a
         # pure function of (text, rules), and the per-cell form was 3.1M calls on
         # the GSS corpus to answer a few hundred distinct questions.
         preview_rules = (missing_rules_by_column or {}).get(header)
-        substantive_distinct = tuple(
-            v for v in tally if not is_missing(v, preview_rules)
-        )
+        missing_distinct = [v for v in tally if is_missing(v, preview_rules)]
+        missing_set = set(missing_distinct)
+        substantive_distinct = tuple(v for v in tally if v not in missing_set)
         substantive_cells = sum(tally[v] for v in substantive_distinct)
         substantive = SubstantiveValues.of(substantive_distinct, substantive_cells)
         na_count = non_empty_count - substantive_cells
@@ -2112,6 +2271,59 @@ def preview_dataset_csv(
         # Detect type
         detection = _detect_column_type(header, parsed, substantive, col_idx)
 
+        # 🔴 #1079 (a): detection judged the cells by the PREFIX rule, because no
+        # type is known before it — so a free-text column whose answers mostly
+        # BEGIN with a non-answer phrase ("Not enough housing", "Unable to
+        # trust…") had those answers removed first, and what was left looked
+        # like a handful of repeated labels. Measured by the audit: at 50% the
+        # column came back NOMINAL with na_count 100 of 200 — imported as
+        # categories, and every read then dropped exactly the answers #1048 set
+        # out to keep. The same answers beginning "Too little" came back free text.
+        # So a column the prefix rule calls closed is asked ONCE MORE under the
+        # free-text rule, and taken as free text only if that detection says so.
+        # ⚠️ ESCALATION ONLY, never a swap: the prefix rule is right for a closed
+        # scale — "Not enough information to say" is an off-scale non-answer on an
+        # Agree/Disagree item, and detecting under the whole-answer rule would put
+        # it back in the substantive set, where the scale match reports it as an
+        # UNMATCHED value (a suspected typo for the researcher to fix) instead of a
+        # non-answer. A handful of such phrases cannot make a closed column look
+        # like prose; only many DISTINCT answers can, and that is free text.
+        # (A `.sav` column with a declaration is judged by it whatever this says —
+        # `missing_rules_for` — and its declared values are codes, which cannot
+        # make a column look like prose; so no clause excludes it here. One did,
+        # and no reachable input could fail it: #941, removed by a mutant.)
+        if (
+            detection["suggested_type"] != ColumnType.OPEN_TEXT.value
+            and missing_distinct
+        ):
+            free_text_rules = missing_rules_for(None, ColumnType.OPEN_TEXT)
+            kept = [v for v in missing_distinct if not is_missing(v, free_text_rules)]
+            if kept:
+                still_missing = missing_set.difference(kept)
+                as_free_text = tuple(v for v in tally if v not in still_missing)
+                recheck = _detect_column_type(
+                    header, parsed,
+                    SubstantiveValues.of(as_free_text, sum(tally[v] for v in as_free_text)),
+                    col_idx,
+                )
+                if recheck["suggested_type"] == ColumnType.OPEN_TEXT.value:
+                    detection = recheck
+
+        # #1048: detection above judged cells by the prefix defaults (no type
+        # was known yet), which is right for telling categories from text. A
+        # column detected as FREE TEXT is imported under the whole-answer
+        # defaults instead, so its `na_count` is recounted under them — the
+        # number must describe what the import will do with the column.
+        # ⚠️ Only the values the prefix rule flagged are re-asked: the free-text
+        # rule is strictly NARROWER (`test_free_text_missing.py` holds the two
+        # lists to that), so nothing it calls missing can be outside them —
+        # and re-asking every distinct answer was part of a 1.3 s slowdown on
+        # the BES file that this and `missing_values._NA_FIRST_LETTERS` removed
+        # together (measured together, not apportioned).
+        judged_by = missing_rules_for(preview_rules, detection["suggested_type"])
+        if judged_by is not preview_rules:
+            na_count = sum(tally[v] for v in missing_distinct if is_missing(v, judged_by))
+
         columns.append({
             "column_name": header,
             "column_index": col_idx,
@@ -2138,14 +2350,22 @@ def preview_dataset_csv(
             "numeric_max": detection["numeric_max"],
         })
 
-    return {"total_rows": total_rows, "columns": columns}
+    return {
+        "total_rows": total_rows,
+        "columns": columns,
+        "overlong_records": records.overlong.as_payload(),
+    }
 
 
-def _scan_source_rows(text: str, column_configs: list[dict]) -> tuple[int, dict, dict]:
+def _scan_source_rows(
+    text: str, column_configs: list[dict],
+) -> tuple[int, dict, dict, OverlongRecords]:
     """ONE streaming pass over the CSV, for everything the import needs to know
     about the data BEFORE it writes anything (#799).
 
-    Returns ``(row_count, distinct_numeric, na_values)``.
+    Returns ``(row_count, distinct_numeric, na_values, overlong)`` — the last
+    the file's too-long records (#985), complete because the pass reads to the
+    end.
 
     ⚠️ **This replaces `data_rows = list(reader)`, and the reason is memory:**
     MEASURED on a real GSS extract (75,699 x 41), that list materialised
@@ -2175,7 +2395,9 @@ def _scan_source_rows(text: str, column_configs: list[dict]) -> tuple[int, dict,
             continue
         idx = cfg["column_index"]
         qtype = cfg.get("column_type", "")
-        rules = cfg.get("missing_values")
+        # #1048: the rules the column will be JUDGED by — its declaration, or
+        # the defaults its type calls for (the prefix rule for both kinds here).
+        rules = missing_rules_for(cfg.get("missing_values"), qtype or None)
         if qtype in (ColumnType.NUMERIC.value, ColumnType.PERCENTAGE.value):
             want_numeric[idx] = rules
         if (
@@ -2188,10 +2410,9 @@ def _scan_source_rows(text: str, column_configs: list[dict]) -> tuple[int, dict,
     distinct_numeric: dict[int, set] = {i: set() for i in want_numeric}
     na_values: dict[int, set] = {i: set() for i in want_na}
 
-    reader = csv.reader(_csv_lines(text))
-    next(reader, None)  # header
+    records = CsvRecords(text)
     row_count = 0
-    for row in reader:
+    for row in records:
         row_count += 1
         n = len(row)
         for idx, rules in want_numeric.items():
@@ -2204,7 +2425,7 @@ def _scan_source_rows(text: str, column_configs: list[dict]) -> tuple[int, dict,
                 cell = row[idx].strip()
                 if cell and is_missing(cell, rules):
                     na_values[idx].add(cell)
-    return row_count, distinct_numeric, na_values
+    return row_count, distinct_numeric, na_values, records.overlong
 
 
 def import_dataset_csv(
@@ -2216,6 +2437,7 @@ def import_dataset_csv(
     description: str | None = None,
     source: str | None = None,
     participant_link_column_index: int | None = None,
+    overlong: OverlongRecords | None = None,
 ) -> dict:
     """
     Import a dataset CSV into the database.
@@ -2241,20 +2463,26 @@ def import_dataset_csv(
         file_contents: The CSV file as a decoded string.
         description: Optional description.
         source: Optional source platform name (e.g. "LimeSurvey").
+        overlong: #985 — the too-long records of the file BEFORE a column
+            selection narrowed it (`narrow_csv_columns`). The narrowed text is
+            exactly as wide as the selection, so its own scan would find none;
+            the router passes the original's report and this fills in its rows.
 
     Returns:
         Summary dict: dataset_id, columns_created, rows_created,
         values_created, recognized_missing_*, participant_link_report
-        (None unless linking ran).
+        (None unless linking ran), overlong_records (#985).
     """
     text = _strip_bom(file_contents)
-    headers = next(csv.reader(_csv_lines(text)))
+    headers = CsvRecords(text).header
     # #799: ONE streaming pass instead of a retained row list — see
     # `_scan_source_rows`. The list cost 288 MB on a real import and was walked
     # once per qualifying column.
-    row_count, distinct_numeric_by_idx, na_values_by_idx = _scan_source_rows(
-        text, column_configs,
+    row_count, distinct_numeric_by_idx, na_values_by_idx, scanned_overlong = (
+        _scan_source_rows(text, column_configs)
     )
+    if overlong is None:
+        overlong = scanned_overlong
     # #803: the cap is enforced on the OPERATION, not only at the wizard. The
     # preview endpoint refuses first and more cheaply, but scripts and direct API
     # callers never pass it — the #589 lesson, restated for size.
@@ -2464,6 +2692,18 @@ def import_dataset_csv(
     VALUE_BATCH = 10_000
     pending_values: list[dict] = []
 
+    # #1048: the rules each column's cells are JUDGED by — its declaration, or
+    # the defaults its TYPE calls for (whole answers on free text). Resolved
+    # once per column; the declaration persisted above stays the raw config.
+    judge_rules_by_idx = {
+        idx: missing_rules_for(cfg_by_idx.get(idx, {}).get("missing_values"),
+                               cfg_by_idx.get(idx, {}).get("column_type") or None)
+        for idx in columns
+    }
+    # #985: the rows the report's named records land on, so a report written
+    # after the import can link to them.
+    overlong_by_record = {e["record"]: e for e in overlong.examples}
+
     def _drain_values() -> None:
         if pending_values:
             db.execute(sa_insert(DatasetValue), pending_values)
@@ -2473,8 +2713,9 @@ def import_dataset_csv(
     # of the CSV text total (this and `_scan_source_rows`) replace one parse plus
     # a retained 3.1M-object list — measured at ~0.8s per parse against a ~76s
     # import, i.e. ~1% of the time for 288 MB of memory.
-    source_rows = csv.reader(_csv_lines(text))
-    next(source_rows, None)  # header
+    # `CsvRecords` again — the SAME record rule the scan counted by (#983), so
+    # `rows_created` and the rows written cannot disagree.
+    source_rows = iter(CsvRecords(text))
     batch_start = 0
     while True:
         batch = list(islice(source_rows, ROW_BATCH))
@@ -2494,6 +2735,11 @@ def import_dataset_csv(
         db.add_all(ds_rows)
         db.flush()  # ONE flush per batch, not per row — populates ds_row.id
 
+        for i, ds_row in enumerate(ds_rows):
+            named = overlong_by_record.get(batch_start + i + 1)
+            if named is not None:
+                named["row_id"] = ds_row.id
+
         for ds_row, data_row in zip(ds_rows, batch):
             for col_idx, column in columns.items():
                 if col_idx >= len(data_row):
@@ -2503,7 +2749,7 @@ def import_dataset_csv(
                     continue
 
                 cfg = cfg_by_idx.get(col_idx, {})
-                col_missing_rules = cfg.get("missing_values")
+                col_missing_rules = judge_rules_by_idx[col_idx]
 
                 # #415: recognized-missing accounting. Mirrors the per-column
                 # na_count in preview_dataset_csv and the value-keyed compute rule
@@ -2633,4 +2879,5 @@ def import_dataset_csv(
         "recognized_missing_labels": sorted(recognized_missing_labels),
         "participant_link_report": participant_link_report,
         "value_label_unlabeled": value_label_unlabeled,
+        "overlong_records": overlong.as_payload(),
     }

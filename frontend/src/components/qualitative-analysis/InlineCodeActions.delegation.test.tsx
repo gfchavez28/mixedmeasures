@@ -31,7 +31,8 @@ vi.mock('@/lib/api', async (orig) => ({
   codesApi: { create: vi.fn() },
 }))
 
-vi.mock('sonner', () => ({ toast: Object.assign(vi.fn(), { error: vi.fn() }) }))
+const toast = vi.hoisted(() => Object.assign(vi.fn(), { error: vi.fn() }))
+vi.mock('sonner', () => ({ toast }))
 
 const CODE = {
   id: 3, name: 'Curriculum fidelity', color: '#4477aa', is_active: true, is_universal: false,
@@ -104,5 +105,30 @@ describe('InlineCodeActions — the host owns the gesture when it can (#875)', (
     fireEvent.click(trigger)
     fireEvent.click(await screen.findByText(other.name))
     await waitFor(() => expect(applyCode).toHaveBeenCalledWith(335, other.id))
+  })
+})
+
+describe('InlineCodeActions — an apply that REPLACED a value says so (#1028)', () => {
+  it('names the code-set value the server removed, on a surface with no set control', async () => {
+    const other = { ...CODE, id: 9, name: 'Pacing adherence' } as Code
+    applyCode.mockImplementationOnce(() => Promise.resolve({ applied: true, replaced_code_ids: [CODE.id] }) as never)
+    renderActions({ allCodes: [CODE, other], codeMap: new Map([[CODE.id, CODE], [other.id, other]]) })
+    const trigger = screen.getByLabelText('Add code')
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: 'mouse' })
+    fireEvent.click(trigger)
+    fireEvent.click(await screen.findByText(other.name))
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(
+      'Applied “Pacing adherence” in place of “Curriculum fidelity”',
+    ))
+  })
+
+  it('an ordinary apply keeps the plain confirmation', async () => {
+    const other = { ...CODE, id: 9, name: 'Pacing adherence' } as Code
+    renderActions({ allCodes: [CODE, other], codeMap: new Map([[CODE.id, CODE], [other.id, other]]) })
+    const trigger = screen.getByLabelText('Add code')
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: 'mouse' })
+    fireEvent.click(trigger)
+    fireEvent.click(await screen.findByText(other.name))
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('Code applied'))
   })
 })

@@ -23,6 +23,19 @@ class CodeSetMemberInfo(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CodeSetClaimant(BaseModel):
+    """A code whose application counts in the set, and the value it reads as.
+
+    Every member is one (reading as itself, unless grouped), and so is a code
+    OUTSIDE the set grouped INTO one of its values (#1028(b)) — "Pos" grouped
+    with "Positive" counts as choosing "Positive". The coding surfaces read this
+    so the set's control shows that choice, and so the server's clear-by-claimant
+    rule is visible to the client rather than re-derived there.
+    """
+    code_id: int
+    value_id: int
+
+
 class CodeSetResponse(BaseModel):
     id: int
     project_id: int
@@ -41,6 +54,10 @@ class CodeSetResponse(BaseModel):
     #: effective code cannot be chosen through this set, and the refusal at the
     #: set's own door cannot close the equivalence-side route into that state.
     composition_warnings: list[str] = []
+    #: Every code whose application counts in this set → the value it reads as
+    #: (`services/code_sets.py::set_claimants`). REQUIRED: a surface deciding
+    #: what a passage holds in this set from `members` alone misses a synonym.
+    claimants: list[CodeSetClaimant]
     created_at: UTCTimestamp
     updated_at: UTCTimestamp
 

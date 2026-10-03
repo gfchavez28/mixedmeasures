@@ -1,7 +1,8 @@
 import logging
+from collections import defaultdict
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select
 
@@ -11,6 +12,7 @@ from ..models.participant import Participant
 from ..models.speaker import Speaker
 from ..models.segment import Segment
 from ..models.conversation import Conversation
+from ..models.document import Document
 from ..models.dataset import (
     DatasetRow as DatasetRowModel,
     DatasetColumn,
@@ -43,7 +45,7 @@ from ..services.participant_scores import mark_participant_scores_stale
 
 logger = logging.getLogger(__name__)
 from ..services.participant_linking import auto_fill_role_from_linked_row
-from .helpers import _get_project_or_404
+from .helpers import _get_project_or_404, visible_segment_filter
 
 router = APIRouter(tags=["participants"])
 
@@ -65,9 +67,10 @@ def participant_to_response(
             select(Segment.speaker_id, Conversation.id, Conversation.name)
             .join(Conversation, Segment.conversation_id == Conversation.id)
             .where(Segment.speaker_id.in_(speaker_ids))
-            .where(Segment.merged_into_id.is_(None))
-            .where(Segment.split_into_id.is_(None))
+            .where(*visible_segment_filter())
             .distinct()
+            # By id, as `participant_list_payload` orders them (#1047).
+            .order_by(Segment.speaker_id, Conversation.id)
         ).all()
         seen_conv_ids: dict[int, set[int]] = {sid: set() for sid in speaker_ids}
         for speaker_id, conv_id, conv_name in rows:
@@ -243,39 +246,152 @@ def _load_participant_with_relations(
     )
 
 
+def participant_list_payload(db: Session, project_id: int) -> list[dict]:
+    """Every participant of a project, in `ParticipantResponse`'s shape, from
+    five set-based reads (#1047).
+
+    🔴 **The list's own builder, and `participant_to_response` stays the ONE
+    for a single participant.** The list used to call that per participant over
+    an ORM load with three joined collections — MEASURED on BES's 122,382
+    participants: 10.1 s to load, 2.8 s to build, 15.1 s end to end with every
+    other request held behind it. And the single builder queries each linked
+    speaker's conversations PER PARTICIPANT, so a project whose speakers are
+    linked paid one query per person on top.
+
+    ⚠️ **Two builders of one shape is #542b's risk**, so
+    `tests/test_participant_list.py` pins them to each other on a fixture that
+    reaches every field (speakers over two conversations and a merged-away
+    segment, a dataset row, a document, and a participant with none).
+
+    Every read is scoped by JOINING to this project's participants — the same
+    rows the ORM relationships would reach — never by an id list: the lists here
+    grow with the participants (the internal design notes). Order within a
+    participant is by id.
+    """
+    member = Participant.project_id == project_id
+
+    conversations: dict[int, list[dict]] = defaultdict(list)
+    for speaker_id, conv_id, conv_name in db.execute(
+        select(Segment.speaker_id, Conversation.id, Conversation.name)
+        .join(Conversation, Segment.conversation_id == Conversation.id)
+        .join(Speaker, Speaker.id == Segment.speaker_id)
+        .join(Participant, Participant.id == Speaker.participant_id)
+        .where(member, *visible_segment_filter())
+        .distinct()
+        .order_by(Segment.speaker_id, Conversation.id)
+    ):
+        conversations[speaker_id].append({"id": conv_id, "name": conv_name})
+
+    speakers: dict[int, list[dict]] = defaultdict(list)
+    for speaker_id, participant_id, name, facilitator, color_index, color in db.execute(
+        select(
+            Speaker.id, Speaker.participant_id, Speaker.name,
+            Speaker.is_facilitator, Speaker.color_index, Speaker.color,
+        )
+        .join(Participant, Participant.id == Speaker.participant_id)
+        .where(member)
+        .order_by(Speaker.id)
+    ):
+        speakers[participant_id].append({
+            "speaker_id": speaker_id,
+            "speaker_name": name,
+            "is_facilitator": bool(facilitator),
+            "conversations": conversations.get(speaker_id, []),
+            "color_index": color_index or 0,
+            "color": color,
+        })
+
+    dataset_rows: dict[int, list[dict]] = defaultdict(list)
+    for row_id, participant_id, dataset_id, dataset_name, row_identifier, submitted_at in db.execute(
+        select(
+            DatasetRowModel.id, DatasetRowModel.participant_id, Dataset.id, Dataset.name,
+            DatasetRowModel.row_identifier, DatasetRowModel.submitted_at,
+        )
+        .join(Participant, Participant.id == DatasetRowModel.participant_id)
+        .join(Dataset, Dataset.id == DatasetRowModel.dataset_id)
+        .where(member)
+        .order_by(DatasetRowModel.id)
+    ):
+        dataset_rows[participant_id].append({
+            "id": row_id,
+            "dataset_name": dataset_name,
+            "dataset_id": dataset_id,
+            "row_identifier": row_identifier,
+            "submitted_at": submitted_at,
+        })
+
+    documents: dict[int, list[dict]] = defaultdict(list)
+    for doc_id, participant_id, name, source_format in db.execute(
+        select(Document.id, Document.participant_id, Document.name, Document.source_format)
+        .join(Participant, Participant.id == Document.participant_id)
+        .where(member)
+        .order_by(Document.id)
+    ):
+        documents[participant_id].append(
+            {"id": doc_id, "name": name, "source_format": source_format}
+        )
+
+    return [
+        {
+            "id": pid,
+            "project_id": project_id,
+            "identifier": identifier,
+            "display_name": display_name,
+            "role": role,
+            "demographics": demographics,
+            "role_auto_filled_from": role_auto_filled_from,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "linked_speakers": speakers.get(pid, []),
+            "dataset_rows": dataset_rows.get(pid, []),
+            "linked_documents": documents.get(pid, []),
+        }
+        for (
+            pid, identifier, display_name, role, demographics,
+            role_auto_filled_from, created_at, updated_at,
+        ) in db.execute(
+            select(
+                Participant.id, Participant.identifier, Participant.display_name,
+                Participant.role, Participant.demographics,
+                Participant.role_auto_filled_from,
+                Participant.created_at, Participant.updated_at,
+            )
+            .where(member)
+            .order_by(Participant.identifier)
+        )
+    ]
+
+
 @router.get(
     "/api/projects/{project_id}/participants",
     response_model=ParticipantListResponse,
 )
-async def list_participants(
+def list_participants(
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List all participants for a project with linked speaker info."""
+    """List all participants for a project with linked speaker info.
+
+    ⚠️ **Plain `def` (#837's rule, #1047).** It awaits nothing, and as
+    `async def` its whole build ran ON the event loop: MEASURED on BES's
+    122,382 participants, 15.1 s with `/health` held for 14.9 s — the stale
+    Datasets list the developer saw after a large linked import. Pinned in
+    `test_endpoint_event_loop.py::MUST_BE_SYNC`.
+
+    ⚠️ **Validated ONCE and serialised ONCE.** Returned as a model, FastAPI
+    dumped it, validated it against `response_model` and serialised it again
+    (1.8 s of the 15.1 s); this validates the payload through the same schema
+    — so a missing or extra field still fails, and a timestamp still gets its
+    `UTCTimestamp` — and returns the JSON it produces.
+    """
     _get_project_or_404(db, project_id, user.id)
 
-    participants = (
-        db.query(Participant)
-        .options(
-            joinedload(Participant.speakers),
-            joinedload(Participant.dataset_rows).joinedload(
-                DatasetRowModel.dataset
-            ),
-            # Row 46 — must match `_load_participant_with_relations`: the SAME
-            # `participant_to_response` walks `.documents`, so a load list that
-            # covers only the detail endpoint leaves this one N+1 per row.
-            joinedload(Participant.documents),
-        )
-        .filter(Participant.project_id == project_id)
-        .order_by(Participant.identifier)
-        .all()
+    payload = participant_list_payload(db, project_id)
+    body = ParticipantListResponse.model_validate(
+        {"participants": payload, "total": len(payload)}
     )
-
-    return ParticipantListResponse(
-        participants=[participant_to_response(p, db) for p in participants],
-        total=len(participants),
-    )
+    return Response(content=body.model_dump_json(), media_type="application/json")
 
 
 @router.post(

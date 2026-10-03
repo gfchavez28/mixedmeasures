@@ -124,18 +124,39 @@ export function describeMagnitude(value: Magnitude, scale: MagnitudeScale | null
  */
 export const MAX_TICKS = 21
 
+/**
+ * Absorbs binary floating point on a fractional step (`0.3 / 0.1` is
+ * 2.9999999999999996 — measured; `1 / 0.1` happens to be exactly 10), and
+ * nothing larger: a real fraction of a step is far bigger than this.
+ */
+const STEP_EPSILON = 1e-9
+
+/**
+ * How many WHOLE steps fit between the minimum and the maximum.
+ *
+ * 🔴 **Floored, never rounded (#1114).** A step that does not divide the range
+ * (0–10 by 4) leaves a remainder, and rounding `2.5` up to 3 put a tick at 12 —
+ * past the maximum, offered as a button whose commit the server then refused.
+ * The epsilon keeps a fractional step that DOES divide (0–0.3 by 0.1) from
+ * losing its last tick to the floor.
+ */
+function wholeSteps(scale: MagnitudeScale): number {
+  const span = scale.max - scale.min
+  const step = scale.step > 0 ? scale.step : 1
+  return Math.floor(span / step + STEP_EPSILON)
+}
+
 export function isTickable(scale: MagnitudeScale): boolean {
   const span = scale.max - scale.min
   if (!Number.isFinite(span) || span <= 0) return false
-  const step = scale.step > 0 ? scale.step : 1
-  return Math.round(span / step) + 1 <= MAX_TICKS
+  return wholeSteps(scale) + 1 <= MAX_TICKS
 }
 
 export function tickValues(scale: MagnitudeScale): number[] {
   if (!isTickable(scale)) return []
   const step = scale.step > 0 ? scale.step : 1
   const out: number[] = []
-  const count = Math.round((scale.max - scale.min) / step)
+  const count = wholeSteps(scale)
   for (let i = 0; i <= count; i++) {
     // Accumulating `v += step` drifts over many steps on a fractional scale
     // (0.1 × 30 ≠ 3.0 in binary floating point) and would put a tick's value a
@@ -149,6 +170,113 @@ export function tickValues(scale: MagnitudeScale): number[] {
 /** The anchor label for a value, or null. Used for the tick's own title. */
 export function anchorLabelFor(value: number, scale: MagnitudeScale): string | null {
   return scale.anchors.find(a => a.value === value)?.label ?? null
+}
+
+/** Is `n` a whole number, allowing for binary floating point? */
+function isWhole(n: number): boolean {
+  return Math.abs(n - Math.round(n)) < 1e-6
+}
+
+/**
+ * Do the steps land exactly on the maximum? (#1114) When they do not (0–10 by
+ * 4), the last point is 8 and the maximum cannot be chosen on the strip — the
+ * dialog says so while the scale is being declared.
+ */
+export function stepsReachMax(scale: Pick<MagnitudeScale, 'min' | 'max' | 'step'>): boolean {
+  const step = scale.step > 0 ? scale.step : 1
+  return isWhole((scale.max - scale.min) / step)
+}
+
+/**
+ * Is this value one of the points the strip offers — inside the range and a
+ * whole number of steps from the minimum? An anchor or a rating that is not
+ * (the step changed after it was given, #1112) is shown but cannot be picked.
+ */
+export function isScalePoint(value: number, scale: Pick<MagnitudeScale, 'min' | 'max' | 'step'>): boolean {
+  if (!Number.isFinite(value) || value < scale.min - 1e-9 || value > scale.max + 1e-9) return false
+  const step = scale.step > 0 ? scale.step : 1
+  return isWhole((value - scale.min) / step)
+}
+
+/**
+ * The part of a scale that decides the strip's TICKS — what a strip must be
+ * re-mounted on when it changes (#1112). The strip sets its cursor once, on
+ * mount (#870 c), so a step change under a live strip would leave the cursor on
+ * an index of the old tick list. Anchors are not in it: a re-labelled anchor
+ * changes no tick and needs no remount.
+ */
+export function scaleSignature(scale: Pick<MagnitudeScale, 'min' | 'max' | 'step'>): string {
+  return `${scale.min}|${scale.max}|${scale.step}`
+}
+
+export interface AnchorPlacement {
+  value: number
+  /** `0 · not at all` — the value and its label, as the strip prints it. */
+  text: string
+  /** Left edge and width of the label's box, in percent of the strip's width. */
+  left: number
+  width: number
+  align: 'left' | 'center' | 'right'
+}
+
+/**
+ * Where each anchor label goes on the strip's single anchor line (#1113).
+ *
+ * The line used to print the labels at the two ENDS only, so a middle anchor
+ * ("5 · somewhat") was declared, saved, read out on its tick — and never shown.
+ * The line is one row high on purpose (`magnitude-coding.md` §11: the strip's
+ * 84px budget at 640×360), so the anchors share it: each sits under its own
+ * point, in a box that ends halfway to its neighbours, so no two labels can
+ * overlap however long they are (the strip truncates and puts the full text in
+ * the label's `title`).
+ *
+ * - With `tickCount` ticks (the strip's equal-width buttons), a value sits under
+ *   the centre of its tick — `(stepsFromMin + 0.5) / tickCount`. With no ticks
+ *   (the number-input arm), it sits proportionally along the range.
+ * - An anchor AT the minimum is left-aligned from the strip's edge, one at the
+ *   maximum right-aligned to the other edge — the two-anchor scale reads exactly
+ *   as it always did. Any other anchor is centred on its point, in a box as wide
+ *   as the nearer of its two neighbour boundaries allows.
+ * - An anchor between points (the server accepts any value in range) sits where
+ *   its value falls; the dialog says it cannot be picked.
+ */
+export function anchorLayout(scale: MagnitudeScale, tickCount: number): AnchorPlacement[] {
+  const span = scale.max - scale.min
+  if (!Number.isFinite(span) || span <= 0) return []
+  const step = scale.step > 0 ? scale.step : 1
+  const position = (v: number) => tickCount > 0
+    ? ((v - scale.min) / step + 0.5) / tickCount
+    : (v - scale.min) / span
+  const anchors = scale.anchors
+    .filter(a => Number.isFinite(a.value) && a.value >= scale.min - 1e-9 && a.value <= scale.max + 1e-9)
+    .slice()
+    .sort((a, b) => a.value - b.value)
+  const at = anchors.map(a => Math.min(1, Math.max(0, position(a.value))))
+  const last = anchors.length - 1
+  return anchors.map((a, i) => {
+    const lo = i === 0 ? 0 : (at[i - 1] + at[i]) / 2
+    const hi = i === last ? 1 : (at[i] + at[i + 1]) / 2
+    let left = lo
+    let right = hi
+    let align: AnchorPlacement['align']
+    if (Math.abs(a.value - scale.min) < 1e-9) {
+      align = 'left'
+    } else if (Math.abs(a.value - scale.max) < 1e-9) {
+      align = 'right'
+    } else {
+      const half = Math.max(0, Math.min(at[i] - lo, hi - at[i]))
+      left = at[i] - half
+      right = at[i] + half
+      align = 'center'
+    }
+    return {
+      value: a.value,
+      text: `${formatMagnitude(a.value)} · ${a.label}`,
+      left: left * 100,
+      width: (right - left) * 100,
+      align,
+    }
+  })
 }
 
 /** A scale's range for a sentence: `0–10`, `−1–1`. En dash, Unicode minus (#35 §10). */

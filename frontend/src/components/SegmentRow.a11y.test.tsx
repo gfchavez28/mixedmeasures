@@ -59,6 +59,7 @@ function renderRow(over: Partial<Segment> = {}, isSelected = false) {
         <SegmentRow
           segment={makeSegment(over)}
           isSelected={isSelected}
+          isUncoded={false}
           onClick={vi.fn()}
           conversationId={7}
           codes={[]}

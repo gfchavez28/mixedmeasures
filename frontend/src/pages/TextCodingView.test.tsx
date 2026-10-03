@@ -528,3 +528,22 @@ describe('undo carries the rating (#868 f) — the text-coding surface', () => {
     await waitFor(() => expect(applyCode).toHaveBeenCalledWith(1, { dataset_value_id: 102, code_id: 7, magnitude: 0 }))
   })
 })
+
+/** #1028 — the server swaps a code-set value and says what it replaced; undo puts it back. */
+describe('an apply that REPLACED a value, and its undo (#1028) — the text-coding surface', () => {
+  it('Ctrl+Z re-applies the replaced value WITH its rating — a ZERO — and removes nothing', async () => {
+    applyCode.mockImplementation(async (_pid: number, body: { code_id: number }) =>
+      ({ dataset_value_id: 102, code_id: body.code_id, applied: true,
+         replaced_code_ids: body.code_id === 8 ? [7] : [] }))
+    renderView()
+    fireEvent.click(await findRow(102))  // holds Engagement, rated 0
+    fireEvent.keyDown(document.body, { key: '2' })  // Disruption
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(1, { dataset_value_id: 102, code_id: 8 }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+
+    fireEvent.keyDown(document.body, { key: 'z', ctrlKey: true })
+    await waitFor(() => expect(applyCode).toHaveBeenLastCalledWith(1, { dataset_value_id: 102, code_id: 7 }))
+    await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(1, { dataset_value_id: 102, code_id: 7, magnitude: 0 }))
+    expect(removeCode).not.toHaveBeenCalled()
+  })
+})

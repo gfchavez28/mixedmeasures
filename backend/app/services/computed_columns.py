@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from typing import Union
 
 from ..models.dataset import VALUE_NUMERIC_TYPES, NUMERIC_COERCIBLE_TYPES
-from .missing_values import is_missing, parse_missing_rules
+from .missing_values import column_missing_rules, is_missing
 
 logger = logging.getLogger(__name__)
 
@@ -970,7 +970,7 @@ def evaluate_computed_column(
     # once from the already-loaded siblings (dependency columns are siblings).
     dep_id_set = set(dep_ids)
     missing_rules = {
-        c.id: parse_missing_rules(c.missing_values)
+        c.id: column_missing_rules(c)
         for c in siblings if c.id in dep_id_set
     }
 

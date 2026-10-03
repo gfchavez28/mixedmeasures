@@ -46,6 +46,18 @@ describe('useQualitativeAnalysis — layerScope', () => {
     expect(result.current.buildCurrentConfig([]).layer_scope).toBe('consensus')
   })
 
+  it('#1098: loadMaterial restores layer_scope=MACHINE — it only ever restored consensus', () => {
+    const { result } = renderHook(() => useQualitativeAnalysis(), { wrapper: wrapper('/') })
+    act(() => result.current.loadMaterial({ id: 1, config: { layer_scope: 'machine' } } as unknown as MaterialResponse))
+    expect(result.current.layerScope).toBe('machine')
+  })
+
+  it('#1098: loadMaterial of a Coders-layer material LEAVES a machine layer in the URL', () => {
+    const { result } = renderHook(() => useQualitativeAnalysis(), { wrapper: wrapper('/?layer=machine') })
+    act(() => result.current.loadMaterial({ id: 1, config: { layer_scope: 'human' } } as unknown as MaterialResponse))
+    expect(result.current.layerScope).toBe('human')
+  })
+
   it('loadMaterial restores layer_scope=consensus into the URL state', () => {
     const { result } = renderHook(() => useQualitativeAnalysis(), { wrapper: wrapper('/') })
     act(() => result.current.loadMaterial({ id: 1, config: { layer_scope: 'consensus' } } as unknown as MaterialResponse))

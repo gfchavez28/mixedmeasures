@@ -546,7 +546,13 @@ function DocumentReader({
   const allSegments = data.segments.filter(s => !s.merged_into_id && !s.split_into_id)
   const totalCount = allSegments.length
   const segments = searchLower ? allSegments.filter(s => s.text.toLowerCase().includes(searchLower)) : allSegments
-  const codedCount = allSegments.filter(s => s.codes.length > 0).length
+  // #1077 (a) — the SERVER's count, never `codes.length > 0` here. That test
+  // counted a model's labels, universal-only markers (#400) and every coder at
+  // once, so a document a model labelled read as coded on this tab while the
+  // gauges said it was not. `coded_segment_count` is `coding_counts`' people-only
+  // figure on the same payload — the conversation reader beside this one already
+  // reads its own (`coded_count`, #1029).
+  const codedCount = data.coded_segment_count
 
   return (
     <div>

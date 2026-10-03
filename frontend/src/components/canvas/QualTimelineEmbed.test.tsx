@@ -43,7 +43,11 @@ vi.mock('@/hooks/useBlindMode', () => ({
     toggleReveal: vi.fn(),
   }),
 }))
+/** #1077 (b) — mutable, so a case can name a machine coder. */
+const MACHINE_IDS = vi.hoisted(() => new Set<number>())
 vi.mock('@/hooks/useCoders', () => ({
+  // #1077 (b): the timeline's lens needs the machine coders too.
+  useMachineCoderIds: () => MACHINE_IDS,
   useCoders: () => ({
     coders: [
       { id: 1, username: 'ana', display_color: '#3b82f6' },
@@ -242,6 +246,36 @@ describe('the numbers agree with the analysis view', () => {
     expect(within(block('Playground afternoon')).getByText(/^0:30\.0 marked$/)).toBeInTheDocument()
     // ... and the disclosure paragraph repeats it where the numbers are.
     expect(within(block('Playground afternoon')).getByText(/Recording length unknown/)).toBeInTheDocument()
+  })
+})
+
+/**
+ * #1077 (b) + #1098 — a MACHINE coder on the canvas. Coder 2 ("bram") is a model
+ * in these cases: Rapport was marked by person 1 AND the model on one clip;
+ * Silence only by the model. The Coders layer leaves the model out; a material
+ * saved on the Machine layer draws ONLY the model — which needs the saved layer
+ * to survive `extractQualComputeParams` (#1098: it read as `human`).
+ */
+describe('#1077 (b) — a machine coder\'s marks follow the saved layer', () => {
+  beforeEach(() => { MACHINE_IDS.clear(); MACHINE_IDS.add(2) })
+  afterEach(() => MACHINE_IDS.clear())
+
+  const marksFor = async (code: string) => {
+    const table = await screen.findByRole('table', { name: /Playground morning/i })
+    const row = within(table).getByRole('row', { name: new RegExp(`^${code}`) })
+    return within(row).getAllByRole('cell')[0].textContent?.trim()
+  }
+
+  it('the Coders layer leaves the model\'s marks out', async () => {
+    renderEmbed(timelineConfig({ observation_ids: [1] }))
+    expect(await marksFor('Rapport')).toBe('1')   // the person's mark only
+    expect(await marksFor('Silence')).toBe('0')   // model-only ⇒ nothing
+  })
+
+  it('the Machine layer draws only the model\'s marks', async () => {
+    renderEmbed(timelineConfig({ observation_ids: [1], layer_scope: 'machine' }))
+    expect(await marksFor('Rapport')).toBe('1')   // the model's mark only
+    expect(await marksFor('Silence')).toBe('1')
   })
 })
 

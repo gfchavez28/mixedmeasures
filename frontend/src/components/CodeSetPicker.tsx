@@ -64,7 +64,11 @@ export function CodeSetPicker({
   set: CodeSet
   /** The ACTIVE coder's current value, or null. */
   selectedCodeId: number | null
-  /** `null` clears. The caller builds the history entry and calls the endpoint. */
+  /**
+   * A value's press passes its id — also for the value already checked, which
+   * the caller's plan turns into a no-op (#1038 e). `null` is the clear
+   * control. The caller builds the history entry and calls the endpoint.
+   */
   onSelect: (codeId: number | null) => void
   /** A choice is being saved: presses are ignored, and nothing loses focus. */
   busy?: boolean
@@ -192,7 +196,12 @@ export function CodeSetPicker({
               onClick={() => {
                 if (busy) return
                 clearPressedRef.current = false
-                onSelect(checked ? null : value.id)
+                // 🔴 A radio press SELECTS; it never clears (#1038 e). Pressing
+                // the checked value is a no-op in every assistive technology's
+                // model, and the caller's plan says so — in a contradiction the
+                // same press is how the coder resolves it, so the decision
+                // needs the whole passage, which this control does not have.
+                onSelect(value.id)
               }}
               className={cn(
                 'rounded-full border px-2.5 py-1 text-xs transition-colors',

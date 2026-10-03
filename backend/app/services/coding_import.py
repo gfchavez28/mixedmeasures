@@ -25,6 +25,25 @@ arrive in a `.mmproject`. The 1.x claim is untouched, which is why row 49 ships 
    its local match, and the researcher decides. **There is no silent name-match**,
    which is the one place this import departs from the merge's fallback.
 
+## A file row is the SAME ACT as the workbench's (Batch 6, #1031)
+
+🔴 **A grouped segment is ONE unit, for every kind of row.** A `SegmentGroup` exists
+so adjacent turns are coded as one — `apply_code` fans a code out to every visible
+sibling, and a rating and a set selection go with it. The import fanned out SET
+selections only, so a plain code or a rating from a file reached the one sibling
+the row named: a state the workbench cannot produce and cannot show as one unit.
+Every segment row now carries its siblings (`group_targets_by_segment`, the
+workbench's own derivation), and every in-file contradiction is judged on the
+GROUP — two siblings given two values of one set, or two ratings of one code, by
+one coder, is one unit given two answers.
+
+🔴 **A code grouped INTO a set value is a selection too.** Routing by
+`Code.code_set_id` alone wrote a synonym ("Pos" grouped with "Positive") as a plain
+apply, so a coder holding "Negative" ended with both. `set_claimed_by` decides
+membership now, as it does at every other apply door (#1028); a synonym goes
+through the ordinary apply's swap because the set's own endpoint refuses a
+non-member.
+
 ## A refused row never half-applies
 
 The whole file is planned, then applied. A row that cannot be resolved carries a
@@ -35,12 +54,12 @@ succeeded.
 
 ## Set membership is derived from the CODE
 
-If the resolved code belongs to a `CodeSet`, the row is a SELECTION (exclusive,
-through `code_sets.apply_selection`) rather than a plain apply. The file cannot
-then contradict the database about what kind of write this is, and the researcher
-has one less column to get wrong. An optional `code_set` column is checked as an
-ASSERTION — a file built against a different codebook fails loudly instead of
-quietly applying the wrong kind of write.
+If the resolved code counts in a `CodeSet`, the row is a SELECTION (exclusive)
+rather than a plain apply. The file cannot then contradict the database about
+what kind of write this is, and the researcher has one less column to get wrong.
+An optional `code_set` column is checked as an ASSERTION — a file built against a
+different codebook fails loudly instead of quietly applying the wrong kind of
+write.
 
 ## What it does NOT do
 
@@ -48,8 +67,8 @@ quietly applying the wrong kind of write.
   the consensus materializer both filter `reliability_coder_clause()`, so a
   machine-attributed application cannot move consensus or a participant score.
   Marking anyway would enqueue one recompute marker per target for a recompute
-  that provably changes nothing — up to 200,000 of them — one per row at the cap — for recomputes that provably change nothing (the bound is the row cap, not the
-  368,717 figure that belongs to `merge_codes` on BES).
+  that provably changes nothing — up to one per row at the cap (the bound is the
+  row cap, not the 368,717 figure that belongs to `merge_codes` on BES).
 - **It never sets `origin='ai'`.** `origin` says how a ROW was produced and is
   reserved for a human accepting a model's suggestion (a future assist mode);
   the LAYER keys on the CODER. Writing it here would be a field no consumer reads
@@ -59,18 +78,18 @@ quietly applying the wrong kind of write.
 from __future__ import annotations
 
 import csv
-import io
 from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Callable, Hashable, Iterable, Sequence
 
 from sqlalchemy import func, insert
 from sqlalchemy.orm import Session
 
 from ..models.code import Code
 from ..models.code_application import CodeApplication
-from ..models.code_set import CodeSet
-from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
+from ..models.dataset import (
+    TEXT_CODEABLE_TYPES, Dataset, DatasetColumn, DatasetRow, DatasetValue,
+)
 from ..models.segment import Segment
 from ..models.text_coding_config import TextCodingConfig, is_empty_text, parse_treat_as_empty
 from ..models.user import User
@@ -79,9 +98,10 @@ from . import code_sets as code_set_rules
 from . import machine_coder
 from . import magnitude as magnitude_rules
 from .coding_layers import build_effective_code_map, project_scoped_segments
+from .dataset_import import _csv_lines
 from .id_set import in_id_set
 from .identifier_match import group_unique_by_key, normalize_key
-from .segment_groups import group_target_ids
+from .segment_groups import group_targets_by_segment
 
 # ── Vocabulary ───────────────────────────────────────────────────────────────
 
@@ -99,6 +119,23 @@ TARGET_KINDS = (TARGET_SEGMENTS, TARGET_TEXT_COLUMN)
 REQUIRED_HEADERS = ("unit_id", "coder", "code")
 OPTIONAL_HEADERS = ("code_set", "magnitude")
 
+#: Another name a header may go by → the header it is read as.
+#:
+#: 🔴 **`rating` is what the coded-segments export WRITES (#1032 c)**, so without
+#: it the export → import round trip — the design claim `coding-import.md` §2
+#: makes — dropped every rating, silently: the import ignores a column it does not
+#: know, and nothing said the ratings had not come with the codes.
+HEADER_ALIASES = {"rating": "magnitude"}
+
+#: The prefixes the exports' `csv_safe` defangs with a leading apostrophe
+#: (`routers/export_helpers.py::_CSV_FORMULA_PREFIXES`). A service may not import
+#: a router, so this is a copy — and `test_coding_import.py` pins the two equal.
+CSV_DEFANGED_PREFIXES = ("=", "@", "\t", "\r")
+
+#: The longest coder name any door accepts (`schemas/auth.py`'s `max_length=50`).
+#: A `create` with no new name takes the FILE's cell, which is otherwise unbounded.
+CODER_NAME_MAX_LENGTH = 50
+
 #: Bounded because an import is exactly the shape `sql-id-sets.md` warns about,
 #: and because every row becomes a row in `code_applications`. 200,000 covers the
 #: demand case with room (a machine labelling all 75,699 posts of the GSS-scale
@@ -107,9 +144,12 @@ OPTIONAL_HEADERS = ("code_set", "magnitude")
 #: 🔴 **IT IS ALSO A FREEZE BUDGET, AND THAT IS MEASURED (#1000).** The endpoints
 #: are `async def` for the multipart read and everything after it takes a `db`
 #: Session, which no router in this codebase threadpools — so a full-cap import
-#: runs **6.9 s ON the event loop** (parse 0.74 · plan 3.48 · apply 2.72,
-#: measured 2026-09-22 against a 200,000-segment corpus). The three phases are
-#: each linear in rows, so **raising this raises that number with it.**
+#: runs ON the event loop: **6.9 s** on a plain file (parse 0.74 · plan 3.48 ·
+#: apply 2.72, 2026-09-22, a 200,000-segment corpus) and **9.2–9.4 s** on a file
+#: of grouped segments and code-set values (parse 0.9 · plan 4.9 · apply 3.5,
+#: 2026-09-27d — that shape took 52.5–55.1 s before #1062). ⚠️ **A budget is a
+#: claim about the shape it was measured on.** The phases are each linear in
+#: rows, so **raising this raises those numbers with it.**
 MAX_CODING_IMPORT_ROWS = 200_000
 
 #: Bound for a chunked `.in_()` over STRING keys. `services/id_set.py::in_id_set`
@@ -122,30 +162,39 @@ _STRING_CHUNK = 5_000
 # NAMED rather than counted. Each needs different words and a different remedy —
 # `participant_resolution.py`'s five-reason shape — and a summary that said only
 # "37 rows skipped" would leave the researcher with no way to act.
+#
+# ⚠️ The client labels each one (`frontend/src/lib/coding-import-report.ts`,
+# `satisfies Record<CodingImportReason, …>`), and `test_coding_import.py` reads
+# that file: a reason added here without a label fails the suite.
 
 REASON_UNIT_NOT_FOUND = "unit_not_found"
 REASON_UNIT_AMBIGUOUS = "unit_ambiguous"
 REASON_UNIT_NOT_CODEABLE = "unit_not_codeable"
 REASON_CODE_NOT_FOUND = "code_not_found"
 REASON_CODE_AMBIGUOUS = "code_ambiguous"
-REASON_CODE_UNIVERSAL = "code_universal"
 REASON_CODE_INACTIVE = "code_inactive"
 REASON_CODER_MISSING = "coder_missing"
 REASON_CODER_SKIPPED = "coder_skipped"
-REASON_CODER_UNMAPPED = "coder_unmapped"
 REASON_RATING_NOT_A_NUMBER = "rating_not_a_number"
 REASON_RATING_OUTSIDE_SCALE = "rating_outside_scale"
 REASON_RATING_WITHOUT_SCALE = "rating_without_scale"
+REASON_RATING_CONFLICT_IN_FILE = "rating_conflict_in_file"
 REASON_SET_MISMATCH = "set_mismatch"
 REASON_SET_CONFLICT_IN_FILE = "set_conflict_in_file"
 REASON_DUPLICATE_ROW = "duplicate_row"
 
+#: ⚠️ Two reasons LEFT this list in Batch 6, each for its own reason:
+#: `code_universal` — a universal code ("Unclear", "Unsubstantive") is ordinary
+#: coding a researcher makes in the workbench, and refusing it lost those marks on
+#: every export → import round trip with a sentence that offered no remedy;
+#: `coder_unmapped` — never emitted (an unmapped name refuses the whole file,
+#: `resolve_coders`), so it was vocabulary no row could carry (#1039 i, #941).
 IMPORT_REASONS = (
     REASON_UNIT_NOT_FOUND, REASON_UNIT_AMBIGUOUS, REASON_UNIT_NOT_CODEABLE,
-    REASON_CODE_NOT_FOUND, REASON_CODE_AMBIGUOUS, REASON_CODE_UNIVERSAL,
-    REASON_CODE_INACTIVE, REASON_CODER_MISSING, REASON_CODER_SKIPPED,
-    REASON_CODER_UNMAPPED, REASON_RATING_NOT_A_NUMBER,
-    REASON_RATING_OUTSIDE_SCALE, REASON_RATING_WITHOUT_SCALE,
+    REASON_CODE_NOT_FOUND, REASON_CODE_AMBIGUOUS, REASON_CODE_INACTIVE,
+    REASON_CODER_MISSING, REASON_CODER_SKIPPED,
+    REASON_RATING_NOT_A_NUMBER, REASON_RATING_OUTSIDE_SCALE,
+    REASON_RATING_WITHOUT_SCALE, REASON_RATING_CONFLICT_IN_FILE,
     REASON_SET_MISMATCH, REASON_SET_CONFLICT_IN_FILE, REASON_DUPLICATE_ROW,
 )
 
@@ -171,6 +220,24 @@ class ParsedRow:
 
 def _normalize_header(value: str | None) -> str:
     return (value or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def undo_formula_defang(cell: str) -> str:
+    """The inverse of the exports' `csv_safe`: `'@mention` → `@mention`.
+
+    🔴 **A code, coder or record id that begins with a formula character comes
+    out of this app's own exports with an apostrophe in front** (#1032 c), and the
+    import compared it verbatim — so a code named `@mention` came back as
+    *"There is no code called “'@mention”"*, from a file the tool wrote.
+
+    ⚠️ Only an apostrophe followed by one of the defanged prefixes is removed, so
+    an ordinary leading apostrophe survives. The one value this misreads is a
+    name that genuinely begins `'@` — which `csv_safe` itself cannot round-trip
+    either.
+    """
+    if len(cell) > 1 and cell[0] == "'" and cell[1] in CSV_DEFANGED_PREFIXES:
+        return cell[1:]
+    return cell
 
 
 def decode_csv(raw: bytes) -> str:
@@ -199,21 +266,33 @@ def parse_rows(text: str) -> list[ParsedRow]:
     ⚠️ **Blank lines are skipped and do NOT advance the reported line number's
     meaning** — the number is the spreadsheet row a researcher will look at, so
     it counts every physical line including the header.
+
+    ⚠️ **`_csv_lines`, never `io.StringIO(text)`** (#1039 i): the latter stores its
+    buffer at 4 bytes per character, so a 49 MB file cost ~190 MB before a row was
+    read — and before the row cap below could refuse it.
     """
-    reader = csv.reader(io.StringIO(text))
+    reader = csv.reader(_csv_lines(text))
     try:
         header = next(reader)
     except StopIteration:
         raise CodingImportError("The file is empty.") from None
 
     positions: dict[str, int] = {}
+    spelled: dict[str, str] = {}
     for index, raw in enumerate(header):
         name = _normalize_header(raw)
+        canonical = HEADER_ALIASES.get(name, name)
+        if canonical in spelled and spelled[canonical] != name:
+            raise CodingImportError(
+                f"The file has both a “{spelled[canonical]}” and a “{name}” column, "
+                "and they mean the same thing. Keep one of them."
+            )
         # First wins: a duplicated header is a file defect, and silently taking
         # the LAST one is how `preview_dataset_csv` described the second column's
         # values under the first column's name (#973 (b')).
-        if name and name not in positions:
-            positions[name] = index
+        if canonical and canonical not in positions:
+            positions[canonical] = index
+            spelled[canonical] = name
 
     missing = [h for h in REQUIRED_HEADERS if h not in positions]
     if missing:
@@ -222,14 +301,14 @@ def parse_rows(text: str) -> list[ParsedRow]:
             + ", ".join(f"“{h}”" for h in missing)
             + ". The header row should read: "
             + ", ".join(REQUIRED_HEADERS + OPTIONAL_HEADERS)
-            + " (the last two are optional)."
+            + " (the last two are optional, and “rating” works for “magnitude”)."
         )
 
     def cell(row: Sequence[str], name: str) -> str:
         index = positions.get(name)
         if index is None or index >= len(row):
             return ""
-        return (row[index] or "").strip()
+        return undo_formula_defang((row[index] or "").strip()).strip()
 
     rows: list[ParsedRow] = []
     for line, raw_row in enumerate(reader, start=2):
@@ -269,15 +348,31 @@ class PlannedApplication:
     code_id: int
     code_name: str
     #: Exactly one is set, matching `ck_code_application_exactly_one_target`.
+    #: For a segment this is the one the ROW named; `targets` is what it reaches.
     segment_id: int | None
     dataset_value_id: int | None
-    #: The set this code belongs to, or None for a plain apply.
+    #: The set this code counts in (a member's own set, or the set a synonym is
+    #: grouped into), or None for a plain apply.
     code_set_id: int | None
     magnitude: float | None
-    #: For a SET selection on a grouped segment: every visible sibling. Empty
-    #: otherwise. Derived once, at plan time, through the SAME helper the
-    #: workbench uses (`code-sets.md` §6 — the caller passes the siblings).
+    #: A grouped segment's VISIBLE siblings, itself included — derived once, at
+    #: plan time, through the workbench's own helper. Empty for an ungrouped
+    #: segment and for a dataset cell.
     group_segment_ids: tuple[int, ...] = ()
+    #: What "this unit" is when the file is checked for contradictions: the GROUP
+    #: for a grouped segment, else the segment or the cell.
+    unit_key: tuple[str, int] = ("", 0)
+    #: The set VALUE this code reads as (`ResolvedSet.claimants`) — a synonym and
+    #: its value are one choice, two values are a contradiction.
+    set_value_id: int | None = None
+    set_label: str = ""
+
+    @property
+    def segment_targets(self) -> tuple[int, ...]:
+        """Every segment this row's act covers (empty for a dataset cell)."""
+        if self.segment_id is None:
+            return ()
+        return self.group_segment_ids or (self.segment_id,)
 
 
 @dataclass(frozen=True)
@@ -286,6 +381,10 @@ class CoderCandidate:
 
     name: str
     row_count: int
+    #: Of those, how many the plan would WRITE. Found by driving (Batch 6): a name
+    #: whose every row is refused was still asked for a kind and, if created,
+    #: added an empty coder to the roster — so the page can default it to skip.
+    rows_to_apply: int
     local_user_id: int | None
     local_coder_type: str | None
     local_archived: bool
@@ -301,18 +400,30 @@ class ImportPlan:
     applications: list[PlannedApplication] = field(default_factory=list)
     problems: list[RowProblem] = field(default_factory=list)
     coders: list[CoderCandidate] = field(default_factory=list)
-    #: Distinct units and codes the file actually resolved to — the two numbers a
-    #: researcher checks before committing, because a file that matched three
-    #: units of five hundred is a file built against the wrong key.
+    #: 🔴 **Each HALF of the addressing, counted on its own (#1004).** Distinct
+    #: unit ids the file names, and how many of them name a unit in this project;
+    #: distinct code names, and how many name a code. They used to be counted over
+    #: the rows that would be WRITTEN, so a file whose ids were all wrong showed
+    #: "Codes matched 0" beside a codebook it matched perfectly — both headline
+    #: numbers pointing at the codes when only the key was wrong.
+    units_in_file: int = 0
     units_matched: int = 0
+    codes_in_file: int = 0
     codes_matched: int = 0
+    #: Passages coded because they are GROUPED with one the file names — the
+    #: difference between "rows applied" and "codings added", said before the act.
+    grouped_passages: int = 0
 
     @property
     def reason_counts(self) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for problem in self.problems:
-            counts[problem.reason] = counts.get(problem.reason, 0) + 1
-        return counts
+        return reason_counts(self.problems)
+
+
+def reason_counts(problems: Iterable[RowProblem]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for problem in problems:
+        counts[problem.reason] = counts.get(problem.reason, 0) + 1
+    return counts
 
 
 @dataclass(frozen=True)
@@ -324,6 +435,9 @@ class CoderDecision:
     new_username: str | None = None
     coder_type: str = CODER_TYPE_HUMAN
     machine_provenance: dict | None = None
+    #: `match` onto an ARCHIVED coder: bring them back (#1031 c). The merge's
+    #: decision carries the same flag, for the same reason.
+    unarchive: bool = False
 
 
 @dataclass
@@ -336,6 +450,9 @@ class ImportReport:
     ratings_set: int = 0
     coders_matched: int = 0
     coders_created: int = 0
+    coders_unarchived: int = 0
+    #: Who was brought back — for the audit entry, which is the durable record.
+    unarchived_coder_ids: list[int] = field(default_factory=list)
     skipped: int = 0
     problems: list[RowProblem] = field(default_factory=list)
 
@@ -357,7 +474,7 @@ class _ResolvedUnit:
     #: have different remedies (re-word the project's non-response list vs undo a
     #: segment merge).
     not_codeable_detail: str = ""
-    group_segment_ids: tuple[int, ...] = ()
+    group_id: int | None = None
 
 
 def _resolve_segment_units(
@@ -381,14 +498,14 @@ def _resolve_segment_units(
             project_scoped_segments(
                 db.query(
                     Segment.uuid, Segment.id, Segment.merged_into_id,
-                    Segment.split_into_id,
+                    Segment.split_into_id, Segment.group_id,
                 ),
                 project_id,
             )
             .filter(Segment.uuid.in_(list(chunk)))
             .all()
         )
-        for uuid, seg_id, merged_into, split_into in rows:
+        for uuid, seg_id, merged_into, split_into, group_id in rows:
             hidden = merged_into is not None or split_into is not None
             found.append((normalize_key(uuid), _ResolvedUnit(
                 segment_id=seg_id,
@@ -399,8 +516,34 @@ def _resolve_segment_units(
                     "unreachable in the app. Undo the merge or split first."
                     if hidden else ""
                 ),
+                group_id=group_id,
             )))
     return group_unique_by_key(found)
+
+
+def _coded_column(db: Session, project_id: int, column_id: int) -> DatasetColumn:
+    """The column the file codes — in this project, and one Text Coding shows.
+
+    ⚠️ **A column of another type is REFUSED, not coded (Batch 6).** The import
+    took any column id, so a file could code an identifier's or a number's cells:
+    applications no screen offers, shows or removes — #987's UI-unreachable class.
+    The page only offers text columns; a script could send anything.
+    """
+    column = (
+        db.query(DatasetColumn)
+        .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+        .filter(DatasetColumn.id == column_id, Dataset.project_id == project_id)
+        .first()
+    )
+    if column is None:
+        raise CodingImportError("That text column is not in this project.")
+    if column.column_type not in TEXT_CODEABLE_TYPES:
+        raise CodingImportError(
+            f"“{column.column_name or column.column_text}” is not an open-text "
+            "column, so codings on it would not appear anywhere in the app. Choose "
+            "the open-text column these codings are about."
+        )
+    return column
 
 
 def _resolve_text_units(
@@ -426,15 +569,31 @@ def _resolve_text_units(
 
     ⚠️ **Resolution is two hops on purpose** — key → ROW, then row → the cell in
     the coded column — so both keys share one path and one set of refusals.
+
+    🔴 **The id column must be in the CODED column's dataset (#1032 a).** It was
+    filtered by its id alone: a column from another dataset refused every row with
+    a sentence about the wrong thing, and — under `MM_MULTIUSER_AUTH_ENABLED` — a
+    foreign project's column id answered `unit_not_codeable` for its values and
+    `unit_not_found` for anything else, an existence oracle (#782/#783's rule:
+    every per-entity id is checked, not only the project). One sentence for
+    "not there" and "somewhere else", so the refusal says nothing about which.
     """
-    column = (
-        db.query(DatasetColumn)
-        .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
-        .filter(DatasetColumn.id == column_id, Dataset.project_id == project_id)
-        .first()
-    )
-    if column is None:
-        raise CodingImportError("That text column is not in this project.")
+    column = _coded_column(db, project_id, column_id)
+    if match_column_id is not None:
+        same_dataset = (
+            db.query(DatasetColumn.id)
+            .filter(
+                DatasetColumn.id == match_column_id,
+                DatasetColumn.dataset_id == column.dataset_id,
+            )
+            .first()
+        )
+        if same_dataset is None:
+            raise CodingImportError(
+                "The column chosen for the ids is not in the same dataset as the "
+                "column you are coding. Choose one of that dataset's columns, or "
+                "use the record IDs."
+            )
 
     row_pairs: list[tuple[str, int]] = []
     for chunk in _chunked(keys):
@@ -514,6 +673,168 @@ def _resolve_text_units(
     return resolved, duplicates
 
 
+# ── In-file contradictions ───────────────────────────────────────────────────
+
+
+def _lines_phrase(lines: Sequence[int]) -> str:
+    ordered = sorted(lines)
+    if len(ordered) == 1:
+        return f"Line {ordered[0]}"
+    return "Lines " + ", ".join(str(n) for n in ordered[:-1]) + f" and {ordered[-1]}"
+
+
+def _who(rows: Sequence[PlannedApplication]) -> str:
+    """The coder a group of rows belongs to, as the researcher named them.
+
+    Two names appear only when both were mapped onto ONE coder (#1039 i), and the
+    sentence then has to say so or it would read as two people disagreeing.
+    """
+    names = sorted({r.coder for r in rows})
+    if len(names) == 1:
+        return f"“{names[0]}”"
+    return " and ".join(f"“{n}”" for n in names) + " (imported as one coder)"
+
+
+def _grouped_note(rows: Sequence[PlannedApplication]) -> str:
+    if len({r.segment_id for r in rows}) > 1:
+        return " (those passages are grouped, and a group is coded as one unit)"
+    return ""
+
+
+def _fmt_rating(value: float) -> str:
+    return magnitude_rules._fmt(value)
+
+
+def settle_contradictions(
+    applications: Sequence[PlannedApplication],
+    coder_key: Callable[[PlannedApplication], Hashable],
+) -> tuple[list[PlannedApplication], list[RowProblem]]:
+    """What the file says, once the rows that contradict each other are out.
+
+    🔴 **A contradiction is counted, never resolved by picking one** — the
+    `SET_MULTIPLE` rule, reached at the file. "First wins" and "last wins" are
+    both a coin toss by another name. Three shapes, each judged on the UNIT a
+    coder codes (a segment GROUP is one, #1031 b):
+
+    1. one coder, one unit, one set, TWO VALUES → every row of that claim refused;
+    2. one coder, one unit, one code, TWO RATINGS → every row refused. Until
+       Batch 6 an exact repeat with another rating kept the first silently, and
+       siblings of one group each kept their own, a state the workbench's rating
+       fan-out cannot produce;
+    3. the same coder, unit and code named twice with no disagreement → the
+       repeat is a `duplicate_row`, and a rating stated on only one of them is
+       the rating (a blank magnitude is "no statement", never a clear).
+
+    Rows naming two SIBLINGS of a group with the same code both stay: an export
+    lists every sibling, and the two rows are one act that the apply de-duplicates.
+
+    ⚠️ **Called twice, with two keys, and that is the point of the parameter.**
+    The planner keys on the file's NAME; the apply keys on the resolved CODER,
+    because two names mapped onto one coder can contradict each other and neither
+    name alone shows it.
+
+    ⚠️ **Only a REPEATED key is grouped** (`_repeats`): at the 200,000-row cap
+    nearly every key occurs once, and a list per key was ~30 MB of the import's
+    peak for groups of one.
+    """
+    problems: list[RowProblem] = []
+    refused: set[int] = set()
+
+    # ── 1 + the synonym case: one choice per coder, unit and set ─────────────
+    by_claim = _repeats(
+        (a for a in applications if a.code_set_id is not None),
+        lambda a: (coder_key(a), a.unit_key, a.code_set_id),
+    )
+    for rows in by_claim:
+        values = {r.set_value_id for r in rows}
+        if len(values) > 1:
+            lines = [r.line for r in rows]
+            names = sorted({r.code_name for r in rows})
+            for r in rows:
+                refused.add(r.line)
+                problems.append(RowProblem(
+                    r.line, REASON_SET_CONFLICT_IN_FILE,
+                    f"{_lines_phrase(lines)} give {_who(rows)} different values of "
+                    f"“{r.set_label}” ({', '.join(names)}) for the same "
+                    f"unit{_grouped_note(rows)}, so none of them is applied — a "
+                    "contradiction is not ours to resolve.",
+                ))
+            continue
+        # One VALUE, possibly spelled by two codes (a synonym and its value).
+        # Holding both is one choice, and the write keeps only one of them, so
+        # the first code named is the one written and a later spelling adds
+        # nothing — said, rather than swapped out by whichever runs second.
+        first_code = rows[0].code_id
+        for r in rows[1:]:
+            if r.code_id != first_code:
+                refused.add(r.line)
+                problems.append(RowProblem(
+                    r.line, REASON_DUPLICATE_ROW,
+                    f"“{r.code_name}” and “{rows[0].code_name}” are the same value "
+                    f"of “{r.set_label}”, and line {rows[0].line} already gives it "
+                    "to this coder for this unit.",
+                ))
+
+    # ── 2 + 3: per coder, unit and code ──────────────────────────────────────
+    by_code = _repeats(
+        (a for a in applications if a.line not in refused),
+        lambda a: (coder_key(a), a.unit_key, a.code_id),
+    )
+
+    # A row outside every repeated key is kept exactly as it came.
+    rewritten: dict[int, PlannedApplication] = {}
+    for rows in by_code:
+        ratings = sorted({r.magnitude for r in rows if r.magnitude is not None})
+        if len(ratings) > 1:
+            lines = [r.line for r in rows]
+            for r in rows:
+                refused.add(r.line)
+                problems.append(RowProblem(
+                    r.line, REASON_RATING_CONFLICT_IN_FILE,
+                    f"{_lines_phrase(lines)} give {_who(rows)} different ratings of "
+                    f"“{r.code_name}” ({', '.join(_fmt_rating(v) for v in ratings)}) "
+                    f"for the same unit{_grouped_note(rows)}, so none of them is "
+                    "applied — a contradiction is not ours to resolve.",
+                ))
+            continue
+        agreed = ratings[0] if ratings else None
+        first_line_for_target: dict[int, int] = {}
+        for r in rows:
+            named = r.segment_id if r.segment_id is not None else r.dataset_value_id
+            if named in first_line_for_target:
+                refused.add(r.line)
+                problems.append(RowProblem(
+                    r.line, REASON_DUPLICATE_ROW,
+                    "The same coder, unit and code appear earlier in this file "
+                    f"(line {first_line_for_target[named]}).",
+                ))
+                continue
+            first_line_for_target[named] = r.line
+            if r.magnitude != agreed:
+                rewritten[r.line] = replace(r, magnitude=agreed)
+
+    kept = [rewritten.get(a.line, a) for a in applications if a.line not in refused]
+    return kept, problems
+
+
+def _repeats(
+    items: Iterable[PlannedApplication],
+    key: Callable[[PlannedApplication], Hashable],
+) -> list[list[PlannedApplication]]:
+    """The groups of items that SHARE a key, in file order — never a group of one."""
+    first: dict[Hashable, PlannedApplication] = {}
+    repeated: dict[Hashable, list[PlannedApplication]] = {}
+    for item in items:
+        k = key(item)
+        if k in repeated:
+            repeated[k].append(item)
+        elif k in first:
+            repeated[k] = [first[k], item]
+        else:
+            first[k] = item
+    return list(repeated.values())
+
+
 # ── Planning ─────────────────────────────────────────────────────────────────
 
 
@@ -550,6 +871,14 @@ def build_plan(
         )
     ambiguous = set(ambiguous_keys)
 
+    # A grouped segment's siblings, for every grouped unit the file names — the
+    # workbench's derivation, batched (a query per chunk of GROUPS, not per row).
+    group_targets = group_targets_by_segment(db, [
+        (u.segment_id, u.group_id)
+        for u in units.values()
+        if u.codeable and u.segment_id is not None and u.group_id
+    ])
+
     # ── Codes, by name ───────────────────────────────────────────────────────
     #
     # ⚠️ CASE-INSENSITIVE here while the UNIT key is case-sensitive, and the
@@ -564,30 +893,18 @@ def build_plan(
     )
     ambiguous_codes = set(ambiguous_code_names)
 
-    sets_by_id = {
-        s.id: s for s in db.query(CodeSet).filter(CodeSet.project_id == project_id).all()
-    }
     effective_map = build_effective_code_map(db, project_id)
     set_index = code_set_rules.build_code_set_index(db, project_id, effective_map)
 
-    # Grouped segments: only a SET selection needs the siblings, so the Segment
-    # rows are loaded for those units alone rather than for the whole file.
-    grouped_cache: dict[int, tuple[int, ...]] = {}
-
-    def _group_ids(segment_id: int) -> tuple[int, ...]:
-        if segment_id not in grouped_cache:
-            segment = db.get(Segment, segment_id)
-            grouped_cache[segment_id] = (
-                tuple(group_target_ids(db, segment)) if segment is not None else (segment_id,)
-            )
-        return grouped_cache[segment_id]
+    # ── Each half of the addressing, counted on its own (#1004) ──────────────
+    code_keys = {r.code.strip().lower() for r in rows if r.code.strip()}
+    plan.units_in_file = len(unit_keys)
+    plan.units_matched = sum(1 for k in unit_keys if k in units)
+    plan.codes_in_file = len(code_keys)
+    plan.codes_matched = sum(1 for k in code_keys if k in codes_by_name)
 
     coder_rows: dict[str, int] = defaultdict(int)
-    seen_triples: set[tuple[str, int, int]] = set()
-    #: (coder, unit, set) → (line, code_id) — the FIRST claim on a set for a unit.
-    set_claims: dict[tuple[str, int, int], tuple[int, int]] = {}
-    conflicted_claims: set[tuple[str, int, int]] = set()
-    planned: list[PlannedApplication] = []
+    candidates: list[PlannedApplication] = []
     problems: list[RowProblem] = []
 
     for row in rows:
@@ -643,14 +960,6 @@ def build_plan(
                 "first, or correct the spelling in the file.",
             ))
             continue
-        if code.is_universal:
-            problems.append(RowProblem(
-                row.line, REASON_CODE_UNIVERSAL,
-                f"“{code.name}” is a universal code. Universal codes are excluded "
-                "from every coded-count and reliability surface, so importing one "
-                "would have no effect on any figure.",
-            ))
-            continue
         if not code.is_active:
             problems.append(RowProblem(
                 row.line, REASON_CODE_INACTIVE,
@@ -660,16 +969,19 @@ def build_plan(
             continue
 
         # ── The set, DERIVED from the code ───────────────────────────────────
-        resolved_set = None
-        if code.code_set_id is not None:
-            resolved_set = set_index.by_id(code.code_set_id)
+        # `set_claimed_by`, never `Code.code_set_id`: a code GROUPED INTO a value
+        # counts in the set too (#1028), and every other apply door swaps it.
+        resolved_set = set_index.set_claimed_by(code.id)
         if row.code_set:
-            declared = (sets_by_id.get(code.code_set_id).label
-                        if code.code_set_id in sets_by_id else None)
+            declared = resolved_set.label if resolved_set is not None else None
             if normalize_key(row.code_set) != normalize_key(declared or ""):
+                relation = (
+                    "belongs to" if code.code_set_id is not None or resolved_set is None
+                    else "counts as a value of"
+                )
                 problems.append(RowProblem(
                     row.line, REASON_SET_MISMATCH,
-                    f"“{code.name}” belongs to "
+                    f"“{code.name}” {relation} "
                     + (f"“{declared}”" if declared else "no code set")
                     + f", not “{row.code_set}”. This file was built against a "
                     "different codebook.",
@@ -701,37 +1013,14 @@ def build_plan(
                     row.line, REASON_RATING_OUTSIDE_SCALE, str(exc)))
                 continue
 
-        unit_key = unit.segment_id if unit.segment_id is not None else unit.dataset_value_id
-        triple = (row.coder, unit_key, code.id)
-        if triple in seen_triples:
-            problems.append(RowProblem(
-                row.line, REASON_DUPLICATE_ROW,
-                "The same coder, unit and code appear earlier in this file.",
-            ))
-            continue
-        seen_triples.add(triple)
+        if unit.segment_id is not None:
+            siblings = group_targets.get(unit.segment_id, ()) if unit.group_id else ()
+            unit_key = ("group", unit.group_id) if unit.group_id else ("segment", unit.segment_id)
+        else:
+            siblings = ()
+            unit_key = ("value", unit.dataset_value_id)
 
-        group_ids: tuple[int, ...] = ()
-        if resolved_set is not None:
-            claim_key = (row.coder, unit_key, resolved_set.id)
-            previous = set_claims.get(claim_key)
-            if previous is not None and previous[1] != code.id:
-                # 🔴 The `SET_MULTIPLE` rule, reached at the FILE: a contradiction
-                # is counted, never resolved by picking one. BOTH claims are
-                # refused, including the earlier one already planned.
-                conflicted_claims.add(claim_key)
-                problems.append(RowProblem(
-                    row.line, REASON_SET_CONFLICT_IN_FILE,
-                    f"This file gives “{row.coder}” two values of "
-                    f"“{resolved_set.label}” for the same unit, so neither is "
-                    "applied — a contradiction is not ours to resolve.",
-                ))
-                continue
-            set_claims[claim_key] = (row.line, code.id)
-            if unit.segment_id is not None:
-                group_ids = _group_ids(unit.segment_id)
-
-        planned.append(PlannedApplication(
+        candidates.append(PlannedApplication(
             line=row.line,
             coder=row.coder,
             code_id=code.id,
@@ -740,39 +1029,33 @@ def build_plan(
             dataset_value_id=unit.dataset_value_id,
             code_set_id=resolved_set.id if resolved_set is not None else None,
             magnitude=rating,
-            group_segment_ids=group_ids,
+            group_segment_ids=siblings,
+            unit_key=unit_key,
+            set_value_id=(
+                resolved_set.claimants.get(code.id, code.id)
+                if resolved_set is not None else None
+            ),
+            set_label=resolved_set.label if resolved_set is not None else "",
         ))
 
-    # The earlier half of every in-file set conflict is withdrawn here. It was
-    # already planned when the contradiction arrived, and leaving it in would
-    # apply the FIRST value — which is the coin toss this rule exists to refuse.
-    if conflicted_claims:
-        kept: list[PlannedApplication] = []
-        for app in planned:
-            key = (app.coder, app.segment_id if app.segment_id is not None
-                   else app.dataset_value_id, app.code_set_id)
-            if app.code_set_id is not None and key in conflicted_claims:
-                line = set_claims[key][0]
-                problems.append(RowProblem(
-                    line, REASON_SET_CONFLICT_IN_FILE,
-                    "A later row in this file gives the same coder a different "
-                    "value of this set for this unit, so neither is applied.",
-                ))
-                continue
-            kept.append(app)
-        planned = kept
+    planned, settled_problems = settle_contradictions(candidates, lambda a: a.coder)
+    problems.extend(settled_problems)
 
     plan.applications = planned
     plan.problems = sorted(problems, key=lambda p: p.line)
-    plan.units_matched = len({
-        (a.segment_id, a.dataset_value_id) for a in planned
-    })
-    plan.codes_matched = len({a.code_id for a in planned})
-    plan.coders = _coder_candidates(db, coder_rows)
+    named = {a.segment_id for a in planned if a.segment_id is not None}
+    reached = {t for a in planned for t in a.segment_targets}
+    plan.grouped_passages = len(reached - named)
+    to_apply: dict[str, int] = defaultdict(int)
+    for app in planned:
+        to_apply[app.coder] += 1
+    plan.coders = _coder_candidates(db, coder_rows, to_apply)
     return plan
 
 
-def _coder_candidates(db: Session, coder_rows: dict[str, int]) -> list[CoderCandidate]:
+def _coder_candidates(
+    db: Session, coder_rows: dict[str, int], to_apply: dict[str, int],
+) -> list[CoderCandidate]:
     """Every name in the file with what this install already has by that name.
 
     🔴 **A CANDIDATE, never a decision.** The merge's coder loop falls back to a
@@ -817,6 +1100,7 @@ def _coder_candidates(db: Session, coder_rows: dict[str, int]) -> list[CoderCand
         out.append(CoderCandidate(
             name=name,
             row_count=coder_rows[name],
+            rows_to_apply=to_apply.get(name, 0),
             local_user_id=local.id if local else None,
             local_coder_type=local.coder_type if local else None,
             local_archived=bool(local.archived) if local else False,
@@ -841,6 +1125,11 @@ def resolve_coders(
     🔴 **An UNMAPPED name is a refusal, not a fallback.** `CodingImportError` names
     the coders, so the client sends the researcher back to the mapping step rather
     than writing somebody's coding under a name that merely looked similar.
+
+    ⚠️ **A decision carrying something it cannot use is REFUSED, never ignored**
+    (#1039 i): a configuration on a person, or on a coder being MATCHED (whose
+    configuration is its own, and frozen once it has coded) — dropping either
+    silently would leave the researcher believing it was recorded.
     """
     report = ImportReport()
     resolved: dict[str, int | None] = {}
@@ -862,6 +1151,13 @@ def resolve_coders(
                 raise CodingImportError(
                     f"No coder was chosen for “{candidate.name}”."
                 )
+            if decision.machine_provenance is not None:
+                raise CodingImportError(
+                    f"A model configuration was sent for “{candidate.name}”, which is "
+                    "being matched to an existing coder. An existing machine coder "
+                    "keeps its own recorded configuration — create a new coder for a "
+                    "different one."
+                )
             target = (
                 db.query(User)
                 .filter(
@@ -875,11 +1171,24 @@ def resolve_coders(
                     f"The coder chosen for “{candidate.name}” no longer exists. "
                     "Re-check the file before importing."
                 )
+            # 🔴 #1031 (c): an ARCHIVED coder's codings are hidden by default and
+            # left out of reliability, consensus and the model comparison. The page
+            # shows the state and offers this; nothing here decides it.
+            if decision.unarchive and target.archived:
+                target.archived = False
+                report.coders_unarchived += 1
+                report.unarchived_coder_ids.append(target.id)
             resolved[candidate.name] = target.id
             report.coders_matched += 1
             continue
         if decision.action == "create":
             base = (decision.new_username or candidate.name).strip() or "Coder"
+            if len(base) > CODER_NAME_MAX_LENGTH:
+                raise CodingImportError(
+                    f"“{base[:40]}…” is longer than {CODER_NAME_MAX_LENGTH} "
+                    "characters, the longest a coder's name can be. Give the new "
+                    "coder a shorter name."
+                )
             coder_type = (
                 CODER_TYPE_MACHINE if decision.coder_type == CODER_TYPE_MACHINE
                 else CODER_TYPE_HUMAN
@@ -922,21 +1231,21 @@ def apply_plan(
 ) -> ImportReport:
     """Write the plan. Flushes; the CALLER commits (the house transaction rule).
 
-    The write is in four passes, and the order matters:
+    The write is in five passes, and the order matters:
 
     1. **Coders** — resolved or created first, because every later pass keys on a
-       user id.
-    2. **Set selections** — grouped by `(set, coder, chosen member)` so one call
-       to `code_sets.apply_selection` covers every unit that took that value.
-       That reuses the swap rather than re-implementing it (`code-sets.md` §6
-       reason 4), and it is why `apply_selection`'s target arms are lists.
-    3. **Plain applies** — a Core `executemany`, never N `db.add`s (#958's
-       remaining import cost, met here before it is paid).
-    4. **Ratings** — ONE pass over both kinds, grouped by
-       `(code, coder, value)`. A rating is the same act however the application
-       arrived, and re-rating clears `magnitude_conflict` because rating again IS
-       the adjudication (#35 §6d).
-
+       user id. Two NAMES mapped onto one coder are checked for contradictions
+       again, per coder (`settle_contradictions`).
+    2. **Set selections** — members grouped by `(set, coder, chosen member)` so
+       one call to `code_sets.apply_selection` covers every unit that took that
+       value (`code-sets.md` §6 reason 4). A SYNONYM goes through
+       `clear_rival_values`, the ordinary apply's swap, then the plain insert —
+       `apply_selection` refuses a non-member.
+    3. **Plain applies** — a Core `executemany`, never N `db.add`s, over every
+       target each row reaches (a grouped segment's siblings included).
+    4. **Ratings** — ONE pass over both kinds, grouped by `(code, coder, value)`,
+       over the same targets. Re-rating clears `magnitude_conflict` because
+       rating again IS the adjudication (#35 §6d).
     5. **Staleness** — marked HERE rather than at the router, so the rule
        *"every code-application mutation site marks consensus stale"* cannot be
        forgotten by a second caller. See `_mark_staleness` for why a machine's
@@ -959,36 +1268,43 @@ def apply_plan(
 
     resolved_user = {a.coder: coder_ids[a.coder] for a in applications}
 
+    # 🔴 Two names onto ONE coder (#1039 i). The planner judged contradictions per
+    # NAME, so "Alice: Positive" and "alice: Negative" on one unit both passed —
+    # and whichever selection ran second swapped the first out. Judged per CODER
+    # now, only when the mapping actually merged names.
+    if len(set(resolved_user.values())) < len(resolved_user):
+        applications, merged_problems = settle_contradictions(
+            applications, lambda a: resolved_user[a.coder],
+        )
+        report.problems.extend(merged_problems)
+
     # ── 2. Set selections ────────────────────────────────────────────────────
     effective_map = build_effective_code_map(db, project_id)
     set_index = code_set_rules.build_code_set_index(db, project_id, effective_map)
 
     selection_groups: dict[tuple[int, int, int], list[PlannedApplication]] = defaultdict(list)
+    synonym_groups: dict[tuple[int, int], list[PlannedApplication]] = defaultdict(list)
     plain: list[PlannedApplication] = []
     for app in applications:
-        if app.code_set_id is None:
+        resolved_set = (
+            set_index.by_id(app.code_set_id) if app.code_set_id is not None else None
+        )
+        if resolved_set is None:
+            # No set — or the set was deleted between the preview and the import.
+            # Not worth aborting the file for: the codes still exist, so the rows
+            # are what the project now says they are, a plain apply.
             plain.append(app)
-        else:
+        elif app.code_id in resolved_set.raw_member_ids:
             selection_groups[
                 (app.code_set_id, resolved_user[app.coder], app.code_id)
             ].append(app)
+        else:
+            synonym_groups[(resolved_user[app.coder], app.code_id)].append(app)
 
     for (set_id, user_id, code_id), group in selection_groups.items():
         resolved_set = set_index.by_id(set_id)
-        if resolved_set is None:
-            # The set was deleted between the preview and the import. Not an
-            # error worth aborting the whole file for: the codes still exist, so
-            # the rows fall back to a plain apply, which is what the project now
-            # says they are.
-            plain.extend(group)
-            continue
-        segment_ids: list[int] = []
-        value_ids: list[int] = []
-        for app in group:
-            if app.segment_id is not None:
-                segment_ids.extend(app.group_segment_ids or (app.segment_id,))
-            else:
-                value_ids.append(app.dataset_value_id)
+        segment_ids = [t for app in group for t in app.segment_targets]
+        value_ids = [app.dataset_value_id for app in group if app.dataset_value_id is not None]
         if segment_ids:
             _, removed = code_set_rules.apply_selection(
                 db, resolved_set, user_id=user_id, code_id=code_id,
@@ -1003,14 +1319,32 @@ def apply_plan(
             report.replaced += removed
         report.selections += len(group)
 
+    for (user_id, code_id), group in synonym_groups.items():
+        segment_ids = [t for app in group for t in app.segment_targets]
+        value_ids = [app.dataset_value_id for app in group if app.dataset_value_id is not None]
+        for kind, ids in (("segment_ids", segment_ids), ("dataset_value_ids", value_ids)):
+            if ids:
+                removed = code_set_rules.clear_rival_values(
+                    db, set_index, code_id=code_id, user_id=user_id, **{kind: ids},
+                )
+                report.replaced += sum(len(codes) for codes in removed.values())
+        report.selections += len(group)
+        plain.extend(group)
+
     # ── 3. Plain applies ─────────────────────────────────────────────────────
     if plain:
-        wanted = {
-            (resolved_user[a.coder], a.code_id, a.segment_id, a.dataset_value_id)
-            for a in plain
-        }
-        existing = _existing_applications(db, plain, resolved_user)
-        fresh = [w for w in wanted if w not in existing]
+        wanted: set[tuple[int, int, int | None, int | None]] = set()
+        for app in plain:
+            user_id = resolved_user[app.coder]
+            if app.dataset_value_id is not None:
+                wanted.add((user_id, app.code_id, None, app.dataset_value_id))
+            for target in app.segment_targets:
+                wanted.add((user_id, app.code_id, target, None))
+        existing = _existing_applications(db, wanted)
+        fresh = sorted(
+            (w for w in wanted if w not in existing),
+            key=lambda w: (w[0], w[1], w[2] or 0, w[3] or 0),
+        )
         report.already_present += len(wanted) - len(fresh)
         if fresh:
             db.execute(insert(CodeApplication), [
@@ -1032,8 +1366,8 @@ def apply_plan(
         if app.magnitude is not None:
             rating_groups[(app.code_id, resolved_user[app.coder], app.magnitude)].append(app)
     for (code_id, user_id, value), group in rating_groups.items():
-        segment_ids = [a.segment_id for a in group if a.segment_id is not None]
-        value_ids = [a.dataset_value_id for a in group if a.dataset_value_id is not None]
+        segment_ids = sorted({t for a in group for t in a.segment_targets})
+        value_ids = sorted({a.dataset_value_id for a in group if a.dataset_value_id is not None})
         for column, ids in (
             (CodeApplication.segment_id, segment_ids),
             (CodeApplication.dataset_value_id, value_ids),
@@ -1056,6 +1390,12 @@ def apply_plan(
 
     # ── 5. Staleness ─────────────────────────────────────────────────────────
     _mark_staleness(db, project_id, applications, resolved_user)
+    if report.coders_unarchived:
+        # Archiving a coder moves every participant score on the install
+        # (`gather_target_votes` filters `archived`), and so does bringing one
+        # back — the archive path marks them; this is the same fact reversed.
+        from .participant_scores import mark_participant_scores_stale
+        mark_participant_scores_stale(db)
 
     report.skipped = len(report.problems)
     report.problems.sort(key=lambda p: p.line)
@@ -1064,10 +1404,9 @@ def apply_plan(
 
 def _existing_applications(
     db: Session,
-    applications: list[PlannedApplication],
-    resolved_user: dict[str, int],
+    wanted: Iterable[tuple[int, int, int | None, int | None]],
 ) -> set[tuple[int, int, int | None, int | None]]:
-    """Which planned `(coder, code, target)` rows already exist.
+    """Which wanted `(coder, code, segment, value)` rows already exist.
 
     ⚠️ Queried by (coder, code) PAIR rather than by target id, because the target
     list is the whole import while the pair list is the CODEBOOK — a handful of
@@ -1077,12 +1416,11 @@ def _existing_applications(
     pairs: dict[tuple[int, int], tuple[list[int], list[int]]] = defaultdict(
         lambda: ([], [])
     )
-    for app in applications:
-        key = (resolved_user[app.coder], app.code_id)
-        if app.segment_id is not None:
-            pairs[key][0].append(app.segment_id)
+    for user_id, code_id, segment_id, value_id in wanted:
+        if segment_id is not None:
+            pairs[(user_id, code_id)][0].append(segment_id)
         else:
-            pairs[key][1].append(app.dataset_value_id)
+            pairs[(user_id, code_id)][1].append(value_id)
 
     for (user_id, code_id), (segment_ids, value_ids) in pairs.items():
         if segment_ids:
@@ -1113,10 +1451,10 @@ def machine_written_targets(
     score**, because `consensus.gather_target_votes` and
     `materialize_consensus_for_project` both filter `reliability_coder_clause()`.
     Marking them stale would enqueue one recompute marker per target for a
-    recompute that provably changes nothing — up to 200,000 of them — one per row at the cap — for recomputes that provably change nothing, drained by the
-    background sweep one target at a time. ⚠️ **The 368,717 figure this argument
-    invites belongs to `merge_codes` on BES, a DIFFERENT operation; the bound
-    HERE is the row cap.**
+    recompute that provably changes nothing — up to one per row at the cap —
+    drained by the background sweep one target at a time. ⚠️ **The 368,717 figure
+    this argument invites belongs to `merge_codes` on BES, a DIFFERENT operation;
+    the bound HERE is the row cap.**
 
     ⚠️ **The kind is read from the DATABASE, not from the file's description of
     it.** A coder whose kind this build does not recognise therefore counts as a
@@ -1137,7 +1475,7 @@ def machine_written_targets(
         if user_id is None or user_id in machine_ids:
             continue
         if app.segment_id is not None:
-            segment_ids.update(app.group_segment_ids or (app.segment_id,))
+            segment_ids.update(app.segment_targets)
         elif app.dataset_value_id is not None:
             value_ids.add(app.dataset_value_id)
     return sorted(segment_ids), sorted(value_ids)

@@ -48,6 +48,7 @@ export type { Code, CodeCategory, CategoryMergeResponse, CategoryBulkMoveRespons
 
 // Coding
 export { codingApi } from './coding'
+export type { CodeApplyResult } from './coding'
 
 // Speakers
 export { speakersApi } from './speakers'
@@ -103,6 +104,8 @@ export type {
   DatasetColumnSummary,
   DatasetColumnsResponse,
   DatasetPreviewResponse,
+  OverlongRecord,
+  OverlongRecords,
   DatasetColumnConfig,
   DatasetImportConfig,
   DatasetImportResponse,
@@ -336,6 +339,7 @@ export type {
 // Text Coding
 export { textCodingApi, TEXT_PAGE_SIZE } from './text-coding'
 export type {
+  TextCodeApplyResult,
   TextQueryParams,
   TextCodingResponse,
   TextCodingListResponse,
@@ -480,6 +484,7 @@ export type {
 export { codeSetsApi } from './code-sets'
 export type {
   CodeSet,
+  CodeSetClaimant,
   CodeSetMember,
   CodeSetListResponse,
   CodeSetSelectionResponse,

@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect, useId } from 'react'
 import { useParams, useNavigate, Link } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert, Tags } from 'lucide-react'
-import { retryUnanswered, datasetsApi, participantsApi, type DatasetPreviewResponse, type DatasetColumnPreview, type DatasetColumnsResponse, type DatasetColumnConfig, type ParticipantLinkReport } from '@/lib/api'
+import { retryUnanswered, datasetsApi, type DatasetPreviewResponse, type DatasetColumnPreview, type DatasetColumnsResponse, type DatasetColumnConfig, type OverlongRecords, type ParticipantLinkReport } from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -26,9 +26,11 @@ import {
 } from '@/lib/dataset-import-formats'
 import { checkImportFiles } from '@/lib/upload-limits'
 import { useStepFocus } from '@/hooks/useStepFocus'
-import { formatBytes } from '@/lib/format'
+import { projectHadParticipants } from '@/lib/participant-snapshot'
+import { countLabel, formatBytes, plural } from '@/lib/format'
 import UploadLimitNote from '@/components/UploadLimitNote'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
+import { OverlongRecordsNotice } from '@/components/OverlongRecordsNotice'
 
 /** Human-readable labels for auto-detected column types. */
 const TYPE_LABELS: Record<string, string> = {
@@ -93,6 +95,8 @@ interface ImportResult {
   /** #575: total observed codes left unlabeled across cells-are-codes columns. */
   valueLabelUnlabeledCount?: number
   linkReport?: ParticipantLinkReport | null
+  /** #985: records with more values than column headings, each linked to its row. */
+  overlongRecords?: OverlongRecords
   error?: string
 }
 
@@ -409,13 +413,6 @@ export default function DatasetImport() {
   // #414: whether the project had participants BEFORE this import — drives
   // the results-step identity-pollution callout. Snapshotted into a ref at
   // import start (the import itself creates participants).
-  const participantsQuery = useQuery({
-    queryKey: ['participants', id],
-    queryFn: () => participantsApi.list(id),
-    enabled: !!id,
-    retry: retryUnanswered,
-  })
-  const participantsData = participantsQuery.data
   /**
    * #963 — `undefined` means "we could not tell", never `false`.
    *
@@ -426,6 +423,9 @@ export default function DatasetImport() {
    * KNOW the project was empty — the safe direction, and the sentence it prints
    * is true whenever nothing matched.
    */
+  // 🔴 #1047 — filled at import START by `projectHadParticipants`, a count
+  // (`lib/participant-snapshot.ts`). The page used to fetch the WHOLE
+  // participant list for this one boolean.
   const hadParticipantsRef = useRef<boolean | undefined>(false)
 
   const existingDatasetNames = useMemo(
@@ -1007,14 +1007,14 @@ export default function DatasetImport() {
 
   const handleImport = useCallback(async () => {
     setError('')
-
-    hadParticipantsRef.current = participantsData
-      ? participantsData.participants.length > 0
-      : undefined
+    // Busy BEFORE the snapshot's request (#1047): the Import button is disabled
+    // by `isLoading`, so a second press cannot start a second import while the
+    // count is answered.
+    setIsLoading(true)
+    hadParticipantsRef.current = await projectHadParticipants(queryClient, id)
 
     if (files.length === 1) {
       // Single file: import directly, navigate to ProjectView
-      setIsLoading(true)
       setStatusMessage(
         hasSlowFile
           ? `Importing. This is a large file and may take around ${estimatedSeconds} seconds.`
@@ -1053,12 +1053,13 @@ export default function DatasetImport() {
             recognizedMissingLabels: result.recognized_missing_labels,
             valueLabelUnlabeledCount: Object.values(result.value_label_unlabeled ?? {}).reduce((a, v) => a + v.length, 0),
             linkReport: result.participant_link_report,
+            overlongRecords: result.overlong_records,
           }],
         })
         // #1011: announce completion — failure already announced itself below,
         // success said nothing, so the region kept "Still working — 30 seconds…".
         setStatusMessage(
-          `Import complete: “${config.datasetName}”, ${result.rows_created.toLocaleString()} records and ${result.columns_created} columns.`,
+          `Import complete: “${config.datasetName}”, ${result.rows_created.toLocaleString()} records and ${countLabel(result.columns_created, 'column', 'columns')}.`,
         )
         setStep('results')
       } catch (err: unknown) {
@@ -1072,6 +1073,7 @@ export default function DatasetImport() {
       }
     } else {
       // Multi-file: go to importing step
+      setIsLoading(false)
       setStep('importing')
       handleBatchImport()
     }
@@ -1138,6 +1140,7 @@ export default function DatasetImport() {
           recognizedMissingLabels: result.recognized_missing_labels,
           valueLabelUnlabeledCount: Object.values(result.value_label_unlabeled ?? {}).reduce((a, v) => a + v.length, 0),
           linkReport: result.participant_link_report,
+          overlongRecords: result.overlong_records,
         })
       } catch (err: unknown) {
         results.push({
@@ -1239,7 +1242,7 @@ export default function DatasetImport() {
       <div className="space-y-6">
         {/* Summary bar */}
         <div className="bg-mm-surface border rounded-lg px-4 py-3 flex flex-wrap gap-3 text-sm">
-          <span className="font-medium">{config.previewColumns.length} columns:</span>
+          <span className="font-medium">{countLabel(config.previewColumns.length, 'column', 'columns')}:</span>
           {Object.entries(typeCounts)
             .sort(([, a], [, b]) => b - a)
             .map(([type, count]) => (
@@ -1254,9 +1257,13 @@ export default function DatasetImport() {
               </span>
             ))}
           {config.preview && (
-            <span className="text-mm-text-muted ml-auto">{config.preview.total_rows} records</span>
+            <span className="text-mm-text-muted ml-auto">{config.preview.total_rows.toLocaleString()} records</span>
           )}
         </div>
+
+        {/* #985: rows whose values will land in the wrong columns — said BEFORE
+            the import, where the researcher can still correct the file. */}
+        <OverlongRecordsNotice report={config.preview?.overlong_records} stage="before" newDataset />
 
         {/* Worksheet picker (#523, .xlsx with multiple sheets only) */}
         {config.preview?.sheet_names && config.preview.sheet_names.length > 1 && (
@@ -1294,7 +1301,11 @@ export default function DatasetImport() {
                 const effectiveType: string = authoredVL?.type || config.typeOverrides[col.column_index] || col.suggested_type
                 const isAutoSkip = col.suggested_type === 'skip'
                 const typeBadgeClass = TYPE_BADGE_CLASSES[effectiveType] || 'bg-mm-bg text-mm-text-muted'
-                // #364: stray values not in the matched scale import as blank.
+                // #364: values not in the matched scale keep their text but get
+                // no number, so statistics leave them out. Since #1102 the server
+                // reports only values NO known scale accounts for — so the note
+                // states the consequence and never guesses the cause ("likely
+                // typos" was wrong for the midpoint it used to name).
                 // Only relevant while the column stays ordinal (the scale applies).
                 const unmatchedScaleValues =
                   !isSkipped && effectiveType === 'ordinal'
@@ -1390,15 +1401,19 @@ export default function DatasetImport() {
                     >
                       <TriangleAlert className="w-3.5 h-3.5 shrink-0 mt-px" aria-hidden="true" />
                       <span>
-                        {unmatchedScaleValues.length} value
-                        {unmatchedScaleValues.length === 1 ? '' : 's'} not in the
+                        {unmatchedScaleValues.length === 1
+                          ? '1 value is not'
+                          : `${unmatchedScaleValues.length} values are not`} on the
                         {col.suggested_scale_name ? ` “${col.suggested_scale_name}” ` : ' '}
-                        scale will import blank:{' '}
+                        scale, so {unmatchedScaleValues.length === 1 ? 'it' : 'they'} will
+                        import without a number and statistics will leave{' '}
+                        {unmatchedScaleValues.length === 1 ? 'it' : 'them'} out:{' '}
                         {unmatchedScaleValues.slice(0, 3).map(v => `“${v}”`).join(', ')}
                         {unmatchedScaleValues.length > 3
                           ? `, +${unmatchedScaleValues.length - 3} more`
                           : ''}
-                        . Likely typos — fix in the source CSV or change the column type.
+                        . Correct {unmatchedScaleValues.length === 1 ? 'it' : 'them'} in
+                        the file, or change the column type.
                       </span>
                     </div>
                   )}
@@ -1522,7 +1537,7 @@ export default function DatasetImport() {
 
         {/* Footer stats */}
         <div className="text-sm text-mm-text-muted">
-          {columnCount} columns from {config.previewColumns.length} columns ({skipCount} skipped)
+          {countLabel(columnCount, 'column', 'columns')} from {countLabel(config.previewColumns.length, 'column', 'columns')} ({skipCount} skipped)
           {config.preview && <> &middot; {config.preview.total_rows} records</>}
         </div>
       </div>
@@ -1805,6 +1820,7 @@ export default function DatasetImport() {
                     const isExpanded = expandedFileIndex === i
                     const hasError = !!config.previewError
                     const hasNameIssue = !config.datasetName.trim() || !!nameDuplicates[i]
+                    const hasOverlong = (config.preview?.overlong_records?.count ?? 0) > 0
 
                     return (
                       <div key={i} className="border rounded-lg overflow-hidden">
@@ -1815,6 +1831,8 @@ export default function DatasetImport() {
                             isExpanded && 'bg-mm-bg'
                           )}
                           onClick={() => setExpandedFileIndex(isExpanded ? -1 : i)}
+                          aria-expanded={isExpanded}
+                          aria-describedby={`file-status-${i}`}
                         >
                           <ChevronDown className={cn(
                             'w-4 h-4 text-mm-text-faint transition-transform',
@@ -1825,21 +1843,37 @@ export default function DatasetImport() {
                           {!hasError && config.preview && (
                             <>
                               <span className="text-xs text-mm-text-muted flex-shrink-0">
-                                {getColumnCount(config)} columns
+                                {countLabel(getColumnCount(config), 'column', 'columns')}
                               </span>
                               <span className="text-xs text-mm-text-faint flex-shrink-0">
-                                {config.preview.total_rows} records
+                                {config.preview.total_rows.toLocaleString()} records
                               </span>
                             </>
                           )}
+                          {/* The status was an icon alone — colour and shape, no
+                              words — so a collapsed file's problem was invisible to
+                              a screen reader, and #985's warning, which lives in the
+                              collapsed body, to everyone. The icon now has a state
+                              for it, and every state is said in words: as the
+                              button's DESCRIPTION, never its name, because it
+                              changes as the name field below is edited (#770). */}
                           {hasError ? (
-                            <CircleX className="w-4 h-4 text-red-500 flex-shrink-0" />
-                          ) : hasNameIssue ? (
-                            <CircleAlert className="w-4 h-4 text-amber-500 flex-shrink-0" />
+                            <CircleX aria-hidden="true" className="w-4 h-4 text-red-500 flex-shrink-0" />
+                          ) : hasNameIssue || hasOverlong ? (
+                            <CircleAlert aria-hidden="true" className="w-4 h-4 text-amber-500 flex-shrink-0" />
                           ) : (
-                            <CircleCheck className="w-4 h-4 text-green-500 flex-shrink-0" />
+                            <CircleCheck aria-hidden="true" className="w-4 h-4 text-green-500 flex-shrink-0" />
                           )}
                         </button>
+                        <span id={`file-status-${i}`} hidden>
+                          {hasError
+                            ? 'Preview failed.'
+                            : hasNameIssue
+                              ? 'Needs a unique dataset name.'
+                              : hasOverlong
+                                ? 'Some rows have more values than there are column headings.'
+                                : 'Ready to import.'}
+                        </span>
 
                         {/* Accordion body */}
                         {isExpanded && (
@@ -1937,7 +1971,7 @@ export default function DatasetImport() {
                       <span className="truncate">{r.datasetName}</span>
                       {r.columnsCreated != null && (
                         <span className="text-mm-text-faint flex-shrink-0">
-                          {r.columnsCreated} columns, {r.recordsCreated} records
+                          {countLabel(r.columnsCreated, 'column', 'columns')}, {countLabel(r.recordsCreated ?? 0, 'record', 'records')}
                         </span>
                       )}
                       {r.error && (
@@ -1987,12 +2021,18 @@ export default function DatasetImport() {
                   </div>
                   <div><strong>Dataset:</strong> {importProgress.results[0].datasetName}</div>
                   <div><strong>Columns created:</strong> {importProgress.results[0].columnsCreated}</div>
-                  <div><strong>Records imported:</strong> {importProgress.results[0].recordsCreated}</div>
-                  <div><strong>Values stored:</strong> {importProgress.results[0].valuesCreated}</div>
+                  <div><strong>Records imported:</strong> {importProgress.results[0].recordsCreated?.toLocaleString()}</div>
+                  <div><strong>Values stored:</strong> {importProgress.results[0].valuesCreated?.toLocaleString()}</div>
                   <RecognizedMissingNote
                     count={importProgress.results[0].recognizedMissingCount}
                     labels={importProgress.results[0].recognizedMissingLabels}
                     projectId={id}
+                  />
+                  <OverlongRecordsNotice
+                    report={importProgress.results[0].overlongRecords}
+                    stage="after"
+                    newDataset
+                    datasetPath={`/projects/${id}/datasets/${importProgress.results[0].datasetId}`}
                   />
                   {(importProgress.results[0].valueLabelUnlabeledCount ?? 0) > 0 && (
                     <div role="note" className="pt-1 text-xs text-amber-700 dark:text-amber-400">
@@ -2084,8 +2124,9 @@ export default function DatasetImport() {
                         </div>
                         {r.columnsCreated != null && (
                           <span className="text-mm-text-muted flex-shrink-0 text-xs">
-                            {r.columnsCreated} columns, {r.recordsCreated} records, {r.valuesCreated} values
+                            {countLabel(r.columnsCreated, 'column', 'columns')}, {plural(r.recordsCreated ?? 0, '1 record', `${(r.recordsCreated ?? 0).toLocaleString()} records`)}, {(r.valuesCreated ?? 0).toLocaleString()} values
                             <RecognizedMissingNote count={r.recognizedMissingCount} compact />
+                            <OverlongRecordsNotice report={r.overlongRecords} stage="after" newDataset compact />
                             <ParticipantLinkNote report={r.linkReport} compact />
                           </span>
                         )}

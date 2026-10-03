@@ -12,6 +12,9 @@
  * exactly as `CodeApplication.user_id.in_(coder_ids)` drops NULL rows — so the
  * timeline chart agrees with the neighboring heatmap/bar charts under every
  * lens state. `include === null` means no filter: all coders AND unattributed.
+ * #1077 (b): the LAYER is part of the lens too (`TimedLens`) — the human layer
+ * leaves machine coders out and the machine layer draws only them, as the
+ * backend's `layer_scope_filter` does before the coder filter.
  *
  * Definitions (locked in §8q, DEC-6c-5):
  * - A MARK is one visible (clip × code × coder) application — two coders coding
@@ -29,7 +32,8 @@
 
 import { unionIntervals, coveredSeconds, assignTracks } from './clip-timeline'
 import { formatTimecode } from './utils'
-import type { CodeApplicationIdentity } from './coding-progress'
+import type { CodeApplicationIdentity, MachineCoderIds } from './coding-progress'
+import type { LayerScope } from './coding-layers'
 
 export interface TimedClipLike {
   id: number
@@ -42,8 +46,41 @@ export interface TimedClipLike {
 /** null = no filter (all coders + unattributed). A set = ONLY these coder ids. */
 export type CoderInclude = ReadonlySet<number> | null
 
-export function detailVisible(userId: number | null, include: CoderInclude): boolean {
-  return include === null || (userId !== null && include.has(userId))
+/**
+ * The two layers a timeline can draw. There is no consensus arm: the clip
+ * payload is the P-1 working layer, which carries no consensus rows, so under
+ * that scope the chart is gated off rather than drawn from the wrong layer.
+ */
+export type TimedLayer = 'human' | 'machine'
+
+/** Which timeline layer a view's layer scope asks for — null under consensus. */
+export function timedLayerFor(scope: LayerScope | null | undefined): TimedLayer | null {
+  if (scope === 'consensus') return null
+  return scope === 'machine' ? 'machine' : 'human'
+}
+
+/**
+ * Whose marks the timeline draws — the backend's `layer_scope_filter` AND
+ * `_coder_filter`, in that order, so the chart agrees with the Descriptives
+ * charts beside it under every lens state (#1077 b).
+ *
+ * 🔴 **`machineCoderIds` is REQUIRED (#1029's rule).** With only `include`, a
+ * machine coder's marks were drawn and counted under the HUMAN layer while the
+ * backend's human arm left them out — measured by the audit: 50 covered seconds
+ * where people coded 10. Build it with `hooks/useCoders.ts::useMachineCoderIds`.
+ * ⚠️ Unattributed marks (`user_id` null) are a person's by the backend's own
+ * NULL arm (`without_machine_filter`), so they stay on the human layer.
+ */
+export interface TimedLens {
+  include: CoderInclude
+  machineCoderIds: MachineCoderIds
+  layer: TimedLayer
+}
+
+export function detailVisible(userId: number | null, lens: TimedLens): boolean {
+  const machine = userId !== null && lens.machineCoderIds.has(userId)
+  if (lens.layer === 'machine' ? !machine : machine) return false
+  return lens.include === null || (userId !== null && lens.include.has(userId))
 }
 
 export interface TimedMark {
@@ -57,13 +94,13 @@ export interface TimedMark {
 export function marksForCode(
   clips: readonly TimedClipLike[],
   codeId: number,
-  include: CoderInclude,
+  lens: TimedLens,
 ): TimedMark[] {
   const marks: TimedMark[] = []
   for (const clip of clips) {
     for (const d of clip.applied_code_details) {
       if (d.code_id !== codeId) continue
-      if (!detailVisible(d.user_id, include)) continue
+      if (!detailVisible(d.user_id, lens)) continue
       marks.push({ clipId: clip.id, start: clip.start_time, end: clip.end_time, userId: d.user_id })
     }
   }
@@ -117,10 +154,10 @@ function rowFromMarks(codeId: number, marks: readonly TimedMark[], extent: numbe
 export function computeTimedRows(
   clips: readonly TimedClipLike[],
   codeIds: readonly number[],
-  include: CoderInclude,
+  lens: TimedLens,
   extent: number | null,
 ): TimedCodeRow[] {
-  return codeIds.map(codeId => rowFromMarks(codeId, marksForCode(clips, codeId, include), extent))
+  return codeIds.map(codeId => rowFromMarks(codeId, marksForCode(clips, codeId, lens), extent))
 }
 
 export interface TimedCoderRow extends TimedCodeRow {
@@ -135,13 +172,13 @@ export interface TimedCoderRow extends TimedCodeRow {
 export function computeTimedRowsByCoder(
   clips: readonly TimedClipLike[],
   codeIds: readonly number[],
-  include: CoderInclude,
+  lens: TimedLens,
   extent: number | null,
 ): TimedCoderRow[] {
   const rows: TimedCoderRow[] = []
   for (const codeId of codeIds) {
     const byCoder = new Map<number | null, TimedMark[]>()
-    for (const mark of marksForCode(clips, codeId, include)) {
+    for (const mark of marksForCode(clips, codeId, lens)) {
       const arr = byCoder.get(mark.userId)
       if (arr) arr.push(mark)
       else byCoder.set(mark.userId, [mark])
@@ -169,13 +206,13 @@ export function computeTimedRowsByCoder(
 export function coveredTotalSeconds(
   clips: readonly TimedClipLike[],
   codeIds: readonly number[],
-  include: CoderInclude,
+  lens: TimedLens,
   extent: number | null,
 ): number | null {
   if (extent == null) return null
   const codeSet = new Set(codeIds)
   const intervals = clips.flatMap(clip =>
-    clip.applied_code_details.some(d => codeSet.has(d.code_id) && detailVisible(d.user_id, include))
+    clip.applied_code_details.some(d => codeSet.has(d.code_id) && detailVisible(d.user_id, lens))
       ? [{ start: clip.start_time, end: clip.end_time }]
       : [])
   return coveredSeconds(unionIntervals(intervals), extent)
@@ -229,12 +266,12 @@ export interface CodelineCategoryGroup {
 export function buildCodelineLanes(
   clips: readonly TimedClipLike[],
   codeIds: readonly number[],
-  include: CoderInclude,
+  lens: TimedLens,
   orderedCategories: readonly { id: number; name: string }[],
   codeToCategoryId: ReadonlyMap<number, number | null>,
 ): CodelineCategoryGroup[] {
   const laneFor = (codeId: number): CodelineLane => {
-    const marks = marksForCode(clips, codeId, include)
+    const marks = marksForCode(clips, codeId, lens)
     const tracks = assignTracks(marks.map((m, i) => ({ id: i, start_time: m.start, end_time: m.end })))
     const withTracks = marks.map((m, i) => ({ ...m, track: tracks.get(i) ?? 0 }))
     const trackCount = Math.max(1, ...withTracks.map(m => m.track + 1))
