@@ -1,6 +1,6 @@
 {
   "name": "mixedmeasures-desktop",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "private": true,
   "description": "Electron desktop shell for Mixed Measures",
   "author": "George Chavez <contact@mixedmeasures.com>",
@@ -14,7 +14,7 @@
     "dist": "electron-builder"
   },
   "devDependencies": {
-    "electron": "^42.11.8",
+    "electron": "^44.5.1",
     "electron-builder": "^26.15.3"
   },
   "build": {
@@ -46,9 +46,19 @@
       "provider": "github",
       "releaseType": "draft"
     },
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "grantFileProtocolExtraPrivileges": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "resetAdHocDarwinSignature": true
+    },
     "mac": {
       "icon": "build/icon.png",
       "category": "public.app-category.education",
+      "minimumSystemVersion": "14.0",
       "target": [
         "dmg",
         "zip"

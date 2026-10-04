@@ -37,7 +37,7 @@ from ..schemas.backup import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.5.5"
+APP_VERSION = "1.5.6"
 MANIFEST_FORMAT_VERSION = 1
 STALE_HOURS = 24
 

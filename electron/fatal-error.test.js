@@ -8,9 +8,15 @@ const {
   createFatalLineCollector,
   crashDialogText,
   crashDialogClipboardText,
+  showCrashDialog,
+  CRASH_BUTTONS,
+  COPIED_NOTE,
+  COPY_FAILED_NOTE,
   describeExit,
   truncateForDialog,
 } = require('./fatal-error')
+const fs = require('node:fs')
+const path = require('node:path')
 
 /** A high surrogate with no low after it, or a low with no high before it. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
@@ -228,4 +234,86 @@ test('describeExit reports whichever of code/signal the OS gave', () => {
 
 test('the default line cap is a real number', () => {
   assert.ok(MAX_FATAL_LINES > 0 && MAX_FATAL_LINES <= 10)
+})
+
+// --- showCrashDialog: the dialog stays until Quit (Electron 44's async clipboard) --------
+
+/** A dialog that answers with the given button indexes in turn, recording what it showed. */
+function scriptedDialog(answers) {
+  const shown = []
+  return {
+    shown,
+    showMessageBoxSync(options) {
+      shown.push(options)
+      if (answers.length === 0) throw new Error('the dialog was shown more often than the test scripted')
+      return answers.shift()
+    },
+  }
+}
+
+const COPY = CRASH_BUTTONS.indexOf('Copy details')
+const QUIT = CRASH_BUTTONS.indexOf('Quit')
+const DISK_FULL_TEXT = crashDialogText({ code: 3, signal: null, fatalLines: [DISK_FULL] })
+
+test('Quit at once: one dialog, nothing copied', async () => {
+  const dialog = scriptedDialog([QUIT])
+  const writes = []
+  await showCrashDialog({ dialog, clipboard: { writeText: async (t) => { writes.push(t) } }, text: DISK_FULL_TEXT })
+  assert.strictEqual(dialog.shown.length, 1)
+  assert.deepStrictEqual(writes, [])
+  const [first] = dialog.shown
+  assert.strictEqual(first.message, DISK_FULL_TEXT.message) // the guidance leads (#716)
+  assert.strictEqual(first.detail, DISK_FULL_TEXT.detail)
+  assert.strictEqual(first.defaultId, QUIT)
+  assert.strictEqual(first.cancelId, QUIT) // Escape quits; it never copies
+})
+
+test('Copy details copies the whole dialog, waits for it, and the dialog comes back saying so', async () => {
+  const dialog = scriptedDialog([COPY, QUIT])
+  const writes = []
+  let resolved = false
+  const clipboard = {
+    // Electron 44: writeText returns a Promise. The dialog must not come back before it settles.
+    writeText: (t) => new Promise((resolve) => setTimeout(() => { writes.push(t); resolved = true; resolve() }, 5)),
+  }
+  const showSync = dialog.showMessageBoxSync
+  dialog.showMessageBoxSync = (options) => {
+    if (dialog.shown.length === 1) assert.ok(resolved, 'the dialog came back before the copy finished')
+    return showSync(options)
+  }
+  await showCrashDialog({ dialog, clipboard, text: DISK_FULL_TEXT })
+  assert.strictEqual(dialog.shown.length, 2)
+  assert.deepStrictEqual(writes, [crashDialogClipboardText(DISK_FULL_TEXT)])
+  const second = dialog.shown[1]
+  assert.strictEqual(second.message, DISK_FULL_TEXT.message, 'the guidance must stay on screen')
+  assert.ok(second.detail.startsWith(`${COPIED_NOTE}\n\n`), second.detail)
+  assert.ok(second.detail.endsWith(DISK_FULL_TEXT.detail), 'the exit code must survive the note')
+  assert.deepStrictEqual(second.buttons, CRASH_BUTTONS)
+})
+
+test('a failed copy is said, not swallowed, and the dialog still waits for Quit', async () => {
+  const dialog = scriptedDialog([COPY, COPY, QUIT])
+  const logged = []
+  let calls = 0
+  const clipboard = {
+    writeText: async () => {
+      calls++
+      if (calls === 1) throw new Error('no clipboard owner')
+    },
+  }
+  await showCrashDialog({ dialog, clipboard, text: DISK_FULL_TEXT, log: (m) => logged.push(m) })
+  assert.strictEqual(dialog.shown.length, 3)
+  assert.ok(dialog.shown[1].detail.startsWith(`${COPY_FAILED_NOTE}\n\n`))
+  assert.ok(dialog.shown[2].detail.startsWith(`${COPIED_NOTE}\n\n`), 'a retry that works says so')
+  assert.ok(logged.some((m) => m.includes('no clipboard owner')))
+})
+
+test('main.js reaches the clipboard only through showCrashDialog, and holds the quit while it shows', () => {
+  // The two halves of the 44 change that live in main.js, which nothing else tests: a bare
+  // clipboard.writeText there would race app.quit(), and 'window-all-closed' — fired when
+  // the splash closes for a startup crash — would quit during the dialog's await.
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8').replace(/\/\/.*$/gm, '')
+  assert.doesNotMatch(main, /clipboard\.\w+\(/)
+  assert.match(main, /showCrashDialog\(\{\s*dialog,\s*clipboard,/)
+  assert.match(main, /app\.on\('window-all-closed',\s*\(\)\s*=>\s*\{\s*if \(!crashDialogShowing\) app\.quit\(\)/)
 })

@@ -54,12 +54,13 @@ it — no setup required:
 
 | Platform | File |
 |----------|------|
-| **Windows** (x64) | `.exe` installer |
-| **macOS** — **Apple Silicon only** (M1 or later) | `.dmg` |
-| **Linux** (x86_64) | `.AppImage` — mark it executable, then run it |
+| **Windows** 10 or 11 (x64) | `.exe` installer |
+| **macOS** 14 (Sonoma) or later — **Apple Silicon only** (M1 or later) | `.dmg` |
+| **Linux** (x86_64, glibc 2.38 or newer — e.g. Ubuntu 24.04+) | `.AppImage` — mark it executable, then run it |
 
 **Intel Macs are not supported.** Not sure which you have? Apple menu → *About This
-Mac*; the **Chip** line reads "Apple M1" (or M2/M3/M4) on a supported machine.
+Mac*; the **Chip** line reads "Apple M1" (or a later Apple chip) on a supported machine,
+and the **macOS** line must read 14 or higher.
 
 Prefer to build it yourself? See [Running from source](#running-from-source).
 

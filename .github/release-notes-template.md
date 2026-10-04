@@ -28,11 +28,18 @@ as people's coding progress, and large linked surveys no longer stall the app.
 
 Pick the one for your computer and click it:
 
-- **macOS** (Apple Silicon — M1, M2, M3, or M4) → **[MixedMeasures-__VERSION__-mac-arm64.dmg](https://github.com/__REPO__/releases/download/v__VERSION__/MixedMeasures-__VERSION__-mac-arm64.dmg)**
+- **macOS** (Apple Silicon — M1 or later) → **[MixedMeasures-__VERSION__-mac-arm64.dmg](https://github.com/__REPO__/releases/download/v__VERSION__/MixedMeasures-__VERSION__-mac-arm64.dmg)**
 - **Windows** → **[MixedMeasures-__VERSION__-win-x64.exe](https://github.com/__REPO__/releases/download/v__VERSION__/MixedMeasures-__VERSION__-win-x64.exe)**
 - **Linux** → **[MixedMeasures-__VERSION__-linux-x86_64.AppImage](https://github.com/__REPO__/releases/download/v__VERSION__/MixedMeasures-__VERSION__-linux-x86_64.AppImage)**
 
-> **Not sure if your Mac is Apple Silicon?** Click the Apple menu (top-left) → **About This Mac**. If the **Chip** line says "Apple M1" (or M2/M3/M4), this is the right file. Older Intel Macs aren't supported in this release.
+> **Not sure if your Mac is Apple Silicon?** Click the Apple menu (top-left) → **About This Mac**. If the **Chip** line says "Apple M1" (or any later Apple chip), this is the right file. Older Intel Macs aren't supported in this release.
+
+<!-- Requirements: re-check at every cut. macOS from electron/package.json build.mac.minimumSystemVersion (the release's "macOS floor" step proves it against every binary); Windows from Electron's own README "Platform support"; Linux from the AppImage's highest GLIBC_ symbol version (2.38 measured on v1.5.5 — the frozen backend's libraries, collected on the ubuntu-24.04 runner). -->
+**What it runs on**
+
+- **macOS 14 (Sonoma) or later**, on Apple Silicon. A Mac on an older version is not offered this update; every Apple Silicon Mac can be updated to macOS 14.
+- **Windows 10 or 11**, 64-bit.
+- **Linux**, 64-bit, with glibc 2.38 or newer — Ubuntu 24.04 or later, for example.
 
 You can **ignore the other files** in the Assets list below (the `.blockmap` and `.yml` files) — the app uses those for updates; you don't need to download them.
 

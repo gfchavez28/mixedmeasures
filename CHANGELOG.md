@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.6] - 2026-10-04
+
+### Changed
+
+- **The Mac app now needs macOS 14 (Sonoma) or later, and says so.** Version
+  1.5.5 stated macOS 12, but the statistics libraries inside it were already
+  the editions built for macOS 14, and they load when the app starts — so on
+  macOS 12 or 13 it most likely did not start. The app and its update feed now
+  state macOS 14, and every Mac build checks each file inside it against that
+  number before it can be published. A Mac on an older version is not offered
+  the update — its update check reports it as up to date — and every Apple
+  Silicon Mac can be updated to macOS 14. (#1118)
+
+### Fixed
+
+- **The crash message's *Copy details* button no longer closes the app in the
+  same click.** It used to copy and quit at once, which took the message — and
+  the folder it asks you to deal with — off the screen, without confirming
+  anything was copied; on Linux the copied text could also vanish as the app
+  closed. Now the message comes back with "The details are copied" at the top,
+  and only *Quit* closes it. (#1100)
+- **Saving the recovery key opens in your Downloads folder on every system.**
+  The folder the save dialog opened in had changed with the desktop engine.
+  It now opens in Downloads, the standard folder least likely to be synced to a
+  cloud service. On Windows the file is kept out of the recent-files list; on
+  Linux you are asked before an existing file is replaced; on a Mac the dialog
+  says what the file is for. (#1100)
+
+### Security
+
+- **Moved the desktop app to a newer, supported browser engine** (Electron
+  42.11.8 → 44.5.1). Electron 42 stops receiving security fixes on
+  2026-10-20. The new line carries every published Electron security fix and
+  two Chromium fixes for flaws that were being exploited in the wild. It also
+  includes Electron's fix for a page being reported as not responding the
+  moment Windows wakes from sleep — the signal the app's own "The window is not
+  responding" message listens for. VoiceOver users get the right line on a
+  braille display in multi-line text fields, such as memos. (#1100)
+- **Locked down how the desktop app can be started.** The installed app can no
+  longer be run as a plain script engine, have code injected through an
+  environment variable, or have a debugger attached — three ways another
+  program on the same computer could otherwise act as Mixed Measures, which on
+  a Mac holds the key to your encrypted data. On Mac and Windows the app also
+  refuses to start if its own program files have been altered. (#1100)
+
 ## [1.5.5] - 2026-10-03
 
 ### Changed
@@ -2208,7 +2253,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.5...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.6...HEAD
+[1.5.6]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.5...v1.5.6
 [1.5.5]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.4...v1.5.5
 [1.5.4]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.3...v1.5.4
 [1.5.3]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.2...v1.5.3

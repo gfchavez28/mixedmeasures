@@ -10,7 +10,10 @@ const {
   exportRecoveryKey,
   importRecoveryKey,
   saveRecoveryKeyToFile,
+  recoveryKeySaveOptions,
+  RECOVERY_KEY_FILE_NAME,
 } = require('./key-manager')
+const path = require('node:path')
 
 const KEY_FILE = '/userData/mm-encryption.key'
 const DB_FILE = '/userData/mixedmeasures.db'
@@ -36,6 +39,7 @@ function makeSafeStorage({ available = true, backend, failDecrypt = false } = {}
 
 function makeFs(seed = {}) {
   const store = new Map(Object.entries(seed))
+  const chmods = []
   return {
     existsSync: (p) => store.has(p),
     readFileSync: (p) => store.get(p),
@@ -51,7 +55,9 @@ function makeFs(seed = {}) {
       return n
     },
     closeSync: () => {},
+    chmodSync: (p, mode) => { chmods.push([p, mode]) },
     _store: store,
+    _chmods: chmods,
   }
 }
 
@@ -189,6 +195,46 @@ test('saveRecoveryKeyToFile: no stored key yet → ok:false unavailable', async 
   const res = await saveRecoveryKeyToFile({ safeStorage: makeSafeStorage(), keyFilePath: KEY_FILE, fs, showSaveDialog })
   assert.equal(res.ok, false)
   assert.equal(res.reason, 'unavailable')
+})
+
+// Electron 43+ opens a folder-less dialog in Downloads and no longer restores the last one,
+// so the folder is chosen here (#1100) — and the options carry the file's sensitivity.
+test('saveRecoveryKeyToFile: the dialog opens in the folder main.js passes, with the private-file options', async () => {
+  const fs = makeFs({ [KEY_FILE]: Buffer.from('ENC:' + FIXED_KEY) })
+  let shown = null
+  const showSaveDialog = async (opts) => { shown = opts; return { canceled: false, filePath: SAVE_PATH } }
+  await saveRecoveryKeyToFile({ safeStorage: makeSafeStorage(), keyFilePath: KEY_FILE, fs, showSaveDialog, defaultDir: '/home/me/Downloads' })
+  assert.equal(shown.defaultPath, path.join('/home/me/Downloads', RECOVERY_KEY_FILE_NAME))
+  assert.deepEqual([...shown.properties].sort(), ['createDirectory', 'dontAddToRecent', 'showOverwriteConfirmation'])
+  assert.match(shown.message, /private/)
+  assert.deepEqual(shown.filters, [{ name: 'Text', extensions: ['txt'] }])
+})
+
+test('main.js hands the save the Downloads folder', () => {
+  const main = require('node:fs').readFileSync(path.join(__dirname, 'main.js'), 'utf8')
+  assert.match(main, /saveRecoveryKeyToFile\(\{[\s\S]*?defaultDir: downloadsDir\(\),[\s\S]*?\}\)/)
+  assert.match(main, /function downloadsDir\(\) \{[\s\S]*?app\.getPath\('downloads'\)/)
+})
+
+test('recoveryKeySaveOptions: no folder known → the bare name, so the dialog still opens', () => {
+  assert.equal(recoveryKeySaveOptions(undefined).defaultPath, RECOVERY_KEY_FILE_NAME)
+})
+
+test('saveRecoveryKeyToFile: re-applies 0600 after writing — `mode` only applies when the file is created', async () => {
+  const fs = makeFs({ [KEY_FILE]: Buffer.from('ENC:' + FIXED_KEY), [SAVE_PATH]: Buffer.from('an older recovery file') })
+  const showSaveDialog = async () => ({ canceled: false, filePath: SAVE_PATH })
+  const res = await saveRecoveryKeyToFile({ safeStorage: makeSafeStorage(), keyFilePath: KEY_FILE, fs, showSaveDialog })
+  assert.equal(res.ok, true)
+  assert.deepEqual(fs._chmods, [[SAVE_PATH, 0o600]])
+})
+
+test('saveRecoveryKeyToFile: a filesystem that refuses chmod still saves the file', async () => {
+  const fs = makeFs({ [KEY_FILE]: Buffer.from('ENC:' + FIXED_KEY) })
+  fs.chmodSync = () => { throw new Error('EPERM: operation not permitted') }
+  const showSaveDialog = async () => ({ canceled: false, filePath: SAVE_PATH })
+  const res = await saveRecoveryKeyToFile({ safeStorage: makeSafeStorage(), keyFilePath: KEY_FILE, fs, showSaveDialog })
+  assert.deepEqual(res, { ok: true, path: SAVE_PATH })
+  assert.match(fs._store.get(SAVE_PATH).toString(), new RegExp(FIXED_KEY))
 })
 
 // --- inspectDatabaseFile + first-run DB sniff (an internal audit/M2) ------------

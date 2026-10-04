@@ -18,6 +18,9 @@ const {
   renderManifest,
   patchManifest,
   mergeManifests,
+  readMinimumSystemVersion,
+  stampMinimumSystemVersion,
+  requireMinimumSystemVersion,
 } = require('./update-manifest.js')
 
 const ARM64 = `version: 1.2.0
@@ -137,4 +140,85 @@ test('merge of a single manifest is a valid passthrough (one mac leg failed)', (
 test('merge refuses mixed versions — a lying manifest is worse than no manifest', () => {
   const other = X64.replace(/1\.2\.0/g, '1.2.1')
   assert.throws(() => mergeManifests([ARM64, other]), /version mismatch/)
+})
+
+// --- minimumSystemVersion (#1100, #1118) -------------------------------------------------
+
+test('min-os stamps the floor directly under version:, and nothing else moves', () => {
+  const stamped = stampMinimumSystemVersion(ARM64, '23.0.0')
+  assert.strictEqual(stamped, ARM64.replace('version: 1.2.0\n', 'version: 1.2.0\nminimumSystemVersion: 23.0.0\n'))
+  assert.strictEqual(readMinimumSystemVersion(parseManifest(stamped)), '23.0.0')
+})
+
+test('min-os replaces an existing floor instead of adding a second one', () => {
+  const twice = stampMinimumSystemVersion(stampMinimumSystemVersion(ARM64, '22.0.0'), '23.0.0')
+  assert.strictEqual(twice.split('minimumSystemVersion:').length - 1, 1)
+  assert.strictEqual(readMinimumSystemVersion(parseManifest(twice)), '23.0.0')
+})
+
+test('min-os refuses every value electron-updater would read as "supported"', () => {
+  for (const bad of ['14.0', '23', '23.0', 'v23.0.0', '23.0.0-beta', '']) {
+    assert.throws(() => stampMinimumSystemVersion(ARM64, bad), /full x\.y\.z/, `accepted "${bad}"`)
+  }
+})
+
+test('the floor survives the staple re-patch and the arch merge', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-manifest-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'MixedMeasures-1.2.0-mac-arm64.dmg'), Buffer.from('stapled'))
+    const { text: patched } = patchManifest(stampMinimumSystemVersion(ARM64, '23.0.0'), dir)
+    assert.strictEqual(readMinimumSystemVersion(parseManifest(patched)), '23.0.0')
+    const { text: merged } = mergeManifests([patched, stampMinimumSystemVersion(X64, '23.0.0')])
+    assert.strictEqual(requireMinimumSystemVersion(merged), '23.0.0')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('merge refuses legs that disagree on the floor — the head would take whichever came first', () => {
+  assert.throws(
+    () => mergeManifests([stampMinimumSystemVersion(ARM64, '23.0.0'), stampMinimumSystemVersion(X64, '24.0.0')]),
+    /minimumSystemVersion mismatch/,
+  )
+  assert.throws(() => mergeManifests([stampMinimumSystemVersion(ARM64, '23.0.0'), X64]), /minimumSystemVersion mismatch/)
+})
+
+test('check-min-os refuses a feed with no floor or a malformed one', () => {
+  assert.throws(() => requireMinimumSystemVersion(ARM64), /has no minimumSystemVersion/)
+  const malformed = ARM64.replace('version: 1.2.0\n', 'version: 1.2.0\nminimumSystemVersion: 13.0\n')
+  assert.throws(() => requireMinimumSystemVersion(malformed), /not a full x\.y\.z/)
+  const quoted = ARM64.replace('version: 1.2.0\n', "version: 1.2.0\nminimumSystemVersion: '23.0.0'\n")
+  assert.strictEqual(requireMinimumSystemVersion(quoted), '23.0.0')
+})
+
+// The stamp is only worth anything if the SHIPPED updater reads it the way this file
+// assumes. So the two halves are checked against electron-updater's own code: the feed
+// parsed by its js-yaml, the comparison made by its checkIfUpdateSupported, with
+// os.release() (which that method reads at call time) set to a real Darwin version.
+function updaterSupports(feedText, darwinRelease) {
+  const yaml = require('js-yaml')
+  const { AppUpdater } = require('electron-updater/out/AppUpdater.js')
+  const info = yaml.load(feedText)
+  const realRelease = os.release
+  os.release = () => darwinRelease
+  try {
+    return AppUpdater.prototype.checkIfUpdateSupported.call({ _logger: { info() {}, warn() {} } }, info)
+  } finally {
+    os.release = realRelease
+  }
+}
+
+test('the shipped updater, reading a stamped feed, holds back macOS 13 and lets macOS 14 through', () => {
+  const feed = stampMinimumSystemVersion(ARM64, '23.0.0')
+  assert.strictEqual(require('js-yaml').load(feed).minimumSystemVersion, '23.0.0') // a string, not a number
+  assert.strictEqual(updaterSupports(feed, '22.6.0'), false) // macOS 13.x
+  assert.strictEqual(updaterSupports(feed, '23.0.0'), true) // macOS 14.0
+  assert.strictEqual(updaterSupports(feed, '25.6.0'), true) // macOS 26.x
+})
+
+test('WHY the format guard exists: the shipped updater lets every Mac through on a malformed floor', () => {
+  // If this starts failing, electron-updater changed checkIfUpdateSupported — re-read it
+  // before trusting or loosening the x.y.z guard above.
+  const malformed = ARM64.replace('version: 1.2.0\n', 'version: 1.2.0\nminimumSystemVersion: 14.0\n')
+  assert.strictEqual(updaterSupports(malformed, '21.6.0'), true) // macOS 12 would update
 })

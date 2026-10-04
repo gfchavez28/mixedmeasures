@@ -104,9 +104,67 @@ test('verifyUpdateCodeSignature is not disabled', () => {
   )
 })
 
+test('the Mac app declares its macOS floor, as a version the update feed can carry (#1118)', () => {
+  // Electron 44's own Info.plist says 13.0, but the backend's numpy/scipy are macOS 14
+  // builds, so the floor is set here and the release's macos-floor step proves it against
+  // every binary. darwinForMacos throws on anything the feed cannot express.
+  const { darwinForMacos } = require('./scripts/macos-floor.js')
+  const declared = pkg.build.mac.minimumSystemVersion
+  assert.equal(typeof declared, 'string', 'build.mac.minimumSystemVersion is not set')
+  assert.match(darwinForMacos(declared), /^\d+\.\d+\.\d+$/)
+})
+
 // --- the half that lives in the release workflow -------------------------------------
 
 const releaseYml = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/release.yml'), 'utf8')
+const ciYml = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')
+const docsYml = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/docs.yml'), 'utf8')
+
+test('every workflow job names its machine — no `-latest` label (#1097, #1119)', () => {
+  // A `-latest` label is a build machine someone else chooses. ubuntu-latest moving to 26.04
+  // would silently re-anchor the R oracles (R 4.5.2) and raise the AppImage's glibc floor;
+  // the mac runner decides which wheels pip picks, and so the app's macOS floor (#1118).
+  const labels = []
+  for (const [name, text] of [['release.yml', releaseYml], ['ci.yml', ciYml], ['docs.yml', docsYml]]) {
+    for (const line of text.split('\n')) {
+      const m = /^\s*(?:runs-on|- os):\s*(\S+)/.exec(line.replace(/\s+#.*$/, ''))
+      if (!m || m[1].startsWith('${{')) continue
+      labels.push(`${name}: ${m[1]}`)
+    }
+  }
+  // Population check: a pattern that matched nothing would pass any workflow.
+  assert.ok(labels.length >= 9, `found only ${labels.length} runner labels: ${labels.join(', ')}`)
+  const floating = labels.filter((l) => !/: (ubuntu|macos|windows)-\d/.test(l) || /latest/.test(l))
+  assert.deepEqual(floating, [], `pin these to a versioned image (a label change is a pipeline change, RELEASING §3b)`)
+})
+
+test('both workflows that install R assert the 4.3.3 anchor (#1097)', () => {
+  const assertion = `Rscript -e 'v <- getRversion(); if (v != "4.3.3") stop("R ", v, " is installed; the R oracles are anchored to 4.3.3")'`
+  for (const [name, text] of [['ci.yml', ciYml], ['release.yml', releaseYml]]) {
+    assert.ok(text.includes(assertion), `${name} installs R without asserting its version`)
+    assert.ok(
+      text.indexOf(assertion) < text.indexOf('install.packages("irr"'),
+      `${name}: assert the version before anything is built against it`,
+    )
+  }
+})
+
+test('the release workflow proves the macOS floor, stamps the feed, checks it, and reads the fuses', () => {
+  // Each is the only guard of its kind; a refactor that drops one leaves every gate green.
+  for (const [what, needle] of [
+    ['the floor check on the built .app (#1118)', 'node scripts/macos-floor.js check "$APP"'],
+    ['the feed stamp from that check (#1100)', 'node scripts/update-manifest.js min-os release/latest-mac.yml "$DARWIN"'],
+    ['the merged feed assertion (#1100)', 'node electron/scripts/update-manifest.js check-min-os "$WORK/latest-mac.yml"'],
+    ['the packaged fuse read-back (#1100)', 'node scripts/check-fuses.js "$TARGET"'],
+  ]) {
+    assert.ok(releaseYml.includes(needle), `release.yml no longer runs ${what}`)
+  }
+  // The stamp must precede the per-arch upload that publishes it.
+  assert.ok(
+    releaseYml.indexOf('update-manifest.js min-os') < releaseYml.indexOf('cp release/latest-mac.yml "latest-mac-'),
+    'the feed is uploaded before it is stamped',
+  )
+})
 
 test('release.yml supplies publisherName on the signed Windows path', () => {
   assert.match(

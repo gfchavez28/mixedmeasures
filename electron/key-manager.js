@@ -7,7 +7,11 @@
 // consumes it). Pure/injectable (safeStorage + fs + randomBytes are parameters)
 // so it is unit-testable headlessly — the GUI/dialog wiring lives in main.js.
 
+const path = require('node:path')
+
 const KEY_HEX_RE = /^[0-9a-f]{64}$/i  // 256-bit key as 64 hex chars
+
+const RECOVERY_KEY_FILE_NAME = 'mixed-measures-recovery-key.txt'
 
 const SQLITE_PLAINTEXT_HEADER = Buffer.from('SQLite format 3\x00')
 
@@ -184,24 +188,48 @@ function recoveryKeyFileContents(keyHex) {
  *  - { ok: true, path }
  *  - { ok: false, reason: 'unavailable', message }  (no usable keyring / no key)
  *  - { ok: false, reason: 'canceled' }              (user dismissed the dialog)
+ *
+ * Where the dialog opens is chosen, not left to the runtime (#1100): Electron 43 began
+ * opening a dialog with no folder in Downloads and stopped restoring the last folder, and a
+ * bare filename had opened "an unusable location" on Linux until 42.10.0. `defaultDir` is
+ * the Downloads folder, passed in by main.js — the standard folder least often synced to a
+ * cloud (OneDrive's folder backup and iCloud's Desktop & Documents both leave it out), which
+ * matters for a file that can decrypt a backup. The options also keep the file out of
+ * Windows' recent-files list, ask before overwriting on Linux (macOS and Windows always
+ * ask), and tell a Mac user what the file is, in the panel itself.
  */
-async function saveRecoveryKeyToFile({ safeStorage, keyFilePath, fs, showSaveDialog }) {
+async function saveRecoveryKeyToFile({ safeStorage, keyFilePath, fs, showSaveDialog, defaultDir }) {
   let keyHex
   try {
     keyHex = exportRecoveryKey({ safeStorage, keyFilePath, fs })
   } catch (e) {
     return { ok: false, reason: 'unavailable', message: e.message }
   }
-  const result = await showSaveDialog({
-    title: 'Save recovery key',
-    defaultPath: 'mixed-measures-recovery-key.txt',
-    filters: [{ name: 'Text', extensions: ['txt'] }],
-  })
+  const result = await showSaveDialog(recoveryKeySaveOptions(defaultDir))
   if (!result || result.canceled || !result.filePath) {
     return { ok: false, reason: 'canceled' }
   }
   fs.writeFileSync(result.filePath, recoveryKeyFileContents(keyHex), { mode: 0o600 })
+  // `mode` applies only when the file is CREATED: overwriting an earlier recovery-key file
+  // kept whatever permissions it had. A no-op on Windows; never fatal — the file is written.
+  try {
+    fs.chmodSync(result.filePath, 0o600)
+  } catch {
+    /* a filesystem without POSIX modes */
+  }
   return { ok: true, path: result.filePath }
+}
+
+/** The Save dialog's options. `defaultDir` absent → the bare name (the runtime picks the folder). */
+function recoveryKeySaveOptions(defaultDir) {
+  return {
+    title: 'Save recovery key',
+    defaultPath: defaultDir ? path.join(defaultDir, RECOVERY_KEY_FILE_NAME) : RECOVERY_KEY_FILE_NAME,
+    // macOS only: shown in the panel above the file name.
+    message: 'Keep this file private: anyone with this key can decrypt a backup of your data.',
+    filters: [{ name: 'Text', extensions: ['txt'] }],
+    properties: ['createDirectory', 'showOverwriteConfirmation', 'dontAddToRecent'],
+  }
 }
 
 /**
@@ -222,6 +250,8 @@ function importRecoveryKey(keyHex, { safeStorage, keyFilePath, fs }) {
 
 module.exports = {
   KEY_HEX_RE,
+  RECOVERY_KEY_FILE_NAME,
+  recoveryKeySaveOptions,
   encryptionBackendUsable,
   inspectDatabaseFile,
   resolveKey,

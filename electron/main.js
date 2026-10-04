@@ -8,6 +8,8 @@
 // The non-GUI logic lives in ./backend-process.js (unit-tested headlessly).
 
 const { app, BrowserWindow, Menu, clipboard, dialog, shell, safeStorage, ipcMain, session } = require('electron')
+// ⚠️ `clipboard` is only ever handed to showCrashDialog: from Electron 44 its writeText
+// returns a Promise, and a bare call followed by app.quit() can lose the copy.
 const { spawn, spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -22,7 +24,7 @@ const {
 } = require('./backend-process')
 const { resolveKey, saveRecoveryKeyToFile } = require('./key-manager')
 const { clampZoomFactor } = require('./zoom')
-const { createFatalLineCollector, crashDialogText, crashDialogClipboardText } = require('./fatal-error')
+const { createFatalLineCollector, crashDialogText, showCrashDialog } = require('./fatal-error')
 const { attachRendererRecovery } = require('./renderer-recovery')
 const {
   canAutoUpdate,
@@ -65,6 +67,10 @@ let isQuitting = false
 // first now reports THE SAME dialog, once.
 let fatalCollector = null
 let crashReported = false
+// True while the crash dialog is up. Closing the splash for it can leave no window, and
+// 'window-all-closed' would then quit during the dialog's await on the clipboard — taking
+// the dialog down after the first "Copy details", the very behaviour this replaced.
+let crashDialogShowing = false
 let mainWindow = null
 let splashWindow = null
 let updater = null
@@ -197,21 +203,15 @@ function reportCrash({ code = null, signal = null, error = null }) {
   })
   // "Copy details" exists because the guidance names a PATH the researcher is being
   // asked to act on, and a native message box is not selectable — without this the
-  // only way to report it onward is to retype it from a screenshot.
-  const COPY = 0
-  const QUIT = 1
-  const choice = dialog.showMessageBoxSync({
-    type: 'error',
-    title: text.title,
-    message: text.message,
-    detail: text.detail,
-    buttons: ['Copy details', 'Quit'],
-    defaultId: QUIT,
-    cancelId: QUIT,
-    noLink: true,
-  })
-  if (choice === COPY) clipboard.writeText(crashDialogClipboardText(text))
-  app.quit()
+  // only way to report it onward is to retype it from a screenshot. The dialog stays up
+  // until Quit (fatal-error.js::showCrashDialog says why).
+  crashDialogShowing = true
+  showCrashDialog({ dialog, clipboard, text, log: (msg) => console.log(msg) })
+    .catch((err) => console.error(`crash dialog: ${(err && err.message) || err}`))
+    .finally(() => {
+      crashDialogShowing = false
+      app.quit()
+    })
 }
 
 function createSplash() {
@@ -356,6 +356,15 @@ function setupUpdater() {
   return controller
 }
 
+/** The Downloads folder, or undefined when the OS cannot say (the dialog then picks). */
+function downloadsDir() {
+  try {
+    return app.getPath('downloads')
+  } catch {
+    return undefined
+  }
+}
+
 async function startup() {
   try {
     applyAppMenu()
@@ -369,6 +378,7 @@ async function startup() {
         keyFilePath: path.join(app.getPath('userData'), KEY_FILE_NAME),
         fs,
         showSaveDialog: (opts) => dialog.showSaveDialog(mainWindow, opts),
+        defaultDir: downloadsDir(),
       }),
     )
     // Page zoom (#697). ONE verb, and main is the only place `setZoomFactor` is
@@ -441,7 +451,10 @@ app.on('before-quit', () => {
   })
 })
 
-// Single-window desktop app: closing the window quits (incl. macOS).
-app.on('window-all-closed', () => app.quit())
+// Single-window desktop app: closing the window quits (incl. macOS) — except while the
+// crash dialog is up, which quits by itself once the researcher has chosen Quit.
+app.on('window-all-closed', () => {
+  if (!crashDialogShowing) app.quit()
+})
 
 app.whenReady().then(startup)

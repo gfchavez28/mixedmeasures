@@ -68,9 +68,18 @@ the single-page app that the backend serves same-origin at
 - `preload.js` — minimal hardened context bridge (`window.mmDesktop`).
 - `splash.html` — shown while the backend starts.
 - `scripts/update-manifest.js` — release-pipeline tool: re-patches
-  `latest-mac.yml` after the DMG staple rewrites the artifact, and merges the mac
-  legs' per-arch manifests into the one file the auto-updater reads.
-  Dependency-free; exercised by `release.yml`. Unit tests alongside it.
+  `latest-mac.yml` after the DMG staple rewrites the artifact, merges the mac
+  legs' per-arch manifests into the one file the auto-updater reads, and stamps
+  and checks the feed's `minimumSystemVersion` (#1100). Dependency-free;
+  exercised by `release.yml`. Unit tests alongside it.
+- `scripts/macos-floor.js` — release-pipeline tool (#1118): reads every Mach-O
+  file in the built `.app`, fails when any needs a newer macOS than
+  `LSMinimumSystemVersion`, and prints the floor as the Darwin version the feed
+  needs. v1.5.5 said 12.0 and shipped numpy/scipy built for 14.0; this is what
+  would have said so. Dependency-free, unit-tested on synthetic headers.
+- `scripts/check-fuses.js` — release-pipeline tool (#1100): reads the fuses back
+  out of each packaged leg and fails when they differ from `build.electronFuses`.
+  Nothing else ever looks at them.
 
 ## 🔴 `build.files` is a deny-by-default allow-list — and nothing but a launch tests it (#761)
 
@@ -184,16 +193,24 @@ across two stderr chunks is still collected, developer noise and tracebacks neve
 reach the dialog, and the body is capped), and renderer recovery (#1046 — one
 dialog per crash, a repeat recommends the project list, a hang dialog withdrawn
 when the page recovers, and a deliberate kill never reported as a crash), and the
-runtime floor (#1093 — the locked Electron and the declared range at or above `FLOOR`).
+runtime floor (#1093 — the locked Electron and the declared range at or above `FLOOR`),
+the macOS floor scan (#1118 — synthetic thin and universal Mach-O headers), the
+feed's `minimumSystemVersion` (checked against the shipped electron-updater's own
+comparison, which lets an update through on a malformed value), and the fuse
+read-back (#1100 — a stand-in binary flipped through electron-builder's own mapping).
 
 ⚠️ **What the headless suite cannot prove: that the crash dialog appears.** The
 backend is only a spawned child in a packaged build, so #716's last mile is a
 packaged-build check — it is on the RELEASING §4b list and #716 stays open until it
 passes. In dev the backend's stderr goes to the terminal and looks fine, which is
-how the original gap survived. **The same is true of the renderer-recovery dialogs
+how the original gap survived. The dialog stays up until *Quit*: *Copy details*
+copies (awaited — a Promise from Electron 44) and the same dialog comes back saying
+so (`fatal-error.js::showCrashDialog`); `main.js` holds `window-all-closed` off
+while it shows. **The same is true of the renderer-recovery dialogs
 (#1046):** the suite drives every rule through fakes. A throwaway harness has driven
-them in a real Electron on Linux: 42.3.3 (2026-09-26), then 42.11.8 at the runtime
-bump (2026-09-28). Whether they appear on the packaged Windows build, and whether
+them in a real Electron on Linux: 42.3.3 (2026-09-26), 42.11.8 at the runtime
+bump (2026-09-28), and 44.5.1 at the major move (2026-10-04 — the kill-by-process-id
+fallback still fires there). Whether they appear on the packaged Windows build, and whether
 the hang path's kill behaves the same there, is a §4b check. **Re-run that harness in
 the new binary whenever the runtime moves**
 (the internal design notes, git-ignored; run steps in its
@@ -224,10 +241,21 @@ and confirm the backend process exits and a shutdown backup is written.
 - On Windows, process teardown uses `taskkill /T /F`, so the graceful-shutdown
   backup does not run on a Windows quit; the periodic auto-backup is the
   mitigation. POSIX platforms get a clean `SIGTERM` shutdown.
-- The shipped Electron runtime is locked to a release on a supported line (42.11.8,
-  taken on 2026-09-28 as the head of the 42 line), with a floor guarded by
-  `runtime-floor.test.js`. **Supported is dated:** Electron supports the latest
-  three majors, and the 42 line reaches end of life on 2026-10-20 (#1100).
-  RELEASING §1b's `/security-audit` step compares the lock with the line at every cut.
-  **The move to 44 is decided (2026-09-29) as the first job after the v1.5.5 cut** —
-  plan: the internal design notes.
+- The shipped Electron runtime is locked to a release on a supported line (44.5.1,
+  taken on 2026-10-04 as the head of the 44 line; 42 reaches end of life 2026-10-20),
+  with a floor guarded by `runtime-floor.test.js`. **Supported is dated:** Electron
+  supports the latest three majors; 44's end of life is 2027-03-02, and the move
+  after it needs #1121 first (Electron 46 removes the synchronous `safeStorage`
+  calls). RELEASING §1b's `/security-audit` step compares the lock with the line
+  at every cut. Plan and sources: the internal design notes
+  (git-ignored; its calendar names the Linux proof kits saved beside it).
+- **Fuses** (`build.electronFuses`, flipped before signing): no
+  `ELECTRON_RUN_AS_NODE`, no `NODE_OPTIONS`, no `--inspect`, no extra `file://`
+  privileges, and only an integrity-checked `app.asar` loads (macOS/Windows check
+  it). The release legs read them back (`scripts/check-fuses.js`). ⚠️ With
+  `runAsNode` off, `child_process.fork()` from the main process throws (44.4.0);
+  nothing here forks.
+- **macOS 14 or later** (`build.mac.minimumSystemVersion`), because that is what
+  the bundled numpy/scipy need — proven per build by `scripts/macos-floor.js` and
+  carried in the update feed so an older Mac is not updated into an app that will
+  not open.

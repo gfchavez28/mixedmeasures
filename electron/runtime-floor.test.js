@@ -14,17 +14,25 @@ const path = require('node:path')
 // every gate green. This file is the assertion (dependency-security.md §1a: a floor the
 // auditor cannot hold needs its own).
 //
-// FLOOR is the version last taken ON PURPOSE, not the lowest safe one. 42.10.0 closes
-// the one 08-29 advisory whose mechanism applies here — GHSA-qmv3-fv6v-rmhq, a
-// compromised renderer poisoning the sandboxed preload's code cache (main.js runs
-// `sandbox: true` with preload.js) — and the releases after it carry the line's
-// Chromium/V8 backport batches, 42.11.1's fifteen named CVEs among them.
+// FLOOR is the version last taken ON PURPOSE, not the lowest safe one. On the 44 line
+// (#1100, 2026-10-04) the security floor is lower than what was taken:
+//   - GHSA-qmv3-fv6v-rmhq, the one 08-29 advisory whose mechanism applies here (a
+//     compromised renderer poisoning the sandboxed preload's code cache; main.js runs
+//     `sandbox: true` with preload.js), is fixed from 44.0.0-beta.6;
+//   - the two CISA-KEV V8 bugs are fixed from 44.2.0 (CVE-2026-85046, backport #53479)
+//     and 44.4.0 (CVE-2026-87491, #53769), and natively from 44.4.2;
+//   - 44.4.0 and 44.4.4 also fix two events this shell listens to (`unresponsive` after
+//     sleep on Windows; `ready-to-show` never firing for some hidden windows).
+// 44.5.1 is the line's head as taken: 44.5.0's Linux fixes plus 27 upstream backports.
 //
 // A MAJOR move fails here until FLOOR moves with it, deliberately. A patched version is
-// per LINE (qmv3 is fixed in 42.10.0 but in 43.4.2 on the 43 line), so "42.11.8 or
-// higher" would wave through 43.0.0–43.4.1, which lack the fix. Whoever changes the
-// major reads that line's advisories and sets FLOOR to the version they took.
-const FLOOR = '42.11.8'
+// per LINE (qmv3 is fixed in 42.10.0, 43.5.0 and 44.0.0-beta.6), so a bare "44.5.1 or
+// higher" would wave through the next line's early releases, which can lack a fix that
+// was backported here.
+// Whoever changes the major reads that line's advisories and sets FLOOR to the version
+// they took. ⚠️ The move after 44 also needs #1121 first: Electron 46 removes the
+// synchronous safeStorage calls key-manager.js uses.
+const FLOOR = '44.5.1'
 
 const ELECTRON_DIR = __dirname
 const pkg = JSON.parse(fs.readFileSync(path.join(ELECTRON_DIR, 'package.json'), 'utf8'))

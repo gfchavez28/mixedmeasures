@@ -80,7 +80,12 @@ jobs:
   # the same checks as ci.yml but as HARD failures — a freshly-disclosed CVE or a
   # schema drift must stop a release, not just warn.
   verify:
-    runs-on: ubuntu-latest
+    # PINNED, not ubuntu-latest (#1097): the R oracles are anchored to noble's R 4.3.3, and
+    # `ubuntu-latest` moves to 26.04 (R 4.5.2, every r-cran-* name still resolving) over
+    # 2026-10-19 → 11-19 — a silent re-anchor. Never fall back to ubuntu-22.04: it
+    # preinstalls CRAN R 4.6.1, which apt will not downgrade. Moving off 24.04 is a
+    # deliberate re-anchor, done together with ci.yml's backend job.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30          # +5 for the R toolchain install (#642)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -124,6 +129,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             r-base-core r-cran-readr r-cran-dplyr r-cran-psych \
             r-cran-ggplot2 r-cran-lpsolve
+          # #1097: the anchor is ASSERTED, not assumed from the runner label. Matches ci.yml.
+          Rscript -e 'v <- getRversion(); if (v != "4.3.3") stop("R ", v, " is installed; the R oracles are anchored to 4.3.3")'
           sudo Rscript -e 'install.packages("irr", repos = "https://cloud.r-project.org")'
           Rscript -e 'for (p in c("readr","dplyr","psych","ggplot2","irr")) if (!requireNamespace(p, quietly = TRUE)) stop("R oracle package missing: ", p)'
 
@@ -193,7 +200,7 @@ jobs:
 
   # ── Package: one runner per platform/arch ───────────────────────────────────
   # The backend is a NATIVE PyInstaller bundle, so each arch must build on its own
-  # native runner — there is no cross-compile. macos-14 = Apple Silicon (arm64).
+  # native runner — there is no cross-compile. macos-15 = Apple Silicon (arm64).
   # All three publish to the same draft release for the tag.
   package:
     needs: verify
@@ -205,9 +212,21 @@ jobs:
       fail-fast: false
       matrix:
         # Full release matrix. The backend is a NATIVE PyInstaller bundle, so each arch
-        # builds on its own native runner (no cross-compile): macos-14 = Apple Silicon.
+        # builds on its own native runner (no cross-compile): macos-15 = Apple Silicon.
         # Every entry was validated individually during the 2026-06-14 signing/packaging
         # bring-up — mac sign+notarize+backend-boot-smoke, windows Azure signing, linux.
+        #
+        # 🔴 EVERY LABEL IS PINNED, never `-latest` (#1097, #1119; build-config.test.js
+        # fails on a `-latest` label). The build machine decides what ships: pip picks
+        # wheels by the runner's OS, so the mac runner can RAISE the app's macOS floor
+        # (#1118 — macos-14 put macOS-14-only numpy/scipy into an app that said 12.0;
+        # the "macOS floor" step below now fails on that), and the Linux runner's glibc
+        # becomes the AppImage's floor (24.04: 2.39; 26.04: 2.43). Changing a label is a
+        # pipeline change and takes an rc (RELEASING §3b).
+        #   - macos-15, not macos-14: macos-14 retires 2026-11-02, with brownouts (jobs
+        #     terminated) from 2026-10-05 (actions/runner-images#13518).
+        #   - windows-2025: the image windows-latest resolved to for v1.5.5.
+        #   - ubuntu-24.04: what ubuntu-latest meant until 2026-10-19.
         #
         # macOS INTEL (macos-13) WAS REMOVED 2026-07-10 (#29 S1). It habitually hung on
         # GitHub's scarce Intel runners and v1.1.1 shipped without an Intel dmg anyway;
@@ -217,13 +236,13 @@ jobs:
         # auto-update. Re-adding a mac arch means adding it HERE and to EXPECTED_ARCHES
         # in the finalize-mac-manifest job below; the two must never disagree.
         include:
-          - os: macos-14
+          - os: macos-15
             eb_target: mac
             eb_arch: arm64
-          - os: windows-latest
+          - os: windows-2025
             eb_target: win
             eb_arch: x64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             eb_target: linux
             eb_arch: x64
     runs-on: ${{ matrix.os }}
@@ -453,6 +472,26 @@ jobs:
           echo "electron-builder ${ARGS[*]}"
           npx --no-install electron-builder "${ARGS[@]}"
 
+      # 3a1) The fuses the packaged app REALLY carries (#1100). electron-builder flips
+      #      build.electronFuses into the Electron binary just before signing; nothing else
+      #      ever looks at them, so a skipped flip would ship an app that launches, passes
+      #      every gate and lacks the protection. check-fuses.js reads the wire back out of
+      #      what this leg built and fails on any difference from the config. ⚠️ It reads
+      #      the BYTES; whether the asar-integrity pair lets the signed app LAUNCH is proved
+      #      only by RELEASING §4b's install passes (a mismatch is a fatal error at start).
+      - name: Verify — the packaged app carries its configured fuses
+        timeout-minutes: 5
+        working-directory: electron
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.eb_target }}" = "mac" ]; then
+            TARGET="$(find release -maxdepth 4 -name '*.app' -print -quit)"
+          else
+            TARGET="release/${{ matrix.eb_target }}-unpacked"
+          fi
+          if [ -z "${TARGET:-}" ] || [ ! -e "$TARGET" ]; then echo "❌ no packaged app found for ${{ matrix.eb_target }}"; exit 1; fi
+          node scripts/check-fuses.js "$TARGET"
+
       # 3a2) Notarize + staple the DMG itself (macOS, signed path only). electron-builder
       #      notarizes & staples the .app but NOT the .dmg container, so `stapler validate`
       #      on the dmg fails the Gatekeeper gate below (the rc2 finding). Submit the dmg to
@@ -498,6 +537,28 @@ jobs:
           VERSION="$(node -p "require('./package.json').version")"
           echo "re-uploading stapled dmg to draft release v${VERSION}"
           gh release upload "v${VERSION}" "$DMG" --clobber --repo "$GITHUB_REPOSITORY"
+
+      # 3a2b) The app's macOS floor: PROVE it, then put it in the update feed (#1118, #1100).
+      #       macos-floor.js reads every Mach-O file in the built .app and FAILS when any
+      #       needs a newer macOS than Info.plist's LSMinimumSystemVersion — v1.5.5 said
+      #       12.0 and shipped numpy/scipy built for 14.0, with every gate green. On a pass
+      #       it prints the floor as the DARWIN version electron-updater compares against
+      #       os.release(), and update-manifest.js stamps it into the local latest-mac.yml
+      #       before the next step publishes it. Without the stamp, a Mac below the floor
+      #       auto-updates into an app that will not open. Runs on the signed AND unsigned
+      #       paths (it reads the bundle, not the signature).
+      - name: macOS floor — verify every binary, stamp the update feed (macOS)
+        if: matrix.eb_target == 'mac'
+        timeout-minutes: 5
+        working-directory: electron
+        run: |
+          set -euo pipefail
+          APP="$(find release -maxdepth 4 -name '*.app' -print -quit)"
+          if [ -z "${APP:-}" ]; then echo "❌ no .app found under release/"; exit 1; fi
+          # A separate assignment, so a failing check fails the step (set -e does not see
+          # a failure inside `local x=$(…)`, and nothing here is in a pipeline).
+          DARWIN="$(node scripts/macos-floor.js check "$APP")"
+          node scripts/update-manifest.js min-os release/latest-mac.yml "$DARWIN"
 
       # 3a3) Publish this arch's update manifest under an ARCH-SPECIFIC name (#29 S1).
       #      Each mac leg generates a latest-mac.yml listing only its OWN arch's files;
@@ -714,7 +775,7 @@ jobs:
   finalize-mac-manifest:
     needs: package
     if: ${{ !cancelled() && needs.package.result != 'skipped' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -774,6 +835,9 @@ jobs:
           node electron/scripts/update-manifest.js merge "$WORK/latest-mac.yml" "${INPUTS[@]}"
           echo "----- merged latest-mac.yml -----"
           cat "$WORK/latest-mac.yml"
+          # #1118/#1100: the feed must carry the macOS floor, as a full x.y.z — the updater
+          # treats anything else as "supported" and would update every Mac.
+          node electron/scripts/update-manifest.js check-min-os "$WORK/latest-mac.yml"
 
           gh release upload "$TAG" "$WORK/latest-mac.yml" --clobber --repo "$GITHUB_REPOSITORY"
           for f in "${INPUTS[@]}"; do

@@ -42,7 +42,12 @@ concurrency:
 jobs:
   # ── Backend: pytest + schema-drift gate + production-dep audit ──────────────
   backend:
-    runs-on: ubuntu-latest
+    # PINNED, never ubuntu-latest (#1097): the R oracles are anchored to noble's R 4.3.3,
+    # and ubuntu-latest moves to 26.04 over 2026-10-19 → 11-19, where every apt name below
+    # still resolves — to R 4.5.2. The install step now ASSERTS the version too. Moving off
+    # 24.04 is a deliberate re-anchor, made here and in release.yml's verify job together.
+    # Never ubuntu-22.04: it preinstalls CRAN R 4.6.1, which apt will not downgrade.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25          # +5 for the R toolchain install (#642)
     defaults:
       run:
@@ -117,6 +122,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             r-base-core r-cran-readr r-cran-dplyr r-cran-psych \
             r-cran-ggplot2 r-cran-lpsolve
+          # #1097: the anchor is ASSERTED, not assumed from the runner label — the label is
+          # what moves. getRversion() ignores the Debian revision, so a 4.3.3 rebuild passes.
+          Rscript -e 'v <- getRversion(); if (v != "4.3.3") stop("R ", v, " is installed; the R oracles are anchored to 4.3.3")'
           sudo Rscript -e 'install.packages("irr", repos = "https://cloud.r-project.org")'
           Rscript -e 'for (p in c("readr","dplyr","psych","ggplot2","irr")) if (!requireNamespace(p, quietly = TRUE)) stop("R oracle package missing: ", p)'
 
@@ -159,7 +167,7 @@ jobs:
 
   # ── Frontend: lint + vitest + production build + dep audit ──────────────────
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned like every job here (#1097); see `backend`
     timeout-minutes: 20
     defaults:
       run:
@@ -218,7 +226,7 @@ jobs:
 
   # ── Electron shell: headless unit tests ─────────────────────────────────────
   electron:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned like every job here (#1097); see `backend`
     timeout-minutes: 15
     defaults:
       run:

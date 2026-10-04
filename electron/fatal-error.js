@@ -167,6 +167,51 @@ function crashDialogClipboardText({ title, message, detail }) {
   return [title, '', message, '', detail].join('\n')
 }
 
+const CRASH_BUTTONS = ['Copy details', 'Quit']
+const CRASH_COPY = 0
+const CRASH_QUIT = 1
+
+/** The first line of `detail` once "Copy details" has worked, or failed. */
+const COPIED_NOTE = 'The details are copied. Paste them somewhere before you choose Quit.'
+const COPY_FAILED_NOTE = 'The details could not be copied. A screenshot of this message works too; take it before you choose Quit.'
+
+/**
+ * Show the crash dialog until the researcher chooses Quit; the caller quits after.
+ *
+ * "Copy details" used to copy and quit in ONE press (#716). That took the guidance off the
+ * screen — and it names a folder the researcher is being asked to act on — said nothing
+ * about whether the copy worked, and on Linux an app's clipboard can empty when the app
+ * exits, before anything was pasted. Now the copy is awaited (Electron 44 made
+ * `clipboard.writeText` return a Promise, in the main process too) and the same dialog
+ * comes back with a first line saying it worked. A re-shown native dialog is announced
+ * again, so a screen reader hears the confirmation too. Only Quit (or Escape) ends it.
+ *
+ * Electron-free: `dialog` and `clipboard` are injected, like the rest of this file.
+ */
+async function showCrashDialog({ dialog, clipboard, text, log = () => {} }) {
+  let note = null
+  for (;;) {
+    const choice = dialog.showMessageBoxSync({
+      type: 'error',
+      title: text.title,
+      message: text.message,
+      detail: note ? `${note}\n\n${text.detail}` : text.detail,
+      buttons: CRASH_BUTTONS,
+      defaultId: CRASH_QUIT,
+      cancelId: CRASH_QUIT,
+      noLink: true,
+    })
+    if (choice !== CRASH_COPY) return
+    try {
+      await clipboard.writeText(crashDialogClipboardText(text))
+      note = COPIED_NOTE
+    } catch (err) {
+      log(`crash dialog: copy failed (${(err && err.message) || err})`)
+      note = COPY_FAILED_NOTE
+    }
+  }
+}
+
 module.exports = {
   MM_FATAL_PREFIX,
   MAX_FATAL_LINES,
@@ -175,6 +220,10 @@ module.exports = {
   createFatalLineCollector,
   crashDialogText,
   crashDialogClipboardText,
+  showCrashDialog,
+  CRASH_BUTTONS,
+  COPIED_NOTE,
+  COPY_FAILED_NOTE,
   describeExit,
   truncateForDialog,
 }
