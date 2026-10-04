@@ -116,24 +116,31 @@ test('the Mac app declares its macOS floor, as a version the update feed can car
 
 // --- the half that lives in the release workflow -------------------------------------
 
-const releaseYml = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/release.yml'), 'utf8')
-const ciYml = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')
-const docsYml = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/docs.yml'), 'utf8')
+const WORKFLOWS_DIR = path.join(REPO_ROOT, '.github/workflows')
+const releaseYml = fs.readFileSync(path.join(WORKFLOWS_DIR, 'release.yml'), 'utf8')
+const ciYml = fs.readFileSync(path.join(WORKFLOWS_DIR, 'ci.yml'), 'utf8')
 
 test('every workflow job names its machine — no `-latest` label (#1097, #1119)', () => {
   // A `-latest` label is a build machine someone else chooses. ubuntu-latest moving to 26.04
   // would silently re-anchor the R oracles (R 4.5.2) and raise the AppImage's glibc floor;
   // the mac runner decides which wheels pip picks, and so the app's macOS floor (#1118).
+  //
+  // ⚠️ The workflow SET differs between the two repos: the public sync strips docs.yml (a
+  // private-only gate), and naming it here failed the public CI on 2026-10-04 while the private
+  // one was green. So read whatever workflows exist, and require only the two that ship.
+  const files = fs.readdirSync(WORKFLOWS_DIR).filter((f) => /\.ya?ml$/.test(f))
+  for (const required of ['ci.yml', 'release.yml']) assert.ok(files.includes(required), `${required} is missing`)
   const labels = []
-  for (const [name, text] of [['release.yml', releaseYml], ['ci.yml', ciYml], ['docs.yml', docsYml]]) {
-    for (const line of text.split('\n')) {
+  for (const name of files) {
+    for (const line of fs.readFileSync(path.join(WORKFLOWS_DIR, name), 'utf8').split('\n')) {
       const m = /^\s*(?:runs-on|- os):\s*(\S+)/.exec(line.replace(/\s+#.*$/, ''))
       if (!m || m[1].startsWith('${{')) continue
       labels.push(`${name}: ${m[1]}`)
     }
   }
-  // Population check: a pattern that matched nothing would pass any workflow.
-  assert.ok(labels.length >= 9, `found only ${labels.length} runner labels: ${labels.join(', ')}`)
+  // Population check: a pattern that matched nothing would pass any workflow. ci.yml has three
+  // jobs and release.yml five labels (verify, three package legs, finalize), in both repos.
+  assert.ok(labels.length >= 8, `found only ${labels.length} runner labels: ${labels.join(', ')}`)
   const floating = labels.filter((l) => !/: (ubuntu|macos|windows)-\d/.test(l) || /latest/.test(l))
   assert.deepEqual(floating, [], `pin these to a versioned image (a label change is a pipeline change, RELEASING §3b)`)
 })
