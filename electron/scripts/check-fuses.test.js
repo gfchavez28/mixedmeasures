@@ -55,6 +55,28 @@ test('the shipped config sets the six fuses the plan decided, and cookie encrypt
   assert.equal(f.enableCookieEncryption, undefined)
 })
 
+test('with extra file:// privileges off, no shipped shell module loads a page by file path (#1171)', () => {
+  // With grantFileProtocolExtraPrivileges off, Electron 44 fails a file:// load of a page
+  // INSIDE app.asar (ERR_FILE_NOT_FOUND, measured on 44.5.1 with the shipped fuses), and every
+  // page the shell ships is inside it. The splash was loaded that way and was a blank white
+  // box in every 1.5.6 draft — no test could see it, because none runs Electron. A page is
+  // handed over as a data: URL the main process read, or served by a registered protocol.
+  assert.equal(pkg.build.electronFuses.grantFileProtocolExtraPrivileges, false, 'this guard assumes the fuse is off')
+  const modules = pkg.build.files.filter((f) => f.endsWith('.js'))
+  // Population check: a list that resolved to nothing would pass any source.
+  assert.ok(modules.includes('main.js') && modules.length >= 5, `shipped modules: ${modules.join(', ')}`)
+  const offenders = []
+  for (const file of modules) {
+    const lines = fs.readFileSync(path.join(__dirname, '..', file), 'utf8').split('\n')
+    lines.forEach((line, i) => {
+      if (/^\s*(\*|\/\*)/.test(line)) return // a block-comment line
+      const code = line.replace(/(^|\s)\/\/.*$/, '') // a trailing comment, never the // of a URL
+      if (/\.loadFile\s*\(|['"`]file:\/\//.test(code)) offenders.push(`${file}:${i + 1}: ${line.trim()}`)
+    })
+  }
+  assert.deepEqual(offenders, [], 'these load a page by file path, which fails inside app.asar with the fuse off')
+})
+
 test('every configured key names a fuse @electron/fuses knows', () => {
   for (const key of Object.keys(pkg.build.electronFuses)) {
     if (NOT_FUSES.has(key)) continue

@@ -263,7 +263,10 @@ and confirm the backend process exits and a shutdown backup is written.
   privileges, and only an integrity-checked `app.asar` loads (macOS/Windows check
   it). The release legs read them back (`scripts/check-fuses.js`). ⚠️ With
   `runAsNode` off, `child_process.fork()` from the main process throws (44.4.0);
-  nothing here forks.
+  nothing here forks. ⚠️ With the extra `file://` privileges off, a page INSIDE
+  `app.asar` cannot be loaded by file path — it fails `ERR_FILE_NOT_FOUND` (#1171,
+  measured on 44.5.1) — so the splash goes in as a `data:` URL the main process
+  read, and `scripts/check-fuses.test.js` refuses a `loadFile` or `file://` page.
 - **macOS 14 or later** (`build.mac.minimumSystemVersion`), because that is what
   the bundled numpy/scipy need — proven per build by `scripts/macos-floor.js` and
   carried in the update feed so an older Mac is not updated into an app that will

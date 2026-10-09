@@ -246,7 +246,21 @@ function createSplash() {
     show: true,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
   })
-  splashWindow.loadFile(path.join(__dirname, 'splash.html'))
+  // #1171: handed over as a `data:` URL, never by file path. The fuse that grants file://
+  // pages extra privileges is off (#1100), and with it off Electron 44 fails a file:// load
+  // of a page INSIDE app.asar with ERR_FILE_NOT_FOUND — every 1.5.6 draft showed a blank
+  // white box here. The main process still reads the page out of the integrity-checked
+  // asar. A splash that cannot be read stays blank; it must never stop the app starting.
+  let html
+  try {
+    html = fs.readFileSync(path.join(__dirname, 'splash.html'), 'utf8')
+  } catch (err) {
+    console.error(`splash: ${err.message}`)
+    return
+  }
+  splashWindow
+    .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+    .catch((err) => console.error(`splash: ${err.message}`))
 }
 
 function closeSplash() {
