@@ -44,7 +44,9 @@ export function partitionBySizeLimit<T extends { size: number }>(
  */
 export const MAX_PROJECT_FILE_BYTES = 500 * 1024 * 1024
 
-const labelFor = (maxBytes: number) => `${maxBytes / (1024 * 1024)} MB`
+/** A limit as the pages state it (`50 MB`, `500 MB`) — one spelling for the note and the refusal. */
+export const fileLimitLabel = (maxBytes: number) => `${maxBytes / (1024 * 1024)} MB`
+const labelFor = fileLimitLabel
 
 /**
  * The sentence for files turned away at selection. It names each file and its size,

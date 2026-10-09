@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo } from 'react'
-import { useSearchParams } from 'react-router'
+import { useComposableSearchParams } from './useComposableSearchParams'
 import { parseIntParam } from '@/lib/utils'
 import type {
   QualTab,
@@ -217,7 +217,10 @@ function serializeIds(ids: Set<number>): string {
 }
 
 export function useQualitativeAnalysis(): QualitativeAnalysisState & QualitativeAnalysisActions {
-  const [searchParams, setSearchParams] = useSearchParams()
+  // #1129 — composable: the setters below are called several to a tick (the
+  // Content tab's auto-select calls five), and React Router's own setter lets
+  // only the last write of a tick land.
+  const [searchParams, setSearchParams] = useComposableSearchParams()
   const [formatting, setFormatting] = useState<ChartFormatting>({ ...DEFAULT_FORMATTING })
 
   // Text annotations (per-tab, not URL-persisted — saved via palette only)

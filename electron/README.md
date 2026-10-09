@@ -23,7 +23,10 @@ the single-page app that the backend serves same-origin at
 
 ## Files
 
-- `main.js` — Electron main process (lifecycle, window, single-instance lock).
+- `main.js` — Electron main process (lifecycle, window). Every app listener lives in
+  `registerPrimaryInstance`, so a refused second launch registers nothing.
+- `single-instance.js` — the single-instance lock: claim it, then register the app's
+  lifecycle only when it is held, or quit (#1141). Electron-free; unit-tested.
 - `backend-process.js` — Electron-free helpers (port selection, health polling,
   executable/env resolution, teardown). Unit-tested headlessly.
 - `backend-process.test.js` — `node --test` suite (no Electron, no display).
@@ -80,6 +83,12 @@ the single-page app that the backend serves same-origin at
 - `scripts/check-fuses.js` — release-pipeline tool (#1100): reads the fuses back
   out of each packaged leg and fails when they differ from `build.electronFuses`.
   Nothing else ever looks at them.
+- `scripts/electron-advisories.js` — CI check (#1094): reads Electron's own
+  published security advisories and fails when the locked `electron` version is
+  in a range its `REVIEWED` list does not excuse. The dependency audits cannot
+  see the runtime (`electron` is a devDependency), and the global advisory
+  database has missed Electron's advisories before. Dependency-free; it uses
+  `GITHUB_TOKEN` when set. Not packaged: `build.files` does not name it.
 
 ## 🔴 `build.files` is a deny-by-default allow-list — and nothing but a launch tests it (#761)
 

@@ -23,7 +23,6 @@ What these guard, and why each is here:
 import asyncio
 import os
 import sqlite3
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -400,11 +399,10 @@ def test_nothing_reaches_the_replaced_database_during_or_after_a_restore(tmp_pat
         s.get(Project, 1).name = "AFTER THE BACKUP"
         s.commit()
 
-    # Stage in THIS filesystem, so the swap is a rename — the POSIX shape, where a
-    # connection opened before it keeps the old inode. Asserted below, not assumed.
-    real_mkdtemp = tempfile.mkdtemp
-    monkeypatch.setattr(backup_service.tempfile, "mkdtemp", lambda: real_mkdtemp(dir=tmp_path))
-
+    # The swap is a rename — the POSIX shape, where a connection opened before it
+    # keeps the old inode. Asserted below, not assumed. This test used to force it
+    # by pointing OS temp at `tmp_path`; since #1036 (b) the restore stages beside
+    # the database itself, so the rename is what the product does.
     paused, resume = threading.Event(), threading.Event()
     real_create_backup = backup_service.create_backup
 

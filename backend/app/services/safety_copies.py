@@ -56,7 +56,10 @@ SAFETY_COPY_SUFFIX = ".mmproject"
 _NAME_RE = re.compile(
     r"^(?P<prefix>" + "|".join(re.escape(p) for p in SAFETY_COPY_PREFIXES) + r")"
     r"_(?P<project_id>\d+)_(?P<date>\d{8})_(?P<time>\d{6})(?:-(?P<n>\d+))?"
-    + re.escape(SAFETY_COPY_SUFFIX) + r"$"
+    + re.escape(SAFETY_COPY_SUFFIX) + r"\Z",
+    # ASCII digits and `\Z` (#1039 f): `\d` also matches other scripts' digits, and
+    # `$` matches before a trailing newline.
+    re.ASCII,
 )
 
 # Until 1.5.2 a MERGE's copy was also named `pre-overwrite` (#919's sibling, fixed

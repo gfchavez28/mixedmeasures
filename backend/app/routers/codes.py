@@ -44,6 +44,7 @@ from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
 from ..services.participant_scores import mark_participant_scores_stale
 from ..services import magnitude
+from ..services import code_sets as code_set_rules
 from .helpers import _get_project_or_404
 
 router = APIRouter(prefix="/api/projects/{project_id}/codes", tags=["codes"])
@@ -639,6 +640,10 @@ async def merge_codes(
     skipped = 0
     ratings_carried = 0
     rating_conflicts = 0
+    # #1081 (a): the (target, coder) pairs this merge re-pointed a coding onto, so
+    # the contradictions it leaves can be counted once the writes are flushed.
+    moved_segments: set[tuple[int, int]] = set()
+    moved_values: set[tuple[int, int]] = set()
 
     for app in source_apps:
         kept = _kept_for(app)
@@ -658,6 +663,11 @@ async def merge_codes(
             if app.magnitude is not None:
                 ratings_carried += 1
             merged += 1
+            if app.user_id is not None:
+                if app.segment_id is not None:
+                    moved_segments.add((app.segment_id, app.user_id))
+                elif app.dataset_value_id is not None:
+                    moved_values.add((app.dataset_value_id, app.user_id))
 
     # Flush the reassignment (and dup deletes) BEFORE deleting the source code.
     # Without this, the source-Code delete fires `Code.applications`'
@@ -666,6 +676,14 @@ async def merge_codes(
     # applications. Flushing first writes code_id=target, so the source then owns
     # no applications and the cascade is a no-op. (Data-loss bug, fixed 2026-06-22.)
     db.flush()
+
+    # 🔴 #1081 (a) — a merge is the one coding write that does NOT go through the
+    # code-set swap, so a coder who held the source (in no set) and another value
+    # of the target's set now holds two. Counted and SAID, never resolved: which
+    # value the coder meant is theirs to choose, and the merge has no undo.
+    contradictions = code_set_rules.contradictions_held(
+        db, target, segment_pairs=moved_segments, value_pairs=moved_values,
+    )
 
     # Deactivate or delete source
     if delete_source:
@@ -691,6 +709,7 @@ async def merge_codes(
             "source_action": source_action,
             "ratings_carried": ratings_carried,
             "rating_conflicts": rating_conflicts,
+            **({"set_contradictions": contradictions.count} if contradictions.count else {}),
         }
     )
     db.commit()
@@ -702,6 +721,8 @@ async def merge_codes(
         ratings_carried=ratings_carried,
         rating_conflicts=rating_conflicts,
         target_has_scale=magnitude.has_scale(target),
+        set_contradictions=contradictions.count,
+        contradiction_set_label=contradictions.set_label if contradictions.count else None,
     )
 
 

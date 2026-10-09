@@ -1,15 +1,25 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # CI — build & test (the foundation workflow)
 #
-# WHAT IT DOES: on every push to main / every pull request, spins up clean cloud
-# Linux machines and runs the same checks you run by hand — backend pytest,
-# frontend lint+vitest+build, and the electron unit tests — plus a schema-drift
-# gate and advisory dependency audits. No packaging or signing happens here
-# (that's the separate release workflow); this is the fast feedback loop.
+# WHAT IT DOES: on pushes to main and pull requests, spins up clean cloud Linux
+# machines and runs the same checks you run by hand — backend pytest, frontend
+# lint+vitest+build, and the electron unit tests — plus a schema-drift gate and
+# the dependency audits. No packaging or signing happens here (that's the
+# separate release workflow); this is the fast feedback loop.
 #
-# COST: free on a PUBLIC repo with GitHub-hosted runners. Until the repo is
-# public it can still run if Actions is enabled, against the private-repo minute
-# allowance.
+# WHICH TESTS RUN (#1095): a `plan` job runs first and each area job runs only if
+# it says so. The rule: test every area with a change since that area last PASSED
+# on this branch, where "change" includes the files OUTSIDE its folder that its
+# tests read (`.github/scripts/ci-areas.py` lists them, and the Doc gates workflow
+# fails when a test reads one it does not list). Everything runs on a hand-started
+# run (the full run RELEASING asks for before a release), on the weekly schedule
+# (`ci-weekly.yml`, private only), on a change to this machinery, and always in the
+# public repository. The run's summary page says, per area, why it ran or where it
+# last passed.
+#
+# COST: free on a PUBLIC repo with GitHub-hosted runners. On the PRIVATE repo it
+# draws on the Free plan's 2,000 minutes a month, which ran out on 2026-09-28 when
+# every push ran everything (#1095).
 #
 # ✅ ACTIONS SHA-PINNED 2026-06-14. Project policy (ROADMAP "Build pipeline") requires
 # every `uses:` action pinned to a FULL COMMIT SHA, never a mutable tag like `@v4`, so a
@@ -27,21 +37,77 @@ name: CI
 on:
   push:
     branches: [main]
+    # A push that changes none of these (notes, plans, ISSUES) starts no run at all — only
+    # Doc gates. Each entry must be one of the patterns in ci-areas.py's AREAS, and together
+    # they must reach all of them; Doc gates checks both directions.
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'electron/**'
+      - '.github/workflows/**'
+      - '.github/scripts/ci-areas.py'
+      - 'CHANGELOG.md'
+      - 'CITATION.cff'
   pull_request:
-  workflow_dispatch:        # lets you trigger a run manually from the Actions tab
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'electron/**'
+      - '.github/workflows/**'
+      - '.github/scripts/ci-areas.py'
+      - 'CHANGELOG.md'
+      - 'CITATION.cff'
+  # A hand-started run tests EVERY area — RELEASING §3 starts one before every sync:
+  #     gh workflow run ci.yml --ref main
+  workflow_dispatch:
+  # ci-weekly.yml calls this file on a schedule (private repo only), as a full run.
+  workflow_call:
 
-# Least privilege: this workflow only reads the repo, never writes to it.
+# Least privilege: this workflow only reads the repo, never writes to it. The plan job
+# alone adds `actions: read`, to find where each area last passed.
 permissions:
   contents: read
 
-# If you push twice quickly, cancel the older in-flight run for the same ref.
+# If you push twice quickly, cancel the older in-flight run for the same ref. Safe with the
+# plan: the cancelled run's areas never PASSED, so the newer run tests them. The event is in
+# the group so a push never cancels the weekly or a hand-started full run, nor they a push.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
+  # ── Plan: which areas this run tests (#1095) ─────────────────────────────────
+  plan:
+    runs-on: ubuntu-24.04   # pinned like every job here (#1097); see `backend`
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read         # earlier CI runs: where each area last passed
+    outputs:
+      backend: ${{ steps.plan.outputs.backend }}
+      frontend: ${{ steps.plan.outputs.frontend }}
+      electron: ${{ steps.plan.outputs.electron }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0        # every commit: the diff runs from each area's last pass
+          filter: blob:none     # but no file contents, which a list of changed paths never needs
+
+      # Standard-library Python on the runner's own interpreter; nothing to install. Any
+      # failure to decide plans EVERY area, with a warning saying why.
+      - name: Decide which areas this run tests
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/ci-areas.py plan
+
+  # ⚠️ Each area job runs UNLESS the plan says exactly `false`, so a plan that crashed (no
+  # outputs) tests everything — the fail-safe direction. `!cancelled()` lets a failed plan
+  # still reach them. Doc gates fails if a job's condition loses either half.
   # ── Backend: pytest + schema-drift gate + production-dep audit ──────────────
   backend:
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.outputs.backend != 'false' }}
     # PINNED, never ubuntu-latest (#1097): the R oracles are anchored to noble's R 4.3.3,
     # and ubuntu-latest moves to 26.04 over 2026-10-19 → 11-19, where every apt name below
     # still resolves — to R 4.5.2. The install step now ASSERTS the version too. Moving off
@@ -167,6 +233,8 @@ jobs:
 
   # ── Frontend: lint + vitest + production build + dep audit ──────────────────
   frontend:
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.outputs.frontend != 'false' }}
     runs-on: ubuntu-24.04   # pinned like every job here (#1097); see `backend`
     timeout-minutes: 20
     defaults:
@@ -226,6 +294,8 @@ jobs:
 
   # ── Electron shell: headless unit tests ─────────────────────────────────────
   electron:
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.outputs.electron != 'false' }}
     runs-on: ubuntu-24.04   # pinned like every job here (#1097); see `backend`
     timeout-minutes: 15
     defaults:
@@ -276,3 +346,16 @@ jobs:
       - name: Dependency audit (HARD gate, production deps)
         if: ${{ !cancelled() }}
         run: npm audit --omit=dev --audit-level=high
+
+      # #1094: the shipped RUNTIME, which every audit above skips (`electron` is a
+      # devDependency, so --omit=dev drops it by construction) and which the global advisory
+      # database has missed before: six Electron advisories of 2026-08-29 returned 404 there
+      # while four named the 42.8.1 that v1.5.3 and v1.5.4 shipped (#1093). This reads
+      # Electron's OWN published advisories and fails when the locked version is in a range
+      # nobody has reviewed (the script's REVIEWED list, each entry with its reason). Replayed
+      # 2026-10-06: on 42.8.1 it names exactly those four. Network-bound like the audits.
+      - name: Electron runtime advisories (HARD gate, the shipped runtime)
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/electron-advisories.js

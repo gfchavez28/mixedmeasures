@@ -112,8 +112,9 @@ vi.mock('@/lib/api', async () => {
   }
 })
 
+const setBreadcrumbLabel = vi.hoisted(() => vi.fn())
 vi.mock('@/layouts/ProjectLayout', () => ({
-  useProjectLayout: () => ({ projectId: 1 }),
+  useProjectLayout: () => ({ projectId: 1, setBreadcrumbLabel }),
 }))
 
 // The workbench reads only `user` (the active coder id for INV-6 scoping).
@@ -285,6 +286,13 @@ beforeEach(() => {
 })
 
 afterEach(cleanup)
+
+describe('#1134 — the page names the observation', () => {
+  it('sets the breadcrumb label (and so a jotted note’s origin) to the observation’s name', async () => {
+    renderWorkbench()
+    await waitFor(() => expect(setBreadcrumbLabel).toHaveBeenCalledWith('Classroom Obs — Day 2'))
+  })
+})
 
 describe('the clip listbox (#436/#484 pattern)', () => {
   it('renders a focusable listbox whose rows are options, with point events and the unlabeled placeholder', async () => {
@@ -2465,7 +2473,7 @@ describe('#963 — the clip list says "none" only of an answered query', () => {
 describe('an apply that REPLACED a value, and its undo (#1028)', () => {
   it('Ctrl+Z re-applies the replaced value and removes nothing', async () => {
     applyCode.mockImplementation(async (_clip: number, code: number) =>
-      ({ applied: true, replaced_code_ids: code === 8 ? [7] : [] }))
+      ({ applied: true, replaced_code_ids: code === 8 ? [7] : code === 7 ? [8] : [] }))
     renderWorkbench()
     const row = (await screen.findAllByRole('option'))[3] // clip 14, holds Engagement (unrated)
     fireEvent.click(row)

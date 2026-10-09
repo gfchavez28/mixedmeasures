@@ -27,6 +27,7 @@ const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
     dataset_id: 1, name: 'Survey', rows: 1, responses: 12,
     code_applications: 0, excerpts: 0, notes: 0, memos: 1, row_scores: 2,
   }],
+  documents: [],
   ...over,
 })
 
@@ -92,6 +93,21 @@ describe('what the screen says will happen', () => {
     ])
     expect(keptSummary(empty)).toEqual([])
   })
+
+  /**
+   * #1123 — the withdrawal unlinks a document about them and KEEPS it, and the
+   * confirm never said so: the report's document list was dropped by the
+   * server's response schema, and nothing here read it either.
+   */
+  it('says a document about them stays, under "This will stay"', () => {
+    setup(report({
+      documents: [{ document_id: 3, name: 'Workplan P07', segments: 4,
+                    code_applications: 1, excerpts: 0, notes: 0 }],
+    }))
+    const stay = screen.getByText('This will stay').parentElement!
+    expect(stay).toHaveTextContent('The document “Workplan P07” stays, no longer linked to them')
+    expect(screen.getByText('This will be removed').parentElement).not.toHaveTextContent(/Workplan/)
+  })
 })
 
 describe('the limitation is on the screen', () => {
@@ -116,6 +132,41 @@ describe('the limitation is on the screen', () => {
   it('says a backup is taken and that there is no per-person undo', () => {
     setup()
     expect(screen.getByText(/no per-person undo/i)).toBeInTheDocument()
+  })
+})
+
+/**
+ * #1131 (a11y-name-sweep run 11) — a reader opening the dialog hears its
+ * DESCRIPTION, then the focused Cancel. Only the backup sentence was in it, so
+ * what is removed, what stays and the warning above were on screen and silent.
+ */
+describe('#1131 — the dialog’s description carries the decision', () => {
+  it('describes what is removed, what stays, and that it cannot finish the job', () => {
+    setup(report({
+      documents: [{ document_id: 3, name: 'Workplan P07', segments: 4,
+                    code_applications: 1, excerpts: 0, notes: 0 }],
+    }))
+    const dialog = screen.getByRole('alertdialog')
+    expect(dialog).toHaveAccessibleDescription(/no per-person undo/)
+    expect(dialog).toHaveAccessibleDescription(/This will be removed/)
+    expect(dialog).toHaveAccessibleDescription(/3 conversation turns/)
+    expect(dialog).toHaveAccessibleDescription(/This will stay/)
+    expect(dialog).toHaveAccessibleDescription(/The document “Workplan P07” stays/)
+    expect(dialog).toHaveAccessibleDescription(/cannot finish the job on its own/)
+    expect(dialog).toHaveAccessibleDescription(/cannot tell you whether this satisfies your obligations/)
+  })
+
+  it('while the report loads, the description says it is checking', () => {
+    setup(null)
+    expect(screen.getByRole('alertdialog')).toHaveAccessibleDescription(/Checking what would be removed/)
+  })
+
+  it('one turn is "stays … as an empty placeholder", not "stay … placeholders"', () => {
+    const one = keptSummary(report({
+      conversations: [{ conversation_id: 1, name: 'F', segments: 1, code_applications: 0, excerpts: 0, notes: 0 }],
+    })).join(' | ')
+    expect(one).toMatch(/Their 1 turn stays in place as an empty placeholder,/)
+    expect(keptSummary(report()).join(' | ')).toMatch(/Their 3 turns stay in place as empty placeholders,/)
   })
 })
 

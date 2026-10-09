@@ -793,6 +793,50 @@ def _csv_lines(text: str) -> Iterator[str]:
         start = nl + 1
 
 
+class CsvReadError(csv.Error, ValueError):
+    """A file the CSV reader cannot read, with a sentence saying where and why (#1083).
+
+    🔴 **Both bases, on purpose.** Every caller that already caught `csv.Error` or
+    `ValueError` keeps catching this one, so no path can turn it into a 500 — and
+    the endpoints that know it show `str(exc)` instead of rewriting it to *"check
+    the file format"*, which named neither the line nor the fault.
+    """
+
+
+def csv_error_sentence(exc: csv.Error, where: str) -> str:
+    """What `csv.reader` refused, as guidance (#1083). ``where`` is "Line 7" or similar.
+
+    Two of the reader's errors have a cause a researcher can act on, and each is
+    named rather than echoed:
+
+    - **`field larger than field limit`** — a value over `csv.field_size_limit()`
+      (131,072 characters). Almost always a quotation mark that opens a value and
+      never closes, so the rest of the file reads as one value.
+    - **`new-line character seen in unquoted field`** — a carriage return inside a
+      value. A file saved with old Mac line endings (a carriage return alone) is
+      one long line of them, so every row fails at once.
+
+    ⚠️ The limit is NOT raised to let a long value through. It is process-global
+    state shared by every reader in the app, and what it catches here is the
+    unclosed quote, which would otherwise swallow the rest of the file silently.
+    """
+    message = str(exc)
+    if "field larger than field limit" in message:
+        return (
+            f"{where} holds a value longer than {csv.field_size_limit():,} characters, "
+            "the most one value can be. That is usually a quotation mark that opens a "
+            "value and is never closed, so everything after it reads as one value — "
+            "check the quotation marks on that line."
+        )
+    if "new-line character seen in unquoted field" in message:
+        return (
+            f"{where} has a line break inside a value that is not in quotes. A file "
+            "saved with old Mac line endings does this on every line — save it again "
+            "as “CSV UTF-8” and try again."
+        )
+    return f"{where} could not be read as CSV ({message}). Check the file and try again."
+
+
 #: How many malformed records a report names (#985). The count covers them all;
 #: past a handful the fault is the file's convention, not a few rows.
 OVERLONG_EXAMPLE_LIMIT = 10
@@ -858,13 +902,28 @@ class CsvRecords:
     base a response rate is computed on. Blank lines after the last record are
     dropped in both cases (a file's trailing newlines are not respondents).
 
+    🔴 **A line of nothing but spaces or tabs is a blank line too — in a file of
+    two or more columns (#1083 c).** It reads as ONE cell, and no respondent of a
+    wider file is written that way (an empty record has its commas), so it was a
+    phantom respondent moving the base a response rate is computed on (#830d).
+    ⚠️ **In a ONE-column file it stays a record**, deliberately: narrowing a wider
+    file to one column and the `.xlsx`/`.sav` adapters both write a whitespace
+    answer as a bare line, and reading it as blank would drop a real respondent
+    when it is the last one.
+
+    🔴 **A file the reader cannot read raises `CsvReadError`, naming the line the
+    failing record STARTS on (#1083)** — the same line the overlong report uses.
+
     ⚠️ **Single-pass**, like the reader underneath it. ``overlong`` is complete
     only once the records have been read to the end.
     """
 
     def __init__(self, text: str):
         self._reader = csv.reader(_csv_lines(_strip_bom(text)))
-        self.header: list[str] = next(self._reader, None) or []
+        try:
+            self.header: list[str] = next(self._reader, None) or []
+        except csv.Error as exc:
+            raise CsvReadError(csv_error_sentence(exc, "Line 1 (the header)")) from exc
         self.width = len(self.header)
         self.overlong = OverlongRecords(header_width=self.width)
         self._started = False
@@ -881,15 +940,25 @@ class CsvRecords:
         pending_blank_lines = 0
         record = 0
         previous_line = reader.line_num
-        for cells in reader:
+        while True:
             # `line_num` counts physical lines consumed, so a quoted answer
             # spanning three lines moves it by three; the record STARTS on the
             # line after the previous record ended.
             line = previous_line + 1
+            try:
+                cells = next(reader)
+            except StopIteration:
+                return
+            except csv.Error as exc:
+                raise CsvReadError(csv_error_sentence(exc, f"Line {line:,}")) from exc
             previous_line = reader.line_num
             if not cells:
                 if width == 1:
                     pending_blank_lines += 1
+                continue
+            if width > 1 and len(cells) == 1 and not cells[0].strip():
+                # #1083 (c): spaces or a tab and no delimiter — a blank line in a
+                # wider file, never a respondent (see the class docstring).
                 continue
             for _ in range(pending_blank_lines):
                 record += 1

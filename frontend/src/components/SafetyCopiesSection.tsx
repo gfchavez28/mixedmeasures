@@ -23,8 +23,8 @@
  * server bounds the payload too, because each row's project name comes from that
  * copy's manifest and reading one means opening the zip.
  */
-import { useId, useRef, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useId, useRef, useState } from 'react'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ChevronUp, Download, LoaderCircle, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { backupApi, type SafetyCopyInfo } from '@/lib/api'
@@ -65,10 +65,40 @@ export default function SafetyCopiesSection() {
     queryKey: [...SAFETY_COPIES_QUERY_KEY, pageSize],
     queryFn: () => backupApi.listSafetyCopies(pageSize),
     staleTime: 60_000,
+    // #1038 (f): Show all changes the key, so with nothing to show while the new
+    // key loaded the whole section returned null — the button the keyboard user
+    // had just pressed unmounted and focus fell to <body>. The page already on
+    // screen stays while the rest loads. That is not list-load-state §1's false
+    // claim: its rows are the newest of the full answer, and the line above them
+    // still says "Showing the 50 most recent of N" beside a busy button.
+    placeholderData: keepPreviousData,
   })
   const load = useListLoad(copiesQuery)
   const page = copiesQuery.data
   const copies = page?.copies
+  const showingAllLoads = pageSize === 0 && copiesQuery.isPlaceholderData
+
+  // "Show all" unmounts itself once every copy is shown, which would drop a
+  // keyboard user's focus to <body> (#955's class). Like the Participants page's
+  // "Show more", the press moves focus to the FIRST copy it revealed — where
+  // reading continues anyway — once that row exists.
+  const listRef = useRef<HTMLUListElement>(null)
+  const focusRowAfterReveal = useRef<number | null>(null)
+  useEffect(() => {
+    const index = focusRowAfterReveal.current
+    if (index === null || copiesQuery.isPlaceholderData) return
+    focusRowAfterReveal.current = null
+    const rows = Array.from(listRef.current?.children ?? []) as HTMLElement[]
+    const row = rows[index] ?? rows[rows.length - 1]
+    ;(row?.querySelector<HTMLButtonElement>('button') ?? toggleRef.current)?.focus()
+  }, [copies, copiesQuery.isPlaceholderData])
+  // No click guard while it loads: a second press asks for the key already
+  // loading, which React Query treats as the same request (mutation-proven: a
+  // guard here changed nothing, #941's first meaning).
+  const showAll = () => {
+    focusRowAfterReveal.current = copies?.length ?? 0
+    setPageSize(0)
+  }
 
   const deleteMutation = useMutation({
     mutationFn: (copy: SafetyCopyInfo) => backupApi.deleteSafetyCopy(copy.filename),
@@ -163,17 +193,25 @@ export default function SafetyCopiesSection() {
               {page.total_count.toLocaleString()}.{' '}
               <button
                 type="button"
-                onClick={() => setPageSize(0)}
-                className="underline underline-offset-2 hover:text-mm-text"
+                onClick={showAll}
+                // `aria-disabled`, never `disabled`: Chrome blurs a focused button
+                // that becomes disabled (#959 §4). Its refusal is that a second press
+                // is the same request (see `showAll`).
+                aria-disabled={showingAllLoads || undefined}
+                aria-busy={showingAllLoads || undefined}
+                className="underline underline-offset-2 hover:text-mm-text aria-busy:cursor-wait aria-busy:opacity-60"
               >
                 Show all {page.total_count.toLocaleString()}
               </button>
+              {/* Said beside the button, never in its name (#770: no transient
+                  state in an accessible name); this paragraph is the status. */}
+              {showingAllLoads && ' Loading the rest…'}
             </p>
           )}
           {copies.length === 0 ? (
             <p className="text-xs text-mm-text-faint">No safety copies remain.</p>
           ) : (
-            <ul aria-label="Safety copies" className="space-y-1.5 max-h-80 overflow-y-auto pr-1">
+            <ul ref={listRef} aria-label="Safety copies" className="space-y-1.5 max-h-80 overflow-y-auto pr-1">
               {copies.map(copy => {
                 const title = safetyCopyTitle(copy)
                 const takenAt = formatTakenAt(copy.taken_at)

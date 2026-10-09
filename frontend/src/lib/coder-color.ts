@@ -21,10 +21,16 @@ export function coderColor(coder: { id: number; display_color?: string | null })
 }
 
 export function coderInitials(username: string): string {
-  const parts = username.trim().split(/\s+/).filter(Boolean)
-  if (parts.length === 0) return '?'
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+  // #1135 — initials are LETTERS and DIGITS: "Priya (lead)" read "P(" on every
+  // badge, the parenthesis taken for the second word's initial. A word with no
+  // letter or digit in it (a lone "—") contributes nothing. Code points, not
+  // UTF-16 units, so an astral letter is not split in half.
+  const words = username.trim().split(/\s+/)
+    .map(w => Array.from(w.matchAll(/[\p{L}\p{N}]/gu), m => m[0]))
+    .filter(chars => chars.length > 0)
+  if (words.length === 0) return '?'
+  if (words.length === 1) return words[0].slice(0, 2).join('').toUpperCase()
+  return (words[0][0] + words[words.length - 1][0]).toUpperCase()
 }
 
 /**

@@ -75,6 +75,7 @@ say so and an undo can put it back.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from sqlalchemy import insert
 from sqlalchemy.orm import Session
@@ -216,9 +217,8 @@ def membership_refusal(
 def set_claimants(members: list[Code], *, effective_map: dict[int, int]) -> dict[int, int]:
     """Every code whose application counts in this set → the value it reads as.
 
-    - each MEMBER → its effective code (itself, unless it is grouped — and a
-      member grouped with an OUTSIDE code reads as that outside code, which is
-      the composition hole `set_composition_warnings` reports);
+    - each MEMBER that reads as one of the set's values → that value (itself,
+      or the member it is grouped under);
     - each code OUTSIDE the set grouped INTO one of its values → that value.
 
     The second kind is #1028(b): "Pos" grouped with the member "Positive" never
@@ -226,18 +226,23 @@ def set_claimants(members: list[Code], *, effective_map: dict[int, int]) -> dict
     matrix, consensus, reconciliation) records it as choosing "Positive". A
     write path that clears only members leaves it standing beside a new choice.
 
-    ⚠️ A code may claim TWO sets — a member of one grouped into a value of
-    another, which the set door refuses and the equivalence door does not. It
-    is a claimant of both; `CodeSetIndex.set_claimed_by` settles which set an
-    apply of it swaps in (its own set first).
+    🔴 **A member grouped with a code OUTSIDE the set is NOT a claimant of its
+    own set (#1081 b).** It reads as that outside code, so its application is
+    not a selection here — `set_composition_warnings` says so — and this list
+    used to carry it anyway, mapped to a "value" the set does not have. The write
+    path then cleared this set when it was pressed (where it does not count) and
+    left the set it DOES count in holding two values; pressing a real value here
+    removed it, which was the coder's choice in the other set.
+
+    So a code counts in AT MOST ONE set: it has one effective code, and that code
+    is a member of at most one set. `CodeSetIndex.set_claimed_by` relies on it.
     """
     member_ids = {c.id for c in members}
-    claimants: dict[int, int] = {
-        c.id: effective_map.get(c.id, c.id) for c in members
-    }
+    reads_as = {c.id: effective_map.get(c.id, c.id) for c in members}
     # A VALUE of the set is a member that is its own effective code; only those
     # can be read into — a member that resolves elsewhere has left the set.
-    values = {mid for mid, value in claimants.items() if mid == value}
+    values = {mid for mid, value in reads_as.items() if mid == value}
+    claimants: dict[int, int] = {mid: value for mid, value in reads_as.items() if value in values}
     for raw, effective in effective_map.items():
         if raw not in member_ids and effective in values:
             claimants[raw] = effective
@@ -270,7 +275,8 @@ def set_composition_warnings(
             out.append(
                 f"“{code.name}” is grouped with “{other}” as one effective code, and "
                 f"“{other}” is not in this set — uses of “{code.name}” are recorded as "
-                f"“{other}” and do not count as a selection here."
+                f"“{other}” and do not count as a selection here, so it cannot be "
+                "chosen through this set."
             )
     claimants = set_claimants(members, effective_map=effective_map)
     for raw in sorted(set(claimants) - member_ids):
@@ -301,10 +307,11 @@ class ResolvedSet:
     #: Display order for the confusion matrix's axes and the member breakdown.
     ordered_members: tuple[int, ...]
     #: 🔴 Every member's OWN id, including one that resolves to a grouped sibling.
-    #: What may be CHOSEN through the set's own endpoint — a code outside the set
-    #: is refused there even when it reads as one of its values. Carried on the
-    #: dataclass rather than passed in, because a parameter is something a fourth
-    #: caller can forget.
+    #: With `claimants`, what may be CHOSEN through the set's own endpoint: a code
+    #: outside the set is refused there even when it reads as one of its values,
+    #: and so is a member that reads as a code OUTSIDE the set (#1081 b). Carried
+    #: on the dataclass rather than passed in, because a parameter is something a
+    #: fourth caller can forget.
     raw_member_ids: frozenset[int]
     member_names: dict[int, str] = field(default_factory=dict)
     #: 🔴 Every code whose application counts in this set → the value it reads as
@@ -339,15 +346,15 @@ class CodeSetIndex:
         return None
 
     def set_claimed_by(self, code_id: int) -> ResolvedSet | None:
-        """The set an application of ``code_id`` is a selection in, or None.
+        """The set an application of ``code_id`` is a selection in, or None —
+        the set it COUNTS in, which is where an apply of it must swap.
 
-        Its OWN set first: a member of one set grouped into a value of another
-        claims both (`set_claimants`), and the set it was deliberately put in is
-        the one an apply of it swaps in.
+        🔴 **Not "its own set first" (#1081 b).** A member of one set grouped into
+        a value of another reads as that value, so it counts THERE; this used to
+        answer its own set, where it counts as nothing, and the apply cleared the
+        wrong set's values. A code counts in at most one set (`set_claimants`), so
+        there is no tie to break.
         """
-        for s in self.sets:
-            if code_id in s.raw_member_ids:
-                return s
         for s in self.sets:
             if code_id in s.claimants:
                 return s
@@ -614,8 +621,87 @@ def replaced_code_ids(removed: dict[int, list[int]]) -> list[int]:
     return sorted({cid for ids in removed.values() for cid in ids})
 
 
+class Contradictions(NamedTuple):
+    """How many passages hold a coder with two or more values of one set."""
+
+    count: int
+    #: The set's label, so a sentence can name it; None when ``code`` counts in no set.
+    set_label: str | None
+
+
+def contradictions_held(
+    db: Session,
+    code: Code,
+    *,
+    segment_pairs: set[tuple[int, int]],
+    value_pairs: set[tuple[int, int]],
+) -> Contradictions:
+    """Of the passages in these ``(target id, coder id)`` pairs — each a coder
+    who now HOLDS ``code`` there — how many find that coder also holding ANOTHER
+    value of the set ``code`` counts in. The question a write that bypasses the
+    swap must answer afterwards, because nothing stopped it (#1081 a).
+
+    A code MERGE re-points one code's applications onto another without the
+    swap: a coder who held "Upbeat" (in no set) and "Negative" ends holding
+    "Positive" and "Negative" once "Upbeat" is merged into "Positive". That is a
+    contradiction the α counts and drops (§3), so the merge must SAY it made one
+    rather than leave it to be found as a number. "Another value" is by VALUE: a
+    synonym of ``code``'s own value is the same choice, as `selection_for` reads it.
+
+    ⚠️ **The pair is the unit, not the passage alone:** a colleague holding the
+    other value on that passage is a DISAGREEMENT, which the α exists to measure.
+    ⚠️ A code in no set and no group counts in no set, so it costs no query.
+    """
+    if code.code_set_id is None and code.code_equivalence_group_id is None:
+        return Contradictions(0, None)
+    if not segment_pairs and not value_pairs:
+        return Contradictions(0, None)
+    index = build_code_set_index(db, code.project_id, build_effective_code_map(db, code.project_id))
+    resolved = index.set_claimed_by(code.id)
+    if resolved is None:
+        return Contradictions(0, None)
+    own_value = resolved.claimants[code.id]
+    rivals = [cid for cid, value in resolved.claimants.items() if value != own_value]
+    count = 0
+    for column, pairs in (
+        (CodeApplication.segment_id, segment_pairs),
+        (CodeApplication.dataset_value_id, value_pairs),
+    ):
+        if not pairs or not rivals:
+            continue
+        count += len({
+            target for target, user_id in db.query(column, CodeApplication.user_id).filter(
+                CodeApplication.code_id.in_(rivals),
+                CodeApplication.user_id.in_(sorted({u for _, u in pairs})),
+                in_id_set(column, sorted({t for t, _ in pairs})),
+            ).all()
+            if (target, user_id) in pairs
+        })
+    return Contradictions(count, resolved.label)
+
+
 class SetSelectionError(ValueError):
     """A refused selection. The router renders ``str(exc)`` verbatim (#871)."""
+
+
+class SelectionOutcome(NamedTuple):
+    """What one `apply_selection` call did, in CODINGS (one per target).
+
+    ⚠️ **Four fields, not the `(code_id, removed)` pair it used to be (#1066).**
+    The bulk import has to say how many codings it ADDED, and a selection's
+    inserts never left this function, so the import's finished screen counted a
+    set value only as a "selection" (a ROW count) beside codings counted per
+    target. A two-way unpack of this tuple now RAISES rather than mis-assigning —
+    the `build_irr_matrices` precedent — so a caller cannot keep the old reading.
+    """
+
+    code_id: int | None
+    #: Rival values of the set this coder held on these targets, now removed.
+    removed: int
+    #: Targets on which the chosen value was newly written.
+    inserted: int
+    #: Targets that already held the chosen value — nothing was written there.
+    already_held: int
 
 
 def apply_selection(
@@ -627,10 +713,11 @@ def apply_selection(
     segment_ids: list[int] | None = None,
     dataset_value_ids: list[int] | None = None,
     attribution: str | None = None,
-) -> tuple[int | None, int]:
+) -> SelectionOutcome:
     """Make ``code_id`` this coder's ONE selection in ``resolved`` on these targets.
 
-    Returns ``(code_id, removed)``. ``code_id=None`` clears the selection.
+    Returns a `SelectionOutcome`. ``code_id=None`` clears the selection (nothing
+    is inserted or held then, so both counts are 0).
 
     🔴 **THE SWAP IS ONE ACT ON THE SERVER, NOT TWO CALLS FROM THE CLIENT.** Five
     reasons, and the first alone decides it:
@@ -676,20 +763,32 @@ def apply_selection(
         raise SetSelectionError(
             f"That code is not a value of “{resolved.label}”."
         )
+    if code_id is not None and code_id not in resolved.claimants:
+        # 🔴 #1081 (b): a member grouped with a code OUTSIDE this set reads as
+        # that code, so writing it here would clear this set's values and count
+        # somewhere else. `schemas/code_set.py` has said since row 48 that such a
+        # member "cannot be chosen through this set"; nothing enforced it.
+        code = db.get(Code, code_id)
+        name = code.name if code is not None else f"code {code_id}"
+        raise SetSelectionError(
+            f"“{name}” is grouped with a code outside “{resolved.label}” as one "
+            f"effective code, so it does not count as a value of “{resolved.label}”. "
+            "Choose another value, or take it out of that group in the codebook."
+        )
 
     removed = clear_other_members(
         db, resolved, user_id=user_id, keep_code_id=code_id,
         segment_ids=segment_ids, dataset_value_ids=dataset_value_ids,
     )
     if code_id is None:
-        return None, removed
+        return SelectionOutcome(None, removed, 0, 0)
 
     is_value_target = dataset_value_ids is not None
     # De-duplicated, because the same unit twice would breach the per-coder
     # unique index at commit — far from here, as an opaque IntegrityError.
     targets = list(dict.fromkeys(dataset_value_ids if is_value_target else (segment_ids or [])))
     if not targets:
-        return code_id, removed
+        return SelectionOutcome(code_id, removed, 0, 0)
 
     column = _target_column(dataset_value_ids)
     existing = {
@@ -712,4 +811,4 @@ def apply_selection(
             for t in fresh
         ])
     db.flush()
-    return code_id, removed
+    return SelectionOutcome(code_id, removed, len(fresh), len(targets) - len(fresh))

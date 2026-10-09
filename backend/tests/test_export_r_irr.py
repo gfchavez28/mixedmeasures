@@ -501,3 +501,96 @@ for (sid in unique(d$set_id)) {{
     assert float(m.group(2)) == pytest.approx(row["krippendorff_alpha"], abs=1e-6)
     assert float(m.group(3)) == pytest.approx(row["cohens_kappa"], abs=1e-6)
     assert float(m.group(4)) == pytest.approx(row["percent_agreement"], abs=1e-6)
+
+
+# ── #1039 (h) — the columns are the coders who WORKED the scope ───────────────
+
+IRR_SECTION = "# ---- Inter-rater reliability (intercoder agreement) ----"
+
+
+def _seed_with_a_bystander(db):
+    """`_seed`'s two coders plus a THIRD person on the install who never opened
+    this project — the roster is install-wide, so before #1039 (h) every matrix
+    was three wide and the script's `ncol(m) == 2` κ gate was false."""
+    user = _seed_with_code_set(db)
+    db.add(User(id=3, username="Bystander", password_hash=None, coder_type="human"))
+    db.flush()
+    return user
+
+
+def test_a_coder_who_never_engaged_the_project_gets_no_column(db_session):
+    db = db_session
+    user = _seed_with_a_bystander(db)
+    raw = asyncio.run(_export_zip_bytes(db, user))
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        names = zf.namelist()
+        irr_csv = zf.read(next(n for n in names if n.endswith("_irr.csv"))).decode("utf-8-sig")
+        set_csv = zf.read(next(n for n in names if n.endswith("_irr_code_sets.csv"))).decode("utf-8-sig")
+    assert irr_csv.splitlines()[0] == "code_id,code_name,coder_1,coder_2"
+    assert set_csv.splitlines()[0] == "set_id,set_label,set_basis,coder_1,coder_2"
+
+
+def test_the_dropped_column_was_BLANK_in_every_cell(db_session):
+    """Why dropping it is lossless: Option B gives a coder who engaged no source in
+    the scope a blank everywhere, so no α, κ or % agreement can change."""
+    from app.services.irr import build_irr_matrices
+
+    db = db_session
+    _seed_with_a_bystander(db)
+    roster, _names, per_code, _src, scope, _mag, sets = build_irr_matrices(db, PID)
+    assert roster == [1, 2, 3] and scope == {1, 2}, "the precondition: a third, unengaged coder"
+    idx = roster.index(3)
+    for rows in [*per_code.values(), *(s["rows"] for s in sets.values())]:
+        assert all(row[idx] is None for row in rows)
+
+
+def _run_emitted_section(workdir: Path, setup: str, header: str) -> str:
+    """Execute the section of the EMITTED script under ``header`` — not a copy.
+
+    ⚠️ The other round-trip tests in this file run a hand-written R runner that
+    re-states the block's calls, so the block itself could drift (or, as here,
+    gate on the wrong thing) with every one of them green.
+    """
+    runner = workdir / "emitted.R"
+    runner.write_text(
+        "suppressMessages(library(irr)); suppressMessages(library(readr))\n"
+        "options(readr.show_col_types = FALSE)\n"
+        + _section(setup, header),
+        encoding="utf-8",
+    )
+    proc = subprocess.run([_RSCRIPT, runner.name], cwd=str(workdir),
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, f"R failed:\n{proc.stderr}"
+    return proc.stdout
+
+
+@pytest.mark.skipif(not _HAS_IRR, reason="Rscript + irr package not available")
+def test_the_EMITTED_script_prints_kappa_where_the_app_does(db_session):
+    """With a bystander on the install the app still shows κ and % agreement (its
+    gate is the two coders the SCOPE engaged); the emitted script printed NA."""
+    db = db_session
+    user = _seed_with_a_bystander(db)
+    res = compute_irr(db, PID)
+    per_code = {c["code_id"]: c for c in res["per_code"]}
+    set_row = next(r for r in res["set_agreement"] if r["set_id"] == SET_ID)
+    assert per_code[9590]["cohens_kappa"] is not None, "the app reports κ here"
+
+    raw = asyncio.run(_export_zip_bytes(db, user))
+    with tempfile.TemporaryDirectory() as d:
+        workdir = Path(d)
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            zf.extractall(workdir)
+            setup = zf.read(next(n for n in zf.namelist() if n.endswith(".R"))).decode("utf-8")
+        per_code_out = _run_emitted_section(workdir, setup, IRR_SECTION)
+        set_out = _run_emitted_section(workdir, setup, SET_SECTION)
+
+    line = next(ln for ln in per_code_out.splitlines() if ln.startswith("IRR\tcode=9590\t"))
+    fields = dict(f.split("=", 1) for f in line.split("\t")[1:])
+    assert float(fields["kappa"]) == pytest.approx(per_code[9590]["cohens_kappa"], abs=1e-6)
+    assert float(fields["agree"]) == pytest.approx(per_code[9590]["percent_agreement"], abs=1e-6)
+    assert float(fields["alpha"]) == pytest.approx(per_code[9590]["krippendorff_alpha"], abs=1e-6)
+
+    line = next(ln for ln in set_out.splitlines() if ln.startswith(f"IRR_CODE_SET\tset={SET_ID}\t"))
+    fields = dict(f.split("=", 1) for f in line.split("\t")[1:])
+    assert float(fields["kappa"]) == pytest.approx(set_row["cohens_kappa"], abs=1e-6)
+    assert float(fields["agree"]) == pytest.approx(set_row["percent_agreement"], abs=1e-6)

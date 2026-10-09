@@ -98,7 +98,7 @@ from . import code_sets as code_set_rules
 from . import machine_coder
 from . import magnitude as magnitude_rules
 from .coding_layers import build_effective_code_map, project_scoped_segments
-from .dataset_import import _csv_lines
+from .dataset_import import _csv_lines, csv_error_sentence
 from .id_set import in_id_set
 from .identifier_match import group_unique_by_key, normalize_key
 from .segment_groups import group_targets_by_segment
@@ -151,6 +151,15 @@ CODER_NAME_MAX_LENGTH = 50
 #: claim about the shape it was measured on.** The phases are each linear in
 #: rows, so **raising this raises those numbers with it.**
 MAX_CODING_IMPORT_ROWS = 200_000
+
+#: The most coder NAMES one file may hold (#1076). Every name becomes a row on the
+#: mapping step that needs a decision, and the apply refuses a name without one —
+#: so past this the file cannot be imported anyway, and the preview's list was the
+#: cost: a coder column holding per-row ids (two headings swapped) made a 56.5 MB
+#: response with 200,000 candidates, the white-window class #1065 bounded one step
+#: later. 200 is far above any team this tool is for, and the refusal says how to
+#: split a file that genuinely has more.
+MAX_CODERS_IN_FILE = 200
 
 #: Bound for a chunked `.in_()` over STRING keys. `services/id_set.py::in_id_set`
 #: is integers-only (`json.dumps(True)` is `true`, which silently matches
@@ -222,6 +231,17 @@ def _normalize_header(value: str | None) -> str:
     return (value or "").strip().lower().replace(" ", "_").replace("-", "_")
 
 
+def _name_key(value: str) -> str:
+    """How a code NAME or a code set's LABEL is compared: trimmed, case-insensitive.
+
+    One rule for both (#1082 d). The set column was compared exactly while code
+    names were not, so a file saying *stance* for the set *Stance* was refused as
+    *"built against a different codebook"* — by the import that accepted *positive*
+    for the code *Positive* on the same row.
+    """
+    return value.strip().lower()
+
+
 def undo_formula_defang(cell: str) -> str:
     """The inverse of the exports' `csv_safe`: `'@mention` → `@mention`.
 
@@ -263,9 +283,17 @@ def decode_csv(raw: bytes) -> str:
 def parse_rows(text: str) -> list[ParsedRow]:
     """The CSV as rows, or raise `CodingImportError` naming what is missing.
 
-    ⚠️ **Blank lines are skipped and do NOT advance the reported line number's
-    meaning** — the number is the spreadsheet row a researcher will look at, so
-    it counts every physical line including the header.
+    ⚠️ **The reported number is the SPREADSHEET ROW a researcher will look at** —
+    the header is 1, and a blank row still counts, because a spreadsheet shows it.
+    It is NOT the physical line: a quoted value holding line breaks (the passage
+    text of the coded-segments export, often) is one row and several lines. This
+    docstring said "every physical line" until #1083, which was never what the
+    count did.
+
+    🔴 **A file the reader refuses is a `CodingImportError` naming the row (#1083
+    b)** — it reached the researcher as a 500. Two shapes do it: a value over the
+    reader's 131,072-character limit (an unclosed quotation mark, or a very long
+    passage in the export's text column) and old Mac line endings.
 
     ⚠️ **`_csv_lines`, never `io.StringIO(text)`** (#1039 i): the latter stores its
     buffer at 4 bytes per character, so a 49 MB file cost ~190 MB before a row was
@@ -276,6 +304,10 @@ def parse_rows(text: str) -> list[ParsedRow]:
         header = next(reader)
     except StopIteration:
         raise CodingImportError("The file is empty.") from None
+    except csv.Error as exc:
+        # Old Mac line endings fail HERE: the whole file is one line, so the header
+        # read is where the reader meets the first carriage return.
+        raise CodingImportError(csv_error_sentence(exc, "Line 1 (the header)")) from None
 
     positions: dict[str, int] = {}
     spelled: dict[str, str] = {}
@@ -298,7 +330,7 @@ def parse_rows(text: str) -> list[ParsedRow]:
     if missing:
         raise CodingImportError(
             "The file needs a column for "
-            + ", ".join(f"“{h}”" for h in missing)
+            + _and_list([f"“{h}”" for h in missing])
             + ". The header row should read: "
             + ", ".join(REQUIRED_HEADERS + OPTIONAL_HEADERS)
             + " (the last two are optional, and “rating” works for “magnitude”)."
@@ -311,7 +343,23 @@ def parse_rows(text: str) -> list[ParsedRow]:
         return undo_formula_defang((row[index] or "").strip()).strip()
 
     rows: list[ParsedRow] = []
-    for line, raw_row in enumerate(reader, start=2):
+    line = 1
+    while True:
+        line += 1
+        try:
+            raw_row = next(reader)
+        except StopIteration:
+            break
+        except csv.Error as exc:
+            sentence = csv_error_sentence(exc, f"Line {line:,}")
+            if "field larger than field limit" in str(exc):
+                sentence += (
+                    " This import reads only the " + ", ".join(REQUIRED_HEADERS + OPTIONAL_HEADERS)
+                    + " columns, so if the long value is in another one — the passage "
+                    "text of the coded-segments export, say — delete that column and "
+                    "try again."
+                )
+            raise CodingImportError(sentence) from None
         if not any((c or "").strip() for c in raw_row):
             continue
         rows.append(ParsedRow(
@@ -328,7 +376,23 @@ def parse_rows(text: str) -> list[ParsedRow]:
                 "Split it and import the parts one after another — they add up in "
                 "the project."
             )
+    if not rows:
+        # #1159 — a header with nothing under it passed this step and reached the
+        # mapping step with "Rows read 0", no problem list, and a sentence pointing
+        # at the list. Nothing in it can ever be imported, so it is said here,
+        # beside the button that checked it.
+        raise CodingImportError(
+            "The file has its header row but no codings under it, so there is "
+            "nothing to import. Check that it is the file you meant."
+        )
     return rows
+
+
+def _and_list(items: list[str]) -> str:
+    """“a”, “b” and “c” — #1164 (d): the refusal read "“unit_id”, “coder”, “code”"."""
+    if len(items) <= 1:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 # ── The plan ─────────────────────────────────────────────────────────────────
@@ -400,6 +464,15 @@ class ImportPlan:
     applications: list[PlannedApplication] = field(default_factory=list)
     problems: list[RowProblem] = field(default_factory=list)
     coders: list[CoderCandidate] = field(default_factory=list)
+    #: 🔴 **Every resolvable row BEFORE the file's contradictions were settled
+    #: (#1082 a).** `applications` is settled per file NAME; when the researcher
+    #: maps two names onto one coder the apply must settle again per CODER, and it
+    #: has to start from here — re-settling `applications` saw only what the
+    #: per-name pass had left, so *Alice: Positive · Alice: Negative · alice:
+    #: Positive* on one unit applied Positive: the first two refused each other and
+    #: the third had nobody left to contradict. A list of the same objects, so it
+    #: costs pointers, not rows.
+    unsettled: list[PlannedApplication] = field(default_factory=list)
     #: 🔴 **Each HALF of the addressing, counted on its own (#1004).** Distinct
     #: unit ids the file names, and how many of them name a unit in this project;
     #: distinct code names, and how many name a code. They used to be counted over
@@ -442,10 +515,19 @@ class CoderDecision:
 
 @dataclass
 class ImportReport:
+    """What `apply_plan` did. ⚠️ **`applied`, `already_present` and `selections` are
+    CODINGS — one per target, a grouped passage's siblings included — never file
+    ROWS (#1066).** `selections` is a PART of `applied` (the codings that are a
+    code set's value), not a sibling count beside it."""
+
     rows_read: int = 0
+    #: New codings written, set values included.
     applied: int = 0
+    #: Codings the file asked for that this coder already held.
     already_present: int = 0
+    #: Of `applied`, the codings that are a code set's value.
     selections: int = 0
+    #: A set value this coder held on the unit, removed to make room for the file's.
     replaced: int = 0
     ratings_set: int = 0
     coders_matched: int = 0
@@ -859,6 +941,8 @@ def build_plan(
     if target_kind == TARGET_TEXT_COLUMN and column_id is None:
         raise CodingImportError("Choose the text column these codings are about.")
 
+    _refuse_too_many_coders(rows)
+
     plan = ImportPlan(target_kind=target_kind, column_id=column_id, rows_read=len(rows))
 
     unit_keys = sorted({r.unit_id for r in rows if r.unit_id})
@@ -889,7 +973,7 @@ def build_plan(
     # into `code_ambiguous` rather than a coin toss.
     all_codes = db.query(Code).filter(Code.project_id == project_id).all()
     codes_by_name, ambiguous_code_names = group_unique_by_key(
-        (c.name.strip().lower(), c) for c in all_codes if c.name
+        (_name_key(c.name), c) for c in all_codes if c.name
     )
     ambiguous_codes = set(ambiguous_code_names)
 
@@ -897,7 +981,7 @@ def build_plan(
     set_index = code_set_rules.build_code_set_index(db, project_id, effective_map)
 
     # ── Each half of the addressing, counted on its own (#1004) ──────────────
-    code_keys = {r.code.strip().lower() for r in rows if r.code.strip()}
+    code_keys = {_name_key(r.code) for r in rows if r.code.strip()}
     plan.units_in_file = len(unit_keys)
     plan.units_matched = sum(1 for k in unit_keys if k in units)
     plan.codes_in_file = len(code_keys)
@@ -940,7 +1024,7 @@ def build_plan(
                 row.line, REASON_UNIT_NOT_CODEABLE, unit.not_codeable_detail))
             continue
 
-        code_key = row.code.strip().lower()
+        code_key = _name_key(row.code)
         if not code_key:
             problems.append(RowProblem(
                 row.line, REASON_CODE_NOT_FOUND, "This row names no code."))
@@ -974,11 +1058,22 @@ def build_plan(
         resolved_set = set_index.set_claimed_by(code.id)
         if row.code_set:
             declared = resolved_set.label if resolved_set is not None else None
-            if normalize_key(row.code_set) != normalize_key(declared or ""):
-                relation = (
-                    "belongs to" if code.code_set_id is not None or resolved_set is None
-                    else "counts as a value of"
-                )
+            # #1082 (d): compared as code names are — trimmed, case-insensitive.
+            # Labels are not unique (not even exactly), so this stays what it was: an
+            # assertion about the set THIS code counts in, never a lookup.
+            if _name_key(row.code_set) != _name_key(declared or ""):
+                # Three relations, each a true sentence (#1081 b): a member counts
+                # in its own set; a code grouped INTO another set's value counts
+                # THERE — a member of one set included; a member grouped with a
+                # code in no set counts in none.
+                if resolved_set is not None and code.id in resolved_set.raw_member_ids:
+                    relation = "belongs to"
+                elif resolved_set is not None:
+                    relation = "counts as a value of"
+                elif code.code_set_id is not None:
+                    relation = "is grouped with a code outside its set, so it counts in"
+                else:
+                    relation = "belongs to"
                 problems.append(RowProblem(
                     row.line, REASON_SET_MISMATCH,
                     f"“{code.name}” {relation} "
@@ -1041,6 +1136,7 @@ def build_plan(
     planned, settled_problems = settle_contradictions(candidates, lambda a: a.coder)
     problems.extend(settled_problems)
 
+    plan.unsettled = candidates
     plan.applications = planned
     plan.problems = sorted(problems, key=lambda p: p.line)
     named = {a.segment_id for a in planned if a.segment_id is not None}
@@ -1051,6 +1147,46 @@ def build_plan(
         to_apply[app.coder] += 1
     plan.coders = _coder_candidates(db, coder_rows, to_apply)
     return plan
+
+
+def _refuse_too_many_coders(rows: Sequence[ParsedRow]) -> None:
+    """Refuse a file naming more than `MAX_CODERS_IN_FILE` coders (#1076).
+
+    🔴 **The likely cause is the file, not the team**, so the sentence shows what
+    the coder column actually holds — three of its values, in file order — and
+    says when the unit column is the one holding a handful of values, which is what
+    two swapped headings look like.
+
+    Counted before anything is resolved: it reads the parsed rows once and stops at
+    the first name past the bound.
+    """
+    seen: dict[str, None] = {}
+    for row in rows:
+        if row.coder and row.coder not in seen:
+            seen[row.coder] = None
+            if len(seen) > MAX_CODERS_IN_FILE:
+                break
+    if len(seen) <= MAX_CODERS_IN_FILE:
+        return
+    examples = list(seen)[:3]
+    sentence = (
+        f"This file names more than {MAX_CODERS_IN_FILE} different coders — for "
+        "example " + ", ".join(f"“{n}”" for n in examples[:-1])
+        + f" and “{examples[-1]}”. The coder column usually holds a few names, so "
+        "check that the column headed “coder” says who coded each row."
+    )
+    units = {row.unit_id for row in rows if row.unit_id}
+    if 0 < len(units) <= MAX_CODERS_IN_FILE:
+        sentence += (
+            f" The “unit_id” column holds only {len(units):,} different "
+            f"{'value' if len(units) == 1 else 'values'}, so the two headings may be "
+            "the wrong way round."
+        )
+    sentence += (
+        f" If these really are different people, import the file in parts of up to "
+        f"{MAX_CODERS_IN_FILE} coders each — the parts add up in the project."
+    )
+    raise CodingImportError(sentence)
 
 
 def _coder_candidates(
@@ -1130,9 +1266,21 @@ def resolve_coders(
     (#1039 i): a configuration on a person, or on a coder being MATCHED (whose
     configuration is its own, and frozen once it has coded) — dropping either
     silently would leave the researcher believing it was recorded.
+
+    🔴 **Two names CREATED under one new name become ONE new coder (#1082 b).**
+    Each `create` minted its own row, so *Alice* and *alice*, both typed as the new
+    coder "Alice", became "Alice (2)" and "Alice (3)" with nothing said — two
+    coders nobody asked for, splitting one person's work. One name typed twice is
+    the researcher saying who these are, exactly as two names MATCHED onto one
+    existing coder is (#1039 i), and the apply then judges their rows together.
+    They must agree on what the coder IS: a person and a model, or two model
+    configurations, cannot be one coder (`machine_coder.py`'s rule), so that is
+    refused naming both — the page blocks it first.
     """
     report = ImportReport()
     resolved: dict[str, int | None] = {}
+    #: new name → (user id, kind, configuration, the file name that created it)
+    created: dict[str, tuple[int, str, dict | None, str]] = {}
     missing = [c.name for c in plan.coders if c.name not in decisions]
     if missing:
         raise CodingImportError(
@@ -1178,6 +1326,12 @@ def resolve_coders(
                 target.archived = False
                 report.coders_unarchived += 1
                 report.unarchived_coder_ids.append(target.id)
+                # 🔴 #1074 — their vote counts again in every consensus they took
+                # part in, in EVERY project: `_mark_staleness` marks only what the
+                # file writes. Marked HERE, at the flip, so the door and its mark
+                # cannot drift apart (`test_coder_archive_consensus.py`'s scan).
+                from .consensus_staleness import mark_consensus_stale_for_coder
+                mark_consensus_stale_for_coder(db, target.id)
             resolved[candidate.name] = target.id
             report.coders_matched += 1
             continue
@@ -1205,6 +1359,24 @@ def resolve_coders(
                     )
                 except machine_coder.MachineCoderError as exc:
                     raise CodingImportError(str(exc)) from None
+            same_name = created.get(base)
+            if same_name is not None:
+                user_id, kind, configuration, first = same_name
+                if kind != coder_type:
+                    raise CodingImportError(
+                        f"“{first}” and “{candidate.name}” are both to become a new "
+                        f"coder called “{base}”, but one is a person and the other a "
+                        "model, and one coder cannot be both. Give them different names."
+                    )
+                if configuration != provenance:
+                    raise CodingImportError(
+                        f"“{first}” and “{candidate.name}” are both to become a new "
+                        f"model called “{base}”, with different model configurations — "
+                        "two configurations of one model are two coders. Give them "
+                        "different names, or the same configuration."
+                    )
+                resolved[candidate.name] = user_id
+                continue
             coder = User(
                 username=unique_username(db, base),
                 password_hash=None,
@@ -1215,6 +1387,7 @@ def resolve_coders(
             db.add(coder)
             db.flush()
             resolved[candidate.name] = coder.id
+            created[base] = (coder.id, coder_type, provenance, candidate.name)
             report.coders_created += 1
             continue
         raise CodingImportError(f"Unknown decision {decision.action!r}.")
@@ -1253,30 +1426,36 @@ def apply_plan(
     """
     coder_ids, report = resolve_coders(db, plan, decisions)
     report.rows_read = plan.rows_read
-    report.problems = list(plan.problems)
+    resolved_user = {name: uid for name, uid in coder_ids.items() if uid is not None}
 
-    applications: list[PlannedApplication] = []
+    # 🔴 Two names onto ONE coder (#1039 i) — matched onto one, or created under one
+    # name (#1082 b). The planner judged contradictions per NAME, so "Alice:
+    # Positive" and "alice: Negative" on one unit both passed, and whichever
+    # selection ran second swapped the first out. Judged per CODER when the mapping
+    # merged names — and from the UNSETTLED rows (#1082 a): settling what the
+    # per-name pass had already settled could not see a contradiction one name had
+    # inside itself, and applied the other name's value as if uncontested.
+    if len(set(resolved_user.values())) < len(resolved_user):
+        pool = [a for a in plan.unsettled if a.coder in resolved_user]
+        applications, merged_problems = settle_contradictions(
+            pool, lambda a: resolved_user[a.coder],
+        )
+        # Those rows' per-name verdicts are replaced by the per-coder ones; every
+        # other problem (an unresolved row, a skipped name's own contradiction)
+        # stands as the plan said it.
+        resettled = {a.line for a in pool}
+        report.problems = [p for p in plan.problems if p.line not in resettled]
+        report.problems.extend(merged_problems)
+    else:
+        applications = [a for a in plan.applications if a.coder in resolved_user]
+        report.problems = list(plan.problems)
+
     for app in plan.applications:
-        user_id = coder_ids.get(app.coder)
-        if user_id is None:
+        if app.coder not in resolved_user:
             report.problems.append(RowProblem(
                 app.line, REASON_CODER_SKIPPED,
                 f"“{app.coder}” was not imported, so this row was left out.",
             ))
-            continue
-        applications.append(app)
-
-    resolved_user = {a.coder: coder_ids[a.coder] for a in applications}
-
-    # 🔴 Two names onto ONE coder (#1039 i). The planner judged contradictions per
-    # NAME, so "Alice: Positive" and "alice: Negative" on one unit both passed —
-    # and whichever selection ran second swapped the first out. Judged per CODER
-    # now, only when the mapping actually merged names.
-    if len(set(resolved_user.values())) < len(resolved_user):
-        applications, merged_problems = settle_contradictions(
-            applications, lambda a: resolved_user[a.coder],
-        )
-        report.problems.extend(merged_problems)
 
     # ── 2. Set selections ────────────────────────────────────────────────────
     effective_map = build_effective_code_map(db, project_id)
@@ -1305,20 +1484,27 @@ def apply_plan(
         resolved_set = set_index.by_id(set_id)
         segment_ids = [t for app in group for t in app.segment_targets]
         value_ids = [app.dataset_value_id for app in group if app.dataset_value_id is not None]
-        if segment_ids:
-            _, removed = code_set_rules.apply_selection(
+        # 🔴 #1066 — counted in CODINGS, from what the swap actually WROTE. This
+        # added `len(group)` (file ROWS) to `selections` and nothing to `applied`,
+        # so three rows onto one coder — one plain code, two set values — finished
+        # as "Codings added 1 · Set selections 2", and a re-import of set values
+        # read as new work. A grouped passage's siblings count, as in pass 3.
+        for kind, ids in (("segment_ids", segment_ids), ("dataset_value_ids", value_ids)):
+            if not ids:
+                continue
+            outcome = code_set_rules.apply_selection(
                 db, resolved_set, user_id=user_id, code_id=code_id,
-                segment_ids=segment_ids, attribution=attribution,
+                attribution=attribution, **{kind: ids},
             )
-            report.replaced += removed
-        if value_ids:
-            _, removed = code_set_rules.apply_selection(
-                db, resolved_set, user_id=user_id, code_id=code_id,
-                dataset_value_ids=value_ids, attribution=attribution,
-            )
-            report.replaced += removed
-        report.selections += len(group)
+            report.replaced += outcome.removed
+            report.applied += outcome.inserted
+            report.already_present += outcome.already_held
+            report.selections += outcome.inserted
 
+    # A synonym is a set value written by the PLAIN insert (the swap refuses a
+    # non-member), so which of pass 3's fresh rows are set values is remembered
+    # here and counted there — once, never as a row here AND a coding there.
+    synonym_wanted: set[tuple[int, int, int | None, int | None]] = set()
     for (user_id, code_id), group in synonym_groups.items():
         segment_ids = [t for app in group for t in app.segment_targets]
         value_ids = [app.dataset_value_id for app in group if app.dataset_value_id is not None]
@@ -1328,7 +1514,11 @@ def apply_plan(
                     db, set_index, code_id=code_id, user_id=user_id, **{kind: ids},
                 )
                 report.replaced += sum(len(codes) for codes in removed.values())
-        report.selections += len(group)
+        for app in group:
+            if app.dataset_value_id is not None:
+                synonym_wanted.add((user_id, code_id, None, app.dataset_value_id))
+            for target in app.segment_targets:
+                synonym_wanted.add((user_id, code_id, target, None))
         plain.extend(group)
 
     # ── 3. Plain applies ─────────────────────────────────────────────────────
@@ -1359,6 +1549,7 @@ def apply_plan(
             ])
             db.flush()
         report.applied += len(fresh)
+        report.selections += sum(1 for w in fresh if w in synonym_wanted)
 
     # ── 4. Ratings, one pass over both kinds ─────────────────────────────────
     rating_groups: dict[tuple[int, int, float], list[PlannedApplication]] = defaultdict(list)

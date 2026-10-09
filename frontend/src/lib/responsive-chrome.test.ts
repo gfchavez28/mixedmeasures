@@ -750,10 +750,15 @@ describe('#998 — the panel rail yields at a short viewport instead of starving
     // #894's rule: cap the thing that GROWS (the list), never the section, whose
     // chrome is fixed. Capping the panel instead was built and measured — under a
     // two-code-set strip the list came back at 8px.
+    // #1040 — the needle is checked in the RAW text before any file is stripped.
+    // Stripping only REMOVES text, so a raw miss can never hide a stripped hit;
+    // stripping all ~280 pages to find six cost ~2 s and timed out under load.
+    const NEEDLE = 'ref={listRef} className='
     const scrollers = sourceFiles({ ext: 'tsx', floor: 250 })
       .map(srcRel)
+      .filter(rel => read(rel).includes(NEEDLE))
       .flatMap(rel => code(rel)
-        .filter(l => l.includes('ref={listRef} className='))
+        .filter(l => l.includes(NEEDLE))
         .map(line => ({ rel, line })))
     expect(scrollers.length, 'the listRef scroller population vanished — has the pattern moved?')
       .toBeGreaterThanOrEqual(6)

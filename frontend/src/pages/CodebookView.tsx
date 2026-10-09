@@ -24,6 +24,8 @@ import CodebookActionBar from '@/components/codebook/CodebookActionBar'
 import CodebookNodeMenu from '@/components/codebook/CodebookNodeMenu'
 import CreateCodePanel from '@/components/codebook/CreateCodePanel'
 import { CodeSetsPanel } from '@/components/codebook/CodeSetsPanel'
+import { mergedToast } from '@/lib/code-merge-toast'
+import { describeMergeContradictions } from '@/lib/code-sets'
 import CreateCategoryPanel from '@/components/codebook/CreateCategoryPanel'
 import MergeCodesDialog from '@/components/codebook/MergeCodesDialog'
 import MergeCategoriesDialog from '@/components/codebook/MergeCategoriesDialog'
@@ -655,6 +657,9 @@ export default function CodebookView() {
       let ratingsCarried = 0
       let ratingConflicts = 0
       let targetHasScale = true
+      // #1081 (a): contradictions a merge left in a code set, by set label.
+      let setContradictions = 0
+      let contradictionSet: string | null = null
       for (const sourceId of sourceIds) {
         try {
           const result = await codesApi.merge(projectId, sourceId, targetId, false)
@@ -662,6 +667,8 @@ export default function CodebookView() {
           ratingsCarried += result.ratings_carried
           ratingConflicts += result.rating_conflicts
           targetHasScale = result.target_has_scale
+          setContradictions += result.set_contradictions
+          contradictionSet = result.contradiction_set_label ?? contradictionSet
           succeededIds.push(sourceId)
         } catch (err) {
           failed++
@@ -670,18 +677,24 @@ export default function CodebookView() {
       }
 
       if (failed > 0 && failed < sourceIds.length) {
-        toast.warning(`Merged ${succeededIds.length} of ${sourceIds.length} codes into "${targetName}" (${failed} failed): ${lastReason}`)
+        toast.warning(
+          `Merged ${succeededIds.length} of ${sourceIds.length} codes into "${targetName}" (${failed} failed): ${lastReason}`,
+          // The merges that DID land can still have left a contradiction (#1081 a).
+          setContradictions > 0
+            ? { description: describeMergeContradictions(setContradictions, contradictionSet), duration: 10_000 }
+            : undefined,
+        )
       } else if (failed === sourceIds.length) {
         toast.error(lastReason || 'Failed to merge codes')
       } else {
-        const details: string[] = []
-        if (skippedTotal > 0) details.push(`${skippedTotal} duplicate${skippedTotal !== 1 ? 's' : ''} skipped`)
-        if (ratingConflicts > 0) details.push(`${ratingConflicts} rating difference${ratingConflicts !== 1 ? 's' : ''} flagged for reconciliation`)
-        if (ratingsCarried > 0 && !targetHasScale) {
-          details.push(`${ratingsCarried} rating${ratingsCarried !== 1 ? 's' : ''} kept but not shown until "${targetName}" has a rating scale`)
-        }
-        const detail = details.length > 0 ? ` (${details.join(' · ')})` : ''
-        toast.success(`Merged ${sourceIds.length} code${sourceIds.length !== 1 ? 's' : ''} into "${targetName}"${detail}`)
+        const outcome = mergedToast({
+          sourceCount: sourceIds.length, targetName, skipped: skippedTotal,
+          ratingsCarried, ratingConflicts, targetHasScale, setContradictions, contradictionSet,
+        })
+        // 10 s, the app's length for a warning that carries guidance: the merge has
+        // no undo, and the sentence is the only place the contradiction is named.
+        if (outcome.kind === 'warning') toast.warning(outcome.message, { description: outcome.description, duration: 10_000 })
+        else toast.success(outcome.message)
       }
 
       if (succeededIds.length > 0) {

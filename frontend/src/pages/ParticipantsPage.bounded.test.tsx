@@ -239,4 +239,16 @@ describe('the participant filter says which filter is on', () => {
     await waitFor(() => expect(unlinked).toHaveAttribute('aria-pressed', 'true'))
     expect(all).toHaveAttribute('aria-pressed', 'false')
   })
+
+  // #1090 — the filter in force is not a control that does something: pressing
+  // it again used to clear the selection, and must not re-collapse a table
+  // "Show more" widened.
+  it('re-choosing the filter in force changes nothing', async () => {
+    const { rows } = renderPage(45, 5)
+    await screen.findByText('P00001')
+    fireEvent.click(screen.getByRole('button', { name: `Show ${PARTICIPANT_LIST_LIMIT} more` }))
+    await waitFor(() => expect(rows()).toHaveLength(2 * PARTICIPANT_LIST_LIMIT))
+    fireEvent.click(screen.getByRole('button', { name: 'All (45)' }))
+    expect(rows()).toHaveLength(2 * PARTICIPANT_LIST_LIMIT)
+  })
 })

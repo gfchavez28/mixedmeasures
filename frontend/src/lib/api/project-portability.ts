@@ -242,6 +242,12 @@ export interface ProjectImportResult {
    * gate any message on `> 0`, never on the field's presence.
    */
   metrics_marked_stale: number
+  /**
+   * #1039 (a) — how many saved statistical tests the import marked out of date: every one
+   * it brought in that the file said was current, because a test's result is a number the
+   * copy that saved it computed. `0` on a merge and when none were saved — gate on `> 0`.
+   */
+  tests_marked_stale: number
 }
 
 export interface CodebookImportResult {

@@ -30,16 +30,24 @@ import { basename } from 'node:path'
 import { stripComments } from '@/lib/strip-comments'
 import { sourceFiles } from '@/test-support/source-tree'
 
+// #1040 — computed ONCE, and a page is stripped only when its RAW text holds the
+// tag (stripping removes text, so a raw miss can never hide a stripped mount).
+// Stripping every page for each of four tests cost ~1.4 s.
+let found: { file: string; tag: string }[] | null = null
 function mounts(): { file: string; tag: string }[] {
+  if (found) return found
   const out: { file: string; tag: string }[] = []
   // The pages directory, one level, `.tsx` only — a mount is JSX. The walk and
   // its floor live in `sourceFiles()` (#729/#730).
   for (const abs of sourceFiles({ root: 'pages', ext: 'tsx', floor: 10, recursive: false })) {
     const name = basename(abs)
-    const src = stripComments(readFileSync(abs, 'utf-8'), name)
+    const raw = readFileSync(abs, 'utf-8')
+    if (!raw.includes('<MagnitudeStrip')) continue
+    const src = stripComments(raw, name)
     const re = /<MagnitudeStrip\b[\s\S]*?\/>/g
     for (const m of src.matchAll(re)) out.push({ file: name, tag: m[0] })
   }
+  found = out
   return out
 }
 

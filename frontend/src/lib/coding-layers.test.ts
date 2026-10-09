@@ -7,9 +7,14 @@
  * source worth having.
  */
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { stripComments } from '@/lib/strip-comments'
+import { SRC_DIR } from '@/test-support/source-tree'
 import {
   asLayerScope,
   availableLayerScopes,
+  effectiveLayerScope,
   isMachineCoder,
   LAYER_SCOPES,
   LAYER_SCOPE_META,
@@ -151,5 +156,32 @@ describe('the cross-language contract', () => {
     // reads this literal back in `test_machine_coder_layer.py`.
     const expected: LayerScope[] = ['human', 'consensus', 'machine']
     expect([...LAYER_SCOPES]).toEqual(expected)
+  })
+})
+
+describe('effectiveLayerScope (#1038 g)', () => {
+  const ALL = { consensusAvailable: true, hasMachineCoders: true }
+  const NONE = { consensusAvailable: false, hasMachineCoders: false }
+
+  it('sends the preference while it is offered — the MACHINE layer included', () => {
+    for (const scope of LAYER_SCOPES) expect(effectiveLayerScope(scope, ALL)).toBe(scope)
+  })
+
+  it('falls back to people’s coding when the preferred layer is not offered', () => {
+    for (const scope of LAYER_SCOPES) expect(effectiveLayerScope(scope, NONE)).toBe('human')
+    expect(effectiveLayerScope('machine', { consensusAvailable: true, hasMachineCoders: false })).toBe('human')
+  })
+
+  it('🔴 CrossAnalysisPanel derives its scope through it, from THIS project’s coders', () => {
+    // It derived `pref === 'consensus' && … ? 'consensus' : 'human'`, so choosing
+    // the Machine layer it offered sent `human`; and it offered that layer from
+    // the install-wide roster. Rendering the panel needs six data sources mocked,
+    // so the wiring is read from the source (comments stripped).
+    const panel = stripComments(
+      readFileSync(join(SRC_DIR, 'components/CrossAnalysisPanel.tsx'), 'utf8'), 'CrossAnalysisPanel.tsx',
+    )
+    expect(panel).toMatch(/const layerScope: LayerScope = effectiveLayerScope\(layerScopePref, layerAvailability\)/)
+    expect(panel).toMatch(/hasMachineCoders: projectKinds\.hasMachine/)
+    expect(panel).not.toMatch(/rosterHasMachineCoders/)
   })
 })

@@ -214,10 +214,13 @@ def test_EVERY_ci_hard_dependency_gate_runs_even_when_an_earlier_step_failed():
                 unconditional.append(f"{job_name}: {name}")
 
     # Population self-check (#730): an empty scan passes by finding nothing,
-    # including when the steps are renamed out from under this matcher.
-    assert found == 3, (
-        f"expected three HARD production-dependency gates in ci.yml, found {found} "
-        "— a job was added, removed, or its gate renamed."
+    # including when the steps are renamed out from under this matcher. FOUR since
+    # 2026-10-06: the three dependency audits plus the electron job's check of
+    # Electron's own advisories against the shipped runtime (#1094).
+    assert found == 4, (
+        f"expected four HARD gates in ci.yml (three production-dependency audits and "
+        f"the Electron runtime advisories), found {found} — a job was added, removed, "
+        "or its gate renamed."
     )
     assert not unconditional, (
         "these ci.yml hard dependency gates are unconditional, so any earlier "

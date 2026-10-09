@@ -711,7 +711,7 @@ def test_drain_isolates_a_target_that_raises(db_session, monkeypatch):
     result = drain_stale_consensus(db, limit=500)
 
     assert result.recomputed == 1
-    assert result.failed_marker_ids == {bad_marker}
+    assert result.failed_marker_ids == (bad_marker,)
     assert {r.code_id for r in _consensus_rows(db, segment_id=good_sid)} == {9401}
     remaining = [m.id for m in db.query(ConsensusStaleTarget).all()]
     assert remaining == [bad_marker], "the failing marker stays queued; the rest drained"
@@ -737,14 +737,93 @@ def test_a_known_failure_is_left_out_of_the_batch_and_retried_alone(db_session, 
 
     second = drain_stale_consensus(db, limit=500, known_failed=first.failed_marker_ids)
     assert attempts["bad"] == 3, "left out of the batch, retried once on its own"
-    assert second.recomputed == 1 and second.failed_marker_ids == {bad_marker}
+    assert second.recomputed == 1 and second.failed_marker_ids == (bad_marker,)
     assert {r.code_id for r in _consensus_rows(db, segment_id=sid3)} == {9501}
 
     # A fix (here: the failure going away) clears it on the next retry.
     monkeypatch.setattr(staleness, "recompute_consensus_for_target", recompute_consensus_for_target)
     third = drain_stale_consensus(db, limit=500, known_failed=second.failed_marker_ids)
-    assert third.recomputed == 1 and third.failed_marker_ids == frozenset()
+    assert third.recomputed == 1 and third.failed_marker_ids == ()
     assert db.query(ConsensusStaleTarget).count() == 0
+
+
+def _systematic_failure(db, monkeypatch, n):
+    """``n`` markers on two-coder targets whose recompute ALL raise — the shape of
+    a defect that fails a whole class of targets, as #1017's did. Returns the
+    marker ids in queue order and a log of which marker each call attempted."""
+    import app.services.consensus_staleness as staleness
+
+    _coder(db, 2, "B")
+    sids = []
+    for i in range(n):
+        pid, sid = _conv_project(db, pid=960 + i, sid=9600 + i)
+        _code(db, 9600 + i, pid, 1)
+        _apply(db, 9600 + i, 1, segment_id=sid)
+        _apply(db, 9600 + i, 2, segment_id=sid)
+        mark_consensus_stale(db, pid, segment_ids=[sid])
+        sids.append(sid)
+    db.commit()
+    marker_of = {
+        m.segment_id: m.id for m in db.query(ConsensusStaleTarget).all()
+    }
+    attempted: list[int] = []
+
+    def always_fails(db_, project_id, *, segment_id=None, dataset_value_id=None):
+        attempted.append(marker_of[segment_id])
+        raise RuntimeError("simulated systematic failure")
+
+    monkeypatch.setattr(staleness, "recompute_consensus_for_target", always_fails)
+    return [marker_of[s] for s in sids], attempted
+
+
+def test_known_failures_are_retried_a_BATCH_at_a_time_in_ROTATION(db_session, monkeypatch):
+    """#1039 (g): every known failure was retried on every call, so a systematic
+    failure grew each tick's work by a whole batch, without bound. Now a call
+    retries at most ``limit`` of them, the ones that waited longest first — so
+    the work per call is bounded AND every stuck marker still gets its turn."""
+    from app.services.consensus_staleness import drain_stale_consensus
+
+    db = db_session
+    limit = 3
+    markers, attempted = _systematic_failure(db, monkeypatch, 7)
+    m1, m2, m3, m4, m5, m6, m7 = markers
+
+    known: tuple[int, ...] = ()
+    per_call: list[list[int]] = []
+    for _ in range(5):
+        attempted.clear()
+        result = drain_stale_consensus(db, limit=limit, known_failed=known)
+        assert result.recomputed == 0
+        per_call.append(list(attempted))
+        known = result.failed_marker_ids
+        # Bounded: one failed batch attempt, its isolation, and `limit` retries.
+        assert len(attempted) <= limit + limit + limit
+
+    # Call 3: m7 is the last new one; m4–m6 are retried and m1–m3 WAIT their turn.
+    assert set(per_call[2]) == {m7, m4, m5, m6}
+    # Call 4: nothing new is left, so only the three that waited longest are tried…
+    assert per_call[3] == [m1, m2, m3]
+    # …and call 5 takes the next three — the rotation reaches every marker.
+    assert per_call[4] == [m7, m4, m5]
+    assert set(known) == set(markers), "every failing marker is still queued and known"
+    assert db.query(ConsensusStaleTarget).count() == 7
+
+
+def test_a_retried_marker_that_now_SUCCEEDS_leaves_the_rotation(db_session, monkeypatch):
+    """The rotation must still clear a fixed target — the reason retries exist."""
+    import app.services.consensus_staleness as staleness
+    from app.services.consensus_staleness import drain_stale_consensus
+
+    db = db_session
+    markers, _attempted = _systematic_failure(db, monkeypatch, 4)
+    first = drain_stale_consensus(db, limit=500)
+    assert set(first.failed_marker_ids) == set(markers)
+    monkeypatch.setattr(staleness, "recompute_consensus_for_target", recompute_consensus_for_target)
+    second = drain_stale_consensus(db, limit=2, known_failed=first.failed_marker_ids)
+    assert second.recomputed == 2
+    assert second.failed_marker_ids == tuple(first.failed_marker_ids[2:]), (
+        "the two retried and fixed are gone; the two still waiting keep their place"
+    )
 
 
 def test_a_database_lock_is_not_isolated(db_session, monkeypatch):

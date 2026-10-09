@@ -1087,7 +1087,7 @@ def set_text_code_set_selection(
         raise HTTPException(status_code=404, detail="Code set not found")
 
     try:
-        chosen, removed = code_set_rules.apply_selection(
+        outcome = code_set_rules.apply_selection(
             db, resolved, user_id=user.id, code_id=data.code_id,
             # A one-element LIST since row 49 widened both target arms so the bulk
             # import could reuse the swap instead of re-implementing it
@@ -1096,6 +1096,7 @@ def set_text_code_set_selection(
         )
     except code_set_rules.SetSelectionError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    chosen, removed = outcome.code_id, outcome.removed
 
     log_action(
         db, action="code_set_selection", entity_type="code_application",

@@ -1,6 +1,10 @@
 import { useState, useMemo, useCallback, useId, memo } from 'react'
 import { useListKeyboardNav } from '@/hooks/useListKeyboardNav'
-import { PARTICIPANT_LIST_LIMIT, pickerLimitNote, searchParticipants } from '@/lib/participant-search'
+import {
+  NO_PARTICIPANTS_YET, PARTICIPANT_LIST_LIMIT, PARTICIPANT_SEARCH_LABEL, PARTICIPANT_SEARCH_PLACEHOLDER,
+  noParticipantsMatch, pickerLimitNote, searchParticipants,
+} from '@/lib/participant-search'
+import { SELECTED_ROW } from '@/lib/selection'
 import { useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -941,8 +945,11 @@ function ParticipantPicker({
           is `shrink-0`, so a short viewport scrolls the popover rather than
           squeezing the search box or the create button to nothing. */}
       <div className="p-2 border-b shrink-0">
+        {/* #1092 — the wording all three participant pickers share. This box
+            had no name of its own, so its placeholder was its name. */}
         <Input
-          placeholder="Search participants..."
+          placeholder={PARTICIPANT_SEARCH_PLACEHOLDER}
+          aria-label={PARTICIPANT_SEARCH_LABEL}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           onKeyDown={listProps.onKeyDown}
@@ -958,9 +965,12 @@ function ParticipantPicker({
             <span className="text-xs text-mm-text-muted">
               Current: <span className="font-medium text-mm-text">{row.participant_display_name}</span>
             </span>
+            {/* #1092 — red-500 on this band measured 3.2:1; the darker pair is
+                the one the app uses for destructive text elsewhere. */}
             <button
+              type="button"
               onClick={(e) => { e.stopPropagation(); onLink(row.id, null, null); onClose() }}
-              className="text-xs text-red-500 hover:text-red-700"
+              className="text-xs text-red-700 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300"
             >
               Remove link
             </button>
@@ -983,7 +993,9 @@ function ParticipantPicker({
           padded out with an empty band. */}
       <div ref={listProps.ref} className={`max-h-[240px] overflow-y-auto ${shown.length > 2 ? 'min-h-20' : 'shrink-0'}`}>
         {!participantsKnown ? null : shown.length === 0 ? (
-          <div className="px-3 py-4 text-center text-xs text-mm-text-faint">No participants found</div>
+          <div className="px-3 py-4 text-center text-xs text-mm-text-muted">
+            {searching ? noParticipantsMatch(search) : NO_PARTICIPANTS_YET}
+          </div>
         ) : (
           shown.map((p, i) => {
             const name = p.display_name || p.identifier
@@ -1003,9 +1015,12 @@ function ParticipantPicker({
                 aria-current={isCurrentRow ? 'true' : undefined}
                 data-focused={itemProps['data-focused']}
                 onMouseEnter={itemProps.onMouseEnter}
+                // #1092 — the current link takes the house selected-row recipe
+                // and a check, as "Who is this document about?" does; it was a
+                // hand-written tint, the one participant picker that did not.
                 className={`w-full text-left px-3 py-2 text-sm border-b last:border-b-0 ${
                   isCurrentRow
-                    ? 'bg-mm-blue/12 text-mm-blue-text'
+                    ? SELECTED_ROW
                     : isDisabled
                       ? 'opacity-50 cursor-not-allowed bg-mm-bg'
                       : focusedIndex === i
@@ -1013,9 +1028,12 @@ function ParticipantPicker({
                         : 'hover:bg-mm-surface-hover'
                 }`}
               >
-                <div className="flex items-center justify-between">
-                  <span className="font-medium">{name}</span>
-                  {p.role && <span className="text-xs text-mm-text-faint">{p.role}</span>}
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium min-w-0 truncate">{name}</span>
+                  <span className="flex items-center gap-1.5 shrink-0">
+                    {p.role && <span className="text-xs text-mm-text-faint">{p.role}</span>}
+                    {isCurrentRow && <Check className="w-3.5 h-3.5 text-mm-blue-text" aria-hidden="true" />}
+                  </span>
                 </div>
                 {p.linked_speakers.length > 0 && (
                   <div className="text-[11px] text-mm-text-faint">

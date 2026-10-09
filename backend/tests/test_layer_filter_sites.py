@@ -41,6 +41,8 @@ ALLOWED: dict[str, tuple[int, str]] = {
     "services/coding_coverage.py": (1, "WHO coded — attribution, which names a machine by design"),
     "routers/text_coding.py": (3, "the chips payload, the per-coder breakdown, the CSV export (#1060)"),
     "routers/observations.py": (1, "freezing marks consensus stale — a mutation; over-marking is safe"),
+    "services/consensus_staleness.py": (1, "marking a coder's voting passages stale (#1074) — machines are "
+                                           "kept out by reliability_coder_clause beside it; a mutation"),
     "routers/search.py": (2, "a code's usage count, and one response's codes as its chips list them (#1060)"),
     "routers/codes.py": (2, "a code's usage count (a delete warning counts what it removes) and the rating strand count"),
     "routers/export.py": (3, "the codebook's usage counts and the coded-segments CSV (#1060)"),

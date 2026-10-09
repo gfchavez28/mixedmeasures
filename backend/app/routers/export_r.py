@@ -2381,9 +2381,9 @@ def _build_r_script(
         coder_cols_r = ", ".join(f'"coder_{cid}"' for cid in irr_coder_ids)
         toc_sections.append("Inter-rater reliability")
         r_lines.append("# ---- Inter-rater reliability (intercoder agreement) ----")
-        r_lines.append("# Per code, over the human coder roster (Option B source-level")
-        r_lines.append("# engagement). Krippendorff's alpha (any n), plus Cohen's kappa +")
-        r_lines.append("# percent agreement when exactly 2 coders. Reproduces the tool's IRR.")
+        r_lines.append("# Per code, over the coders who coded shared material (Option B")
+        r_lines.append("# source-level engagement). Krippendorff's alpha (any n), plus Cohen's")
+        r_lines.append("# kappa + percent agreement when exactly 2 coders. Reproduces the tool's IRR.")
         # #43 — the app reports confidence intervals on these coefficients and
         # this script does NOT recompute them. Said out loud rather than left to
         # inference: a researcher comparing the two would otherwise read the
@@ -3007,14 +3007,15 @@ def export_r_data(
         m for m in r_materials if not m.material_type.startswith("qual_")
     ]
 
-    # Inter-rater reliability matrices (Track J · J2-5, M-4) — all-roster (no
-    # coder_ids filter); the exported R re-derives κ/α/% from these. Gated below
-    # on the same condition as compute_irr.available.
+    # Inter-rater reliability matrices (Track J · J2-5, M-4) — no `coder_ids`
+    # filter (a visibility filter must never change a reliability statistic); the
+    # exported R re-derives κ/α/% from these. Gated below on the same condition as
+    # compute_irr.available.
     from ..services.irr import build_irr_matrices
     # ⚠️ #829 added two trailing values (the selectable source set and the scope's
     # engaged coders). The export is deliberately POOLED — it emits what it has
     # always emitted (#402, test_export_r_irr.py) — so it takes no `source` and
-    # discards both. #35 added a sixth: the per-scaled-code RATING matrices.
+    # discards the first. #35 added a sixth: the per-scaled-code RATING matrices.
     #
     # ⚠️ Row 48 added a SEVENTH — the code-set matrices — emitted since #995.
     #
@@ -3023,13 +3024,32 @@ def export_r_data(
     # what its TABLE shows, so the app's screen narrowed and this export did not;
     # the set block is an ADDITION beside them, never a replacement.
     (
-        irr_coder_ids, irr_code_names, irr_per_code, _, _, irr_magnitude_all, irr_code_sets_all,
+        irr_roster, irr_code_names, irr_per_code_all, _, irr_scope_coders,
+        irr_magnitude_all, irr_code_sets_all,
     ) = build_irr_matrices(db, project_id)
+    # 🔴 #1039 (h) — ONE COLUMN PER CODER WHO WORKED THE SHARED MATERIAL, never one
+    # per coder on the install. The matrices are as wide as the roster, and the
+    # roster is the INSTALL's people (`gather_coder_applications`), so a third
+    # person who never opened this project made every matrix three wide: the R
+    # block's `ncol(m) == 2` was false and it printed NA for κ and % agreement
+    # where the app — which asks how many coders the SCOPE engaged
+    # (`compute_irr`'s `pair_idx`) — showed both. Dropping those columns is
+    # LOSSLESS: a coder outside the scope engaged no source in it, so Option B gave
+    # them a blank in every cell (`test_export_r_irr.py` asserts it). With this,
+    # `ncol(m) == 2` asks exactly what the app asks.
+    keep = [i for i, cid in enumerate(irr_roster) if cid in irr_scope_coders]
+    irr_coder_ids = [irr_roster[i] for i in keep]
+
+    def _scope_columns(rows):
+        return [[row[i] for i in keep] for row in rows]
+
+    irr_per_code = {code_id: _scope_columns(rows) for code_id, rows in irr_per_code_all.items()}
     # A scaled code nobody has rated yet has an all-blank matrix, which is not
     # a coefficient R can compute; the app reports it as coverage (0 rated).
     # Narrowed ONCE, here, so the CSV and the R block that reads it agree.
     irr_magnitude = {
-        code_id: entry for code_id, entry in irr_magnitude_all.items() if entry["n_rated"] > 0
+        code_id: {**entry, "rows": _scope_columns(entry["rows"])}
+        for code_id, entry in irr_magnitude_all.items() if entry["n_rated"] > 0
     }
     # A one-value set is a binary code wearing a costume — `compute_irr` refuses
     # it as `degenerate`, and a reproducibility script emitting a coefficient over
@@ -3040,7 +3060,8 @@ def export_r_data(
     # `insufficient_n` are `compute_irr`'s to report and are deliberately NOT
     # re-derived — a second implementation of that vocabulary is the drift.
     irr_code_sets = {
-        set_id: entry for set_id, entry in irr_code_sets_all.items()
+        set_id: {**entry, "rows": _scope_columns(entry["rows"])}
+        for set_id, entry in irr_code_sets_all.items()
         if len(entry["members"]) >= 2
     }
 

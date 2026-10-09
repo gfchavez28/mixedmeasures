@@ -32,6 +32,15 @@ describe('coderInitials', () => {
   it('blank → ?', () => {
     expect(coderInitials('   ')).toBe('?')
   })
+  it('#1135: punctuation is never an initial — "Priya (lead)" is PL, not P(', () => {
+    expect(coderInitials('Priya (lead)')).toBe('PL')
+    expect(coderInitials('Model B — v2')).toBe('MV')
+    expect(coderInitials('"Sam"')).toBe('SA')
+    expect(coderInitials('— —')).toBe('?')
+  })
+  it('#1135: an astral letter is one initial, not half of one', () => {
+    expect(coderInitials('𝒜da Lovelace')).toBe('𝒜L')
+  })
 })
 
 describe('isCoderVisible (per-coder visibility filter)', () => {

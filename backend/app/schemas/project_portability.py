@@ -194,6 +194,11 @@ class ProjectImportResult(BaseModel):
     # rather than required so a caller that passes no `import_report` still validates — the
     # same bargain `ProjectSummary`'s counts make for older manifests (#639).
     metrics_marked_stale: int = 0
+    # #1039 (a): the saved STATISTICAL TESTS the import marked out of date — every one it
+    # brought in that the file said was current. A test's result is a number another build
+    # computed; this one cannot vouch for it until it is run again. Same default, same
+    # reason as the line above.
+    tests_marked_stale: int = 0
 
 
 class CodebookImportResult(BaseModel):

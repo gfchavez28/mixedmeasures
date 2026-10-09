@@ -999,9 +999,11 @@ export default function ConversationImport() {
             const match = participantsByName.get(mapping.normalized_name.trim().toLowerCase())
             if (!match) return null
             const orphaned = isOrphanedParticipant(match)
+            // #1110 — a document they are the subject of is a source too.
             const sources = [
               ...new Set(match.linked_speakers.flatMap(s => s.conversations.map(c => c.name))),
               ...new Set(match.dataset_rows.map(d => d.dataset_name)),
+              ...new Set(match.linked_documents.map(d => d.name)),
             ]
             const matchName = match.display_name || match.identifier
             return (
@@ -1015,7 +1017,7 @@ export default function ConversationImport() {
                   {orphaned ? (
                     <>
                       Matches an orphaned participant "<strong>{matchName}</strong>" — left over
-                      from a deleted conversation or dataset (no live data). It will be reused;
+                      from a deleted conversation, dataset or document (no live data). It will be reused;
                       rename above if this is a different person.
                     </>
                   ) : (
@@ -1093,8 +1095,8 @@ export default function ConversationImport() {
             <CardHeader>
               <CardTitle>Upload Transcripts</CardTitle>
               <CardDescription>
-                Upload transcript CSVs, or VTT/SRT subtitle files exported from Zoom or Teams.
-                Multiple files will share the same column mapping.
+                Upload one or more transcripts. Multiple files will share the same
+                column mapping.
                 {/* Video V1 slab 6 (§15.3): Zoom LOCAL recordings produce no
                     transcript — point that gap at free offline transcription
                     (aTrain et al. export SRT) instead of dead-ending. */}
@@ -1131,9 +1133,13 @@ export default function ConversationImport() {
                 onClick={(e) => openPickerFromZoneClick(e, () => transcriptInputRef.current?.click())}
               >
                 <FileInput className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />
-                <p className="text-mm-text-secondary mb-4">
+                <p className="text-mm-text-secondary mb-1">
                   Drag and drop transcript file(s) here, or click to browse
                 </p>
+                {/* #1010 (a) — the formats IN the zone, from the module's label, as
+                    the dataset and observation zones state theirs. The description
+                    above hand-wrote the list, which is #1008's stale-copy class. */}
+                <p className="text-xs text-mm-text-faint mb-4">{TRANSCRIPT_FORMAT_LABEL}</p>
                 <UploadLimitNote noun="transcript files" recordings className="-mt-2 mb-4" />
                 <input
                   ref={transcriptInputRef}

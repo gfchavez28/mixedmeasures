@@ -6,6 +6,7 @@ import {
   formatMagnitude,
   isUnrated,
   normalizedPosition,
+  ratingBadgeFill,
   type Magnitude,
   type MagnitudeScale,
 } from '@/lib/magnitude'
@@ -108,8 +109,10 @@ export default function CodeChip({
           */}
           <span
             className="font-mono text-[9.5px] font-bold leading-none px-1 rounded-[3px] shrink-0 tabular-nums"
+            // #1115 — tinted AWAY from the number (`ratingBadgeFill`); the old
+            // tint toward it put white on the default grey at 3.16:1.
             style={{
-              backgroundColor: `rgba(${ink}, ${unrated ? 0.10 : 0.22})`,
+              backgroundColor: ratingBadgeFill(textColor, unrated),
               color: textColor,
             }}
             aria-hidden="true"

@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { BookOpen, ChevronLeft, ChevronRight, Check, Undo2, Redo2, Eye, EyeOff, Pencil, Mic, Volume2, Trash2, RefreshCw, AlertCircle, Video, Tags, StickyNote, NotebookPen, PanelRightClose, PanelRightOpen } from 'lucide-react'
+import { BookOpen, ChevronLeft, ChevronRight, Check, Undo2, Redo2, Eye, EyeOff, Pencil, Mic, Volume2, Trash2, RefreshCw, AlertCircle, Video, Tags, StickyNote, NotebookPen, PanelRightClose, PanelRightOpen, SkipForward } from 'lucide-react'
 import { toast } from 'sonner'
 import { validateMediaFile, MEDIA_ACCEPT, describeMediaUploadError } from '@/lib/media-constants'
 import {
@@ -882,17 +882,34 @@ export default function CodingWorkbench() {
     [queryClient, cid, user?.id],
   )
 
+  /**
+   * Optimistic rating + one server call, bracketed by a CANCEL of the segments
+   * query before and ONE refetch of it after — #881's recipe, which the document
+   * and observation writers already follow (`magnitude-coding.md` §11).
+   *
+   * 🔴 #1059 — this page was EXEMPT on the premise that no segments refetch can be
+   * in flight when a rating commits here (its apply door uses #367's LIGHT
+   * settle). That stopped being true at row 48: a code-set strip choice settles by
+   * refetching the whole segment list, and so do a dozen other acts on this page
+   * (merge, split, group, quote, a segment edit). A rating given while one of those
+   * is out was painted and then overwritten by a response that left the server
+   * BEFORE the rating did — "not rated" over a rating the server holds. Cancelling
+   * stops the overwrite; the refetch after the write is what makes the truth land
+   * last (cancelling REVERTS to that fetch's start, so an act it would have
+   * delivered blinks out until this refetch lands — #881's measured second half).
+   * ⚠️ Still no `settleAfterCodeChange`: a rating changes no coded COUNT.
+   */
   const runOptimisticMagnitude = useCallback(
     async (segmentId: number, codeId: number, value: number | null) => {
-      const snapshot = queryClient.getQueryData(['segments', cid])
+      const key = ['segments', cid]
+      await queryClient.cancelQueries({ queryKey: key })
+      const snapshot = queryClient.getQueryData(key)
       patchSegmentMagnitude(segmentId, codeId, value)
       try {
         await codingApi.setMagnitude(segmentId, codeId, value)
-        // Deliberately the LIGHT settle: a rating changes no coded COUNT, so the
-        // derived-count invalidation `settleAfterCodeChange` performs would be
-        // work for nothing. Nothing else on this screen reads the value.
+        queryClient.invalidateQueries({ queryKey: key })
       } catch (e) {
-        queryClient.setQueryData(['segments', cid], snapshot)
+        queryClient.setQueryData(key, snapshot)
         throw e
       }
     },
@@ -2336,9 +2353,10 @@ export default function CodingWorkbench() {
                 <button
                   onClick={(e) => { e.stopPropagation(); handleJumpToNextUncoded() }}
                   disabled={!segmentsKnown}
-                  className="text-[10px] text-mm-text-muted hover:text-mm-text-secondary transition-colors disabled:opacity-50"
+                  className="inline-flex items-center gap-1 text-[10px] text-mm-text-muted hover:text-mm-text-secondary transition-colors disabled:opacity-50"
                 >
-                  Jump to uncoded ⏭
+                  Jump to uncoded
+                  <SkipForward className="w-3 h-3" aria-hidden="true" />
                 </button>
                 <button
                   onClick={(e) => { e.stopPropagation(); rightColumn.collapse() }}

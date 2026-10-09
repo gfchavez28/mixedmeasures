@@ -27,6 +27,12 @@ UTCTimestamp = Annotated[
 ]
 
 
+#: The largest integer SQLite's INTEGER holds. A request integer above it is an
+#: `OverflowError` when SQLAlchemy binds it — a 500, not a refusal (#1083 d) —
+#: so an id field a request supplies is bounded here (`Field(le=…)`).
+SQLITE_INTEGER_MAX = 2**63 - 1
+
+
 def strip_required_text(field: str):
     """Build an after-validator that trims a required text field and refuses a
     whitespace-only value (#556a, generalised for #925).

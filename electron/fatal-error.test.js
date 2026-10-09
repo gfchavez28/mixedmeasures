@@ -14,6 +14,7 @@ const {
   COPY_FAILED_NOTE,
   describeExit,
   truncateForDialog,
+  backendSpawnFailureMessage,
 } = require('./fatal-error')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -316,4 +317,61 @@ test('main.js reaches the clipboard only through showCrashDialog, and holds the 
   assert.doesNotMatch(main, /clipboard\.\w+\(/)
   assert.match(main, /showCrashDialog\(\{\s*dialog,\s*clipboard,/)
   assert.match(main, /app\.on\('window-all-closed',\s*\(\)\s*=>\s*\{\s*if \(!crashDialogShowing\) app\.quit\(\)/)
+})
+
+// ── #1143 — an engine that cannot be started ──────────────────────────────────
+
+const WIN_EXE = 'C:\\Program Files\\Mixed Measures\\resources\\mm-backend\\mm-backend.exe'
+
+test('a MISSING engine names its file, the likely quarantine, and where it should be', () => {
+  const err = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })
+  const text = backendSpawnFailureMessage(err, WIN_EXE)
+  assert.match(text, /could not find its engine \(“mm-backend\.exe”\)/)
+  assert.match(text, /quarantined/)
+  assert.match(text, /Check your antivirus for “mm-backend\.exe”/)
+  assert.ok(text.endsWith(`The engine should be at:\n${WIN_EXE}`), 'the path is the last line, on its own')
+})
+
+for (const code of ['EACCES', 'EPERM']) {
+  test(`an engine NOT PERMITTED to run (${code}) says security software may be blocking it`, () => {
+    const err = Object.assign(new Error(`spawn ${code}`), { code })
+    const text = backendSpawnFailureMessage(err, '/opt/mm/resources/mm-backend/mm-backend')
+    assert.match(text, /was not allowed to start its engine \(“mm-backend”\)/)
+    assert.match(text, /Allow “mm-backend” in your antivirus or security settings/)
+  })
+}
+
+test('any other failure says what the OS said, and never claims a cause it was not given', () => {
+  const err = Object.assign(new Error('spawn UNKNOWN'), { code: 'UNKNOWN' })
+  const text = backendSpawnFailureMessage(err, WIN_EXE)
+  assert.match(text, /could not start its engine \(“mm-backend\.exe”\): UNKNOWN\./)
+  assert.doesNotMatch(text, /quarantin|security software/)
+  // With no code at all, the message stands in; with no path, the file is named generically.
+  assert.match(backendSpawnFailureMessage(new Error('boom'), null), /\(“mm-backend”\): boom\./)
+  assert.doesNotMatch(backendSpawnFailureMessage(new Error('boom'), null), /should be at/)
+})
+
+test('the crash dialog shows that sentence verbatim under "failed to start"', () => {
+  const err = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })
+  const text = crashDialogText({
+    code: null, signal: null, startupError: new Error(backendSpawnFailureMessage(err, WIN_EXE)),
+  })
+  assert.strictEqual(text.title, 'Mixed Measures failed to start')
+  assert.match(text.message, /could not find its engine/)
+  assert.match(text.message, /mm-backend\.exe$/)
+})
+
+test('main.js handles a failed START: one dialog at once, nothing left to kill', () => {
+  // A source scan: whether main.js listens for the spawn's 'error' at all is the one
+  // link a headless suite cannot drive (renderer-recovery.test.js's precedent).
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8').replace(/(^|[^:])\/\/.*$/gm, '$1')
+  const at = main.indexOf("child.on('error'")
+  assert.ok(at > 0, "main.js no longer listens for the backend's 'error' event (#1143)")
+  const handler = main.slice(at, main.indexOf('return child', at))
+  // Only a child that never ran is a failed start; a later failed kill must not
+  // show a startup dialog.
+  assert.match(handler, /if \(child\.pid !== undefined\)/)
+  assert.match(handler, /backendExited = true/, 'waitForHealth would wait out its full 60 s')
+  assert.match(handler, /if \(backend === child\) backend = null/, "stopBackend would run `taskkill /pid undefined`")
+  assert.match(handler, /reportCrash\(\{ error: new Error\(backendSpawnFailureMessage\(err, exe\)\) \}\)/)
 })

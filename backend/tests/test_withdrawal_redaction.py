@@ -321,3 +321,69 @@ class TestTheOutcomeIsAnHonestRecord:
         assert out.segments_blanked == 0
         assert out.speaker_label is None
         assert db.get(Participant, 1) is None
+
+
+class TestTheirDataLeavesTheNumbersToo:
+    """🔴 #1144 (widened by the 1.5.6 pre-cut batch's review) — a withdrawal deleted
+    the person's responses and rows and marked no metric out of date. A saved metric
+    keeps the result it last computed, and quick compute reuses any metric that is not
+    stale, so the analysis view went on showing means and frequencies that INCLUDED the
+    withdrawn person — on the one feature whose purpose is that their data is gone."""
+
+    def _metric(self, db, column_id, name):
+        from app.models.metric import MetricDefinition
+        from app.models.statistical_test import StatisticalTest
+
+        m = MetricDefinition(project_id=1, name=name, metric_type="frequency_distribution",
+                             input_source_type="dataset_column", input_source_id=column_id,
+                             config="{}", stale=False)
+        db.add(m)
+        db.flush()
+        db.add(StatisticalTest(project_id=1, test_type="independent_t_test", config="{}",
+                               target_type="metric_definition", target_id=m.id,
+                               result_data="{}", stale=False))
+        db.flush()
+        return m.id
+
+    def _state(self, db, metric_id):
+        from app.models.metric import MetricDefinition
+        from app.models.statistical_test import StatisticalTest
+
+        db.expire_all()
+        test = db.query(StatisticalTest).filter(StatisticalTest.target_id == metric_id).one()
+        return db.get(MetricDefinition, metric_id).stale, test.stale
+
+    def test_a_metric_on_a_dataset_that_lost_their_row_is_marked(self, focus_group):
+        db = focus_group
+        # A second column of the same survey, with no answer from them: a row is in
+        # EVERY column's population, so it is marked too.
+        db.add(DatasetColumn(id=2, dataset_id=1, column_code="Q2", column_text="Q2",
+                             column_type="nominal", sequence_order=1, display_order=1))
+        db.flush()
+        answered = self._metric(db, 1, "Q1 frequencies")
+        unanswered = self._metric(db, 2, "Q2 frequencies")
+
+        apply_withdrawal(db, db.get(Participant, 1))
+        db.flush()
+
+        assert self._state(db, answered) == (True, True)
+        assert self._state(db, unanswered) == (True, True)
+
+    def test_a_dataset_they_were_never_in_is_left_alone(self, focus_group):
+        """The control: a guard that marked every metric in the project would pass
+        the test above."""
+        db = focus_group
+        db.add(Dataset(id=2, project_id=1, name="Staff list"))
+        db.flush()
+        db.add(DatasetColumn(id=3, dataset_id=2, column_code="S1", column_text="Grade",
+                             column_type="nominal", sequence_order=0, display_order=0))
+        db.add(DatasetRow(id=3, dataset_id=2, participant_id=2))
+        db.flush()
+        theirs = self._metric(db, 1, "Q1 frequencies")
+        elsewhere = self._metric(db, 3, "Grade frequencies")
+
+        apply_withdrawal(db, db.get(Participant, 1))
+        db.flush()
+
+        assert self._state(db, theirs) == (True, True)
+        assert self._state(db, elsewhere) == (False, False)

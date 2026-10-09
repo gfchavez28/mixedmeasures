@@ -800,10 +800,12 @@ class TestApplySelection:
         _coder(db, 2, "alice")
         resolved = _index(db, 60).by_id(code_set.id)
         cs.apply_selection(db, resolved, user_id=2, code_id=positive.id, segment_ids=[6000])
-        chosen, removed = cs.apply_selection(
+        outcome = cs.apply_selection(
             db, resolved, user_id=2, code_id=negative.id, segment_ids=[6000],
         )
-        assert chosen == negative.id and removed == 1
+        assert outcome.code_id == negative.id and outcome.removed == 1
+        # #1066 — what it WROTE rides the result, so a bulk caller can count it.
+        assert (outcome.inserted, outcome.already_held) == (1, 0)
         held = {
             r.code_id for r in db.query(CodeApplication).filter(
                 CodeApplication.segment_id == 6000, CodeApplication.user_id == 2,
@@ -832,10 +834,11 @@ class TestApplySelection:
         _coder(db, 2, "alice")
         resolved = _index(db, 62).by_id(code_set.id)
         cs.apply_selection(db, resolved, user_id=2, code_id=positive.id, segment_ids=[6200])
-        chosen, removed = cs.apply_selection(
+        outcome = cs.apply_selection(
             db, resolved, user_id=2, code_id=None, segment_ids=[6200],
         )
-        assert chosen is None and removed == 1
+        assert outcome.code_id is None and outcome.removed == 1
+        assert (outcome.inserted, outcome.already_held) == (0, 0)
         assert db.query(CodeApplication).filter(
             CodeApplication.segment_id == 6200,
         ).count() == 0
@@ -902,9 +905,9 @@ class TestApplySelection:
         assert alias.id not in resolved.member_ids  # it resolves to `positive`
 
         cs.apply_selection(db, resolved, user_id=2, code_id=alias.id, segment_ids=[6500])
-        _chosen, removed = cs.apply_selection(
+        removed = cs.apply_selection(
             db, resolved, user_id=2, code_id=negative.id, segment_ids=[6500],
-        )
+        ).removed
         assert removed == 1
         held = {
             r.code_id for r in db.query(CodeApplication).filter(
@@ -1156,9 +1159,9 @@ class TestClaimants:
         _coder(db, 2, "alice")
         _apply(db, synonym.id, 2, 8100)
         resolved = _index(db, 81).by_id(code_set.id)
-        _chosen, removed = cs.apply_selection(
+        removed = cs.apply_selection(
             db, resolved, user_id=2, code_id=negative.id, segment_ids=[8100],
-        )
+        ).removed
         assert removed == 1
         assert _held(db, 2, 8100) == {negative.id}
         effective = build_effective_code_map(db, 81)
@@ -1177,23 +1180,6 @@ class TestClaimants:
         assert "“Pos”" in warnings[0] and "“Positive”" in warnings[0]
         assert "choosing another value clears it" in warnings[0]
 
-    def test_a_member_of_one_set_claims_its_OWN_set_first(self, db_session):
-        """Reachable from the equivalence side only (the set door refuses it):
-        a member of one set grouped into a value of another claims both, and an
-        apply of it swaps in the set it was deliberately put in."""
-        db = db_session
-        stance, (positive, _n, _u) = _stance_project(db, 83)
-        tone = CodeSet(id=8301, project_id=83, label="Tone")
-        db.add(tone)
-        db.flush()
-        warm = _code(db, 8311, 83, 50, "Warm", code_set_id=tone.id)
-        _code(db, 8312, 83, 51, "Cold", code_set_id=tone.id)
-        _group(db, 8300, 83, positive, warm)
-        index = _index(db, 83)
-        assert warm.id in index.by_id(stance.id).claimants
-        assert warm.id in index.by_id(tone.id).claimants
-        assert index.set_claimed_by(warm.id).id == tone.id
-
     def test_the_claimants_ride_the_list_payload(self, db_session):
         from app.routers.code_sets import list_code_sets
 
@@ -1205,6 +1191,176 @@ class TestClaimants:
             positive.id: positive.id, negative.id: negative.id,
             neutral.id: neutral.id, synonym.id: positive.id,
         }
+
+
+class TestADoubleClaimantCountsInOneSet:
+    """#1081 (b): "Warm" is a member of "Tone" grouped into "Positive", a value of
+    "Stance" — reachable from the equivalence side only (the set's door refuses
+    it, `set_composition_warnings` reports it). It reads as "Positive" wherever
+    the effective code is read, so it counts in STANCE and as nothing in Tone.
+
+    The claimant list carried it in BOTH sets and `set_claimed_by` answered its
+    own, so pressing it cleared "Cold" in Tone (where it does not count) and left
+    Stance holding two values; pressing "Cold" removed it, which was the coder's
+    Stance choice. Executed by the audit, both ways.
+    """
+
+    def _double(self, db, pid):
+        stance, (positive, negative, neutral) = _stance_project(db, pid)
+        tone = CodeSet(id=pid * 10 + 5, project_id=pid, label="Tone")
+        db.add(tone)
+        db.flush()
+        warm = _code(db, pid * 10 + 8, pid, 50, "Warm", code_set_id=tone.id)
+        cold = _code(db, pid * 10 + 9, pid, 51, "Cold", code_set_id=tone.id)
+        _group(db, pid * 10, pid, positive, warm)
+        return stance, tone, (positive, negative, neutral), warm, cold
+
+    def test_it_claims_ONLY_the_set_it_counts_in(self, db_session):
+        db = db_session
+        stance, tone, (positive, _n, _u), warm, cold = self._double(db, 160)
+        index = _index(db, 160)
+        assert index.by_id(stance.id).claimants[warm.id] == positive.id
+        assert warm.id not in index.by_id(tone.id).claimants
+        assert index.by_id(tone.id).claimants[cold.id] == cold.id
+        assert index.set_claimed_by(warm.id).id == stance.id
+
+    def test_a_member_grouped_with_ANOTHER_MEMBER_still_counts_in_its_set(self, db_session):
+        """The positive control for the narrowing: "Cool" grouped under "Cold" —
+        both Tone members — reads as a Tone value and stays a claimant there."""
+        db = db_session
+        _stance, tone, _values, _warm, cold = self._double(db, 161)
+        cool = _code(db, 1615, 161, 52, "Cool", code_set_id=tone.id)
+        _group(db, 1611, 161, cold, cool)
+        resolved = _index(db, 161).by_id(tone.id)
+        assert resolved.claimants[cool.id] == cold.id
+        cs.apply_selection(db, resolved, user_id=1, code_id=cool.id, segment_ids=[16100])
+        assert _held(db, 1, 16100) == {cool.id}
+
+    def test_pressing_it_swaps_in_the_set_it_COUNTS_in(self, db_session):
+        db = db_session
+        stance, _tone, (positive, negative, _u), warm, cold = self._double(db, 162)
+        _coder(db, 2, "alice")
+        _apply(db, negative.id, 2, 16200)
+        _apply(db, cold.id, 2, 16200)
+        response = _seg_apply(db, 2, 16200, warm.id)
+        assert response.replaced_code_ids == [negative.id]
+        assert _held(db, 2, 16200) == {warm.id, cold.id}, "Tone's Cold is untouched"
+        effective = build_effective_code_map(db, 162)
+        applied = {effective.get(c, c) for c in _held(db, 2, 16200)}
+        assert cs.selection_for(applied, _index(db, 162).by_id(stance.id)) == positive.id
+
+    def test_pressing_a_value_of_its_OWN_set_leaves_it_standing(self, db_session):
+        db = db_session
+        _stance, _tone, _values, warm, cold = self._double(db, 163)
+        _coder(db, 2, "alice")
+        _apply(db, warm.id, 2, 16300)
+        response = _seg_apply(db, 2, 16300, cold.id)
+        assert response.replaced_code_ids == []
+        assert _held(db, 2, 16300) == {warm.id, cold.id}
+
+    def test_its_OWN_sets_endpoint_refuses_it_and_says_why(self, db_session):
+        """`schemas/code_set.py` has said since row 48 that such a member "cannot
+        be chosen through this set"; nothing enforced it, and writing it there
+        cleared Tone and counted in Stance. Entered at the ENDPOINT."""
+        from fastapi import HTTPException
+        from app.routers.coding import set_segment_code_set_selection
+        from app.schemas.code_set import CodeSetSelectionRequest
+
+        db = db_session
+        _stance, tone, _values, warm, cold = self._double(db, 164)
+        _apply(db, cold.id, 1, 16400)
+        with pytest.raises(HTTPException) as exc:
+            set_segment_code_set_selection(
+                segment_id=16400, set_id=tone.id,
+                data=CodeSetSelectionRequest(code_id=warm.id), user=db.get(User, 1), db=db,
+            )
+        assert exc.value.status_code == 400
+        assert "“Warm”" in exc.value.detail and "“Tone”" in exc.value.detail
+        assert _held(db, 1, 16400) == {cold.id}, "a refusal writes nothing"
+
+    def test_the_list_payload_no_longer_offers_it_to_its_own_set(self, db_session):
+        from app.routers.code_sets import list_code_sets
+
+        db = db_session
+        stance, tone, (positive, _n, _u), warm, _cold = self._double(db, 165)
+        listed = {s.id: s for s in list_code_sets(project_id=165, user=db.get(User, 1), db=db).sets}
+        assert warm.id not in {c.code_id for c in listed[tone.id].claimants}
+        assert {c.code_id: c.value_id for c in listed[stance.id].claimants}[warm.id] == positive.id
+
+
+def _merge(db, pid, source_id, target_id, uid=1):
+    import asyncio
+    from app.routers.codes import merge_codes
+
+    return asyncio.run(merge_codes(
+        pid, source_id, target_id, delete_source=False, user=db.get(User, uid), db=db,
+    ))
+
+
+class TestACodeMergeSaysWhatItContradicted:
+    """#1081 (a): a code merge re-points one code's applications onto another and
+    is the one coding write that does NOT go through the swap. A coder holding
+    "Upbeat" (in no set) and "Negative" ends holding "Positive" AND "Negative"
+    once "Upbeat" is merged into "Positive" — a contradiction the set's α counts
+    and drops, made silently (executed by the audit: `selection_for` = −2, the
+    response says nothing, and a merge has no undo). Counted and said, never
+    resolved: which value the coder meant is theirs to choose."""
+
+    def test_the_contradiction_it_MAKES_is_counted_and_named(self, db_session):
+        db = db_session
+        _stance, (positive, negative, _u) = _stance_project(db, 166)
+        upbeat = _code(db, 1669, 166, 40, "Upbeat")   # in no set
+        _coder(db, 2, "alice")
+        _apply(db, upbeat.id, 2, 16600)
+        _apply(db, negative.id, 2, 16600)
+        _apply(db, upbeat.id, 2, 16601)                # no other value here: no contradiction
+        result = _merge(db, 166, upbeat.id, positive.id)
+        assert (result.set_contradictions, result.contradiction_set_label) == (1, "Stance")
+        assert _held(db, 2, 16600) == {positive.id, negative.id}, "said, not resolved"
+
+    def test_a_merge_into_a_code_in_NO_set_reports_nothing(self, db_session):
+        """And costs no query — the target counts in no set."""
+        db = db_session
+        _stance_project(db, 167)
+        upbeat = _code(db, 1678, 167, 40, "Upbeat")
+        cheerful = _code(db, 1679, 167, 41, "Cheerful")
+        _apply(db, upbeat.id, 1, 16700)
+        result = _merge(db, 167, upbeat.id, cheerful.id)
+        assert (result.set_contradictions, result.contradiction_set_label) == (0, None)
+
+    def test_a_COLLEAGUE_holding_the_other_value_is_not_a_contradiction(self, db_session):
+        """A contradiction is ONE coder holding two values; two coders differing is
+        a disagreement, which is what the set's α exists to measure.
+
+        ⚠️ The colleague ALSO moves a coding elsewhere (16801), so they are among
+        the coders the count asks about: a count keyed on the passage alone would
+        read their Negative on 16800 as Alice's contradiction."""
+        db = db_session
+        _stance, (positive, negative, _u) = _stance_project(db, 168)
+        upbeat = _code(db, 1689, 168, 40, "Upbeat")
+        _coder(db, 2, "alice")
+        _apply(db, upbeat.id, 2, 16800)
+        _apply(db, negative.id, 1, 16800)
+        _apply(db, upbeat.id, 1, 16801)
+        assert _merge(db, 168, upbeat.id, positive.id).set_contradictions == 0
+
+    def test_a_SYNONYM_of_the_target_is_its_own_value_not_another(self, db_session):
+        """"Pos" grouped into "Positive" is the same choice — holding it beside a
+        merged-in "Positive" is no contradiction."""
+        db = db_session
+        _stance, (positive, _n, _u) = _stance_project(db, 169)
+        upbeat = _code(db, 1698, 169, 40, "Upbeat")
+        pos = _code(db, 1699, 169, 41, "Pos")
+        _group(db, 1690, 169, positive, pos)
+        _apply(db, upbeat.id, 1, 16900)
+        _apply(db, pos.id, 1, 16900)
+        assert _merge(db, 169, upbeat.id, positive.id).set_contradictions == 0
+
+    def test_the_count_reaches_the_wire(self, db_session):
+        """#855's lesson for the merge: a field the service fills and the schema
+        does not declare is dropped with no error."""
+        from app.schemas.code import MergeCodesResponse
+        assert {"set_contradictions", "contradiction_set_label"} <= set(MergeCodesResponse.model_fields)
 
 
 # ── 6c. #1028(a) — EVERY apply door is exclusive, not only the set's own ──────
@@ -1562,6 +1718,50 @@ class TestPortability:
             "a merge must blank `code_sets`, or a colleague's codebook STRUCTURE "
             "is imported as well as their coding"
         )
+
+    @pytest.mark.parametrize("action", ["new", "link"])
+    def test_a_DIVERGENT_set_member_arrives_in_NO_set_through_a_merge(self, db_session, tmp_path, action):
+        """#1039 (j): the merge's `"code_set_id": None` on a divergent code's insert
+        was pinned by the source scan above ALONE. Both reconcile actions that
+        insert a code take it.
+
+        ⚠️ **The fixture makes the file's set id COLLIDE with a set in the
+        target** — the same project, exported and merged back — because without
+        the override `_build_entity` copies the raw id, and a colliding one is a
+        SILENT wrong membership. A dangling id would only be an IntegrityError,
+        which any test notices; this is the case that hides."""
+        from app.services.project_portability import import_project
+        from tests.test_trackj_j3_roundtrip import _export_to_file, _seed_coded
+
+        db = db_session
+        p, _conv, seg = _seed_coded(db, f"Sets {action}")
+        local_set = CodeSet(project_id=p.id, label="Stance")
+        db.add(local_set)
+        db.flush()
+        twin = Code(project_id=p.id, numeric_id=1, name="Positive", is_active=True,
+                    code_set_id=local_set.id)
+        diverge = Code(project_id=p.id, numeric_id=2, name="Upbeat", is_active=True,
+                       code_set_id=local_set.id)
+        db.add_all([twin, diverge])
+        db.flush()
+        db.add(CodeApplication(segment_id=seg.id, code_id=diverge.id, user_id=1, origin="human"))
+        db.flush()
+        diverge_uuid = diverge.uuid
+        f = _export_to_file(db, p.id, tmp_path / "docs", tmp_path / "sets.mmproject")
+        db.delete(diverge)   # the file's copy is now a code the target does not have
+        db.flush()
+
+        decision = {"action": action}
+        if action == "link":
+            decision["target_code_id"] = twin.id
+        import_project(
+            db, f, tmp_path / "docs", user_id=1, import_mode="merge",
+            target_project_id=p.id, code_mapping={diverge_uuid: decision},
+        )
+        db.flush()
+        arrived = db.query(Code).filter(Code.project_id == p.id, Code.name == "Upbeat").one()
+        assert arrived.code_set_id is None, "a merge imports codings, not set membership"
+        assert db.get(Code, twin.id).code_set_id == local_set.id, "the target's own set is untouched"
 
     def test_a_set_survives_a_codebook_round_trip_by_LABEL(self, db_session):
         """Keyed on the LABEL, because a codebook crosses projects and an id

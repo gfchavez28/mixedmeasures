@@ -59,9 +59,30 @@ class TestWhatARecordIs:
         "a,b\n\n1,2\n3,4\n",          # right after the header
         "a,b\n1,2\n3,4\n\n\n",        # trailing
         "a,b\r\n1,2\r\n\r\n3,4\r\n",  # CRLF
+        # #1083 (c): a line of spaces or a tab is a blank line in a wide file —
+        # between records and trailing alike. It read as a one-cell respondent.
+        "a,b\n1,2\n   \n3,4\n",
+        "a,b\n1,2\n3,4\n   \n",
+        "a,b\n1,2\n3,4\n\t\n",
+        "a,b\r\n1,2\r\n \t \r\n3,4\r\n",
     ])
     def test_a_blank_line_is_not_a_record_in_a_wide_file(self, text):
         assert _records(text) == [["1", "2"], ["3", "4"]]
+
+    def test_a_record_of_SPACES_with_its_commas_still_counts(self):
+        """The #1083 (c) rule reads a line with no delimiter; `   ,  ` is a
+        respondent whose answers are blank, the same as `,`."""
+        assert _records("a,b\n1,2\n   ,  \n") == [["1", "2"], ["   ", "  "]]
+
+    def test_a_whitespace_answer_STAYS_a_record_in_a_one_column_file(self):
+        """🔴 Deliberately NOT the wide-file rule. Narrowing a wide file to one
+        column writes a whitespace answer as a bare line, and so do the `.xlsx`/`.sav`
+        adapters — so reading it as blank would drop a real respondent when it is the
+        last one. This pins the respondent the narrowing would otherwise lose."""
+        wide = "a,b\n1,x\n   ,y\n"
+        assert _records(wide) == [["1", "x"], ["   ", "y"]]
+        narrowed = select_csv_columns(wide, [0])
+        assert _records(narrowed) == [["1"], ["   "]]
 
     def test_a_record_with_every_answer_empty_still_counts(self):
         """``,`` is a respondent who answered nothing — distinct from a blank line."""
@@ -95,6 +116,8 @@ FILES_WITH_BLANK_LINES = [
     "a,b\n\n1,2\n,\n3,4\n",
     "q\nyes\n\nno\n\n",
     "q\n\nyes\n",
+    "a,b\n1,2\n   \n3,4\n\t\n",     # #1083 (c)
+    "q\nyes\n  \nno\n",             # one column: the spaces are an answer
 ]
 
 
@@ -367,3 +390,124 @@ class TestTheAppendReadsTheSameWay:
             ))
         assert exc.value.status_code == 400
         assert exc.value.detail == "This file has no data rows."
+
+
+# ── #1083: a file the reader refuses says where and why ──────────────────────
+
+
+# An unclosed quote on line 3 swallows every line after it — the realistic shape, and
+# the one where the line the record STARTS on (3) and the line the reader has reached
+# when the value passes the limit (~26,000) differ.
+LONG_QUOTE = 'pid,comment\nP1,fine\nP2,"oops\n' + "P3,x\n" * 30_000
+MAC = "pid,comment\rP1,fine\rP2,ok\r"
+
+
+class TestTheReaderSaysWhereAndWhy:
+    def test_an_unclosed_quote_names_the_line_its_record_STARTS_on(self):
+        from app.services.dataset_import import CsvReadError
+
+        with pytest.raises(CsvReadError) as exc:
+            _records(LONG_QUOTE)
+        assert str(exc.value).startswith("Line 3 holds a value longer than 131,072 characters")
+        assert "quotation mark" in str(exc.value)
+
+    def test_the_line_follows_a_multi_line_answer(self):
+        from app.services.dataset_import import CsvReadError
+
+        text = 'pid,comment\nP1,"two\nlines"\nP2,"' + "x" * 140_000 + "\n"
+        with pytest.raises(CsvReadError, match=r"^Line 4 "):
+            _records(text)
+
+    def test_old_MAC_line_endings_fail_at_the_header_and_say_so(self):
+        from app.services.dataset_import import CsvReadError
+
+        with pytest.raises(CsvReadError) as exc:
+            CsvRecords(MAC)
+        assert str(exc.value).startswith("Line 1 (the header) has a line break")
+        assert "old Mac line endings" in str(exc.value)
+
+    def test_it_is_still_a_csv_Error_AND_a_ValueError(self):
+        """So every arm that caught either before still catches it — none of them
+        can turn it into a 500."""
+        import csv as _csv
+
+        from app.services.dataset_import import CsvReadError
+
+        assert issubclass(CsvReadError, _csv.Error)
+        assert issubclass(CsvReadError, ValueError)
+
+
+class TestEveryDoorSaysTheSentence:
+    """🔴 #1083 (a): with a column SELECTION the narrowing ran before either
+    endpoint's own `try`, and only `ColumnSelectionError` was caught there — so the
+    file above answered 500 on the narrowed path and 400 on the other."""
+
+    @pytest.mark.parametrize("selection", [None, "[0, 1]"])
+    def test_the_preview_with_and_without_a_selection(self, project, selection):
+        from app.routers.dataset import preview_dataset
+
+        with pytest.raises(HTTPException) as exc:
+            _run(preview_dataset(
+                project_id=983, file=_upload(LONG_QUOTE), encoding="utf-8",
+                sheet_name=None, column_indices=selection, user=_user(project), db=project,
+            ))
+        assert exc.value.status_code == 400
+        assert exc.value.detail.startswith("Line 3 holds a value longer")
+
+    def test_the_import_with_a_selection(self, project):
+        from app.routers.dataset import import_dataset
+
+        config = {
+            "name": "narrowed", "source_column_indices": [0, 1],
+            "column_configs": [
+                {"column_index": 0, "column_type": "identifier", "column_text": "pid"},
+                {"column_index": 1, "column_type": "open_text", "column_text": "comment"},
+            ],
+        }
+        with pytest.raises(HTTPException) as exc:
+            _run(import_dataset(
+                project_id=983, file=_upload(MAC), import_config=json.dumps(config),
+                encoding="utf-8", user=_user(project), db=project,
+            ))
+        assert exc.value.status_code == 400
+        assert "old Mac line endings" in exc.value.detail
+
+    def test_the_import_without_one(self, project):
+        from app.routers.dataset import import_dataset
+
+        config = {
+            "name": "whole",
+            "column_configs": [
+                {"column_index": 0, "column_type": "identifier", "column_text": "pid"},
+                {"column_index": 1, "column_type": "open_text", "column_text": "comment"},
+            ],
+        }
+        with pytest.raises(HTTPException) as exc:
+            _run(import_dataset(
+                project_id=983, file=_upload(LONG_QUOTE), import_config=json.dumps(config),
+                encoding="utf-8", user=_user(project), db=project,
+            ))
+        assert exc.value.status_code == 400
+        assert exc.value.detail.startswith("Line 3 holds a value longer")
+
+    def test_the_column_describer(self, project):
+        from app.routers.dataset import describe_dataset_columns
+
+        with pytest.raises(HTTPException) as exc:
+            _run(describe_dataset_columns(
+                project_id=983, file=_upload(MAC), encoding="utf-8", sheet_name=None,
+                user=_user(project), db=project,
+            ))
+        assert exc.value.status_code == 400
+        assert "old Mac line endings" in exc.value.detail
+
+    def test_the_append_steps(self, project, dataset):
+        from app.routers.dataset import append_preview
+
+        with pytest.raises(HTTPException) as exc:
+            _run(append_preview(
+                project_id=983, dataset_id=dataset.id, file=_upload(LONG_QUOTE),
+                encoding="utf-8", sheet_name=None, user=_user(project), db=project,
+            ))
+        assert exc.value.status_code == 400
+        assert exc.value.detail.startswith("Line 3 holds a value longer")

@@ -16,6 +16,34 @@ from ..models.statistical_test import StatisticalTest
 from ..models.analysis_domain import AnalysisDomainMember
 
 
+def mark_metric_tests_stale(db: Session, metric_ids) -> int:
+    """Mark the statistical tests that target these metrics stale (#1039 a).
+
+    🔴 **A metric whose numbers may have moved takes its tests with it.** A t-test
+    or ANOVA saved against a metric was computed from what the metric described,
+    so when the metric is out of date the test is too. `mark_metrics_stale` below
+    has always cascaded; three doors did not — an edit to a metric's definition,
+    the `.mmproject` import, and every recompute but the single-metric button — so
+    a test could keep a result computed from data or settings that had changed,
+    with no amber marker. The ONE place the cascade is written, so a door that
+    stales a metric reaches the tests by calling it.
+
+    Returns how many tests it marked.
+    """
+    ids = sorted({int(i) for i in metric_ids})
+    if not ids:
+        return 0
+    return (
+        db.query(StatisticalTest)
+        .filter(
+            StatisticalTest.target_type == "metric_definition",
+            StatisticalTest.target_id.in_(ids),
+            StatisticalTest.stale == False,  # noqa: E712
+        )
+        .update({"stale": True}, synchronize_session="fetch")
+    )
+
+
 def mark_metrics_stale(
     db: Session,
     project_id: int,

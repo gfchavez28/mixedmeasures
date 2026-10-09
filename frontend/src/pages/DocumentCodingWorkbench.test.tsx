@@ -327,8 +327,10 @@ describe('#964 — an unanswered coder roster keeps colleagues hidden', () => {
 /** #1028 — the server swaps a code-set value and says what it replaced; undo puts it back. */
 describe('an apply that REPLACED a value, and its undo (#1028)', () => {
   it('Ctrl+Z re-applies the replaced value WITH its rating — a ZERO — and removes nothing', async () => {
+    // The server swaps BOTH ways while the two are values of one set: the undo's
+    // re-apply of 7 reports 8 replaced (#1081 c reads that report).
     applyCode.mockImplementation(async (_seg: number, code: number) =>
-      ({ applied: true, replaced_code_ids: code === 8 ? [7] : [] }))
+      ({ applied: true, replaced_code_ids: code === 8 ? [7] : code === 7 ? [8] : [] }))
     renderWorkbench()
     const rows = await screen.findAllByRole('option')
     fireEvent.mouseDown(rows[1], { button: 0 })  // segment 52: Engagement rated 0
@@ -345,7 +347,7 @@ describe('an apply that REPLACED a value, and its undo (#1028)', () => {
     // It was a private copy of the pair: no rating strip, and an undo that
     // could only remove.
     applyCode.mockImplementation(async (_seg: number, code: number) =>
-      ({ applied: true, replaced_code_ids: code === 7 ? [8] : [] }))
+      ({ applied: true, replaced_code_ids: code === 7 ? [8] : code === 8 ? [7] : [] }))
     renderWorkbench()
     const rows = await screen.findAllByRole('option')
     fireEvent.contextMenu(rows[0])                                  // segment 51

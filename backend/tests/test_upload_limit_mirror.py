@@ -15,9 +15,12 @@ from pathlib import Path
 from app.routers.helpers import MAX_UPLOAD_SIZE
 
 _TS = Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib" / "upload-limits.ts"
-def _client_limit(name: str = "MAX_IMPORT_FILE_BYTES") -> int:
-    match = re.search(rf"export const {name} = ([0-9 *]+)\n", _TS.read_text(encoding="utf-8"))
-    assert match, f"{name} not found as a product of integers in {_TS}"
+_BACKUP_TS = Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib" / "api" / "backup.ts"
+
+
+def _client_limit(name: str = "MAX_IMPORT_FILE_BYTES", ts: Path = _TS) -> int:
+    match = re.search(rf"export const {name} = ([0-9 *]+)\n", ts.read_text(encoding="utf-8"))
+    assert match, f"{name} not found as a product of integers in {ts}"
     product = 1
     for factor in match.group(1).split("*"):
         product *= int(factor.strip())
@@ -41,3 +44,14 @@ def test_the_client_project_file_limit_is_the_servers():
 
     assert _client_limit("MAX_PROJECT_FILE_BYTES") == PROJECT_MAX
     assert PROJECT_MAX != MAX_UPLOAD_SIZE  # the two limits are distinct on purpose
+
+
+def test_the_client_backup_upload_limit_is_the_servers():
+    # #1039 (j): Settings refuses an over-limit .mmbackup at SELECTION and names
+    # the limit on the page, so its number must be the restore endpoint's. Both
+    # are 500 MiB today; nothing held them together.
+    from app.routers.backup import MAX_UPLOAD_SIZE as BACKUP_MAX
+
+    client = _client_limit("MAX_BACKUP_UPLOAD_BYTES", _BACKUP_TS)
+    assert client > 1024 * 1024  # the parse read a real number
+    assert client == BACKUP_MAX

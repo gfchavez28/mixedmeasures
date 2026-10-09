@@ -145,3 +145,45 @@ class TestTheMappingIsChecked:
         detail = _refused(db, ds, [{"csv_column_index": 0, "column_id": c1.id},
                                    {"csv_column_index": 1, "column_id": c2.id}])
         assert detail.startswith(f"“Q2” is a {source} column.")
+
+
+class TestAnIdPastSQLitesIntegerIsRefused:
+    """#1083 (d): `10**30` passed `StrictInt` and reached SQLite as an
+    `OverflowError` — a 500 for a request that should be refused, and the same for a
+    huge NEGATIVE id. Script-only: the page cannot send it."""
+
+    @pytest.mark.parametrize("column_id", [10**30, -(10**30)])
+    def test_in_the_mapping(self, db, column_id):
+        ds = _dataset(db)
+        detail = _refused(db, ds, [{"csv_column_index": 0, "column_id": column_id}])
+        assert detail.startswith("Invalid import configuration: column_mapping.0.column_id")
+
+    def test_a_huge_FILE_index_needs_no_bound_of_its_own(self, db):
+        """It never reaches SQLite: the endpoint refuses an index past the file's
+        width by name, which is the sentence a script sending one should read."""
+        ds = _dataset(db)
+        c1, _ = _cols(db, ds)
+        detail = _refused(db, ds, [{"csv_column_index": 10**30, "column_id": c1.id}])
+        assert "file column" in detail and "Invalid import configuration" not in detail
+
+    def test_the_participant_link_column_too(self, db):
+        """A sibling of the filed field, in the same request."""
+        from app.routers.dataset import append_import
+
+        ds = _dataset(db)
+        c1, c2 = _cols(db, ds)
+        with pytest.raises(HTTPException) as exc:
+            _run(append_import(
+                project_id=1020, dataset_id=ds.id,
+                file=UploadFile(filename="more.csv", file=io.BytesIO(FILE.encode())),
+                import_config=json.dumps({
+                    "column_mapping": [{"csv_column_index": 0, "column_id": c1.id},
+                                       {"csv_column_index": 1, "column_id": c2.id}],
+                    "skip_duplicates": False,
+                    "participant_link_column_id": 10**30,
+                }),
+                encoding="utf-8", user=db.query(User).filter(User.id == 1).one(), db=db,
+            ))
+        assert exc.value.status_code == 400
+        assert "participant_link_column_id" in exc.value.detail
+        assert db.query(DatasetRow).filter(DatasetRow.dataset_id == ds.id).count() == 0

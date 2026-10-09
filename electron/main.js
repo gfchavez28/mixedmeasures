@@ -24,8 +24,14 @@ const {
 } = require('./backend-process')
 const { resolveKey, saveRecoveryKeyToFile } = require('./key-manager')
 const { clampZoomFactor } = require('./zoom')
-const { createFatalLineCollector, crashDialogText, showCrashDialog } = require('./fatal-error')
+const {
+  createFatalLineCollector,
+  crashDialogText,
+  showCrashDialog,
+  backendSpawnFailureMessage,
+} = require('./fatal-error')
 const { attachRendererRecovery } = require('./renderer-recovery')
+const { runAsPrimaryInstance } = require('./single-instance')
 const {
   canAutoUpdate,
   readAutoCheck,
@@ -47,11 +53,9 @@ const UPDATER_CONFIG_NAME = 'mm-updater.json'
 // Pre-1.0 only: changing this after release would strand users' existing data.
 app.setName('Mixed Measures')
 
-// Two app instances → two uvicorn writers on one SQLite file → corruption.
-// Hold a single-instance lock; a second launch just focuses the first window.
-if (!app.requestSingleInstanceLock()) {
-  app.quit()
-}
+// Two app instances → two uvicorn writers on one SQLite file → corruption. The lock
+// is claimed at the END of this file, by `runAsPrimaryInstance`, and nothing the app
+// does is registered outside `registerPrimaryInstance` (#1141).
 
 // How long 'exit' waits for stdio to drain before reporting without it (#716).
 // Short enough to be invisible next to a crash dialog, long enough that the fatal
@@ -181,6 +185,24 @@ function startBackend(port, encryptionKeyHex, loopbackToken) {
     if (!isQuitting) setTimeout(() => report(code, signal), STDIO_DRAIN_GRACE_MS)
   })
   child.on('close', (code, signal) => report(code, signal))
+  // #1143 — an engine that cannot be STARTED (missing — an antivirus quarantine, a
+  // damaged install — or not permitted to run) emits 'error' and NEITHER 'exit' nor
+  // 'close'. Unhandled, that was Electron's raw "A JavaScript error occurred" box,
+  // then waitForHealth's full 60 s, then a dialog naming the symptom. Now one crash
+  // dialog at once, naming the engine and what to check.
+  child.on('error', (err) => {
+    // A child that ran has a pid; its 'error' is a failed kill or message, not a
+    // failed start, and the 'exit'/'close' path above already speaks for it.
+    if (child.pid !== undefined) {
+      console.error(`backend: ${(err && err.message) || err}`)
+      return
+    }
+    backendExited = true
+    // It never ran, so there is nothing to stop — and `stopBackend` on a child with
+    // no pid would run `taskkill /pid undefined` on the way out.
+    if (backend === child) backend = null
+    reportCrash({ error: new Error(backendSpawnFailureMessage(err, exe)) })
+  })
   return child
 }
 
@@ -413,6 +435,18 @@ async function startup() {
       }
       callback({ requestHeaders: details.requestHeaders })
     })
+    // #1051 — every export's Save dialog was titled "blob:http://127.0.0.1:<port>/<uuid>",
+    // naming the loopback port: Electron titles a download's dialog with its URL when
+    // none is set (`electron_download_manager_delegate.cc`, 44-x-y: `if
+    // (settings.title.empty()) settings.title = item->GetURL().spec()`). Only the TITLE
+    // is set — an empty `defaultPath` keeps Chromium's own, the suggested name in this
+    // run's last-used folder or else Downloads (the same file, two lines down), which
+    // pinning a folder would lose. A macOS save dialog is a sheet with no title bar.
+    // Scoped to this app's own origin, as the loopback token above is.
+    session.defaultSession.on('will-download', (_event, item) => {
+      if (`${item.getInitiatorOrigin()}/` !== appOrigin) return
+      item.setSaveDialogOptions({ title: `Save “${item.getFilename()}”` })
+    })
     const encryptionKeyHex = resolveEncryptionKey()
     backend = startBackend(port, encryptionKeyHex, loopbackToken)
     createSplash()
@@ -428,33 +462,51 @@ async function startup() {
   }
 }
 
-app.on('second-instance', () => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore()
-    mainWindow.focus()
-  }
-})
-
-app.on('before-quit', () => {
-  isQuitting = true
-  // Also reached via autoUpdater.quitAndInstall() and the autoInstallOnAppQuit
-  // path, so the backend always gets its stop signal before an update is applied.
-  if (updater) updater.stop()
-  // #554a: spawnSync — the Windows kill must COMPLETE before the app exe exits,
-  // or the auto-updater's already-running NSIS installer can start overwriting the
-  // install dir while mm-backend.exe still holds locks in it. before-quit is our
-  // last synchronous moment.
-  stopBackend(backend, {
-    platform: process.platform,
-    spawnSync,
-    log: (msg) => console.log(msg),
+/**
+ * Everything this process does as THE running app (#1141).
+ *
+ * 🔴 Runs only in the instance holding the single-instance lock. Every app listener
+ * and `whenReady` belongs in here: one registered at module scope runs in a refused
+ * second launch too — which is how a second launch used to start a second backend on
+ * the same database that nothing ever stopped. `single-instance.test.js` fails the
+ * suite for an `app.on(...)` / `app.whenReady()` outside this function.
+ */
+function registerPrimaryInstance() {
+  app.on('second-instance', () => {
+    // During startup there is only the splash; focusing it says the app is already
+    // on its way, where focusing nothing looked like the launch had been ignored.
+    const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : splashWindow
+    if (win && !win.isDestroyed()) {
+      if (win.isMinimized()) win.restore()
+      win.focus()
+    }
   })
-})
 
-// Single-window desktop app: closing the window quits (incl. macOS) — except while the
-// crash dialog is up, which quits by itself once the researcher has chosen Quit.
-app.on('window-all-closed', () => {
-  if (!crashDialogShowing) app.quit()
-})
+  app.on('before-quit', () => {
+    isQuitting = true
+    // Also reached via autoUpdater.quitAndInstall() and the autoInstallOnAppQuit
+    // path, so the backend always gets its stop signal before an update is applied.
+    if (updater) updater.stop()
+    // #554a: spawnSync — the Windows kill must COMPLETE before the app exe exits,
+    // or the auto-updater's already-running NSIS installer can start overwriting the
+    // install dir while mm-backend.exe still holds locks in it. before-quit is our
+    // last synchronous moment.
+    stopBackend(backend, {
+      platform: process.platform,
+      spawnSync,
+      log: (msg) => console.log(msg),
+    })
+  })
 
-app.whenReady().then(startup)
+  // Single-window desktop app: closing the window quits (incl. macOS) — except while the
+  // crash dialog is up, which quits by itself once the researcher has chosen Quit.
+  app.on('window-all-closed', () => {
+    if (!crashDialogShowing) app.quit()
+  })
+
+  app.whenReady().then(startup)
+}
+
+// A second launch is refused here and registers NOTHING — the first instance's
+// 'second-instance' handler focuses its window instead.
+runAsPrimaryInstance({ app, register: registerPrimaryInstance })

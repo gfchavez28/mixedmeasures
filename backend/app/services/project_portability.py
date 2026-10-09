@@ -87,7 +87,9 @@ from ..models import (
     StatisticalTest,
 )
 from ..models.user import User
-from ..auth import CODER_TYPE_MACHINE, normalize_coder_type, unique_username
+from ..auth import (
+    CODER_TYPE_CONSENSUS, CODER_TYPE_MACHINE, normalize_coder_type, unique_username,
+)
 from . import machine_coder
 from . import material_config
 from ..config import get_backup_dir
@@ -242,8 +244,10 @@ peak did not move (1,846 → 1,907 MB); the same import with `materialize_consen
 switched off peaks at **445 MB**. That rebuild gathered every vote of the project into nested
 dicts and held one pending ORM row per consensus decision until one final flush. ✅ **Since
 2026-09-23 it gathers only targets with ≥2 eligible voters and flushes every 5,000 rows: BES
-import 1,907 → 675 MB, byte-identical layer.** What remains above 445 is that filtered gather
-read whole (`.all()`); streaming it is the separable last step of #958.
+import 1,907 → 675 MB, byte-identical layer.** ✅ **And since 2026-09-24 that gather STREAMS one
+ballot per target (#958's last step): the BES import peaks at 445.0 MB, exactly the consensus-off
+floor.** #958 stays open on that floor, which is unattributed (this paragraph called the
+streaming "the separable last step" until #1039 c).
 **4,000,000 is still set just above the largest round trip actually verified** — do not raise
 it on the strength of the time numbers, which are not what binds, nor on the format fix,
 which moved the ceiling without removing it.
@@ -994,12 +998,12 @@ def export_project(
 
     # Segment has no project_id — it is gathered through its parents, so EVERY
     # Segment parent needs a branch here. A missing one is silent data loss that
-    # cascades: segment_ids below is the root of the code_applications, coders,
-    # and (via segment_id) excerpt/note dependency chains.
-    # #958 — the parent predicate is built ONCE and reused three ways: the streamed
-    # serialization below, the `segment_ids` list the note/excerpt chains still need,
-    # and the code-application subquery. Three copies of an `or_` over three parents is
-    # how a fourth parent gets added to two of them (the §6 rule, from the other side).
+    # cascades: the predicate below is the root of the code_applications and coders
+    # chains (notes are gathered by their own parents, excerpts by project).
+    # #958 — the parent predicate is built ONCE and reused: the streamed
+    # serialization below and the code-application subquery. Copies of an `or_` over
+    # three parents is how a fourth parent gets added to one of them and not the
+    # other (the §6 rule, from the other side).
     _seg_parent_clauses = []
     if conv_ids:
         _seg_parent_clauses.append(Segment.conversation_id.in_(conv_ids))
@@ -1017,13 +1021,10 @@ def export_project(
     segments = _StreamedEntity(
         Segment, cols[Segment], segment_parent_clause, Segment.id,
     )
-    # ⚠️ The ID LIST is still materialised, deliberately: the note and excerpt chains
-    # below filter on it, and those are separate queries this change does not touch.
-    # It is ints only — the text is what streaming removed.
-    segment_ids = (
-        [r[0] for r in db.query(Segment.id).filter(segment_parent_clause).all()]
-        if segment_parent_clause is not None else []
-    )
+    # 🔴 #1039 (c): a `segment_ids` LIST was built here — every segment id of the
+    # project, 1.2 million on the BES corpus — "for the note and excerpt chains", and
+    # nothing read it: notes are gathered by their parents and excerpts by project.
+    # Removed rather than kept as a comment's promise.
 
     code_categories = db.query(CodeCategory).filter(
         CodeCategory.project_id == project_id
@@ -1099,7 +1100,7 @@ def export_project(
     # the coder-roster derivation below.
     #
     # 🔴 **The segment arm was a LATENT #842 site.** It read
-    # `CodeApplication.segment_id.in_(segment_ids)` — one bind parameter per segment,
+    # `CodeApplication.segment_id.in_(<every segment id>)` — one bind parameter per segment,
     # against SQLite's 250,000 ceiling. The dataset arm was converted to a join-back in
     # #842; the segment arm was not, because no corpus here has that many segments.
     # `test_portability_scale_bound.py` could not see it either: its scan is scoped to
@@ -1259,7 +1260,7 @@ def export_project(
     # stale, so a score computed by SOME OTHER BUILD — before #767's Cronbach fix, before
     # #689's undefined-statistics rule, before whatever lands next — arrived reading as this
     # build's current answer. Carrying the rows was what made that silence possible; the
-    # import marks the metrics stale instead (`_mark_imported_metrics_stale`), which is also
+    # import marks the metrics stale instead (its §x.6 pass), which is also
     # what makes the existing recovery affordances work — `create_scale_score_metric` only
     # retries a compute on a metric that says it is stale.
     #
@@ -3037,8 +3038,10 @@ def import_project(
     counts — overwrite takes a snapshot too and has no merge report to carry it. Absent
     key = no snapshot was taken (import_mode "new" / "copy_for_coding").
     `import_report` (every mode): a THIRD caller-passed dict, populated in-place with
-    `{"metrics_marked_stale": int}` — what §x.6 declared out of date because its per-record
-    scores were not carried (#958 §6). Separate from `report` for the same reason
+    `{"metrics_marked_stale": int, "tests_marked_stale": int}` — what §x.6 declared out of
+    date because its per-record scores were not carried (#958 §6), and the saved tests §y
+    marked because their results are another build's claim (#1039 a). Separate from
+    `report` for the same reason
     `safety_report` is: `report` is merge-only and its keys are pinned, field for field,
     against `MergeReport` by `test_trackj_j3_roundtrip.py`, while this applies to the three
     modes that import metrics at all and to no merge.
@@ -3278,6 +3281,23 @@ def import_project(
         # confirm screen shows is the name the import writes.
         file_coder_names = _file_coder_names(data.get("coders", []))
         for item in data.get("coders", []):
+            # 🔴 #1039 (d): a coder of the CONSENSUS kind is refused, and the whole
+            # file with it. No export writes one — the consensus layer's rows are
+            # filtered out (`CONSENSUS_ORIGIN`), so its owner never reaches
+            # `coders` — and `normalize_coder_type` accepts the system kinds, so a
+            # hand-edited file could otherwise mint one on an install that has none,
+            # which `get_or_create_consensus_user` would then adopt as THE layer, or
+            # name-match the real one and write the file's codings into it.
+            # ⚠️ ONLY consensus: an `unattributed` coder is exported legitimately
+            # (every owner of a non-consensus application travels), and mapping this
+            # one to a person instead would make a forged layer a voter.
+            if item.get("coder_type") == CODER_TYPE_CONSENSUS:
+                raise ValueError(
+                    f"This file lists “{item.get('username') or 'a coder'}” as the "
+                    "consensus layer. No export includes that layer — the app rebuilds "
+                    "it from the coders' own codings — so the file has been edited by "
+                    "hand. Export the project again, or remove that coder from the file."
+                )
             oid = item["_original_id"]
             name = item.get("username")
             reserved = file_coder_names - {name}
@@ -3305,6 +3325,12 @@ def import_project(
                     # coded in, as archiving them did (Batch 6: all three unarchive
                     # doors — this, the endpoint and the coding import — mark now).
                     mark_participant_scores_stale(db)
+                    # 🔴 #1074 — and the consensus of every OTHER project they
+                    # coded in: the post-pass below rebuilds only THIS project's
+                    # layer, so this one is left out of the marking (a marker here
+                    # would make the fresh rebuild read as stale until the sweep).
+                    from .consensus_staleness import mark_consensus_stale_for_coder
+                    mark_consensus_stale_for_coder(db, target_coder.id, except_project_id=pid)
                 if report is not None:
                     report["coders_matched"] += 1
             elif decision and decision.get("action") == "create":
@@ -4497,7 +4523,7 @@ def import_project(
         # exchange file — still holds the full inline list. Importing those while a fresh
         # export carries none would make the same project behave differently depending on
         # which build produced its file, and would land numbers of unknown provenance that
-        # `_mark_imported_metrics_stale` then has to declare stale anyway.
+        # §x.6 below then has to declare stale anyway.
         #
         # ⚠️ **Nothing is lost that the archive does not already carry.** A `RowScore` is
         # `compute_metric`'s output over the dataset values and metric definitions in this
@@ -4652,7 +4678,22 @@ def import_project(
         if import_report is not None:
             import_report["metrics_marked_stale"] = metrics_marked_stale
 
-        # ── y. StatisticalTests ────────────────────────────────────
+        # ── y. StatisticalTests — every one arrives MARKED STALE (#1039 a) ──
+        #
+        # 🔴 **The rule §x.6 applies to metrics, reached for the tests it left out.** A
+        # test's `result_data` is a number some build computed from data that may since
+        # have changed — before #767's Cronbach fix, say — and the file's `stale: false`
+        # is that build's claim, which this import cannot check. They were copied as-is,
+        # so an imported α arrived reading as current, and the page's quick compute,
+        # which refreshes the stale METRIC before answering, never touched the test.
+        # Marking them here covers the tests no metric recompute reaches (α and
+        # split-half target a variable group, not a metric).
+        #
+        # ⚠️ `"stale": True` as an OVERRIDE, so the flag is written with the row; the
+        # count is of the ones that arrived saying they were current, which is what the
+        # import's toast reports. A merge blanks `statistical_tests` (above), so this is
+        # a no-op there, as §x.6 is.
+        tests_marked_stale = 0
         for item in data.get("statistical_tests", []):
             tt = item.get("target_type")
             tid = item.get("target_id")
@@ -4660,10 +4701,15 @@ def import_project(
                 tid = _remap_id(remap, "analysis_domains", tid)
             elif tt == "metric_definition":
                 tid = _remap_id(remap, "metric_definitions", tid)
+            if not item.get("stale"):
+                tests_marked_stale += 1
             _add(StatisticalTest, item, {
                 "project_id": pid,
                 "target_id": tid or 0,
+                "stale": True,
             })
+        if import_report is not None:
+            import_report["tests_marked_stale"] = tests_marked_stale
 
         # ── z–aa. Material Collections & Materials ─────────────────
         for item in data.get("material_collections", []):

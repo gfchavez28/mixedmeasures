@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import type { Coder, CodingImportCoderCandidate, ProjectColumnInfo } from '@/lib/api'
 import {
-  CODER_NAME_MAX_LENGTH, coderOptionLabel, draftBlocker, initialDraft,
-  matchKeyOptions, namesSharingACoder, toDecision, type CoderDraft,
+  CODER_NAME_MAX_LENGTH, coderOptionLabel, draftBlocker, initialDraft, mappingIntro,
+  matchKeyOptions, namesSharingACoder, sharedCreateConflicts, takenNameSuffix,
+  toDecision, type CoderDraft,
 } from './coding-import-mapping'
 
 const candidate = (over: Partial<CodingImportCoderCandidate> = {}): CodingImportCoderCandidate => ({
@@ -37,6 +38,30 @@ describe('initialDraft', () => {
   })
 })
 
+describe('mappingIntro (#1158)', () => {
+  it('keeps "nothing is matched" ONLY when nothing starts matched', () => {
+    expect(mappingIntro([candidate(), candidate({ name: 'B' })]))
+      .toMatch(/Nothing is matched by name on your behalf/)
+    // A same-name coder for a name with nothing to import starts at SKIP, so it is
+    // not a pre-selection either (#1064).
+    expect(mappingIntro([candidate({ local_user_id: 4, rows_to_apply: 0 })]))
+      .toMatch(/Nothing is matched by name on your behalf/)
+  })
+
+  it('says a same-name coder IS chosen when one is, and that Import confirms it', () => {
+    const one = mappingIntro([candidate({ local_user_id: 4 }), candidate({ name: 'B' })])
+    expect(one).not.toMatch(/Nothing is matched/)
+    expect(one).toMatch(/One name is the same as an existing coder’s, so that coder is chosen for it to start with/)
+    expect(one).toMatch(/pressing Import confirms it\.$/)
+  })
+
+  it('counts several', () => {
+    const two = mappingIntro([candidate({ local_user_id: 4 }), candidate({ name: 'B', local_user_id: 5 })])
+    expect(two).toMatch(/2 names are the same as existing coders’, so those coders are chosen/)
+    expect(two).toMatch(/confirms each choice\.$/)
+  })
+})
+
 describe('toDecision', () => {
   const base = initialDraft(candidate({ local_user_id: 4 }))
 
@@ -57,7 +82,7 @@ describe('toDecision', () => {
 describe('draftBlocker', () => {
   it('asks for the kind of a new coder', () => {
     expect(draftBlocker('GPT-4o', initialDraft(candidate())))
-      .toBe('Say whether “GPT-4o” is a person or a model.')
+      .toBe('Say whether “GPT-4o” is a person or a machine.')
     expect(draftBlocker('GPT-4o', { ...initialDraft(candidate()), coderType: 'ai' })).toBeNull()
   })
 
@@ -80,18 +105,76 @@ describe('draftBlocker', () => {
   })
 })
 
-describe('namesSharingACoder (#1039 i)', () => {
+describe('namesSharingACoder (#1039 i, #1082 b)', () => {
+  const d = (targetUserId: number | null, action: CoderDraft['action'] = 'match', newUsername = ''): CoderDraft =>
+    ({ ...initialDraft(candidate()), action, targetUserId, newUsername })
+
   it('pairs the names that go to ONE coder, and nothing else', () => {
-    const d = (targetUserId: number | null, action: CoderDraft['action'] = 'match'): CoderDraft =>
-      ({ ...initialDraft(candidate()), action, targetUserId })
     const shared = namesSharingACoder({
       Alice: d(1), alice: d(1), Bob: d(2), New: d(1, 'create'), Unset: d(null),
     })
     expect(shared.get('Alice')).toEqual(['alice'])
     expect(shared.get('alice')).toEqual(['Alice'])
     expect(shared.has('Bob')).toBe(false)
-    expect(shared.has('New')).toBe(false)   // a create never shares
+    // A create lands on the coder its NEW NAME makes — never on an existing coder,
+    // whatever id its draft happens to carry.
+    expect(shared.has('New')).toBe(false)
     expect(shared.has('Unset')).toBe(false)
+  })
+
+  it('🔴 two names CREATED under one new name are one coder (#1082 b)', () => {
+    const shared = namesSharingACoder({
+      'A. Smith': d(null, 'create', 'Alice Smith'),
+      asmith: d(null, 'create', ' Alice Smith '),   // trimmed, as the server does
+      Other: d(null, 'create', 'Alice smith'),       // another spelling is another name
+    })
+    expect(shared.get('A. Smith')).toEqual(['asmith'])
+    expect(shared.get('asmith')).toEqual(['A. Smith'])
+    expect(shared.has('Other')).toBe(false)
+  })
+
+  it('the FILE’s name is the new name when none is typed', () => {
+    const shared = namesSharingACoder({ Alice: d(null, 'create'), alice: d(null, 'create', 'Alice') })
+    expect(shared.get('alice')).toEqual(['Alice'])
+  })
+})
+
+describe('sharedCreateConflicts (#1082 b)', () => {
+  const create = (newUsername: string, coderType: CoderDraft['coderType'], model = ''): CoderDraft =>
+    ({ ...initialDraft(candidate()), action: 'create', newUsername, coderType, model })
+
+  it('a person and a model under one name cannot be one coder', () => {
+    expect(sharedCreateConflicts({ Alice: create('Shared', 'human'), Bot: create('Shared', 'ai') }))
+      .toEqual(['“Alice” and “Bot” are both to become a new coder called “Shared”, '
+        + 'but one is a person and the other a machine. Give them different names.'])
+  })
+
+  it('two model configurations under one name cannot either', () => {
+    const out = sharedCreateConflicts({ a: create('GPT', 'ai', 'gpt-4o'), b: create('GPT', 'ai', 'gpt-4o-mini') })
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatch(/different model configurations/)
+  })
+
+  it('agreeing ones are fine — and an unchosen kind is left to its own blocker', () => {
+    expect(sharedCreateConflicts({ a: create('GPT', 'ai', 'gpt-4o'), b: create('GPT', 'ai', 'gpt-4o') })).toEqual([])
+    expect(sharedCreateConflicts({ a: create('X', 'human'), b: create('X', null) })).toEqual([])
+    expect(sharedCreateConflicts({ a: create('X', 'human'), b: create('Y', 'ai') })).toEqual([])
+  })
+})
+
+describe('takenNameSuffix (#1082 b)', () => {
+  const roster = [
+    { id: 1, username: 'Alice', coder_type: 'human' },
+    { id: 2, username: 'Alice (2)', coder_type: 'human', archived: true },
+  ] as Coder[]
+
+  it('predicts the number the server adds, past an archived holder too', () => {
+    expect(takenNameSuffix('Alice', roster)).toBe('Alice (3)')
+  })
+
+  it('says nothing for a free name — the match is exact, as the server’s is', () => {
+    expect(takenNameSuffix('Bob', roster)).toBeNull()
+    expect(takenNameSuffix('alice', roster)).toBeNull()
   })
 })
 

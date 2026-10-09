@@ -4,7 +4,7 @@
 // participant-derived override applied at submit time).
 import { describe, expect, it } from 'vitest'
 
-import { generateParticipantName, syncAutoNames, type SpeakerMapping } from './conversation-import-utils'
+import { generateParticipantName, isOrphanedParticipant, syncAutoNames, type SpeakerMapping } from './conversation-import-utils'
 
 const speaker = (name: string, isFacilitator = false): SpeakerMapping =>
   ({ original_label: name, normalized_name: name, is_facilitator: isFacilitator }) as SpeakerMapping
@@ -62,5 +62,28 @@ describe('generateParticipantName', () => {
     expect(generateParticipantName([speaker('A'), speaker('B'), speaker('C')], [])).toBe(
       'Group (A, B, & C)',
     )
+  })
+})
+
+/**
+ * #1110 — a document's SUBJECT is not an orphan.
+ *
+ * The predicate drives the Participants page's "No linked sources" filter — the
+ * list a researcher selects from to delete people — and it counted speakers and
+ * dataset rows only, so the subject of a workplan was offered for deletion and
+ * deleting them silently cleared the document's subject. One case per link, so a
+ * clause dropped from the predicate fails by name.
+ */
+describe('isOrphanedParticipant', () => {
+  const none = { linked_speakers: [], dataset_rows: [], linked_documents: [] }
+  it('is true only when NO link of the three is present', () => {
+    expect(isOrphanedParticipant(none)).toBe(true)
+  })
+  it.each([
+    ['a speaker', { linked_speakers: [{}] }],
+    ['a dataset record', { dataset_rows: [{}] }],
+    ['a document they are the subject of', { linked_documents: [{}] }],
+  ])('%s makes them linked', (_, link) => {
+    expect(isOrphanedParticipant({ ...none, ...link })).toBe(false)
   })
 })

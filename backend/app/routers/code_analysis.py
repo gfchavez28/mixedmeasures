@@ -667,18 +667,20 @@ async def recompute_consensus(
     this syncs the STORED layer for the other surfaces + clears the stale badge."""
     _get_project_or_404(db, project_id, user.id)
     recomputed = 0
-    failed: frozenset[int] = frozenset()
+    failed: tuple[int, ...] = ()
     try:
         for _ in range(20):  # cap iterations (≤10k targets/call) — runaway backstop
             # `drain_stale_consensus` commits and isolates a target that raises
             # (#1017): before it, one bad target made this button a 500 and left
             # every other marker of the project undrained. A failing marker stays
-            # queued and is counted in `remaining`.
+            # queued and is counted in `remaining`. It retries at most a batch of
+            # known failures per call (#1039 g), so this loop's worst case is
+            # bounded too: it used to retry every failure on every iteration.
             result = drain_stale_consensus(
                 db, project_id=project_id, limit=500, known_failed=failed,
             )
             recomputed += result.recomputed
-            new_failures = result.failed_marker_ids - failed
+            new_failures = set(result.failed_marker_ids) - set(failed)
             failed = result.failed_marker_ids
             if result.recomputed + len(new_failures) < 500:
                 break

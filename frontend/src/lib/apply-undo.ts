@@ -31,9 +31,11 @@ import type { SelectionDetail } from '@/lib/code-sets'
  * the coder is told which half did not land (#1023's rule for the strip).
  *
  * ⚠️ **Residual, stated: a passage that held TWO values of one set gets one
- * back.** No apply door creates a contradiction any more, which is the point
- * (four other routes still can — a code merge, a member grouped into another
- * set's value, an undo after the set changed, two applies at once: #1081).
+ * back.** No apply door creates a contradiction any more, which is the point.
+ * Of the four other routes #1081 found, three are closed: a member grouped into
+ * another set's value (the claimant list), an undo after the set changed (below,
+ * `runApplyUndo`), and a code merge, which still makes one but SAYS so. Two
+ * applies landing at once can still make one (#1081 d).
  * Where the coder already held the applied value beside another (a merge's
  * contradiction, resolved by the act), the undo leaves the value they re-affirmed.
  */
@@ -171,8 +173,11 @@ export function planApplyUndo(capture: ApplyCapture, replaced: Replaced): ApplyU
  */
 export interface ApplyUndoApi {
   remove(targetIds: number[], codeId: number): Promise<unknown>
-  /** Apply unrated — the server's swap removes the value being undone. */
-  reapply(targetIds: number[], codeId: number): Promise<unknown>
+  /**
+   * Apply unrated — the server's swap removes the value being undone — and
+   * return what it REPORTS it replaced, per target (#1081 c).
+   */
+  reapply(targetIds: number[], codeId: number): Promise<Replaced>
   rate(targetId: number, codeId: number, magnitude: number): Promise<unknown>
 }
 
@@ -181,8 +186,9 @@ export function segmentUndoApi(single: boolean): ApplyUndoApi {
   return {
     remove: (ids, codeId) =>
       single ? codingApi.removeCode(ids[0], codeId) : codingApi.bulkCode(ids, codeId, 'remove'),
-    reapply: (ids, codeId) =>
-      single ? codingApi.applyCode(ids[0], codeId) : codingApi.bulkCode(ids, codeId, 'apply'),
+    reapply: async (ids, codeId) => single
+      ? replacedFromSingle(ids[0], await codingApi.applyCode(ids[0], codeId))
+      : replacedFromBulk(await codingApi.bulkCode(ids, codeId, 'apply')),
     rate: (id, codeId, magnitude) => codingApi.setMagnitude(id, codeId, magnitude),
   }
 }
@@ -193,9 +199,13 @@ export function textUndoApi(projectId: number, single: boolean): ApplyUndoApi {
     remove: (ids, codeId) => single
       ? textCodingApi.removeCode(projectId, { dataset_value_id: ids[0], code_id: codeId })
       : textCodingApi.bulkRemoveCode(projectId, { dataset_value_ids: ids, code_id: codeId }),
-    reapply: (ids, codeId) => single
-      ? textCodingApi.applyCode(projectId, { dataset_value_id: ids[0], code_id: codeId })
-      : textCodingApi.bulkCode(projectId, { dataset_value_ids: ids, code_id: codeId }),
+    reapply: async (ids, codeId) => single
+      ? replacedFromSingle(
+        ids[0], await textCodingApi.applyCode(projectId, { dataset_value_id: ids[0], code_id: codeId }),
+      )
+      : replacedFromBulk(
+        await textCodingApi.bulkCode(projectId, { dataset_value_ids: ids, code_id: codeId }),
+      ),
     rate: (id, codeId, magnitude) =>
       textCodingApi.setMagnitude(projectId, { dataset_value_id: id, code_id: codeId, magnitude }),
   }
@@ -205,6 +215,14 @@ export function textUndoApi(projectId: number, single: boolean): ApplyUndoApi {
  * Run the plan. A transient failure THROWS, so `useHistory` keeps the step for a
  * retry (re-applying and removing are both idempotent). A REFUSED rating does
  * not: the value is back, and the coder is told the rating is not.
+ *
+ * 🔴 **The restore re-applies the replaced code AND CHECKS THE SERVER'S REPORT
+ * (#1081 c).** The swap removes the undone value only while the two are still
+ * values of one set. If the set was deleted, or the replaced value left it,
+ * between the act and the undo, the re-apply swaps nothing out and the passage
+ * held BOTH — while the conversation page painted the plan and showed one. Where
+ * the report does not name the undone value, it is removed explicitly, after the
+ * value is back (never before: an exhaustive set must not pass through empty).
  */
 export async function runApplyUndo(
   plan: ApplyUndoPlan,
@@ -213,8 +231,15 @@ export async function runApplyUndo(
 ): Promise<void> {
   const byCode = new Map<number, number[]>()
   for (const r of plan.restore) byCode.set(r.codeId, [...(byCode.get(r.codeId) ?? []), r.targetId])
-  for (const [codeId, targets] of byCode) await api.reapply(targets, codeId)
-  if (plan.removeFrom.length > 0) await api.remove(plan.removeFrom, plan.codeId)
+  const leftBehind: number[] = []
+  for (const [codeId, targets] of byCode) {
+    const replaced = await api.reapply(targets, codeId)
+    for (const target of targets) {
+      if (!(replaced.get(target) ?? []).includes(plan.codeId)) leftBehind.push(target)
+    }
+  }
+  const removeFrom = [...plan.removeFrom, ...leftBehind]
+  if (removeFrom.length > 0) await api.remove(removeFrom, plan.codeId)
   await restoreRatings(plan.restore, api, nameOf, 'The replaced values are back')
 }
 

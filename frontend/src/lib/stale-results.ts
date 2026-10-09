@@ -32,12 +32,27 @@
  * ⚠️ Deliberately does NOT name a menu path. The act lives on a route the researcher has
  * to be ON to perform, and the notice that meets them there is the durable half.
  */
-export function staleResultsNote(count: number): string | null {
-  if (!Number.isFinite(count) || count <= 0) return null
-  const subject = count === 1 ? '1 saved result was' : `${count} saved results were`
+export function staleResultsNote(metrics: number, tests = 0): string | null {
+  const m = Number.isFinite(metrics) && metrics > 0 ? metrics : 0
+  const t = Number.isFinite(tests) && tests > 0 ? tests : 0
+  if (m === 0 && t === 0) return null
+  if (t === 0) {
+    const subject = m === 1 ? '1 saved result was' : `${m} saved results were`
+    return (
+      `${subject} marked out of date: computed results travel with a project file, `
+      + 'but the per-record scores behind them are rebuilt here. Recompute them in '
+      + 'Analysis to get this version’s numbers.'
+    )
+  }
+  // #1039 (a) — saved TESTS are marked too: a test's result is a number the copy that
+  // saved it computed, and nothing here can vouch for it until it runs again.
+  const tested = t === 1 ? '1 saved test' : `${t} saved tests`
+  const subject = m === 0
+    ? `${tested} ${t === 1 ? 'was' : 'were'}`
+    : `${m === 1 ? '1 saved result' : `${m} saved results`} and ${tested} were`
   return (
-    `${subject} marked out of date: computed results travel with a project file, `
-    + 'but the per-record scores behind them are rebuilt here. Recompute them in '
-    + 'Analysis to get this version’s numbers.'
+    `${subject} marked out of date: they travel with a project file as the copy that `
+    + 'saved them computed them, and this version works them out again from the data. '
+    + 'Recompute them in Analysis to get this version’s numbers.'
   )
 }

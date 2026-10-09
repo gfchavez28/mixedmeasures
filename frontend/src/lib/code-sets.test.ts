@@ -7,6 +7,7 @@ import {
   codeSetOf,
   conflictingSetValues,
   describeSetConflict,
+  describeMergeContradictions,
   heldCodeIn,
   multipleSelectionIn,
   selectionIn,
@@ -179,16 +180,34 @@ describe('a synonym grouped INTO a value (#1028 b)', () => {
     expect(selectionPlan(WITH_SYNONYM, [app(90, 2)], 2, 11)).toBeNull()
   })
 
-  it('is indexed to its set, and a member of another set keeps its OWN', () => {
+  it('a member grouped into ANOTHER set’s value counts THERE, and its own set does not offer it (#1081 b)', () => {
+    // 90 is a MEMBER of Tone grouped into Stance's "Positive". It reads as
+    // Positive, so the server lists it as a claimant of Stance and NOT of Tone.
+    // The index used to map members first, so it answered Tone — where the code
+    // counts as nothing — and the multi-code check refused the wrong pair.
     const TONE: CodeSet = {
-      ...STANCE, id: 8, label: 'Tone', members: [member(90, 'Pos')],
-      claimants: [{ code_id: 90, value_id: 11 }],
+      ...STANCE, id: 8, label: 'Tone', members: [member(90, 'Warm'), member(91, 'Cold')],
+      claimants: [{ code_id: 91, value_id: 91 }],
     }
-    // 90 is a MEMBER of Tone and a synonym in Stance; Tone listed second on
-    // purpose, so first-wins over the list order would pick Stance.
-    const index = buildCodeSetIndex([WITH_SYNONYM, TONE])
-    expect(codeSetOf(index, 90)?.label).toBe('Tone')
-    expect(codeSetOf(buildCodeSetIndex([WITH_SYNONYM]), 90)?.label).toBe('Stance')
+    for (const sets of [[WITH_SYNONYM, TONE], [TONE, WITH_SYNONYM]]) {
+      expect(codeSetOf(buildCodeSetIndex(sets), 90)?.label).toBe('Stance')
+    }
+    const index = buildCodeSetIndex([TONE, WITH_SYNONYM])
+    expect(conflictingSetValues(index, [90, 91])).toEqual([])        // two sets
+    expect(conflictingSetValues(index, [90, 23])).toHaveLength(1)    // one set, two values
+    // Its own set's control does not offer it: the server refuses it there.
+    expect(choosableValues(TONE).map((v) => v.id)).toEqual([91])
+  })
+})
+
+describe('what a code merge left behind (#1081 a)', () => {
+  it('names the set, the count and what the agreement figures do with it', () => {
+    expect(describeMergeContradictions(3, 'Stance')).toBe(
+      'In 3 passages this merge touched, one coder now holds two values of “Stance”. '
+      + 'Its agreement figures leave them out until that coder chooses one value.',
+    )
+    expect(describeMergeContradictions(1, 'Stance')).toMatch(/^In 1 passage this merge touched,.* leave it out/)
+    expect(describeMergeContradictions(2, null)).toContain('two values of a code set')
   })
 })
 

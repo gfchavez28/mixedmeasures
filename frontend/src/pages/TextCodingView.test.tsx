@@ -23,7 +23,7 @@
  * from the ROUTE, so the router carries it.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react'
+import { render, screen, cleanup, waitFor, fireEvent, within, act } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -534,7 +534,7 @@ describe('an apply that REPLACED a value, and its undo (#1028) — the text-codi
   it('Ctrl+Z re-applies the replaced value WITH its rating — a ZERO — and removes nothing', async () => {
     applyCode.mockImplementation(async (_pid: number, body: { code_id: number }) =>
       ({ dataset_value_id: 102, code_id: body.code_id, applied: true,
-         replaced_code_ids: body.code_id === 8 ? [7] : [] }))
+         replaced_code_ids: body.code_id === 8 ? [7] : body.code_id === 7 ? [8] : [] }))
     renderView()
     fireEvent.click(await findRow(102))  // holds Engagement, rated 0
     fireEvent.keyDown(document.body, { key: '2' })  // Disruption
@@ -545,5 +545,26 @@ describe('an apply that REPLACED a value, and its undo (#1028) — the text-codi
     await waitFor(() => expect(applyCode).toHaveBeenLastCalledWith(1, { dataset_value_id: 102, code_id: 7 }))
     await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(1, { dataset_value_id: 102, code_id: 7, magnitude: 0 }))
     expect(removeCode).not.toHaveBeenCalled()
+  })
+})
+
+describe('#1038 (i) — a filter change keeps the old rows, but never as if current', () => {
+  it('while the new filter loads: the table is busy, no count is stated, and the line says it is updating', async () => {
+    let release!: (v: typeof PAGE) => void
+    renderView()
+    await findRow(101)
+    expect(screen.getByText('All 2 responses loaded')).toBeInTheDocument()
+    list.mockReturnValueOnce(new Promise(r => { release = r }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search responses' }), { target: { value: 'second' } })
+    // The debounced search fires the new query; the previous rows are HELD.
+    expect(await screen.findByText('Updating for the new filter…')).toBeInTheDocument()
+    expect(document.getElementById('text-101')).not.toBeNull()
+    expect(document.getElementById('text-101')!.closest('[aria-busy="true"]')).not.toBeNull()
+    expect(screen.queryByText('All 2 responses loaded')).toBeNull()
+    await act(async () => {
+      release({ ...PAGE, texts: [PAGE.texts[1]], total_texts: 1, non_empty_texts: 1 })
+    })
+    expect(await screen.findByText('All 1 response loaded')).toBeInTheDocument()
+    expect(document.getElementById('text-102')!.closest('[aria-busy="true"]')).toBeNull()
   })
 })

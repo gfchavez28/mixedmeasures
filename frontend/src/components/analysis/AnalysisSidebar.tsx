@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useId } from 'react'
-import type { SetURLSearchParams } from 'react-router'
+import type { ComposableSetSearchParams } from '@/hooks/useComposableSearchParams'
 import { SELECTED_ROW } from '@/lib/selection'
 import {
   ChevronDown,
@@ -174,7 +174,8 @@ export interface AnalysisSidebarProps {
   pid: number
   activeTab: 'descriptives' | 'rc' | 'data_quality'
   setUrlParam: (key: string, value: string) => void
-  setSearchParams: SetURLSearchParams
+  /** #1146 — `useAnalysisUrlState`'s composable setter (`url-state.md`). */
+  setSearchParams: ComposableSetSearchParams
 
   // Palette
   materials: MaterialResponse[]

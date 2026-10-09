@@ -95,6 +95,14 @@ export interface MergeCodesResponse {
   rating_conflicts: number
   /** False when carried ratings landed on a code that has no scale to show them on. */
   target_has_scale: boolean
+  /**
+   * Passages this merge touched where a coder now holds TWO values of the code
+   * set the target counts in (#1081 a) — a merge does not go through the swap
+   * every apply makes, so it can create a contradiction. Said, never resolved.
+   */
+  set_contradictions: number
+  /** The set's label, when `set_contradictions` is above zero. */
+  contradiction_set_label: string | null
 }
 
 // Category operation response types

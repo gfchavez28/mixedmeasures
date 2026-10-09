@@ -102,11 +102,22 @@ describe('the plan', () => {
   })
 })
 
-function fakeApi(over: Partial<Record<keyof ApplyUndoApi, ReturnType<typeof vi.fn>>> = {}) {
+/**
+ * A fake server. ``swaps`` is what its re-apply REPORTS it replaced on every
+ * target — the value being undone, while the two are still values of one set;
+ * nothing, once the set has changed (#1081 c).
+ */
+function fakeApi(
+  over: Partial<Record<keyof ApplyUndoApi, ReturnType<typeof vi.fn>>> = {},
+  { swaps = [] as number[] } = {},
+) {
   const calls: string[] = []
   const api = {
     remove: over.remove ?? vi.fn(async (ids: number[], code: number) => { calls.push(`remove ${code} ${ids}`) }),
-    reapply: over.reapply ?? vi.fn(async (ids: number[], code: number) => { calls.push(`reapply ${code} ${ids}`) }),
+    reapply: over.reapply ?? vi.fn(async (ids: number[], code: number) => {
+      calls.push(`reapply ${code} ${ids}`)
+      return new Map(ids.map((id) => [id, [...swaps]]))
+    }),
     rate: over.rate ?? vi.fn(async (id: number, code: number, m: number) => { calls.push(`rate ${code} ${id} ${m}`) }),
   }
   return { api: api as unknown as ApplyUndoApi, calls }
@@ -124,7 +135,7 @@ describe('running the plan', () => {
   }
 
   it('re-applies each replaced value in ONE call per value, then removes, then re-rates', async () => {
-    const { api, calls } = fakeApi()
+    const { api, calls } = fakeApi({}, { swaps: [POSITIVE] })
     await runApplyUndo(plan, api, () => 'code')
     expect(calls).toEqual([
       `reapply ${NEGATIVE} 301,311`,
@@ -137,7 +148,7 @@ describe('running the plan', () => {
 
   it('a REFUSED rating completes the undo and says which half did not land', async () => {
     const refusal = new ApiError(400, { detail: 'outside the scale' }, {})
-    const { api, calls } = fakeApi({ rate: vi.fn(async () => { throw refusal }) })
+    const { api, calls } = fakeApi({ rate: vi.fn(async () => { throw refusal }) }, { swaps: [POSITIVE] })
     await expect(runApplyUndo({ ...plan, restore: [plan.restore[0]] }, api, () => 'Negative'))
       .resolves.toBeUndefined()
     expect(calls).toEqual([`reapply ${NEGATIVE} 301`, `remove ${POSITIVE} 303`])
@@ -148,9 +159,32 @@ describe('running the plan', () => {
   })
 
   it('a TRANSIENT rating failure throws, so the history keeps the step', async () => {
-    const { api } = fakeApi({ rate: vi.fn(async () => { throw new Error('network') }) })
+    const { api } = fakeApi({ rate: vi.fn(async () => { throw new Error('network') }) }, { swaps: [POSITIVE] })
     await expect(runApplyUndo(plan, api, () => 'code')).rejects.toThrow('network')
     expect(toastWarning).not.toHaveBeenCalled()
+  })
+
+  it('the set CHANGED since the act: nothing was swapped out, so the undone value is removed — after the value is back (#1081 c)', async () => {
+    // The set was deleted, or the replaced value left it: re-applying it no
+    // longer takes the undone value off, and the passage held BOTH.
+    const { api, calls } = fakeApi({}, { swaps: [] })
+    await runApplyUndo(plan, api, () => 'code')
+    expect(calls).toEqual([
+      `reapply ${NEGATIVE} 301,311`,
+      `reapply ${NEUTRAL} 313`,
+      `remove ${POSITIVE} 303,301,311,313`,
+      `rate ${NEGATIVE} 301 0`,
+      `rate ${NEUTRAL} 313 4`,
+    ])
+  })
+
+  it('removes the undone value only where the report does NOT name it', async () => {
+    const reapply = vi.fn(async (ids: number[]) => new Map(
+      ids.map((id) => [id, id === 301 ? [POSITIVE] : []] as [number, number[]]),
+    ))
+    const { api, calls } = fakeApi({ reapply })
+    await runApplyUndo({ ...plan, restore: plan.restore.slice(0, 2) }, api, () => 'code')
+    expect(calls).toEqual([`remove ${POSITIVE} 303,311`, `rate ${NEGATIVE} 301 0`])
   })
 })
 
@@ -190,7 +224,7 @@ describe('a single act on a segment GROUP (#1070)', () => {
       replaced_code_ids: [POSITIVE],
       replaced_by_target: [{ segment_id: X, replaced_code_ids: [POSITIVE] }],
     }))
-    const { api, calls } = fakeApi()
+    const { api, calls } = fakeApi({}, { swaps: [NEGATIVE] })
     await runApplyUndo(plan, api, () => 'code')
     expect(calls).toEqual([
       `reapply ${POSITIVE} ${X}`,

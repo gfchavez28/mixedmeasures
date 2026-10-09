@@ -177,12 +177,23 @@ def managed_dataset_refusal(dataset: Dataset | None, action: str) -> str | None:
     its own. Fails closed on an unknown action, because that is a wiring bug
     rather than user input.
     """
+    return managed_kind_refusal(dataset.managed_kind if dataset is not None else None, action)
+
+
+def managed_kind_refusal(managed_kind: str | None, action: str) -> str | None:
+    """`managed_dataset_refusal`, asked of a dataset's ``managed_kind`` alone.
+
+    For a reader that has the kind from a set-based query and no `Dataset` object —
+    the participant list's own builder (#1157), which answers for every linked row
+    of every participant and must not load a dataset per row to do it. ONE rule:
+    the object form above is a call to this.
+    """
     if action not in _REFUSALS:
         raise ValueError(
             f"unknown managed-dataset action {action!r}; expected one of "
             f"{sorted(_REFUSALS)}"
         )
-    if dataset is None or dataset.managed_kind is None:
+    if managed_kind is None:
         return None
     return _REFUSALS[action]
 

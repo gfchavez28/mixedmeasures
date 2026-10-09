@@ -263,7 +263,7 @@ function TimecodeField({ label, value, onCommit }: {
 }
 
 export default function ObservationWorkbench() {
-  const { projectId, openKeyboardHelp } = useProjectLayout()
+  const { projectId, openKeyboardHelp, setBreadcrumbLabel } = useProjectLayout()
   const { observationId: observationIdParam } = useParams()
   const observationId = Number(observationIdParam)
   const navigate = useNavigate()
@@ -307,6 +307,14 @@ export default function ObservationWorkbench() {
     queryFn: () => observationsApi.get(projectId, observationId),
     enabled: Number.isFinite(observationId),
   })
+
+  // #1134 — the breadcrumb (and so a jotted note's "From …", #1002) names the
+  // observation, as the conversation and document workbenches do. The layout's
+  // cache lookup runs once, before this query answers on a direct visit, so
+  // without it both read "Observations" alone.
+  useEffect(() => {
+    if (observation?.name) setBreadcrumbLabel(observation.name)
+  }, [observation?.name, setBreadcrumbLabel])
 
   const clipsQuery = useQuery({
     queryKey: ['observation-segments', projectId, observationId],

@@ -1140,6 +1140,10 @@ async def update_metric(
 
     if mark_stale:
         metric.stale = True
+        # #1039 (a): the door and its cascade together — a test saved against this
+        # metric was computed under the definition just changed.
+        from ..services.staleness import mark_metric_tests_stale
+        mark_metric_tests_stale(db, [metric.id])
 
     # Validate grouping_mode constraints on the resulting metric state
     gm_errors = _validate_grouping_mode(
@@ -1217,13 +1221,11 @@ async def compute_single_metric(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Mark statistical tests targeting this metric as stale (data has changed)
-    from ..models.statistical_test import StatisticalTest
-    db.query(StatisticalTest).filter(
-        StatisticalTest.target_type == "metric_definition",
-        StatisticalTest.target_id == metric_id,
-        StatisticalTest.stale == False,  # noqa: E712
-    ).update({"stale": True}, synchronize_session="fetch")
+    # Mark statistical tests targeting this metric as stale (data has changed) —
+    # unconditionally here: pressing Compute asks for fresh numbers (#1039 a's
+    # helper; `compute_metric` itself marks only when the metric WAS stale).
+    from ..services.staleness import mark_metric_tests_stale
+    mark_metric_tests_stale(db, [metric_id])
 
     log_action(
         db,

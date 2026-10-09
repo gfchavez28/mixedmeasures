@@ -313,7 +313,7 @@ Being honest about scope:
 - **Withdrawal is supported, but it cannot *read* — and deleting a participant is
   still not a withdrawal.** Two things exist. A **withdrawal report** answers
   "what traces back to this person?" — counts and locations across transcripts,
-  datasets, excerpts, notes and memos, never the text itself. And a **withdrawal
+  datasets, documents about them, excerpts, notes and memos, never the text itself. And a **withdrawal
   action** removes the identity, deletes what is unambiguously theirs (their
   dataset rows and responses), renames their speaker to a numbered token, and
   **blanks** their conversation turns rather than deleting them — a turn removed
@@ -435,8 +435,8 @@ Common ones — see `backend/app/config.py` for the full list:
 | `MM_BACKUP_DIR` | `backups` | Backup storage |
 | `MM_INACTIVITY_TIMEOUT_MINUTES` | `0` (off) | Auto-logout on a shared machine (e.g. `30`) |
 | `MM_COOKIE_SECURE` | `false` | Set `true` when serving over HTTPS |
-| `MM_AUTO_BACKUP_INTERVAL_HOURS` | `4` | How often the periodic automatic backup runs |
-| `MM_AUTO_BACKUP_MAX_COUNT` | `5` | How many automatic backups are kept before the oldest is rotated out |
+| `MM_AUTO_BACKUP_INTERVAL_HOURS` | `4` | Hours between periodic automatic backups; `0` turns them off |
+| `MM_AUTO_BACKUP_MAX_COUNT` | `5` | How many automatic backups are kept before the oldest is rotated out (at least `1`) |
 | `MM_SESSION_EXPIRE_HOURS` | `24` | Session lifetime (multi-user mode) |
 | `MM_CSRF_ENABLED` | `true` | CSRF protection on state-changing requests; leave on |
 
@@ -462,7 +462,9 @@ guidance, and dependency policy.
 
 Qualitative coding is irreplaceable manual work, so the app keeps several backup
 mechanisms: automatic pre-migration backups, periodic auto-backups, a snapshot
-taken when the app closes, and user-triggered `.mmbackup` archives (database +
+taken when the app closes (on macOS and Linux — on Windows the app stops its
+engine at once when it quits, so the periodic backups are the cover there), and
+user-triggered `.mmbackup` archives (database +
 documents + media) with a validate-and-preview restore flow. *Settings → Backup
 & Data → Backup history* lists them all, and any one can be restored, downloaded
 or deleted from there — restoring from that list is not held to the upload limit,

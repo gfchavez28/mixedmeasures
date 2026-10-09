@@ -131,10 +131,29 @@ describe('the upload step', () => {
     expect(await screen.findByRole('button', { name: /Check the file/ })).toBeDisabled()
   })
 
-  it('refuses a file the importer cannot read, by its own gate', async () => {
+  it('refuses a file the importer cannot read, by its own gate — ON the page', async () => {
     setup()
     upload(new File(['x'], 'notes.xlsx', { type: 'application/vnd.ms-excel' }))
-    expect(toasts.error).toHaveBeenCalledWith(expect.stringContaining('CSV'))
+    expect(screen.getByRole('alert')).toHaveTextContent(/CSV/)
+    expect(toasts.error).not.toHaveBeenCalled()
+  })
+
+  it('🔴 a refused file’s sentence stays on the page, not in a four-second toast (#1083, #1076)', async () => {
+    setup()
+    const sentence = 'Line 1 (the header) has a line break inside a value that is not in quotes.'
+    api.preview.mockRejectedValue({ response: { data: { detail: sentence } } })
+    fireEvent.click(screen.getByLabelText(/A segment’s Unit ID/))
+    upload(csv())
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Check the file/ })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: /Check the file/ }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(sentence)
+    expect(toasts.error).not.toHaveBeenCalled()
+    // Still the upload step, with the button back for the next try.
+    expect(screen.getByRole('button', { name: /Check the file/ })).toBeEnabled()
+    // A new file makes the sentence stale, so it goes.
+    upload(csv('fixed.csv'))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('sends the DECLARED target kind, never a guess', async () => {
@@ -153,7 +172,7 @@ describe('the upload limit (#1007)', () => {
     Object.defineProperty(big, 'size', { value: 50 * 1024 * 1024 + 1 })
     fireEvent.click(screen.getByLabelText(/A segment’s Unit ID/))
     upload(big)
-    expect(toasts.error).toHaveBeenCalledWith(expect.stringMatching(/“huge\.csv” .* was not added.*50 MB or smaller/))
+    expect(screen.getByRole('alert')).toHaveTextContent(/“huge\.csv” .* was not added.*50 MB or smaller/)
     // POSITIVE control on the same screen: a file at the limit IS taken.
     expect(screen.queryByText('huge.csv')).not.toBeInTheDocument()
     const ok = csv('fine.csv')
@@ -242,6 +261,17 @@ describe('the mapping step', () => {
     expect(
       within(aliceGroup).getByRole('combobox', { name: 'Which coder' }),
     ).toHaveAccessibleDescription(/already exists, with 0 codings across your projects/)
+    // #1158 — and the card says so, where it used to say nothing was matched.
+    expect(screen.getByText(/One name is the same as an existing coder’s, so that coder is chosen/))
+      .toBeInTheDocument()
+    expect(screen.queryByText(/Nothing is matched by name on your behalf/)).toBeNull()
+  })
+
+  it('#1158: with no same-name coder the card still says nothing is matched', async () => {
+    setup()
+    api.preview.mockResolvedValue(PREVIEW)
+    await reachMapStep()
+    expect(screen.getByText(/Nothing is matched by name on your behalf/)).toBeInTheDocument()
   })
 
   it('🔴 sends the model PROVENANCE with a machine it creates', async () => {
@@ -252,7 +282,7 @@ describe('the mapping step', () => {
     fireEvent.click(screen.getByRole('radio', { name: /A machine/ }))
     fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-4o-2024-08-06' } })
     fireEvent.change(screen.getByLabelText('Settings'), { target: { value: 'temperature=0' } })
-    fireEvent.click(screen.getByRole('button', { name: /^Import 3 codings$/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Import 3 rows$/ }))
 
     await waitFor(() => expect(api.run).toHaveBeenCalled())
     expect(api.run.mock.calls[0][3]).toEqual({
@@ -276,7 +306,7 @@ describe('the mapping step', () => {
     api.run.mockResolvedValue(RESULT)
     await reachMapStep()
     choosePerson()
-    fireEvent.click(screen.getByRole('button', { name: /^Import 3 codings$/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Import 3 rows$/ }))
     await waitFor(() => expect(api.run).toHaveBeenCalled())
     expect(api.run.mock.calls[0][2]).toEqual(api.preview.mock.calls[0][2])
   })
@@ -314,7 +344,7 @@ describe('the mapping step', () => {
     expect(await screen.findByText('Nothing is identified by “nope”.')).toBeInTheDocument()
     expect(screen.getByText(/1 row will not be imported/)).toBeInTheDocument()
     // The summary is WORDS, not the reason's slug.
-    expect(screen.getByText('1 no such passage or record')).toBeInTheDocument()
+    expect(screen.getByText('no such passage or record (1)')).toBeInTheDocument()
   })
 
   it('🔴 renders a BOUNDED problem list, and the whole list is a download away', async () => {
@@ -364,9 +394,9 @@ describe('a new coder’s kind (#1038 h)', () => {
     api.preview.mockResolvedValue(PREVIEW)
     api.run.mockResolvedValue(RESULT)
     await reachMapStep()
-    const importButton = screen.getByRole('button', { name: /^Import 3 codings$/ })
+    const importButton = screen.getByRole('button', { name: /^Import 3 rows$/ })
     expect(importButton).toBeDisabled()
-    expect(importButton).toHaveAccessibleDescription('Say whether “GPT-4o” is a person or a model.')
+    expect(importButton).toHaveAccessibleDescription('Say whether “GPT-4o” is a person or a machine.')
     choosePerson()
     expect(importButton).toBeEnabled()
     fireEvent.click(importButton)
@@ -380,7 +410,7 @@ describe('a new coder’s kind (#1038 h)', () => {
     api.preview.mockResolvedValue({ ...PREVIEW, coders: [{ ...PREVIEW.coders[0], name: long }] })
     await reachMapStep()
     choosePerson()
-    const importButton = screen.getByRole('button', { name: /^Import 3 codings$/ })
+    const importButton = screen.getByRole('button', { name: /^Import 3 rows$/ })
     expect(importButton).toHaveAccessibleDescription(/longer than 50 characters/)
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Short' } })
     expect(importButton).toBeEnabled()
@@ -426,7 +456,7 @@ describe('an archived coder (#1031 c)', () => {
     expect(screen.getByRole('checkbox', { name: /Bring “Old run” back/ }))
       .toHaveAccessibleDescription(/hidden by default and left out of reliability/)
     fireEvent.click(screen.getByRole('checkbox', { name: /Bring “Old run” back/ }))
-    fireEvent.click(screen.getByRole('button', { name: /^Import 3 codings$/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Import 3 rows$/ }))
     await waitFor(() => expect(api.run).toHaveBeenCalled())
     expect(api.run.mock.calls[0][3]['Old run'])
       .toEqual({ action: 'match', target_user_id: 5, unarchive: true })
@@ -492,6 +522,126 @@ describe('two names onto one coder (#1039 i)', () => {
   })
 })
 
+describe('#1099 — the Import button counts what the DECISIONS will send', () => {
+  // It read the plan's count, fixed before any decision: a file with two of three
+  // names set to "Do not import" read "Import 10 codings" and added 6.
+  const TWO = {
+    ...PREVIEW,
+    rows_read: 7,
+    will_apply: 6,
+    coders: [
+      { ...PREVIEW.coders[0], name: 'Alice', local_user_id: 1, local_coder_type: 'human' },
+      // 4 rows, 3 importable: a skip takes away its SHARE of `will_apply`, not its rows.
+      { ...PREVIEW.coders[0], name: 'Model B', row_count: 4, rows_to_apply: 3 },
+    ],
+  }
+
+  it('a skipped name takes its importable rows off the stat AND the button', async () => {
+    setup()
+    api.preview.mockResolvedValue(TWO)
+    await reachMapStep()
+    expect(screen.getByRole('button', { name: /^Import 6 rows$/ })).toBeDisabled()  // Model B's kind
+    fireEvent.click(screen.getAllByRole('radio', { name: 'Do not import these' })[1])
+    const button = screen.getByRole('button', { name: /^Import 3 rows$/ })
+    expect(button).toBeEnabled()
+    const stat = screen.getByText('Rows to import').parentElement!
+    expect(stat).toHaveTextContent('Rows to import3')
+    expect(stat).toHaveTextContent('3 more rows belong to names set to Do not import')
+  })
+
+  it('with every name skipped it imports nothing, is off, and says why', async () => {
+    setup()
+    api.preview.mockResolvedValue(TWO)
+    await reachMapStep()
+    for (const radio of screen.getAllByRole('radio', { name: 'Do not import these' })) {
+      fireEvent.click(radio)
+    }
+    const button = screen.getByRole('button', { name: /^Import 0 rows$/ })
+    expect(button).toBeDisabled()
+    expect(button).toHaveAccessibleDescription('Every name is set to Do not import, so nothing would be imported.')
+  })
+
+  it('says "up to" when two names go to one coder — the server may refuse a passage they disagree on', async () => {
+    setup()
+    api.preview.mockResolvedValue({
+      ...TWO,
+      coders: [TWO.coders[0], { ...TWO.coders[1], local_user_id: 1, local_coder_type: 'human' }],
+    })
+    await reachMapStep()
+    expect(screen.getByRole('button', { name: /^Import up to 6 rows$/ })).toBeEnabled()
+  })
+
+  it('a file with nothing importable keeps the button off WITH a reason', async () => {
+    setup()
+    api.preview.mockResolvedValue({
+      ...PREVIEW, will_apply: 0,
+      coders: [{ ...PREVIEW.coders[0], rows_to_apply: 0 }],
+    })
+    await reachMapStep()
+    expect(screen.getByRole('button', { name: /^Import 0 rows$/ }))
+      .toHaveAccessibleDescription(/No row in this file can be imported/)
+  })
+
+  it('#1159: that reason points at the list ABOVE the button, where it is', async () => {
+    setup()
+    const problems = [{ line: 2, reason: 'unit_not_found', detail: 'Nothing is identified by “seg-9”.' }]
+    api.preview.mockResolvedValue({
+      ...PREVIEW, will_apply: 0, units_matched: 0, problems, reason_counts: { unit_not_found: 1 },
+      coders: [{ ...PREVIEW.coders[0], rows_to_apply: 0 }],
+    })
+    await reachMapStep()
+    const button = screen.getByRole('button', { name: /^Import 0 rows$/ })
+    expect(button).toHaveAccessibleDescription(/the list above says why/)
+    // The geometry the sentence claims, in document order: the problem list comes first.
+    const list = screen.getByRole('table')
+    expect(within(list).getByText(/seg-9/)).toBeInTheDocument()
+    expect(list.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})
+
+describe('#1066 — the finished screen counts CODINGS, and a set value is part of them', () => {
+  it('reads "Codings added 3, including 2 code set values" — never a sibling count', async () => {
+    // "Codings added 1 · Set selections 2" read as one coding added when three were.
+    setup()
+    api.preview.mockResolvedValue(PREVIEW)
+    api.run.mockResolvedValue({ ...RESULT, applied: 3, selections: 2, replaced: 1 })
+    await reachMapStep()
+    choosePerson()
+    fireEvent.click(screen.getByRole('button', { name: /^Import 3 rows$/ }))
+    const added = (await screen.findByText('Codings added')).parentElement!
+    expect(added).toHaveTextContent('Codings added3including 2 code set values')
+    expect(screen.queryByText('Set selections')).not.toBeInTheDocument()
+    expect(screen.getByText('Earlier set values replaced')).toBeInTheDocument()
+  })
+
+  it('says nothing about set values when there were none', async () => {
+    setup()
+    api.preview.mockResolvedValue(PREVIEW)
+    api.run.mockResolvedValue(RESULT)
+    await reachMapStep()
+    choosePerson()
+    fireEvent.click(screen.getByRole('button', { name: /^Import 3 rows$/ }))
+    expect((await screen.findByText('Codings added')).parentElement).not.toHaveTextContent(/including/)
+  })
+})
+
+describe('#1010 (l) — a visible step rail, as every other wizard has', () => {
+  it('marks the current step, and moves with the page', async () => {
+    setup()
+    api.preview.mockResolvedValue(PREVIEW)
+    api.run.mockResolvedValue(RESULT)
+    const rail = await screen.findByRole('navigation', { name: 'Import progress' })
+    const current = () => rail.querySelector('[aria-current="step"]')
+    expect(current()).toHaveTextContent('Choose the file')
+    await reachMapStep()
+    expect(current()).toHaveTextContent('Check and assign coders')
+    choosePerson()
+    fireEvent.click(screen.getByRole('button', { name: /^Import 3 rows$/ }))
+    await screen.findByText('Import finished')
+    expect(current()).toHaveTextContent('Done')
+  })
+})
+
 describe('the id column (#1032 b)', () => {
   it('waits for the coded column, and says why', async () => {
     setup()
@@ -507,20 +657,91 @@ describe('the id column (#1032 b)', () => {
 })
 
 describe('after the import', () => {
-  it('🔴 marks EVERY query of the project stale, not the derived-count list (#1038 d)', async () => {
+  it('🔴 marks EVERY query stale — a SOURCE-keyed segment list included (#1038 d, #1082 c)', async () => {
     setup()
     api.preview.mockResolvedValue(PREVIEW)
     api.run.mockResolvedValue(RESULT)
     client.setQueryData(['code-frequencies', 1, 'x'], { any: 1 })
     client.setQueryData(['text-coding-texts', 1], { any: 1 })
-    client.setQueryData(['code-frequencies', 2], { any: 1 })   // another project
+    // The conversation workbench's list is keyed by CONVERSATION, so "the project's
+    // queries" never reached it and imported chips were missing for a minute.
+    client.setQueryData(['segments', 42], { any: 1 })
     await reachMapStep()
     choosePerson()
-    fireEvent.click(screen.getByRole('button', { name: /^Import 3 codings$/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Import 3 rows$/ }))
     await screen.findByText('Import finished')
     expect(client.getQueryState(['code-frequencies', 1, 'x'])?.isInvalidated).toBe(true)
     expect(client.getQueryState(['text-coding-texts', 1])?.isInvalidated).toBe(true)
-    expect(client.getQueryState(['code-frequencies', 2])?.isInvalidated).toBe(false)
+    expect(client.getQueryState(['segments', 42])?.isInvalidated).toBe(true)
+  })
+
+  it('a refused import keeps the decisions, and a changed decision clears the sentence', async () => {
+    setup()
+    api.preview.mockResolvedValue(PREVIEW)
+    api.run.mockRejectedValue({ response: { data: { detail: 'Say who these codings belong to before importing: “GPT-4o”.' } } })
+    await reachMapStep()
+    choosePerson()
+    fireEvent.click(screen.getByRole('button', { name: /^Import 3 rows$/ }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Say who these codings belong to/)
+    expect(toasts.error).not.toHaveBeenCalled()
+    expect(screen.getByRole('radio', { name: /A person/ })).toBeChecked()
+    // Changing a decision makes the sentence stale.
+    fireEvent.click(screen.getByRole('radio', { name: /A machine/ }))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+})
+
+describe('a NEW coder’s name (#1082 b)', () => {
+  const TWO_NEW = {
+    ...PREVIEW,
+    rows_read: 5,
+    will_apply: 5,
+    coders: [
+      { ...PREVIEW.coders[0], name: 'A. Smith' },
+      { ...PREVIEW.coders[0], name: 'asmith', row_count: 2, rows_to_apply: 2 },
+    ],
+  }
+
+  it('🔴 two names typed alike are ONE new coder, and each row says so', async () => {
+    setup()
+    api.preview.mockResolvedValue(TWO_NEW)
+    await reachMapStep()
+    const names = screen.getAllByRole('textbox', { name: 'Name' })
+    fireEvent.change(names[0], { target: { value: 'Alice Smith' } })
+    fireEvent.change(names[1], { target: { value: 'Alice Smith' } })
+    expect(names[0]).toHaveAccessibleDescription(
+      /“asmith” in the file is also set to become “Alice Smith”, so they are one new coder — where the names disagree about a passage, neither row is imported\./)
+    expect(names[1]).toHaveAccessibleDescription(/“A\. Smith” in the file is also set to become “Alice Smith”/)
+    // …and the button says "up to", as it does for two names matched onto one coder.
+    for (const radio of screen.getAllByRole('radio', { name: /A person/ })) fireEvent.click(radio)
+    expect(screen.getByRole('button', { name: /^Import up to 5 rows$/ })).toBeEnabled()
+  })
+
+  it('a person and a model under one name block the import, with the reason', async () => {
+    setup()
+    api.preview.mockResolvedValue(TWO_NEW)
+    await reachMapStep()
+    const names = screen.getAllByRole('textbox', { name: 'Name' })
+    fireEvent.change(names[0], { target: { value: 'Shared' } })
+    fireEvent.change(names[1], { target: { value: 'Shared' } })
+    fireEvent.click(screen.getAllByRole('radio', { name: /A person/ })[0])
+    fireEvent.click(screen.getAllByRole('radio', { name: /A machine/ })[1])
+    const button = screen.getByRole('button', { name: /^Import up to 5 rows$/ })
+    expect(button).toBeDisabled()
+    expect(button).toHaveAccessibleDescription(/one is a person and the other a machine/)
+  })
+
+  it('says when the name is TAKEN, and what the new coder will be called', async () => {
+    setup([{ id: 1, username: 'Alice', coder_type: 'human' }])
+    api.preview.mockResolvedValue({ ...PREVIEW, coders: [{ ...PREVIEW.coders[0], name: 'alice' }] })
+    await reachMapStep()
+    await waitFor(() => expect(api.listCoders).toHaveBeenCalled())
+    const name = screen.getByRole('textbox', { name: 'Name' })
+    expect(name).not.toHaveAttribute('aria-describedby')   // "alice" is free
+    fireEvent.change(name, { target: { value: 'Alice' } })
+    await waitFor(() => expect(name).toHaveAccessibleDescription(
+      'A coder called “Alice” already exists, so this one will be called “Alice (2)”. '
+      + 'To add these codings to the existing coder, choose An existing coder.'))
   })
 })
 
@@ -566,13 +787,13 @@ describe('where focus goes between steps (a11y sweep, 2026-09-23)', () => {
     api.run.mockResolvedValue(DONE)
     await reachMapStep()
     choosePerson()
-    fireEvent.click(screen.getByRole('button', { name: /^Import 3 codings$/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Import 3 rows$/ }))
     const heading = await screen.findByRole('heading', { level: 2, name: /Step 3 of 3/ })
     await waitFor(() => expect(document.activeElement).toBe(heading))
     expect(screen.getByText('1 row was not imported')).toBeInTheDocument()
     expect(screen.queryByText(/will not be imported/)).not.toBeInTheDocument()
     // The finished screen carries the reason summary too — it passed `{}` before.
-    expect(screen.getByText('1 no such passage or record')).toBeInTheDocument()
+    expect(screen.getByText('no such passage or record (1)')).toBeInTheDocument()
   })
 })
 
@@ -604,7 +825,7 @@ describe('the exits', () => {
     api.run.mockResolvedValue(RESULT)
     await reachMapStep()
     choosePerson()
-    fireEvent.click(screen.getByRole('button', { name: /^Import 3 codings$/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Import 3 rows$/ }))
     fireEvent.click(await screen.findByRole('button', { name: 'Open Qualitative Analysis' }))
     expect(navigate).toHaveBeenLastCalledWith('/projects/1/analysis/qualitative')
     fireEvent.click(screen.getByRole('button', { name: 'Done' }))
@@ -706,7 +927,7 @@ describe('the result', () => {
     })
     await reachMapStep()
     choosePerson()
-    fireEvent.click(screen.getByRole('button', { name: /^Import 3 codings$/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Import 3 rows$/ }))
 
     expect(await screen.findByText('Import finished')).toBeInTheDocument()
     expect(screen.getByText('Rows skipped')).toBeInTheDocument()
@@ -721,10 +942,9 @@ describe('the result', () => {
     })
     await reachMapStep()
     choosePerson()
-    fireEvent.click(screen.getByRole('button', { name: /^Import 3 codings$/ }))
-    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith(
-      expect.stringContaining('Say who these codings belong to'),
-    ))
+    fireEvent.click(screen.getByRole('button', { name: /^Import 3 rows$/ }))
+    // On the page beside the button since #1083/#1076 — a toast was gone in four seconds.
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Say who these codings belong to/)
   })
 })
 
@@ -744,6 +964,52 @@ describe('a name with nothing to import (found by driving)', () => {
     expect(b.querySelector('legend')).toHaveTextContent('Model B · 2 rows, none can be imported')
     expect(within(b).getByRole('radio', { name: /Do not import these/ })).toBeChecked()
     choosePerson()   // GPT-4o's — the only kind asked for
-    expect(screen.getByRole('button', { name: /^Import 3 codings$/ })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /^Import 3 rows$/ })).toBeEnabled()
+  })
+})
+
+describe('the two step buttons keep focus while they run (#965, reached by #1076/#1083)', () => {
+  // Measured live: *Check the file* went natively `disabled` while it ran, Chrome
+  // blurred it, and the refusal then appeared beside a button the keyboard user was
+  // no longer on. Busy is `aria-disabled` now, and each handler refuses a second press.
+  it('Check the file: still focused and busy, a second press sends nothing', async () => {
+    setup()
+    let fail!: (e: unknown) => void
+    api.preview.mockReturnValue(new Promise((_, reject) => { fail = reject }))
+    fireEvent.click(screen.getByLabelText(/A segment’s Unit ID/))
+    upload(csv())
+    const button = await screen.findByRole('button', { name: /Check the file/ })
+    await waitFor(() => expect(button).toBeEnabled())
+    button.focus()
+    fireEvent.click(button)
+    await waitFor(() => expect(button).toHaveAttribute('aria-busy', 'true'))
+    expect(button).toHaveAttribute('aria-disabled', 'true')
+    expect(button).not.toBeDisabled()
+    expect(button).toHaveFocus()
+    fireEvent.click(button)
+    expect(api.preview).toHaveBeenCalledTimes(1)
+    fail({ response: { data: { detail: 'Refused.' } } })
+    expect(await screen.findByRole('alert')).toHaveTextContent('Refused.')
+    expect(button).toHaveFocus()
+    expect(button).not.toHaveAttribute('aria-disabled')
+  })
+
+  it('Import: still focused and busy, a second press sends nothing', async () => {
+    setup()
+    api.preview.mockResolvedValue(PREVIEW)
+    let finish!: (v: unknown) => void
+    api.run.mockReturnValue(new Promise(resolve => { finish = resolve }))
+    await reachMapStep()
+    choosePerson()
+    const button = screen.getByRole('button', { name: /^Import 3 rows$/ })
+    button.focus()
+    fireEvent.click(button)
+    await waitFor(() => expect(button).toHaveAttribute('aria-busy', 'true'))
+    expect(button).not.toBeDisabled()
+    expect(button).toHaveFocus()
+    fireEvent.click(button)
+    expect(api.run).toHaveBeenCalledTimes(1)
+    finish(RESULT)
+    await screen.findByText('Import finished')
   })
 })

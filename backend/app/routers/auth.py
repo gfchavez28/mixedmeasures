@@ -7,6 +7,7 @@ from ..database import get_db
 from ..models.user import User
 from ..models.audit import AuditEntry
 from ..services.participant_scores import mark_participant_scores_stale
+from ..services.consensus_staleness import mark_consensus_stale_for_coder
 from ..schemas.auth import (
     SetupRequest,
     LoginRequest,
@@ -663,12 +664,17 @@ async def switch_coder(
 
 
 @router.post("/coders/{coder_id}/archive", response_model=CoderResponse)
-async def archive_coder(
+def archive_coder(
     coder_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Archive a roster coder (never hard-delete — preserves their attribution)."""
+    """Archive a roster coder (never hard-delete — preserves their attribution).
+
+    ⚠️ Plain `def` since #1074 (#837's rule): it now marks every consensus passage
+    the coder shared, set-based but measured at 1.47 s for BES's main coder, and
+    an `async def` body with no `await` would hold the event loop for all of it.
+    """
     if coder_id == user.id:
         raise HTTPException(status_code=400, detail="Switch to another coder before archiving this one")
     target = (
@@ -688,6 +694,10 @@ async def archive_coder(
         # hence no project scope. The input class furthest from anything that
         # looks like coding, and the reason the freshness marker is a pair.
         mark_participant_scores_stale(db)
+        # #1074 — and every CONSENSUS row they took part in: an archived coder does
+        # not vote either (DEC-F), so the stored layer is wrong wherever their vote
+        # counted. The scores were marked here since row 45; consensus never was.
+        mark_consensus_stale_for_coder(db, target.id)
         db.commit()
         db.add(AuditEntry(
             user_id=user.id, action="coder_archived", entity_type="user", entity_id=target.id,
@@ -698,12 +708,13 @@ async def archive_coder(
 
 
 @router.post("/coders/{coder_id}/unarchive", response_model=CoderResponse)
-async def unarchive_coder(
+def unarchive_coder(
     coder_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Restore an archived roster coder to the selectable roster.
+    """Restore an archived roster coder to the selectable roster. Plain `def` for
+    `archive_coder`'s reason (#1074).
 
     Usernames stay globally unique even while archived (create checks all users),
     so an unarchive can never collide — no rename needed.
@@ -722,6 +733,8 @@ async def unarchive_coder(
         # marked them; this did not, so the table read as current after a change
         # to who counts.
         mark_participant_scores_stale(db)
+        # #1074 — the same fact for consensus: their vote counts again.
+        mark_consensus_stale_for_coder(db, target.id)
         db.commit()
         db.add(AuditEntry(
             user_id=user.id, action="coder_unarchived", entity_type="user", entity_id=target.id,

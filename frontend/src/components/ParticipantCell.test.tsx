@@ -33,7 +33,7 @@ vi.mock('sonner', () => ({
 }))
 
 import { ParticipantCell } from './DatasetGridComponents'
-import { PARTICIPANT_LIST_LIMIT } from '@/lib/participant-search'
+import { NO_PARTICIPANTS_YET, PARTICIPANT_LIST_LIMIT, PARTICIPANT_SEARCH_LABEL } from '@/lib/participant-search'
 
 afterEach(() => {
   cleanup()
@@ -82,7 +82,7 @@ function renderCell({
 
 async function openPopover() {
   fireEvent.click(screen.getByRole('button', { name: /link/i }))
-  await screen.findByPlaceholderText('Search participants...')
+  await screen.findByRole('textbox', { name: PARTICIPANT_SEARCH_LABEL })
 }
 
 it('creates a participant from the row identifier and links it', async () => {
@@ -152,7 +152,7 @@ it('#963 while loading: says so, claims no absence, and offers no create', async
   renderCell()
   await openPopover()
   expect(await screen.findByText(/Loading participants…/)).toBeInTheDocument()
-  expect(screen.queryByText('No participants found')).not.toBeInTheDocument()
+  expect(screen.queryByText(NO_PARTICIPANTS_YET)).not.toBeInTheDocument()
   const createBtn = screen.getByRole('button', { name: /new participant/i })
   expect(createBtn).toBeDisabled()
   expect(createBtn).toHaveAttribute('title', expect.stringMatching(/Still loading/i))
@@ -166,7 +166,7 @@ it('#963 after a failure: says the load failed, offers Retry, and creates nothin
   await openPopover()
   expect(await screen.findByText(/participants could not be loaded/i)).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
-  expect(screen.queryByText('No participants found')).not.toBeInTheDocument()
+  expect(screen.queryByText(NO_PARTICIPANTS_YET)).not.toBeInTheDocument()
   const createBtn = screen.getByRole('button', { name: /new participant/i })
   expect(createBtn).toBeDisabled()
   fireEvent.click(createBtn)
@@ -230,17 +230,17 @@ describe('#1045 — a closed picker costs nothing, an open one is bounded', () =
   it('POSITIVE CONTROL: opening one picker subscribes exactly one, and closing releases it', async () => {
     const { observers } = renderWarmGrid(30, participants(500))
     fireEvent.click(screen.getAllByRole('button', { name: /link/i })[0])
-    await screen.findByPlaceholderText('Search participants...')
+    await screen.findByRole('textbox', { name: PARTICIPANT_SEARCH_LABEL })
     expect(observers()).toBe(1)
-    fireEvent.keyDown(screen.getByPlaceholderText('Search participants...'), { key: 'Escape' })
-    await waitFor(() => expect(screen.queryByPlaceholderText('Search participants...')).toBeNull())
+    fireEvent.keyDown(screen.getByRole('textbox', { name: PARTICIPANT_SEARCH_LABEL }), { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: PARTICIPANT_SEARCH_LABEL })).toBeNull())
     expect(observers()).toBe(0)
   })
 
   it('renders at most PARTICIPANT_LIST_LIMIT options, and says the list stops early', async () => {
     renderWarmGrid(1, participants(1000))
     fireEvent.click(screen.getByRole('button', { name: /link/i }))
-    const search = await screen.findByPlaceholderText('Search participants...')
+    const search = await screen.findByRole('textbox', { name: PARTICIPANT_SEARCH_LABEL })
     await screen.findByText('P00001')
     const options = screen.getAllByRole('button').filter(b => /^P\d{5}/.test(b.textContent ?? ''))
     expect(options).toHaveLength(PARTICIPANT_LIST_LIMIT)
@@ -253,7 +253,7 @@ describe('#1045 — a closed picker costs nothing, an open one is bounded', () =
   it('search reaches past the bound, exact match first, and the note goes when nothing is hidden', async () => {
     renderWarmGrid(1, participants(1000))
     fireEvent.click(screen.getByRole('button', { name: /link/i }))
-    const search = await screen.findByPlaceholderText('Search participants...')
+    const search = await screen.findByRole('textbox', { name: PARTICIPANT_SEARCH_LABEL })
     // P00999 sits at position 999 in server order — far outside the first 200.
     fireEvent.change(search, { target: { value: 'p00999' } })
     await waitFor(() => {
@@ -311,7 +311,7 @@ it('#963 POSITIVE CONTROL: an answered EMPTY list says so and still creates', as
   create.mockResolvedValue({ id: 42, identifier: 'P-07', display_name: null, role: null, linked_speakers: [] })
   renderCell()
   await openPopover()
-  expect(await screen.findByText('No participants found')).toBeInTheDocument()
+  expect(await screen.findByText(NO_PARTICIPANTS_YET)).toBeInTheDocument()
   expect(screen.queryByText(/Loading participants/)).not.toBeInTheDocument()
   const createBtn = screen.getByRole('button', { name: /new participant .P-07./i })
   expect(createBtn).toBeEnabled()

@@ -200,11 +200,16 @@ describe('#963 — the import wizards gate on their checks, and split loading fr
     // Read from an unanswered list the gate was `false`, so the callout was
     // SUPPRESSED and the researcher was not told that none of their IDs matched
     // anyone already in the project.
-    const code = src('pages/DatasetImport.tsx')
-    expect(code).toContain('hadParticipants !== false && report.created > 0 && report.matched === 0')
-    expect(code).toMatch(/useRef<boolean \| undefined>/)
+    // The callout moved to a shared component when Append became its second
+    // user (#1010); BOTH wizards must keep the snapshot `undefined`-capable.
+    expect(src('components/ParticipantLinkNote.tsx'))
+      .toContain('hadParticipants !== false && report.created > 0 && report.matched === 0')
+    expect(src('pages/DatasetImport.tsx')).toMatch(/useRef<boolean \| undefined>/)
+    expect(src('pages/AppendImport.tsx')).toMatch(/useRef<boolean \| undefined>/)
     // The snapshot records "unknown", never a bare length-of-nothing.
-    expect(code).not.toMatch(/hadParticipantsRef\.current = \(participantsData\?\./)
+    for (const file of ['pages/DatasetImport.tsx', 'pages/AppendImport.tsx']) {
+      expect(src(file)).not.toMatch(/hadParticipantsRef\.current = \(participantsData\?\./)
+    }
   })
 
   it('#1047 — the snapshot is a COUNT taken as the import starts, never the whole list', () => {

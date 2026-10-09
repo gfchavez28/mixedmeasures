@@ -53,7 +53,7 @@ export function invalidateDerivedCounts(
 }
 
 /**
- * After a BULK coding import (row 49) — every query of this project, not the list above.
+ * After a BULK coding import (row 49) — EVERY query in the cache, not the list above.
  *
  * 🔴 **#1038 (d): the list above is the set ONE coding moves on OTHER screens; an import
  * moves every coding surface at once** — the code list's "N uses", the qualitative
@@ -62,13 +62,19 @@ export function invalidateDerivedCounts(
  * cache for up to a minute showing none of what was just imported. Naming each of those
  * keys here would be the #450 hand-list again, one surface short the day a surface is added.
  *
+ * 🔴 **#1082 (c): "this project's queries" was itself a hand-list, one key shape long.** It
+ * matched `queryKey[1] === projectId`, and the conversation workbench's segment list is
+ * `['segments', conversationId]` — a SOURCE id in that slot — so imported chips could be
+ * missing there for its 60 s `staleTime`; `['dataset-data', datasetId]` and
+ * `['participant-detail', participantId]` are keyed the same way. A key's second element
+ * is not a project id by any rule the cache can check, so the import invalidates
+ * everything: there is no key it can miss.
+ *
  * Cheap for the reason the helper above is: an import runs from its own page, so nearly
- * every one of these queries is INACTIVE — marked stale at no network cost and refetched
- * when its screen opens. `String()` because a project id reaches keys as a number from the
- * layout and as a string from a route param.
+ * every query is INACTIVE — marked stale at no network cost and refetched when its screen
+ * opens. Another project's queries are marked too, and cost one refetch each if opened.
  */
 export function invalidateAfterCodingImport(qc: QueryClient, projectId: number | string): void {
   invalidateDerivedCounts(qc, projectId, { metrics: true })
-  const pid = String(projectId)
-  qc.invalidateQueries({ predicate: (query) => String(query.queryKey[1]) === pid })
+  qc.invalidateQueries()
 }

@@ -134,6 +134,13 @@ class CodeSegmentsWithContextResponse(BaseModel):
     code_color: str | None
     category_name: str | None
     total_segments: int
+    #: #969 — each kind's own total, for its section's "Showing N of M". The three
+    #: sum to `total_segments`; the sum alone cannot be split back apart.
+    conversation_total: int = 0
+    document_total: int = 0
+    observation_total: int = 0
+    #: True while ANY kind has rows past `offset + limit` (#969: it was the
+    #: conversation kind's alone).
     has_more: bool
     conversations: list[ConversationSegmentGroup]
     documents: list[DocumentSegmentGroup] = []
@@ -360,6 +367,12 @@ class SaturationResponse(BaseModel):
     total_unique_codes: int
     total_sources: int
     category_level: bool
+    #: #708 (i) / #1148 — what the x-axis is ordered BY (`code_analysis.
+    #: SATURATION_ORDERING_*`). The service emitted it from 2026-08-17 and this
+    #: schema did not declare it, so `response_model=` dropped it and the chart's
+    #: axis title and caveat never rendered. Optional because an older payload
+    #: carries none, and the client then shows no ordering rather than guessing one.
+    ordering: str | None = None
 
 
 # ── Text columns ──────────────────────────────────────────────────────────

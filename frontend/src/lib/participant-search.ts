@@ -24,6 +24,30 @@ import type { Participant } from '@/lib/api/participants'
  */
 export const PARTICIPANT_LIST_LIMIT = 200
 
+/**
+ * #1092 — what a participant search box and its empty list SAY, once.
+ *
+ * Three surfaces search the same three fields through `searchParticipants` — the
+ * Participants page, "Who is this document about?" and the data grid's link
+ * picker — and they had grown three placeholders, two accessible names (the
+ * grid's box had none, so its placeholder was its name) and three ways to say a
+ * search matched nobody, one of which did not echo the search. A shared MODULE
+ * is not a shared SURFACE; these constants are what makes it one.
+ * `pages/participant-search-surfaces.test.ts` holds all three to them.
+ *
+ * The placeholder names the fields because a bare "Search…" was read as
+ * searching more than it does (#1008).
+ */
+export const PARTICIPANT_SEARCH_PLACEHOLDER = 'Search by name, ID or role…'
+export const PARTICIPANT_SEARCH_LABEL = 'Search participants by name, ID or role'
+/** An answered, EMPTY list — never shown for one that has not answered (#963). */
+export const NO_PARTICIPANTS_YET = 'This project has no participants yet.'
+
+/** A search that matched nobody, echoing what was typed. */
+export function noParticipantsMatch(search: string): string {
+  return `No participants match “${search.trim()}”.`
+}
+
 type SearchKeys = readonly [label: string, identifier: string, role: string]
 
 /**

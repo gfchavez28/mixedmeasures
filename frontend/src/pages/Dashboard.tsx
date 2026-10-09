@@ -190,7 +190,7 @@ function DashboardCoderSwitcher() {
  * in `onSuccess` pushed `onError` ten characters past it (measured 2026-09-21).
  */
 function staleToast(result: ProjectImportResult): { description: string } | undefined {
-  const note = staleResultsNote(result.metrics_marked_stale)
+  const note = staleResultsNote(result.metrics_marked_stale, result.tests_marked_stale)
   return note ? { description: note } : undefined
 }
 
@@ -259,7 +259,7 @@ export default function Dashboard() {
           `To go back to it, download it from Settings › Backup & Data and import it.`,
         )
       }
-      const stale = staleResultsNote(result.metrics_marked_stale)
+      const stale = staleResultsNote(result.metrics_marked_stale, result.tests_marked_stale)
       if (stale) notes.push(stale)
       toast.success(
         mode === 'overwrite'

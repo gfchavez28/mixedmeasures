@@ -26,6 +26,11 @@ export interface BackupManifest {
   video_excluded: boolean
   video_files_excluded: number
   project_summaries: ProjectBackupSummary[]
+  /** #1039 (k): the project list could not be read when the backup was made, so
+   * `project_summaries` is empty for THAT reason. The server always sends it
+   * (older manifests default to false), so an empty list with this false is
+   * never read as "no projects" either — an older backup's failure looks the same. */
+  project_summaries_unavailable: boolean
 }
 
 export interface BackupStatus {
@@ -37,6 +42,11 @@ export interface BackupStatus {
    * (computed as last_backup_at + interval). Null when no backups exist yet.
    * Used by TopRail freshness label + Settings page countdown. */
   next_backup_at: string | null
+  /** #1043: THIS install's automatic schedule, so the Settings sentences state it
+   * rather than assume the defaults. `0` hours = automatic backups are OFF. Null
+   * only from a server that predates the field. */
+  auto_backup_interval_hours: number | null
+  auto_backup_max_count: number | null
 }
 
 export interface BackupInfo {
@@ -126,7 +136,7 @@ export const backupApi = {
       })),
 
   /** #357: trigger an auto-prefix snapshot without download. Counts toward
-   * the same 5-backup auto rotation. Returns the refreshed BackupStatus so
+   * the same automatic rotation (`MM_AUTO_BACKUP_MAX_COUNT`, 5 by default). Returns the refreshed BackupStatus so
    * the UI can re-render without waiting for the polling tick. */
   now: () =>
     api.post<BackupStatus>('/backup/now', null, { timeout: 120_000 }).then(r => r.data),

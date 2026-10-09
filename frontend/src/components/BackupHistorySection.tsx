@@ -30,7 +30,7 @@ import { backupApi, type BackupInfo } from '@/lib/api'
 import { serverDetailMessage } from '@/lib/api/error-utils'
 import { formatBytes, formatRelativeTime } from '@/lib/format'
 import { formatTakenAt } from '@/lib/safety-copies'
-import { backupRowName, describeBackup, isLastOfItsKind } from '@/lib/backup-history'
+import { backupRowName, backupTitle, describeBackup, isLastOfItsKind } from '@/lib/backup-history'
 import { useListLoad } from '@/hooks/useListLoad'
 import { LoadState } from '@/components/LoadStatus'
 import { Button } from '@/components/ui/button'
@@ -229,8 +229,8 @@ export default function BackupHistorySection({
         title="Delete this backup?"
         description={
           deleteTarget
-            ? `${describeBackup(deleteTarget).label} backup from ` +
-              `${formatTakenAt(deleteTarget.created_at)} (${formatBytes(deleteTarget.size_bytes)}). ` +
+            ? `The ${backupTitle(deleteTarget, formatTakenAt(deleteTarget.created_at))} ` +
+              `(${formatBytes(deleteTarget.size_bytes)}). ` +
               'The file is removed from this computer and cannot be brought back.'
             : ''
         }
@@ -253,7 +253,9 @@ export default function BackupHistorySection({
             className="rounded border border-amber-300 dark:border-amber-600 bg-amber-50 dark:bg-amber-900/20 p-2"
           >
             <p className="text-xs text-amber-800 dark:text-amber-300">
-              This is the only {describeBackup(deleteTarget).label.toLowerCase()} backup you
+              {/* #1132 — quoted: three of the five labels are phrases, so the
+                  lower-cased form read "the only before a restore backup". */}
+              This is the only “{describeBackup(deleteTarget).label}” backup you
               have. Deleting it leaves nothing to go back to from that point.
             </p>
           </div>

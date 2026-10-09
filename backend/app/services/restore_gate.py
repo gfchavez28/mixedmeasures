@@ -78,7 +78,9 @@ class RestoreRefused(RuntimeError):
     """A restore could not take the gate, and nothing was changed.
 
     `reason` is `"already_restoring"` or `"busy"` — two different facts with two
-    different remedies, so the router can say which.
+    different remedies, so the router can say which — or `"restoring_elsewhere"`,
+    raised by `backup.restore_from_backup` when ANOTHER PROCESS holds the restore
+    lock (#1142): this gate is per process, and that lock is what spans them.
     """
 
     def __init__(self, message: str, reason: str):

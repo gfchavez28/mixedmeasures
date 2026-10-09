@@ -1,11 +1,12 @@
 import { useEffect, useId, useRef, type RefObject } from 'react'
-import { onlineManager, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { LoaderCircle } from 'lucide-react'
 import { backupApi, type RestorePreview, type RestoreResult } from '@/lib/api'
 import { serverDetailMessage } from '@/lib/api/error-utils'
 import { formatBytes } from '@/lib/format'
 import { formatTakenAt } from '@/lib/safety-copies'
 import { describeBackup } from '@/lib/backup-history'
+import { holdPageForRestoreOutcome } from '@/lib/restore-outcome-hold'
 import { useElapsedSeconds } from '@/hooks/useElapsedSeconds'
 import { ANNOUNCE_EVERY_SECONDS, elapsedOnlyNote, stillWorkingMessage } from '@/lib/elapsed-progress'
 import { Button } from '@/components/ui/button'
@@ -151,9 +152,11 @@ export default function RestoreBackupDialog({
     // complete"; the failure sentence naming the backup to recover from is the one
     // that can least afford it. Offline, React Query holds every fetch until the
     // dialog is closed; after a success the page reloads instead.
+    // #1084 (a): the hold replaces TanStack's own `online` listener (a reconnect
+    // undid a plain `setOnline(false)`) and holds `client.ts`'s 401 reload for any
+    // request that does not go through React Query.
     if (!showingOutcome) return
-    onlineManager.setOnline(false)
-    return () => onlineManager.setOnline(true)
+    return holdPageForRestoreOutcome()
   }, [showingOutcome])
 
   const close = () => {
@@ -295,14 +298,27 @@ function PreviewDetails({ preview }: { preview: RestorePreview }) {
           {m.video_files_excluded > 0 && ` (${m.video_files_excluded} video excluded)`}
         </span>
       </div>
+      {/* #1039 (k) — said, not left as an absent section: an empty list here read
+          as "this backup holds nothing". An empty list WITHOUT the flag stays
+          silent, because a backup taken before the flag existed cannot tell its
+          own failure from an install with no projects. */}
+      {m.project_summaries_unavailable && (
+        <p className="text-xs text-mm-text-secondary">
+          <span className="text-mm-text-muted">Projects:</span>{' '}
+          the project list could not be read when this backup was made, so it is not
+          shown here. The backup can still be restored.
+        </p>
+      )}
       {m.project_summaries.length > 0 && (
         <div>
           <span className="text-mm-text-muted text-xs">Projects:</span>
           <ul className="mt-1 space-y-0.5">
             {m.project_summaries.map((p, i) => (
               <li key={i} className="text-mm-text text-xs">
-                {p.name}
-                <span className="text-mm-text-faint ml-1">
+                {/* #1132 — a TEXT space: a margin is not one, so the dialog's
+                    description read "…2024–26(3 conv, …" (#908's rule). */}
+                {p.name}{' '}
+                <span className="text-mm-text-faint">
                   ({p.conversation_count} conv, {p.dataset_count} ds, {p.document_count} doc, {p.observation_count} obs)
                 </span>
               </li>

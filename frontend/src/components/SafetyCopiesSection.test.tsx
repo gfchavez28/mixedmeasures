@@ -287,6 +287,58 @@ describe('SafetyCopiesSection', () => {
       await waitFor(() => expect(listSafetyCopies).toHaveBeenLastCalledWith(0))
     })
 
+    describe('#1038 (f) — Show all keeps the list, and the keyboard user’s place', () => {
+      it('keeps the page on screen while the rest loads, and says it is loading', async () => {
+        // Before: the key changed, `data` went undefined, the whole section
+        // returned null, and the pressed button unmounted with focus on it.
+        let finish: (v: unknown) => void = () => {}
+        listSafetyCopies.mockImplementation((size: number) =>
+          size === 0
+            ? new Promise((resolve) => { finish = resolve })
+            : Promise.resolve(page(many(50), { total_count: 60, total_bytes: 1, truncated: true })),
+        )
+        renderSection()
+        await openList()
+        const showAll = screen.getByRole('button', { name: 'Show all 60' })
+        showAll.focus()
+        fireEvent.click(showAll)
+        await waitFor(() => expect(listSafetyCopies).toHaveBeenLastCalledWith(0))
+
+        expect(screen.getAllByRole('listitem')).toHaveLength(50)
+        // The same element, still focused, busy — and its NAME unchanged (#770).
+        expect(document.activeElement).toBe(showAll)
+        expect(showAll).toHaveAttribute('aria-busy', 'true')
+        expect(showAll).toHaveAttribute('aria-disabled', 'true')
+        expect(screen.getByRole('status')).toHaveTextContent('Loading the rest…')
+
+        // A second press while busy asks for nothing more.
+        const calls = listSafetyCopies.mock.calls.length
+        fireEvent.click(showAll)
+        expect(listSafetyCopies.mock.calls.length).toBe(calls)
+
+        finish(page(many(60)))
+        await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(60))
+      })
+
+      it('moves focus to the first copy it revealed, not to <body>', async () => {
+        listSafetyCopies.mockImplementation((size: number) =>
+          Promise.resolve(size === 0
+            ? page(many(60))
+            : page(many(50), { total_count: 60, total_bytes: 1, truncated: true })),
+        )
+        renderSection()
+        await openList()
+        const showAll = screen.getByRole('button', { name: 'Show all 60' })
+        showAll.focus()
+        fireEvent.click(showAll)
+        await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(60))
+        expect(screen.queryByRole('button', { name: /^Show all/ })).not.toBeInTheDocument()
+        const firstRevealed = screen.getAllByRole('listitem')[50]
+        await waitFor(() => expect(document.activeElement).toBe(within(firstRevealed).getAllByRole('button')[0]))
+        expect(document.activeElement).not.toBe(document.body)
+      })
+    })
+
     it('says nothing about paging when the folder fits', async () => {
       // The POSITIVE control: a guard that passes by always showing the notice
       // would pass every assertion above.

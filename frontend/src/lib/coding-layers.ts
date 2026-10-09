@@ -107,6 +107,20 @@ export const showLayerPicker = (availability: LayerAvailability): boolean =>
   availableLayerScopes(availability).length > 1
 
 /**
+ * The layer a surface actually SENDS: the preference while it is offered, else
+ * `human` (#1038 g).
+ *
+ * 🔴 `CrossAnalysisPanel` derived this as `pref === 'consensus' && consensusAvailable
+ * ? 'consensus' : 'human'` — written before the machine layer existed, so a picker
+ * OFFERING *Machine* sent `human` when it was chosen and snapped back to *Coders*.
+ * Deriving from `availableLayerScopes` means a fourth layer cannot be offered by
+ * the picker and dropped by the request.
+ */
+export function effectiveLayerScope(pref: LayerScope, availability: LayerAvailability): LayerScope {
+  return availableLayerScopes(availability).includes(pref) ? pref : 'human'
+}
+
+/**
  * Narrow an untrusted value (a URL param, a persisted preference) to a layer this
  * build knows, falling back to `human`.
  *

@@ -57,24 +57,30 @@ describe('invalidateDerivedCounts (#450)', () => {
   })
 })
 
-describe('invalidateAfterCodingImport (#1038 d)', () => {
-  it('🔴 stales EVERY query of the project — a number or a string id — and no other project', async () => {
+describe('invalidateAfterCodingImport (#1038 d, #1082 c)', () => {
+  it('🔴 stales EVERY query in the cache — a SOURCE-keyed segment list included', async () => {
     const { QueryClient: RealClient } = await import('@tanstack/react-query')
     const { invalidateAfterCodingImport } = await import('./coding-cache')
     const qc = new RealClient()
-    qc.setQueryData(['code-frequencies', 7, { coder: 'x' }], 1)
-    qc.setQueryData(['text-coding-texts', '7'], 1)     // a route param reaches keys as text
-    qc.setQueryData(['codes', 7], 1)
-    qc.setQueryData(['codes', 8], 1)                   // another project
-    qc.setQueryData(['coders'], 1)                     // the roster: reset by the page itself
+    const keys: unknown[][] = [
+      ['code-frequencies', 7, { coder: 'x' }],
+      ['text-coding-texts', '7'],          // a route param reaches keys as text
+      ['codes', 7],
+      // #1082 (c): the conversation workbench keys its segments by CONVERSATION, so
+      // "this project's queries" (`queryKey[1] === projectId`) never matched it, and
+      // imported chips were missing there until the 60 s staleTime ran out.
+      ['segments', 42],
+      ['dataset-data', 9],                 // keyed by dataset — the same shape
+      ['participant-detail', 3],           // keyed by participant
+      ['coders'],                          // the roster: the page also RESETS it (#964)
+    ]
+    for (const key of keys) qc.setQueryData(key, 1)
 
     invalidateAfterCodingImport(qc, 7)
 
-    const stale = (key: unknown[]) => qc.getQueryState(key)?.isInvalidated
-    expect(stale(['code-frequencies', 7, { coder: 'x' }])).toBe(true)
-    expect(stale(['text-coding-texts', '7'])).toBe(true)
-    expect(stale(['codes', 7])).toBe(true)
-    expect(stale(['codes', 8])).toBe(false)
-    expect(stale(['coders'])).toBe(false)
+    // Population, not a list of expectations: a key shape nobody named here is covered too.
+    const all = qc.getQueryCache().getAll()
+    expect(all.length).toBe(keys.length)
+    expect(all.filter(q => !q.state.isInvalidated).map(q => q.queryKey)).toEqual([])
   })
 })

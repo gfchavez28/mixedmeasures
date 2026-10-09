@@ -470,7 +470,6 @@ class TestFreshness:
         """Batch 6: the archive endpoint marked every score stale and the unarchive
         endpoint did not — the same change to who votes, in the other direction,
         leaving the table reading as current."""
-        import asyncio
         from app.models.user import User
         from app.routers.auth import unarchive_coder
         db = world["db"]
@@ -480,7 +479,7 @@ class TestFreshness:
         db.flush()
         assert get_participant_dataset(db, 1).managed_stale is False
 
-        asyncio.run(unarchive_coder(coder_id=90, user=db.get(User, 1), db=db))
+        unarchive_coder(coder_id=90, user=db.get(User, 1), db=db)   # `def` since #1074
 
         assert get_participant_dataset(db, 1).managed_stale is True
 
@@ -811,3 +810,130 @@ class TestTheReapDoesNotBlockTheRefresh:
 
         assert report.columns_removed == 2
         assert report.synced_at is not None
+
+
+# ── #1144 — a refresh marks out of date what it moved, and only that ─────────
+
+
+def _fresh_metric(db, column_id, name):
+    """A saved metric on `column_id` that is current, and a saved test on it."""
+    m = _metric_on(db, column_id, name=name)
+    m.stale = False
+    db.add(StatisticalTest(
+        project_id=1, test_type="independent_t_test", config="{}",
+        target_type="metric_definition", target_id=m.id, result_data="{}", stale=False,
+    ))
+    db.commit()
+    return m.id
+
+
+def _stale(db, metric_id):
+    db.expire_all()
+    test = db.query(StatisticalTest).filter(
+        StatisticalTest.target_type == "metric_definition",
+        StatisticalTest.target_id == metric_id,
+    ).one()
+    return db.get(MetricDefinition, metric_id).stale, test.stale
+
+
+def _manual_numeric_column(db, dataset):
+    """A variable the researcher added to the participant table."""
+    order = max(c.sequence_order for c in _columns(db, dataset)) + 1
+    column = DatasetColumn(
+        dataset_id=dataset.id, column_text="Years in post", column_type=ColumnType.NUMERIC,
+        sequence_order=order, display_order=order, source="manual",
+    )
+    db.add(column)
+    db.commit()
+    return column.id
+
+
+class TestARefreshMarksWhatItMoved:
+    """🔴 #1144 — a refresh rewrote score cells and marked NO metric stale, and quick
+    compute recomputes only a stale metric, so the analysis view kept the number from
+    before the refresh (the 2026-10-08 audit: 2.0 shown, 1.0 true) until *Recompute
+    all*. Batch 16's was-stale gate on saved tests (#1039 a) relies on the flag."""
+
+    def _scored(self, world):
+        db = world["db"]
+        world["rate"]("E-01", 2.0)
+        world["rate"]("E-02", 2.0)
+        create_participant_dataset(db, 1)
+        ps.refresh_participant_dataset(db, 1)
+        db.commit()
+        return db, get_participant_dataset(db, 1)
+
+    def test_a_moved_score_marks_its_metric_and_its_test(self, world):
+        db, dataset = self._scored(world)
+        metric_id = _fresh_metric(db, _score_column(db, dataset).id, "Support (mean)")
+
+        world["rate"]("E-02", -2.0)  # E-02's mean moves 2.0 → 0.0
+        db.commit()
+        report = ps.refresh_participant_dataset(db, 1)
+        db.commit()
+
+        assert report.cells_written > 0, "vacuous: the refresh moved no cell"
+        assert _stale(db, metric_id) == (True, True)
+
+    def test_a_refresh_that_moved_nothing_marks_nothing(self, world):
+        """The other side, and not decoration: an amber marker on a number that
+        cannot have changed teaches a researcher to ignore the marker (#1149)."""
+        db, dataset = self._scored(world)
+        metric_id = _fresh_metric(db, _score_column(db, dataset).id, "Support (mean)")
+
+        report = ps.refresh_participant_dataset(db, 1)
+        db.commit()
+
+        assert (report.cells_written, report.cells_cleared, report.rows_added,
+                report.rows_removed) == (0, 0, 0, 0)
+        assert _stale(db, metric_id) == (False, False)
+
+    def test_a_REAPED_row_marks_every_column_of_the_table(self, world):
+        """A row is a member of every column's population, and a reaped one takes
+        the cells typed into the researcher's own variables with it."""
+        db, dataset = self._scored(world)
+        typed = _fresh_metric(db, _manual_numeric_column(db, dataset), "Years (mean)")
+
+        db.delete(world["people"]["E-03"])  # never rated, so no score cell moves
+        db.commit()
+        report = ps.refresh_participant_dataset(db, 1)
+        db.commit()
+
+        assert report.rows_removed == 1
+        assert report.cells_written == report.cells_cleared == 0, (
+            "the fixture must move a ROW and no score cell, or it cannot tell the "
+            "row arm from the cell arm"
+        )
+        assert _stale(db, typed) == (True, True)
+
+    def test_an_ADDED_row_marks_every_column_of_the_table(self, world):
+        db, dataset = self._scored(world)
+        typed = _fresh_metric(db, _manual_numeric_column(db, dataset), "Years (mean)")
+
+        db.add(Participant(project_id=1, identifier="E-04"))
+        db.commit()
+        report = ps.refresh_participant_dataset(db, 1)
+        db.commit()
+
+        assert report.rows_added == 1 and report.cells_written == 0
+        assert _stale(db, typed) == (True, True)
+
+    def test_a_write_that_fails_after_committed_batches_still_marks(self, world, monkeypatch):
+        """`_write_cell_plan` COMMITS each batch (#1073 a), so a failure part-way has
+        already moved cells — the failure branch must mark as the success one does."""
+        db, dataset = self._scored(world)
+        metric_id = _fresh_metric(db, _score_column(db, dataset).id, "Support (mean)")
+        world["rate"]("E-02", -2.0)
+        db.commit()
+
+        real = ps._write_cell_plan
+
+        def writes_then_fails(db_, plan):
+            real(db_, plan)
+            raise RuntimeError("the disk went away after the last batch")
+
+        monkeypatch.setattr(ps, "_write_cell_plan", writes_then_fails)
+        with pytest.raises(RuntimeError):
+            ps.refresh_participant_dataset(db, 1)
+
+        assert _stale(db, metric_id) == (True, True)

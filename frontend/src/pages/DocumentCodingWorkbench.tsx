@@ -5,7 +5,7 @@ import { Virtuoso, type VirtuosoHandle, type Components } from 'react-virtuoso'
 import { useScrollbarGutter } from '@/hooks/useScrollbarGutter'
 import {
   Search, X, Undo2, Redo2, Eye, EyeOff, Pencil, ChevronLeft, ChevronRight, FileText, Download,
-  Check, Image, ImageOff, Trash2, ArrowUp, ArrowDown, Quote, BookOpen,
+  Check, Image, ImageOff, Trash2, ArrowUp, ArrowDown, Quote, BookOpen, SkipForward,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useTextSplitSelection } from '@/hooks/useTextSplitSelection'
@@ -1888,9 +1888,10 @@ export default function DocumentCodingWorkbench() {
             headerExtra={
               <button
                 onClick={(e) => { e.stopPropagation(); handleJumpToNextUncoded() }}
-                className="text-[10px] text-mm-text-muted hover:text-mm-text-secondary transition-colors"
+                className="inline-flex items-center gap-1 text-[10px] text-mm-text-muted hover:text-mm-text-secondary transition-colors"
               >
-                Jump to uncoded ⏭
+                Jump to uncoded
+                <SkipForward className="w-3 h-3" aria-hidden="true" />
               </button>
             }
           >

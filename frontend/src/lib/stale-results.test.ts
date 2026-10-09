@@ -34,4 +34,21 @@ describe('staleResultsNote (the import / duplicate toast)', () => {
   it('names the act the researcher has to take', () => {
     expect(staleResultsNote(2)).toContain('Recompute')
   })
+
+  it('keeps the metrics-only sentence word for word when no test was marked', () => {
+    expect(staleResultsNote(2, 0)).toBe(staleResultsNote(2))
+  })
+
+  it('🔴 counts saved TESTS too, which used to arrive reading as current (#1039 a)', () => {
+    expect(staleResultsNote(0, 1)).toMatch(/^1 saved test was marked out of date/)
+    expect(staleResultsNote(0, 3)).toMatch(/^3 saved tests were marked out of date/)
+    expect(staleResultsNote(2, 1)).toMatch(/^2 saved results and 1 saved test were marked/)
+    expect(staleResultsNote(1, 2)).toMatch(/^1 saved result and 2 saved tests were marked/)
+    expect(staleResultsNote(0, 2)).toContain('Recompute')
+  })
+
+  it('says nothing for a non-finite or negative test count either', () => {
+    expect(staleResultsNote(0, -1)).toBeNull()
+    expect(staleResultsNote(0, Number.NaN)).toBeNull()
+  })
 })

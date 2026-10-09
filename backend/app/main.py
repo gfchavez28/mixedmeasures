@@ -85,10 +85,16 @@ def _run_auto_backup(db_path: Path, docs_dir: Path, media_dir: Path, backup_dir:
         AUTO_BACKUP_BUSY_WAIT_SECONDS,
         cleanup_old_backups,
         create_backup,
+        sweep_abandoned_staging,
     )
     if not db_gate.try_enter():
         return False
     try:
+        # #1080: what a backup or restore stopped partway left in the folder, swept
+        # on every turn as well as at startup — an install that runs for weeks
+        # would otherwise keep it until the next launch. Inside the slot, so never
+        # during a restore. Never raises.
+        sweep_abandoned_staging(backup_dir)
         # Auto rotation excludes video (slab 5 policy: 4h × 5-rotation would
         # multiply multi-GB recordings; restore preserves them).
         create_backup(
@@ -108,9 +114,14 @@ async def _auto_backup_turn(settings) -> float:
     merge holding it) is tried again after `AUTO_BACKUP_BUSY_RETRY_SECONDS`, not a
     whole interval later. Refusing is what keeps an incomplete copy out of the
     rotation; it must not also cost four hours of cover.
+
+    #1084 (b): a turn SKIPPED because a restore held the gate is retried on the same
+    short delay, for the same reason. It returned the full interval — including when
+    the restore it yielded to then gave up after its drain wait and changed nothing.
     """
     from .services.backup import AUTO_BACKUP_BUSY_RETRY_SECONDS, DatabaseBusyError
     interval = settings.auto_backup_interval_hours * 3600
+    retry = min(interval, AUTO_BACKUP_BUSY_RETRY_SECONDS)
     try:
         db_path = Path(settings.mm_database_path)
         if db_path.exists() and db_path.stat().st_size > 0:
@@ -121,9 +132,12 @@ async def _auto_backup_turn(settings) -> float:
             if ran:
                 logger.info("Auto-backup completed")
             else:
-                logger.info("Auto-backup skipped: a restore was running")
+                logger.info(
+                    "Auto-backup skipped: a restore was running. It will be tried again "
+                    "in %.0f minutes.", retry / 60,
+                )
+                return retry
     except DatabaseBusyError as e:
-        retry = min(interval, AUTO_BACKUP_BUSY_RETRY_SECONDS)
         logger.warning(
             "Auto-backup not taken: %s It will be tried again in %.0f minutes.",
             e, retry / 60,
@@ -135,7 +149,8 @@ async def _auto_backup_turn(settings) -> float:
 
 
 async def _auto_backup_loop():
-    """Periodic auto-backup loop. Runs as a background task."""
+    """Periodic auto-backup loop. Runs as a background task — only when the interval
+    is above zero (`0` turns automatic backups off, #1043)."""
     settings = get_settings()
     delay = settings.auto_backup_interval_hours * 3600
     while True:
@@ -144,9 +159,10 @@ async def _auto_backup_loop():
 
 
 #: Stale markers whose recompute raised, carried from tick to tick so the next
-#: batch leaves them out instead of failing on them again (#1017). Only the
-#: sweep's worker thread touches it, one tick at a time.
-_consensus_failed_markers: frozenset[int] = frozenset()
+#: batch leaves them out instead of failing on them again (#1017) — in the order
+#: the drain retries them, a bounded slice per tick (#1039 g). Only the sweep's
+#: worker thread touches it, one tick at a time.
+_consensus_failed_markers: tuple[int, ...] = ()
 
 
 def _drain_consensus() -> int:
@@ -308,10 +324,29 @@ async def lifespan(app: FastAPI):
     # not a fault, and must not be reported as one. Re-raised unchanged — this
     # REPORTS, it never handles, so uvicorn still refuses to serve.
     try:
+        # #1043: a schedule value with no meaning is refused before anything runs.
+        from .services.backup import (
+            check_backup_settings,
+            recover_interrupted_restore,
+            sweep_abandoned_staging,
+        )
+        _settings_at_start = get_settings()
+        check_backup_settings(
+            _settings_at_start.auto_backup_interval_hours,
+            _settings_at_start.auto_backup_max_count,
+        )
         run_migrations()
         get_documents_dir().mkdir(parents=True, exist_ok=True)
         get_media_dir().mkdir(parents=True, exist_ok=True)
         get_backup_dir().mkdir(parents=True, exist_ok=True)
+        # #1080: what a backup, a restore or a validation stopped partway left behind
+        # — and the recordings a stopped restore had set aside, which until now came
+        # back only at the next restore, unless a restore that outlived its app is
+        # still running in another process (the restore lock, #1142). Neither raises.
+        sweep_abandoned_staging(get_backup_dir())
+        recover_interrupted_restore(
+            Path(_settings_at_start.mm_database_path), get_media_dir()
+        )
         cleanup_expired_sessions()
         # The data repairs every opened database gets — here and after a restore
         # (#1026). In a thread: the media backfill opens files, and media IO on the
@@ -325,15 +360,23 @@ async def lifespan(app: FastAPI):
         raise
 
     # Start periodic auto-backup + consensus staleness sweep
-    auto_backup_task = asyncio.create_task(_auto_backup_loop())
-    consensus_sweep_task = asyncio.create_task(_consensus_sweep_loop())
+    tasks = [asyncio.create_task(_consensus_sweep_loop())]
+    if get_settings().auto_backup_interval_hours > 0:
+        tasks.append(asyncio.create_task(_auto_backup_loop()))
+    else:
+        # #1043: 0 means OFF, as `MM_INACTIVITY_TIMEOUT_MINUTES=0` does. It used to
+        # mean "sleep 0 seconds": 640 backups in a few seconds, measured.
+        logger.warning(
+            "Automatic backups are OFF (MM_AUTO_BACKUP_INTERVAL_HOURS=0). Backup now, "
+            "Download Backup and the on-quit backup still work."
+        )
 
     yield
 
     # Shutdown: cancel loops, create final backup
-    auto_backup_task.cancel()
-    consensus_sweep_task.cancel()
-    for _task in (auto_backup_task, consensus_sweep_task):
+    for _task in tasks:
+        _task.cancel()
+    for _task in tasks:
         try:
             await _task
         except asyncio.CancelledError:

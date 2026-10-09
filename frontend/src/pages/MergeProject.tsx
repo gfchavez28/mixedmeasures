@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { LoadState } from '@/components/LoadStatus'
+import UploadLimitNote from '@/components/UploadLimitNote'
 import { useListLoad } from '@/hooks/useListLoad'
 import {
   Bot, GitMerge, Check, ChevronRight, Users, TriangleAlert, Sparkles, Info,
@@ -413,6 +414,8 @@ export default function MergeProject() {
                 Choose the colleague's <code>.mmproject</code> file. It must be a copy of
                 <strong> {title}</strong> — merge lines codings up by shared identity.
               </p>
+              {/* #1010 (f) — the limit was enforced at selection and stated nowhere. */}
+              <UploadLimitNote noun="project files" maxBytes={MAX_PROJECT_FILE_BYTES} />
               {uploadError && (
                 // #1012: an ALERT, so a refused file is announced — it was a plain div.
                 <div role="alert" className="flex items-start gap-2 max-w-md mx-auto p-3 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 text-sm text-left">

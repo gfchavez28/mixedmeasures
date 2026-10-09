@@ -27,6 +27,7 @@ import {
 import { checkImportFiles } from '@/lib/upload-limits'
 import { useStepFocus } from '@/hooks/useStepFocus'
 import { projectHadParticipants } from '@/lib/participant-snapshot'
+import ParticipantLinkNote from '@/components/ParticipantLinkNote'
 import { countLabel, formatBytes, plural } from '@/lib/format'
 import UploadLimitNote from '@/components/UploadLimitNote'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
@@ -171,82 +172,6 @@ function RecognizedMissingNote({
   )
 }
 
-/**
- * #414: what participant linking did at import time. `compact` is the inline
- * per-dataset suffix for the multi-file list. `hadParticipants` (project had
- * participants BEFORE this import) drives the identity-pollution callout —
- * all-created/none-matched against an existing roster usually means the IDs
- * don't line up with the people already in the project.
- */
-function ParticipantLinkNote({
-  report,
-  projectId,
-  hadParticipants,
-  compact = false,
-}: {
-  report?: ParticipantLinkReport | null
-  projectId?: string | number
-  /** #963 — `undefined` = the participant list never answered, which is NOT
-   *  the same as "the project had nobody". */
-  hadParticipants?: boolean | undefined
-  compact?: boolean
-}) {
-  if (!report) return null
-  if (compact) {
-    if (report.linked <= 0) return null
-    return (
-      <span className="text-mm-text-faint">
-        {' · '}{report.linked.toLocaleString()} linked to participants
-      </span>
-    )
-  }
-  const skippedParts: string[] = []
-  if (report.skipped_duplicate > 0) {
-    const examples = report.duplicate_values.slice(0, 3).join(', ')
-    skippedParts.push(
-      `${report.skipped_duplicate} with a duplicated ID${examples ? ` (${examples})` : ''}`,
-    )
-  }
-  if (report.skipped_missing > 0) skippedParts.push(`${report.skipped_missing} with a blank or N/A ID`)
-  if (report.skipped_conflict > 0) {
-    skippedParts.push(`${report.skipped_conflict} whose participant is already linked to another record`)
-  }
-  // #963 — `!== false`, not truthiness: `undefined` means the participant list
-  // never answered, and suppressing the callout then is the unsafe direction.
-  const pollution = hadParticipants !== false && report.created > 0 && report.matched === 0
-  return (
-    <div className="pt-1 space-y-1 text-xs text-mm-text-muted">
-      <div>
-        <strong className="text-mm-text">Participants:</strong>{' '}
-        {report.linked === 1 ? '1 record linked' : `${report.linked.toLocaleString()} records linked`}
-        {report.linked > 0 && (
-          <>
-            {' '}({report.created > 0 && `${report.created} new`}
-            {report.created > 0 && report.matched > 0 && ', '}
-            {report.matched > 0 && `${report.matched} matched to existing`})
-          </>
-        )}
-      </div>
-      {skippedParts.length > 0 && (
-        <div>Not linked: {skippedParts.join(' · ')}. These records stay unlinked — you can link them by hand on the Participants page.</div>
-      )}
-      {pollution && (
-        <div className="flex items-start gap-1.5 text-amber-700 dark:text-amber-300">
-          <TriangleAlert className="w-3.5 h-3.5 flex-shrink-0 mt-px" aria-hidden="true" />
-          <span>
-            None of these IDs matched the participants already in this project, so{' '}
-            {report.created === 1 ? 'a new participant was' : `${report.created} new participants were`} created.
-            If these records belong to people already here, review and merge them on the{' '}
-            <Link to={`/projects/${projectId}/participants`} className="underline">
-              Participants page
-            </Link>.
-          </span>
-        </div>
-      )}
-    </div>
-  )
-}
-
 const MAX_FILES = 50
 const PREVIEW_CONCURRENCY = 5
 
@@ -356,6 +281,14 @@ export default function DatasetImport() {
   const [files, setFiles] = useState<File[]>([])
   const [fileConfigs, setFileConfigs] = useState<FileConfig[]>([])
   const [isLoading, setIsLoading] = useState(false)
+  /**
+   * #1010 (i) — WHAT is loading. The estimate and the button's word were chosen by
+   * STEP, but two previews run off the upload step (the column chooser's confirm
+   * and the configure step's worksheet change), so a worksheet change on the
+   * configure step read "Importing…" with the import's estimate while only a
+   * preview ran. Set wherever `isLoading` goes true; read only while it is.
+   */
+  const [operation, setOperation] = useState<'preview' | 'import'>('preview')
   const [error, setError] = useState('')
   /**
    * #796 (a11y half): a large import is 30s+ of server work behind a button
@@ -550,7 +483,7 @@ export default function DatasetImport() {
   )
 
   const elapsed = useElapsedSeconds(isLoading)
-  const activeEstimate = step === 'upload' ? estimatedSeconds : estimatedImportSeconds
+  const activeEstimate = operation === 'import' ? estimatedImportSeconds : estimatedSeconds
   const progress = fillFraction(elapsed, activeEstimate)
   const overEstimate = isOverEstimate(elapsed, activeEstimate)
 
@@ -570,6 +503,11 @@ export default function DatasetImport() {
   }, [isLoading, elapsed, overEstimate])
 
   const handlePreviewAll = useCallback(async () => {
+    // #1133 — Next stays focusable while it reads (`aria-disabled`), so this
+    // guard is the refusal (#754: `aria-disabled` changes what a button says,
+    // not what it does).
+    if (isLoading) return
+    setOperation('preview')
     setIsLoading(true)
     setError('')
     setStatusMessage(
@@ -696,7 +634,11 @@ export default function DatasetImport() {
           ? (newConfigs[0].previewError as string)
           : `None of the ${files.length} files could be read. ${errors.join(' · ')}`,
       )
-      setStatusMessage('Import failed. See the message above.')
+      // #1133 — nothing was imported (this is the READ, before configure), and
+      // the reason is the alert this status sits beside, so it names no
+      // direction ("see the message above" — the alert is after it in reading
+      // order, and this line is screen-reader-only).
+      setStatusMessage(files.length === 1 ? 'The file could not be read.' : 'None of the files could be read.')
       return
     }
 
@@ -717,11 +659,12 @@ export default function DatasetImport() {
     // the announcement is composed — omitting them would close over a previous
     // selection's estimate and announce a stale duration after the user adds or
     // removes a file.
-  }, [files, fileConfigs, id, hasSlowFile, estimatedSeconds])
+  }, [files, fileConfigs, id, hasSlowFile, estimatedSeconds, isLoading])
 
   // --- Worksheet change (#523, .xlsx only): re-preview ONE file on its new sheet ---
 
   const handleSheetChange = useCallback(async (fileIndex: number, sheetName: string) => {
+    setOperation('preview')
     setIsLoading(true)
     try {
       const preview = await datasetsApi.preview(id, files[fileIndex], 'utf-8', sheetName)
@@ -751,7 +694,9 @@ export default function DatasetImport() {
         return copy
       })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to preview worksheet')
+      // #797's class: a timeout read as a bare "signal timed out". The upload
+      // describer names the cause the way every other preview here does.
+      setError(describeDatasetUploadError(e))
     } finally {
       setIsLoading(false)
     }
@@ -890,6 +835,7 @@ export default function DatasetImport() {
     const chosen = config?.sourceColumnIndices
     if (!config || !chosen || chosen.length === 0) return
 
+    setOperation('preview')
     setIsLoading(true)
     setError('')
     setStatusMessage('Reading the selected columns…')
@@ -937,7 +883,7 @@ export default function DatasetImport() {
     } catch (err) {
       const msg = describeDatasetUploadError(err)
       setError(msg)
-      setStatusMessage('The selected columns could not be read. See the message above.')
+      setStatusMessage('The selected columns could not be read.')
     } finally {
       setIsLoading(false)
     }
@@ -1010,6 +956,7 @@ export default function DatasetImport() {
     // Busy BEFORE the snapshot's request (#1047): the Import button is disabled
     // by `isLoading`, so a second press cannot start a second import while the
     // count is answered.
+    setOperation('import')
     setIsLoading(true)
     hadParticipantsRef.current = await projectHadParticipants(queryClient, id)
 
@@ -1017,7 +964,7 @@ export default function DatasetImport() {
       // Single file: import directly, navigate to ProjectView
       setStatusMessage(
         hasSlowFile
-          ? `Importing. This is a large file and may take around ${estimatedSeconds} seconds.`
+          ? `Importing. This is a large file and may take around ${estimatedImportSeconds} seconds.`
           : 'Importing…',
       )
       try {
@@ -1067,7 +1014,7 @@ export default function DatasetImport() {
         // can time out the same way — and 'Import failed' told the researcher
         // nothing about which of those it was.
         setError(describeDatasetUploadError(err))
-        setStatusMessage('Import failed. See the message above.')
+        setStatusMessage('Import failed.')
       } finally {
         setIsLoading(false)
       }
@@ -1077,12 +1024,12 @@ export default function DatasetImport() {
       setStep('importing')
       handleBatchImport()
     }
-    // `hasSlowFile`/`estimatedSeconds` added by hand: the disable below silences
+    // `hasSlowFile`/`estimatedImportSeconds` added by hand: the disable below silences
     // exhaustive-deps for the WHOLE line, so a new capture here gets no warning.
     // Both derive from `files` via useMemo and `files` is already a dep, so the
     // closure cannot currently go stale — they are listed so it still cannot if
     // either memo's own deps widen later.
-  }, [files, fileConfigs, id, buildColumnConfigs, queryClient, hasSlowFile, estimatedSeconds]) // eslint-disable-line react-hooks/exhaustive-deps -- handleBatchImport defined below; adding would cause TDZ error
+  }, [files, fileConfigs, id, buildColumnConfigs, queryClient, hasSlowFile, estimatedImportSeconds]) // eslint-disable-line react-hooks/exhaustive-deps -- handleBatchImport defined below; adding would cause TDZ error
 
   const handleBatchImport = useCallback(async () => {
     cancelledRef.current = false
@@ -1696,7 +1643,14 @@ export default function DatasetImport() {
                     </div>
                     <Button
                       onClick={handlePreviewAll}
-                      disabled={files.length === 0 || isLoading}
+                      // #1133 — busy is `aria-disabled` + the handler's guard,
+                      // never `disabled`: Chrome blurs a focused button that
+                      // becomes disabled, so a refused file's alert appeared
+                      // with focus on <body> (#965's class; Batch 16 fixed
+                      // Coding Import's two buttons the same way).
+                      disabled={files.length === 0}
+                      aria-disabled={isLoading || undefined}
+                      aria-busy={isLoading || undefined}
                       className="relative overflow-hidden"
                     >
                       {isLoading && (
@@ -1790,7 +1744,7 @@ export default function DatasetImport() {
                           style={{ width: `${(progress * 100).toFixed(1)}%` }}
                         />
                       )}
-                      <span className="relative">{isLoading ? 'Importing…' : 'Import Dataset'}</span>
+                      <span className="relative">{isLoading ? (operation === 'import' ? 'Importing…' : 'Reading…') : 'Import Dataset'}</span>
                     </Button>
                   </div>
                   </div>
@@ -1910,7 +1864,7 @@ export default function DatasetImport() {
                           style={{ width: `${(progress * 100).toFixed(1)}%` }}
                         />
                       )}
-                      <span className="relative">{isLoading ? 'Importing…' : `Import ${files.length} Datasets`}</span>
+                      <span className="relative">{isLoading ? (operation === 'import' ? 'Importing…' : 'Reading…') : `Import ${files.length} Datasets`}</span>
                     </Button>
                   </div>
                   </div>

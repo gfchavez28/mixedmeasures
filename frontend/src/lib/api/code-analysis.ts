@@ -114,6 +114,12 @@ export interface CodeSegmentsWithContextResponse {
   code_color: string | null
   category_name: string | null
   total_segments: number
+  /** #969 — each kind's own total (they sum to `total_segments`), for its
+   *  section's "Showing N of M". */
+  conversation_total: number
+  document_total: number
+  observation_total: number
+  /** True while ANY kind has rows past this page (#969: it was conversations' alone). */
   has_more: boolean
   conversations: ConversationSegmentGroup[]
   documents: DocumentSegmentGroup[]

@@ -137,7 +137,8 @@ describe('BackupHistorySection', () => {
     expect(rows[1]).toHaveTextContent('On quit')
     expect(rows[2]).toHaveTextContent('Before a restore')
     // The description, not just the name: both of the first two are automatic.
-    expect(rows[0]).toHaveTextContent('taken on the 4-hourly schedule')
+    // #1132 — and *Backup now* writes the first kind too, so it says so.
+    expect(rows[0]).toHaveTextContent('taken on the automatic schedule or with Backup now')
     expect(rows[1]).toHaveTextContent('taken when Mixed Measures last closed')
   })
 
@@ -151,7 +152,7 @@ describe('BackupHistorySection', () => {
     const names = (await screen.findAllByRole('button', { name: /^Restore from / }))
       .map(b => b.getAttribute('aria-label'))
     expect(new Set(names).size).toBe(2)
-    expect(names[0]).toBe(`Restore from the automatic backup from ${formatTakenAt(AUTO.created_at)}`)
+    expect(names[0]).toBe(`Restore from the “Automatic” backup from ${formatTakenAt(AUTO.created_at)}`)
     for (const verb of ['Download', 'Delete']) {
       const set = screen.getAllByRole('button', { name: new RegExp(`^${verb} the `) })
       expect(new Set(set.map(b => b.getAttribute('aria-label'))).size).toBe(2)
@@ -202,7 +203,7 @@ describe('BackupHistorySection', () => {
     fireEvent.click((await screen.findAllByRole('button', { name: /^Delete the / }))[0])
     const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveAccessibleDescription(
-      new RegExp(`Automatic backup from ${formatTakenAt(AUTO.created_at)}`),
+      new RegExp(`The “Automatic” backup from ${formatTakenAt(AUTO.created_at)}`),
     )
     expect(deleteArchive).not.toHaveBeenCalled()
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
@@ -228,13 +229,15 @@ describe('BackupHistorySection', () => {
     list.mockResolvedValue([AUTO, ON_QUIT, PRE_RESTORE])
     renderSection()
     await openHistory()
+    // #1132 — quoted: lower-cased into the sentence, "the before a restore
+    // backup" read as a clause, not a name.
     fireEvent.click(
-      await screen.findByRole('button', { name: /^Delete the before a restore backup/ }),
+      await screen.findByRole('button', { name: /^Delete the “Before a restore” backup/ }),
     )
     const dialog = await screen.findByRole('alertdialog')
     // 🔴 In the DESCRIPTION, not merely on screen: as children the warning is
     // rendered and silent (#886's class), on an act that cannot be undone.
-    expect(dialog).toHaveAccessibleDescription(/only before a restore backup you have/)
+    expect(dialog).toHaveAccessibleDescription(/only “Before a restore” backup you have/)
   })
 
   it('does not warn when another of the same kind remains', async () => {

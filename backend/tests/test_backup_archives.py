@@ -197,7 +197,7 @@ class TestCreateBackupWritesCompleteFiles:
         staged: list[Path] = []
 
         import app.services.backup as backup_service
-        original = backup_service.shutil.move
+        original = backup_service.os.replace
 
         def spy(src, dst):
             # The instant before the rename: the staging file is fully written and
@@ -207,14 +207,19 @@ class TestCreateBackupWritesCompleteFiles:
             assert backup_files(d) == [], "a staging file was listed as a backup"
             return original(src, dst)
 
-        monkeypatch.setattr(backup_service.shutil, "move", spy)
+        monkeypatch.setattr(backup_service.os, "replace", spy)
         create_backup(db, tmp_path / "docs", tmp_path / "media", d, "manual")
 
         assert staged, "the spy never ran — this test would be asserting nothing"
-        assert parse_backup_name(staged[0].name) is None
-        assert not staged[0].name.endswith(".mmbackup"), (
-            f"{staged[0].name} would read as a backup to anything outside this app"
-        )
+        # Neither the staged archive nor the folder holding it reads as a backup
+        # (#1080 moved the archive into a hidden staging FOLDER in the backup folder).
+        for name in (staged[0].name, staged[0].parent.name):
+            assert parse_backup_name(name) is None
+            assert not name.endswith(".mmbackup"), (
+                f"{name} would read as a backup to anything outside this app"
+            )
+        assert staged[0].parent.parent == d, "the archive was not staged in the backup folder"
+        assert backup_service.is_staging_name(staged[0].parent.name)
         assert len(backup_files(d)) == 1
 
     def test_a_second_backup_in_the_same_second_does_not_destroy_the_first(

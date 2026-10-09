@@ -2,7 +2,7 @@ import { useId, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  FileInput, LoaderCircle, CircleCheck, TriangleAlert, Bot, User as UserIcon, Download,
+  FileInput, LoaderCircle, CircleCheck, TriangleAlert, Bot, User as UserIcon, Download, Check, ChevronRight,
 } from 'lucide-react'
 import {
   authApi, codingImportApi, datasetsApi, textCodingApi,
@@ -35,8 +35,9 @@ import {
   isSupportedCodingImportFile,
 } from '@/lib/coding-import-formats'
 import {
-  CODER_NAME_MAX_LENGTH, coderOptionLabel, draftBlocker, initialDraft,
-  matchKeyOptions, namesSharingACoder, toDecision, type CoderDraft,
+  CODER_NAME_MAX_LENGTH, coderOptionLabel, draftBlocker, effectiveNewName, initialDraft,
+  mappingIntro, matchKeyOptions, namesSharingACoder, rowsToImport, sharedCreateConflicts,
+  takenNameSuffix, toDecision, type CoderDraft,
 } from '@/lib/coding-import-mapping'
 import {
   PROBLEM_LIST_LIMIT, problemsCsv, problemsFilename, reasonSummary,
@@ -45,7 +46,6 @@ import { isMachineCoder } from '@/lib/coding-layers'
 import MachineProvenanceFields from '@/components/MachineProvenanceFields'
 import { invalidateAfterCodingImport } from '@/lib/coding-cache'
 import { serverDetailMessage } from '@/lib/api/error-utils'
-import { toast } from 'sonner'
 import { checkImportFiles } from '@/lib/upload-limits'
 import { useStepFocus } from '@/hooks/useStepFocus'
 import UploadLimitNote from '@/components/UploadLimitNote'
@@ -77,6 +77,17 @@ const STEP_HEADING = {
   done: 'Step 3 of 3: the import is finished',
 } satisfies Record<Step, string>
 
+/**
+ * #1010 (l) — the visible rail every other wizard has. Coding Import was the one
+ * page of seven whose steps were stated only to a screen reader (the `sr-only`
+ * heading above), so a sighted researcher was never told there were three.
+ */
+const STEP_RAIL: { key: Step; label: string }[] = [
+  { key: 'upload', label: 'Choose the file' },
+  { key: 'map', label: 'Check and assign coders' },
+  { key: 'done', label: 'Done' },
+]
+
 export default function CodingImport() {
   const { projectId } = useProjectLayout()
   const navigate = useNavigate()
@@ -91,6 +102,14 @@ export default function CodingImport() {
   const [drafts, setDrafts] = useState<Record<string, CoderDraft>>({})
   const [result, setResult] = useState<CodingImportResult | null>(null)
   const [busy, setBusy] = useState(false)
+  /**
+   * Why the server refused the last *Check the file* or *Import* — ON THE PAGE, beside
+   * the button (#1076, #1083). It was a toast, gone in four seconds, and these are the
+   * sentences that say which line of the file to fix or which column holds the wrong
+   * thing; the other import wizards already put a refused file on the page. Cleared by
+   * anything that makes it stale: a new file, a scope change, a coder decision.
+   */
+  const [requestError, setRequestError] = useState<string | null>(null)
   const [isDragOver, setIsDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -153,8 +172,12 @@ export default function CodingImport() {
   // returns to a step that must be checked again — so the lock is the whole rule.
   const scope: Scope = { targetKind, columnId, matchColumnId }
 
+  // ⚠️ NOT `&& !busy` (#965's rule, reached here by #1076/#1083): a natively disabled
+  // button blurs, so a keyboard user who pressed *Check the file* was on `<body>` when
+  // the refusal appeared beside it — measured live. Busy is `aria-disabled` below, and
+  // `runPreview`'s own guard is the refusal.
   const canPreview =
-    !!file && (targetKind === 'segments' || columnId != null) && !busy
+    !!file && (targetKind === 'segments' || columnId != null)
   // Why "Check the file" is off, in words. A transient precondition keeps the
   // native `disabled` (#754's transient arm), so the button earns no tab stop —
   // which is exactly why the reason has to be ON SCREEN beside it.
@@ -169,6 +192,7 @@ export default function CodingImport() {
 
   function chooseCodedColumn(value: string) {
     const next = Number(value)
+    setRequestError(null)
     setColumnId(next)
     // A key column belongs to ONE dataset; the server refuses it for a column of
     // another, so a choice that no longer fits is cleared rather than sent.
@@ -177,23 +201,26 @@ export default function CodingImport() {
   }
 
   async function runPreview() {
-    if (!file) return
+    if (!file || busy) return
     setBusy(true)
+    setRequestError(null)
     try {
       const data = await codingImportApi.preview(projectId, file, scope)
       setPreview(data)
       setDrafts(Object.fromEntries(data.coders.map(c => [c.name, initialDraft(c)])))
       setStep('map')
     } catch (err) {
-      toast.error(serverDetailMessage(err) ?? 'The file could not be read.')
+      setRequestError(serverDetailMessage(err) ?? 'The file could not be read.')
     } finally {
       setBusy(false)
     }
   }
 
   async function runImport() {
-    if (!file || !preview) return
+    // `busy` is refused HERE: the Import button is only aria-disabled while it runs.
+    if (!file || !preview || busy) return
     setBusy(true)
+    setRequestError(null)
     try {
       const decisions = Object.fromEntries(
         Object.entries(drafts).map(([name, draft]) => [name, toDecision(draft)]),
@@ -211,7 +238,7 @@ export default function CodingImport() {
       // roster turns blind mode off.
       await resetCoderRoster(queryClient)
     } catch (err) {
-      toast.error(serverDetailMessage(err) ?? 'The import could not be completed.')
+      setRequestError(serverDetailMessage(err) ?? 'The import could not be completed.')
     } finally {
       setBusy(false)
     }
@@ -225,12 +252,13 @@ export default function CodingImport() {
     })
     const next = accepted[0]
     if (!next) {
-      toast.error(message)
+      setRequestError(message)
       return
     }
     setFile(next)
     setPreview(null)
     setResult(null)
+    setRequestError(null)
   }
 
   const dragHandlers = {
@@ -251,6 +279,27 @@ export default function CodingImport() {
           coder decisions", and opened from a link it left the app entirely. Every
           exit now names a fixed destination, MergeProject's shape. */}
       <h1 className="text-lg font-semibold text-mm-text">Import codings</h1>
+      <nav aria-label="Import progress" className="flex items-center flex-wrap gap-y-2">
+        {STEP_RAIL.map((s, i) => {
+          const current = STEP_RAIL.findIndex(r => r.key === step)
+          return (
+            <div key={s.key} className="flex items-center" aria-current={current === i ? 'step' : undefined}>
+              <div className={cn(
+                'w-7 h-7 rounded-full flex items-center justify-center text-sm font-medium',
+                current === i ? 'bg-primary text-primary-foreground'
+                  : current > i ? 'bg-primary/15 text-primary'
+                  : 'bg-mm-border-subtle text-mm-text-secondary',
+              )}>
+                {current > i ? <Check className="w-4 h-4" aria-hidden="true" /> : i + 1}
+              </div>
+              <span className="ml-2 text-sm font-medium">{s.label}</span>
+              {i < STEP_RAIL.length - 1 && (
+                <ChevronRight className="w-4 h-4 mx-3 text-mm-text-faint" aria-hidden="true" />
+              )}
+            </div>
+          )
+        })}
+      </nav>
       {/* The step's own heading and the element focus lands on (above). Visually
           hidden because each card already titles itself; what was missing was a
           place to move TO — and a level 2, since the cards' titles are level 3. */}
@@ -328,7 +377,7 @@ export default function CodingImport() {
                     className="mt-1"
                     checked={targetKind === 'text_column'}
                     disabled={busy}
-                    onChange={() => setTargetKind('text_column')}
+                    onChange={() => { setRequestError(null); setTargetKind('text_column') }}
                   />
                   <span>
                     <span className="text-mm-text">A record in a dataset</span>
@@ -345,7 +394,7 @@ export default function CodingImport() {
                     className="mt-1"
                     checked={targetKind === 'segments'}
                     disabled={busy}
-                    onChange={() => setTargetKind('segments')}
+                    onChange={() => { setRequestError(null); setTargetKind('segments') }}
                   />
                   <span>
                     <span className="text-mm-text">A segment’s Unit ID</span>
@@ -402,7 +451,10 @@ export default function CodingImport() {
                       </Label>
                       <Select
                         value={matchColumnId != null ? String(matchColumnId) : 'record'}
-                        onValueChange={(v) => setMatchColumnId(v === 'record' ? null : Number(v))}
+                        onValueChange={(v) => {
+                          setRequestError(null)
+                          setMatchColumnId(v === 'record' ? null : Number(v))
+                        }}
                         disabled={busy || columnId == null}
                       >
                         <SelectTrigger
@@ -440,7 +492,9 @@ export default function CodingImport() {
               <Button
                 onClick={runPreview}
                 disabled={!canPreview}
-                className="gap-2"
+                aria-disabled={busy || undefined}
+                aria-busy={busy || undefined}
+                className="gap-2 aria-busy:cursor-wait aria-busy:opacity-50"
                 aria-describedby={previewBlocker ? blockerId : undefined}
               >
                 {busy && <LoaderCircle className="w-4 h-4 animate-spin" />}
@@ -453,6 +507,7 @@ export default function CodingImport() {
                 <p id={blockerId} className="text-xs text-mm-text-muted">{previewBlocker}</p>
               )}
             </div>
+            {requestError && <RequestError message={requestError} />}
           </CardContent>
         </Card>
       )}
@@ -462,11 +517,12 @@ export default function CodingImport() {
           preview={preview}
           fileName={file?.name}
           drafts={drafts}
-          setDrafts={setDrafts}
+          setDrafts={(update) => { setRequestError(null); setDrafts(update) }}
           roster={roster}
           rosterStatus={rosterStatus}
           busy={busy}
-          onBack={() => setStep('upload')}
+          importError={requestError}
+          onBack={() => { setRequestError(null); setStep('upload') }}
           onImport={runImport}
         />
       )}
@@ -486,7 +542,7 @@ export default function CodingImport() {
 // ── The mapping step ────────────────────────────────────────────────────────
 
 function MapStep({
-  preview, fileName, drafts, setDrafts, roster, rosterStatus, busy, onBack, onImport,
+  preview, fileName, drafts, setDrafts, roster, rosterStatus, busy, importError, onBack, onImport,
 }: {
   preview: CodingImportPreview
   fileName: string | undefined
@@ -495,6 +551,7 @@ function MapStep({
   roster: Coder[]
   rosterStatus: ReturnType<typeof listStatus>
   busy: boolean
+  importError: string | null
   onBack: () => void
   onImport: () => void
 }) {
@@ -510,9 +567,24 @@ function MapStep({
   const matchedNoUnit = preview.units_matched === 0 && preview.rows_read > 0
   const matchedNoCode = preview.codes_matched === 0 && preview.codes_in_file > 0
   const shared = namesSharingACoder(drafts)
-  const blockers = preview.coders
-    .map(c => (drafts[c.name] ? draftBlocker(c.name, drafts[c.name]) : null))
-    .filter((b): b is string => b != null)
+  // #1099 — ONE count for the stat and the button, after the coder decisions.
+  const toImport = rowsToImport(preview.coders, preview.will_apply, drafts)
+  const blockers = [
+    // A disabled Import button always says why (#1099): it was silently off when
+    // nothing in the file could be imported, and read "Import 4 codings" with
+    // every name set to Do not import.
+    // #1159 — the problem list sits ABOVE these buttons. (A file with no rows at all
+    // is refused at *Check the file*, so the list always exists here.)
+    preview.will_apply === 0
+      ? 'No row in this file can be imported — the list above says why.'
+      : toImport.rows === 0
+        ? 'Every name is set to Do not import, so nothing would be imported.'
+        : null,
+    ...preview.coders.map(c => (drafts[c.name] ? draftBlocker(c.name, drafts[c.name]) : null)),
+    // #1082 (b): names created under one new name are ONE coder, so they must agree
+    // on what it is — said here before the server refuses the pair.
+    ...sharedCreateConflicts(drafts),
+  ].filter((b): b is string => b != null)
 
   return (
     <div className="space-y-4">
@@ -523,7 +595,13 @@ function MapStep({
         <CardContent className="space-y-3">
           <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
             <Stat label="Rows read" value={preview.rows_read} />
-            <Stat label="Will be applied" value={preview.will_apply} />
+            <Stat
+              label="Rows to import"
+              value={toImport.rows}
+              detail={toImport.skippedRows > 0
+                ? `${toImport.skippedRows.toLocaleString()} more ${plural(toImport.skippedRows, 'row belongs', 'rows belong')} to names set to Do not import`
+                : undefined}
+            />
             {/* 🔴 These two are how a file addressed with the WRONG key — or built
                 against another codebook — is visible before anything is written,
                 and each half is counted on its own (#1004): three ids of five
@@ -565,11 +643,8 @@ function MapStep({
       <Card>
         <CardHeader>
           <CardTitle>Whose codings are these?</CardTitle>
-          <CardDescription>
-            Every name in the file needs an answer. Nothing is matched by name on
-            your behalf — a name that looks like a colleague’s is not evidence
-            that it is theirs.
-          </CardDescription>
+          {/* #1158 — what `initialDraft` did, said: it pre-selects a same-name coder. */}
+          <CardDescription>{mappingIntro(preview.coders)}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {rosterStatus !== 'ready' && (
@@ -609,12 +684,14 @@ function MapStep({
         <Button variant="outline" onClick={onBack} disabled={busy}>Back</Button>
         <Button
           onClick={onImport}
-          disabled={busy || preview.will_apply === 0 || blockers.length > 0}
-          className="gap-2"
+          disabled={blockers.length > 0}
+          aria-disabled={busy || undefined}
+          aria-busy={busy || undefined}
+          className="gap-2 aria-busy:cursor-wait aria-busy:opacity-50"
           aria-describedby={blockers.length > 0 ? importBlockerId : undefined}
         >
           {busy && <LoaderCircle className="w-4 h-4 animate-spin" />}
-          Import {preview.will_apply.toLocaleString()} {preview.will_apply === 1 ? 'coding' : 'codings'}
+          Import {toImport.upToBound ? 'up to ' : ''}{toImport.rows.toLocaleString()} {plural(toImport.rows, 'row', 'rows')}
         </Button>
         {blockers.length > 0 && (
           <ul id={importBlockerId} className="text-xs text-mm-text-muted space-y-0.5">
@@ -622,7 +699,21 @@ function MapStep({
           </ul>
         )}
       </div>
+      {importError && <RequestError message={importError} />}
     </div>
+  )
+}
+
+/** A refused request, said where the button that sent it is (#1076, #1083). */
+function RequestError({ message }: { message: string }) {
+  return (
+    <p
+      role="alert"
+      className="flex items-start gap-2 p-3 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 text-sm"
+    >
+      <TriangleAlert className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+      <span>{message}</span>
+    </p>
   )
 }
 
@@ -643,6 +734,7 @@ function CoderRow({
   const isNameMatch = draft.targetUserId != null && draft.targetUserId === candidate.local_user_id
   const hintId = `${rowId}-target-hint`
   const kindNoteId = `${rowId}-kind-note`
+  const nameNoteId = `${rowId}-name-note`
   // ONE string, never sentences as sibling JSX fragments: the space between two
   // of them was a text node of its own, and Chrome dropped it from the
   // accessibility tree when the second sentence arrived after the first had
@@ -662,6 +754,26 @@ function CoderRow({
     sharedWith.length > 0
       ? `${sharedWith.map(n => `“${n}”`).join(' and ')} also ${sharedWith.length === 1 ? 'goes' : 'go'} `
         + 'to this coder — where the names disagree about a passage, neither row is imported.'
+      : null,
+  ].filter(Boolean).join(' ')
+
+  // #1082 (b) — what a NEW coder will really be: one shared with another name typed
+  // alike, and numbered when the name is taken. Both were silent: two names typed as
+  // "Alice" became "Alice (2)" and "Alice (3)", and a colleague's name made a second
+  // coder the researcher never knew about. One string, for the reason `hint` is one.
+  const newName = effectiveNewName(candidate.name, draft)
+  const numbered = draft.action === 'create' ? takenNameSuffix(newName, roster) : null
+  const nameNote = draft.action !== 'create' ? '' : [
+    numbered
+      ? `A coder called “${newName}” already exists, so this one will be called “${numbered}”. `
+        + 'To add these codings to the existing coder, choose An existing coder.'
+      : null,
+    // #1164 (f) — `sharedWith` holds the other cards' FILE names, which can equal the
+    // new name: it read "“Dana” is also to become “Dana”". Said as the file's names.
+    sharedWith.length > 0
+      ? `${sharedWith.map(n => `“${n}”`).join(' and ')} in the file ${sharedWith.length === 1 ? 'is' : 'are'} `
+        + `also set to become “${newName}”, so they are one new coder — where the names disagree `
+        + 'about a passage, neither row is imported.'
       : null,
   ].filter(Boolean).join(' ')
 
@@ -766,8 +878,12 @@ function CoderRow({
                 id={`${rowId}-name`}
                 value={draft.newUsername}
                 maxLength={Math.max(CODER_NAME_MAX_LENGTH, draft.newUsername.length)}
+                aria-describedby={nameNote ? nameNoteId : undefined}
                 onChange={(e) => onChange({ newUsername: e.target.value })}
               />
+              {nameNote && (
+                <p id={nameNoteId} className="text-xs text-mm-text-muted">{nameNote}</p>
+              )}
             </div>
             {/* A real group: "Kind" was a bare <span>, so the two radios
                 announced as "A person" / "A machine" with nothing saying
@@ -925,12 +1041,22 @@ function DoneStep({
         </CardHeader>
         <CardContent className="space-y-3">
           <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
-            <Stat label="Codings added" value={result.applied} />
+            {/* #1066 — every count here is CODINGS, and a set value is a PART of
+                the codings added, never a count beside it: "Codings added 1 · Set
+                selections 2" read as one coding added when three were. */}
+            <Stat
+              label="Codings added"
+              value={result.applied}
+              detail={result.selections > 0
+                ? `including ${result.selections.toLocaleString()} ${plural(result.selections, 'code set value', 'code set values')}`
+                : undefined}
+            />
             {result.already_present > 0 && (
               <Stat label="Already there" value={result.already_present} />
             )}
-            {result.selections > 0 && <Stat label="Set selections" value={result.selections} />}
-            {result.replaced > 0 && <Stat label="Replaced" value={result.replaced} />}
+            {result.replaced > 0 && (
+              <Stat label="Earlier set values replaced" value={result.replaced} />
+            )}
             {result.ratings_set > 0 && <Stat label="Ratings set" value={result.ratings_set} />}
             {result.coders_created > 0 && (
               <Stat label="Coders created" value={result.coders_created} />
@@ -962,7 +1088,13 @@ function DoneStep({
   )
 }
 
-function Stat({ label, value, of }: { label: string; value: number; of?: number }) {
+function Stat({ label, value, of, detail }: {
+  label: string
+  value: number
+  of?: number
+  /** A breakdown OF this value (a second `<dd>` for the same term), never a sibling count. */
+  detail?: string
+}) {
   return (
     <div>
       <dt className="text-xs text-mm-text-muted">{label}</dt>
@@ -972,6 +1104,7 @@ function Stat({ label, value, of }: { label: string; value: number; of?: number 
           <span className="text-sm text-mm-text-muted"> of {of.toLocaleString()}</span>
         )}
       </dd>
+      {detail && <dd className="text-xs text-mm-text-muted">{detail}</dd>}
     </div>
   )
 }

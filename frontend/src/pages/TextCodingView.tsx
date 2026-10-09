@@ -3,7 +3,7 @@ import { useParams, useSearchParams } from 'react-router'
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData, type InfiniteData } from '@tanstack/react-query'
 import {
   BookOpen, Shuffle, Eye, EyeOff, Quote, Search, Download, BarChart3, Undo2, Redo2,
-  ChevronLeft, ChevronRight, Check, Pencil,
+  ChevronLeft, ChevronRight, Check, Pencil, SkipForward,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
@@ -242,6 +242,17 @@ export default function TextCodingView() {
    * has no data and reads `failed`, which used to render "No texts found. Try
    * adjusting your filters." */
   const textsLoad = useListLoad(commentsQuery)
+  /**
+   * 🔴 #1038 (i) — the rows on screen are the PREVIOUS filter's while the new one
+   * loads. `keepPreviousData` is kept, deliberately: removing it would flash the
+   * full "Loading texts…" notice and lose the scroll position on every debounced
+   * search keystroke. Its exemption in `list-load-state.md` §1 ("serves paging")
+   * was wrong — `fetchNextPage` never changes the key — and what §1 forbids is
+   * showing those rows AS IF CURRENT. So while they are held: the table is
+   * `aria-busy` and dimmed, its row count is not stated, and the paging line
+   * says it is updating instead of the old selection's "Showing N of M".
+   */
+  const updatingFilter = commentsQuery.isPlaceholderData
 
   const comments = useMemo(
     () => commentsData?.pages.flatMap(p => p.texts) ?? [],
@@ -1675,7 +1686,10 @@ export default function TextCodingView() {
                       #697 already found CSS perturbing the getBoundingClientRect
                       react-virtuoso measures. Containing an ancestor is safe;
                       containing the measured scroller is not. */}
-                  <div className="flex-1 min-h-0 @container">
+                  <div
+                    className={`flex-1 min-h-0 @container transition-opacity ${updatingFilter ? 'opacity-60' : ''}`}
+                    aria-busy={updatingFilter || undefined}
+                  >
                     <ByTextTable
                       ref={byTextRef}
                       comments={filteredComments}
@@ -1706,8 +1720,10 @@ export default function TextCodingView() {
                       showArchived={chipShowArchived}
                       searchText={searchText}
                       onClearSearch={() => { setSearchInput(''); setSearchText('') }}
-                      totalRowCount={activeColumnId ? undefined : totalTexts}
-                      onEndReached={() => { if (hasNextPage) void fetchNextPage() }}
+                      totalRowCount={activeColumnId || updatingFilter ? undefined : totalTexts}
+                      // Not while the previous filter's rows are held: their next page
+                      // belongs to a selection that is no longer asked for (#1038 i).
+                      onEndReached={() => { if (hasNextPage && !updatingFilter) void fetchNextPage() }}
                     />
                   </div>
                   <TextPagingStatus
@@ -1716,6 +1732,8 @@ export default function TextCodingView() {
                     hasMore={!!hasNextPage}
                     isLoadingMore={isFetchingNextPage}
                     onLoadMore={() => void fetchNextPage()}
+                    loadFailed={commentsQuery.isFetchNextPageError}
+                    updating={updatingFilter}
                   />
                 </div>
               ) : (
@@ -1783,9 +1801,10 @@ export default function TextCodingView() {
                 headerExtra={
                   <button
                     onClick={(e) => { e.stopPropagation(); handleJumpToNextUncoded() }}
-                    className="text-[10px] text-mm-text-muted hover:text-mm-text-secondary transition-colors"
+                    className="inline-flex items-center gap-1 text-[10px] text-mm-text-muted hover:text-mm-text-secondary transition-colors"
                   >
-                    Jump to uncoded ⏭
+                    Jump to uncoded
+                    <SkipForward className="w-3 h-3" aria-hidden="true" />
                   </button>
                 }
                 className={panelStates.codes.collapsed ? '' : `flex-[2] ${PANEL_EXPANDED}`}

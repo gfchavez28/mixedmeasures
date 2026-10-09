@@ -17,8 +17,20 @@ describe('the reason vocabulary', () => {
 
   it('summarises largest first, in words', () => {
     expect(reasonSummary({ duplicate_row: 1, unit_not_found: 3 }))
-      .toBe('3 no such passage or record · 1 repeats an earlier row')
-    expect(reasonSummary({ unit_not_found: 1200 })).toBe('1,200 no such passage or record')
+      .toBe('no such passage or record (3) · repeats an earlier row (1)')
+    expect(reasonSummary({ unit_not_found: 1200 })).toBe('no such passage or record (1,200)')
+  })
+
+  it('#1089 — the count follows the label, so a label that is a phrase still reads', () => {
+    // The count-first shape printed "2 two different ratings" and "4 coder not
+    // imported": the labels are written to stand alone (the CSV's Reason column
+    // prints them with no count), so the SHAPE carries the count, not the words.
+    expect(reasonSummary({ rating_conflict_in_file: 2 })).toBe('two different ratings (2)')
+    expect(reasonSummary({ set_conflict_in_file: 2 })).toBe('two values of one set (2)')
+    expect(reasonSummary({ coder_skipped: 4 })).toBe('coder not imported (4)')
+    for (const reason of CODING_IMPORT_REASONS) {
+      expect(reasonSummary({ [reason]: 2 })).toBe(`${reasonLabel(reason)} (2)`)
+    }
   })
 })
 

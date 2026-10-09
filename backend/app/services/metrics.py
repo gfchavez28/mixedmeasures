@@ -1605,7 +1605,20 @@ def compute_metric(
 
     Deletes existing results and creates fresh ones.
     Returns the list of created ComputedResult objects.
+
+    🔴 **Recomputing a STALE metric marks its tests stale (#1039 a).** The metric
+    was stale because what it describes changed, so a test computed against it is
+    out of date too — and once this clears the metric's flag, nothing else would
+    say so. Every door that recomputes reaches this: the analysis page's quick
+    compute (which recomputes before it answers, so the flag is gone by the time
+    anything reads it), *Recompute all*, the crosswalk, the import's backfill.
+    ⚠️ Only when it WAS stale: recomputing a current metric moves no number, and
+    marking its tests then would be the marker that teaches a researcher to ignore
+    it. (The single-metric endpoint marks unconditionally, as it always has — a
+    researcher who presses Compute is asking for fresh numbers.)
     """
+    was_stale = bool(metric_def.stale)
+
     # Defensive source check
     source_err = _check_source_exists(
         db, metric_def.project_id,
@@ -1738,8 +1751,11 @@ def compute_metric(
             metric_def.id, metric_def.name, exc_info=True,
         )
 
-    # Clear stale flag
+    # Clear stale flag — and take the tests that read this metric with it (#1039 a).
     metric_def.stale = False
+    if was_stale:
+        from .staleness import mark_metric_tests_stale
+        mark_metric_tests_stale(db, [metric_def.id])
     db.flush()
 
     return created_results

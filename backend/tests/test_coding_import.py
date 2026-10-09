@@ -173,6 +173,31 @@ class TestParser:
         with pytest.raises(ci.CodingImportError, match="empty"):
             ci.parse_rows("")
 
+    @pytest.mark.parametrize("body", [
+        "unit_id,coder,code\n",
+        "unit_id,coder,code",           # no final newline
+        "unit_id,coder,code\n\n,,\n",  # only blank rows under it
+    ])
+    def test_a_header_with_NO_CODINGS_under_it_is_refused_here(self, body):
+        """#1159 — it passed this step and reached the mapping step with "Rows read 0",
+        no problem list, and a sentence pointing at the list. Refused where it is
+        checked, beside *Check the file*."""
+        with pytest.raises(ci.CodingImportError, match="no codings under it"):
+            ci.parse_rows(body)
+
+    def test_one_coding_is_enough(self):
+        """The positive control for the refusal above."""
+        assert len(ci.parse_rows("unit_id,coder,code\nseg-200-0,Alice,Trust")) == 1
+
+    def test_the_missing_columns_are_listed_as_a_sentence(self):
+        """#1164 (d): it read "“unit_id”, “coder”, “code”", with no *and*."""
+        with pytest.raises(ci.CodingImportError) as exc:
+            ci.parse_rows("wrong,headers\n1,2\n")
+        assert "a column for “unit_id”, “coder” and “code”." in str(exc.value)
+        with pytest.raises(ci.CodingImportError) as one:
+            ci.parse_rows("unit_id,coder\nseg-200-0,Alice\n")
+        assert "a column for “code”." in str(one.value)
+
     def test_the_row_cap_is_enforced(self, monkeypatch):
         monkeypatch.setattr(ci, "MAX_CODING_IMPORT_ROWS", 3)
         body = "unit_id,coder,code\n" + "seg-200-0,Alice,Trust\n" * 4
@@ -1277,6 +1302,70 @@ class TestASynonymIsASelection:
         assert plan.problems == []
 
 
+class TestADoubleClaimantInAFile:
+    """#1081 (b), the import half: "Warm" — a Tone member grouped into "Positive"
+    — reads as "Positive", so it counts in STANCE. The import routed it to Tone
+    (`set_claimed_by` answered a member's own set first), so the result depended
+    on ROW ORDER: Warm first wrote only Negative, its own row removed and counted
+    as "replaced 1"; Negative first wrote both, a contradiction. No row was
+    refused either way. Fixed at the source, with no import-specific code."""
+
+    def _double(self, db, pid):
+        from app.models.code_equivalence_group import CodeEquivalenceGroup
+        _stance(db, pid)
+        db.add(CodeSet(id=pid * 10 + 5, project_id=pid, label="Tone"))
+        db.flush()
+        db.add(Code(id=pid * 100 + 21, project_id=pid, numeric_id=30, name="Warm",
+                    code_set_id=pid * 10 + 5))
+        db.add(Code(id=pid * 100 + 22, project_id=pid, numeric_id=31, name="Cold",
+                    code_set_id=pid * 10 + 5))
+        db.flush()
+        group = CodeEquivalenceGroup(project_id=pid, label="Positive",
+                                     canonical_code_id=pid * 100 + 11)
+        db.add(group)
+        db.flush()
+        for cid in (pid * 100 + 11, pid * 100 + 21):
+            db.get(Code, cid).code_equivalence_group_id = group.id
+        db.flush()
+
+    @pytest.mark.parametrize("first,second", [("Warm", "Negative"), ("Negative", "Warm")])
+    def test_it_and_another_Stance_value_conflict_in_EITHER_order(self, db_session, first, second):
+        db = db_session
+        pid = _segment_project(db)
+        self._double(db, pid)
+        alice = _coder(db, 87, "Alice")
+        plan = _plan(
+            db, pid, f"unit_id,coder,code\nseg-200-0,Alice,{first}\nseg-200-0,Alice,{second}\n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        assert set(_reasons(plan).values()) == {ci.REASON_SET_CONFLICT_IN_FILE}
+        ci.apply_plan(db, pid, plan, {"Alice": ci.CoderDecision("match", alice.id)})
+        assert _rows_for(db, pid) == []
+
+    def test_it_and_a_Tone_value_are_two_sets_and_BOTH_land(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        self._double(db, pid)
+        alice = _coder(db, 88, "Alice")
+        plan = _plan(db, pid, "unit_id,coder,code\nseg-200-0,Alice,Warm\nseg-200-0,Alice,Cold\n",
+                     target_kind=ci.TARGET_SEGMENTS)
+        assert plan.problems == []
+        ci.apply_plan(db, pid, plan, {"Alice": ci.CoderDecision("match", alice.id)})
+        assert _rows_for(db, pid) == [(pid * 10, pid * 100 + 21, None),
+                                      (pid * 10, pid * 100 + 22, None)]
+
+    def test_a_file_asserting_its_OWN_set_is_told_where_it_counts(self, db_session):
+        """The mismatch sentence used to say "belongs to" for every member, which
+        is false of a member that counts in another set."""
+        db = db_session
+        pid = _segment_project(db)
+        self._double(db, pid)
+        plan = _plan(db, pid, "unit_id,coder,code,code_set\nseg-200-0,Alice,Warm,Tone\n",
+                     target_kind=ci.TARGET_SEGMENTS)
+        assert _reasons(plan) == {2: ci.REASON_SET_MISMATCH}
+        assert "“Warm” counts as a value of “Stance”, not “Tone”" in plan.problems[0].detail
+
+
 class TestAnArchivedCoder:
     """#1031 (c): a name matching an ARCHIVED coder was pre-selected, the picker
     could not show it, and the import wrote onto a coder hidden by default and
@@ -1405,6 +1494,90 @@ class TestTwoNamesOntoOneCoder:
         })
         assert report.problems == []
         assert report.selections == 2
+
+
+class TestTheReportCountsCodings:
+    """#1066 — every count on the finished screen is CODINGS, and a set value is a
+    PART of the codings added. The report added file ROWS to `selections` and
+    nothing to `applied` for a member value, so three rows — one plain code, two
+    set values — finished as *Codings added 1 · Set selections 2*."""
+
+    def test_the_filed_case_three_rows_are_three_codings_two_of_them_set_values(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        _stance(db, pid)
+        alice = _coder(db, 81, "Alice")
+        plan = _plan(
+            db, pid,
+            "unit_id,coder,code\nseg-200-0,Alice,Trust\nseg-200-1,Alice,Positive\n"
+            "seg-200-2,Alice,Negative\n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        report = ci.apply_plan(db, pid, plan, {"Alice": ci.CoderDecision("match", alice.id)})
+        assert (report.applied, report.selections, report.already_present) == (3, 2, 0)
+        assert len(_rows_for(db, pid)) == 3
+
+    def test_re_importing_a_set_value_is_ALREADY_THERE_not_new_work(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        _stance(db, pid)
+        alice = _coder(db, 82, "Alice")
+        db.add(CodeApplication(code_id=pid * 100 + 11, user_id=alice.id, segment_id=pid * 10))
+        db.flush()
+        plan = _plan(db, pid, "unit_id,coder,code\nseg-200-0,Alice,Positive\n",
+                     target_kind=ci.TARGET_SEGMENTS)
+        report = ci.apply_plan(db, pid, plan, {"Alice": ci.CoderDecision("match", alice.id)})
+        assert (report.applied, report.already_present, report.selections) == (0, 1, 0)
+
+    def test_a_synonym_is_ONE_coding_and_one_set_value(self, db_session):
+        """Written by the plain insert, so it was counted as a row in `selections`
+        AND a coding in `applied`; now it is one coding that is a set value."""
+        db = db_session
+        pid = _segment_project(db)
+        _stance(db, pid)
+        _synonym(db, pid)
+        alice = _coder(db, 83, "Alice")
+        plan = _plan(db, pid, "unit_id,coder,code\nseg-200-0,Alice,Pos\nseg-200-1,Alice,Trust\n",
+                     target_kind=ci.TARGET_SEGMENTS)
+        report = ci.apply_plan(db, pid, plan, {"Alice": ci.CoderDecision("match", alice.id)})
+        assert (report.applied, report.selections) == (2, 1)
+
+    def test_a_synonym_already_held_adds_nothing_to_either_count(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        _stance(db, pid)
+        pos = _synonym(db, pid)
+        alice = _coder(db, 84, "Alice")
+        db.add(CodeApplication(code_id=pos, user_id=alice.id, segment_id=pid * 10))
+        db.flush()
+        plan = _plan(db, pid, "unit_id,coder,code\nseg-200-0,Alice,Pos\n",
+                     target_kind=ci.TARGET_SEGMENTS)
+        report = ci.apply_plan(db, pid, plan, {"Alice": ci.CoderDecision("match", alice.id)})
+        assert (report.applied, report.already_present, report.selections) == (0, 1, 0)
+
+    def test_a_set_value_on_a_GROUPED_passage_counts_each_sibling(self, db_session):
+        """One row, two codings — the plain pass already counted a group this way,
+        and a set value must not be counted per ROW beside it."""
+        db = db_session
+        pid = _segment_project(db)
+        _stance(db, pid)
+        _group(db, pid, 19)
+        alice = _coder(db, 85, "Alice")
+        plan = _plan(db, pid, "unit_id,coder,code\nseg-200-0,Alice,Positive\n",
+                     target_kind=ci.TARGET_SEGMENTS)
+        report = ci.apply_plan(db, pid, plan, {"Alice": ci.CoderDecision("match", alice.id)})
+        assert (report.applied, report.selections) == (2, 2)
+
+    def test_a_set_value_on_a_TEXT_record_is_counted_on_the_value_arm(self, db_session):
+        db = db_session
+        pid, col, _ = _text_project(db)
+        _stance(db, pid)
+        alice = _coder(db, 86, "Alice")
+        plan = _plan(db, pid, "unit_id,coder,code\nR0001,Alice,Positive\nR0002,Alice,Trust\n",
+                     target_kind=ci.TARGET_TEXT_COLUMN, column_id=col)
+        assert plan.problems == []
+        report = ci.apply_plan(db, pid, plan, {"Alice": ci.CoderDecision("match", alice.id)})
+        assert (report.applied, report.selections) == (2, 1)
 
 
 class TestADecisionIsUsedOrRefused:
@@ -1691,3 +1864,325 @@ class TestEachNameSaysWhatItWouldImport:
         )
         by_name = {c.name: (c.row_count, c.rows_to_apply) for c in plan.coders}
         assert by_name == {"Alice": (2, 1), "Bob": (1, 0)}
+
+
+# ── Batch 16 (2026-10-07): #1083 (b) · #1082 (a)(b)(d) · #1076 ──────────────
+
+
+class TestAFileTheReaderRefusesIsASentence:
+    """#1083 (b): `_csv.Error` escaped `parse_rows` as a 500. The coded-segments export
+    carries passage TEXT, so its own round trip could hit the field limit."""
+
+    def test_old_MAC_line_endings_name_the_fault_at_the_header(self):
+        with pytest.raises(ci.CodingImportError) as exc:
+            ci.parse_rows("unit_id,coder,code\rseg-1,Alice,Trust\r")
+        assert str(exc.value).startswith("Line 1 (the header) has a line break")
+        assert "old Mac line endings" in str(exc.value)
+
+    def test_a_value_over_the_field_limit_names_its_ROW_and_the_columns_read(self):
+        long_value = "x" * 140_000
+        text = (
+            "unit_id,coder,code,text\n"
+            "seg-1,Alice,Trust,short\n"
+            f'seg-2,Alice,Trust,"{long_value}"\n'
+        )
+        with pytest.raises(ci.CodingImportError) as exc:
+            ci.parse_rows(text)
+        message = str(exc.value)
+        assert message.startswith("Line 3 holds a value longer than 131,072 characters")
+        # The remedy names the columns this import reads, so a long passage in the
+        # export's TEXT column has a way out.
+        assert "unit_id, coder, code, code_set, magnitude" in message
+        assert "delete that column" in message
+
+    def test_the_numbers_are_SPREADSHEET_ROWS_not_physical_lines(self, db_session):
+        """The docstring said "every physical line", which the count never did: a
+        quoted passage with a line break is one row of a spreadsheet and two lines of
+        a text editor, and the problem list numbers the ROW."""
+        db = db_session
+        pid = _segment_project(db)
+        plan = _plan(
+            db, pid,
+            'unit_id,coder,code,text\nseg-200-0,Alice,Trust,"one\ntwo"\nnope,Alice,Trust,x\n',
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        assert _reasons(plan) == {3: ci.REASON_UNIT_NOT_FOUND}
+
+    def test_the_ENDPOINT_answers_400_with_the_sentence(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        with pytest.raises(HTTPException) as exc:
+            _run(preview_coding_import(
+                project_id=pid, file=_upload("unit_id,coder,code\rseg-200-0,A,Trust\r"),
+                target_kind=ci.TARGET_SEGMENTS, column_id=None, match_column_id=None,
+                user=db.get(User, 1), db=db,
+            ))
+        assert exc.value.status_code == 400
+        assert "old Mac line endings" in exc.value.detail
+
+
+class TestTheSetColumnIsComparedLikeCodeNames:
+    """#1082 (d): code names were matched case-insensitively and the set column
+    exactly, so one row could name the code in any case and the set in only one."""
+
+    def test_a_set_named_in_ANOTHER_CASE_passes(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        _stance(db, pid)
+        plan = _plan(
+            db, pid, "unit_id,coder,code,code_set\nseg-200-0,Alice,positive, stance \n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        assert plan.problems == []
+        assert len(plan.applications) == 1
+
+    def test_a_DIFFERENT_set_is_still_refused(self, db_session):
+        """The control: the comparison is case-blind, not blind."""
+        db = db_session
+        pid = _segment_project(db)
+        _stance(db, pid)
+        plan = _plan(
+            db, pid, "unit_id,coder,code,code_set\nseg-200-0,Alice,Positive,stances\n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        assert _reasons(plan) == {2: ci.REASON_SET_MISMATCH}
+
+
+def _many_coders(n: int, *, units: int = 1) -> str:
+    lines = ["unit_id,coder,code"]
+    for i in range(n):
+        lines.append(f"seg-200-{i % units},R{i + 1:05d},Trust")
+    return "\n".join(lines) + "\n"
+
+
+class TestAFileOfTooManyCoders:
+    """#1076: every distinct coder name became a mapping row — 200,000 of them, a
+    56.5 MB response, when the coder column held per-row ids."""
+
+    def test_past_the_bound_the_file_is_refused_with_three_examples(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        with pytest.raises(ci.CodingImportError) as exc:
+            _plan(db, pid, _many_coders(ci.MAX_CODERS_IN_FILE + 1),
+                  target_kind=ci.TARGET_SEGMENTS)
+        message = str(exc.value)
+        assert f"more than {ci.MAX_CODERS_IN_FILE} different coders" in message
+        assert "“R00001”, “R00002” and “R00003”" in message
+        assert f"parts of up to {ci.MAX_CODERS_IN_FILE} coders" in message
+
+    def test_a_handful_of_UNIT_values_is_named_as_a_possible_swap(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        with pytest.raises(ci.CodingImportError) as exc:
+            _plan(db, pid, _many_coders(ci.MAX_CODERS_IN_FILE + 1, units=3),
+                  target_kind=ci.TARGET_SEGMENTS)
+        assert "holds only 3 different values" in str(exc.value)
+        assert "wrong way round" in str(exc.value)
+
+    def test_MANY_unit_values_name_no_swap(self, db_session):
+        """The swap sentence is evidence-driven: with as many units as coders it
+        would be a guess."""
+        db = db_session
+        pid = _segment_project(db)
+        text = "unit_id,coder,code\n" + "".join(
+            f"u{i},R{i},Trust\n" for i in range(ci.MAX_CODERS_IN_FILE + 1)
+        )
+        with pytest.raises(ci.CodingImportError) as exc:
+            _plan(db, pid, text, target_kind=ci.TARGET_SEGMENTS)
+        assert "wrong way round" not in str(exc.value)
+
+    def test_EXACTLY_the_bound_is_planned(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        plan = _plan(db, pid, _many_coders(ci.MAX_CODERS_IN_FILE),
+                     target_kind=ci.TARGET_SEGMENTS)
+        assert len(plan.coders) == ci.MAX_CODERS_IN_FILE
+
+    def test_the_PREVIEW_answers_400_before_any_list_is_built(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        with pytest.raises(HTTPException) as exc:
+            _run(preview_coding_import(
+                project_id=pid, file=_upload(_many_coders(ci.MAX_CODERS_IN_FILE + 1)),
+                target_kind=ci.TARGET_SEGMENTS, column_id=None, match_column_id=None,
+                user=db.get(User, 1), db=db,
+            ))
+        assert exc.value.status_code == 400
+        assert "different coders" in exc.value.detail
+
+
+class TestMergedNamesAreSettledFromTheWholeFile:
+    """#1082 (a): the per-coder settle ran over what the per-NAME settle had LEFT, so
+    a contradiction inside one name took that name's rows out and the other name's
+    value went in as if uncontested."""
+
+    _FILED = (
+        "unit_id,coder,code\n"
+        "seg-200-0,Alice,Positive\n"
+        "seg-200-0,Alice,Negative\n"
+        "seg-200-0,alice,Positive\n"
+    )
+
+    def test_the_filed_case_applies_NOTHING(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        _stance(db, pid)
+        alice = _coder(db, 76, "Alice")
+        plan = _plan(db, pid, self._FILED, target_kind=ci.TARGET_SEGMENTS)
+        # Per name, "alice" alone is uncontested — the planner is right about that.
+        assert [a.coder for a in plan.applications] == ["alice"]
+        report = ci.apply_plan(db, pid, plan, {
+            "Alice": ci.CoderDecision("match", alice.id),
+            "alice": ci.CoderDecision("match", alice.id),
+        })
+        assert _rows_for(db, pid) == []
+        assert sorted((p.line, p.reason) for p in report.problems) == [
+            (2, ci.REASON_SET_CONFLICT_IN_FILE),
+            (3, ci.REASON_SET_CONFLICT_IN_FILE),
+            (4, ci.REASON_SET_CONFLICT_IN_FILE),
+        ]
+        assert "imported as one coder" in report.problems[0].detail
+
+    def test_the_RATINGS_variant_writes_no_rating(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        _scale(db, pid * 100 + 1)
+        alice = _coder(db, 77, "Alice")
+        plan = _plan(
+            db, pid,
+            "unit_id,coder,code,magnitude\n"
+            "seg-200-0,Alice,Trust,1\nseg-200-0,Alice,Trust,2\nseg-200-0,alice,Trust,2\n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        report = ci.apply_plan(db, pid, plan, {
+            "Alice": ci.CoderDecision("match", alice.id),
+            "alice": ci.CoderDecision("match", alice.id),
+        })
+        assert _rows_for(db, pid) == []
+        assert {p.reason for p in report.problems} == {ci.REASON_RATING_CONFLICT_IN_FILE}
+
+    def test_each_row_is_reported_ONCE_and_a_SKIPPED_name_keeps_its_own_verdict(self, db_session):
+        """The per-name verdicts of the merged names are REPLACED, not added to; a
+        skipped name's contradiction is the plan's, and its rows are not also
+        reported as skipped."""
+        db = db_session
+        pid = _segment_project(db)
+        _stance(db, pid)
+        alice = _coder(db, 78, "Alice")
+        plan = _plan(
+            db, pid,
+            self._FILED + "seg-200-1,Bob,Positive\nseg-200-1,Bob,Negative\nseg-200-2,Bob,Trust\n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        report = ci.apply_plan(db, pid, plan, {
+            "Alice": ci.CoderDecision("match", alice.id),
+            "alice": ci.CoderDecision("match", alice.id),
+            "Bob": ci.CoderDecision("skip"),
+        })
+        lines = [p.line for p in report.problems]
+        assert sorted(lines) == [2, 3, 4, 5, 6, 7]
+        assert len(lines) == len(set(lines))
+        by_line = {p.line: p.reason for p in report.problems}
+        assert by_line[5] == by_line[6] == ci.REASON_SET_CONFLICT_IN_FILE
+        assert by_line[7] == ci.REASON_CODER_SKIPPED
+
+
+class TestNamesCreatedUnderOneNameAreOneCoder:
+    """#1082 (b): each `create` minted its own row, so two names typed as one new
+    coder became "Alice (2)" and "Alice (3)" with nothing said."""
+
+    def test_two_names_typed_alike_become_ONE_coder(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        plan = _plan(
+            db, pid, "unit_id,coder,code\nseg-200-0,A. Smith,Trust\nseg-200-1,asmith,Risk\n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        report = ci.apply_plan(db, pid, plan, {
+            "A. Smith": ci.CoderDecision("create", new_username="Alice Smith"),
+            "asmith": ci.CoderDecision("create", new_username="Alice Smith"),
+        })
+        assert report.coders_created == 1
+        made = db.query(User).filter(User.username.like("Alice Smith%")).all()
+        assert [u.username for u in made] == ["Alice Smith"]
+        assert {r[0] for r in _rows_for(db, pid, made[0].id)} == {pid * 10, pid * 10 + 1}
+
+    def test_and_their_rows_are_judged_TOGETHER(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        _stance(db, pid)
+        plan = _plan(
+            db, pid, "unit_id,coder,code\nseg-200-0,Alice,Positive\nseg-200-0,alice,Negative\n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        report = ci.apply_plan(db, pid, plan, {
+            "Alice": ci.CoderDecision("create", new_username="Alice"),
+            "alice": ci.CoderDecision("create", new_username="Alice"),
+        })
+        assert {p.reason for p in report.problems} == {ci.REASON_SET_CONFLICT_IN_FILE}
+        assert _rows_for(db, pid) == []
+
+    def test_a_TAKEN_name_is_still_numbered_and_both_names_share_it(self, db_session):
+        """The positive control for `unique_username`: an existing "Alice" keeps her
+        name and her codings; the new coder is "Alice (2)", once."""
+        db = db_session
+        pid = _segment_project(db)
+        _coder(db, 79, "Alice")
+        plan = _plan(
+            db, pid, "unit_id,coder,code\nseg-200-0,Alice,Trust\nseg-200-1,alice,Risk\n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        ci.apply_plan(db, pid, plan, {
+            "Alice": ci.CoderDecision("create", new_username="Alice"),
+            "alice": ci.CoderDecision("create", new_username="Alice"),
+        })
+        names = sorted(u.username for u in db.query(User).filter(User.username.like("Alice%")))
+        assert names == ["Alice", "Alice (2)"]
+        new = db.query(User).filter(User.username == "Alice (2)").one()
+        assert len(_rows_for(db, pid, new.id)) == 2
+        assert _rows_for(db, pid, 79) == []
+
+    def test_a_PERSON_and_a_MODEL_under_one_name_are_refused_naming_both(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        plan = _plan(
+            db, pid, "unit_id,coder,code\nseg-200-0,Alice,Trust\nseg-200-1,Bot,Risk\n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        with pytest.raises(ci.CodingImportError, match="“Alice” and “Bot”.*a person and the other a model"):
+            ci.apply_plan(db, pid, plan, {
+                "Alice": ci.CoderDecision("create", new_username="Shared"),
+                "Bot": ci.CoderDecision("create", new_username="Shared", coder_type=CODER_TYPE_MACHINE),
+            })
+
+    def test_two_MODEL_CONFIGURATIONS_under_one_name_are_refused(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        plan = _plan(
+            db, pid, "unit_id,coder,code\nseg-200-0,run-a,Trust\nseg-200-1,run-b,Risk\n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        with pytest.raises(ci.CodingImportError, match="different model configurations"):
+            ci.apply_plan(db, pid, plan, {
+                "run-a": ci.CoderDecision("create", new_username="GPT", coder_type=CODER_TYPE_MACHINE,
+                                          machine_provenance={"model": "gpt-4o"}),
+                "run-b": ci.CoderDecision("create", new_username="GPT", coder_type=CODER_TYPE_MACHINE,
+                                          machine_provenance={"model": "gpt-4o-mini"}),
+            })
+
+    def test_ONE_model_configuration_under_one_name_is_one_coder(self, db_session):
+        db = db_session
+        pid = _segment_project(db)
+        plan = _plan(
+            db, pid, "unit_id,coder,code\nseg-200-0,run-a,Trust\nseg-200-1,run-b,Risk\n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        same = {"model": "gpt-4o", "access": "api"}
+        report = ci.apply_plan(db, pid, plan, {
+            "run-a": ci.CoderDecision("create", new_username="GPT", coder_type=CODER_TYPE_MACHINE,
+                                      machine_provenance=dict(same)),
+            "run-b": ci.CoderDecision("create", new_username="GPT", coder_type=CODER_TYPE_MACHINE,
+                                      machine_provenance=dict(same)),
+        })
+        assert report.coders_created == 1
+        assert db.query(User).filter(User.username == "GPT").one().coder_type == CODER_TYPE_MACHINE

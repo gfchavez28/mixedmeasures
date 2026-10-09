@@ -338,7 +338,7 @@ export default function ObservationImport() {
       toast.success(`"${cut.observation.name}" imported`, {
         description: cut.warnings.length
           ? cut.warnings.join(' ')
-          : `${cut.created} clip(s) ready to code.`,
+          : `${countLabel(cut.created, 'clip', 'clips')} ready to code.`,
       })
       return
     }
@@ -753,7 +753,7 @@ export default function ObservationImport() {
             </CardTitle>
             <CardDescription>
               {result.created > 0
-                ? `${result.created} clip(s) created. Open the observation to start coding.`
+                ? `${countLabel(result.created, 'clip', 'clips')} created. Open the observation to start coding.`
                 : 'No starting clips — mark them in the workbench while you watch.'}
             </CardDescription>
           </CardHeader>

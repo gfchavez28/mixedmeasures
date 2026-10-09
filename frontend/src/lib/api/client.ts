@@ -1,3 +1,5 @@
+import { reloadForLapsedSession } from './session-lapse'
+
 // ── Error class ───────────────────────────────────────────────────────
 
 export class ApiError extends Error {
@@ -19,6 +21,29 @@ let csrfToken: string | null = null
 
 export function setCsrfToken(token: string | null) {
   csrfToken = token
+}
+
+// ── Holding the session-lapse reload ──────────────────────────────────
+
+let sessionReloadHolds = 0
+
+/**
+ * #1084 (a): stop a 401 from reloading the page until the returned release is
+ * called. For one screen: a restore's outcome. After a restore the browser's
+ * session is one the restored database never saw, so EVERY request answers 401 —
+ * and the reload below took "Restore complete", or the failure sentence naming
+ * the backup to recover from, off the screen unread. React Query is held offline
+ * there too, but a request made outside React Query does not ask it. Holds count,
+ * so two holders cannot release each other's; a release is idempotent.
+ */
+export function holdSessionReload(): () => void {
+  sessionReloadHolds += 1
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    sessionReloadHolds -= 1
+  }
 }
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -109,10 +134,12 @@ async function request<T>(
 
     // 401 → the session lapsed (e.g. expiry). Local-first has no login screen,
     // so clear the stale CSRF token and reload: AuthProvider re-hits /status,
-    // which auto-provisions a fresh session and returns us to where we were.
+    // which auto-provisions a fresh session and returns us to where we were —
+    // unless a screen holds the reload (`holdSessionReload`), whose own button
+    // reloads when the researcher has read it.
     if (response.status === 401) {
       csrfToken = null
-      window.location.reload()
+      if (sessionReloadHolds === 0) reloadForLapsedSession()
     }
 
     throw new ApiError(response.status, errorData, respHeaders)

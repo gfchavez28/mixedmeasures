@@ -28,6 +28,10 @@ go and the turn stays as an empty placeholder.
 | `CodeApplication` | KEPT | the researcher's analysis, not the participant's personal data — and deleting it would silently change every κ/α figure other coders' work feeds |
 | `Note` / `Memo` | KEPT and REPORTED | researcher-authored prose that may QUOTE the person; a machine cannot judge that, so it is surfaced for human review rather than guessed at |
 
+On the dataset side their responses and rows are DELETED, and every saved metric on
+a dataset that lost a row is marked out of date (#1144): a computed result is a copy
+of what it was computed from, and quick compute reuses one that is not stale.
+
 ⚠️ **A linked DOCUMENT (row 46) is UNLINKED and REPORTED — a third treatment,
 and it needed one.** The dataset rule ("theirs alone, so it goes") does not
 transfer: `Document.participant_id` says the document is *about* this person,
@@ -60,12 +64,13 @@ from ..models.participant import Participant
 from ..models.speaker import Speaker
 from ..models.segment import Segment
 from ..models.document import Document
-from ..models.dataset import DatasetRow, DatasetValue
+from ..models.dataset import DatasetColumn, DatasetRow, DatasetValue
 from ..models.excerpt import Excerpt
 from ..models.note import Note
 from ..models.memo import Memo
 from ..models.row_score import RowScore
 from ..models.code_application import CodeApplication
+from .staleness import mark_metrics_stale
 from .withdrawal_report import build_withdrawal_report
 
 
@@ -203,6 +208,8 @@ def apply_withdrawal(
     memos_for_review = 0
 
     if row_ids:
+        # #1144 — the datasets losing a row, read BEFORE the rows go.
+        affected_dataset_ids = sorted({r.dataset_id for r in rows})
         value_ids = [
             v[0] for v in
             db.query(DatasetValue.id).filter(DatasetValue.row_id.in_(row_ids)).all()
@@ -238,6 +245,17 @@ def apply_withdrawal(
         db.query(DatasetRow).filter(DatasetRow.id.in_(row_ids)).delete(
             synchronize_session=False
         )
+        # 🔴 #1144 — their data must leave the NUMBERS too. A saved metric keeps the
+        # result it last computed, and quick compute reuses any metric not marked
+        # stale, so after a withdrawal the analysis view went on showing means and
+        # frequencies that included this person's responses. Every column of each
+        # dataset that lost a row: a row is in every column's population.
+        affected_columns = [
+            column_id for (column_id,) in
+            db.query(DatasetColumn.id).filter(DatasetColumn.dataset_id.in_(affected_dataset_ids))
+        ]
+        if affected_columns:
+            mark_metrics_stale(db, project_id, column_ids=affected_columns)
 
     # ── The document side: UNLINKED and reported, never deleted (row 46) ──
     #

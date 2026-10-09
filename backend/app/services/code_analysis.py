@@ -737,7 +737,6 @@ def get_segments_with_context(
 
     total_segments = len(all_apps)
     paged_apps = all_apps[offset:offset + limit]
-    has_more = (offset + limit) < total_segments
 
     # #618: NO early return on an empty conversation arm — the document and
     # observation gathers below must still run (a doc-only or clip-only code
@@ -916,9 +915,11 @@ def get_segments_with_context(
     ]
 
     doc_total_segments = len(all_doc_apps)
-    # Apply offset/limit across all sources — document segments come after conversation segments
-    # For simplicity, we'll return document results as a separate list without shared pagination
-    doc_paged_apps = all_doc_apps[:limit]
+    # #968/#969 — each kind is its own ordered list and pages by the SAME window,
+    # so a page of N asks every kind for its next N. This was `[:limit]`: the
+    # first `limit` documents on every page, so paging re-sent them (duplicate
+    # cards) and no request could reach document segment `limit + 1`.
+    doc_paged_apps = all_doc_apps[offset:offset + limit]
 
     doc_focal_by_doc: dict[int, list[int]] = defaultdict(list)
     doc_focal_seg_ids = set()
@@ -1054,8 +1055,8 @@ def get_segments_with_context(
     ]
 
     obs_total_clips = len(all_obs_apps)
-    # Same simple-pagination posture as documents (no shared pagination).
-    obs_paged_apps = all_obs_apps[:limit]
+    # #968/#969 — the same window as the other two kinds (see documents above).
+    obs_paged_apps = all_obs_apps[offset:offset + limit]
 
     obs_focal_by_obs: dict[int, list[int]] = defaultdict(list)
     obs_focal_seg_ids = set()
@@ -1197,7 +1198,15 @@ def get_segments_with_context(
         "category_name": code.category.name if code.category else None,
         # Clip-inclusive total (D25) — must agree with the frequencies count.
         "total_segments": total_segments + doc_total_segments + obs_total_clips,
-        "has_more": has_more,
+        # #969 — per KIND, because each section says "Showing N of M" for its own
+        # list and the sum cannot be split back apart.
+        "conversation_total": total_segments,
+        "document_total": doc_total_segments,
+        "observation_total": obs_total_clips,
+        # #969 — ANY kind has more. It was the conversation arm's alone, so a code
+        # with ≤ limit conversation passages and more document segments or clips
+        # than that offered no Load more anywhere and ended those lists silently.
+        "has_more": (offset + limit) < max(total_segments, doc_total_segments, obs_total_clips),
         "conversations": conversations,
         "documents": doc_results,
         "observations": obs_results,

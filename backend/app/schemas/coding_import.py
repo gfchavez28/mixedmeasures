@@ -111,11 +111,14 @@ class CodingImportResult(BaseModel):
     """What the import did. A partial failure is THIS, not a throw (#678)."""
 
     rows_read: int
-    #: New applications written.
+    #: New codings written, code-set values included. ⚠️ All three counts here are
+    #: CODINGS (one per passage or record — a grouped passage's siblings count),
+    #: never file rows (#1066).
     applied: int
-    #: Rows whose coder already had that code on that unit. Not an error.
+    #: Codings the file asked for that the coder already had. Not an error.
     already_present: int
-    #: Rows that went through the code-set swap rather than a plain apply.
+    #: Of `applied`, the codings that are a code set's value — a PART of
+    #: `applied`, not a count beside it (#1066).
     selections: int
     #: Applications a swap CLEARED — the previous value of a set on that unit.
     replaced: int

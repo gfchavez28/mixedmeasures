@@ -8,7 +8,47 @@
  * they live beside `lib/safety-copies.ts`, which does the same job for the other
  * list on that screen.
  */
-import type { BackupInfo } from '@/lib/api'
+import type { BackupInfo, BackupStatus } from '@/lib/api'
+
+/**
+ * #1043 — the automatic schedule in the words the Backup & Data section uses.
+ *
+ * The section said "a separate 4-hourly safety snapshot … every 4 hours, keeping the
+ * 5 most recent" whatever `MM_AUTO_BACKUP_INTERVAL_HOURS` / `…_MAX_COUNT` held — and
+ * `0` hours now turns automatic backups OFF, where those sentences would promise a
+ * snapshot that never comes. The server states the install's values; until it
+ * answers (or from a server that predates the fields) the sentences carry NO number
+ * rather than the default stated as this install's fact (#961's rule).
+ */
+export function scheduleSentences(
+  status: Pick<BackupStatus, 'auto_backup_interval_hours' | 'auto_backup_max_count'> | undefined,
+): { off: boolean; intro: string; detail: string } {
+  const hours = status?.auto_backup_interval_hours ?? null
+  const keep = status?.auto_backup_max_count ?? null
+  if (hours === 0) {
+    return {
+      off: true,
+      intro:
+        'Your edits save to disk instantly. Automatic backups are turned off on this ' +
+        'installation, so a backup is taken when you ask for one.',
+      detail:
+        'Backups are a separate safety net from saving. Automatic snapshots are turned off ' +
+        'on this installation, so take one with Backup now, or download one, before a big change.',
+    }
+  }
+  const cadence = hours === null ? '' : hours === 1 ? 'hourly ' : `${hours}-hourly `
+  const every = hours === null ? 'on a schedule' : hours === 1 ? 'every hour' : `every ${hours} hours`
+  const keeping = keep === null ? 'keeping the most recent ones' : `keeping the ${keep} most recent`
+  return {
+    off: false,
+    intro: `Your edits save to disk instantly; backups are a separate ${cadence}safety snapshot.`,
+    detail:
+      'Every edit is saved to disk the moment you make it — your work isn’t waiting in ' +
+      'memory anywhere. Backups are a separate safety net: Mixed Measures takes a snapshot of ' +
+      `the database, documents, and audio ${every}, ${keeping} so you can recover from disk ` +
+      'corruption or accidental deletion.',
+  }
+}
 
 /**
  * What each kind of backup IS, in words a researcher can choose between.
@@ -26,7 +66,13 @@ import type { BackupInfo } from '@/lib/api'
  */
 export const BACKUP_TYPE_LABELS: Record<string, { label: string; description: string }> = {
   manual: { label: 'Downloaded', description: 'you downloaded a copy' },
-  auto: { label: 'Automatic', description: 'taken on the 4-hourly schedule' },
+  // #1043: no number — the schedule is the install's (`MM_AUTO_BACKUP_INTERVAL_HOURS`),
+  // and Backup & Data states it from the server.
+  // #1132: *Backup now* writes this type too (it is the rotation key, ISSUES
+  // archive's "REFUTED as a naming bug"), so "on the automatic schedule" alone
+  // was false of every backup taken by hand — and of all of them with the
+  // schedule turned off.
+  auto: { label: 'Automatic', description: 'taken on the automatic schedule or with Backup now' },
   shutdown: { label: 'On quit', description: 'taken when Mixed Measures last closed' },
   pre_restore: { label: 'Before a restore', description: 'your data as it was before a restore' },
   pre_withdrawal: {
@@ -78,5 +124,19 @@ export function isLastOfItsKind(
  * dangerous.
  */
 export function backupRowName(backup: BackupInfo, takenAt: string): string {
-  return `the ${describeBackup(backup).label.toLowerCase()} backup from ${takenAt}`
+  return `the ${backupTitle(backup, takenAt)}`
+}
+
+/**
+ * #1132 — a backup's name inside a sentence: `“Before a restore” backup from …`.
+ *
+ * The ONE builder for it: the row controls, the delete confirmation and the
+ * restore dialog (Settings' `RestoreSource.name`) each composed their own, and
+ * lower-cased or bare it read "Restore from the before a restore backup from …",
+ * "the contents of Before a restore backup from …" — three of the five labels
+ * are phrases, not adjectives. Quoted, it is the restored view's own wording
+ * (*as the “Before a restore” backup from …*).
+ */
+export function backupTitle(backup: Pick<BackupInfo, 'backup_type'>, takenAt: string): string {
+  return `“${describeBackup(backup).label}” backup from ${takenAt}`
 }

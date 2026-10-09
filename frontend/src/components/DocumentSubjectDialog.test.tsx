@@ -12,7 +12,7 @@ import '@testing-library/jest-dom/vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import DocumentSubjectDialog from './DocumentSubjectDialog'
-import { PARTICIPANT_LIST_LIMIT } from '@/lib/participant-search'
+import { PARTICIPANT_LIST_LIMIT, PARTICIPANT_SEARCH_LABEL } from '@/lib/participant-search'
 
 const listParticipants = vi.fn()
 
@@ -99,7 +99,7 @@ describe('DocumentSubjectDialog', () => {
   it('filters by name, identifier and role', async () => {
     renderDialog()
     await screen.findByRole('button', { name: /Ada Chen/ })
-    const search = screen.getByRole('textbox', { name: 'Search participants' })
+    const search = screen.getByRole('textbox', { name: PARTICIPANT_SEARCH_LABEL })
 
     fireEvent.change(search, { target: { value: 'finance' } })
     await waitFor(() => {
@@ -118,7 +118,7 @@ describe('DocumentSubjectDialog', () => {
     // search that matches nothing must not strand the researcher.
     renderDialog()
     await screen.findByRole('button', { name: /Ada Chen/ })
-    fireEvent.change(screen.getByRole('textbox', { name: 'Search participants' }), {
+    fireEvent.change(screen.getByRole('textbox', { name: PARTICIPANT_SEARCH_LABEL }), {
       target: { value: 'zzzz' },
     })
     await waitFor(() => {
@@ -148,7 +148,7 @@ describe('DocumentSubjectDialog', () => {
     expect(rows()).toHaveLength(PARTICIPANT_LIST_LIMIT)
     const note = `Showing the first ${PARTICIPANT_LIST_LIMIT} of 600 participants. Type a name or ID to find the others.`
     expect(screen.getByText(note)).toBeInTheDocument()
-    const search = screen.getByRole('textbox', { name: 'Search participants' })
+    const search = screen.getByRole('textbox', { name: PARTICIPANT_SEARCH_LABEL })
     expect(search).toHaveAccessibleDescription(note)
 
     fireEvent.change(search, { target: { value: 'r0599' } })

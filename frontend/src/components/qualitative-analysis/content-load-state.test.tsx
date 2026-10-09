@@ -68,7 +68,7 @@ const answered500 = () => Object.assign(new Error('boom'), { status: 500 })
 /** The three-source payload, ANSWERED and empty in every arm. */
 const EMPTY_SEGMENTS = {
   conversations: [], documents: [], observations: [],
-  total_segments: 0, has_more: false,
+  total_segments: 0, conversation_total: 0, document_total: 0, observation_total: 0, has_more: false,
 }
 
 function wrap(ui: React.ReactElement) {

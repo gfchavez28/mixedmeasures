@@ -1,5 +1,5 @@
 import { useMemo, useCallback } from 'react'
-import { useSearchParams } from 'react-router'
+import { useComposableSearchParams } from '@/hooks/useComposableSearchParams'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -33,7 +33,12 @@ function serializeIds(ids: Set<number>): string {
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useCodebookState() {
-  const [searchParams, setSearchParams] = useSearchParams()
+  // #1147 — composable (`url-state.md`). With React Router's own setter, *Reset
+  // filter*'s two writes in one click kept only the second (`?minSeg=3` stayed), and
+  // a hide toast's *Undo* — a setter captured by the render that made the toast —
+  // wrote that render's URL back, clearing a search typed since and un-hiding a
+  // second code.
+  const [searchParams, setSearchParams] = useComposableSearchParams()
 
   // ── Read URL params ──────────────────────────────────────────────────
 
@@ -97,7 +102,9 @@ export function useCodebookState() {
     setUrlParam('hideCols', serializeIds(ids))
   }, [setUrlParam])
 
-  // Remove specific code IDs from hidden set (reads fresh URL state via functional update)
+  // Remove specific code IDs from the hidden set. `prev` is the URL as it is NOW —
+  // the composable setter reads it from a ref, so an *Undo* made by an older render
+  // undoes only its own ids (#1147; this comment claimed that before it was true).
   const removeHiddenCodeIds = useCallback((idsToRemove: number[]) => {
     setSearchParams(prev => {
       const current = parseIds(prev.get('hideCodes') ?? '')

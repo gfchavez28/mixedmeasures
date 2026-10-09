@@ -87,6 +87,12 @@ def world(db_session):
     db.flush()
     db.add(DatasetRow(dataset_id=survey.id, participant_id=rich.id, row_identifier="R0007",
                       submitted_at=datetime(2026, 3, 4, 5, 6, 7)))
+    # #1157 — a row of the table the tool maintains, whose link is NOT the
+    # researcher's to change: `link_refusal` must come out of both builders alike.
+    managed = Dataset(project_id=1, name="Participants", managed_kind="participants")
+    db.add(managed)
+    db.flush()
+    db.add(DatasetRow(dataset_id=managed.id, participant_id=rich.id, row_identifier="P-02"))
     db.add(Document(project_id=1, name="Workplan", source_filename="w.docx",
                     source_format="docx", participant_id=rich.id))
     db.flush()
@@ -111,6 +117,9 @@ class TestTheListSaysWhatTheSingleBuilderSays:
         assert [len(s["conversations"]) for s in rich["linked_speakers"]] == [2, 1]
         assert rich["linked_speakers"][1]["color"] == "#3b82f6"
         assert rich["dataset_rows"][0]["submitted_at"].endswith("+00:00")
+        refusals = {r["dataset_name"]: r["link_refusal"] for r in rich["dataset_rows"]}
+        assert refusals["Survey"] is None
+        assert refusals["Participants"], "the managed row's link refusal is the field under test"
         assert rich["linked_documents"][0]["source_format"] == "docx"
         assert rich["demographics"] == '{"age": 41}'
 

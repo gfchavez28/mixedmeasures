@@ -129,3 +129,43 @@ it('Restore from a file stays focusable while the chosen file is checked', async
   fireEvent.click(busy)
   expect(pick).not.toHaveBeenCalled()
 })
+
+describe('#1043 — the section states THIS install’s automatic schedule', () => {
+  const status = (hours: number | null, keep: number | null, extra: object = {}) => ({
+    last_backup_at: '2026-10-04T12:00:00+00:00', backup_count: 1, total_size_bytes: 1,
+    is_stale: false, next_backup_at: null,
+    auto_backup_interval_hours: hours, auto_backup_max_count: keep, ...extra,
+  })
+
+  it('says the schedule the server reports, not the default', async () => {
+    api.status.mockResolvedValue(status(2, 3))
+    renderSection()
+    expect(await screen.findByText(/a separate 2-hourly safety snapshot/)).toBeInTheDocument()
+    expect(screen.queryByText(/4-hourly/)).not.toBeInTheDocument()
+  })
+
+  it('says automatic backups are off when the interval is 0', async () => {
+    api.status.mockResolvedValue(status(0, 5))
+    renderSection()
+    expect(await screen.findByText(/Automatic backups are turned off on this installation/)).toBeInTheDocument()
+    expect(screen.getByText(/Automatic backups are off/, { selector: 'p' })).toBeInTheDocument()
+    expect(screen.queryByText(/hourly/)).not.toBeInTheDocument()
+  })
+
+  it('states no number before the server answers', () => {
+    api.status.mockReturnValue(new Promise(() => {}))
+    renderSection()
+    expect(screen.getByText(/backups are a separate safety snapshot/)).toBeInTheDocument()
+    expect(screen.queryByText(/hourly/)).not.toBeInTheDocument()
+  })
+})
+
+it('#908 — the backup count is separated by a real space, not only a margin', async () => {
+  api.status.mockResolvedValue({
+    last_backup_at: '2026-10-04T12:00:00+00:00', backup_count: 2, total_size_bytes: 2048,
+    is_stale: false, next_backup_at: null, auto_backup_interval_hours: 0, auto_backup_max_count: 5,
+  })
+  renderSection()
+  const line = await screen.findByText(/Last backup:/)
+  expect(line.textContent).toMatch(/off \(2 backups, /)
+})

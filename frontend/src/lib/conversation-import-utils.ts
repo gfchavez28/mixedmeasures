@@ -93,14 +93,24 @@ export function getInitialsBadgeColors(isFacilitator: boolean): string {
 }
 
 // A participant is "orphaned" when no live source references it — every
-// conversation/dataset it appeared in was deleted. Participants are
-// project-scoped and intentionally survive source deletion (shared
-// cross-source identity), so these accumulate until manually removed.
+// conversation, dataset record and document it was linked to has gone.
+// Participants are project-scoped and intentionally survive source deletion
+// (shared cross-source identity), so these accumulate until manually removed.
 // Structurally typed so this stays import-cycle-free.
+//
+// 🔴 #1110 — a DOCUMENT can say who it is about (row 46, `Document.participant_id`),
+// and this predicate counted only speakers and dataset rows. So the subject of a
+// workplan was listed under "No linked sources" — the filter a researcher uses to
+// pick people to delete — and deleting them silently cleared the document's
+// subject. The THREE links are the three FKs to `participants.id`; a fourth fails
+// `test_withdrawal_report.py::TestEveryParticipantFkHasAnArm`, and must land here
+// too.
 export function isOrphanedParticipant(
-  p: { linked_speakers: unknown[]; dataset_rows: unknown[] }
+  p: { linked_speakers: unknown[]; dataset_rows: unknown[]; linked_documents: unknown[] }
 ): boolean {
-  return p.linked_speakers.length === 0 && p.dataset_rows.length === 0
+  return p.linked_speakers.length === 0
+    && p.dataset_rows.length === 0
+    && p.linked_documents.length === 0
 }
 
 // Generate conversation name from participant (non-facilitator) names

@@ -11,12 +11,11 @@ import ScratchpadPopover from '@/components/ScratchpadPopover'
 import ExportDialog from '@/components/ExportDialog'
 import KeyboardHelpDialog from '@/components/KeyboardHelpDialog'
 import { detectWorkspace } from './workspace'
+import { deriveBreadcrumbs } from './breadcrumbs'
+import { scratchpadContextHint } from '@/lib/scratchpad-context'
 // Toaster moved to App.tsx
 
-export interface BreadcrumbSegment {
-  label: string
-  to?: string
-}
+export type { BreadcrumbSegment } from './breadcrumbs'
 
 export interface ProjectLayoutContext {
   project: Project | undefined
@@ -50,71 +49,6 @@ function detectCompact(pathname: string): boolean {
     /\/documents\/\d+/.test(pathname) ||
     /\/analysis\/codebook/.test(pathname) ||
     /\/analysis\/canvas/.test(pathname)
-}
-
-function deriveBreadcrumbs(pathname: string, projectName: string | undefined, projectId: number): BreadcrumbSegment[] {
-  const crumbs: BreadcrumbSegment[] = []
-  const base = `/projects/${projectId}`
-
-  // Always start with project name
-  crumbs.push({ label: projectName || 'Project', to: `${base}/overview` })
-
-  const relPath = pathname.replace(base, '').replace(/^\//, '')
-  const segments = relPath.split('/').filter(Boolean)
-
-  if (segments.length === 0 || segments[0] === 'overview') return crumbs
-
-  // Special-case label map for hyphenated routes
-  const SPECIAL_LABELS: Record<string, string> = {
-    'memos-notes': 'Memos & Notes',
-    // Matches the page's own <h1>; the capitalised slug read "Coding-import".
-    'coding-import': 'Import codings',
-  }
-
-  // Workspace-level breadcrumb
-  const workspace = segments[0]
-  const workspaceLabel = SPECIAL_LABELS[workspace] ?? (workspace.charAt(0).toUpperCase() + workspace.slice(1))
-
-  if (segments.length === 1) {
-    crumbs.push({ label: workspaceLabel })
-  } else {
-    crumbs.push({ label: workspaceLabel, to: `${base}/${workspace}` })
-  }
-
-  // Sub-segments
-  if (segments.length >= 2) {
-    const sub = segments[1]
-    if (sub === 'import') {
-      crumbs.push({ label: 'Import' })
-    } else if (sub === 'variable-groups') {
-      crumbs.push({ label: 'Variable Groups' })
-    } else if (sub === 'text-coding') {
-      crumbs.push({ label: 'Code Text' })
-    } else if (sub === 'qualitative') {
-      crumbs.push({ label: 'Qualitative' })
-    } else if (sub === 'quantitative') {
-      crumbs.push({ label: 'Quantitative' })
-    } else if (sub === 'canvas') {
-      crumbs.push({ label: 'Canvas' })
-    } else if (sub === 'codebook') {
-      crumbs.push({ label: 'Codebook' })
-    } else if (/^\d+$/.test(sub)) {
-      // Entity ID — resolved by cache lookup or child setBreadcrumbLabel
-      if (segments.length >= 3) {
-        crumbs.push({ label: '', to: `${base}/${workspace}/${sub}` })
-        const action = segments[2]
-        // `recode` is retired (2026-08-23) — the route redirects — but an
-        // in-flight render can still see it, and a stale crumb is worse than a
-        // duplicated arm.
-        if (action === 'variables' || action === 'recode') crumbs.push({ label: 'Variables' })
-        else if (action === 'append') crumbs.push({ label: 'Append' })
-      } else {
-        crumbs.push({ label: '' })
-      }
-    }
-  }
-
-  return crumbs
 }
 
 /** Synchronous cache lookup for entity names — avoids breadcrumb flash */
@@ -223,23 +157,6 @@ export default function ProjectLayout() {
     return { entityType: 'project', entityId: projectId }
   }, [location.pathname, projectId])
 
-  // Context hint for scratchpad — human-readable string from current page
-  const contextHintLabel = useMemo(() => {
-    const path = location.pathname
-    const search = location.search
-    if (/\/conversations\/\d+/.test(path)) return breadcrumbLabel ? `Conversation: ${breadcrumbLabel}` : 'Conversation'
-    if (/\/datasets\/\d+/.test(path)) return breadcrumbLabel ? `Dataset: ${breadcrumbLabel}` : 'Dataset'
-    if (path.includes('/datasets/text-coding')) return 'Code Text'
-    if (path.includes('/analysis/quantitative')) {
-      if (search.includes('tab=rc')) return 'Relationships & Comparisons'
-      return 'Quantitative Analysis'
-    }
-    if (path.includes('/analysis/qualitative')) return 'Qualitative Analysis'
-    if (path.includes('/analysis/canvas')) return breadcrumbLabel ? `Canvas: ${breadcrumbLabel}` : 'Canvas'
-    if (path.includes('/memos-notes')) return 'Memos & Notes'
-    return 'Project overview'
-  }, [location.pathname, location.search, breadcrumbLabel])
-
   // Scratchpad count query (unresolved entries)
   const { data: scratchpadData } = useQuery({
     queryKey: ['scratchpad', projectId, false],
@@ -275,6 +192,11 @@ export default function ProjectLayout() {
     }
     return crumbs
   }, [location.pathname, project?.name, projectId, breadcrumbLabel, queryClient])
+
+  // #1002 — where a scratchpad note was jotted, from the SAME trail the top rail
+  // shows. It was a second hand-kept list of eight routes that fell through to
+  // "Project overview" everywhere else, and the hint is STORED with the note.
+  const contextHintLabel = scratchpadContextHint(breadcrumbs, breadcrumbLabel, location.search)
 
   const openSearch = useCallback(() => setIsSearchOpen(true), [])
   const openCodebook = useCallback(() => { bringToFront(setCodebookZ); setIsCodebookOpen(true) }, [bringToFront])

@@ -73,59 +73,70 @@ export default function WithdrawParticipantDialog({
     // Cancel alike (`ConfirmDialog`'s shape, #959 §4).
     <AlertDialog open={open} onOpenChange={(o) => { if (!o && !isPending) onCancel() }}>
       <AlertDialogContent>
+        {/*
+          #1131 — EVERYTHING up to the buttons is the dialog's description
+          (`asChild` onto a div, `ConfirmDialog`'s `details` shape). Only the first
+          paragraph was, so a reader opening this heard the backup sentence and
+          then "Cancel": what is removed, what stays and the warning below were
+          on screen and silent (a11y-name-sweep run 6's rule, #886's class).
+        */}
         <AlertDialogHeader>
           <AlertDialogTitle>Remove {identifier}&rsquo;s data?</AlertDialogTitle>
-          <AlertDialogDescription>
-            For honouring a withdrawal request. A full backup is taken first — but
-            there is no per-person undo, so restoring it would also undo any work
-            done afterwards.
+          <AlertDialogDescription asChild>
+            <div className="space-y-3">
+              <p>
+                For honouring a withdrawal request. A full backup is taken first — but
+                there is no per-person undo, so restoring it would also undo any work
+                done afterwards.
+              </p>
+
+              {report === null ? (
+                <div className="text-xs text-mm-text-faint py-2">Checking what would be removed…</div>
+              ) : (
+                <div className="space-y-3 max-h-72 overflow-y-auto text-xs">
+                  {removed.length > 0 && (
+                    <div>
+                      <p className="font-medium text-mm-text mb-1">This will be removed</p>
+                      <ul className="space-y-0.5 text-mm-text-secondary list-disc pl-4">
+                        {removed.map(l => <li key={l}>{l}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                  {kept.length > 0 && (
+                    <div>
+                      <p className="font-medium text-mm-text mb-1">This will stay</p>
+                      <ul className="space-y-0.5 text-mm-text-secondary list-disc pl-4">
+                        {kept.map(l => <li key={l}>{l}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/*
+                🔴 The most important text on this screen. Not a footnote, not a
+                tooltip: a researcher records that they honoured a withdrawal, and this
+                is the part that is still theirs to do.
+              */}
+              <div
+                className="flex items-start gap-1.5 px-2 py-1.5 rounded bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-[11px] text-amber-700 dark:text-amber-300"
+                role="note"
+              >
+                <TriangleAlert className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" aria-hidden="true" />
+                <span>
+                  <strong>This cannot finish the job on its own.</strong> It will not find their
+                  name where other people said it in a conversation, or inside free-text answers,
+                  notes or memos. Search for their name afterwards and review those yourself.
+                </span>
+              </div>
+
+              <div className="flex items-start gap-1.5 text-[11px] text-mm-text-faint">
+                <Info className="w-3 h-3 mt-0.5 flex-shrink-0" aria-hidden="true" />
+                <span>Mixed Measures cannot tell you whether this satisfies your obligations.</span>
+              </div>
+            </div>
           </AlertDialogDescription>
         </AlertDialogHeader>
-
-        {report === null ? (
-          <div className="text-xs text-mm-text-faint py-2">Checking what would be removed…</div>
-        ) : (
-          <div className="space-y-3 max-h-72 overflow-y-auto text-xs">
-            {removed.length > 0 && (
-              <div>
-                <p className="font-medium text-mm-text mb-1">This will be removed</p>
-                <ul className="space-y-0.5 text-mm-text-secondary list-disc pl-4">
-                  {removed.map(l => <li key={l}>{l}</li>)}
-                </ul>
-              </div>
-            )}
-            {kept.length > 0 && (
-              <div>
-                <p className="font-medium text-mm-text mb-1">This will stay</p>
-                <ul className="space-y-0.5 text-mm-text-secondary list-disc pl-4">
-                  {kept.map(l => <li key={l}>{l}</li>)}
-                </ul>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/*
-          🔴 The most important text on this screen. Not a footnote, not a
-          tooltip: a researcher records that they honoured a withdrawal, and this
-          is the part that is still theirs to do.
-        */}
-        <div
-          className="flex items-start gap-1.5 px-2 py-1.5 rounded bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-[11px] text-amber-700 dark:text-amber-300"
-          role="note"
-        >
-          <TriangleAlert className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" aria-hidden="true" />
-          <span>
-            <strong>This cannot finish the job on its own.</strong> It will not find their
-            name where other people said it in a conversation, or inside free-text answers,
-            notes or memos. Search for their name afterwards and review those yourself.
-          </span>
-        </div>
-
-        <div className="flex items-start gap-1.5 text-[11px] text-mm-text-faint">
-          <Info className="w-3 h-3 mt-0.5 flex-shrink-0" aria-hidden="true" />
-          <span>Mixed Measures cannot tell you whether this satisfies your obligations.</span>
-        </div>
 
         {isPending && <WithdrawingStatus />}
 

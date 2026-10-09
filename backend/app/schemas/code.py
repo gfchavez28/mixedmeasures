@@ -147,6 +147,13 @@ class MergeCodesResponse(BaseModel):
     ratings_carried: int = 0
     rating_conflicts: int = 0
     target_has_scale: bool = False
+    # #1081 (a): passages this merge touched on which a coder now holds TWO values
+    # of the code set the target counts in — a merge re-points codings without the
+    # swap every apply door makes, so it can create the contradiction the set's α
+    # counts and drops. Said, never resolved (`code-sets.md` §3). The label names
+    # the set; None when the target counts in no set.
+    set_contradictions: int = 0
+    contradiction_set_label: str | None = None
 
 
 class CategoryMergeRequest(BaseModel):

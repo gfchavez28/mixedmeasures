@@ -1,7 +1,10 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
-import { PARTICIPANT_LIST_LIMIT, searchParticipants, shownOfTotal } from '@/lib/participant-search'
+import {
+  PARTICIPANT_LIST_LIMIT, PARTICIPANT_SEARCH_LABEL, PARTICIPANT_SEARCH_PLACEHOLDER,
+  noParticipantsMatch, searchParticipants, shownOfTotal,
+} from '@/lib/participant-search'
 import { Link } from 'react-router'
-import { SELECTED_ROW } from '@/lib/selection'
+import { FOCUS_RING, SELECTED_ROW } from '@/lib/selection'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
@@ -16,6 +19,9 @@ import {
   ExternalLink,
   ChevronRight,
   Search,
+  MessageSquare,
+  Table2,
+  FileText,
 } from 'lucide-react'
 import {
   participantsApi,
@@ -32,15 +38,44 @@ import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
+import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { getSpeakerInitials, getInitialsBadgeColors, isOrphanedParticipant, isUnnamedLabel, UNNAMED_LABEL } from '@/lib/conversation-import-utils'
 import { getContrastColor } from '@/lib/utils'
 import {
-  withdrawalLocations, describeDeleteConsequence, withdrawalHeadline,
+  withdrawalLocations, describeDeleteConsequence, withdrawalHeadline, withdrawalDoneNote,
+  WITHDRAWAL_SCOPE_NOTE,
+  bulkDeleteDescription,
 } from '@/lib/withdrawal-copy'
 import WithdrawParticipantDialog from '@/components/WithdrawParticipantDialog'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+
+/**
+ * #1088 — the table and the detail panel share a row only when there is room
+ * for both. Measured at 640×360: the panel kept its 384px beside a table whose
+ * narrowest form was 613px in a 593px column, so it was drawn OVER the Role and
+ * Conversations columns, and its height cap (`100vh - 200px`) left it 160px.
+ *
+ * So the layout asks the CONTAINER (`@container/participants`), never the
+ * viewport (#899: a scrollbar takes width no media query sees). Below 960px the
+ * panel stacks under the table's scroll box at its natural height and the page
+ * scrolls; from 960px it is a sticky column beside the table, bounded to the
+ * same 70vh as the table box rather than to a guess about the window. The
+ * classes are literal strings in ONE place so the two halves cannot drift.
+ */
+const DETAIL_LAYOUT =
+  'flex flex-col gap-4 @min-[960px]/participants:flex-row @min-[960px]/participants:items-start'
+const DETAIL_PANEL =
+  'w-full shrink-0 bg-mm-surface rounded-lg border border-mm-border-subtle '
+  + '@min-[960px]/participants:w-96 @min-[960px]/participants:sticky @min-[960px]/participants:top-4 '
+  + '@min-[960px]/participants:max-h-[70vh] @min-[960px]/participants:overflow-y-auto'
+/** The id the open row's `aria-controls` names. */
+const DETAIL_PANEL_ID = 'participant-detail-panel'
+
+/** The orphan filter's description, and the badge's — one sentence (#1110). */
+const NO_LINKED_SOURCES_TITLE =
+  'Not linked to any conversation, dataset record or document'
 
 export default function ParticipantsPage() {
   const { projectId } = useProjectLayout()
@@ -81,6 +116,39 @@ export default function ParticipantsPage() {
   const [showOrphansOnly, setShowOrphansOnly] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false)
+
+  /**
+   * 🔴 #1091 — WHERE FOCUS GOES when the detail panel opens and closes.
+   *
+   * The panel renders after the whole table in the DOM, so a keyboard user who
+   * opened row 17 of 30 was 65 Tab presses from it (measured, run before this
+   * fix) — and at 200 rows, several hundred: linking a dataset record and the
+   * withdrawal report were out of reach in practice. Closing it dropped focus to
+   * `<body>`, back at the top of the page.
+   *
+   * - Opened from the KEYBOARD, the panel takes focus (its heading). Opened by a
+   *   click it does not — the pointer is already where the reader is looking —
+   *   but a stacked panel below the fold is scrolled into view.
+   * - Closed while focus was INSIDE it (or already lost), focus returns to the
+   *   row that opened it, whose Enter re-opens it; if that row is no longer
+   *   shown, to the search box. Focus that is somewhere real is never moved.
+   */
+  const [panelTakesFocus, setPanelTakesFocus] = useState(false)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const focusRowAfterClose = useRef<number | null>(null)
+  const openPanel = (participantId: number, viaKeyboard: boolean) => {
+    setPanelTakesFocus(viaKeyboard)
+    setSelectedParticipantId(participantId)
+  }
+  const closePanel = useCallback(() => {
+    const active = document.activeElement
+    const focusLost = !active || active === document.body
+    if (selectedParticipantId !== null && (focusLost || panelRef.current?.contains(active))) {
+      focusRowAfterClose.current = selectedParticipantId
+    }
+    setSelectedParticipantId(null)
+  }, [selectedParticipantId])
 
   // Mutations
   const createParticipantMutation = useMutation({
@@ -169,22 +237,25 @@ export default function ParticipantsPage() {
   const withdrawMutation = useMutation({
     mutationFn: (participantId: number) =>
       participantsApi.withdraw(projectId, participantId),
-    onSuccess: (res) => {
+    onSuccess: (res, participantId) => {
       void queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
       // Their turns and responses changed, so anything reading conversations or
       // datasets is now stale.
       void queryClient.invalidateQueries({ queryKey: ['conversations', projectId] })
       void queryClient.invalidateQueries({ queryKey: ['dataset'] })
+      // #1123 — and a document about them no longer says so.
+      void queryClient.invalidateQueries({ queryKey: ['documents', projectId] })
       toast.success(
         `${res.identifier} removed. Backup saved as ${res.backup_filename}.`,
         {
-          description:
-            'Now search your transcripts and free-text answers for their name — '
-            + 'that part cannot be automated.',
+          description: withdrawalDoneNote(res.documents_unlinked),
           duration: 12000,
         },
       )
       setWithdrawParticipant(null)
+      // Their panel would otherwise ask for a participant that no longer exists
+      // and say "Loading…" until the page was left.
+      setSelectedParticipantId((open) => (open === participantId ? null : open))
     },
     onError: (err: unknown) => {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
@@ -249,6 +320,15 @@ export default function ParticipantsPage() {
     setShownLimit((n) => n + PARTICIPANT_LIST_LIMIT)
   }
 
+  // #1091 — the close half: back to the row that opened the panel.
+  useEffect(() => {
+    const id = focusRowAfterClose.current
+    if (id === null || selectedParticipantId !== null) return
+    focusRowAfterClose.current = null
+    const row = tableBodyRef.current?.querySelector<HTMLElement>(`tr[data-participant-id="${id}"]`)
+    ;(row ?? searchRef.current)?.focus()
+  }, [selectedParticipantId])
+
   /**
    * 🔴 #1072 — THE selection every act reads: the checked rows that are SHOWN.
    *
@@ -276,6 +356,14 @@ export default function ParticipantsPage() {
       ? labels.join(', ')
       : `${labels.slice(0, 3).join(', ')} and ${(labels.length - 3).toLocaleString()} more`
   }, [renderedParticipants, selectedIds])
+  // #1110 — the documents a bulk delete leaves without a subject. The confirm
+  // used to say only that "speaker or dataset-row links will be cleared".
+  const selectedDocumentCount = useMemo(
+    () => renderedParticipants
+      .filter((p) => selectedIds.has(p.id))
+      .reduce((n, p) => n + p.linked_documents.length, 0),
+    [renderedParticipants, selectedIds],
+  )
 
   const allVisibleSelected =
     renderedParticipants.length > 0 &&
@@ -289,6 +377,36 @@ export default function ParticipantsPage() {
       }
       return new Set([...prev, ...renderedParticipants.map((p) => p.id)])
     })
+  }
+
+  /**
+   * #1090 — the filter row.
+   *
+   * - The two filter buttons render only when there is something to filter BY
+   *   (an orphan exists) or the orphan filter is ON. Rendered whenever something
+   *   was selected, a lone *All (N)* read as part of the selection bar, and
+   *   pressing it — the filter already in force — cleared the selection.
+   * - The filter stays on screen while it is ON, even at zero: deleting every
+   *   unlinked participant through it used to remove the buttons and leave an
+   *   empty table with no way back to *All* (measured, before this fix).
+   * - Choosing a filter no longer clears the selection: since #1072 every act
+   *   reads the checked rows that are SHOWN, so the clear bought nothing and cost
+   *   the selection. Re-choosing the filter in force does nothing.
+   * - Two acts unmount the control that was pressed — *Clear* (the bar goes with
+   *   the selection) and *All* once no orphan is left (the buttons go) — so each
+   *   hands focus to the control that stays: select-all, and the search box.
+   */
+  const filterAvailable = orphanCount > 0 || showOrphansOnly
+  const selectAllRef = useRef<HTMLButtonElement>(null)
+  const chooseFilter = (orphansOnly: boolean) => {
+    if (orphansOnly === showOrphansOnly) return
+    setShowOrphansOnly(orphansOnly)
+    setShownLimit(PARTICIPANT_LIST_LIMIT)
+    if (!orphansOnly && orphanCount === 0) searchRef.current?.focus()
+  }
+  const clearSelection = () => {
+    setSelectedIds(new Set())
+    selectAllRef.current?.focus()
   }
 
   /**
@@ -316,6 +434,10 @@ export default function ParticipantsPage() {
     )
   }
 
+  const selectedParticipant = selectedParticipantId === null
+    ? null
+    : participants.find((p) => p.id === selectedParticipantId) ?? null
+
   return (
     <div className="h-full overflow-auto">
       <div className="max-w-5xl mx-auto p-4 space-y-4">
@@ -329,7 +451,7 @@ export default function ParticipantsPage() {
         </Link>
 
         {/* Header + Add button */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-3">
           <h1 className="text-lg font-semibold text-mm-text">
             Participants
             {/* #908's rule: the space is a text node in the HEADING's own child
@@ -339,7 +461,7 @@ export default function ParticipantsPage() {
               <>{' '}<span className="text-mm-text-muted font-normal ml-1">({participants.length.toLocaleString()})</span></>
             )}
           </h1>
-          <Button onClick={() => setIsAddingParticipant(true)} size="sm">
+          <Button onClick={() => setIsAddingParticipant(true)} size="sm" className="shrink-0">
             <Plus className="w-4 h-4 mr-1.5" />
             Add Participant
           </Button>
@@ -453,59 +575,63 @@ export default function ParticipantsPage() {
             </Button>
           </div>
         ) : participants.length > 0 && (
-          <div className="space-y-3">
+          <div className="@container/participants space-y-3">
             {/* #1052 — what reaches a participant the bounded table does not
                 show. Named for what it matches (#1008: a bare "Search…" was
-                read as searching more than it did). */}
+                read as searching more than it did); the wording is shared
+                with the two participant pickers (#1092). */}
             <div className="relative max-w-xs">
               <Search
                 className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-mm-text-muted"
                 aria-hidden="true"
               />
               <Input
+                ref={searchRef}
                 value={search}
                 onChange={(e) => changeSearch(e.target.value)}
-                placeholder="Search by name, ID or role…"
-                aria-label="Search participants by name, ID or role"
+                placeholder={PARTICIPANT_SEARCH_PLACEHOLDER}
+                aria-label={PARTICIPANT_SEARCH_LABEL}
                 className="pl-8 h-8 text-sm"
               />
             </div>
-            {/* Orphan filter + bulk actions */}
-            {(orphanCount > 0 || selectedCount > 0) && (
+            {/* Orphan filter + bulk actions (#1090 — see `filterAvailable`). */}
+            {(filterAvailable || selectedCount > 0) && (
               <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div className="flex items-center gap-1.5">
-                  {/* a11y-name-sweep run 10: which filter is on was shown by
-                      colour alone; `aria-pressed` says it to a screen reader. */}
-                  <button
-                    onClick={() => { setShowOrphansOnly(false); setSelectedIds(new Set()); setShownLimit(PARTICIPANT_LIST_LIMIT) }}
-                    aria-pressed={!showOrphansOnly}
-                    className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
-                      !showOrphansOnly
-                        ? 'bg-mm-text text-mm-bg border-mm-text'
-                        : 'border-mm-border-subtle text-mm-text-muted hover:text-mm-text'
-                    }`}
-                  >
-                    All ({participants.length.toLocaleString()})
-                  </button>
-                  {orphanCount > 0 && (
+                {filterAvailable && (
+                  <div className="flex items-center gap-1.5" role="group" aria-label="Show participants">
+                    {/* a11y-name-sweep run 10: which filter is on was shown by
+                        colour alone; `aria-pressed` says it to a screen reader. */}
                     <button
-                      onClick={() => { setShowOrphansOnly(true); setSelectedIds(new Set()); setShownLimit(PARTICIPANT_LIST_LIMIT) }}
+                      type="button"
+                      onClick={() => chooseFilter(false)}
+                      aria-pressed={!showOrphansOnly}
+                      className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+                        !showOrphansOnly
+                          ? 'bg-mm-text text-mm-bg border-mm-text'
+                          : 'border-mm-border-subtle text-mm-text-muted hover:text-mm-text'
+                      }`}
+                    >
+                      All ({participants.length.toLocaleString()})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => chooseFilter(true)}
                       aria-pressed={showOrphansOnly}
                       className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
                         showOrphansOnly
                           ? 'bg-mm-text text-mm-bg border-mm-text'
                           : 'border-mm-border-subtle text-mm-text-muted hover:text-mm-text'
                       }`}
-                      title="Participants whose conversations and datasets were all deleted"
+                      title={NO_LINKED_SOURCES_TITLE}
                     >
-                      No linked sources ({orphanCount})
+                      No linked sources ({orphanCount.toLocaleString()})
                     </button>
-                  )}
-                </div>
+                  </div>
+                )}
                 {selectedCount > 0 && (
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 ml-auto">
                     <span className="text-sm text-mm-text-muted">{selectedCount.toLocaleString()} selected</span>
-                    <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>
+                    <Button size="sm" variant="ghost" onClick={clearSelection}>
                       Clear
                     </Button>
                     <Button
@@ -521,15 +647,19 @@ export default function ParticipantsPage() {
                 )}
               </div>
             )}
-          <div className="flex gap-4 items-start">
-            {/* Table */}
-            <div className={`bg-mm-surface rounded-lg border border-mm-border-subtle ${selectedParticipantId ? 'flex-1 min-w-0' : 'w-full'}`}>
+          <div className={DETAIL_LAYOUT}>
+            {/* Table — #1088: it scrolls in its own box (the house rule for a
+                table that can be wider than its column), so a long name or a
+                narrow window scrolls the table, never the page. */}
+            <div className="bg-mm-surface rounded-lg border border-mm-border-subtle min-w-0 flex-1 overflow-hidden">
+              <ScrollableTable maxHeight="70vh">
               <table className="w-full">
-                <caption className="sr-only">Participants with their role and their linked conversations and datasets.</caption>
-                <thead className="bg-mm-bg">
+                <caption className="sr-only">Participants with their role and what each is linked to: conversations, dataset records and documents.</caption>
+                <thead className="bg-mm-bg sticky top-0 z-10">
                   <tr>
-                    <th className="px-4 py-3 w-10">
+                    <th scope="col" className="px-3 py-3 w-10">
                       <Checkbox
+                        ref={selectAllRef}
                         checked={allVisibleSelected ? true : selectedCount > 0 ? 'indeterminate' : false}
                         onCheckedChange={toggleSelectAll}
                         // a11y-name-sweep run 10: "all" only when the table shows
@@ -541,19 +671,22 @@ export default function ParticipantsPage() {
                           : 'Select all participants'}
                       />
                     </th>
-                    <th className="px-4 py-3 text-left text-sm font-medium text-mm-text-secondary">Name</th>
-                    <th className="px-4 py-3 text-left text-sm font-medium text-mm-text-secondary">Role</th>
-                    <th className="px-4 py-3 text-left text-sm font-medium text-mm-text-secondary">Conversations</th>
-                    <th className="px-4 py-3 text-right text-sm font-medium text-mm-text-secondary w-16">Datasets</th>
-                    <th className="px-4 py-3 text-right text-sm font-medium text-mm-text-secondary w-24">Actions</th>
+                    {/* A floor for the Name column: the names may wrap (a long
+                        identifier must not hold the table wider than its box),
+                        and without one the table squeezed "P004" onto two lines
+                        beside an open panel (measured at 1280). */}
+                    <th scope="col" className="px-3 py-3 text-left text-sm font-medium text-mm-text-secondary min-w-[9rem]">Name</th>
+                    <th scope="col" className="px-3 py-3 text-left text-sm font-medium text-mm-text-secondary">Role</th>
+                    <th scope="col" className="px-3 py-3 text-left text-sm font-medium text-mm-text-secondary">Linked to</th>
+                    <th scope="col" className="px-3 py-3 text-right text-sm font-medium text-mm-text-secondary w-24">Actions</th>
                   </tr>
                 </thead>
                 <tbody ref={tableBodyRef} className="divide-y divide-mm-border-subtle">
                   {visibleParticipants.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="px-4 py-8 text-center text-sm text-mm-text-muted">
+                      <td colSpan={5} className="px-4 py-8 text-center text-sm text-mm-text-muted">
                         {search.trim()
-                          ? `No participants match “${search.trim()}”.`
+                          ? noParticipantsMatch(search)
                           : 'No participants without linked sources.'}
                       </td>
                     </tr>
@@ -562,7 +695,6 @@ export default function ParticipantsPage() {
                     <ParticipantRow
                       key={participant.id}
                       participant={participant}
-                      isOrphan={isOrphanedParticipant(participant)}
                       checked={selectedIds.has(participant.id)}
                       onToggleChecked={() => setSelectedIds((prev) => {
                         const next = new Set(prev)
@@ -571,9 +703,10 @@ export default function ParticipantsPage() {
                         return next
                       })}
                       isSelected={selectedParticipantId === participant.id}
-                      onSelect={() => setSelectedParticipantId(
-                        selectedParticipantId === participant.id ? null : participant.id
-                      )}
+                      onSelect={(viaKeyboard) => {
+                        if (selectedParticipantId === participant.id) closePanel()
+                        else openPanel(participant.id, viaKeyboard)
+                      }}
                       onUpdate={(data) => updateParticipantMutation.mutate({ participantId: participant.id, data })}
                       onWithdraw={() => setWithdrawParticipant({ id: participant.id, identifier: participant.identifier })}
                       onDelete={() => setDeleteParticipant({ id: participant.id, identifier: participant.identifier })}
@@ -581,6 +714,7 @@ export default function ParticipantsPage() {
                   ))}
                 </tbody>
               </table>
+              </ScrollableTable>
               {/* #1052 — the table stops early, and says so. */}
               {tableNote && (
                 <div className="flex items-center justify-between gap-3 flex-wrap px-4 py-3 border-t border-mm-border-subtle">
@@ -594,13 +728,21 @@ export default function ParticipantsPage() {
               )}
             </div>
 
-            {/* Detail panel */}
-            {selectedParticipantId && (
+            {/* Detail panel — keyed, so switching participants starts it afresh:
+                a half-made link to one person's dataset record must not carry
+                over to the next person's panel. */}
+            {selectedParticipantId !== null && (
               <ParticipantDetailPanel
+                key={selectedParticipantId}
+                panelRef={panelRef}
                 participantId={selectedParticipantId}
+                fallbackName={selectedParticipant
+                  ? (selectedParticipant.display_name || selectedParticipant.identifier)
+                  : null}
+                takeFocus={panelTakesFocus}
                 projectId={projectId}
                 datasets={datasets}
-                onClose={() => setSelectedParticipantId(null)}
+                onClose={closePanel}
               />
             )}
           </div>
@@ -654,7 +796,7 @@ export default function ParticipantsPage() {
         open={bulkDeleteOpen}
         onOpenChange={(open) => { if (!open) setBulkDeleteOpen(false) }}
         title={`Delete ${selectedCount} participant${selectedCount === 1 ? '' : 's'}`}
-        description={`Permanently delete ${selectedCount} selected participant${selectedCount === 1 ? '' : 's'} (${selectedNames})? Any remaining speaker or dataset-row links will be cleared. This cannot be undone.`}
+        description={bulkDeleteDescription(selectedCount, selectedNames, selectedDocumentCount)}
         confirmLabel="Delete"
         onConfirm={() => {
           bulkDeleteMutation.mutate(selectedShownIds)
@@ -668,6 +810,18 @@ export default function ParticipantsPage() {
 
 // ── Participant table row ──────────────────────────────────────────────
 
+/** #1110 — everything a participant is linked to, in one cell. */
+function linkedSources(participant: Participant) {
+  return [
+    ...[...new Set(participant.linked_speakers.flatMap(s => s.conversations.map(c => c.name)))]
+      .map(name => ({ kind: 'Conversation', name, Icon: MessageSquare })),
+    ...[...new Set(participant.dataset_rows.map(d => d.dataset_name))]
+      .map(name => ({ kind: 'Dataset', name, Icon: Table2 })),
+    ...participant.linked_documents
+      .map(d => ({ kind: 'Document', name: d.name, Icon: FileText })),
+  ]
+}
+
 function ParticipantRow({
   participant,
   onUpdate,
@@ -675,7 +829,6 @@ function ParticipantRow({
   onWithdraw,
   isSelected,
   onSelect,
-  isOrphan = false,
   checked = false,
   onToggleChecked,
 }: {
@@ -684,8 +837,8 @@ function ParticipantRow({
   onDelete: () => void
   onWithdraw: () => void
   isSelected?: boolean
-  onSelect?: () => void
-  isOrphan?: boolean
+  /** `viaKeyboard` decides whether the opened panel takes focus (#1091). */
+  onSelect?: (viaKeyboard: boolean) => void
   checked?: boolean
   onToggleChecked?: () => void
 }) {
@@ -720,11 +873,12 @@ function ParticipantRow({
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') { e.preventDefault(); handleSave() }
-    else if (e.key === 'Escape') handleCancel()
+    // Marked handled, so the open detail panel (which closes on an unhandled
+    // Escape) stays open while an edit is cancelled (#1091).
+    else if (e.key === 'Escape') { e.preventDefault(); handleCancel() }
   }
 
-  const linkedConversations = participant.linked_speakers.flatMap(s => s.conversations.map(c => c.name))
-  const uniqueConversations = [...new Set(linkedConversations)]
+  const sources = linkedSources(participant)
 
   // #353: keyboard activation for the (now-expandable) row. Enter/Space
   // toggles the detail panel exactly like a click. The whole row stays a
@@ -736,7 +890,7 @@ function ParticipantRow({
     if (e.target !== e.currentTarget) return
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
-      onSelect?.()
+      onSelect?.(true)
     }
   }
 
@@ -744,21 +898,24 @@ function ParticipantRow({
     <tr
       // #1052 — "Show more" moves focus to the first row it revealed.
       data-participant-row=""
+      // #1091 — closing the detail panel returns focus to this row.
+      data-participant-id={participant.id}
       className={`hover:bg-mm-surface-hover cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset ${isSelected ? SELECTED_ROW : ''}`}
-      onClick={() => onSelect?.()}
+      onClick={() => onSelect?.(false)}
       // #353 — keyboard + screen-reader affordance for row expansion
       tabIndex={0}
       aria-expanded={isSelected}
+      aria-controls={isSelected ? DETAIL_PANEL_ID : undefined}
       onKeyDown={handleRowKeyDown}
     >
-      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+      <td className="px-3 py-3" onClick={(e) => e.stopPropagation()}>
         <Checkbox
           checked={checked}
           onCheckedChange={() => onToggleChecked?.()}
           aria-label={`Select ${displayName}`}
         />
       </td>
-      <td className="px-4 py-3 text-sm text-mm-text">
+      <td className="px-3 py-3 text-sm text-mm-text">
         <div className="flex items-center gap-2">
           {/* #353: chevron affordance — rotates to indicate the detail
             * panel state. aria-hidden because the <tr>'s aria-expanded
@@ -777,46 +934,50 @@ function ParticipantRow({
                 }`}
                 style={s.color ? { backgroundColor: s.color, color: getContrastColor(s.color) } : undefined}
                 title={s.speaker_name}
+                aria-hidden="true"
               >
                 {getSpeakerInitials(currentName)}
               </span>
             )
           })()}
           {isEditing ? (
-            <Input value={editName} onChange={(e) => setEditName(e.target.value)} onKeyDown={handleKeyDown} className="h-8 text-sm" autoFocus onClick={(e) => e.stopPropagation()} />
+            <Input value={editName} onChange={(e) => setEditName(e.target.value)} onKeyDown={handleKeyDown} className="h-8 text-sm" autoFocus onClick={(e) => e.stopPropagation()} aria-label={`Name for ${rawName}`} />
           ) : (
-            <span className={isUnnamed ? 'text-mm-text-faint italic' : ''}>{displayName}</span>
-          )}
-          {isOrphan && (
-            <span
-              className="px-1.5 py-0.5 text-[10px] rounded bg-mm-surface-hover text-mm-text-muted shrink-0"
-              title="No conversations or datasets reference this participant — its sources were deleted"
-            >
-              No linked sources
-            </span>
+            // #1088 — `anywhere`, not `break-word`: only `anywhere` lowers the
+            // cell's MIN width, so a 30-character identifier with no space wraps
+            // instead of holding the table 85px wider than its box at 640×360
+            // (measured: the Name column held at 280px).
+            <span className={`min-w-0 [overflow-wrap:anywhere] ${isUnnamed ? 'text-mm-text-faint italic' : ''}`}>{displayName}</span>
           )}
         </div>
       </td>
-      <td className="px-4 py-3 text-sm text-mm-text">
+      <td className="px-3 py-3 text-sm text-mm-text">
         {isEditing ? (
-          <Input value={editRole} onChange={(e) => setEditRole(e.target.value)} onKeyDown={handleKeyDown} className="h-8 text-sm" placeholder="Role" onClick={(e) => e.stopPropagation()} />
+          <Input value={editRole} onChange={(e) => setEditRole(e.target.value)} onKeyDown={handleKeyDown} className="h-8 text-sm" placeholder="Role" onClick={(e) => e.stopPropagation()} aria-label={`Role for ${rawName}`} />
         ) : (
-          <span className={participant.role ? '' : 'text-mm-text-faint italic'}>{participant.role || '-'}</span>
+          <span className={participant.role ? '[overflow-wrap:anywhere]' : 'text-mm-text-faint italic'}>{participant.role || '-'}</span>
         )}
       </td>
-      <td className="px-4 py-3 text-sm text-mm-text-secondary">
-        {uniqueConversations.length > 0
-          ? uniqueConversations.join(', ')
-          : <span className="text-mm-text-faint italic">No linked conversations</span>
-        }
+      <td className="px-3 py-3 text-sm text-mm-text-secondary">
+        {/* #1110 — conversations, dataset records AND documents. The page
+            listed conversation names and a dataset count, and nothing about
+            a document, so the subject of a workplan read as linked to
+            nothing. The kind is an icon for the eye and a word for the ear. */}
+        {sources.length > 0 ? (
+          <ul className="flex flex-wrap gap-x-3 gap-y-0.5">
+            {sources.map(({ kind, name, Icon }, i) => (
+              <li key={`${kind}-${name}-${i}`} className="inline-flex items-center gap-1 min-w-0">
+                <Icon className="w-3.5 h-3.5 shrink-0 text-mm-text-muted" aria-hidden="true" />
+                <span className="sr-only">{`${kind}: `}</span>
+                <span className="[overflow-wrap:anywhere]">{name}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <span className="text-mm-text-faint italic" title={NO_LINKED_SOURCES_TITLE}>No linked sources</span>
+        )}
       </td>
-      <td className="px-4 py-3 text-sm text-right">
-        {participant.dataset_rows.length > 0
-          ? <span className="text-mm-blue-text">{participant.dataset_rows.length}</span>
-          : <span className="text-mm-text-faint">0</span>
-        }
-      </td>
-      <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+      <td className="px-3 py-3 text-right" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-end gap-1">
           {isEditing ? (
             <>
@@ -864,12 +1025,20 @@ function ParticipantRow({
 // ── Participant detail side panel ──────────────────────────────────────
 
 function ParticipantDetailPanel({
+  panelRef,
   participantId,
+  fallbackName,
+  takeFocus,
   projectId,
   datasets,
   onClose,
 }: {
+  panelRef: React.RefObject<HTMLDivElement | null>
   participantId: number
+  /** The list's name for them, so the heading exists before the detail loads. */
+  fallbackName: string | null
+  /** Opened from the keyboard — move focus into the panel (#1091). */
+  takeFocus: boolean
   projectId: number
   datasets: Dataset[]
   onClose: () => void
@@ -877,11 +1046,32 @@ function ParticipantDetailPanel({
   const queryClient = useQueryClient()
   const [linkingDatasetId, setLinkingDatasetId] = useState<number | null>(null)
   const [linkSearch, setLinkSearch] = useState('')
+  const headingRef = useRef<HTMLHeadingElement>(null)
+  const linkSelectRef = useRef<HTMLSelectElement>(null)
 
-  const { data: detail, isLoading } = useQuery({
+  const detailQuery = useQuery({
     queryKey: ['participant-detail', participantId],
     queryFn: () => participantsApi.getDetail(projectId, participantId),
   })
+  const detail = detailQuery.data
+  /** #963 — a failed load said "Loading..." for as long as the panel was open. */
+  const detailLoad = useListLoad(detailQuery)
+
+  // #1091 — on open: the keyboard's focus comes here; a stacked panel (below
+  // 960px it sits under the table box) is scrolled into view for the pointer.
+  // A side-by-side panel is sticky and already in view, so it is left alone.
+  useEffect(() => {
+    if (takeFocus) {
+      headingRef.current?.focus()
+      return
+    }
+    const panel = panelRef.current
+    if (panel && getComputedStyle(panel).position !== 'sticky') {
+      panel.scrollIntoView?.({ block: 'nearest' })
+    }
+    // Once per participant: the panel is keyed on it, and both inputs are
+    // fixed for the life of one panel.
+  }, [takeFocus, panelRef])
 
   const linkableQuery = useQuery({
     queryKey: ['linkable-rows', projectId, linkingDatasetId],
@@ -900,15 +1090,49 @@ function ParticipantDetailPanel({
    */
   const linkableLoad = useListLoad(linkableQuery)
 
+  /**
+   * #1130 — a link or an unlink unmounts the control that made it (the record
+   * picker closes; the unlinked record's row goes), so a keyboard press left
+   * focus on `<body>`. Land on the section's heading — but only when focus was
+   * lost: focus that is somewhere real is never moved (#1091's rule).
+   */
+  const linkedHeadingRef = useRef<HTMLHeadingElement>(null)
+  // 🔴 An EFFECT, run after the commit that removed the control — never a
+  // guess about frames: driven live, a `requestAnimationFrame` landing raced
+  // React's commit, saw the pressed control still there, and stood down.
+  const [landingRequest, setLandingRequest] = useState(0)
+  const landOnLinkedDatasets = () => setLandingRequest(n => n + 1)
+  useEffect(() => {
+    // Also runs on mount, harmlessly: the panel only opens from a row, so focus
+    // is on that row or (by keyboard) on the h2 above, both real.
+    const active = document.activeElement
+    if (active && active !== document.body && active.isConnected) return
+    linkedHeadingRef.current?.focus()
+  }, [landingRequest])
+
+  // #1130 — the withdrawal summary below is a list of what is LINKED; a link or
+  // an unlink that did not refresh it left it naming the old set.
+  const invalidateAfterLinkChange = () => {
+    queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
+    queryClient.invalidateQueries({ queryKey: ['withdrawal-report', projectId] })
+    queryClient.invalidateQueries({ predicate: (q) => (q.queryKey[0] as string)?.startsWith?.('dataset') })
+    // Resolves once the panel's own detail has refetched — when an unlinked
+    // record's row, and the Unlink that was focused, actually go.
+    return queryClient.invalidateQueries({ queryKey: ['participant-detail', participantId] })
+  }
+
+  // 🔴 The two acts lose focus at DIFFERENT moments, so each lands when its own
+  // control goes: a link unmounts the picker at once, an unlink's row goes only
+  // when the detail refetch lands. Driven live, a one-frame landing after an
+  // unlink saw the Unlink still there, stood down, and focus then fell to <body>.
   const linkMutation = useMutation({
     mutationFn: ({ datasetId, rowId }: { datasetId: number; rowId: number }) =>
       participantsApi.linkDatasetRow(projectId, participantId, datasetId, rowId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['participant-detail', participantId] })
-      queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
-      queryClient.invalidateQueries({ predicate: (q) => (q.queryKey[0] as string)?.startsWith?.('dataset') })
+      void invalidateAfterLinkChange()
       setLinkingDatasetId(null)
       setLinkSearch('')
+      landOnLinkedDatasets()
     },
   })
 
@@ -916,15 +1140,18 @@ function ParticipantDetailPanel({
     mutationFn: (rowId: number) =>
       participantsApi.unlinkDatasetRow(projectId, participantId, rowId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['participant-detail', participantId] })
-      queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
-      queryClient.invalidateQueries({ predicate: (q) => (q.queryKey[0] as string)?.startsWith?.('dataset') })
+      void invalidateAfterLinkChange().then(landOnLinkedDatasets)
     },
   })
 
-  // Close on Escape
+  /**
+   * Close on Escape — but only an Escape nothing else took. A dialog opened from
+   * the page (withdraw, delete) handles its own Escape and marks it, and closing
+   * that dialog used to close this panel behind it as well (#784/#1041's
+   * stand-down, measured before this fix).
+   */
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    if (e.key === 'Escape') onClose()
+    if (e.key === 'Escape' && !e.defaultPrevented) onClose()
   }, [onClose])
 
   useEffect(() => {
@@ -932,44 +1159,41 @@ function ParticipantDetailPanel({
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [handleKeyDown])
 
-  if (isLoading || !detail) {
-    return (
-      <div className="w-96 flex-shrink-0 sticky top-4 bg-mm-surface rounded-lg border border-mm-border-subtle p-4">
-        <div className="text-center text-mm-text-faint py-8">Loading...</div>
-      </div>
-    )
+  const stopLinking = () => {
+    setLinkingDatasetId(null)
+    setLinkSearch('')
+    // The picker's own controls unmount; its opener stays.
+    requestAnimationFrame(() => linkSelectRef.current?.focus())
   }
 
-  const rawName = detail.display_name || detail.identifier
+  const rawName = detail ? (detail.display_name || detail.identifier) : (fallbackName ?? '')
   const isUnnamed = isUnnamedLabel(rawName)  // #396
   const currentName = isUnnamed ? UNNAMED_LABEL : rawName
-  const linkedDatasetIds = new Set(detail.dataset_rows.map(dr => dr.dataset_id))
-  const availableDatasets = datasets.filter(ds => !linkedDatasetIds.has(ds.id))
-
-  // Group demographics by dataset
-  const demoByDataset = new Map<number, typeof detail.linked_demographics>()
-  for (const d of detail.linked_demographics) {
-    const arr = demoByDataset.get(d.dataset_id) || []
-    arr.push(d)
-    demoByDataset.set(d.dataset_id, arr)
-  }
-
-  const linkableRows = linkableData?.rows || []
-  // #418: search every value in the row (was demographic-typed values only)
-  const filteredRows = filterLinkableRows(linkableRows, linkSearch)
 
   return (
     <div
-      className="w-96 flex-shrink-0 sticky top-4 bg-mm-surface rounded-lg border border-mm-border-subtle overflow-y-auto max-h-[calc(100vh-200px)]"
+      ref={panelRef}
+      id={DETAIL_PANEL_ID}
+      className={DETAIL_PANEL}
       role="complementary"
       aria-label="Participant details"
     >
-      {/* Header */}
-      <div className="p-4 border-b border-mm-border-subtle flex items-start justify-between">
+      {/* Header — the panel's heading is h2 under the page's h1, and the focus
+          target when the keyboard opens it. */}
+      <div className="p-4 border-b border-mm-border-subtle flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <h3 className={`font-medium text-sm truncate ${isUnnamed ? 'text-mm-text-faint italic' : 'text-mm-text'}`} title={currentName}>{currentName}</h3>
-          <p className="text-xs text-mm-text-faint">{detail.identifier}</p>
-          {detail.role && (
+          <h2
+            ref={headingRef}
+            tabIndex={-1}
+            // A keyboard open lands here, so it shows where focus went (the
+            // house ring; `outline-none` alone left the landing invisible).
+            className={`font-medium text-sm truncate rounded-sm ${FOCUS_RING} ${isUnnamed ? 'text-mm-text-faint italic' : 'text-mm-text'}`}
+            title={currentName}
+          >
+            {currentName}
+          </h2>
+          {detail && <p className="text-xs text-mm-text-faint">{detail.identifier}</p>}
+          {detail?.role && (
             <p className="text-xs text-mm-text-secondary mt-0.5">
               {detail.role}
               {detail.role_auto_filled_from && (
@@ -978,28 +1202,46 @@ function ParticipantDetailPanel({
             </p>
           )}
         </div>
-        <button onClick={onClose} className="text-mm-text-faint hover:text-mm-text-secondary p-1" title="Close">
-          <X className="w-4 h-4" />
+        <button
+          type="button"
+          onClick={onClose}
+          className="inline-flex items-center justify-center w-6 h-6 rounded shrink-0 text-mm-text-faint hover:text-mm-text-secondary"
+          aria-label="Close participant details"
+          title="Close"
+        >
+          <X className="w-4 h-4" aria-hidden="true" />
         </button>
       </div>
 
+      {!detail ? (
+        <LoadState
+          load={detailLoad}
+          loadingLabel="Loading participant…"
+          failedTitle="This participant could not be loaded."
+          size="panel"
+        />
+      ) : (
+      <>
       {/* Speakers & Conversations */}
       {detail.linked_speakers.length > 0 && (
         <div className="p-4 border-b border-mm-border-subtle">
-          <h4 className="text-xs font-medium text-mm-text-muted mb-2">Speakers</h4>
+          <h3 className="text-xs font-medium text-mm-text-muted mb-2">Speakers</h3>
           <div className="space-y-2">
             {detail.linked_speakers.map(s => (
               <div key={s.speaker_id} className="flex items-center gap-2">
                 <Popover>
                   <PopoverTrigger asChild>
                     <button
+                      type="button"
                       className={`w-6 h-6 rounded-full text-[10px] font-semibold flex items-center justify-center ring-1 shrink-0 cursor-pointer hover:ring-2 transition-all ${
                         s.color ? 'ring-black/10 dark:ring-white/20' : getInitialsBadgeColors(s.is_facilitator)
                       }`}
                       style={s.color ? { backgroundColor: s.color, color: getContrastColor(s.color) } : undefined}
+                      // #1124 — its name was its initials ("P0").
+                      aria-label={`Change ${s.speaker_name}'s color`}
                       title="Change color"
                     >
-                      {getSpeakerInitials(s.speaker_name)}
+                      <span aria-hidden="true">{getSpeakerInitials(s.speaker_name)}</span>
                     </button>
                   </PopoverTrigger>
                   <PopoverContent className="w-auto p-3" align="start" aria-label="Speaker color">
@@ -1042,18 +1284,53 @@ function ParticipantDetailPanel({
         </div>
       )}
 
+      {/* #1110 — the documents this participant is the subject of. The panel
+          listed speakers and dataset records and had no word for a document,
+          so its subject looked linked to nothing at all. Changing the subject
+          stays on the document ("Who is this document about?"). */}
+      {detail.linked_documents.length > 0 && (
+        <div className="p-4 border-b border-mm-border-subtle">
+          <h3 className="text-xs font-medium text-mm-text-muted mb-2">Documents about them</h3>
+          <ul className="space-y-1">
+            {detail.linked_documents.map(d => (
+              <li key={d.id}>
+                <a
+                  href={`/projects/${projectId}/documents/${d.id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="group/doclink inline-flex items-center gap-1 min-w-0 text-xs text-mm-text hover:text-mm-blue-text"
+                  title={`Open document "${d.name}" in new tab`}
+                >
+                  <FileText className="w-3 h-3 shrink-0 text-mm-text-muted" aria-hidden="true" />
+                  <span className="truncate group-hover/doclink:underline">{d.name}</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {/* Linked datasets */}
       <div className="p-4 border-b border-mm-border-subtle">
-        <h4 className="text-xs font-medium text-mm-text-muted mb-2">Linked Datasets</h4>
+        {/* #1130 — the landing after a link or an unlink (`tabIndex -1`, the
+            house ring, like the panel's own heading). */}
+        <h3
+          ref={linkedHeadingRef}
+          tabIndex={-1}
+          className={`text-xs font-medium text-mm-text-muted mb-2 rounded-sm ${FOCUS_RING}`}
+        >
+          Linked Datasets
+        </h3>
         {detail.dataset_rows.length === 0 ? (
           <p className="text-xs text-mm-text-faint italic">No linked datasets</p>
         ) : (
           <div className="space-y-3">
             {detail.dataset_rows.map(dr => {
-              const demos = demoByDataset.get(dr.dataset_id) || []
+              const demos = detail.linked_demographics.filter(d => d.dataset_id === dr.dataset_id)
+              const record = dr.row_identifier ?? 'record'
               return (
                 <div key={dr.id} className="bg-mm-bg rounded p-2">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <a
                         href={`/projects/${projectId}/datasets/${dr.dataset_id}`}
@@ -1067,15 +1344,35 @@ function ParticipantDetailPanel({
                       </a>
                       <p className="text-[11px] text-mm-text-faint" title={dr.row_identifier ?? undefined}>{dr.row_identifier}</p>
                     </div>
+                    {/* #1157 — the participant table keeps its own links: an
+                        unlink there only made the next refresh delete the row and
+                        every value typed into it. The server says so (and refuses);
+                        the panel shows that sentence instead of the control. */}
+                    {dr.link_refusal === null && (
                     <button
-                      onClick={() => unlinkMutation.mutate(dr.id)}
-                      className="text-mm-text-faint hover:text-red-500 p-0.5 flex-shrink-0"
+                      type="button"
+                      onClick={() => {
+                        if (unlinkMutation.isPending) return
+                        unlinkMutation.mutate(dr.id)
+                      }}
+                      // #1124 — "Unlink" alone, once per dataset, said neither
+                      // which record nor which dataset; and its 12px icon in
+                      // `p-0.5` was a 16px target (WCAG 2.5.8 asks 24).
+                      className="inline-flex items-center justify-center w-6 h-6 rounded flex-shrink-0 text-mm-text-faint hover:text-red-500 aria-disabled:opacity-50"
+                      aria-label={`Unlink ${record} in ${dr.dataset_name}`}
                       title="Unlink"
-                      disabled={unlinkMutation.isPending}
+                      // #1130 — busy is `aria-disabled` + the guard above, never
+                      // `disabled`: Chrome blurs a focused button that becomes
+                      // disabled (#959 §4).
+                      aria-disabled={unlinkMutation.isPending || undefined}
                     >
-                      <X className="w-3 h-3" />
+                      <X className="w-3 h-3" aria-hidden="true" />
                     </button>
+                    )}
                   </div>
+                  {dr.link_refusal !== null && (
+                    <p className="mt-1 text-[11px] text-mm-text-muted leading-snug">{dr.link_refusal}</p>
+                  )}
                   {demos.length > 0 && (
                     <div className="mt-1 space-y-0.5">
                       {demos.map(d => {
@@ -1109,45 +1406,63 @@ function ParticipantDetailPanel({
 
         {/* Link to dataset row */}
         {!linkingDatasetId ? (
-          availableDatasets.length > 0 && (
-            <div className="mt-2">
-              <select
-                value=""
-                onChange={(e) => {
-                  const dsId = parseInt(e.target.value)
-                  if (dsId) setLinkingDatasetId(dsId)
-                }}
-                className="w-full text-xs border border-mm-border-subtle rounded px-2 py-1.5 bg-mm-surface text-mm-text-secondary"
-              >
-                <option value="">+ Link to dataset...</option>
-                {availableDatasets.map(ds => (
-                  <option key={ds.id} value={ds.id}>{ds.name}</option>
-                ))}
-              </select>
-            </div>
-          )
-        ) : (
+          (() => {
+            const linkedDatasetIds = new Set(detail.dataset_rows.map(dr => dr.dataset_id))
+            // #1157 — never a table the tool keeps in step with the participants:
+            // its records link themselves at the next refresh, and the server
+            // refuses a hand-made link (found live: offered after an unlink).
+            const availableDatasets = datasets.filter(ds => !linkedDatasetIds.has(ds.id) && !ds.managed_kind)
+            return availableDatasets.length > 0 && (
+              <div className="mt-2">
+                <select
+                  ref={linkSelectRef}
+                  value=""
+                  onChange={(e) => {
+                    const dsId = parseInt(e.target.value)
+                    if (dsId) setLinkingDatasetId(dsId)
+                  }}
+                  // #1124 — a `<select>` with no label has NO name; the option
+                  // it shows is its value.
+                  aria-label={`Link ${currentName} to a dataset record`}
+                  className="w-full text-xs border border-mm-border-subtle rounded px-2 py-1.5 bg-mm-surface text-mm-text-secondary"
+                >
+                  <option value="">+ Link to dataset...</option>
+                  {availableDatasets.map(ds => (
+                    <option key={ds.id} value={ds.id}>{ds.name}</option>
+                  ))}
+                </select>
+              </div>
+            )
+          })()
+        ) : (() => {
+          const linkingName = datasets.find(d => d.id === linkingDatasetId)?.name ?? 'this dataset'
+          const filteredRows = filterLinkableRows(linkableData?.rows || [], linkSearch)
+          return (
           <div className="mt-2 border border-mm-border-subtle rounded bg-mm-surface">
             <div className="p-1.5 border-b border-mm-border-subtle flex items-center gap-1">
-              <span className="text-[11px] text-mm-text-muted truncate max-w-[120px]" title={datasets.find(d => d.id === linkingDatasetId)?.name}>
-                {datasets.find(d => d.id === linkingDatasetId)?.name}
+              <span className="text-[11px] text-mm-text-muted truncate max-w-[120px]" title={linkingName}>
+                {linkingName}
               </span>
               <a
                 href={`/projects/${projectId}/datasets/${linkingDatasetId}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-mm-text-faint hover:text-mm-blue-text flex-shrink-0"
+                className="inline-flex items-center justify-center w-6 h-6 rounded text-mm-text-faint hover:text-mm-blue-text flex-shrink-0"
+                aria-label={`Open dataset "${linkingName}" in new tab`}
                 title="Open dataset in new tab"
                 onClick={(e) => e.stopPropagation()}
               >
-                <ExternalLink className="w-3 h-3" />
+                <ExternalLink className="w-3 h-3" aria-hidden="true" />
               </a>
               <div className="flex-1" />
               <button
-                onClick={() => { setLinkingDatasetId(null); setLinkSearch('') }}
-                className="text-mm-text-faint hover:text-mm-text-secondary flex-shrink-0"
+                type="button"
+                onClick={stopLinking}
+                className="inline-flex items-center justify-center w-6 h-6 rounded text-mm-text-faint hover:text-mm-text-secondary flex-shrink-0"
+                aria-label="Stop linking"
+                title="Stop linking"
               >
-                <X className="w-3 h-3" />
+                <X className="w-3 h-3" aria-hidden="true" />
               </button>
             </div>
             <div className="p-2 border-b border-mm-border-subtle">
@@ -1155,7 +1470,10 @@ function ParticipantDetailPanel({
                 type="text"
                 value={linkSearch}
                 onChange={(e) => setLinkSearch(e.target.value)}
+                // Escape leaves the PICKER, not the whole panel.
+                onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); stopLinking() } }}
                 placeholder="Search rows..."
+                aria-label={`Search ${linkingName} records`}
                 className="w-full text-xs border border-mm-border-subtle rounded px-2 py-1 bg-mm-surface text-mm-text"
                 autoFocus
               />
@@ -1163,23 +1481,44 @@ function ParticipantDetailPanel({
             <div className="max-h-48 overflow-y-auto divide-y divide-mm-border-subtle">
               {filteredRows.map(row => {
                 const isLinked = !!row.linked_participant_name
-                // #418: identifying values (Student_ID, names, School, \u2026),
+                // #418: identifying values (Student_ID, names, School, …),
                 // not just demographic-typed ones
                 const demoText = linkableRowDetail(row)
                 return (
                   <button
+                    type="button"
                     key={row.row_id}
-                    disabled={isLinked || linkMutation.isPending}
-                    onClick={() => linkMutation.mutate({ datasetId: linkingDatasetId!, rowId: row.row_id })}
+                    // #1130 — busy is `aria-disabled` + the guard, never
+                    // `disabled` (#959 §4); a record someone else holds stays
+                    // natively disabled, which is permanent, not a busy state.
+                    disabled={isLinked}
+                    aria-disabled={(!isLinked && linkMutation.isPending) || undefined}
+                    onClick={() => {
+                      if (linkMutation.isPending) return
+                      linkMutation.mutate({ datasetId: linkingDatasetId!, rowId: row.row_id })
+                    }}
                     className={`w-full text-left px-2 py-1.5 text-xs ${
                       isLinked
                         ? 'text-mm-text-faint bg-mm-bg cursor-not-allowed'
                         : 'hover:bg-mm-surface-hover cursor-pointer text-mm-text'
                     }`}
                   >
+                    {/* #1130 — the parts are joined by TEXT spaces, not margins
+                        alone: a margin is not a space, so the name read
+                        "R001North(P001)" (#908's rule). And a taken record says
+                        so in words, as the grid's picker does. */}
                     <span className="font-medium">{row.row_identifier || `Row ${row.row_id}`}</span>
-                    {demoText && <span className="text-mm-text-faint ml-1">{demoText}</span>}
-                    {isLinked && <span className="text-mm-text-faint ml-1">({row.linked_participant_name})</span>}
+                    {demoText && <>{' '}<span className="text-mm-text-faint">{demoText}</span></>}
+                    {isLinked && (
+                      <>
+                        {' '}
+                        {/* The words are ONE text node: a space at the edge of
+                            an inline span is dropped by name computation
+                            (measured in jsdom: "already linked toP009"). */}
+                        <span className="text-mm-text-faint" aria-hidden="true">({row.linked_participant_name})</span>
+                        <span className="sr-only">{`(already linked to ${row.linked_participant_name})`}</span>
+                      </>
+                    )}
                   </button>
                 )
               })}
@@ -1199,7 +1538,8 @@ function ParticipantDetailPanel({
               ) : null}
             </div>
           </div>
-        )}
+          )
+        })()}
       </div>
 
       {/* Demographics summary — scoped to actual DEMOGRAPHIC-typed columns
@@ -1214,7 +1554,7 @@ function ParticipantDetailPanel({
         if (demoOnly.length === 0) return null
         return (
         <div className="p-4">
-          <h4 className="text-xs font-medium text-mm-text-muted mb-1">Demographics</h4>
+          <h3 className="text-xs font-medium text-mm-text-muted mb-1">Demographics</h3>
           <div className="space-y-0.5">
             {(() => {
               const bySubtype = new Map<string, Array<{ value: string | null; dataset: string }>>()
@@ -1267,6 +1607,8 @@ function ParticipantDetailPanel({
         * without going anywhere near the delete button.
         */}
       <WithdrawalSection projectId={projectId} participantId={participantId} />
+      </>
+      )}
     </div>
   )
 }
@@ -1284,9 +1626,9 @@ function WithdrawalSection({
   const locations = withdrawalLocations(report)
   return (
     <div className="p-4 border-t border-mm-border-subtle">
-      <h4 className="text-xs font-medium text-mm-text-secondary mb-1">
+      <h3 className="text-xs font-medium text-mm-text-secondary mb-1">
         If this person withdraws
-      </h4>
+      </h3>
       <p className="text-xs text-mm-text-faint leading-snug">
         {withdrawalHeadline(report)}
       </p>
@@ -1305,8 +1647,7 @@ function WithdrawalSection({
         </p>
       )}
       <p className="mt-2 text-[11px] text-mm-text-faint leading-snug">
-        Mixed Measures has no erase function — removing this data is manual.
-        This is a description of the software, not compliance advice.
+        {WITHDRAWAL_SCOPE_NOTE}
       </p>
     </div>
   )

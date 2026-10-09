@@ -34,6 +34,7 @@
       "zoom.js",
       "fatal-error.js",
       "renderer-recovery.js",
+      "single-instance.js",
       "splash.html"
     ],
     "extraResources": [

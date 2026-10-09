@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from 'react'
+import { useRef, useEffect, useCallback, useId } from 'react'
 import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { LoaderCircle } from 'lucide-react'
@@ -21,6 +21,7 @@ export default function ScratchpadPopover({ projectId, contextHint, unsortedCoun
   const queryClient = useQueryClient()
   const containerRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const originId = useId()
 
   // Focus trap: Tab wraps within popover, Escape closes, restore focus on unmount
   useFocusTrap(containerRef, onClose)
@@ -69,16 +70,28 @@ export default function ScratchpadPopover({ projectId, contextHint, unsortedCoun
       style={{ width: 320, top: 52, right: 16, zIndex: zIndex ?? 50 }}
     >
       {/* Context hint */}
+      {/* #1002 — the origin STORED with the note, said as one: a bare grey
+          "Conversations › Interview 3" read to a screen reader as an unlabelled
+          fragment above the text box. `title` carries the whole trail when a long
+          name is truncated. */}
       {contextHint && (
-        <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-mm-text-muted bg-mm-bg rounded px-1.5 py-0.5 truncate max-w-[280px]">
-            {contextHint}
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span
+            id={originId}
+            className="text-[10px] text-mm-text-muted bg-mm-bg rounded px-1.5 py-0.5 truncate max-w-[280px]"
+            title={contextHint}
+          >
+            From {contextHint}
           </span>
         </div>
       )}
 
+      {/* #1134 — the text box takes focus on open, so a reader never met the
+          "From …" line above it; it is the box's description now (run 8's
+          "a hint on screen but attached to nothing"). */}
       <Textarea
         ref={textareaRef}
+        aria-describedby={contextHint ? originId : undefined}
         value={draft}
         onChange={(e) => onDraftChange(e.target.value)}
         onKeyDown={handleKeyDown}

@@ -1,4 +1,4 @@
-import { MAX_IMPORT_FILE_LABEL } from '@/lib/upload-limits'
+import { MAX_IMPORT_FILE_BYTES, fileLimitLabel } from '@/lib/upload-limits'
 import { MAX_MEDIA_SIZE } from '@/lib/media-constants'
 import { formatBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -15,16 +15,23 @@ import { cn } from '@/lib/utils'
 export default function UploadLimitNote({
   noun,
   recordings = false,
+  maxBytes = MAX_IMPORT_FILE_BYTES,
   className,
 }: {
-  /** What the 50 MB applies to on this page, e.g. "transcript files". Omit on a recording-only zone. */
+  /** What the limit applies to on this page, e.g. "transcript files". Omit on a recording-only zone. */
   noun?: string
   recordings?: boolean
+  /**
+   * The page's own per-file limit, when it is not the 50 MB import limit — the merge
+   * page's 500 MB `.mmproject` (#1010 f). Pass the CONSTANT the page's check uses,
+   * never a literal, so the sentence and the refusal cannot disagree.
+   */
+  maxBytes?: number
   className?: string
 }) {
   const recordingLimit = formatBytes(MAX_MEDIA_SIZE)
   const text = noun
-    ? `Mixed Measures can import ${noun} of up to ${MAX_IMPORT_FILE_LABEL} each`
+    ? `Mixed Measures can import ${noun} of up to ${fileLimitLabel(maxBytes)} each`
       + (recordings ? `; recordings can be up to ${recordingLimit}.` : '.')
     : `Mixed Measures can import recordings of up to ${recordingLimit} each.`
   return <p className={cn('text-xs text-mm-text-muted', className)}>{text}</p>

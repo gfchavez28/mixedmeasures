@@ -407,13 +407,21 @@ describe('while a choice is being saved', () => {
 })
 
 describe('the hosts pass their STACK, not a copy of the builder', () => {
+  // #1040 — computed ONCE, and a page is stripped only when its RAW text holds the
+  // tag (stripping removes text, so a raw miss can never hide a stripped mount).
+  // Stripping every page per test cost ~2.2 s and timed out under load.
+  let found: { file: string; tag: string }[] | null = null
   function mounts(): { file: string; tag: string }[] {
+    if (found) return found
     const out: { file: string; tag: string }[] = []
     for (const abs of sourceFiles({ root: 'pages', ext: 'tsx', floor: 10, recursive: false })) {
       const name = basename(abs)
-      const src = stripComments(readFileSync(abs, 'utf-8'), name)
+      const raw = readFileSync(abs, 'utf-8')
+      if (!raw.includes('<CodeSetStrip')) continue
+      const src = stripComments(raw, name)
       for (const m of src.matchAll(/<CodeSetStrip\b[\s\S]*?\/>/g)) out.push({ file: name, tag: m[0] })
     }
+    found = out
     return out
   }
 

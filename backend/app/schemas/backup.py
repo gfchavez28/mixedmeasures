@@ -32,6 +32,14 @@ class BackupManifest(BaseModel):
     video_excluded: bool = False
     video_files_excluded: int = 0
     project_summaries: list[ProjectBackupSummary]
+    # #1039 (k): the project list could not be read when the backup was made, so
+    # `project_summaries` is empty for that reason and not because the install
+    # held no projects. Defaults to False so every older manifest parses — and an
+    # older backup's silent failure cannot be told from a real empty install, so
+    # the preview never claims "no projects" from an empty list either.
+    # ⚠️ No MANIFEST_FORMAT_VERSION bump: `validate_backup` warns on ANY version
+    # difference, so a bump would put a warning on every backup taken before it.
+    project_summaries_unavailable: bool = False
 
 
 class BackupStatus(BaseModel):
@@ -45,6 +53,12 @@ class BackupStatus(BaseModel):
     # freshness label + Settings backup section to give researchers a
     # countdown ("Next auto at 4:30 PM") instead of an opaque amber dot.
     next_backup_at: str | None = None
+    # #1043: THIS install's automatic schedule, so the Settings screen states it
+    # rather than writing "every 4 hours, keeping the 5 most recent" into its
+    # sentences. `0` hours = automatic backups are OFF. None only where the
+    # caller did not pass the settings (a direct service call).
+    auto_backup_interval_hours: int | None = None
+    auto_backup_max_count: int | None = None
 
 
 class BackupInfo(BaseModel):

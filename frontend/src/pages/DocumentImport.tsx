@@ -260,9 +260,12 @@ export default function DocumentImport() {
               {...dragHandlers}
             >
               <FileInput className="w-12 h-12 mx-auto text-mm-text-faint mb-4" />
-              <p className="text-sm text-mm-text-muted mb-4">
+              <p className="text-sm text-mm-text-muted mb-1">
                 Drag and drop files here, or click to browse
               </p>
+              {/* #1010 (a) — the formats IN the zone, as the dataset and observation
+                  zones state theirs; from the module's label, never a literal. */}
+              <p className="text-xs text-mm-text-faint mb-4">{DOCUMENT_FORMAT_LABEL}</p>
               <UploadLimitNote noun="documents" className="-mt-2 mb-4" />
               <Button
                 onClick={() => fileInputRef.current?.click()}

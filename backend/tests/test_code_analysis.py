@@ -433,6 +433,35 @@ class TestSaturationOrderingIsDeclared:
             "field makes the chart silently drop its caveat"
         )
 
+    def test_the_ordering_survives_the_routes_response_schema(self, db_session):
+        """#1148 — the service emitted `ordering` and the WIRE did not.
+
+        `SaturationResponse` declared no such field, so FastAPI's `response_model=`
+        dropped it and the chart's axis title and caveat never rendered — while the
+        test above stayed green, because it reads the service's dict (#1123's blind
+        spot). So this goes through the ROUTE's own response model, read off the
+        router rather than imported, so a route pointed at another schema fails too.
+        """
+        from app.models.project import Project
+        from app.routers.code_analysis import router
+        from app.schemas.code_analysis import SaturationResponse
+        from app.services.code_analysis import (
+            SATURATION_ORDERING_IMPORT_DATE, get_saturation_data,
+        )
+
+        route = next(r for r in router.routes if getattr(r, "path", "").endswith("/saturation"))
+        assert route.response_model is SaturationResponse
+
+        db_session.add(Project(id=1148, name="P1148", user_id=1))
+        db_session.flush()
+        data = get_saturation_data(db_session, project_id=1148)
+
+        # Under pytest every schema forbids extra keys (conftest), so an undeclared
+        # `ordering` fails HERE; in production it would be dropped, which the dump
+        # assertion catches.
+        wire = route.response_model.model_validate(data).model_dump()
+        assert wire["ordering"] == SATURATION_ORDERING_IMPORT_DATE
+
     def test_the_client_knows_the_ordering_the_server_declares(self):
         """Cross-language pin — hand-mirrored, no codegen (the #710 pattern).
 

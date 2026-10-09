@@ -162,6 +162,38 @@ function crashDialogText({ code, signal, fatalLines = [], startupError = null })
   }
 }
 
+/**
+ * #1143 — the guidance when the engine could not be STARTED at all.
+ *
+ * A spawn that fails emits only 'error' — no exit code, no stderr, no marker line —
+ * so the crash dialog's other two sources have nothing to say, and the researcher is
+ * the one who has to act. The likeliest real cause is security software: PyInstaller
+ * binaries are commonly flagged, and a quarantine leaves the install looking intact.
+ * So the sentence names the engine's FILE (the name a quarantine list shows) and its
+ * path, and what to check — never only the error code.
+ *
+ * Returned as plain text for `crashDialogText`'s `startupError` arm, which shows it
+ * verbatim under "Mixed Measures failed to start".
+ */
+function backendSpawnFailureMessage(err, exePath) {
+  const code = (err && err.code) || null
+  const file = exePath ? String(exePath).split(/[\\/]/).pop() : 'mm-backend'
+  const where = exePath ? `\n\nThe engine should be at:\n${exePath}` : ''
+  if (code === 'ENOENT') {
+    return `Mixed Measures could not find its engine (“${file}”). Security software `
+      + 'may have quarantined it, or the installation may be damaged. Check your '
+      + `antivirus for “${file}” and restore it, or reinstall Mixed Measures.${where}`
+  }
+  if (code === 'EACCES' || code === 'EPERM') {
+    return `Mixed Measures was not allowed to start its engine (“${file}”). Security `
+      + `software may be blocking it. Allow “${file}” in your antivirus or security `
+      + `settings, or reinstall Mixed Measures.${where}`
+  }
+  const reason = code || (err && err.message) || 'an unknown error'
+  return `Mixed Measures could not start its engine (“${file}”): ${reason}. `
+    + `Reinstalling Mixed Measures may fix this.${where}`
+}
+
 /** What "Copy details" puts on the clipboard — the whole dialog, as support would want it. */
 function crashDialogClipboardText({ title, message, detail }) {
   return [title, '', message, '', detail].join('\n')
@@ -220,6 +252,7 @@ module.exports = {
   createFatalLineCollector,
   crashDialogText,
   crashDialogClipboardText,
+  backendSpawnFailureMessage,
   showCrashDialog,
   CRASH_BUTTONS,
   COPIED_NOTE,

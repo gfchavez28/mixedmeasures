@@ -636,12 +636,18 @@ export default function AnalysisView() {
   // so they're safe in one effect with a single setSearchParams call.
   // Decision logic lives in computeInvalidAnalysisParams (#505): while metrics
   // hydrate chartType is null = indeterminate, and chart-dependent params survive.
+  //
+  // 🔴 #1146 — decide FIRST, write only when something is invalid. This effect lists
+  // the setter, whose identity changes with every URL change, so it runs after every
+  // one — and it used to navigate every time, returning `prev` unchanged. That
+  // navigation started from the last render's URL and undid the Group By auto-clear
+  // made earlier in the same commit (the setter is composable now as well).
   useEffect(() => {
+    const invalid = computeInvalidAnalysisParams({
+      decompose, canDecompose, divergingMode, chartType, axisTransform, metricType, crossTabColumnId,
+    })
+    if (invalid.length === 0) return
     setSearchParams(prev => {
-      const invalid = computeInvalidAnalysisParams({
-        decompose, canDecompose, divergingMode, chartType, axisTransform, metricType, crossTabColumnId,
-      })
-      if (invalid.length === 0) return prev
       const next = new URLSearchParams(prev)
       invalid.forEach(k => next.delete(k))
       return next

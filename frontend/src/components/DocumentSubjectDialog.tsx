@@ -32,7 +32,10 @@
  */
 import { useId, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { PARTICIPANT_LIST_LIMIT, pickerLimitNote, searchParticipants } from '@/lib/participant-search'
+import {
+  NO_PARTICIPANTS_YET, PARTICIPANT_LIST_LIMIT, PARTICIPANT_SEARCH_LABEL, PARTICIPANT_SEARCH_PLACEHOLDER,
+  noParticipantsMatch, pickerLimitNote, searchParticipants,
+} from '@/lib/participant-search'
 import { LoadState } from '@/components/LoadStatus'
 import { useListLoad } from '@/hooks/useListLoad'
 import { Check, Search, UserRound, X } from 'lucide-react'
@@ -146,8 +149,8 @@ export default function DocumentSubjectDialog({
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search participants…"
-            aria-label="Search participants"
+            placeholder={PARTICIPANT_SEARCH_PLACEHOLDER}
+            aria-label={PARTICIPANT_SEARCH_LABEL}
             aria-describedby={limitNote ? limitNoteId : undefined}
             className="pl-8"
           />
@@ -208,14 +211,13 @@ export default function DocumentSubjectDialog({
               /* The empty state names where to fix it — the remedy is on another
                * screen and nothing on this one would say so. */
               <li className="px-2 py-3 text-sm text-mm-text-muted">
-                This project has no participants yet. Add them on the Participants
-                page, or import a dataset with an identifier column.
+                {`${NO_PARTICIPANTS_YET} Add them on the Participants page, or import a dataset with an identifier column.`}
               </li>
             )}
 
             {participantsLoad.status === 'ready' && participants.length > 0 && matches.length === 0 && (
               <li className="px-2 py-3 text-sm text-mm-text-muted">
-                No participant matches “{search.trim()}”.
+                {noParticipantsMatch(search)}
               </li>
             )}
 

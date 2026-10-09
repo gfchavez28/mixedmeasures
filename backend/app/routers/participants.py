@@ -42,6 +42,11 @@ from ..config import get_documents_dir, get_media_dir, get_backup_dir, get_setti
 from ..auth import get_current_user
 from ..services.audit import log_action
 from ..services.participant_scores import mark_participant_scores_stale
+from ..services.participant_dataset import (
+    ACTION_LINK_PARTICIPANTS,
+    managed_dataset_refusal,
+    managed_kind_refusal,
+)
 
 logger = logging.getLogger(__name__)
 from ..services.participant_linking import auto_fill_role_from_linked_row
@@ -102,6 +107,7 @@ def participant_to_response(
                 dataset_id=dr.dataset_id,
                 row_identifier=dr.row_identifier,
                 submitted_at=dr.submitted_at,
+                link_refusal=managed_dataset_refusal(dr.dataset, ACTION_LINK_PARTICIPANTS),
             )
         )
 
@@ -302,10 +308,14 @@ def participant_list_payload(db: Session, project_id: int) -> list[dict]:
         })
 
     dataset_rows: dict[int, list[dict]] = defaultdict(list)
-    for row_id, participant_id, dataset_id, dataset_name, row_identifier, submitted_at in db.execute(
+    for (
+        row_id, participant_id, dataset_id, dataset_name, row_identifier, submitted_at,
+        managed_kind,
+    ) in db.execute(
         select(
             DatasetRowModel.id, DatasetRowModel.participant_id, Dataset.id, Dataset.name,
             DatasetRowModel.row_identifier, DatasetRowModel.submitted_at,
+            Dataset.managed_kind,
         )
         .join(Participant, Participant.id == DatasetRowModel.participant_id)
         .join(Dataset, Dataset.id == DatasetRowModel.dataset_id)
@@ -318,6 +328,7 @@ def participant_list_payload(db: Session, project_id: int) -> list[dict]:
             "dataset_id": dataset_id,
             "row_identifier": row_identifier,
             "submitted_at": submitted_at,
+            "link_refusal": managed_kind_refusal(managed_kind, ACTION_LINK_PARTICIPANTS),
         })
 
     documents: dict[int, list[dict]] = defaultdict(list)
@@ -588,6 +599,12 @@ async def link_dataset_row(
             status_code=404,
             detail="Dataset not found in this project",
         )
+    # 🔴 #1157 — a table the tool keeps in step with the participants links itself
+    # ("locked spine, open columns", `backend-invariants.md` §5b). The dataset
+    # router's three link doors asked; this one did not.
+    refusal = managed_dataset_refusal(dataset, ACTION_LINK_PARTICIPANTS)
+    if refusal is not None:
+        raise HTTPException(status_code=409, detail=refusal)
 
     # Check participant not already linked to another row in this dataset
     existing_link = (
@@ -674,6 +691,14 @@ async def unlink_dataset_row(
             status_code=409,
             detail="Row is not linked to this participant",
         )
+    # 🔴 #1157 — on the participant table this is not an unlink but a DELETE with a
+    # delay: the next refresh reaps the row (`sync_rows` step 2), inserts a fresh
+    # one, and every value typed into the researcher's own variables is gone. The
+    # panel offered it; nothing refused it. Measured on a scratch install
+    # 2026-10-08 — the typed text left the database.
+    refusal = managed_dataset_refusal(row.dataset, ACTION_LINK_PARTICIPANTS)
+    if refusal is not None:
+        raise HTTPException(status_code=409, detail=refusal)
 
     row.participant_id = None
     # Row 45 step 4 — a link is a SCORE input: it decides which coded passages

@@ -37,6 +37,7 @@ import pathlib
 
 import pytest
 
+from app.routers.auth import archive_coder, unarchive_coder
 from app.routers.backup import backup_create
 from app.routers.participants import list_participants, withdraw_participant
 from app.routers.dataset import (
@@ -120,6 +121,12 @@ MUST_BE_SYNC = [
     # as `async def` the whole body is the freeze.
     (bulk_type_update, "5.15s retyping five columns, ~1.0s per column"),
     (update_manual_column, "~1.0s retyping a 122,382-cell column (plan 0.49s + write 0.49s)"),
+    # #1074, 2026-10-05 — archiving or unarchiving a coder marks every consensus
+    # passage they shared. Timed AT THE CALL on a migrated file copy of the scale
+    # corpus (BES, three coders, 1.2M codings); as `async def` the body is the freeze.
+    (archive_coder, "1.47s marking 168,729 passages for the main coder; 0.63s / 160,801 "
+                    "for the second"),
+    (unarchive_coder, "the same marking as archive_coder, reversed"),
 ]
 
 # Endpoints that genuinely await I/O and therefore CANNOT take that treatment.

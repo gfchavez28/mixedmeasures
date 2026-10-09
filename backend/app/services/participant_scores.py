@@ -75,6 +75,7 @@ from .participant_dataset import (
     get_participant_dataset,
     sync_rows,
 )
+from .staleness import mark_metrics_stale
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +417,9 @@ class _CellPlan:
     inserts: list[dict] = field(default_factory=list)
     updates: list[dict] = field(default_factory=list)
     deletes: list[dict] = field(default_factory=list)
+    #: #1144 — the columns any of the three touches, so a metric built on one of
+    #: them can be marked out of date. Bounded by the scaled codes (two each).
+    columns: set[int] = field(default_factory=set)
 
 
 def _plan_cells(db: Session, dataset_id: int, rollup: MagnitudeRollup) -> _CellPlan:
@@ -485,6 +489,7 @@ def _plan_cells(db: Session, dataset_id: int, rollup: MagnitudeRollup) -> _CellP
                 # importer's own treatment of a blank.
                 if cell is not None:
                     plan.deletes.append({"b_id": cell[0]})
+                    plan.columns.add(column_id)
                 continue
 
             # #942 — a SCORE is a measurement and gets a fixed number of decimal
@@ -501,8 +506,10 @@ def _plan_cells(db: Session, dataset_id: int, rollup: MagnitudeRollup) -> _CellP
                     "row_id": row_id, "column_id": column_id,
                     "value_text": text, "value_numeric": value,
                 })
+                plan.columns.add(column_id)
             elif cell[1] != text or cell[2] != value:
                 plan.updates.append({"b_id": cell[0], "b_text": text, "b_number": value})
+                plan.columns.add(column_id)
     return plan
 
 
@@ -589,7 +596,7 @@ def refresh_participant_dataset(db: Session, project_id: int) -> RefreshReport |
     when it inserts nothing) and then run the rollup inside that transaction.
     MEASURED on 122,382 participants: a coding click 6–31 s into a 40 s refresh
     failed with "database is locked", and every click during a first create
-    (172 s) did. Three steps now:
+    (172 s) did. The steps now:
 
       1. **CLAIM** — clear `managed_stale` and COMMIT. That also ends any write
          transaction the CALLER holds (the create endpoint's new table), which
@@ -604,6 +611,9 @@ def refresh_participant_dataset(db: Session, project_id: int) -> RefreshReport |
          flushed for the caller to commit. MEASURED on 122,382 participants × 4
          rated codes before this: 8.90 s held for a first scoring, a competing
          writer failing at 5.06 s.
+      5. **METRICS** (#1144) — every saved metric on a column this refresh moved is
+         marked out of date, in the same final transaction
+         (`_mark_moved_metrics_stale`).
 
     🔴 **One refresh at a time (#1073 c).** It runs inside
     `participant_table_turn`, so a second one — another tab, the per-column menu
@@ -628,6 +638,43 @@ def refresh_participant_dataset(db: Session, project_id: int) -> RefreshReport |
         return _refresh_in_turn(db, project_id)
 
 
+def _mark_moved_metrics_stale(
+    db: Session,
+    project_id: int,
+    dataset_id: int,
+    row_report,
+    plan: _CellPlan | None,
+) -> int:
+    """#1144 — mark out of date every saved metric whose INPUT this refresh moved.
+
+    🔴 **A refresh rewrote a score column's cells and marked nothing**, and quick
+    compute recomputes only a metric that is `stale` or has no result — so the
+    analysis view kept showing the number from before the refresh, silently, until
+    *Recompute all* (measured: 2.0 shown, 1.0 true). Batch 16's "was the metric
+    stale?" gate on saved tests (#1039 a) relies on this flag being complete.
+
+    What moved, and the second half is the one easy to miss:
+      - a score column with any planned insert, update or delete;
+      - EVERY column of the table when `sync_rows` added or reaped a ROW — a row is
+        a member of every column's population, and a reaped row takes the cells
+        the researcher typed into their own variables with it.
+    A refresh that moved nothing marks NOTHING: an amber marker on a number that
+    cannot have changed trains a researcher to ignore it (#1149's lesson).
+
+    Bounded by the table's columns, never by its rows (`sql-id-sets.md`).
+    """
+    column_ids: set[int] = set(plan.columns) if plan is not None else set()
+    if row_report is not None and (row_report.added or row_report.removed):
+        column_ids.update(
+            column_id for (column_id,) in db.execute(
+                select(DatasetColumn.id).where(DatasetColumn.dataset_id == dataset_id)
+            )
+        )
+    if not column_ids:
+        return 0
+    return mark_metrics_stale(db, project_id, column_ids=sorted(column_ids))
+
+
 def _refresh_in_turn(db: Session, project_id: int) -> RefreshReport | None:
     """`refresh_participant_dataset`'s body, with the project's turn held."""
     dataset = get_participant_dataset(db, project_id)
@@ -642,6 +689,8 @@ def _refresh_in_turn(db: Session, project_id: int) -> RefreshReport | None:
     db.commit()
     synced_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
+    row_report = None
+    plan: _CellPlan | None = None
     try:
         # (2) READ — nothing may write before this returns.
         rollup = compute_magnitude_rollup(db, project_id)
@@ -654,9 +703,16 @@ def _refresh_in_turn(db: Session, project_id: int) -> RefreshReport | None:
         db.commit()
 
         # (4) CELLS — planned with no lock held, written in committed batches.
-        written, cleared = _write_cell_plan(db, _plan_cells(db, dataset_id, rollup))
+        plan = _plan_cells(db, dataset_id, rollup)
+        written, cleared = _write_cell_plan(db, plan)
         dataset = db.get(Dataset, dataset_id)
         dataset.managed_synced_at = synced_at
+
+        # (5) #1144 — the metrics built on what moved. AFTER the cells, in the
+        # transaction that stamps `managed_synced_at`: marked before them, a quick
+        # compute between two committed batches would recompute on half-written
+        # numbers and clear the flag (#1145 (c)'s shape).
+        _mark_moved_metrics_stale(db, project_id, dataset_id, row_report, plan)
         db.flush()
     except IntegrityError:
         # Another PROCESS updating the same table (this one's turn keeps a second
@@ -669,6 +725,8 @@ def _refresh_in_turn(db: Session, project_id: int) -> RefreshReport | None:
         db.rollback()
         try:
             mark_participant_scores_stale(db, project_id)
+            # Batches committed before the failure have already moved cells (#1144).
+            _mark_moved_metrics_stale(db, project_id, dataset_id, row_report, plan)
             db.commit()
         except Exception:
             db.rollback()

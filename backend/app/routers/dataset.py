@@ -81,6 +81,7 @@ from ..schemas.dataset import (
 from ..models.recode import RecodeDefinition, RecodeType
 from ..services.dataset_import import (
     ColumnSelectionError,
+    CsvReadError,
     CsvRecords,
     DatasetTooLargeError,
     MAX_DATASET_CELLS,
@@ -598,6 +599,11 @@ async def describe_dataset_columns(
     except (XlsxImportError, SavImportError) as e:
         logger.warning("column describe failed: %s", e)
         raise HTTPException(status_code=400, detail=str(e))
+    except CsvReadError as e:
+        # #1083 — the reader's own sentence names the line and the likely fault;
+        # caught BEFORE the generic arm, which would rewrite it to "check the format".
+        logger.warning("column describe failed: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
     except (ValueError, csv.Error, TypeError) as e:
         logger.warning("column describe failed: %s", e)
         raise HTTPException(
@@ -681,6 +687,10 @@ async def preview_dataset(
         # ⚠️ `ColumnSelectionError` is deliberately NOT listed: the narrowing it
         # comes from runs inside `_upload_to_csv_text`, above this block, and is
         # converted there. An arm here could never fire (#941).
+        raise HTTPException(status_code=400, detail=str(e))
+    except CsvReadError as e:
+        # #1083 — see the describe endpoint: the sentence says where and why.
+        logger.warning("CSV parse failed: %s", e)
         raise HTTPException(status_code=400, detail=str(e))
     except (ValueError, csv.Error, TypeError) as e:
         logger.warning("CSV parse failed: %s", e)
@@ -813,6 +823,10 @@ async def import_dataset(
         # big, and "check the file format" would be a wrong diagnosis (#797).
         # ⚠️ `ColumnSelectionError` is converted at the seam; see the preview.
         db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except CsvReadError as e:
+        db.rollback()
+        logger.warning("Dataset import failed: %s", e)
         raise HTTPException(status_code=400, detail=str(e))
     except (ValueError, csv.Error, TypeError, KeyError) as e:
         db.rollback()
@@ -3536,6 +3550,13 @@ async def _upload_to_csv_text(
             # the request (#797).
             logger.warning("column selection rejected: %s", e)
             raise HTTPException(status_code=400, detail=str(e))
+        except CsvReadError as e:
+            # 🔴 #1083 (a): a file the reader could not read escaped this seam as a
+            # 500 — only `ColumnSelectionError` was caught here, and the endpoints'
+            # own arms sit below this call. Without a selection the same file
+            # answered 400, so the two paths disagreed about one file.
+            logger.warning("CSV parse failed while narrowing: %s", e)
+            raise HTTPException(status_code=400, detail=str(e))
     return text, None, None, narrowed_overlong
 
 
@@ -3564,6 +3585,10 @@ def _read_append_records(text: str) -> tuple[CsvRecords, list[str], list[list[st
     try:
         records = CsvRecords(text)
         rows = list(records)
+    except CsvReadError as e:
+        # #1083 — the reader's sentence, not the generic one below.
+        logger.warning("CSV parse failed: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
     except (csv.Error, ValueError) as e:
         logger.warning("CSV parse failed: %s", e)
         raise HTTPException(status_code=400, detail="Unable to read this file. Check the file format and try again.")

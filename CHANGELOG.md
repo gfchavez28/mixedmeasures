@@ -7,18 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.5.6] - 2026-10-04
+## [1.5.6] - 2026-10-09
 
 ### Changed
 
 - **The Mac app now needs macOS 14 (Sonoma) or later, and says so.** Version
   1.5.5 stated macOS 12, but the statistics libraries inside it were already
-  the editions built for macOS 14, and they load when the app starts — so on
-  macOS 12 or 13 it most likely did not start. The app and its update feed now
+  the editions built for macOS 14, and one of them loads as the app starts — so
+  on macOS 12 or 13 it most likely did not start. The app and its update feed now
   state macOS 14, and every Mac build checks each file inside it against that
   number before it can be published. A Mac on an older version is not offered
-  the update — its update check reports it as up to date — and every Apple
-  Silicon Mac can be updated to macOS 14. (#1118)
+  the update — its update check simply finds nothing to install — and every
+  Apple Silicon Mac can be updated to macOS 14. (#1118)
 
 ### Fixed
 
@@ -26,22 +26,368 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same click.** It used to copy and quit at once, which took the message — and
   the folder it asks you to deal with — off the screen, without confirming
   anything was copied; on Linux the copied text could also vanish as the app
-  closed. Now the message comes back with "The details are copied" at the top,
-  and only *Quit* closes it. (#1100)
+  closed. Now the message comes back with "The details are copied" above the
+  details, and only *Quit* closes it. (#1100)
 - **Saving the recovery key opens in your Downloads folder on every system.**
-  The folder the save dialog opened in had changed with the desktop engine.
+  It used to open wherever the system chose, often the last folder you used.
   It now opens in Downloads, the standard folder least likely to be synced to a
   cloud service. On Windows the file is kept out of the recent-files list; on
   Linux you are asked before an existing file is replaced; on a Mac the dialog
   says what the file is for. (#1100)
+- **A withdrawal now accounts for the documents about the person.** When a
+  document was marked as being about a participant, the report of what traces
+  back to them left the document out, so the Participants page could say
+  "Nothing else in this project is linked to this participant" about someone a
+  document is about. The report now lists those documents. The withdrawal
+  confirmation now says the document stays in the project, unlinked, and has to
+  be read, because a document about someone can also be their own words. The
+  message after a withdrawal counts the documents it unlinked. In every release
+  since 1.5.2. (#1123)
+- **The Participants page no longer lists a document's subject under "No
+  linked sources".** That filter is where people go to tidy up unlinked
+  records, and deleting from it silently removed the document's link to its
+  subject. Documents now count as a link. The table shows what each person is
+  linked to (conversations, dataset records and documents), the details panel
+  lists the documents about them, and a bulk delete says how many documents will
+  lose their subject. In every release since 1.5.2. (#1110)
+- **The Participants page fits a small window.** In a narrow window the table
+  scrolled the whole page sideways and an opened participant's details were
+  drawn over it. The table now scrolls in its own box. The details sit beside
+  it when there is room and below it when there is not. (#1088)
+- **The participant details panel can be reached and left from the keyboard.**
+  Opening a participant with Enter now moves you into their details, where it
+  could take dozens of Tab presses to arrive. Closing them returns you to their
+  row instead of the top of the page. Pressing Escape in a confirmation over the
+  page no longer closes the details behind it as well. The panel's dataset
+  picker, colour buttons and *Unlink* buttons now say what they act on. (#1091,
+  #1124)
+- **Deleting every unlinked participant through the filter no longer leaves an
+  empty page with no way back.** The filter buttons stay while the filter is on.
+  The lone *All* button no longer appears just because something is selected,
+  and choosing a filter no longer clears your selection. (#1090)
+- **The three places you search for a participant now read the same**, and the
+  data grid's search box now has a label of its own, rather than borrowing its
+  grey hint text. (#1092)
+- **The rating number on a coded chip is easier to read.** Its background now
+  darkens or lightens away from the number, rather than toward it. On the
+  default grey chip the number went from 3.2:1 contrast to 7.8:1. (#1115)
+- **A large backup with recordings can be restored from Backup history.**
+  Restoring from the list refused any backup whose contents unpack to more than
+  20 GB. That ruled out the full backups that carry video — including the
+  "Before a restore" copy that a failed restore tells you to restore. Backups
+  listed in Backup history are no longer held to that limit; a file chosen with
+  *Restore from a file* still is. The restore preview now warns when the
+  computer does not have the free space to unpack the backup. In every release
+  since 1.5.4. (#1036)
+- **A restore swaps the database in with one step on every system.** On
+  Windows a restore copied the backup's database over the live one instead of
+  swapping it in, so a full disk or a quit partway through could leave the
+  database damaged. It is now unpacked beside the live database and swapped in
+  with a single rename. (#1036)
+- **A restore that stops before changing anything now says so.** When a backup
+  could not be unpacked — a damaged file, or the disk filling up — the message
+  said the restore had "failed partway" and told you to restore the copy of
+  your data it had saved, when nothing had been changed. It now says the
+  restore stopped before replacing anything, and that the copy it saved first
+  can be deleted if you want the space back. (#1036)
+- **A backup or restore stopped by quitting no longer leaves files behind for
+  good.** On Windows, quitting stops Mixed Measures at once. Quitting there
+  during a backup left a full copy of the database in the system's temporary
+  folder and a hidden partial file in the backup folder, and nothing ever
+  removed either; the same happened on any system when Mixed Measures was forced
+  to stop. Backups, restores and previews no longer use the system's temporary
+  folder. What a stopped backup or preview leaves is removed the next time
+  Mixed Measures starts, or before the next automatic backup, once nothing has
+  touched it for an hour. The documents and recordings a stopped restore had
+  unpacked are still cleared by the next restore. Recordings that a stopped
+  restore had set aside are put back the next time Mixed Measures starts,
+  rather than at the next restore. (#1080)
+- **A restore cannot start while an earlier one is still finishing.** On a Mac
+  or on Linux, closing Mixed Measures during a restore leaves that restore
+  running in the background, and a restore started after reopening could
+  interfere with it. It is now refused with nothing changed, and the message
+  says to close Mixed Measures and wait for the first one to finish. (#1142)
+- **Backups of a large database finish sooner.** The database inside a backup
+  is now compressed with a faster setting. On a 469 MB database the compression
+  took 4.1 seconds instead of 11.4, for an archive about 7% larger. The backup
+  taken when you quit on a Mac or on Linux also finishes sooner, and an
+  automatic backup keeps a restore waiting for less time. (#1080)
+- **"Restore complete" stays on screen until you reload.** Reconnecting to a
+  network, or waking a laptop, while a restore's result was showing reloaded
+  the page and took the message with it. An automatic backup that gave way to
+  a restore is now tried again five minutes later, not at the next scheduled
+  time. (#1084)
+- **Backup history shows when each backup was really taken.** Backup history
+  showed each file's last-changed date, so copying the backup folder to another
+  computer could make every backup show the time of the copy. The time now
+  comes from the backup itself, and it matches the time the restore message
+  gives for the copy of your data it saved first. (#1039)
+- **"Show all" in the list of safety copies keeps your place.** The list
+  vanished while the rest loaded, and keyboard focus fell back to the top of
+  the page. The list now stays, says it is loading, and moves focus to the
+  first copy it adds. (#1038)
+- **Checking a backup file from another computer no longer freezes Mixed
+  Measures while it runs.** (#1125)
+- **`MM_AUTO_BACKUP_INTERVAL_HOURS=0` now turns automatic backups off.** It used
+  to take backups in a tight loop. A negative value, or an
+  `MM_AUTO_BACKUP_MAX_COUNT` below 1 (at 0, every automatic backup was deleted
+  as soon as it was written), now stops Mixed Measures at startup with a message
+  saying what to set. *Settings › Backup & Data* states the schedule the
+  installation actually runs. These settings are for a server or Docker
+  install; the desktop app does not set them. (#1043)
+- **The Content tab keeps your place when you load more.** Pressing *Load more*
+  under a code's passages replaced the whole list with "Loading coded
+  passages…" until the next page arrived, so you lost where you were reading. The new passages are
+  now added below the ones already showing. The document segments and
+  observation clips sections now page too: each stopped at its first 200 with
+  no *Load more* and nothing saying the list was cut short, and a code with few
+  conversation passages offered no way to see the rest of its documents or
+  clips. Every section now says "Showing 200 of 260" while it has more. A fifth
+  *Load more* on a code with more than 1,000 coded passages or texts used to
+  fail outright. (#968, #969)
+- **The Content tab's search says what it searched.** It searches only the
+  passages already loaded, but read "12 matches of 1,040 segments" as though it
+  had searched all of them. It now says "12 matches among the 200 loaded of
+  1,040 passages — load more to search the rest" while more remain. (#968)
+- **Text Coding no longer shows the previous filter's results as current.**
+  While a new search or filter loads, the rows from the last one stay on screen
+  so you don't lose your place, but they are now dimmed and marked busy, and
+  the line below says "Updating for the new filter…" instead of the old count.
+  The *Load more* button there keeps keyboard focus while it loads, and a page
+  that fails to load now says so. (#1038)
+- **The coding import's *Import* button counts what you have chosen to
+  import.** It counted every importable row in the file, including the rows of
+  names set to *Do not import*, so it could promise "Import 10 codings" and add
+  6. For that file it now says "Import 6 rows", and the summary at the top of
+  the step says how many more rows belong to names you are leaving out. With
+  every name left out, the button is off and says why. (#1099)
+- **The coding import's finished screen counts every coding added.** Code-set
+  values were counted separately as "Set selections", so a file with one plain
+  code and two set values finished as "Codings added 1 · Set selections 2". It
+  now says "Codings added 3 — including 2 code set values", and re-importing set
+  values you already had counts as "Already there" rather than as new work.
+  (#1066)
+- **The coding import's list of problems reads properly.** It put each count
+  in front of its reason, giving "2 two different ratings" and "4 coder not
+  imported". It now reads "two different ratings (2)". (#1089)
+- **The coding import shows its three steps**, as every other import page
+  does. (#1010)
+- **Dataset Import says how long the import itself will take.** On a large
+  file it announced the reading estimate (about a third of the import's) as the
+  import began, and after a long preview it could announce "Still working — 40
+  seconds elapsed" the moment the import started. Changing worksheet on the
+  settings step said "Importing…" while it only re-read the sheet; it now says
+  "Reading…". A worksheet that cannot be read now gets the same plain message as
+  any other file problem. (#1010, #1038)
+- **The import pages agree with each other in small ways.** The conversation
+  and document pages now name their file types inside the drop zone, as the
+  other import pages do; the merge page
+  states its 500 MB limit; Observation Import says "1 clip" rather than "1
+  clip(s)"; and after an append, the participants line now matches Dataset
+  Import's — it no longer prints "0 matched", it gives the reason for each group
+  of records left unlinked, and it warns when none of the IDs matched the people already in the
+  project. Append's result no longer shows an internal batch ID. (#1010)
+- **"Jump to uncoded" no longer ends in an emoji.** The ⏭ symbol could show as
+  an empty box on a system without an emoji font, and screen readers read it as
+  part of the button's name. It is now a drawn icon. (#967)
+- **A jotted note now records the page it was written on.** Notes jotted on a
+  document, an observation, the Codebook, Ratings, Participants and several
+  other pages were saved as coming from "Project overview". They now take the
+  page's breadcrumb, such as "Documents › Field notes", and the jot box shows it
+  as "From …". A note jotted on a conversation, dataset or canvas whose name is
+  close to the 255-character limit no longer fails to save. Notes already saved keep the label they were given.
+  (#1002)
+- **The Save dialog for an export is titled with the file's name** on Windows
+  and Linux. It was titled with an internal address such as
+  "blob:http://127.0.0.1:53325/…". (On a Mac the dialog has no title.) (#1051)
+- **A rating given just after a change to the conversation is no longer
+  overwritten on screen.** On the conversation workbench, rating a code while
+  the transcript was refreshing — straight after choosing a code-set value,
+  merging, splitting or quoting — could show "not rated" over a rating that had
+  been saved, until the next refresh. (#1059)
+- **The Machine layer works in Text Coding's cross-analysis.** Choosing it sent
+  people's coding instead and switched the control back to *Coders*. It is also
+  offered only in a project where a model's codings were imported, rather than
+  in every project once any project had them. (#1038)
+- **A backup whose project list could not be read now says so.** The restore
+  preview showed no projects at all, which read as an empty backup. A backup
+  made from this version on says the list could not be read when it was made,
+  and that the backup can still be restored. An older backup cannot tell this
+  apart from one with no projects, so its preview is unchanged. (#1039)
+- **Archiving a coder, or bringing one back, now updates the saved consensus.**
+  An archived coder's coding does not count towards consensus, so archiving one
+  changes the consensus of every passage they coded alongside someone else — and
+  bringing one back changes it the other way. Neither Settings, the coding
+  import's *bring back* option nor a project merge (in the coder's other
+  projects) marked those passages, so the
+  saved consensus kept the old answer while the Reconciliation tab showed the new
+  one. They are now updated in the background; on a very large project this can
+  take a while, during which the Reconciliation tab says how many updates the
+  saved consensus is behind, and each press of *Recompute consensus* catches up
+  as many as 10,000 of them at once.
+  (#1074)
+- **A code in one code set that is grouped with a value of another set now
+  counts where it is read.** Such a code is recorded as that other value, so it
+  is a choice in the OTHER set. Applying it used to clear the coder's choice in
+  its own set, where it counts for nothing, and leave the other set holding two
+  values; choosing a value of its own set removed it. It now replaces the
+  coder's value in the set it counts in, its own set's control no longer offers
+  it, and a coding import judges it the same way whatever order the file lists
+  its rows in. (#1081)
+- **Undoing a code-set choice after the set changed no longer leaves both
+  values.** If the set was deleted, or the replaced value was taken out of it,
+  between a choice and its undo, the undo put the old value back without taking
+  the new one off — while the conversation page showed only one. (#1081)
+- **Merging codes says when it gave a coder two values of a code set.** Merging
+  a code into a value of a set can leave a coder holding that value and another
+  one on the same passage, which the set's agreement figures leave out. The merge
+  now warns, naming the set and how many passages. (#1081)
+- **The exported R script reproduces Cohen's kappa and percent agreement on an
+  installation with more than two coders.** The script printed "NA" for both
+  wherever anyone else had a coder on the same installation — even someone who
+  never opened the project — while the app showed the numbers. Its reliability
+  files now hold only the coders who coded the shared material, so its rule for
+  when kappa applies matches the app's. (#1039)
+- **The background consensus update can no longer take longer and longer.** If
+  some updates kept failing, every one of them was retried on every pass, so the
+  work grew with each pass. It now retries a fixed number per pass, taking turns
+  so that each is still retried. (#1039)
+- **A file that cannot be read now says which line, and why.** Importing a
+  dataset saved with old Mac line endings, or holding a value longer than
+  131,072 characters — usually a quotation mark that was never closed, with a
+  long stretch of the file after it — said only "Unable to parse CSV file". The
+  coding import failed with a server error on the same files, including its own
+  coded-segments export when a passage was longer than that. Each now names the line
+  and the likely cause, and the coding import says which columns it reads, so a
+  long passage in a column it does not read can simply be deleted. (#1083)
+- **A line of spaces in a dataset file is no longer counted as a respondent.**
+  In a file with two or more columns, a line holding only spaces or a tab — often
+  left at the end by a text editor — became an extra, empty respondent, which
+  changed response rates. It is now read as the blank line it is. In a
+  one-column file it still counts, because there it can be someone's empty
+  answer. (#1083)
+- **A coding import no longer applies a value the file contradicts when two
+  names are one coder.** With "Alice" and "alice" imported as one coder, a file
+  giving Alice two different values for a passage and alice one of them applied
+  alice's value as if nobody disagreed. All three rows are now left out, and the
+  list says why. (#1082)
+- **Two names given the same new coder's name become one coder.** Typing one
+  name for two names in the file made two separate coders — the second numbered
+  "(2)" — with nothing said. They are now one new coder, and each row says so; a person and a
+  model, or two model configurations, cannot share a name and the import waits
+  for different names. When a new coder's name is already taken, the page now
+  says what the coder will be called instead, and how to add the codings to the
+  existing coder. (#1082)
+- **Imported codings show at once in a conversation you had open.** The
+  conversation's codings could take up to a minute to appear after an import.
+  (#1082)
+- **A coding import accepts a code set named in other capitals.** Rows saying
+  "stance" for the set "Stance" were left out as built against a different
+  codebook, though the same file could name its codes in any capitals. (#1082)
+- **A coding file whose coder column holds the wrong thing is refused with a
+  sentence that says so.** A coder column holding a different value on every row
+  — two column headings swapped, say — made the page list every row as a coder
+  to match, which could freeze the window. More than 200 names is now refused,
+  showing three of them and noting when the headings may be the wrong way round.
+  (#1076)
+- **The coding import's refusals stay on the page.** A refused file or import
+  was a message that disappeared after four seconds; it now stays beside the
+  button, and the button keeps keyboard focus while the request runs.
+  (#1076, #1083)
+- **Saved statistical tests in an imported or duplicated project are marked out
+  of date.** A test's result arrived reading as current, though it was
+  computed by whichever version saved the file — for a reliability test, perhaps
+  before a fix to the calculation. Imported tests are now marked out of date, and
+  the import message counts them. Editing a metric's settings, or recomputing a
+  metric that was out of date, now marks the tests saved against it as well.
+  (#1039)
+- **A project file cannot add a fake consensus layer.** No export includes the
+  consensus layer, which the app rebuilds from the coders' own codings; a
+  hand-edited file that listed one could have written its codings into it. Such
+  a file is now refused with a sentence saying why. (#1039)
+- **The Content tab shows every kind of source again.** Opening it from another
+  tab of Qualitative Analysis kept only the last of the selections it fills in,
+  so no code was selected and only one kind of source was shown — observation
+  clips, in a project that has any. Deleting the material
+  you were looking at also left the page pointing at the deleted material. (#1129)
+- **The withdrawal confirmation reads out everything it shows.** A screen reader
+  opening it heard its opening paragraph and then "Cancel": what will be removed,
+  what will stay and the warning that the tool cannot finish the job on its own
+  were on screen but not announced. They are now part of what the dialog says
+  when it opens. "Their 1 turn stay in place" now reads "stays". (#1131)
+- **Linking a participant to a dataset record keeps your place.** On the
+  Participants page, linking or unlinking a record from the keyboard sent focus
+  back to the top of the page; it now lands on the *Linked Datasets* heading. A
+  record someone else holds is announced as "already linked to" them, and the
+  summary of what would need removing for a withdrawal updates straight away.
+  (#1130)
+- **Backups are named the same way everywhere.** A backup taken with *Backup now*
+  no longer says it was taken on the automatic schedule, and names such as
+  "the before a restore backup" now read "the “Before a restore” backup".
+  (#1132)
+- **The dataset import keeps keyboard focus on *Next* when a file is refused**,
+  instead of dropping it to the top of the page as the reason appears. (#1133)
+- **An observation's page names it in the breadcrumb**, even when you open it
+  from a link or reload it, so a note jotted there now names the observation too.
+  When jotting, a screen reader now hears where the note will be filed. (#1134)
+- **A coder badge no longer shows punctuation as an initial** — "Priya (lead)"
+  reads "PL", not "P(". (#1135)
+- **Opening Mixed Measures while it is already open no longer starts a second
+  engine.** Clicking the shortcut a second time was refused a window, but it
+  still started a second copy of the local engine on the same project data, and
+  nothing ever stopped it: it could keep writing to the database, take its own
+  automatic backups, and make every later restore fail on Windows. A second
+  launch now only brings the open window to the front — or the startup screen,
+  if the app is still starting. In every release so far. (#1141)
+- **When the engine cannot be started, the message says why.** If the engine's
+  file was missing or blocked — security software quarantining it is the likely
+  cause — the app showed a raw "JavaScript error" box, waited a minute, and then
+  reported that the engine "did not become healthy". It now says at once that the
+  engine could not be found or was not allowed to run, names its file and where it
+  should be, and says what to check. (#1143)
+- **Refreshing the participant table marks the analyses built on it out of
+  date.** The refresh rewrote score cells — and added or removed records — without
+  telling the saved charts and tests that use them, so the analysis view went on
+  showing the old number. A withdrawal had the same gap:
+  the withdrawn person's responses were deleted but stayed inside saved results.
+  Both now mark what they changed. (#1144)
+- ***Group by* in Quantitative Analysis is now cleared when a selection makes it
+  unavailable.** Choosing a variable group alongside a variable makes *Group by*
+  unavailable, but the grouping stayed in the address, kept being used for the
+  chart and was saved with it, while the control showing it was disabled so it
+  could not be removed. (#1146)
+- **The Codebook's *Reset filter* and a hide's *Undo* do what they say.** *Reset
+  filter* left a minimum segment count in place, and *Undo* after hiding a code
+  also cleared a search typed since and showed a second hidden code again. (#1147)
+- **The saturation curve says what order its sources are in.** The axis title and
+  the caveat under it — that sources are in the order they were added to the
+  project, which may not be the order fieldwork happened in — were computed but
+  never reached the screen. (#1148)
+- **A record in the participant table can no longer be unlinked from the
+  Participants panel.** That table keeps its own links, so an unlink only made the
+  next refresh delete the record — and anything typed into the variables you added
+  to it. The panel now says the link is kept for you, the table is no longer
+  offered for linking, and the app refuses the change. (#1157)
+- **The Participants panel no longer says Mixed Measures cannot remove a
+  person's data.** It said there was "no erase function" and that everything would
+  have to be removed by hand, beside the button that does it. It now says what
+  the withdrawal removes and what it cannot do — find their name in other people's
+  words, free-text answers, notes and memos. (#1136)
+- **Coding Import says when it has already chosen a coder.** A name in the file
+  that matches an existing coder starts with that coder chosen, under a sentence
+  that said nothing was matched for you. It now says the coder is chosen and that
+  pressing *Import* confirms it. A file with headings and no codings is now
+  refused when it is checked, rather than reaching the next step with *Import*
+  turned off and no reason. A list of missing columns now ends with "and", and a
+  new coder's prompt asks whether it is a person or a machine, the words its
+  choices use. (#1158, #1159, #1164)
 
 ### Security
 
 - **Moved the desktop app to a newer, supported browser engine** (Electron
   42.11.8 → 44.5.1). Electron 42 stops receiving security fixes on
-  2026-10-20. The new line carries every published Electron security fix and
-  two Chromium fixes for flaws that were being exploited in the wild. It also
-  includes Electron's fix for a page being reported as not responding the
+  2026-10-20; the 44 line goes on receiving them. It also includes Electron's
+  fix for a page being reported as not responding the
   moment Windows wakes from sleep — the signal the app's own "The window is not
   responding" message listens for. VoiceOver users get the right line on a
   braille display in multi-line text fields, such as memos. (#1100)
@@ -50,7 +396,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment variable, or have a debugger attached — three ways another
   program on the same computer could otherwise act as Mixed Measures, which on
   a Mac holds the key to your encrypted data. On Mac and Windows the app also
-  refuses to start if its own program files have been altered. (#1100)
+  refuses to start if the code of its desktop shell — the part that opens the
+  window — has been altered; the analysis engine and its screens, installed
+  beside it, are not part of that check. (#1100)
 
 ## [1.5.5] - 2026-10-03
 

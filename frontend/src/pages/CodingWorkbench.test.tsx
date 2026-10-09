@@ -10,7 +10,7 @@
  * Harness mirrors `ObservationWorkbench.test.tsx` / `DocumentCodingWorkbench.test.tsx`.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react'
+import { render, screen, cleanup, waitFor, fireEvent, within, act } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -123,8 +123,7 @@ const CODES = [
   makeCode(8, 2, 'Disruption'),
 ]
 
-function renderWorkbench() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+function renderWorkbench(qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   return render(
     <QueryClientProvider client={qc}>
       <ThemeProvider>
@@ -212,8 +211,10 @@ describe('undo carries the rating (#868 f)', () => {
  */
 describe('an apply that REPLACED a value, and its undo (#1028)', () => {
   it('paints the replaced chip away, and Ctrl+Z puts it back WITH its rating — a ZERO', async () => {
+  // The server swaps BOTH ways while the two are values of one set: the undo's
+  // re-apply of 7 reports 8 replaced (#1081 c reads that report).
     applyCode.mockImplementation(async (_seg: number, code: number) =>
-      ({ applied: true, replaced_code_ids: code === 8 ? [7] : [] }))
+      ({ applied: true, replaced_code_ids: code === 8 ? [7] : code === 7 ? [8] : [] }))
     renderWorkbench()
     const rows = await screen.findAllByRole('option')
     fireEvent.mouseDown(rows[1], { button: 0 })   // segment 52 holds Engagement, rated 0
@@ -240,7 +241,7 @@ describe('an apply that REPLACED a value, and its undo (#1028)', () => {
     // It was a private copy of the pair: no rating strip for a scaled code, and
     // an undo that could only remove (found by a SURVIVING mutant).
     applyCode.mockImplementation(async (_seg: number, code: number) =>
-      ({ applied: true, replaced_code_ids: code === 7 ? [8] : [] }))
+      ({ applied: true, replaced_code_ids: code === 7 ? [8] : code === 8 ? [7] : [] }))
     renderWorkbench()
     const rows = await screen.findAllByRole('option')
     fireEvent.contextMenu(rows[0])                                  // segment 51
@@ -256,6 +257,24 @@ describe('an apply that REPLACED a value, and its undo (#1028)', () => {
     expect(removeCode).not.toHaveBeenCalled()
   })
 
+  it('the set CHANGED before the undo: nothing was swapped out, so the undone value is removed (#1081 c)', async () => {
+    // The set was deleted, or Engagement left it, between the act and Ctrl+Z:
+    // re-applying Engagement no longer takes Disruption off, and the passage
+    // held BOTH while this page painted one.
+    applyCode.mockImplementation(async (_seg: number, code: number) =>
+      ({ applied: true, replaced_code_ids: code === 8 ? [7] : [] }))
+    renderWorkbench()
+    const rows = await screen.findAllByRole('option')
+    fireEvent.mouseDown(rows[1], { button: 0 })   // segment 52 holds Engagement
+    fireEvent.keyDown(window, { key: '2' })         // Disruption
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(52, 8))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled())
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+    await waitFor(() => expect(applyCode).toHaveBeenLastCalledWith(52, 7))
+    await waitFor(() => expect(removeCode).toHaveBeenCalledWith(52, 8))
+  })
+
   it('a multi-segment apply’s undo leaves the code on a segment that ALREADY had it', async () => {
     renderWorkbench()
     const rows = await screen.findAllByRole('option')
@@ -269,6 +288,101 @@ describe('an apply that REPLACED a value, and its undo (#1028)', () => {
     // It used to be `([51, 52], 7, 'remove')` — deleting a coding the
     // researcher made before the act, by undoing something else.
     await waitFor(() => expect(bulkCode).toHaveBeenLastCalledWith([51], 7, 'remove'))
+  })
+})
+
+/**
+ * #1059 — a rating given while a segments refetch is OUT used to be painted and
+ * then overwritten by that response, which left the server before the rating did.
+ * The race needs a refetch held open across the commit, so the second list call is
+ * a deferred promise carrying the STALE data, released after the rating lands.
+ */
+describe('a rating is not painted over by a refetch already in flight (#1059)', () => {
+  function deferred<T>() {
+    let resolve!: (v: T) => void
+    const promise = new Promise<T>(r => { resolve = r })
+    return { promise, resolve }
+  }
+  const page = (segments: Segment[]) => ({
+    segments, total: segments.length, coded_count: 1, participant_total: 2, participant_coded: 1,
+  })
+  const rated = (value: number) => segment(52, 1, 'The second turn.', {
+    applied_codes: [7],
+    applied_code_details: [{ code_id: 7, user_id: 1, attribution: null, is_universal: false,
+                             magnitude: value, magnitude_conflict: null }],
+  })
+
+  async function rateWhileARefetchIsOut(afterWrite: Segment[]) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const stale = deferred<ReturnType<typeof page>>()
+    listSegments.mockReset()
+    listSegments
+      .mockResolvedValueOnce(page(SEGMENTS))   // first load: 52 rated 0
+      .mockReturnValueOnce(stale.promise)      // a strip choice's refetch, held open
+      .mockResolvedValue(page(afterWrite))     // what the server holds after the write
+    renderWorkbench(qc)
+    const rows = await screen.findAllByRole('option')
+    fireEvent.mouseDown(rows[1], { button: 0 })   // segment 52, Engagement rated 0
+    act(() => { void qc.invalidateQueries({ queryKey: ['segments', 9] }) })
+    await waitFor(() => expect(listSegments).toHaveBeenCalledTimes(2))
+    fireEvent.keyDown(window, { key: 'r' })
+    const group = await screen.findByRole('radiogroup')
+    fireEvent.keyDown(group, { key: '5' })
+    await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(52, 7, 5))
+    // The stale response lands AFTER the rating, as it did in the race.
+    await act(async () => { stale.resolve(page(SEGMENTS)) })
+    return () => screen.getAllByRole('option')
+  }
+
+  it('the rating survives a stale response that lands WHILE the write is out', async () => {
+    // The window the cancel closes: the refetch after the write would cancel a
+    // still-pending stale fetch on its own, so only a response landing DURING the
+    // write could paint over the rating — "0 out of 10" until the settle, and for
+    // good on the code before #1059, which had no settle at all.
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const stale = deferred<ReturnType<typeof page>>()
+    const write = deferred<{ applied: boolean; magnitude: number }>()
+    setMagnitude.mockReturnValueOnce(write.promise)
+    listSegments.mockReset()
+    listSegments
+      .mockResolvedValueOnce(page(SEGMENTS))
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValue(page([SEGMENTS[0], rated(5)]))
+    renderWorkbench(qc)
+    const rows = await screen.findAllByRole('option')
+    fireEvent.mouseDown(rows[1], { button: 0 })
+    act(() => { void qc.invalidateQueries({ queryKey: ['segments', 9] }) })
+    await waitFor(() => expect(listSegments).toHaveBeenCalledTimes(2))
+    fireEvent.keyDown(window, { key: 'r' })
+    fireEvent.keyDown(await screen.findByRole('radiogroup'), { key: '5' })
+    await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(52, 7, 5))
+    const row52 = () => screen.getAllByRole('option')[1]
+    await waitFor(() => expect(row52()).toHaveTextContent(/5 out of 10/))   // painted
+    // ⚠️ Let React re-render before reading the row: TanStack notifies observers on
+    // a timer, so a read straight after the resolve sees the OLD DOM and passes
+    // whether or not the stale data landed (it did, and a mutant survived that way).
+    await act(async () => {
+      stale.resolve(page(SEGMENTS))                                           // lands mid-write
+      await new Promise(r => setTimeout(r, 30))
+    })
+    expect(row52()).toHaveTextContent(/5 out of 10/)
+    expect(row52()).not.toHaveTextContent(/0 out of 10/)
+    await act(async () => { write.resolve({ applied: true, magnitude: 5 }) })
+    await waitFor(() => expect(row52()).toHaveTextContent(/5 out of 10/))
+  })
+
+  it('a later truth the cancelled refetch would have carried still lands — the refetch after the write', async () => {
+    // Cancelling reverts to the state at that fetch's start, so what IT would have
+    // delivered (here, Disruption on segment 51 from a strip choice) must come
+    // from the one refetch after the write.
+    const withChoice = segment(51, 0, 'The first turn of the interview.', {
+      applied_codes: [8],
+      applied_code_details: [{ code_id: 8, user_id: 1, attribution: null, is_universal: false,
+                               magnitude: null, magnitude_conflict: null }],
+    })
+    const rowsNow = await rateWhileARefetchIsOut([withChoice, rated(5)])
+    await waitFor(() => expect(within(rowsNow()[0]).getAllByText('Disruption').length).toBeGreaterThan(0))
+    expect(rowsNow()[1]).toHaveTextContent(/5 out of 10/)
   })
 })
 
@@ -668,6 +782,12 @@ describe('undo on a segment GROUP whose siblings differ (#1070)', () => {
 
   it('(b) each sibling gets back ITS OWN replaced value, with its rating', async () => {
     grouped([detail(7, 0)], [])
+    // The bulk re-apply of 7 on X swaps 8 off it and says so (#1081 c).
+    bulkCode.mockImplementation(async (ids: number[], code: number, action: string) => (
+      action === 'apply' && code === 7
+        ? { results: ids.map((id) => ({ segment_id: id, replaced_code_ids: [8] })),
+            success_count: ids.length, error_count: 0, failed_segment_ids: [] }
+        : { success_count: 0, error_count: 0, failed_segment_ids: [] }))
     applyCode.mockImplementation(async (_seg: number, code: number) => (code === 8
       ? { applied: true, replaced_code_ids: [7], replaced_by_target: [{ segment_id: 61, replaced_code_ids: [7] }] }
       : { applied: true, replaced_code_ids: [], replaced_by_target: [] }))

@@ -43,7 +43,11 @@ const LOCAL: RestoreSource = {
 
 /** `videoFiles` excluded; `null` = a backup that took video with it. Every
  * automatic backup sets `video_excluded`, including one with nothing to exclude. */
-function preview(videoFiles: number | null = null): RestorePreview {
+function preview(
+  videoFiles: number | null = null,
+  summariesUnavailable = false,
+  summaries: RestorePreview['manifest']['project_summaries'] = [],
+): RestorePreview {
   return {
     manifest: {
       format_version: 1,
@@ -55,7 +59,8 @@ function preview(videoFiles: number | null = null): RestorePreview {
       media_file_count: 1,
       video_excluded: videoFiles !== null,
       video_files_excluded: videoFiles ?? 0,
-      project_summaries: [],
+      project_summaries: summaries,
+      project_summaries_unavailable: summariesUnavailable,
     },
     warnings: [],
   }
@@ -81,11 +86,15 @@ function deferred<T>() {
 function Harness({
   source = LOCAL,
   videoFiles = null,
+  summariesUnavailable = false,
+  summaries = [],
   onClose,
   onReload,
 }: {
   source?: RestoreSource
   videoFiles?: number | null
+  summariesUnavailable?: boolean
+  summaries?: RestorePreview['manifest']['project_summaries']
   onClose: () => void
   onReload: () => void
 }) {
@@ -95,7 +104,7 @@ function Harness({
       <button type="button" onClick={() => setOpen(true)}>reopen</button>
       <RestoreBackupDialog
         source={open ? source : null}
-        preview={open ? preview(videoFiles) : null}
+        preview={open ? preview(videoFiles, summariesUnavailable, summaries) : null}
         onClose={() => {
           onClose()
           setOpen(false)
@@ -106,7 +115,12 @@ function Harness({
   )
 }
 
-function renderDialog(props: { source?: RestoreSource; videoFiles?: number | null } = {}) {
+function renderDialog(props: {
+  source?: RestoreSource
+  videoFiles?: number | null
+  summariesUnavailable?: boolean
+  summaries?: RestorePreview['manifest']['project_summaries']
+} = {}) {
   // `main.tsx`'s mutation default, which toasts "Something went wrong" over any
   // error a mutation does not handle itself.
   const defaultMutationError = vi.fn()
@@ -136,6 +150,14 @@ afterEach(() => {
 })
 
 describe('RestoreBackupDialog', () => {
+  it('#1132: a project and its counts are separated by a SPACE in the description, not a margin', () => {
+    renderDialog({ summaries: [{
+      name: 'Northgate Health, 2024–26', conversation_count: 3, dataset_count: 1,
+      document_count: 15, observation_count: 2,
+    }] })
+    expect(dialog()).toHaveAccessibleDescription(/Northgate Health, 2024–26 \(3 conv, 1 ds, 15 doc, 2 obs\)/)
+  })
+
   it('stays open while the restore runs, and says it is running (#1037)', async () => {
     const pending = deferred<RestoreResult>()
     restoreLocal.mockReturnValue(pending.promise)
@@ -202,11 +224,55 @@ describe('RestoreBackupDialog', () => {
     expect(onReload).toHaveBeenCalledTimes(1)
   })
 
+  it('#1084 (a) — a reconnect while the outcome shows does not bring the page back online', async () => {
+    // TanStack's own `online` listener undid a plain `setOnline(false)`: a Wi-Fi
+    // reconnect, or a laptop woken on this screen, ran the paused fetches, the
+    // first 401 reloaded the page, and "Restore complete" was gone unread.
+    restoreLocal.mockResolvedValue(RESULT)
+    renderDialog()
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
+    await screen.findByRole('heading', { name: 'Restore complete' })
+    expect(onlineManager.isOnline()).toBe(false)
+
+    act(() => { window.dispatchEvent(new Event('online')) })
+    expect(onlineManager.isOnline()).toBe(false)
+    expect(dialog()).toBeInTheDocument()
+  })
+
+  it('#1084 (a) — once a failure is closed, the browser’s online events count again', async () => {
+    // The hold REPLACES the library's listener; closing must put a working one
+    // back, or the page would never learn it went offline again.
+    restoreLocal.mockRejectedValue(new ApiError(500, { detail: 'x' }, {}))
+    renderDialog()
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
+    await screen.findByRole('alert')
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(dialog()).not.toBeInTheDocument())
+    expect(onlineManager.isOnline()).toBe(true)
+
+    act(() => { window.dispatchEvent(new Event('offline')) })
+    expect(onlineManager.isOnline()).toBe(false)
+    act(() => { window.dispatchEvent(new Event('online')) })
+    expect(onlineManager.isOnline()).toBe(true)
+  })
+
   it('keeps the video notice on screen instead of in a toast before a reload', async () => {
     restoreLocal.mockResolvedValue(RESULT)
     renderDialog({ videoFiles: 3 })
     fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
     expect(await screen.findByText(/did not include 3 video recordings/)).toBeInTheDocument()
+  })
+
+  it('#1039 (k) — says the project list could not be read, rather than showing no section', async () => {
+    renderDialog({ summariesUnavailable: true })
+    expect(screen.getByText(/the project list could not be read when this backup was made/))
+      .toBeInTheDocument()
+  })
+
+  it('#1039 (k) — an empty list WITHOUT the flag claims nothing (an older backup looks the same)', () => {
+    renderDialog()
+    expect(screen.queryByText(/Projects:/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/could not be read/)).not.toBeInTheDocument()
   })
 
   it('says nothing about video when a backup left none out', async () => {

@@ -1,6 +1,6 @@
 import { useMemo, useCallback } from 'react'
-import { useSearchParams } from 'react-router'
 import type { ChartType, SortOrder } from '@/lib/chart-data'
+import { useComposableSearchParams } from '@/hooks/useComposableSearchParams'
 import { parseIntParam } from '@/lib/utils'
 import { toComparisonChartType, type ComparisonChartType } from '@/lib/comparison-chart-types'
 
@@ -43,7 +43,12 @@ function getDefaultForKey(key: string): string {
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useAnalysisUrlState() {
-  const [searchParams, setSearchParams] = useSearchParams()
+  // #1146 — composable, so two writes in one commit both land (`url-state.md`).
+  // `AnalysisView` clears an invalid Group By in one effect and drops invalid params
+  // in another; with React Router's own setter the second started from the last
+  // render's URL and put the cleared grouping back — kept in the URL, sent with every
+  // compute and saved with the chart, under a select that was disabled.
+  const [searchParams, setSearchParams] = useComposableSearchParams()
 
   // ── Tab state ────────────────────────────────────────────────────────
   const activeTab = (searchParams.get('tab') || 'descriptives') as 'descriptives' | 'rc' | 'data_quality'

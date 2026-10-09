@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { WORD_COUNT_NOTE } from '@/lib/word-count-basis'
-import { useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery } from '@tanstack/react-query'
 import { SELECTED_ROW } from '@/lib/selection'
 import { Link } from 'react-router'
 import {
@@ -13,7 +13,6 @@ import {
   Search,
   X,
 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import BlindScopeNotice from './BlindScopeNotice'
 import {
@@ -25,6 +24,8 @@ import {
   type ObservationSegmentGroup,
 } from '@/lib/api'
 import { LoadState } from '@/components/LoadStatus'
+import TextPagingStatus from '@/components/TextPagingStatus'
+import { CONTENT_PAGE_SIZE, loadedCount, mergeContentPages, mergeTextPages } from '@/lib/content-pages'
 import { useListLoad } from '@/hooks/useListLoad'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { getSpeakerInitials } from '@/lib/conversation-import-utils'
@@ -104,11 +105,12 @@ export default function ContentByCode({
    * ⚠️ The Coded Texts section keeps its OWN query — a different endpoint, so a
    * failure in one must not blank the other.
    *
-   * ⚠️ `loadedLimit` rides the key, so a *Load more* is a new query and the
-   * sections show this notice while it runs. That is today's behaviour widened
-   * from one section to three, not a new defect — the underlying paging shape
-   * (an offset in the key rather than `useInfiniteQuery`, which the sibling
-   * `ContentBySource` uses) is filed separately as #968.
+   * ✅ #968 — an INFINITE query: *Load more* appends a page instead of putting a
+   * larger limit in the key (a new query with nothing in hand, which replaced
+   * all three sections with this notice and lost the researcher's place). The
+   * pages merge in `lib/content-pages.ts`; every kind pages by the same window
+   * (#969, server side), so one request widens all three sections, and each
+   * section's own *Load more* calls this one `fetchNextPage`.
    *
    * 🔴 **`needsSegments` is the `enabled` flag, not only a render gate, and it
    * has to be derived HERE rather than beside the other `show*` flags below.**
@@ -126,12 +128,9 @@ export default function ContentByCode({
     (source !== 'text' && hasDocuments) ||
     (source !== 'text' && hasObservations)
 
-  const [loadedLimit, setLoadedLimit] = useState(200)
-  /* eslint-disable react-hooks/set-state-in-effect -- reset pagination on code change */
-  useEffect(() => { setLoadedLimit(200) }, [selectedContentCodeId])
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  const segmentsQuery = useQuery({
+  const segmentsQuery = useInfiniteQuery({
+    // The page is NOT in the key (#968): the code and the filters are, so a new
+    // code or filter starts again at the first page by construction.
     queryKey: [
       'code-segments-context', projectId, selectedContentCodeId,
       filterParams.exclude_facilitator,
@@ -142,18 +141,30 @@ export default function ContentByCode({
       filterParams.observation_ids,
       filterParams.coder_ids,
       filterParams.layer_scope,
-      loadedLimit, 0,
     ],
-    queryFn: () => codeAnalysisApi.segmentsWithContext(projectId, selectedContentCodeId!, {
+    queryFn: ({ pageParam }) => codeAnalysisApi.segmentsWithContext(projectId, selectedContentCodeId!, {
       ...filterParams,
       context_size: 1,
-      limit: loadedLimit,
-      offset: 0,
+      limit: CONTENT_PAGE_SIZE,
+      offset: pageParam,
     }),
+    initialPageParam: 0,
+    // OFFSET arithmetic, never a count of the rows received: the three kinds page
+    // by one window and run out on different pages, so no row count is the offset.
+    getNextPageParam: (last, _all, lastParam) => (last.has_more ? lastParam + CONTENT_PAGE_SIZE : undefined),
     enabled: !!selectedContentCodeId && needsSegments,
   })
-  const segmentsData = segmentsQuery.data
+  const segmentsData = useMemo(
+    () => (segmentsQuery.data ? mergeContentPages(segmentsQuery.data.pages) : undefined),
+    [segmentsQuery.data],
+  )
   const segmentsLoad = useListLoad(segmentsQuery)
+  const { fetchNextPage: fetchNextSegments } = segmentsQuery
+  const paging: ContentPaging = {
+    isLoadingMore: segmentsQuery.isFetchingNextPage,
+    loadFailed: segmentsQuery.isFetchNextPageError,
+    onLoadMore: () => { void fetchNextSegments() },
+  }
   const landingRef = useMainContentLanding()
 
   // Build a code map for rendering code chips (uses allCodes so co-applied chips always render)
@@ -351,9 +362,8 @@ export default function ContentByCode({
           )}
           <SegmentsSection
             data={segmentsData}
+            paging={paging}
             projectId={projectId}
-            loadedLimit={loadedLimit}
-            onLoadMore={() => setLoadedLimit(l => l + 200)}
             codeId={selectedContentCodeId}
             codeMap={codeMap}
             allCodes={chipCodes}
@@ -404,6 +414,7 @@ export default function ContentByCode({
           )}
           <DocumentSegmentsSection
             data={segmentsData}
+            paging={paging}
             projectId={projectId}
             codeId={selectedContentCodeId}
             codeMap={codeMap}
@@ -428,6 +439,7 @@ export default function ContentByCode({
           )}
           <ObservationClipsSection
             data={segmentsData}
+            paging={paging}
             projectId={projectId}
             codeId={selectedContentCodeId}
             codeMap={codeMap}
@@ -492,12 +504,69 @@ function CodeListItem({
 }
 
 
+// ── Paging (#968 / #969) ─────────────────────────────────────────────────
+
+/** The ONE request behind the three sections — its *Load more* widens all of them. */
+interface ContentPaging {
+  isLoadingMore: boolean
+  loadFailed: boolean
+  onLoadMore: () => void
+}
+
+/**
+ * A section's "Showing N of M" and its *Load more* (#969).
+ *
+ * The document and clip sections had NEITHER, so a code past one page of
+ * document segments or clips ended those lists silently — #844's rule, one
+ * surface over: a coding list that ends early without saying so lets a
+ * researcher conclude they have seen everything. Rendered only for a kind with
+ * more than one page in total, or every small section gains an "All 3 clips
+ * loaded" line about nothing.
+ */
+function SectionPaging({ loaded, total, paging, noun }: {
+  loaded: number
+  total: number
+  paging: ContentPaging
+  noun: { one: string; many: string }
+}) {
+  if (total <= CONTENT_PAGE_SIZE) return null
+  return (
+    <TextPagingStatus
+      loaded={loaded}
+      total={total}
+      hasMore={loaded < total}
+      isLoadingMore={paging.isLoadingMore}
+      loadFailed={paging.loadFailed}
+      onLoadMore={paging.onLoadMore}
+      noun={noun}
+    />
+  )
+}
+
+/**
+ * The search line. Search runs over the LOADED rows only (this endpoint takes
+ * no search), so while a kind has more it says so — "12 matches of 1,040" read
+ * as a search of all 1,040 when 200 had been searched (#968's review).
+ */
+function searchMatchLine(matches: number, loaded: number, total: number, noun: string): string {
+  const head = `${matches.toLocaleString()} match${matches !== 1 ? 'es' : ''}`
+  return loaded < total
+    ? `${head} among the ${loaded.toLocaleString()} loaded of ${total.toLocaleString()} ${noun} — load more to search the rest`
+    : `${head} of ${total.toLocaleString()} ${noun}`
+}
+
+/** A search that matched nothing LOADED says so while more are unloaded (#968's review). */
+function noLoadedMatch(loaded: number, total: number, noun: string): string {
+  return loaded < total
+    ? `None of the ${loaded.toLocaleString()} loaded ${noun} match your search — ${(total - loaded).toLocaleString()} more are not loaded yet.`
+    : `No ${noun} match your search.`
+}
+
 // ── Segments Section ─────────────────────────────────────────────────────
 
 function SegmentsSection({
   data,
-  loadedLimit,
-  onLoadMore,
+  paging,
   projectId,
   codeId,
   codeMap,
@@ -510,8 +579,7 @@ function SegmentsSection({
 }: {
   /** #963 Tier 3 — the ANSWERED payload, owned by the parent (see its comment). */
   data: CodeSegmentsWithContextResponse
-  loadedLimit: number
-  onLoadMore: () => void
+  paging: ContentPaging
   /** Only for the workbench deep links — the query lives in the parent now. */
   projectId: number
   codeId: number
@@ -558,18 +626,28 @@ function SegmentsSection({
   )
 
   const matchCount = searchLower ? sortedConversations.reduce((n, c) => n + c.segments.length, 0) : null
+  const loaded = loadedCount(data.conversations)
 
   if (sortedConversations.length === 0) {
-    return <div className="text-center py-8 text-mm-text-muted">
-      {searchLower ? 'No segments match your search.' : 'No segments found for this code with current filters.'}
-    </div>
+    return (
+      <div>
+        <div className="text-center py-8 text-mm-text-muted">
+          {searchLower
+            ? noLoadedMatch(loaded, data.conversation_total, 'passages')
+            : 'No segments found for this code with current filters.'}
+        </div>
+        <SectionPaging loaded={loaded} total={data.conversation_total} paging={paging} noun={{ one: 'passage', many: 'passages' }} />
+      </div>
+    )
   }
 
   return (
     <div className="space-y-2">
       {matchCount != null && (
         <p className="text-sm text-mm-text-faint">
-          {matchCount} match{matchCount !== 1 ? 'es' : ''} of {data.total_segments} segment{data.total_segments !== 1 ? 's' : ''}
+          {/* #968's review: it divided conversation matches by the THREE kinds'
+              total, and named a search of the loaded rows as a search of all. */}
+          {searchMatchLine(matchCount, loaded, data.conversation_total, 'passages')}
         </p>
       )}
 
@@ -679,13 +757,12 @@ function SegmentsSection({
         )
       })}
 
-      {data.has_more && (
-        <div className="text-center py-3">
-          <Button variant="outline" size="sm" onClick={onLoadMore}>
-            Load more ({Math.max(0, data.total_segments - loadedLimit)} remaining)
-          </Button>
-        </div>
-      )}
+      <SectionPaging
+        loaded={loaded}
+        total={data.conversation_total}
+        paging={paging}
+        noun={{ one: 'passage', many: 'passages' }}
+      />
     </div>
   )
 }
@@ -758,28 +835,39 @@ function CommentsSection({
   onCodeChange?: () => void
 }) {
   const [collapsedDatasets, setCollapsedDatasets] = useState<Set<number>>(new Set())
-  const [loadedLimit, setLoadedLimit] = useState(200)
 
-  /* eslint-disable react-hooks/set-state-in-effect -- reset pagination on code change */
   useEffect(() => {
-    setLoadedLimit(200)
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset collapsed state on code change
     setCollapsedDatasets(new Set())
   }, [codeId])
-  /* eslint-enable react-hooks/set-state-in-effect */
 
-  const textsQuery = useQuery({
-    queryKey: ['code-texts-context', projectId, codeId, participantIds, textColumnIds, coderIds, layerScope, loadedLimit, 0],
-    queryFn: () => codeAnalysisApi.textsWithContext(projectId, codeId, {
+  // #968 — an infinite query, as the passages above: the page is not in the key,
+  // so *Load more* appends instead of replacing the section with a loading notice.
+  const textsQuery = useInfiniteQuery({
+    queryKey: ['code-texts-context', projectId, codeId, participantIds, textColumnIds, coderIds, layerScope],
+    queryFn: ({ pageParam }) => codeAnalysisApi.textsWithContext(projectId, codeId, {
       participant_ids: participantIds,
       text_column_ids: textColumnIds,
       coder_ids: coderIds,
       layer_scope: layerScope,
-      limit: loadedLimit,
-      offset: 0,
+      limit: CONTENT_PAGE_SIZE,
+      offset: pageParam,
     }),
+    initialPageParam: 0,
+    getNextPageParam: (last, _all, lastParam) => (last.has_more ? lastParam + CONTENT_PAGE_SIZE : undefined),
     enabled: !!codeId,
   })
-  const data = textsQuery.data
+  const data = useMemo(
+    () => (textsQuery.data ? mergeTextPages(textsQuery.data.pages) : undefined),
+    [textsQuery.data],
+  )
+  const loadedTexts = data ? data.datasets.reduce((n, ds) => n + ds.texts.length, 0) : 0
+  const { fetchNextPage: fetchNextTexts } = textsQuery
+  const textsPaging: ContentPaging = {
+    isLoadingMore: textsQuery.isFetchingNextPage,
+    loadFailed: textsQuery.isFetchNextPageError,
+    onLoadMore: () => { void fetchNextTexts() },
+  }
   /**
    * #963 Tier 3 — this section keeps its OWN load, deliberately: a DIFFERENT
    * endpoint from the three beside it, so a failure in one must not blank the
@@ -827,16 +915,23 @@ function CommentsSection({
   const matchCount = searchLower ? sortedDatasets.reduce((n, ds) => n + ds.texts.length, 0) : null
 
   if (sortedDatasets.length === 0) {
-    return <div className="text-center py-8 text-mm-text-muted">
-      {searchLower ? 'No texts match your search.' : 'No coded texts found for this code with current filters.'}
-    </div>
+    return (
+      <div>
+        <div className="text-center py-8 text-mm-text-muted">
+          {searchLower
+            ? noLoadedMatch(loadedTexts, data.total_texts, 'texts')
+            : 'No coded texts found for this code with current filters.'}
+        </div>
+        <SectionPaging loaded={loadedTexts} total={data.total_texts} paging={textsPaging} noun={{ one: 'text', many: 'texts' }} />
+      </div>
+    )
   }
 
   return (
     <div className="space-y-2">
       {matchCount != null && (
         <p className="text-sm text-mm-text-faint">
-          {matchCount} match{matchCount !== 1 ? 'es' : ''} of {data.total_texts} text{data.total_texts !== 1 ? 's' : ''}
+          {searchMatchLine(matchCount, loadedTexts, data.total_texts, 'texts')}
         </p>
       )}
 
@@ -926,13 +1021,7 @@ function CommentsSection({
         )
       })}
 
-      {data.has_more && (
-        <div className="text-center py-3">
-          <Button variant="outline" size="sm" onClick={() => setLoadedLimit(l => l + 200)}>
-            Load more ({Math.max(0, data.total_texts - loadedLimit)} remaining)
-          </Button>
-        </div>
-      )}
+      <SectionPaging loaded={loadedTexts} total={data.total_texts} paging={textsPaging} noun={{ one: 'text', many: 'texts' }} />
     </div>
   )
 }
@@ -942,6 +1031,7 @@ function CommentsSection({
 
 function DocumentSegmentsSection({
   data,
+  paging,
   projectId,
   codeId,
   codeMap,
@@ -954,6 +1044,7 @@ function DocumentSegmentsSection({
 }: {
   /** #963 Tier 3 — the ANSWERED payload, shared with the two sibling sections. */
   data: CodeSegmentsWithContextResponse
+  paging: ContentPaging
   /** Only for the workbench deep links — the query lives in the parent now. */
   projectId: number
   codeId: number
@@ -1004,12 +1095,29 @@ function DocumentSegmentsSection({
     (a, b) => b.segments.length - a.segments.length,
   )
 
+  const loaded = loadedCount(data.documents)
+  const docNoun = { one: 'document segment', many: 'document segments' }
   if (sortedDocuments.length === 0) {
-    return <div className="text-center py-8 text-mm-text-muted">No document segments match your search.</div>
+    return (
+      <div>
+        <div className="text-center py-8 text-mm-text-muted">
+          {noLoadedMatch(loaded, data.document_total, 'document segments')}
+        </div>
+        <SectionPaging loaded={loaded} total={data.document_total} paging={paging} noun={docNoun} />
+      </div>
+    )
   }
 
   return (
     <div className="space-y-2">
+      {searchLower && (
+        <p className="text-sm text-mm-text-faint">
+          {searchMatchLine(
+            sortedDocuments.reduce((n, d) => n + d.segments.length, 0),
+            loaded, data.document_total, 'document segments',
+          )}
+        </p>
+      )}
       {sortedDocuments.map(doc => {
         const collapsed = collapsedDocs.has(doc.document_id)
         return (
@@ -1094,6 +1202,8 @@ function DocumentSegmentsSection({
           </div>
         )
       })}
+      {/* #969 — this section had no Load more and said nothing at 200. */}
+      <SectionPaging loaded={loaded} total={data.document_total} paging={paging} noun={docNoun} />
     </div>
   )
 }
@@ -1216,6 +1326,7 @@ function OccurrenceStrip({ observation, color }: { observation: ObservationSegme
 
 function ObservationClipsSection({
   data,
+  paging,
   projectId,
   codeId,
   codeMap,
@@ -1235,6 +1346,7 @@ function ObservationClipsSection({
    * Retry buttons for it.
    */
   data: CodeSegmentsWithContextResponse
+  paging: ContentPaging
   /** Only for the workbench deep links — the query lives in the parent now. */
   projectId: number
   codeId: number
@@ -1284,8 +1396,17 @@ function ObservationClipsSection({
     (a, b) => b.segments.length - a.segments.length,
   )
 
+  const loaded = loadedCount(data.observations)
+  const clipNoun = { one: 'clip', many: 'clips' }
   if (sortedObservations.length === 0) {
-    return <div className="text-center py-8 text-mm-text-muted">No clips match your search.</div>
+    return (
+      <div>
+        <div className="text-center py-8 text-mm-text-muted">
+          {noLoadedMatch(loaded, data.observation_total, 'clips')}
+        </div>
+        <SectionPaging loaded={loaded} total={data.observation_total} paging={paging} noun={clipNoun} />
+      </div>
+    )
   }
 
   // The strip's marks carry the CODE's color — the mockup's rule; the strip
@@ -1410,6 +1531,8 @@ function ObservationClipsSection({
           </div>
         )
       })}
+      {/* #969 — this section had no Load more and said nothing at 200. */}
+      <SectionPaging loaded={loaded} total={data.observation_total} paging={paging} noun={clipNoun} />
     </div>
   )
 }

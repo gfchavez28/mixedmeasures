@@ -362,6 +362,98 @@ class TestTheFourRefusalsAtTheDoor:
         assert project.query(Dataset).filter(Dataset.id == ordinary.id).first() is None
 
 
+class TestTheParticipantPanelsDoorsAreLockedToo:
+    """#1157 — the participants router writes `DatasetRow.participant_id` at two
+    doors the dataset router's gate never reached, and the Participants panel offered
+    *Unlink* on this table. The unlink was a DELETE with a delay: the next refresh
+    reaped the row and the cells typed into it (measured on a scratch install)."""
+
+    def _managed_row(self, db):
+        ds = create_participant_dataset(db, 1)
+        row = db.query(DatasetRow).filter(
+            DatasetRow.dataset_id == ds.id, DatasetRow.participant_id.isnot(None),
+        ).order_by(DatasetRow.id).first()
+        return ds, row
+
+    def test_the_panels_unlink_is_refused_and_changes_nothing(self, project):
+        from app.routers.participants import unlink_dataset_row
+        from app.schemas.participant import UnlinkDatasetRowRequest
+
+        ds, row = self._managed_row(project)
+        owner = row.participant_id
+        with pytest.raises(HTTPException) as exc:
+            _run(unlink_dataset_row(
+                1, owner, UnlinkDatasetRowRequest(row_id=row.id), _user(project), project,
+            ))
+        assert exc.value.status_code == 409
+        assert exc.value.detail == managed_dataset_refusal(ds, pd.ACTION_LINK_PARTICIPANTS)
+        project.expire_all()
+        assert project.get(DatasetRow, row.id).participant_id == owner
+
+    def test_the_panels_link_is_refused_with_the_tables_own_sentence(self, project):
+        """The row is someone else's, so the old code refused this too — with
+        "Row already linked". The DETAIL is what proves the new gate answered first."""
+        from app.routers.participants import link_dataset_row
+        from app.schemas.participant import LinkDatasetRowRequest
+
+        ds, row = self._managed_row(project)
+        newcomer = Participant(project_id=1, identifier="E-99")
+        project.add(newcomer)
+        project.flush()
+        with pytest.raises(HTTPException) as exc:
+            _run(link_dataset_row(
+                1, newcomer.id, LinkDatasetRowRequest(dataset_id=ds.id, row_id=row.id),
+                _user(project), project,
+            ))
+        assert exc.value.status_code == 409
+        assert exc.value.detail == managed_dataset_refusal(ds, pd.ACTION_LINK_PARTICIPANTS)
+
+    def test_an_ORDINARY_datasets_row_still_unlinks_and_links_back(self, project):
+        """The positive control: a guard that refused every unlink passes both
+        tests above."""
+        from app.routers.participants import link_dataset_row, unlink_dataset_row
+        from app.schemas.participant import LinkDatasetRowRequest, UnlinkDatasetRowRequest
+
+        person = project.query(Participant).filter(Participant.identifier == "E-01").one()
+        survey = Dataset(project_id=1, name="Survey")
+        project.add(survey)
+        project.flush()
+        row = DatasetRow(dataset_id=survey.id, participant_id=person.id, row_identifier="R1")
+        project.add(row)
+        project.flush()
+
+        _run(unlink_dataset_row(
+            1, person.id, UnlinkDatasetRowRequest(row_id=row.id), _user(project), project,
+        ))
+        project.expire_all()
+        assert project.get(DatasetRow, row.id).participant_id is None
+        _run(link_dataset_row(
+            1, person.id, LinkDatasetRowRequest(dataset_id=survey.id, row_id=row.id),
+            _user(project), project,
+        ))
+        project.expire_all()
+        assert project.get(DatasetRow, row.id).participant_id == person.id
+
+    def test_the_payload_says_which_links_are_locked(self, project):
+        """The panel shows the server's sentence instead of *Unlink*, so the payload
+        must carry it — for the managed row only."""
+        from app.routers.participants import _load_participant_with_relations, participant_to_response
+
+        create_participant_dataset(project, 1)
+        person = project.query(Participant).filter(Participant.identifier == "E-01").one()
+        survey = Dataset(project_id=1, name="Survey")
+        project.add(survey)
+        project.flush()
+        project.add(DatasetRow(dataset_id=survey.id, participant_id=person.id, row_identifier="R1"))
+        project.flush()
+        project.expire_all()
+
+        response = participant_to_response(_load_participant_with_relations(project, person.id), project)
+        by_dataset = {r.dataset_name: r.link_refusal for r in response.dataset_rows}
+        assert by_dataset["Survey"] is None
+        assert by_dataset["Participants"] == pd._REFUSALS[pd.ACTION_LINK_PARTICIPANTS]
+
+
 class TestOpenColumns:
     """The half a lock-only suite would lose."""
 
@@ -756,6 +848,122 @@ class TestEveryRowSetEndpointAsksTheGate:
     def test_the_allowlist_has_no_stale_entries(self):
         found = self._row_set_endpoints()
         stale = sorted(set(self.ALLOWLIST) - set(found))
+        assert not stale, f"{stale} are allowlisted but no longer match the scan"
+
+
+class TestEveryDoorThatRelinksARowAsksTheGate:
+    """#1157 — the scan above reads `routers/dataset.py` ONLY, and the doors were not
+    all there: `routers/participants.py`'s `link_dataset_row` / `unlink_dataset_row`
+    write the same `DatasetRow.participant_id` and never asked. **Count the doors by
+    what they WRITE, never by the file they live in.**
+
+    So this walks EVERY router module and finds the route functions that write a
+    dataset row's participant link — an assignment to `.participant_id` in a body
+    that names `DatasetRow` (or the router's alias for it), or a call to the linking
+    service — and requires each to ask the gate (`_refuse_if_managed` or
+    `managed_dataset_refusal`).
+    """
+
+    #: Route functions that match but cannot touch a tool-maintained table, each
+    #: with its reason; `test_the_allowlist_has_no_stale_entries` fails on a stale one.
+    #: EMPTY, and measured rather than assumed: the first draft allowlisted
+    #: `import_dataset` (a new dataset is never managed), and the stale-entry test
+    #: refused it — the import links rows inside `dataset_import`, not in the router.
+    #: Six doors match today and all six ask (append is the sixth).
+    ALLOWLIST: dict[str, str] = {}
+
+    GATE_CALLS = ("_refuse_if_managed", "managed_dataset_refusal")
+    ROUTE_METHODS = {"post", "patch", "put", "delete"}
+
+    def _relinking_routes(self, source: str, module: str) -> dict[str, bool]:
+        tree = ast.parse(source)
+        found: dict[str, bool] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            is_route = any(
+                isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                and d.func.attr in self.ROUTE_METHODS
+                for d in node.decorator_list
+            )
+            if not is_route:
+                continue
+            names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+            mentions_rows = any(n.startswith("DatasetRow") for n in names)
+            writes_link = any(
+                isinstance(t, ast.Attribute) and t.attr == "participant_id"
+                for n in ast.walk(node) if isinstance(n, ast.Assign)
+                for t in n.targets
+            )
+            calls_linker = any(
+                isinstance(n, ast.Call)
+                and getattr(n.func, "id", getattr(n.func, "attr", None)) == "link_rows_by_identifier_column"
+                for n in ast.walk(node)
+            )
+            if (writes_link and mentions_rows) or calls_linker:
+                calls = {
+                    getattr(n.func, "id", getattr(n.func, "attr", None))
+                    for n in ast.walk(node) if isinstance(n, ast.Call)
+                }
+                found[f"{module}::{node.name}"] = any(g in calls for g in self.GATE_CALLS)
+        return found
+
+    def _scan(self) -> dict[str, bool]:
+        from tests.guard_support import app_files
+
+        found: dict[str, bool] = {}
+        for path in app_files(
+            "routers", floor=30,
+            sentinels=("routers/participants.py", "routers/dataset.py"),
+        ):
+            found.update(self._relinking_routes(path.read_text(encoding="utf-8"), path.stem))
+        return found
+
+    @staticmethod
+    def _bare(name: str) -> str:
+        return name.split("::", 1)[1]
+
+    def test_the_scan_finds_the_known_doors(self):
+        """Population self-check: the dataset router's three link doors, its append,
+        and the participants router's two."""
+        found = self._scan()
+        for door in (
+            "dataset::link_participant", "dataset::bulk_link_participants",
+            "dataset::link_by_column", "participants::link_dataset_row",
+            "participants::unlink_dataset_row",
+        ):
+            assert door in found, f"the scan no longer finds {door} — it has gone blind"
+
+    def test_the_predicate_actually_discriminates(self):
+        """Falsifier: a SPEAKER link is written in the conversations router, and it
+        is not a dataset row."""
+        planted = (
+            "@router.post('/x')\n"
+            "def link_speaker(db):\n"
+            "    speaker.participant_id = 3\n"
+            "@router.post('/y')\n"
+            "def relink(db):\n"
+            "    row = db.query(DatasetRow).first()\n"
+            "    row.participant_id = None\n"
+        )
+        found = self._relinking_routes(planted, "planted")
+        assert found == {"planted::relink": False}
+
+    def test_every_door_that_relinks_a_row_asks_the_gate(self):
+        missing = sorted(
+            name for name, gated in self._scan().items()
+            if not gated and self._bare(name) not in self.ALLOWLIST
+        )
+        assert not missing, (
+            f"{missing} write a dataset row's participant link without asking "
+            "whether the dataset maintains its own links. Call "
+            "`managed_dataset_refusal(dataset, ACTION_LINK_PARTICIPANTS)` and refuse "
+            "with 409, or allowlist it here with a reason."
+        )
+
+    def test_the_allowlist_has_no_stale_entries(self):
+        bare = {self._bare(n) for n in self._scan()}
+        stale = sorted(set(self.ALLOWLIST) - bare)
         assert not stale, f"{stale} are allowlisted but no longer match the scan"
 
 

@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest'
 import { renderHook, act, cleanup } from '@testing-library/react'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, useNavigate } from 'react-router'
 import type { ReactNode } from 'react'
 import type { MaterialResponse } from '@/lib/api'
 import { useQualitativeAnalysis } from './useQualitativeAnalysis'
@@ -138,5 +138,63 @@ describe('useQualitativeAnalysis — #685 timelineTableMode', () => {
     const { result } = renderHook(() => useQualitativeAnalysis(), { wrapper: wrapper('/?timedMode=coder') })
     act(() => result.current.loadMaterial({ id: 1, config: {} } as unknown as MaterialResponse))
     expect(result.current.timelineTableMode).toBe('code')
+  })
+})
+
+/**
+ * #1129 — two writes in one tick must both land.
+ *
+ * React Router hands a functional `setSearchParams(prev => …)` the params of the
+ * last RENDER, so every write before the next render started from the same URL
+ * and the last one won. Entering the Content tab fills five selections in one
+ * effect run, and only the observations survived: the codes, conversations and
+ * documents were dropped, and the tab showed observation clips alone.
+ */
+describe('useQualitativeAnalysis — #1129 writes in one tick compose', () => {
+  it('keeps every selection written in one act (the Content tab auto-select)', () => {
+    const { result } = renderHook(() => useQualitativeAnalysis(), { wrapper: wrapper('/?tab=content') })
+    act(() => {
+      result.current.setSelectedCodeIds(new Set([6]))
+      result.current.setSelectedConversationIds(new Set([1, 2]))
+      result.current.setSelectedDocumentIds(new Set([3]))
+      result.current.setSelectedObservationIds(new Set([4]))
+    })
+    expect([...result.current.selectedCodeIds]).toEqual([6])
+    expect([...result.current.selectedConversationIds]).toEqual([1, 2])
+    expect([...result.current.selectedDocumentIds]).toEqual([3])
+    expect([...result.current.selectedObservationIds]).toEqual([4])
+    expect(result.current.tab).toBe('content')
+  })
+
+  it('clearing a deleted material clears it — the second write no longer restores it', () => {
+    const { result } = renderHook(() => useQualitativeAnalysis(), { wrapper: wrapper('/?material=12') })
+    expect(result.current.activeMaterialId).toBe(12)
+    act(() => {
+      result.current.setUrlParam('material', '')
+      result.current.setUrlParam('element', '')
+    })
+    expect(result.current.activeMaterialId).toBeNull()
+  })
+
+  it('a write after the URL has moved on starts from the NEW URL', () => {
+    const { result } = renderHook(() => useQualitativeAnalysis(), { wrapper: wrapper('/') })
+    act(() => result.current.setSelectedCodeIds(new Set([1])))
+    act(() => result.current.setSelectedCodeIds(new Set()))
+    act(() => result.current.setSelectedDocumentIds(new Set([5])))
+    expect([...result.current.selectedCodeIds]).toEqual([])
+    expect([...result.current.selectedDocumentIds]).toEqual([5])
+  })
+
+  it('a URL change made ELSEWHERE (Back, a link) is not overwritten by a stale pending write', () => {
+    const { result } = renderHook(
+      () => ({ qa: useQualitativeAnalysis(), navigate: useNavigate() }),
+      { wrapper: wrapper('/') },
+    )
+    act(() => result.current.qa.setSelectedCodeIds(new Set([1])))
+    act(() => result.current.navigate('/?tab=quotes&codes=9'))
+    act(() => result.current.qa.setSelectedDocumentIds(new Set([5])))
+    expect(result.current.qa.tab).toBe('quotes')
+    expect([...result.current.qa.selectedCodeIds]).toEqual([9])
+    expect([...result.current.qa.selectedDocumentIds]).toEqual([5])
   })
 })

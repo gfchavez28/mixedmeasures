@@ -259,6 +259,38 @@ class TestEveryParticipantFkHasAnArm:
                 "the fixture that populates every reachable kind"
             )
 
+    #: #1110 — the CLIENT's orphan predicate is a fourth consumer of the same FK
+    #: set: it decides who the Participants page lists under "No linked sources",
+    #: the list a researcher deletes from. It read two of the three links, so the
+    #: subject of a document was offered for deletion. Each FK → the field of the
+    #: participant payload that carries it.
+    CLIENT_ORPHAN_FIELD = {
+        ("speakers", "participant_id"): "linked_speakers",
+        ("dataset_rows", "participant_id"): "dataset_rows",
+        ("documents", "participant_id"): "linked_documents",
+    }
+
+    def test_the_clients_orphan_predicate_reads_every_link(self):
+        import re
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[2]
+               / "frontend/src/lib/conversation-import-utils.ts").read_text()
+        match = re.search(
+            r"export function isOrphanedParticipant\([\s\S]*?\n\}\n", src)
+        assert match, "isOrphanedParticipant was not found — this scan has gone blind"
+        body = match.group(0)
+        assert set(self.CLIENT_ORPHAN_FIELD) == self._participant_fks(), (
+            "a link to `participants.id` has no entry here: add the payload field "
+            "that carries it, and make `isOrphanedParticipant` read it"
+        )
+        missing = [f for f in self.CLIENT_ORPHAN_FIELD.values()
+                   if f"{f}.length === 0" not in body]
+        assert not missing, (
+            f"`isOrphanedParticipant` does not test {missing} — a participant "
+            "linked only that way would be listed under 'No linked sources' and "
+            "offered for deletion"
+        )
+
 
 class TestWhatItDeliberatelyOmits:
     def test_it_reports_no_text(self, populated):
@@ -281,6 +313,53 @@ class TestWhatItDeliberatelyOmits:
         target.merged_into_id = [s for s in segs if s.id != target.id][0].id
         db.flush()
         assert build_withdrawal_report(db, subject).conversations[0].segments == 2
+
+
+class TestTheReportReachesTheWire:
+    """🔴 #1123 — the document arm was built, tested and DROPPED at the wire.
+
+    Every test above reads the service's dataclass, and `TestEndpoint` calls the
+    router function directly, where FastAPI's `response_model` never runs — so
+    nothing noticed that `WithdrawalReportResponse` declared no `documents`. In
+    production the list was discarded on the way out, and the Participants page
+    told a researcher "Nothing else in this project is linked to this
+    participant" about someone a document is about.
+
+    Two checks, because they fail differently: the round trip proves the
+    populated report SURVIVES the schema (under pytest every schema forbids extra
+    keys, so a dropped field raises here rather than vanishing), and the
+    field-set comparison holds every report class to its wire twin whether or not
+    a fixture happens to populate a field.
+    """
+
+    def test_the_whole_report_survives_the_response_model(self, populated):
+        from app.schemas.participant import WithdrawalReportResponse
+        db, subject, _ = populated
+        sent = build_withdrawal_report(db, subject).to_dict()
+        assert sent["documents"], "the fixture must populate the document arm"
+        received = WithdrawalReportResponse.model_validate(sent).model_dump()
+        assert received == sent
+
+    def test_every_report_class_has_the_same_fields_as_its_wire_schema(self):
+        from dataclasses import fields
+        from app.schemas import participant as wire
+        from app.services import withdrawal_report as service
+
+        pairs = [
+            (service.WithdrawalReport, wire.WithdrawalReportResponse, {"total_items"}),
+            (service.ConversationTouchpoint, wire.WithdrawalConversationTouchpoint, set()),
+            (service.DatasetTouchpoint, wire.WithdrawalDatasetTouchpoint, set()),
+            (service.DocumentTouchpoint, wire.WithdrawalDocumentTouchpoint, set()),
+        ]
+        for cls, schema, derived in pairs:
+            written = {f.name for f in fields(cls)} | derived
+            declared = set(schema.model_fields)
+            assert written, f"{cls.__name__} has no fields — the comparison went blind"
+            assert written == declared, (
+                f"{cls.__name__} writes {sorted(written - declared)} that "
+                f"{schema.__name__} drops, and {schema.__name__} declares "
+                f"{sorted(declared - written)} the service never writes"
+            )
 
 
 class TestEndpoint:

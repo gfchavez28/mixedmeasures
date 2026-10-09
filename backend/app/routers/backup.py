@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from ..services.backup import (
     BackupNameError,
     DatabaseBusyError,
     RestoreError,
+    RestoreNotStarted,
     create_backup,
     cleanup_old_backups,
     find_backup,
@@ -35,6 +37,7 @@ from ..services.backup import (
     restore_from_backup,
     validate_backup,
 )
+from ..services.archive_safety import MAX_ARCHIVE_EXPANDED_BYTES
 from ..services.data_repairs import run_data_repairs
 from ..services.restore_gate import RestoreRefused, db_gate
 from ..services.safety_copies import (
@@ -64,6 +67,17 @@ def _get_paths() -> tuple[Path, Path, Path, Path]:
     """Return (db_path, docs_dir, media_dir, backup_dir)."""
     db_path = Path(get_settings().mm_database_path)
     return db_path, get_documents_dir(), get_media_dir(), get_backup_dir()
+
+
+def _free_bytes_where_a_restore_unpacks() -> int | None:
+    """Free space on the disk a restore unpacks onto — the data folder, which holds
+    the recordings that dominate a large backup. None when it cannot be read: the
+    preview then simply says nothing about space."""
+    try:
+        _, _, media_dir, _ = _get_paths()
+        return shutil.disk_usage(media_dir.parent).free
+    except OSError:
+        return None
 
 
 #: What a researcher is told when a backup could not be written for a reason other
@@ -139,8 +153,12 @@ async def backup_status(user: User = Depends(get_current_user)):
     computed as `last_backup_at + auto_backup_interval_hours` so the UI
     can render a freshness label instead of a stale-only amber dot."""
     _, _, _, backup_dir = _get_paths()
-    interval = get_settings().auto_backup_interval_hours
-    return get_backup_status(backup_dir, interval_hours=interval)
+    settings = get_settings()
+    return get_backup_status(
+        backup_dir,
+        interval_hours=settings.auto_backup_interval_hours,
+        max_count=settings.auto_backup_max_count,
+    )
 
 
 @router.post("/now", response_model=BackupStatus)
@@ -192,7 +210,11 @@ async def backup_now(
     db.add(audit)
     db.commit()
 
-    return get_backup_status(backup_dir, interval_hours=settings.auto_backup_interval_hours)
+    return get_backup_status(
+        backup_dir,
+        interval_hours=settings.auto_backup_interval_hours,
+        max_count=settings.auto_backup_max_count,
+    )
 
 
 @router.get("/list", response_model=list[BackupInfo])
@@ -251,7 +273,11 @@ def backup_validate_local(
     _, _, _, backup_dir = _get_paths()
     path = _backup_or_error(backup_dir, filename)
     try:
-        return validate_backup(path)
+        # A backup in this app's own folder is not held to the 20 GB unpacking cap
+        # that guards a file from outside (#1036 a).
+        return validate_backup(
+            path, expansion_limit=None, free_bytes=_free_bytes_where_a_restore_unpacks()
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -269,7 +295,9 @@ def backup_restore_local(
     UPLOAD, capped at 500 MB — and the complete backup, the one a careful
     researcher takes by hand before something risky, is the likeliest to exceed
     it, because the automatic ones exclude video to stay small. Restoring in place
-    has no ceiling at all: nothing crosses the wire, and nothing is copied.
+    has no ceiling: nothing crosses the wire, nothing is copied, and — since
+    #1036 (a) — the 20 GB unpacking cap that guards a file from outside does not
+    apply either. Free disk space is the only limit, and the preview states it.
 
     🔴 **It also makes the app's own disaster-recovery instruction followable.**
     When a restore fails partway, `RestoreError` tells the researcher their data
@@ -286,10 +314,22 @@ def backup_restore_local(
     return _restore_in_place(
         path, db=db, user_id=user.id,
         audit_details={"filename": path.name, "source": "backup_folder"},
+        # This app wrote it: not held to the 20 GB cap that guards a file from
+        # outside (#1036 a). That cap refused the full backups — the ones carrying
+        # recordings — including the "Before a restore" copy a failed restore says
+        # to restore from here.
+        expansion_limit=None,
     )
 
 
-def _restore_in_place(zip_path: Path, *, db: Session, user_id: int, audit_details: dict) -> dict:
+def _restore_in_place(
+    zip_path: Path,
+    *,
+    db: Session,
+    user_id: int,
+    audit_details: dict,
+    expansion_limit: int | None = MAX_ARCHIVE_EXPANDED_BYTES,
+) -> dict:
     """The restore both doors run, inside the database gate (#1024).
 
     🔴 **The order is the fix.** Take the gate (no new request is admitted, and every
@@ -308,7 +348,8 @@ def _restore_in_place(zip_path: Path, *, db: Session, user_id: int, audit_detail
 
     After the swap, still inside the gate, the restored database gets the same
     data repairs startup gives every database it opens (#1026) — otherwise a backup
-    from before a repair shipped would stay unrepaired until the next relaunch.
+    from before a repair shipped would stay unrepaired until the next relaunch —
+    and a `restore_completed` record of where it came from (#1084 c).
 
     A synchronous function: the local door is a `def` endpoint and the upload door
     hands this to a worker thread, so the wait for the gate never blocks the event
@@ -331,16 +372,18 @@ def _restore_in_place(zip_path: Path, *, db: Session, user_id: int, audit_detail
             engine.dispose()
             try:
                 pre_restore_info = restore_from_backup(
-                    zip_path, db_path, docs_dir, media_dir, backup_dir
+                    zip_path, db_path, docs_dir, media_dir, backup_dir,
+                    expansion_limit=expansion_limit,
                 )
             finally:
                 # Whether the swap finished or failed partway, the file may have
                 # changed under the pool.
                 engine.dispose()
             # On the NEW file (the pool was just emptied), before anyone else is let
-            # in. Never raises: the files are already swapped, and the restore must
+            # in. Neither raises: the files are already swapped, and the restore must
             # still report that it succeeded.
             run_data_repairs(SessionLocal)
+            _record_the_restore_in_the_restored_database(audit_details, pre_restore_info)
         return {
             "status": "restored",
             "pre_restore_backup": pre_restore_info.filename,
@@ -368,6 +411,10 @@ def _restore_in_place(zip_path: Path, *, db: Session, user_id: int, audit_detail
         raise HTTPException(400, str(e))
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
+    except RestoreNotStarted as e:
+        # #1036 d: stopped BEFORE the swap — said as such, never as "failed partway".
+        logger.error("Restore stopped before replacing anything: %s", e)
+        raise HTTPException(500, str(e))
     except RestoreError as e:
         # #550: name the escape hatch rather than pointing at server logs — and
         # since #971 that instruction is one a researcher can actually follow,
@@ -379,8 +426,48 @@ def _restore_in_place(zip_path: Path, *, db: Session, user_id: int, audit_detail
             "backup from Backup history to return to the prior state."
         ))
     except Exception as e:
+        # Every known failure has its own arm above, so which side of the swap this
+        # is on is not known here — and "check the server logs" sent a desktop user
+        # to a log they cannot reach. Say what IS known: where the way back would be.
         logger.error("Restore failed: %s", e)
-        raise HTTPException(500, "Restore failed. Check server logs for details.")
+        raise HTTPException(500, (
+            f"The restore failed ({type(e).__name__}: {e}). If it had begun replacing "
+            "your data, a “Before a restore” backup of it is in Backup history."
+        ))
+
+
+def _record_the_restore_in_the_restored_database(audit_details: dict, pre_restore_info) -> None:
+    """Write `restore_completed` into the database that was just swapped in (#1084 c).
+
+    `restore_started` is written BEFORE the swap, into the database being
+    replaced — which is right for the pre-restore backup, whose own trail then
+    says why it was taken. But it left the restored install's trail silent: its
+    history ended wherever the backup was taken, with nothing saying the data had
+    been brought back, from which backup, or where the replaced state went. That
+    is a provenance gap (question 3), closed here after the second dispose, still
+    inside the gate.
+
+    ⚠️ `user_id` is None: the restoring user's id belongs to the REPLACED
+    database, and in the restored one the same number may be someone else.
+    Never raises — the files are already swapped, and the restore succeeded.
+    """
+    try:
+        with SessionLocal() as session:
+            session.add(AuditEntry(
+                user_id=None,
+                action="restore_completed",
+                entity_type="system",
+                details=json.dumps({
+                    **audit_details,
+                    "pre_restore_backup": pre_restore_info.filename,
+                }),
+            ))
+            session.commit()
+    except Exception as e:
+        logger.warning(
+            "The restore succeeded, but its record could not be written into the "
+            "restored database: %s", e,
+        )
 
 
 @router.delete("/archives/{filename}", status_code=204)
@@ -603,11 +690,18 @@ async def backup_validate(
     file: UploadFile,
     user: User = Depends(get_current_user),
 ):
-    """Validate an uploaded .mmbackup file and return a restore preview."""
+    """Validate an uploaded .mmbackup file and return a restore preview.
+
+    `async` only for the upload. The validation — extracting the database and
+    running an integrity check — runs in a worker thread: it ran ON the event loop,
+    freezing every other request (the packaged app's `/health` probe included) for
+    as long as it took, the #1022 class the in-folder door's `def` already avoided.
+    """
     tmp_path = await _stream_upload_to_temp(file)
     try:
-        preview = validate_backup(tmp_path)
-        return preview
+        return await asyncio.to_thread(
+            validate_backup, tmp_path, free_bytes=_free_bytes_where_a_restore_unpacks()
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
     finally:

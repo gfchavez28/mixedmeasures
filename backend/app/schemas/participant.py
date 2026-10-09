@@ -59,6 +59,13 @@ class DatasetRowInfo(BaseModel):
     dataset_id: int
     row_identifier: str | None = None
     submitted_at: UTCTimestamp | None = None
+    #: #1157 — the sentence refusing a change to this link, or None when the link
+    #: is the researcher's to change. Set for a row of a table the TOOL keeps in step
+    #: with the participants (`participant_dataset.managed_dataset_refusal`), where
+    #: an unlink only made the next refresh delete the row and every value typed
+    #: into it. The client shows the sentence and offers no *Unlink*; it never
+    #: re-derives the rule.
+    link_refusal: str | None = None
 
 
 class ParticipantCreate(BaseModel):
@@ -166,6 +173,25 @@ class WithdrawalDatasetTouchpoint(BaseModel):
     row_scores: int = 0
 
 
+class WithdrawalDocumentTouchpoint(BaseModel):
+    """A document this participant is the SUBJECT of (row 46).
+
+    🔴 #1123 — the service has reported these since row 46, and this schema did
+    not declare them, so FastAPI's response model dropped the list on the way out:
+    the Participants page told a researcher that "nothing else in this project is
+    linked" to someone a document is about, on the one report where an
+    under-count is the failure that matters. `TestTheReportReachesTheWire` holds
+    the service's fields and these to the same set.
+    """
+
+    document_id: int
+    name: str
+    segments: int = 0
+    code_applications: int = 0
+    excerpts: int = 0
+    notes: int = 0
+
+
 class WithdrawalReportResponse(BaseModel):
     """Everything in the project that traces back to one participant.
 
@@ -184,4 +210,5 @@ class WithdrawalReportResponse(BaseModel):
     speaker_names: list[str] = []
     conversations: list[WithdrawalConversationTouchpoint] = []
     datasets: list[WithdrawalDatasetTouchpoint] = []
+    documents: list[WithdrawalDocumentTouchpoint] = []
     total_items: int = 0

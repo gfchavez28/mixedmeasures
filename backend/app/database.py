@@ -369,7 +369,21 @@ def _get_current_revision(db_path: Path) -> str | None:
 #: `{stem}_{YYYYMMDD}_{HHMMSS}.db` — the shape `_backup_database` writes below.
 #: Anchored, so nothing else in the backup folder can match: not a `.mmbackup`,
 #: not a `.mmproject` safety copy, not a live database anyone parked there.
-_PRE_MIGRATION_RE = re.compile(r"^(?P<stem>.+)_(?P<date>\d{8})_(?P<time>\d{6})\.db$")
+#: ASCII digits and `\Z` (#1039 f), as `services/backup._BACKUP_NAME_RE`.
+_PRE_MIGRATION_RE = re.compile(
+    r"^(?P<stem>.+)_(?P<date>\d{8})_(?P<time>\d{6})\.db\Z", re.ASCII
+)
+
+#: SQLite's companion files beside a pre-migration copy. The app never opens one,
+#: but anyone inspecting a copy with a SQLite tool leaves them — MEASURED on the
+#: developer's folder: `vl_20260714_235953.db-wal`/`-shm` outliving their database,
+#: which #982's prune had removed. Without the database they are meaningless.
+_PRE_MIGRATION_SIDE_FILES = ("-wal", "-shm", "-journal")
+
+
+def _remove_side_files_of(copy: Path) -> None:
+    for side in _PRE_MIGRATION_SIDE_FILES:
+        Path(f"{copy}{side}").unlink(missing_ok=True)
 
 
 def prune_orphaned_pre_migration_backups(db_path: Path, backup_dir: Path) -> int:
@@ -427,6 +441,18 @@ def prune_orphaned_pre_migration_backups(db_path: Path, backup_dir: Path) -> int
 
         deleted = 0
         for path in backup_dir.iterdir():
+            # A companion file whose copy is gone, whatever its stem (see
+            # `_PRE_MIGRATION_SIDE_FILES`): never part of the count below.
+            for side in _PRE_MIGRATION_SIDE_FILES:
+                if path.name.endswith(side):
+                    base = backup_dir / path.name[: -len(side)]
+                    if _PRE_MIGRATION_RE.match(base.name) and not base.exists():
+                        try:
+                            path.unlink(missing_ok=True)
+                            logger.info("Removed %s: the copy it belonged to is gone", path.name)
+                        except OSError as e:
+                            logger.warning("Could not remove %s: %s", path.name, e)
+                    break
             match = _PRE_MIGRATION_RE.match(path.name)
             if match is None or match["stem"] in live_stems:
                 continue
@@ -435,6 +461,7 @@ def prune_orphaned_pre_migration_backups(db_path: Path, backup_dir: Path) -> int
                     continue
                 size = path.stat().st_size
                 path.unlink()
+                _remove_side_files_of(path)
             except OSError as e:
                 logger.warning("Could not remove orphaned backup %s: %s", path.name, e)
                 continue
@@ -519,10 +546,21 @@ def _backup_database(db_path: Path) -> Path | None:
     # the backup already exists on disk by this point, so a failure to delete an
     # OLD file is no reason to refuse the migration. Folding this into the try
     # above would turn a full-but-writable backup dir into a startup failure.
+    #
+    # 🔴 **This database's copies only, by the NAME PATTERN and an exact stem (#1039 e).**
+    # It globbed `f"{stem}_*.db"`, which for the stem `dev` also matched another
+    # database's copies (`dev_bes_20260101_000000.db`) — and sorted by name, those
+    # read as NEWER (`b` > `2`), so the rotation could delete the copy just written.
     try:
-        backups = sorted(backup_dir.glob(f"{db_path.stem}_*.db"), reverse=True)
-        for old in backups[5:]:
+        own = sorted(
+            (p for p in backup_dir.iterdir()
+             if (m := _PRE_MIGRATION_RE.match(p.name)) is not None and m["stem"] == db_path.stem),
+            key=lambda p: p.name,
+            reverse=True,
+        )
+        for old in own[5:]:
             old.unlink(missing_ok=True)
+            _remove_side_files_of(old)
     except OSError as e:
         logger.warning("Could not prune old pre-migration backups: %s", e)
 

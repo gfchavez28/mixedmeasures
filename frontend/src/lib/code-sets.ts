@@ -43,22 +43,21 @@ export interface CodeSetIndex {
 }
 
 /**
- * ⚠️ **Every CLAIMANT is indexed, not only the members** — a code grouped into a
- * value counts as that value (#1028 b). A code that claims two sets (a member of
- * one grouped into a value of another) maps to its OWN set, which is the one the
- * server's apply swaps in (`CodeSetIndex.set_claimed_by`).
+ * ⚠️ **Indexed by CLAIMANT, never by membership** — a code grouped into a value
+ * counts as that value (#1028 b), and a MEMBER grouped with a code outside its set
+ * counts there, not in its own set (#1081 b): the server's claimant list says
+ * which, and a code claims at most one set. This mirrors
+ * `CodeSetIndex.set_claimed_by`, the set an apply of the code swaps in. It used
+ * to index members first, so a multi-code apply of such a member and its own
+ * set's value was refused as a conflict the server would never have made, while
+ * the one it WOULD make passed.
  */
 export function buildCodeSetIndex(sets: readonly CodeSet[] | undefined): CodeSetIndex {
   const byId = new Map<number, CodeSet>()
   const bySetOfCode = new Map<number, CodeSet>()
   for (const set of sets ?? []) {
     byId.set(set.id, set)
-    for (const member of set.members) bySetOfCode.set(member.id, set)
-  }
-  for (const set of sets ?? []) {
-    for (const claimant of set.claimants) {
-      if (!bySetOfCode.has(claimant.code_id)) bySetOfCode.set(claimant.code_id, set)
-    }
+    for (const claimant of set.claimants) bySetOfCode.set(claimant.code_id, set)
   }
   return { byId, bySetOfCode }
 }
@@ -171,7 +170,19 @@ export function multipleSelectionIn(
  * α would otherwise become uncomputable.
  */
 export function choosableValues(set: CodeSet): CodeSetMember[] {
-  return set.members.filter((m) => m.is_active && !m.is_universal)
+  return set.members.filter(
+    (m) => m.is_active && !m.is_universal && countsInSet(set, m.id),
+  )
+}
+
+/**
+ * Whether choosing this member counts as a value of `set` — false for a member
+ * grouped with a code OUTSIDE the set, which reads as that code (#1081 b). The
+ * set's endpoint refuses such a member, so offering it is the #806 shape; the
+ * set's composition warning says why it is missing.
+ */
+function countsInSet(set: CodeSet, codeId: number): boolean {
+  return set.claimants.some((c) => c.code_id === codeId)
 }
 
 /** The fields of a live code the set's control reads. */
@@ -232,6 +243,18 @@ export function conflictingSetValues(index: CodeSetIndex, codeIds: readonly numb
     bySet.set(set.id, entry)
   }
   return [...bySet.values()].filter((c) => c.codeIds.length > 1)
+}
+
+/**
+ * What a code MERGE left behind in a set (#1081 a): passages where one coder now
+ * holds two values. Counted by the server, which is the one that knows; said
+ * here, never resolved — which value the coder meant is theirs to choose.
+ */
+export function describeMergeContradictions(count: number, setLabel: string | null): string {
+  const set = setLabel ? `“${setLabel}”` : 'a code set'
+  const where = count === 1 ? '1 passage this merge touched' : `${count} passages this merge touched`
+  const them = count === 1 ? 'it' : 'them'
+  return `In ${where}, one coder now holds two values of ${set}. Its agreement figures leave ${them} out until that coder chooses one value.`
 }
 
 /** The sentence for a refused multi-code apply, naming the set and its values. */

@@ -245,6 +245,7 @@ def duplicate_project_endpoint(
                 "source_project_id": project_id,
                 "project_name": project_name,
                 "metrics_marked_stale": import_report.get("metrics_marked_stale", 0),
+                "tests_marked_stale": import_report.get("tests_marked_stale", 0),
             }),
         )
         db.add(audit)
@@ -255,6 +256,7 @@ def duplicate_project_endpoint(
             project_name=project_name,
             merge_report=None,
             metrics_marked_stale=import_report.get("metrics_marked_stale", 0),
+            tests_marked_stale=import_report.get("tests_marked_stale", 0),
         )
     except ValueError as e:
         db.rollback()
@@ -432,6 +434,7 @@ async def import_project_endpoint(
                 # toast says this once and the researcher meets the consequence (a blank
                 # scale-score column, an empty record × variable export) days later.
                 "metrics_marked_stale": import_report.get("metrics_marked_stale", 0),
+                "tests_marked_stale": import_report.get("tests_marked_stale", 0),
             }),
         )
         db.add(audit)
@@ -455,6 +458,7 @@ async def import_project_endpoint(
             merge_report=merge_report,
             safety_backup_filename=safety_report.get("filename"),
             metrics_marked_stale=import_report.get("metrics_marked_stale", 0),
+            tests_marked_stale=import_report.get("tests_marked_stale", 0),
         )
     except MergeDivergenceError as e:
         # Track J · J3-2c: structured refusal (per-source / per-code diff) for the UI.

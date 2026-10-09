@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   withdrawalLocations, describeDeleteConsequence, withdrawalHeadline,
+  keptSummary, removedSummary, withdrawalDoneNote, WITHDRAWAL_SCOPE_NOTE,
 } from './withdrawal-copy'
 import type { WithdrawalReport } from '@/lib/api/participants'
 
@@ -28,8 +29,18 @@ const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
     rows: 1, responses: 34, code_applications: 2, excerpts: 0,
     notes: 0, memos: 1, row_scores: 3,
   }],
+  documents: [],
   total_items: 59,
   ...over,
+})
+
+const workplan = (name = 'Workplan 2026', segments = 3) => ({
+  document_id: 7, name, segments, code_applications: 2, excerpts: 0, notes: 1,
+})
+
+/** Only a document says who this person is — the case #1123 is about. */
+const documentOnly = (docs = [workplan()]) => report({
+  conversations: [], datasets: [], speaker_names: [], documents: docs, total_items: 7,
 })
 
 describe('withdrawalLocations', () => {
@@ -77,7 +88,33 @@ describe('describeDeleteConsequence', () => {
     const msg = describeDeleteConsequence(report({
       conversations: [], datasets: [], speaker_names: [], total_items: 1,
     }))
-    expect(msg).toMatch(/no linked transcript turns or responses/)
+    expect(msg).toMatch(/no linked transcript turns, responses or documents/)
+  })
+
+  it('#1123: names the documents about them, which the record delete leaves unlinked', () => {
+    // The case the page got wrong: only a document says who this person is, and
+    // the confirm said the delete "removes the record only".
+    const msg = describeDeleteConsequence(documentOnly())
+    expect(msg).toContain('1 document about them remains in the project')
+    expect(msg).not.toMatch(/removes the record only\./)
+    expect(describeDeleteConsequence(documentOnly([workplan(), workplan('Workplan 2027')])))
+      .toContain('2 documents about them remain')
+  })
+
+  it('agrees the verb with the list, not with how its one item is spelled', () => {
+    // It read "34 survey responses remains" and "the speaker name … remain".
+    const only = (over: Partial<WithdrawalReport>) => describeDeleteConsequence(report({
+      conversations: [], datasets: [], speaker_names: [], ...over,
+    }))
+    const survey = (responses: number) => [{
+      dataset_id: 1, name: 'S', rows: 1, responses, code_applications: 0, excerpts: 0,
+      notes: 0, memos: 0, row_scores: 0,
+    }]
+    expect(only({ datasets: survey(34) })).toContain('34 survey responses remain in')
+    expect(only({ datasets: survey(1) })).toContain('1 survey response remains in')
+    expect(only({ speaker_names: ['Jane'] })).toContain('the speaker name "Jane" remains in')
+    expect(only({ speaker_names: ['Jane', 'J'] })).toContain('"Jane" / "J" remain in')
+    expect(describeDeleteConsequence(report())).toMatch(/"Jane" remain in/)
   })
 
   it('has a safe form before the report has loaded', () => {
@@ -89,13 +126,70 @@ describe('describeDeleteConsequence', () => {
 })
 
 describe('withdrawalHeadline', () => {
-  it('counts items and sources', () => {
+  it('counts items and sources, and says the count includes the record itself', () => {
     expect(withdrawalHeadline(report()))
-      .toBe('59 items across 2 sources would have to be removed by hand to honour a withdrawal.')
+      .toBe('59 items across 2 sources, counting this record, trace back to this participant.')
   })
 
   it('says so plainly when there is nothing', () => {
     expect(withdrawalHeadline(report({ conversations: [], datasets: [], total_items: 1 })))
       .toBe('Nothing else in this project is linked to this participant.')
+  })
+
+  it('#1123: a document about them IS something linked — never "nothing else"', () => {
+    expect(withdrawalHeadline(documentOnly()))
+      .toBe('7 items across 1 source, counting this record, trace back to this participant.')
+  })
+
+  it('#1136: never claims the removal is manual — the withdrawal button does it', () => {
+    expect(withdrawalHeadline(report())).not.toMatch(/by hand|manual/)
+  })
+})
+
+describe('WITHDRAWAL_SCOPE_NOTE (#1136)', () => {
+  it('says what the withdrawal does, not that the software cannot do it', () => {
+    expect(WITHDRAWAL_SCOPE_NOTE).not.toMatch(/no erase function|manual/)
+    expect(WITHDRAWAL_SCOPE_NOTE).toMatch(/blanks their conversation turns/)
+    expect(WITHDRAWAL_SCOPE_NOTE).toMatch(/deletes their survey responses and this record/)
+    expect(WITHDRAWAL_SCOPE_NOTE).toMatch(/unlinks documents about them/)
+  })
+
+  it('keeps the residual the withdrawal cannot reach (`withdrawal_redaction.py` ⛔)', () => {
+    expect(WITHDRAWAL_SCOPE_NOTE).toMatch(/cannot find their name in other people’s turns/)
+    expect(WITHDRAWAL_SCOPE_NOTE).toMatch(/free-text answers/)
+    expect(WITHDRAWAL_SCOPE_NOTE).toMatch(/notes and memos/)
+    expect(WITHDRAWAL_SCOPE_NOTE).toMatch(/not compliance advice/)
+  })
+})
+
+describe('#1123 — the document arm, on every sentence that reads the report', () => {
+  it('lists each document with what it holds', () => {
+    expect(withdrawalLocations(documentOnly())).toEqual([
+      'Workplan 2026 — a document about them, 3 passages, 2 codes, 1 note',
+    ])
+    // A document with nothing coded in it still says what it is.
+    expect(withdrawalLocations(documentOnly([{ ...workplan(), segments: 0, code_applications: 0, notes: 0 }])))
+      .toEqual(['Workplan 2026 — a document about them'])
+  })
+
+  it('the withdrawal confirm says a document STAYS and has to be read', () => {
+    // `apply_withdrawal` unlinks a document and keeps it — "about them" is true of
+    // a workplan they wrote and of a policy that names them alike.
+    expect(removedSummary(documentOnly()).join(' ')).not.toMatch(/Workplan/)
+    expect(keptSummary(documentOnly())).toEqual([
+      'The document “Workplan 2026” stays, no longer linked to them — read it yourself: '
+      + 'a document about someone can also be their own words',
+    ])
+    expect(keptSummary(documentOnly([workplan(), workplan('B')]))[0])
+      .toMatch(/^2 documents about them stay/)
+    expect(keptSummary(report())).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/document/)]))
+  })
+
+  it('the note after a withdrawal counts the documents it unlinked', () => {
+    expect(withdrawalDoneNote(0)).toBe(
+      'Now search your transcripts and free-text answers for their name — that part cannot be automated.')
+    expect(withdrawalDoneNote(1)).toMatch(/ 1 document no longer says who it is about — read it too\.$/)
+    expect(withdrawalDoneNote(3)).toMatch(/ 3 documents no longer say who they are about — read them too\.$/)
   })
 })

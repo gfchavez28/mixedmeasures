@@ -1,7 +1,7 @@
 """Pydantic schemas for the dataset import and read endpoints."""
 
 from datetime import datetime
-from .common import UTCTimestamp, strip_optional_text, strip_required_text
+from .common import SQLITE_INTEGER_MAX, UTCTimestamp, strip_optional_text, strip_required_text
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
@@ -943,10 +943,16 @@ class AppendColumnMapping(BaseModel):
     index read the file's LAST column (Python counts from the end) and reported a
     successful append of the wrong data. ``StrictInt`` refuses ``true``, which a
     lax int field turns into column 1.
+
+    ⚠️ **`column_id` is bounded on both sides (#1083 d):** `10**30` passed
+    `StrictInt` and reached SQLite as an `OverflowError` — a 500 for a request that
+    should be refused — and so did `-10**30`; a database id is never below 1.
+    `csv_column_index` needs no upper bound: it never reaches SQLite, and the
+    endpoint refuses an index past the file's width by name.
     """
 
     csv_column_index: StrictInt = Field(ge=0)
-    column_id: StrictInt
+    column_id: StrictInt = Field(ge=1, le=SQLITE_INTEGER_MAX)
 
 
 class DatasetAppendRequest(BaseModel):
@@ -960,7 +966,7 @@ class DatasetAppendRequest(BaseModel):
     sheet_name: str | None = None
     # #414 (DEC-7): identifier column id to link the NEW rows by (append's
     # vocabulary is column ids, unlike the initial import's column_index).
-    participant_link_column_id: int | None = None
+    participant_link_column_id: int | None = Field(None, ge=1, le=SQLITE_INTEGER_MAX)
 
     @model_validator(mode="after")
     def _each_column_mapped_once(self):

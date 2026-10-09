@@ -28,7 +28,8 @@ import { LoadState } from '@/components/LoadStatus'
 import CrossTabTable from './CrossTabTable'
 import CodeDensityPanel from './CodeDensityPanel'
 import ResponseLengthPanel from './ResponseLengthPanel'
-import { availableLayerScopes, layerScopeLabel, rosterHasMachineCoders, showLayerPicker, type LayerScope } from '@/lib/coding-layers'
+import { availableLayerScopes, effectiveLayerScope, layerScopeLabel, showLayerPicker, type LayerScope } from '@/lib/coding-layers'
+import { useProjectCoderKinds } from '@/hooks/useCoderCoverage'
 
 interface CrossAnalysisPanelProps {
   projectId: number
@@ -58,15 +59,20 @@ export default function CrossAnalysisPanel({
   const { data: consensusStatus } = useConsensusStatus(projectId)
   const consensusAvailable = !!consensusStatus?.exists
   const [layerScopePref, setLayerScopePref] = useState<LayerScope>('human')
-  // #989 — the layers this panel can offer; `machine` only once one is on the roster.
+  // #989 / #1038 g — the layers this panel can offer; `machine` only once a model
+  // has coded THIS project. It read the install-wide roster, so a model imported
+  // into another project offered a Machine layer here that could return nothing.
+  // No roster fallback while coverage loads: the preference lives in memory and
+  // starts at `human`, so there is no saved choice to protect.
+  const projectKinds = useProjectCoderKinds(projectId)
   const layerAvailability = useMemo(
-    () => ({ consensusAvailable, hasMachineCoders: rosterHasMachineCoders(coders) }),
-    [consensusAvailable, coders],
+    () => ({ consensusAvailable, hasMachineCoders: projectKinds.hasMachine }),
+    [consensusAvailable, projectKinds.hasMachine],
   )
-  // Derived so the consensus layer is honored ONLY while it exists (e.g. it's hidden
-  // again if a coder is archived away from the ≥2 roster) — no setState-in-effect.
-  const layerScope: LayerScope =
-    layerScopePref === 'consensus' && consensusAvailable ? 'consensus' : 'human'
+  // Derived so a layer is honoured ONLY while it is offered (consensus can stop
+  // existing, a model can be archived) — no setState-in-effect. 🔴 It dropped the
+  // Machine layer outright (#1038 g): choosing it sent `human`.
+  const layerScope: LayerScope = effectiveLayerScope(layerScopePref, layerAvailability)
   const coderInclude = useMemo(
     () => hiddenCoders.size === 0 ? undefined : coders.filter(c => !hiddenCoders.has(c.id)).map(c => c.id),
     [coders, hiddenCoders],

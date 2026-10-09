@@ -65,6 +65,26 @@ export function formatMagnitude(value: number): string {
 }
 
 /**
+ * #1115 — the fill behind a chip's rating number: a tint AWAY from its text.
+ *
+ * The badge used to tint toward its own text colour (`rgba(ink, 0.22)`), which
+ * lowers contrast on every chip colour by construction — measured live, white on
+ * the default grey chip went 4.83 → 3.16:1, and 3.5:1 on the default blue. Tinted
+ * the other way the number can only gain: `getContrastColor` already guarantees
+ * the chip's own text ≥ 4.58:1 on ANY colour, and moving the background away from
+ * the text keeps that floor (`lib/rating-badge-contrast.test.ts` sweeps the
+ * palette and the colour cube).
+ *
+ * @param textColor the chip's text, `getContrastColor`'s pure black or white.
+ */
+export function ratingBadgeFill(textColor: string, unrated: boolean): string {
+  const away = textColor === '#000000' ? '255, 255, 255' : '0, 0, 0'
+  return `rgba(${away}, ${unrated ? RATING_BADGE_ALPHA.unrated : RATING_BADGE_ALPHA.rated})`
+}
+/** The two fill strengths: an unrated dash sits lighter than a rating. */
+export const RATING_BADGE_ALPHA = { rated: 0.28, unrated: 0.14 } as const
+
+/**
  * Where this value sits in its own range, as 0–1, for the chip's fill.
  *
  * ⚠️ Returns 0 for a degenerate scale rather than `NaN`. The server refuses

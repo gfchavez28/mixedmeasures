@@ -30,7 +30,7 @@ import SoftwareUpdateSection from '@/components/SoftwareUpdateSection'
 import SafetyCopiesSection from '@/components/SafetyCopiesSection'
 import BackupHistorySection from '@/components/BackupHistorySection'
 import RestoreBackupDialog, { type RestoreSource } from '@/components/RestoreBackupDialog'
-import { describeBackup } from '@/lib/backup-history'
+import { backupTitle, scheduleSentences } from '@/lib/backup-history'
 import { useCoders } from '@/hooks/useCoders'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
 import { useCreateCoder } from '@/hooks/useCreateCoder'
@@ -376,6 +376,7 @@ export function BackupSection() {
     queryFn: backupApi.status,
     staleTime: 60_000,
   })
+  const schedule = scheduleSentences(status)
 
   const createMutation = useMutation({
     mutationFn: backupApi.create,
@@ -400,7 +401,7 @@ export function BackupSection() {
 
   // #357: "Backup now" — creates an auto-prefix snapshot without download.
   // Resets the displayed `next_backup_at` because the new file's mtime is
-  // the most recent. Counts toward the same 5-backup auto rotation.
+  // the most recent. Counts toward the same automatic rotation (5 by default).
   const backupNowMutation = useMutation({
     mutationFn: backupApi.now,
     onSuccess: () => {
@@ -457,7 +458,9 @@ export function BackupSection() {
     const source: RestoreSource = {
       kind: 'local',
       filename: backup.filename,
-      name: `${describeBackup(backup).label} backup from ${formatTakenAt(backup.created_at)}`,
+      // #1132 — the shared builder: unquoted it read "the contents of Before a
+      // restore backup from …".
+      name: backupTitle(backup, formatTakenAt(backup.created_at)),
     }
     setRestoreSource(source)
     validateMutation.mutate(source)
@@ -488,12 +491,11 @@ export function BackupSection() {
       <h2 className="text-base font-semibold text-mm-text mb-3">Backup & Data</h2>
 
       {/* #357/#378: one-line reassurance up front; the full "Saved vs. backed up"
-        * explanation (researchers conflate continuous DB commit with the 4h
-        * snapshot) lives behind the info popover so it isn't a wall of text. */}
+        * explanation (researchers conflate continuous DB commit with the
+        * scheduled snapshot) lives behind the info popover so it isn't a wall of
+        * text. #1043: both state THIS install's schedule, from the server. */}
       <p className="text-sm text-mm-text-secondary leading-relaxed mb-4 flex items-start gap-1.5">
-        <span>
-          Your edits save to disk instantly; backups are a separate 4-hourly safety snapshot.
-        </span>
+        <span>{schedule.intro}</span>
         <Popover>
           <PopoverTrigger asChild>
             <button
@@ -506,14 +508,15 @@ export function BackupSection() {
           </PopoverTrigger>
           <PopoverContent align="start" className="text-sm text-mm-text-secondary leading-relaxed max-w-xs" aria-label="Saved vs. backed up">
             <p className="font-medium text-mm-text mb-1">Saved vs. backed up</p>
-            Every edit is saved to disk the moment you make it — your work isn't waiting in
-            memory anywhere. Backups are a separate safety net: Mixed Measures takes a
-            snapshot of the database, documents, and audio every 4 hours, keeping
-            the 5 most recent so you can recover from disk corruption or accidental deletion.
-            Video recordings are excluded from these automatic snapshots to keep them small
-            — restoring never deletes video already on disk, and a downloaded backup can
-            include video. Use <span className="font-medium text-mm-text">Backup now</span>{' '}
-            before a big change for an extra fresh snapshot.
+            {schedule.detail}
+            {!schedule.off && (
+              <>
+                {' '}Video recordings are excluded from these automatic snapshots to keep them
+                small — restoring never deletes video already on disk, and a downloaded backup
+                can include video. Use <span className="font-medium text-mm-text">Backup now</span>{' '}
+                before a big change for an extra fresh snapshot.
+              </>
+            )}
           </PopoverContent>
         </Popover>
       </p>
@@ -530,8 +533,12 @@ export function BackupSection() {
                 <span className="text-mm-text">{formatNextTime(status.next_backup_at)}</span>
               </>
             )}
+            {schedule.off && ' · Automatic backups are off'}
+            {/* A text-node space: `ml-2` is a gap on screen and nothing in the
+                accessible text, which read "…just now(1 backup" (#908's rule). */}
+            {status.backup_count > 0 && ' '}
             {status.backup_count > 0 && (
-              <span className="ml-2 text-mm-text-faint">
+              <span className="ml-1 text-mm-text-faint">
                 ({status.backup_count} backup{status.backup_count !== 1 ? 's' : ''}, {formatBytes(status.total_size_bytes)})
               </span>
             )}

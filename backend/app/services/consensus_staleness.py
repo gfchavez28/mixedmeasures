@@ -21,15 +21,18 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from sqlalchemy import exists, insert, literal, select, union
+from sqlalchemy import exists, func, insert, literal, select, union
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
+from ..auth import reliability_coder_clause
+from ..models.code import Code
 from ..models.code_application import CodeApplication
 from ..models.consensus_stale_target import ConsensusStaleTarget
 from ..models.dataset import DatasetValue
 from ..models.segment import Segment
-from .coding_layers import consensus_eligible_segment_clause
+from ..models.user import User
+from .coding_layers import consensus_eligible_segment_clause, non_consensus_filter
 from .consensus import recompute_consensus_for_target
 from .id_set import in_id_set
 
@@ -125,6 +128,77 @@ def _union(sources):
     return (sources[0] if len(sources) == 1 else union(*sources)).subquery()
 
 
+def mark_consensus_stale_for_coder(
+    db: Session, coder_id: int, *, except_project_id: int | None = None,
+) -> int:
+    """Mark consensus stale wherever ONE coder's vote could move it, in every
+    project — for the doors that archive or unarchive a coder (#1074).
+
+    🔴 **An archived coder does not vote (DEC-F), so archiving or unarchiving one
+    changes who votes on every passage they coded — and none of the four doors
+    that do it marked anything.** The stored layer then read as current while the
+    live reconciliation disagreed with it: a passage Carol and Alice both coded,
+    with Carol brought back by an import, had no consensus row and no marker.
+
+    **Which passages:** every target this coder holds a VOTING application on
+    (non-consensus, non-universal, and the coder is a kind that votes — a machine
+    never does, so its doors mark nothing) **on which someone else also has an
+    application.** A passage only this coder touched can hold no consensus row
+    with them or without them, so marking it would queue a recompute that writes
+    nothing — and a coder's bulk import, which nobody else coded, would queue
+    every row of it. The "someone else" test counts any other row, a consensus
+    row included, because that row is exactly what may now be wrong.
+
+    ⚠️ **Not gated on `consensus_enabled`, deliberately.** That gate is right
+    where one voter makes consensus meaningless; an archive can CREATE that
+    state, and the recompute is what deletes the rows it makes wrong.
+
+    ⚠️ ``except_project_id`` is for a caller that rebuilds one project's layer
+    anyway (the `.mmproject` merge) — a marker there would only make a freshly
+    rebuilt layer read as stale until the sweep reaches it.
+
+    The project a marker belongs to is the CODE's (`Code.project_id`); a target's
+    applications all use its own project's codes. Set-based, like
+    `mark_consensus_stale`: no id list crosses into Python. Returns the number of
+    NEW markers. Runs in the caller's transaction and does not commit.
+    """
+    markers = ConsensusStaleTarget.__table__
+    other = aliased(CodeApplication)
+    inserted = 0
+    for target_col, other_col, marker_col in (
+        (CodeApplication.segment_id, other.segment_id, markers.c.segment_id),
+        (CodeApplication.dataset_value_id, other.dataset_value_id, markers.c.dataset_value_id),
+    ):
+        rows = (
+            select(func.min(Code.project_id), target_col)
+            .join(Code, CodeApplication.code_id == Code.id)
+            .join(User, CodeApplication.user_id == User.id)
+            .where(
+                CodeApplication.user_id == coder_id,
+                target_col.isnot(None),
+                non_consensus_filter(),
+                Code.is_universal == False,  # noqa: E712
+                reliability_coder_clause(),
+                exists().where(other_col == target_col, other.user_id != coder_id),
+                ~exists().where(marker_col == target_col),
+            )
+        )
+        if target_col is CodeApplication.segment_id:
+            # The same eligibility `mark_consensus_stale` applies — never re-inlined.
+            rows = rows.join(Segment, CodeApplication.segment_id == Segment.id).where(
+                consensus_eligible_segment_clause(),
+            )
+        if except_project_id is not None:
+            rows = rows.where(Code.project_id != except_project_id)
+        # GROUP BY the target: a coder holding three codes on one passage must
+        # write ONE marker, or the partial unique index raises mid-statement.
+        rows = rows.group_by(target_col)
+        inserted += db.execute(
+            insert(markers).from_select(["project_id", marker_col.name], rows)
+        ).rowcount
+    return inserted
+
+
 def _marker_query(db: Session, *, project_id, marker_ids, skip_ids):
     query = db.query(ConsensusStaleTarget)
     if project_id is not None:
@@ -181,9 +255,12 @@ class DrainResult:
     """What one `drain_stale_consensus` call committed, and what it could not."""
 
     recomputed: int
-    #: Markers whose recompute RAISED. They stay queued; the caller passes them
-    #: back as ``known_failed`` so the next batch does not trip over them again.
-    failed_marker_ids: frozenset[int]
+    #: Markers whose recompute RAISED, in the order the next call should RETRY
+    #: them. They stay queued; the caller passes this back as ``known_failed`` so
+    #: the next batch does not trip over them again. A TUPLE, not a set, since
+    #: #1039 (g): its order is the rotation — the ones retried least recently come
+    #: first — and a set has none.
+    failed_marker_ids: tuple[int, ...]
 
 
 def drain_stale_consensus(
@@ -206,8 +283,18 @@ def drain_stale_consensus(
     2. if it raises, it is rolled back and re-run ONE MARKER PER TRANSACTION,
        so everything that can commit does, and the ones that raise are
        returned (and logged, once) in ``failed_marker_ids``;
-    3. markers in ``known_failed`` are retried one at a time every call — a
-       code fix, or an edit to that passage, can clear them.
+    3. markers in ``known_failed`` are retried one at a time — a code fix, or
+       an edit to that passage, can clear them.
+
+    🔴 **AT MOST ``limit`` KNOWN FAILURES ARE RETRIED PER CALL, IN ROTATION
+    (#1039 g).** Every known failure used to be retried on every call, so a
+    SYSTEMATIC failure — a defect that raises for a whole class of targets, as
+    #1017's did — grew the work by up to ``limit`` attempts each tick, without
+    bound: one tick's batch fails into the known set, and the next tick retries
+    all of it plus a new batch. Now the first ``limit`` of ``known_failed`` are
+    retried and the rest wait their turn; the result lists the waiting ones
+    first, so every stuck marker is still retried, and a call costs at most one
+    batch, its isolation, and ``limit`` retries.
 
     ⚠️ **`OperationalError` is NOT isolated** — it is SQLite's "database is
     locked" from the other writer, a property of the moment rather than of a
@@ -217,8 +304,12 @@ def drain_stale_consensus(
     them, the pysqlite driver needs a workaround for them, and the packaged
     build runs SQLCipher — a first use belongs in its own change.
     """
-    skip = frozenset(known_failed)
-    failed: set[int] = set()
+    # Order kept, repeats dropped: the order IS the rotation.
+    known = tuple(dict.fromkeys(known_failed))
+    skip = frozenset(known)
+    retry_now, waiting = known[:limit], known[limit:]
+    newly_failed: list[int] = []
+    still_failing: list[int] = []
     recomputed = 0
 
     try:
@@ -236,19 +327,21 @@ def drain_stale_consensus(
         ]
         n, newly_failed = _one_at_a_time(db, batch_ids, already_failing=frozenset())
         recomputed += n
-        failed |= newly_failed
 
-    if skip:
-        n, still_failing = _one_at_a_time(db, sorted(skip), already_failing=skip)
+    if retry_now:
+        n, still_failing = _one_at_a_time(db, retry_now, already_failing=skip)
         recomputed += n
-        failed |= still_failing
 
-    return DrainResult(recomputed=recomputed, failed_marker_ids=frozenset(failed))
+    # Least recently attempted first: the ones that waited, then this call's.
+    return DrainResult(
+        recomputed=recomputed,
+        failed_marker_ids=waiting + tuple(newly_failed) + tuple(still_failing),
+    )
 
 
-def _one_at_a_time(db: Session, marker_ids, *, already_failing: frozenset[int]) -> tuple[int, set[int]]:
+def _one_at_a_time(db: Session, marker_ids, *, already_failing: frozenset[int]) -> tuple[int, list[int]]:
     recomputed = 0
-    failed: set[int] = set()
+    failed: list[int] = []
     for mid in marker_ids:
         try:
             recomputed += sweep_stale_consensus(db, marker_ids=[mid])
@@ -258,7 +351,7 @@ def _one_at_a_time(db: Session, marker_ids, *, already_failing: frozenset[int]) 
             raise
         except Exception:  # noqa: BLE001 — the point is to survive it
             db.rollback()
-            failed.add(mid)
+            failed.append(mid)
             if mid not in already_failing:
                 # Logged ONCE per marker, not every 30 s: the caller carries it
                 # forward as known-failed and a repeat is not news.

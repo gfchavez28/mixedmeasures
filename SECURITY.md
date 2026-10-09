@@ -47,9 +47,11 @@ security fixes target the most recent released minor version.
 Understanding what the tool does and does not protect is the most important part of
 this document.
 
-**The design:** Mixed Measures runs entirely on the user's own machine. It makes no
-outbound network connections — no telemetry, analytics, update checks, or external
-content. The backend serves only to the local frontend, with a content-security
+**The design:** Mixed Measures runs entirely on the user's own machine. It sends no
+telemetry or analytics and loads no external content. The desktop app's one outbound
+connection is its update check against github.com, which carries only the app's
+version and platform and can be switched off in **Settings → Software update**. The
+backend serves only to the local frontend, with a content-security
 policy locked to same-origin and standard security headers
 (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
 `Permissions-Policy`).
@@ -59,6 +61,12 @@ researcher (no login screen — your operating-system account is the boundary), 
 server-side sessions in HttpOnly cookies, CSRF tokens on all state-changing
 requests, loopback-only Host validation, and an optional inactivity timeout.
 Project access is owner-scoped and enforced on every project endpoint.
+
+**The desktop app's own program** (since 1.5.6): the installed app cannot be run as
+a plain script engine, have code injected through an environment variable, or have a
+debugger attached, and on macOS and Windows it refuses to start if the code of its
+desktop shell has been altered. That check does not cover the analysis engine and
+interface installed beside the shell.
 
 **At-rest encryption (v1.0) and its limits:**
 
@@ -89,14 +97,14 @@ Project access is owner-scoped and enforced on every project endpoint.
   multi-tenant server. Do not deploy the backend on a public interface.
 - **Local trust assumption.** Anyone with file-system access to the data directory
   can read or modify project data, independent of application login.
-- **A running app is reachable by other accounts on the same machine.** While the
-  app is open, its backend listens on a local (loopback) port — and loopback is
-  shared by every OS account on the machine, not just yours. Because the desktop
-  app signs you in automatically, another account on the same machine could connect
-  to that port while the app is running and read or modify project data. At-rest
-  encryption does not help here: a running app serves decrypted data. On shared or
-  lab machines, quit the app when you step away. A per-launch secret between the
-  desktop shell and the backend is planned to close this gap.
+- **A running app's local port is reachable by other accounts, and guarded by a
+  per-launch secret.** While the app is open, its backend listens on a local
+  (loopback) port — and loopback is shared by every OS account on the machine, not
+  just yours. A running app serves decrypted data, so since v1.0.1 the desktop app
+  gives its backend a new random secret at each launch, and the backend refuses any
+  data request that does not carry it: another account connecting to that port
+  cannot read or change project data. A backend run from source for development has
+  no such secret, so do not run one on a shared machine.
 
 ## In scope
 

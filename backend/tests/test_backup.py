@@ -195,6 +195,69 @@ def test_validate_accepts_pre_v130_manifest_without_observation_count(tmp_path):
     assert preview.manifest.project_summaries[0].observation_count == 0
 
 
+def test_a_project_list_that_cannot_be_read_is_SAID_not_recorded_as_empty(tmp_path):
+    """#1039 (k): the summary read caught every exception and returned `[]`, so a
+    backup whose project list could not be read previewed with no Projects
+    section at all — "this backup holds nothing" — and the warning sign was lost.
+
+    The trigger here is the one the 2026-09-24 session saw: a database missing a
+    table the summary queries (a damaged or partly migrated snapshot).
+    """
+    db_path = tmp_path / "test.db"
+    _create_test_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DROP TABLE observations")
+    conn.commit()
+    conn.close()
+    docs_dir = tmp_path / "documents"
+    docs_dir.mkdir()
+    backup_dir = tmp_path / "backups"
+
+    info = create_backup(db_path, docs_dir, tmp_path / "media", backup_dir, "manual")
+    with zipfile.ZipFile(str(backup_dir / info.filename), "r") as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+    assert manifest["project_summaries"] == []
+    assert manifest["project_summaries_unavailable"] is True
+
+
+def test_a_readable_project_list_is_not_flagged(tmp_path):
+    """The positive control: the flag must not be set whenever the list is read."""
+    db_path = tmp_path / "test.db"
+    _create_test_db(db_path)
+    docs_dir = tmp_path / "documents"
+    docs_dir.mkdir()
+    backup_dir = tmp_path / "backups"
+
+    info = create_backup(db_path, docs_dir, tmp_path / "media", backup_dir, "manual")
+    with zipfile.ZipFile(str(backup_dir / info.filename), "r") as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+    assert manifest["project_summaries_unavailable"] is False
+    assert [p["name"] for p in manifest["project_summaries"]] == ["Test Project"]
+
+
+def test_a_manifest_written_before_the_flag_still_previews(tmp_path):
+    """Every backup taken before #1039 (k) lacks the key; it must parse, as False."""
+    db_path = tmp_path / "test.db"
+    _create_test_db(db_path)
+    docs_dir = tmp_path / "documents"
+    docs_dir.mkdir()
+    backup_dir = tmp_path / "backups"
+    info = create_backup(db_path, docs_dir, tmp_path / "media", backup_dir, "manual")
+    backup_path = backup_dir / info.filename
+    with zipfile.ZipFile(str(backup_path), "r") as zf:
+        entries = {name: zf.read(name) for name in zf.namelist()}
+    manifest = json.loads(entries["manifest.json"])
+    del manifest["project_summaries_unavailable"]
+    entries["manifest.json"] = json.dumps(manifest).encode()
+    with zipfile.ZipFile(str(backup_path), "w") as zf:
+        for name, payload in entries.items():
+            zf.writestr(name, payload)
+
+    preview = validate_backup(backup_path)
+    assert preview.manifest.project_summaries_unavailable is False
+    assert not any("version" in w.lower() for w in preview.warnings)
+
+
 def test_create_backup_no_db_raises(tmp_path):
     db_path = tmp_path / "nonexistent.db"
     docs_dir = tmp_path / "documents"
@@ -719,17 +782,18 @@ def test_media_extraction_stages_next_to_media_dir(tmp_path, monkeypatch):
 
 def test_restore_cleans_staging_on_failure(tmp_path, monkeypatch):
     """A failed restore must not leak the extracted payload — the historical
-    code had no finally, so a multi-GB extraction survived in OS temp."""
+    code had no finally, so a multi-GB extraction survived in OS temp.
+
+    #1080/#1036 (b): and nothing stages in OS temp at all any more. OS temp is
+    pointed at a folder of its own here, so a writer that reverts to a bare
+    `mkdtemp()` lands there and fails the last assertion."""
     import app.services.backup as backup_service
 
     live_db, docs_dir, media_dir, backup_dir, backup_path = _setup_restore_with_video(tmp_path)
 
     tmp_root = tmp_path / "ostemp"
     tmp_root.mkdir()
-    real_mkdtemp = tempfile.mkdtemp
-    monkeypatch.setattr(
-        backup_service.tempfile, "mkdtemp", lambda *a, **k: real_mkdtemp(dir=str(tmp_root))
-    )
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_root))
 
     real_rmtree = shutil.rmtree
     state = {"failed": False}
@@ -745,8 +809,12 @@ def test_restore_cleans_staging_on_failure(tmp_path, monkeypatch):
     with pytest.raises(RestoreError):
         restore_from_backup(backup_path, live_db, docs_dir, media_dir, backup_dir)
 
-    assert list(tmp_root.iterdir()) == [], "extraction temp dirs must be cleaned on failure"
     assert not (media_dir.parent / ".media_restore_stage_tmp").exists()
+    assert not (docs_dir.parent / ".documents_restore_stage_tmp").exists()
+    for folder in (live_db.parent, backup_dir):
+        left = [p.name for p in folder.iterdir() if backup_service.is_staging_name(p.name)]
+        assert left == [], f"staging left in {folder.name}: {left}"
+    assert list(tmp_root.iterdir()) == [], "something staged in OS temp"
 
 
 def test_validate_warns_on_video_excluded_backup(tmp_path):

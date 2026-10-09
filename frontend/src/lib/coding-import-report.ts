@@ -53,11 +53,19 @@ export function reasonLabel(reason: string): string {
     ?? reason.replace(/_/g, ' ')
 }
 
-/** `{reason: n}` as `"3 no such code · 1 repeats an earlier row"`, largest first. */
+/**
+ * `{reason: n}` as `"no such code (3) · repeats an earlier row (1)"`, largest first.
+ *
+ * ⚠️ **The count FOLLOWS the label (#1089).** The labels are written to stand
+ * alone — the download's *Reason* column prints them with no count — so most of
+ * them do not read after a number: the count-first shape rendered *"2 two
+ * different ratings"* and *"4 coder not imported"*. Change the shape here, never
+ * the labels into phrases that only work after a count.
+ */
 export function reasonSummary(counts: Record<string, number>): string {
   return Object.entries(counts)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([reason, n]) => `${n.toLocaleString()} ${reasonLabel(reason)}`)
+    .map(([reason, n]) => `${reasonLabel(reason)} (${n.toLocaleString()})`)
     .join(' · ')
 }
 

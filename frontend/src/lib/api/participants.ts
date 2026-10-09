@@ -21,6 +21,14 @@ export interface DatasetRowInfo {
   dataset_id: number
   row_identifier: string | null
   submitted_at: string | null
+  /**
+   * #1157 — the server's sentence refusing a change to this link, or null when it is
+   * the researcher's to change. Set for a row of the table the tool keeps in step
+   * with the participants, where an unlink only made the next refresh delete the row
+   * and everything typed into it. REQUIRED, so a surface that offers *Unlink* has to
+   * decide what to do with it (#1123's rule for a field that decides a sentence).
+   */
+  link_refusal: string | null
 }
 
 export interface LinkedDocumentInfo {
@@ -142,6 +150,10 @@ export interface WithdrawalOutcome {
   code_applications_kept: number
   notes_for_review: number
   memos_for_review: number
+  /** Row 46 — documents that said they were about this person. They are KEPT,
+   *  only unlinked: "about them" and "theirs" are different claims and only a
+   *  person reading the document can tell which applied. */
+  documents_unlinked: number
   backup_filename: string
 }
 
@@ -170,6 +182,17 @@ export interface WithdrawalReport {
     notes: number
     memos: number
     row_scores: number
+  }[]
+  /** Row 46 — documents this person is the SUBJECT of. 🔴 #1123: the server
+   *  computed these from the start and its response schema dropped them, so the
+   *  page reported "nothing else is linked" about a document's subject. */
+  documents: {
+    document_id: number
+    name: string
+    segments: number
+    code_applications: number
+    excerpts: number
+    notes: number
   }[]
   total_items: number
 }

@@ -27,6 +27,8 @@ import { useStepFocus } from '@/hooks/useStepFocus'
 import UploadLimitNote from '@/components/UploadLimitNote'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
 import { OverlongRecordsNotice } from '@/components/OverlongRecordsNotice'
+import ParticipantLinkNote from '@/components/ParticipantLinkNote'
+import { projectHadParticipants } from '@/lib/participant-snapshot'
 
 type Step = 'upload' | 'review' | 'results'
 
@@ -55,6 +57,8 @@ export default function AppendImport() {
   }, [dataset?.name, setBreadcrumbLabel])
 
   const appendInputRef = useRef<HTMLInputElement>(null)
+  // #1010 — did the project have participants BEFORE this append? (See the mutation.)
+  const hadParticipantsRef = useRef<boolean | undefined>(false)
 
   const [step, setStep] = useState<Step>('upload')
   const [file, setFile] = useState<File | null>(null)
@@ -115,6 +119,11 @@ export default function AppendImport() {
   const importMutation = useMutation({
     mutationFn: async () => {
       if (!file || !preview) throw new Error('No file or preview')
+      const linking = !!(preview.participant_link_column && linkParticipants)
+      // #1010 — the result's participant note warns when NOTHING matched the people
+      // already here, which needs to know whether there WERE any (#1047's snapshot,
+      // taken before the request; `undefined` if it never answered — #963).
+      hadParticipantsRef.current = linking ? await projectHadParticipants(queryClient, pid) : false
       return datasetsApi.appendImport(pid, did, file, {
         column_mapping: preview.matched_columns.map(mc => ({
           csv_column_index: mc.csv_column_index,
@@ -551,23 +560,15 @@ export default function AppendImport() {
                 {importResult.duplicates_skipped > 0 && (
                   <div><strong>Duplicates skipped:</strong> {importResult.duplicates_skipped.toLocaleString()}</div>
                 )}
-                {importResult.participant_link_report && (
-                  <div>
-                    <strong>Participants:</strong>{' '}
-                    {importResult.participant_link_report.linked} linked
-                    {importResult.participant_link_report.linked > 0 && (
-                      <> ({importResult.participant_link_report.created} new, {importResult.participant_link_report.matched} matched)</>
-                    )}
-                    {(() => {
-                      const r = importResult.participant_link_report
-                      const skipped = r.skipped_missing + r.skipped_duplicate + r.skipped_conflict
-                      return skipped > 0 ? (
-                        <span className="text-mm-text-muted"> · {skipped} not linked (blank, duplicated, or already-linked IDs)</span>
-                      ) : null
-                    })()}
-                  </div>
-                )}
-                <div className="text-xs text-mm-text-muted mt-2">Batch ID: {importResult.batch_id}</div>
+                {/* #1010 — the Dataset Import's note: each part only when it is not
+                    zero ("2 linked (2 new, 0 matched)" printed a zero clause), the
+                    reason for each record left unlinked, and the warning when none
+                    matched the people already in this project. */}
+                <ParticipantLinkNote
+                  report={importResult.participant_link_report}
+                  projectId={pid}
+                  hadParticipants={hadParticipantsRef.current}
+                />
               </div>
 
               {/* #985: each appended row that had extra values, linked to it. */}
