@@ -4,7 +4,10 @@ import { FOCUS_RING, SELECTED_ROW, SELECTED_SEGMENT, SELECTED_TINT } from '@/lib
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { toast } from 'sonner'
-import { Star, WandSparkles, Copy, Plus, Trash2, ArrowUpDown, ChevronDown, ChevronRight, Link2, TriangleAlert, Undo2, Redo2 } from 'lucide-react'
+import { Star, WandSparkles, Copy, Plus, Trash2, ArrowUpDown, ChevronDown, ChevronRight, Link2, TriangleAlert, Undo2, Redo2, LoaderCircle } from 'lucide-react'
+import { useElapsedSeconds } from '@/hooks/useElapsedSeconds'
+import { ANNOUNCE_EVERY_SECONDS, elapsedOnlyNote, stillWorkingMessage } from '@/lib/elapsed-progress'
+import { countLabel } from '@/lib/format'
 import {
   datasetsApi,
   recodeApi,
@@ -30,6 +33,8 @@ import { useAddRecord } from '@/hooks/useAddRecord'
 import { useCreateVariable } from '@/hooks/useCreateVariable'
 import { useDeriveVariable } from '@/hooks/useDeriveVariable'
 import { useDeleteVariable } from '@/hooks/useDeleteVariable'
+import { useRecomputeColumn } from '@/hooks/useRecomputeColumn'
+import { useBulkTypeChange } from '@/hooks/useBulkTypeChange'
 import { DeleteVariableDialog } from '@/components/DeleteVariableDialog'
 import { ValueFrequenciesPanel } from '@/components/ValueFrequenciesPanel'
 import RekeyDefinitionsDialog from '@/components/RekeyDefinitionsDialog'
@@ -1258,6 +1263,34 @@ export function NewDefinitionForm({
   )
 }
 
+/**
+ * The wait while a bulk type change runs (#1145). Every selected variable's
+ * cells are re-derived server-side — #1145's review measured 28.5 s for 15
+ * columns × 100,000 rows — and the toolbar showed only a disabled button for
+ * all of it. The shared long-wait
+ * helpers (`lib/elapsed-progress.ts`), WITHOUT an estimate: the time depends on
+ * the cells, which this surface does not know. Mounted only while the change
+ * runs, so each run starts its clock at zero (`RestoreBackupDialog`'s shape).
+ */
+export function BulkTypeChangeStatus({ count }: { count: number }) {
+  const elapsed = useElapsedSeconds(true)
+  const bucket = Math.floor(elapsed / ANNOUNCE_EVERY_SECONDS)
+  const doing = `Changing the type of ${countLabel(count, 'variable', 'variables')}`
+  // The spoken line changes only when a 30-second bucket is crossed.
+  const spoken = bucket === 0
+    ? `${doing}.`
+    : stillWorkingMessage(bucket * ANNOUNCE_EVERY_SECONDS, false)
+  return (
+    <div className="text-xs text-mm-blue-text">
+      <p className="flex items-center gap-1.5" aria-hidden="true">
+        <LoaderCircle className="w-3 h-3 animate-spin shrink-0" />
+        {`${doing} — ${elapsedOnlyNote(elapsed)}`}
+      </p>
+      <p role="status" className="sr-only">{spoken}</p>
+    </div>
+  )
+}
+
 // ── Main Component ───────────────────────────────────────────────────────────
 
 export default function RecodeWorkbench() {
@@ -1533,14 +1566,9 @@ export default function RecodeWorkbench() {
     onError: (err: unknown) => setFormulaError(extractApiError(err, 'Failed to update formula')),
   })
 
-  const recomputeMutation = useMutation({
-    mutationFn: (columnId: number) => datasetsApi.recomputeColumn(pid, did, columnId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dataset-columns', pid, did] })
-      queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, did] })
-    },
-    onError: (err: unknown) => toast.error(extractApiError(err, 'Failed to recompute variable')),
-  })
+  // #1174 — shared with the Data view, and it refreshes the saved statistics'
+  // out-of-date markers the recompute raises.
+  const recomputeMutation = useRecomputeColumn(pid, did)
 
   const handleSubtypeChange = useCallback((columnId: number, subtype: string | null) => {
     subtypeMutation.mutate({ columnId, subtype })
@@ -1923,14 +1951,8 @@ export default function RecodeWorkbench() {
     },
   })
 
-  const bulkTypeMutation = useMutation({
-    mutationFn: () =>
-      recodeApi.bulkTypeUpdate(pid, did, [...bulkSelected], bulkType),
-    onSuccess: () => {
-      setBulkSelected(new Set())
-      queryClient.invalidateQueries({ queryKey: ['dataset-columns', pid, did] })
-    },
-  })
+  // #1145 — the bulk type change (its wait line below, its refresh in the hook).
+  const bulkTypeMutation = useBulkTypeChange(pid, did, () => setBulkSelected(new Set()))
 
   const toggleExpanded = (defId: number) => {
     setExpandedDefs(prev => {
@@ -2171,26 +2193,31 @@ export default function RecodeWorkbench() {
 
           {/* Bulk toolbar */}
           {bulkSelected.size > 0 && (
-            <div className="px-3 py-2 border-b bg-mm-blue/12 flex items-center gap-2">
-              <span className="text-xs text-mm-blue-text">{bulkSelected.size} selected</span>
-              <select
-                aria-label="Set the type of the selected variables"
-                value={bulkType}
-                onChange={e => setBulkType(e.target.value)}
-                className="h-7 text-xs border rounded px-1 flex-grow bg-mm-surface text-mm-text border-mm-border-subtle"
-              >
-                {COLUMN_TYPES.map(t => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
-              <Button
-                size="sm"
-                onClick={() => bulkTypeMutation.mutate()}
-                disabled={bulkTypeMutation.isPending}
-                className="h-7 text-xs"
-              >
-                Change
-              </Button>
+            <div className="px-3 py-2 border-b bg-mm-blue/12 space-y-1.5">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-mm-blue-text">{bulkSelected.size} selected</span>
+                <select
+                  aria-label="Set the type of the selected variables"
+                  value={bulkType}
+                  onChange={e => setBulkType(e.target.value)}
+                  className="h-7 text-xs border rounded px-1 flex-grow bg-mm-surface text-mm-text border-mm-border-subtle"
+                >
+                  {COLUMN_TYPES.map(t => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+                <Button
+                  size="sm"
+                  onClick={() => bulkTypeMutation.mutate({ columnIds: [...bulkSelected], columnType: bulkType })}
+                  disabled={bulkTypeMutation.isPending}
+                  className="h-7 text-xs"
+                >
+                  Change
+                </Button>
+              </div>
+              {bulkTypeMutation.isPending && (
+                <BulkTypeChangeStatus count={bulkTypeMutation.variables?.columnIds.length ?? bulkSelected.size} />
+              )}
             </div>
           )}
 

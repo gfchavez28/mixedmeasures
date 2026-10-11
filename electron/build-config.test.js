@@ -163,6 +163,12 @@ test('the release workflow proves the macOS floor, stamps the feed, checks it, a
     ['the feed stamp from that check (#1100)', 'node scripts/update-manifest.js min-os release/latest-mac.yml "$DARWIN"'],
     ['the merged feed assertion (#1100)', 'node electron/scripts/update-manifest.js check-min-os "$WORK/latest-mac.yml"'],
     ['the packaged fuse read-back (#1100)', 'node scripts/check-fuses.js "$TARGET"'],
+    ["Electron's own advisories against the locked runtime (#1094)", 'run: node scripts/electron-advisories.js'],
+    ["Electron's and Chromium's licence notices in what each leg built (#1122)", 'node scripts/check-notices.js "$TARGET"'],
+    ["the update zip unpacked as Squirrel.Mac unpacks it (#1122)", 'env -i DITTOABORT=1 /usr/bin/ditto -xk'],
+    ['the unpacked update compared with the built app (#1122)', 'node scripts/bundle-tree.js compare "$APP" "$NEW"'],
+    ['the comparison held to a zip that follows symlinks (#1122)', '/usr/bin/zip -qr0 "$W/ctl-deref.zip"'],
+    ["Squirrel's signature check against the last published release (#1122)", 'codesign --verify --deep --strict --all-architectures -R "=$DR" "$NEW"'],
   ]) {
     assert.ok(releaseYml.includes(needle), `release.yml no longer runs ${what}`)
   }
@@ -171,6 +177,21 @@ test('the release workflow proves the macOS floor, stamps the feed, checks it, a
     releaseYml.indexOf('update-manifest.js min-os') < releaseYml.indexOf('cp release/latest-mac.yml "latest-mac-'),
     'the feed is uploaded before it is stamped',
   )
+  // The zip check must precede that upload too: failing there leaves the draft with no mac
+  // manifest, so finalize-mac-manifest fails and the draft cannot be shipped.
+  assert.ok(
+    releaseYml.indexOf('node scripts/bundle-tree.js compare') < releaseYml.indexOf('cp release/latest-mac.yml "latest-mac-'),
+    'the mac manifest is uploaded before the update zip is checked',
+  )
+})
+
+test('the licence-notice check runs on every leg, not only the mac one (#1122)', () => {
+  // The step reads the .app on mac and <target>-unpacked elsewhere; an `if:` added to it would
+  // silently drop Windows and Linux.
+  const step = releaseYml.slice(releaseYml.indexOf("- name: Verify — the app carries Electron's and Chromium's licence notices"))
+  const body = step.slice(0, step.indexOf('\n      - name:', 1))
+  assert.ok(body.includes('node scripts/check-notices.js "$TARGET"'), 'the notice step no longer runs the check')
+  assert.doesNotMatch(body, /^\s+if:/m, 'the notice step must run on every leg')
 })
 
 test('release.yml supplies publisherName on the signed Windows path', () => {

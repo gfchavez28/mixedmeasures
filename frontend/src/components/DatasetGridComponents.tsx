@@ -39,6 +39,7 @@ import {
 } from '@/components/ui/popover'
 import { Input } from '@/components/ui/input'
 import EditableCell from '@/components/EditableCell'
+import { OutOfDateDot } from '@/components/OutOfDateDot'
 import { TYPE_BADGE_CLASSES, variableDeleteEndpoint } from '@/lib/dataset-constants'
 import { ColumnEditorPopover, type EditorField } from '@/components/ColumnEditorPopover'
 import { formatFocusRow } from '@/components/crosswalk/navigation'
@@ -207,9 +208,8 @@ export function ColumnHeaderContent({
         {isComputed && (
           <span title={column.expression || 'Computed column'} className="flex items-center gap-0.5">
             <FunctionSquare className="w-3 h-3 text-violet-500" />
-            {column.stale && (
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" title="Stale — recompute" />
-            )}
+            {/* #1174 — a name, not a `title`; the column menu's Recompute is the fix. */}
+            {column.stale && <OutOfDateDot />}
           </span>
         )}
         {/* Row 45 (i) — a column the TOOL maintains. The marker is deliberately

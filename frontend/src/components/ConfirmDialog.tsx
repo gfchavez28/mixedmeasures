@@ -9,6 +9,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { MODE_DISABLED_CLASS, modeDisabledProps } from '@/lib/mode-disabled'
 
 interface ConfirmDialogProps {
   open: boolean
@@ -40,6 +41,16 @@ interface ConfirmDialogProps {
    * to `<body>`, because Radix returns focus only to a `Trigger` and every
    * `ConfirmDialog` is opened by state. */
   onCloseAutoFocus?: (event: Event) => void
+  /** Why the confirm CANNOT act, in words that complete its name (`'unavailable:
+   * …'`) — a state the researcher can change, so the button stays focusable and
+   * says why (`lib/mode-disabled.ts`, #754). Put the full sentence in `details`
+   * too: a reason only on a control is heard by nobody who does not Tab to it. */
+  confirmBlockedReason?: string | null
+  /** A transient precondition is unmet (e.g. the removal plan has not answered,
+   * #1175) — native `disabled`, no tab stop. ⚠️ Only for a state that holds as
+   * the dialog OPENS (focus starts on Cancel): a confirm that turns `disabled`
+   * while focused drops focus to `<body>` (#959) — that is `loading`'s job. */
+  confirmUnavailable?: boolean
 }
 
 export function ConfirmDialog({
@@ -55,7 +66,23 @@ export function ConfirmDialog({
   children,
   details,
   onCloseAutoFocus,
+  confirmBlockedReason = null,
+  confirmUnavailable = false,
 }: ConfirmDialogProps) {
+  const confirmText = loading ? (loadingLabel || 'Deleting...') : confirmLabel
+  // ⚠️ The click guard is the load-bearing half of a block (#754): the mode arm's
+  // `onClick` prevents the default, which is also what stops Radix's Action from
+  // closing the dialog on a refused press.
+  const confirm = modeDisabledProps<HTMLButtonElement>({
+    label: confirmText,
+    blockedReason: confirmBlockedReason,
+    unavailable: confirmUnavailable,
+    onActivate: (e) => {
+      e.preventDefault()
+      if (loading) return
+      onConfirm()
+    },
+  })
   return (
     <AlertDialog open={open} onOpenChange={loading ? undefined : onOpenChange}>
       <AlertDialogContent onCloseAutoFocus={onCloseAutoFocus}>
@@ -82,18 +109,18 @@ export function ConfirmDialog({
               focus on <body> for the whole request (~20 s on a large dataset).
               `aria-disabled` changes what a button announces, not what it does, so
               each needs a refusal (#754): Cancel's is the Root's `onOpenChange`,
-              which is `undefined` while loading; the confirm's is its guard below. */}
+              which is `undefined` while loading; the confirm's is the `loading`
+              guard in `onActivate` above. */}
           <AlertDialogCancel aria-disabled={loading || undefined}>Cancel</AlertDialogCancel>
           <AlertDialogAction
-            onClick={(e) => {
-              e.preventDefault()
-              if (loading) return
-              onConfirm()
-            }}
-            aria-disabled={loading || undefined}
-            className={destructive ? 'bg-red-600 hover:bg-red-700 focus:ring-red-600' : undefined}
+            {...confirm}
+            aria-disabled={loading || confirm['aria-disabled']}
+            className={[
+              destructive ? 'bg-red-600 hover:bg-red-700 focus:ring-red-600' : '',
+              confirmBlockedReason ? MODE_DISABLED_CLASS : '',
+            ].join(' ').trim() || undefined}
           >
-            {loading ? (loadingLabel || 'Deleting...') : confirmLabel}
+            {confirmText}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

@@ -45,7 +45,7 @@ from ..services.equivalence_validators import (
     assert_domains_intact_after_mutation,
 )
 from ..services.metrics import compute_metric
-from ..services.staleness import mark_metrics_stale
+from ..services.staleness import grouping_sets, mark_metrics_stale, mark_pairing_stale
 from ..services.audit import log_action
 # Single-sourced text normalizer (extracted to services so J3-2b's code-merge
 # triage shares the exact same fuzzy-match behavior — see text_similarity.py).
@@ -249,6 +249,9 @@ async def create_group(
     else:
         columns = []
 
+    # #1168 door 8 — pairing is tier 1 of the sibling match and decides which
+    # columns a variable group's α counts as one item.
+    before = grouping_sets(db, project_id)
     group = EquivalenceGroup(
         project_id=project_id,
         label=data.label,
@@ -260,6 +263,8 @@ async def create_group(
     # Assign columns to this group
     for col in columns:
         col.equivalence_group_id = group.id
+    if columns:
+        mark_pairing_stale(db, project_id, [c.id for c in columns], before)
 
     log_action(
         db,
@@ -310,6 +315,7 @@ async def bulk_create_groups(
             _assert_columns_unique_per_dataset(group_cols)
             assert_columns_same_type(group_cols)  # #366: same-type at creation
 
+    before = grouping_sets(db, project_id)  # #1168 door 8, as `create_group`
     created_groups = []
     for g_data in data.groups:
         group = EquivalenceGroup(
@@ -339,6 +345,8 @@ async def bulk_create_groups(
         )
         created_groups.append(group)
 
+    if all_col_ids:
+        mark_pairing_stale(db, project_id, all_col_ids, before)
     db.commit()
 
     responses = [_build_group_response(g, db) for g in created_groups]
@@ -412,6 +420,7 @@ async def delete_group(
 
     # Capture column IDs before the unlink so we can validate affected domains.
     affected_column_ids = [c.id for c in group.columns]
+    before = grouping_sets(db, project_id)  # #1168 door 8, as `create_group`
 
     # Unlink columns
     db.query(DatasetColumn).filter(
@@ -427,6 +436,7 @@ async def delete_group(
     # cross-dataset analysis domain with unpaired members. Validate before
     # commit so a failed check rolls back the unlink + delete atomically.
     assert_domains_intact_after_mutation(db, affected_column_ids)
+    mark_pairing_stale(db, project_id, affected_column_ids, before)
 
     log_action(
         db,
@@ -479,10 +489,12 @@ async def add_columns(
     # #366: the union of new + existing members must share a single column_type.
     assert_columns_same_type(columns + existing_members)
 
+    before = grouping_sets(db, project_id)  # #1168 door 8, as `create_group`
     for col in columns:
         col.equivalence_group_id = group.id
 
     db.flush()
+    mark_pairing_stale(db, project_id, [c.id for c in columns], before)
 
     log_action(
         db,
@@ -517,6 +529,7 @@ async def remove_columns(
     _get_project_or_404(db, project_id, user.id)
     group = _get_group_or_404(db, project_id, group_id)
 
+    before = grouping_sets(db, project_id)  # #1168 door 8, as `create_group`
     db.query(DatasetColumn).filter(
         DatasetColumn.id.in_(data.column_ids),
         DatasetColumn.equivalence_group_id == group_id,
@@ -533,6 +546,7 @@ async def remove_columns(
     # the unlink atomically. Runs before the dissolve check + log so
     # rejection unwinds the whole operation cleanly.
     assert_domains_intact_after_mutation(db, data.column_ids)
+    mark_pairing_stale(db, project_id, data.column_ids, before)
 
     remaining = (
         db.query(DatasetColumn)
@@ -685,6 +699,8 @@ async def swap_columns(
         affected_group_ids.add(orig_a)
         affected_group_ids.add(orig_b)
 
+    before = grouping_sets(db, project_id)  # #1168 door 8, as `create_group`
+
     # Phase 1: nullify all swap targets (partial index ignores NULLs)
     for col_a, _, col_b, _ in original_assignments:
         col_a.equivalence_group_id = None
@@ -832,6 +848,9 @@ async def swap_columns(
     # any domain containing swapped columns, plus any StatisticalTests
     # targeting those metrics).
     mark_metrics_stale(db, project_id, column_ids=list(swapped_column_ids))
+    # … and the metrics whose sibling grouping the swap changed, read against
+    # the BEFORE state the column-driven cascade above cannot see.
+    mark_pairing_stale(db, project_id, swapped_column_ids, before)
 
     # GAP 3.13 Option A — synchronous recompute of affected domain_aggregate
     # metrics via three-level join: swapped_columns → AnalysisDomainMember →
@@ -947,6 +966,7 @@ async def merge_groups(
     # relationship setter keeps the identity map consistent.
     source_columns = list(source_group.columns)
     moved_column_ids = [c.id for c in source_columns]
+    before = grouping_sets(db, project_id)  # #1168 door 8, as `create_group`
     for col in source_columns:
         col.equivalence_group = target_group
     db.flush()
@@ -965,6 +985,7 @@ async def merge_groups(
     # Mark stale
     if moved_column_ids:
         mark_metrics_stale(db, project_id, column_ids=moved_column_ids)
+        mark_pairing_stale(db, project_id, moved_column_ids, before)
 
     log_action(
         db,

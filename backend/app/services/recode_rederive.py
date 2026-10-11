@@ -173,7 +173,7 @@ def apply_rederive(
     """
     requested = list(dict.fromkeys(definition_ids))
     if not requested:
-        return {"updated": [], "skipped": [], "changed_values": 0}
+        return {"updated": [], "skipped": [], "changed_values": 0, "recomputed_column_ids": []}
 
     plan = {p.definition_id: p for p in plan_rederive(db, source)}
 
@@ -196,6 +196,7 @@ def apply_rederive(
     updated: list[int] = []
     skipped: list[int] = []
     changed_values = 0
+    recomputed_column_ids: list[int] = []
 
     for def_id in requested:
         item = plan[def_id]
@@ -224,6 +225,7 @@ def apply_rederive(
 
         if defn.is_primary:
             recompute_primary_value_numeric(db, defn, defn.column_id)
+            recomputed_column_ids.append(defn.column_id)
 
         updated.append(def_id)
 
@@ -231,4 +233,7 @@ def apply_rederive(
         "updated": updated,
         "skipped": skipped,
         "changed_values": changed_values,
+        # #1168 door 4 — the columns whose stored numbers moved. NOT on the wire
+        # (`RederiveResponse`): the router marks them stale and drops the key.
+        "recomputed_column_ids": recomputed_column_ids,
     }

@@ -183,3 +183,7 @@ class GroupComparisonResponse(BaseModel):
     #: which cause applies at each early return; the client renders the sentence
     #: and never derives one, the same contract as the stated-basis family.
     unavailable_reason: str | None = None
+    #: #1168 R7 — the variable groups whose stored per-record scale scores are
+    #: OUT OF DATE (a member's cells moved since they were computed). Read, never
+    #: recomputed, here; the client names them beside the recompute action.
+    stale_domain_ids: list[int] = []

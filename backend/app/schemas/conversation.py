@@ -1,6 +1,7 @@
 from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 from .common import UTCTimestamp
+from .dataset import OverlongRecords
 from ..models.conversation import ConversationStatus
 from ..services.media_duration import MAX_MEDIA_OFFSET_SECONDS
 
@@ -89,6 +90,9 @@ class CSVPreviewResponse(BaseModel):
     unique_speakers: list[str]
     detected_columns: dict
     unique_values_by_column: dict[str, list[str]] = {}
+    # #1127: rows with more values than headings — an unquoted comma in the text cuts
+    # the turn there. Always present; `count` 0 when there are none.
+    overlong_records: OverlongRecords = Field(default_factory=OverlongRecords)
 
 
 class SpeakerMapping(BaseModel):

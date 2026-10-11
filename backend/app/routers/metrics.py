@@ -53,6 +53,7 @@ from ..services.metrics import (
     _parse_json,
 )
 from ..services.metric_cleanup import cleanup_auto_metrics
+from ..services.scale_scores import pick_scale_scores  # #1177
 from ..services.equivalence_validators import assert_domain_members_numeric_eligible
 from ..services.audit import log_action
 from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
@@ -174,6 +175,8 @@ def _build_summary_response(
     metric: MetricDefinition,
     stats_tuple: tuple | None,
     label_map: dict[tuple[str, int], str],
+    *,
+    is_scale_score: bool,
 ) -> MetricDefinitionSummaryResponse:
     """Build a summary response for the list endpoint."""
     config = _parse_json(metric.config) or {}
@@ -215,6 +218,7 @@ def _build_summary_response(
         total_valid_n=int(total_valid_n) if total_valid_n is not None else None,
         result_count=result_count or 0,
         real_group_count=real_group_count or 0,
+        is_scale_score=is_scale_score,
         last_accessed_at=metric.last_accessed_at,
         created_at=metric.created_at,
         updated_at=metric.updated_at,
@@ -352,13 +356,18 @@ async def list_metrics(
     # Extract metrics for label resolution
     metrics = [row[0] for row in rows]
     label_map = resolve_input_source_labels(db, metrics)
+    # #1177: every metric of the project is in hand, so the choice is the same
+    # one `scale_score_metrics` makes over the database.
+    scale_score_ids = {m.id for m in pick_scale_scores(metrics).values()}
 
     responses = []
     for row in rows:
         metric = row[0]
         # row layout: (MetricDefinition, metric_definition_id, latest_computed_at, total_valid_n, result_count, real_group_count)
         stats = (row[2], row[3], row[4], row[5]) if row[2] is not None else None
-        responses.append(_build_summary_response(metric, stats, label_map))
+        responses.append(_build_summary_response(
+            metric, stats, label_map, is_scale_score=metric.id in scale_score_ids,
+        ))
 
     return MetricListResponse(metrics=responses, total=len(responses))
 

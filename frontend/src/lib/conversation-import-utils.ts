@@ -1,3 +1,5 @@
+import type { OverlongRecords } from '@/lib/api'
+
 export interface PreviewData {
   headers: string[]
   sample_rows: Record<string, string>[]
@@ -5,6 +7,30 @@ export interface PreviewData {
   unique_speakers: string[]
   detected_columns: Record<string, string>
   unique_values_by_column: Record<string, string[]>
+  // #1127: rows with more values than headings — an unquoted comma in the text cuts
+  // the turn there. Always sent by this build; optional for a stale server.
+  overlong_records?: OverlongRecords
+}
+
+/**
+ * #1127 — a file the reader REFUSED, as a per-file warning on the Columns step. It
+ * blocks Continue exactly as a missing column does, and the compatibility list names
+ * the file and offers Remove; before, it was `Error: …`, did not block, and the file
+ * went to the import anyway.
+ */
+export const UNREADABLE_FILE_PREFIX = 'Could not be read.'
+
+/** A per-file warning that stops the wizard: a refused file, or a missing column. */
+export function isBlockingFileWarning(warning: string | null | undefined): boolean {
+  return !!warning && (warning.startsWith('Missing required') || warning.startsWith(UNREADABLE_FILE_PREFIX))
+}
+
+/**
+ * A refusal, naming its file when several are on the page (#1127) — "Line 4 …" alone
+ * does not say WHICH of five transcripts to open.
+ */
+export function namingTheFile(fileName: string, message: string, manyFiles: boolean): string {
+  return manyFiles ? `“${fileName}”: ${message}` : message
 }
 
 export interface SpeakerMapping {

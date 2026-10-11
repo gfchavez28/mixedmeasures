@@ -38,6 +38,7 @@ import {
   type ComparisonChartType,
 } from '@/lib/comparison-chart-types'
 import ComparisonUnavailable from '@/components/analysis/ComparisonUnavailable'
+import StaleScaleScoresNotice from '@/components/analysis/StaleScaleScoresNotice'
 
 /**
  * ⚠️ `satisfies Record<ComparisonChartType, …>` so a new output type is a
@@ -86,8 +87,16 @@ export interface CorrelationsComparisonsContentProps {
   rcFormatting: Partial<ChartFormatting>
   postHocExpanded: boolean
   onPostHocToggle: () => void
+  /** The page's variable-group list — names for the out-of-date notice
+   *  (#1168 R7). REQUIRED, `undefined` while it loads. */
+  domains: readonly { id: number; name: string }[] | undefined
   // Callbacks
   setUrlParam: (key: string, value: string) => void
+}
+
+/** The ids the ACTIVE result's payloads name, once each. */
+function uniqueIds(...lists: (readonly number[] | undefined)[]): number[] {
+  return [...new Set(lists.flatMap(l => l ?? []))]
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -104,8 +113,24 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
     hasComparisonSelection, compareBy, compareBy2, testType, nonparametric,
     rcChartType, comparisonData, isComparisonFetching,
     excludeGroups, rcFormatting, postHocExpanded, onPostHocToggle,
-    setUrlParam,
+    domains, setUrlParam,
   } = props
+
+  // #1168 R7 — the groups whose stored scale scores the SHOWN result read out
+  // of date. Only beside a result on screen: while a view refetches it shows
+  // "Computing…" instead, and the empty-comparison state has its own compute
+  // button (`ComparisonUnavailable`), so neither gets a second one. The scatter
+  // matrix reads the same selection's scores, so its ids join the matrix's.
+  const corrStaleIds = hasRcSelection && !isCorrFetching && corrMatrixData
+    ? uniqueIds(
+        corrMatrixData.stale_domain_ids,
+        showScatter && !isScatterFetching ? scatterMatrixData?.stale_domain_ids : undefined,
+      )
+    : []
+  const comparisonStaleIds = hasComparisonSelection && !isComparisonFetching
+    && comparisonData && comparisonData.rows.length > 0
+    ? comparisonData.stale_domain_ids
+    : []
 
   const corrToolbarRef = useRef<HTMLDivElement>(null)
   const compToolbarRef = useRef<HTMLDivElement>(null)
@@ -234,6 +259,8 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
             </div>
           )}
 
+          <StaleScaleScoresNotice pid={pid} staleDomainIds={corrStaleIds} domains={domains} />
+
           {/* Correlation matrix */}
           {!hasRcSelection ? (
             <div className="flex flex-col items-center justify-center py-20 text-mm-text-faint">
@@ -338,6 +365,8 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
               </div>
             </div>
           )}
+
+          <StaleScaleScoresNotice pid={pid} staleDomainIds={comparisonStaleIds} domains={domains} />
 
           {/* Comparison content */}
           {!compareBy ? (

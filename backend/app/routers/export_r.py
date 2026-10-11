@@ -34,6 +34,7 @@ from ..services.coding_layers import (
     visible_target_filter,
 )
 from ..services.metrics import resolve_input_source_labels
+from ..services.scale_scores import scale_score_metrics  # #1177
 from ..services.grouping import load_grouping_values, order_value_labels
 from ..services.missing_values import column_missing_rules, is_missing
 from ..services.recode import (
@@ -2780,18 +2781,11 @@ def export_r_data(
             identifier_cols.append({"r_name": r_name, "col": col})
 
     # ── Step 4: Load domain metrics & scores ─────────────────────────────
-    domain_metrics = (
-        db.query(MetricDefinition)
-        .filter(
-            MetricDefinition.project_id == project_id,
-            MetricDefinition.metric_type == "domain_aggregate",
-            MetricDefinition.input_source_type == "dataset_domain",
-            MetricDefinition.grouping_column_id == None,
-            MetricDefinition.grouping_column_id_2 == None,
-            (MetricDefinition.grouping_mode == None)
-            | (MetricDefinition.grouping_mode != "dataset"),
-        )
-        .all()
+    # Each group's scale score, ONE per group (#1177). Every ungrouped aggregate
+    # used to qualify, so a lookalike (the aggregate with some answers excluded)
+    # was written as `<group>_score_2` — a second "score" for the same group.
+    domain_metrics = sorted(
+        scale_score_metrics(db, project_id).values(), key=lambda m: m.id,
     )
 
     domain_score_cols: list[dict] = []

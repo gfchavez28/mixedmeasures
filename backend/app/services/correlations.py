@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 from ..models.dataset import DatasetColumn, DatasetValue, Dataset
 from ..models.analysis_domain import AnalysisDomain
 from ..models.row_score import RowScore
-from ..models.metric import MetricDefinition
 from .grouping import load_grouping_values
+from .scale_scores import scale_score_metrics
 from .undefined_stats import (
     INSUFFICIENT_N,
     NO_VARIANCE,
@@ -78,6 +78,45 @@ def _load_column_vectors(
     return values, column_info
 
 
+def _domain_score_metrics(db: Session, domain_ids: list[int], project_id: int):
+    """The metrics whose `RowScore`s stand in for each group's per-record score —
+    the ONE selection both `_load_domain_vectors` and `stale_score_domain_ids` use,
+    so what is disclosed as out of date is exactly what was read.
+
+    🔴 **One per group, THE scale score (#1177).** This was every ungrouped
+    `domain_aggregate` of the group, merged per record with the last one winning,
+    so a lookalike quick compute made beside it — the same aggregate with some
+    answers excluded — was read as the scale score. `scale_scores` decides, and
+    *Compute the scale score* refreshes the same metric.
+    """
+    return list(scale_score_metrics(db, project_id, domain_ids).values())
+
+
+def stale_score_domain_ids(db: Session, domain_ids: list[int], project_id: int) -> list[int]:
+    """The groups whose per-record scores were read from an OUT-OF-DATE metric.
+
+    🔴 **Correlations, scatter and Comparisons read stored `RowScore`s and never
+    recompute** (DEC-C: no compute inside a GET), so after a member's cells move the
+    stored scores are served until the scale score is recomputed — and nothing on
+    those tabs said so (#1168 R7, found 2026-10-10 by reading, reproduced by
+    `test_saved_statistics_doors.py`). The payloads carry this list and the tabs
+    name the groups beside the recompute action.
+
+    Only metrics that HAVE rows count: a stale metric with none contributed nothing,
+    and its group is reported as never computed instead.
+    """
+    stale = [m for m in _domain_score_metrics(db, domain_ids, project_id) if m.stale]
+    if not stale:
+        return []
+    scored = {
+        mid for (mid,) in db.query(RowScore.metric_definition_id)
+        .filter(RowScore.metric_definition_id.in_([m.id for m in stale]))
+        .distinct()
+        .all()
+    }
+    return sorted({m.input_source_id for m in stale if m.id in scored})
+
+
 def _load_domain_vectors(
     db: Session,
     domain_ids: list[int],
@@ -116,23 +155,13 @@ def _load_domain_vectors(
     if not valid_ids:
         return {}, [], set()
 
-    # Find domain_aggregate metrics for these domains (ungrouped only)
-    metrics = (
-        db.query(MetricDefinition.id, MetricDefinition.input_source_id)
-        .filter(
-            MetricDefinition.project_id == project_id,
-            MetricDefinition.metric_type == "domain_aggregate",
-            MetricDefinition.input_source_type == "dataset_domain",
-            MetricDefinition.input_source_id.in_(valid_ids),
-            MetricDefinition.grouping_column_id.is_(None),
-        )
-        .all()
-    )
+    # Each group's scale score — one metric per group (#1177)
+    metrics = _domain_score_metrics(db, valid_ids, project_id)
 
     metric_to_domain = {m.id: m.input_source_id for m in metrics}
     if not metric_to_domain:
-        # No ungrouped scale-score metric at all — nothing has been computed for
-        # any of these groups, which is the same remedy as "computed nothing".
+        # No scale-score metric at all — nothing has been computed for any of
+        # these groups, which is the same remedy as "computed nothing".
         return {}, domain_info, set(valid_ids)
 
     # Bulk load row scores
@@ -321,6 +350,9 @@ def compute_correlation_matrix(
         "matrix": matrix,
         "adjusted_alpha": adjusted_alpha,
         "num_comparisons": num_comparisons,
+        "stale_domain_ids": (
+            stale_score_domain_ids(db, var_ids, project_id) if not column_ids else []
+        ),
     }
 
 
@@ -392,6 +424,9 @@ def compute_scatter_data(
         "n": n,
         "regression": regression,
         "group_regressions": group_regressions if group_regressions else None,
+        "stale_domain_ids": (
+            stale_score_domain_ids(db, [x_id, y_id], project_id) if id_type != "column" else []
+        ),
     }
 
 
@@ -468,6 +503,9 @@ def compute_scatter_matrix(
         "full_labels": full_labels,
         "pairs": pairs,
         "truncated": truncated,
+        "stale_domain_ids": (
+            stale_score_domain_ids(db, var_ids, project_id) if id_type != "column" else []
+        ),
     }
 
 

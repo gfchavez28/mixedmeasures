@@ -4,7 +4,10 @@
 // participant-derived override applied at submit time).
 import { describe, expect, it } from 'vitest'
 
-import { generateParticipantName, isOrphanedParticipant, syncAutoNames, type SpeakerMapping } from './conversation-import-utils'
+import {
+  generateParticipantName, isBlockingFileWarning, isOrphanedParticipant, namingTheFile, syncAutoNames,
+  UNREADABLE_FILE_PREFIX, type SpeakerMapping,
+} from './conversation-import-utils'
 
 const speaker = (name: string, isFacilitator = false): SpeakerMapping =>
   ({ original_label: name, normalized_name: name, is_facilitator: isFacilitator }) as SpeakerMapping
@@ -85,5 +88,19 @@ describe('isOrphanedParticipant', () => {
     ['a document they are the subject of', { linked_documents: [{}] }],
   ])('%s makes them linked', (_, link) => {
     expect(isOrphanedParticipant({ ...none, ...link })).toBe(false)
+  })
+})
+
+describe('#1127 — a refused transcript is named, and blocks', () => {
+  it('names the file only when several are on the page', () => {
+    expect(namingTheFile('b.csv', 'Line 2 …', true)).toBe('“b.csv”: Line 2 …')
+    expect(namingTheFile('b.csv', 'Line 2 …', false)).toBe('Line 2 …')
+  })
+
+  it('a refused file and a missing column block; an optional column does not', () => {
+    expect(isBlockingFileWarning(`${UNREADABLE_FILE_PREFIX} Line 2 …`)).toBe(true)
+    expect(isBlockingFileWarning('Missing required columns: Text ("Text")')).toBe(true)
+    expect(isBlockingFileWarning('Optional columns missing: End Time (will be skipped)')).toBe(false)
+    expect(isBlockingFileWarning(null)).toBe(false)
   })
 })

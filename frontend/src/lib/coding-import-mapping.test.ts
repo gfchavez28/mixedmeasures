@@ -155,6 +155,16 @@ describe('sharedCreateConflicts (#1082 b)', () => {
     expect(out[0]).toMatch(/different model configurations/)
   })
 
+  it('#1150 (b): settings typed in another ORDER are one configuration, as the server reads them', () => {
+    // The server compares dicts; the page compared `JSON.stringify`, which keeps the
+    // order typed — so these were refused on the page and accepted by the server.
+    const a = { ...create('GPT', 'ai', 'gpt-4o'), parameters: 'temperature=0\ntop_p=1' }
+    const b = { ...create('GPT', 'ai', 'gpt-4o'), parameters: 'top_p=1\ntemperature=0' }
+    expect(sharedCreateConflicts({ a, b })).toEqual([])
+    const c = { ...create('GPT', 'ai', 'gpt-4o'), parameters: 'top_p=1\ntemperature=1' }
+    expect(sharedCreateConflicts({ a, c })).toHaveLength(1)
+  })
+
   it('agreeing ones are fine — and an unchosen kind is left to its own blocker', () => {
     expect(sharedCreateConflicts({ a: create('GPT', 'ai', 'gpt-4o'), b: create('GPT', 'ai', 'gpt-4o') })).toEqual([])
     expect(sharedCreateConflicts({ a: create('X', 'human'), b: create('X', null) })).toEqual([])
@@ -175,6 +185,15 @@ describe('takenNameSuffix (#1082 b)', () => {
   it('says nothing for a free name — the match is exact, as the server’s is', () => {
     expect(takenNameSuffix('Bob', roster)).toBeNull()
     expect(takenNameSuffix('alice', roster)).toBeNull()
+  })
+
+  it('#1150 (c): skips a number another card TYPED, as the server reserves it', () => {
+    // An existing "Alice"; one card creates "Alice", another "Alice (3)". The server
+    // reserves every typed name before numbering, so the first becomes "Alice (4)".
+    const typed = new Set(['Alice', 'Alice (3)'])
+    expect(takenNameSuffix('Alice', roster, typed)).toBe('Alice (4)')
+    // A card's OWN typed name is not reserved against itself.
+    expect(takenNameSuffix('Alice (3)', roster, typed)).toBeNull()
   })
 })
 

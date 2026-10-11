@@ -790,6 +790,30 @@ export interface ProjectColumnListResponse {
   total: number
 }
 
+/** A variable group a delete reaches — named, because the researcher made it. */
+export interface RemovalPlanGroup {
+  id: number
+  name: string
+}
+
+/** What deleting a variable or a dataset will remove, recalculate or refuse
+ *  (#1175) — computed by the function the delete itself runs, so the confirm
+ *  cannot disagree with the click. Read through `lib/removal-plan.ts`. */
+export interface RemovalPlan {
+  /** Statistics the researcher made on purpose (scale scores, saved metrics). */
+  saved_metrics_removed: string[]
+  tests_removed: number
+  /** Groups that keep other members and are recalculated. */
+  groups_recalculated: RemovalPlanGroup[]
+  /** Groups left empty, removed with their statistics. */
+  groups_removed: RemovalPlanGroup[]
+  /** Why the delete would be refused (a 409), said before the click. */
+  refusal: string | null
+  /** Computed variables whose formula uses this variable — the delete is
+   *  refused while any exist. Always empty on a dataset's plan. */
+  blocked_by: string[]
+}
+
 // API functions - Datasets
 /** What one refresh of the participant table changed — and what it could not
  *  score, which is the half that matters.
@@ -1041,6 +1065,16 @@ export const datasetsApi = {
     ).then(res => res.data),
   delete: (projectId: number, datasetId: number) =>
     api.delete(`/projects/${projectId}/datasets/${datasetId}`).then(res => res.data),
+  /** #1175 — what `delete` would remove or refuse. Read-only. */
+  getDatasetRemovalPlan: (projectId: number, datasetId: number) =>
+    api.get<RemovalPlan>(
+      `/projects/${projectId}/datasets/${datasetId}/removal-plan`,
+    ).then(res => res.data),
+  /** #1175 — what deleting this variable would remove or refuse. Read-only. */
+  getColumnRemovalPlan: (projectId: number, datasetId: number, columnId: number) =>
+    api.get<RemovalPlan>(
+      `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/removal-plan`,
+    ).then(res => res.data),
   deleteRow: (projectId: number, datasetId: number, rowId: number) =>
     api.delete(`/projects/${projectId}/datasets/${datasetId}/rows/${rowId}`).then(res => res.data),
   allColumns: (projectId: number, params?: { ungrouped?: boolean; dataset_id?: number; search?: string }) =>
@@ -1217,10 +1251,17 @@ export const recodeApi = {
       { rules }
     ).then(res => res.data),
 
+  /** ⚠️ NO timeout (#1145), the participant table's reason (#1073 b): giving up
+   *  does not stop the server. A retype re-derives every cell of every selected
+   *  variable — #1145's review measured 28.5 s for 15 columns × 100,000 rows
+   *  and 73.7 s for 40 — so a larger selection crossed the 30 s default and the
+   *  page gave up while the server went on to finish. The Variables view shows
+   *  the wait (`BulkTypeChangeStatus`). */
   bulkTypeUpdate: (projectId: number, datasetId: number, columnIds: number[], columnType: string) =>
     api.patch(
       `/projects/${projectId}/datasets/${datasetId}/columns/bulk-type`,
-      { column_ids: columnIds, column_type: columnType }
+      { column_ids: columnIds, column_type: columnType },
+      { timeout: 0 },
     ).then(res => res.data),
 
   // Tier 3 crosswalk: return the set of column IDs in this project that

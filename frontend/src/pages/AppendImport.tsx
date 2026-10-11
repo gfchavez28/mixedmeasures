@@ -99,7 +99,9 @@ export default function AppendImport() {
       // #796/#797: appendPreview is one of the four calls that now carry a
       // size-derived timeout, so it can fail by abort as well as by parse —
       // and the two need different words. The shared describer owns that.
-      setError(describeDatasetUploadError(err))
+      // #1127: and it names the file — the upload step shows no file name, so a
+      // "Line 4 …" refusal did not say which file it was about.
+      setError(`“${selectedFile.name}”: ${describeDatasetUploadError(err)}`)
     } finally {
       setIsLoading(false)
     }
@@ -282,7 +284,15 @@ export default function AppendImport() {
                     className="hidden"
                     id="append-file-input"
                   />
-                  <Button onClick={() => appendInputRef.current?.click()} disabled={isLoading}>
+                  <Button
+                    // #1127 — busy is `aria-disabled` + this guard, never `disabled`
+                    // (#1133): focus returns here from the file picker, and a refused
+                    // file's alert must not arrive with focus on <body>.
+                    onClick={() => { if (!isLoading) appendInputRef.current?.click() }}
+                    aria-disabled={isLoading || undefined}
+                    aria-busy={isLoading || undefined}
+                    className="aria-busy:cursor-wait aria-busy:opacity-50"
+                  >
                     {isLoading ? 'Analyzing...' : 'Select File'}
                   </Button>
                 </div>
@@ -530,10 +540,15 @@ export default function AppendImport() {
                 </Button>
                 <Button
                   onClick={() => {
+                    // #1127 — the guard is the refusal while it works (#1133's pattern).
+                    if (importMutation.isPending) return
                     setError('')
                     importMutation.mutate()
                   }}
-                  disabled={importMutation.isPending || newRowCount === 0}
+                  disabled={newRowCount === 0}
+                  aria-disabled={importMutation.isPending || undefined}
+                  aria-busy={importMutation.isPending || undefined}
+                  className="aria-busy:cursor-wait aria-busy:opacity-50"
                 >
                   {importMutation.isPending ? 'Importing...' : `Append ${newRowCount} Responses`}
                 </Button>

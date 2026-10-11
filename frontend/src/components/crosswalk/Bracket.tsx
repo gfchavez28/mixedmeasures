@@ -556,10 +556,17 @@ export const Bracket = memo(function Bracket({
                 className="mt-1.5 inline-flex items-center gap-1 self-start rounded px-1.5 py-0.5 text-[10px] font-semibold transition-colors focus-visible:ring-2 focus-visible:ring-ring focus:outline-none hover:opacity-90"
                 style={labelStyles.scoreBadge}
                 onClick={handleScoreClick}
-                aria-label={`Open scale score metric for ${bracket.name}`}
+                /* #1174 — the state rides the BUTTON's name. Its explicit
+                   `aria-label` wins over content and a button's children are
+                   presentational, so the dot's old `aria-label="stale"` (on a
+                   generic span, where a name is not exposed anyway) reached
+                   nobody. The dot keeps its look and is decorative. */
+                aria-label={`Open scale score metric for ${bracket.name}${
+                  scoreState === 'stale' ? ' — out of date, recompute in Analysis' : ''
+                }`}
                 title={
                   scoreState === 'stale'
-                    ? 'Scale score — stale, click to view'
+                    ? 'Scale score — out of date, click to view'
                     : 'Scale score — click to open in Analysis'
                 }
               >
@@ -568,7 +575,7 @@ export const Bracket = memo(function Bracket({
                 {scoreState === 'stale' && (
                   <span
                     className="ml-0.5 inline-block w-1.5 h-1.5 rounded-full bg-amber-500"
-                    aria-label="stale"
+                    aria-hidden="true"
                   />
                 )}
               </button>

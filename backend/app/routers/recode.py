@@ -91,7 +91,11 @@ from ..services.participant_dataset import (
     managed_column_refusal,
 )
 
-from ..services.staleness import mark_metrics_stale
+from ..services.staleness import (
+    grouping_sets,
+    mark_metrics_stale,
+    mark_regrouped_metrics_stale,
+)
 from ..services.column_retype import plan_rederived_cells, write_rederived_cells  # #1079 (b)
 from .helpers import _get_project_or_404
 
@@ -360,6 +364,12 @@ async def rederive_dependents(
         # 409, not 400: the request is well-formed, the STATE refuses it.
         raise HTTPException(status_code=409, detail=str(exc))
 
+    # #1168 door 4 — a re-derived PRIMARY rewrote its column's stored numbers.
+    recomputed = result.pop("recomputed_column_ids")
+    if recomputed:
+        db.flush()
+        mark_metrics_stale(db, project_id, column_ids=recomputed)
+
     if result["updated"]:
         log_action(
             db,
@@ -439,6 +449,12 @@ async def rekey_column_definitions(
     except RekeyBlockedError as exc:
         # 409, not 400: the request is well-formed, the STATE refuses it.
         raise HTTPException(status_code=409, detail=str(exc))
+
+    # #1168 door 4 — a re-keyed PRIMARY rewrote its column's stored numbers.
+    recomputed = result.pop("recomputed_column_ids")
+    if recomputed:
+        db.flush()
+        mark_metrics_stale(db, project_id, column_ids=recomputed)
 
     if result["updated"]:
         log_action(
@@ -1186,6 +1202,8 @@ def apply_value_labels_endpoint(
 
     pairs = [(p.value, p.label.strip()) for p in data.labels]
     target_type = ColumnType(data.column_type) if data.column_type else None
+    # #1168 door 8 — a retype to or from demographic changes who is a sibling.
+    before = grouping_sets(db, project_id) if target_type is not None else None
 
     try:
         result = apply_value_labels(db, col, pairs, target_type)
@@ -1195,6 +1213,8 @@ def apply_value_labels_endpoint(
         raise HTTPException(status_code=400, detail=str(e))
 
     mark_metrics_stale(db, project_id, column_ids=[column_id])
+    if before is not None:
+        mark_regrouped_metrics_stale(db, project_id, before)
     log_action(
         db,
         action="applied_value_labels",
@@ -1531,6 +1551,10 @@ def bulk_type_update(
             },
         )
 
+    # #1168 door 8 — a type change to or from demographic (and the subtype it
+    # clears) changes which column is a grouped variable group's sibling.
+    before = grouping_sets(db, project_id)
+
     updated = 0
     retyped: list[DatasetColumn] = []
     for col_id in data.column_ids:
@@ -1555,21 +1579,25 @@ def bulk_type_update(
     # changed the type and left them: numbers typed as categories and retyped
     # numeric stayed NULL in every cell (measured), so Correlations, Comparisons
     # and both exports read an empty column while the grid showed values.
-    # Planned for EVERY column before anything is written (reads take no lock;
-    # the new type is on the unflushed objects), then written in one short
-    # transaction. Re-derived even when the type did not change, so re-applying
-    # a type repairs a column retyped before this build.
+    # Re-derived even when the type did not change, so re-applying a type
+    # repairs a column retyped before this build.
     #
-    # ⚠️ One short transaction PER COLUMN for the cells, after the types commit:
-    # MEASURED at 122,382 rows, a column's cells take ~0.5 s to write, and this
-    # endpoint runs beside other writers (`def`, below), so five columns in one
-    # transaction held SQLite's lock ~2.5 s and ten would reach the 5 s busy
-    # timeout (#1033's class). A failure part-way leaves a column typed but not
-    # re-derived — the state every column was in before #1079 — and re-applying
-    # the type repairs it.
-    plans = [plan_rederived_cells(db, col) for col in retyped]
+    # 🔴 #1145 — **the types COMMIT FIRST, then each column is planned, written,
+    # marked and committed in turn.** It used to plan EVERY column before writing
+    # any, which held every plan in memory at once (1,121 MB for 40 columns of
+    # 100,000 cells, measured) and planned from the uncommitted type, so a cell
+    # edited during the planning derived its number from the OLD type and the
+    # write then skipped it (b). Planning after the commit means an edit in the
+    # window already derives from the new type.
+    #
+    # The type alone changes what the metrics may read (eligibility, which cells
+    # are missing), so every retyped column is marked with the type commit — and
+    # again after its cells are written, because a quick compute between the two
+    # commits would compute on the old numbers and clear the flag (c).
     db.flush()
-    mark_metrics_stale(db, project_id, column_ids=data.column_ids)
+    retyped_ids = [col.id for col in retyped]
+    mark_metrics_stale(db, project_id, column_ids=retyped_ids)
+    mark_regrouped_metrics_stale(db, project_id, before)
 
     log_action(
         db,
@@ -1585,8 +1613,18 @@ def bulk_type_update(
         },
     )
     db.commit()
-    for changes in plans:
-        write_rederived_cells(db, changes)
+
+    # ⚠️ One short transaction PER COLUMN for the cells: MEASURED at 122,382 rows,
+    # a column's cells take ~0.5 s to write, and this endpoint runs beside other
+    # writers (`def`, above), so five columns in one transaction held SQLite's
+    # lock ~2.5 s and ten would reach the 5 s busy timeout (#1033's class). A
+    # failure part-way leaves a column typed but not re-derived — the state every
+    # column was in before #1079 — and re-applying the type repairs it.
+    for col in retyped:
+        changes = plan_rederived_cells(db, col)
+        if changes:
+            write_rederived_cells(db, changes)
+            mark_metrics_stale(db, project_id, column_ids=[col.id])
         db.commit()
 
     return {"status": "ok", "updated": updated}

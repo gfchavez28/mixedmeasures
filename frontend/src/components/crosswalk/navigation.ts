@@ -10,14 +10,11 @@
  * that param (`useAnalysisUrlState.ts:99-101`) and triggers `useQuickCompute`
  * to auto-resolve the domain_aggregate metric for the chosen domain.
  *
- * The `metric_id` param is retained as a forward-compatible hint for Phase 4.7's
- * `DomainPickerPopover`, which will read it to pre-select a specific metric
- * variant (ungrouped vs grouped-by-dimension) when a domain has multiple
- * `domain_aggregate` metrics. Today no consumer reads it; the URL just carries
- * it for future use. setUrlParam / setSearchParams calls in AnalysisView don't
- * strip unknown keys (verified: useAnalysisUrlState:149-159 reads `prev` and
- * only mutates the targeted key), so the hint survives subsequent filter
- * changes.
+ * The `metric_id` param is read by NOTHING. It was meant to pre-select one of a
+ * domain's several `domain_aggregate` variants in the picker, and #1177 retired
+ * that radio: a variable group has ONE scale score (the server's
+ * `is_scale_score`), which `domains=` + `metricType=domain_aggregate` already
+ * selects. Unknown keys survive filter changes, so it is inert, not harmful.
  *
  * Stale-domain edge case (deferred to Phase 4.7): if `domains=N` references a
  * domain that was deleted between the click and the page load, AnalysisView's

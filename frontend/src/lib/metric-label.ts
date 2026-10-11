@@ -8,9 +8,11 @@
  * cleanup and remain in R-export filters; `origin_context="crosswalk_auto"`
  * is the UI marker.
  *
- * Foot-gun: ungrouped scale-score metrics require BOTH `grouping_column_id`
- * AND `grouping_column_id_2` to be null. A single-field check would silently
- * match grouped variants and pre-select the wrong row in DomainPickerDetail.
+ * ⚠️ WHICH metric is a variable group's scale score is NOT decided here: the
+ * server states it as `is_scale_score` (#1177). `isUngroupedScaleScore` — any
+ * `domain_aggregate` with both grouping columns null — lived here and was
+ * deleted with its last caller, because a lookalike with some answers excluded
+ * passes that test too.
  */
 
 interface MetricLike {
@@ -19,22 +21,8 @@ interface MetricLike {
   origin_context: string | null
 }
 
-interface MetricGroupingLike {
-  metric_type: string
-  grouping_column_id: number | null
-  grouping_column_id_2: number | null
-}
-
 export function isCrosswalkAuto(m: { origin_context: string | null }): boolean {
   return m.origin_context === 'crosswalk_auto'
-}
-
-export function isUngroupedScaleScore(m: MetricGroupingLike): boolean {
-  return (
-    m.metric_type === 'domain_aggregate' &&
-    m.grouping_column_id == null &&
-    m.grouping_column_id_2 == null
-  )
 }
 
 export function metricDisplayLabel(m: MetricLike): string {

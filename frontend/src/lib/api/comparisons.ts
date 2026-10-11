@@ -133,6 +133,11 @@ export interface GroupComparisonResponse {
    *  guessed at the render site. `null` when rows were produced; absent from a
    *  server that predates the field, which the reader treats as unknown. */
   unavailable_reason?: string | null
+  /** #1168 R7 — variable groups whose stored per-record scale scores predate a
+   *  change to their members' cells. The comparison READ them, as stored; the
+   *  page names them beside the recompute (`StaleScaleScoresNotice`). `[]` when
+   *  fresh or when the request used variables, not groups. */
+  stale_domain_ids: number[]
 }
 
 // API functions - Comparisons

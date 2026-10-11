@@ -86,6 +86,8 @@ export function useDeleteVariable(
     request,
     /** Props for `DeleteVariableDialog`. */
     dialogProps: {
+      projectId,
+      datasetId,
       column: target,
       isPending: mutation.isPending,
       onCancel: close,

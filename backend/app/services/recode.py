@@ -12,6 +12,7 @@ from ..models.recode import RecodeDefinition, RecodeType
 from ..services.dataset_import import _coerce_scale_codes
 from ..services.missing_values import column_missing_rules, is_declaration, is_missing
 from ..services.recode_ranges import parse_ranges, resolve_range_output
+from ..services.staleness import mark_metrics_stale_for_columns
 
 logger = logging.getLogger(__name__)
 
@@ -912,6 +913,7 @@ def repair_reverse_recode_mappings(db: Session) -> int:
         return _cache[def_id]
 
     repaired = 0
+    reapplied_column_ids: list[int] = []
     for defn in reverse_defs:
         reference = _forward_reference_mapping(db, defn, resolve)
         if not reference:
@@ -946,9 +948,17 @@ def repair_reverse_recode_mappings(db: Session) -> int:
             defn.source_definition_id = adopted_source.id
         if defn.is_primary:
             recompute_primary_value_numeric(db, defn, defn.column_id)
+            reapplied_column_ids.append(defn.column_id)
         repaired += 1
 
     if repaired:
+        # #1168 door 7 — a re-applied primary rewrote its column's stored numbers,
+        # and a saved result computed on the double-flipped data would otherwise
+        # keep being served. Install-wide (this runs at startup and after a
+        # restore, with no project in hand), so each column resolves its own.
+        if reapplied_column_ids:
+            db.flush()
+            mark_metrics_stale_for_columns(db, reapplied_column_ids)
         db.commit()
         logger.info(
             "Repaired %d reverse recode mapping(s) — #578 double-flip", repaired

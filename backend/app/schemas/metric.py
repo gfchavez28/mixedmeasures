@@ -211,6 +211,11 @@ class MetricDefinitionSummaryResponse(BaseModel):
     # listwise-deletion bucket. Group-count displays and the t-vs-ANOVA
     # picker must read this, never result_count.
     real_group_count: int = 0
+    # #1177: this metric is its variable group's scale score — the one metric
+    # Correlations, Comparisons, the Data view and the R export read for the group,
+    # decided by `services/scale_scores.py`. The client reads it and never
+    # re-derives it from the grouping fields (a lookalike shares them).
+    is_scale_score: bool
     last_accessed_at: UTCTimestamp | None = None
     created_at: UTCTimestamp
     updated_at: UTCTimestamp

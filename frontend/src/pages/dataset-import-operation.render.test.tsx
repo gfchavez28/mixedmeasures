@@ -12,6 +12,7 @@ import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { estimatedProcessingSeconds, SLOW_UPLOAD_THRESHOLD_BYTES } from '@/lib/dataset-import-formats'
+import { ApiError } from '@/lib/api/client'
 
 const api = vi.hoisted(() => ({
   list: vi.fn(),
@@ -93,7 +94,15 @@ describe('#1010 (i) — the wizard names the operation that is running', () => {
     await waitFor(() => expect(status()).toHaveTextContent(
       `Importing. This is a large file and may take around ${importEstimate} seconds.`,
     ))
-    expect(screen.getByRole('button', { name: 'Importing…' })).toBeInTheDocument()
+    // #1127 — busy, not disabled (#1133's pattern), and the guard refuses a second press.
+    const importing = screen.getByRole('button', { name: 'Importing…' })
+    expect(importing).toHaveAttribute('aria-disabled', 'true')
+    expect(importing).not.toBeDisabled()
+    fireEvent.click(importing)
+    // The handler awaits the participant count BEFORE it imports, so a second press
+    // would reach `import` a tick later — wait it out, or this proves nothing.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(api.import).toHaveBeenCalledTimes(1)
   })
 
   it('#1133: step 1’s Next stays FOCUSABLE while it reads — busy, not disabled — and refuses a second press', async () => {
@@ -143,12 +152,68 @@ describe('#1010 (i) — the wizard names the operation that is running', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Next' }))
   })
 
+  it('#1127: with SEVERAL files, the alert names each refused file and its sentence — once', async () => {
+    const sentence = 'Line 2 opens a value with a quotation mark that is never closed.'
+    api.preview.mockImplementation((_pid: number, file: File) => (file.name === 'b.csv'
+      ? Promise.reject(new ApiError(400, { detail: sentence }, {}))
+      : Promise.resolve(preview())))
+    api.describeColumns.mockRejectedValue(new Error('still bad'))
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const { container } = render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/projects/1/datasets/import']}>
+          <Routes><Route path="/projects/:projectId/datasets/import" element={<DatasetImport />} /></Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    fireEvent.change(container.querySelector('#dataset-file-input')!, {
+      target: { files: [new File(['Q1\n3\n'], 'a.csv'), new File(['x'], 'b.csv')] },
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Next' }))
+    const alert = await screen.findByRole('alert')
+    // It said "1 file(s) had preview errors. You can remove them and continue." —
+    // no file, no reason, and no remove control on that step.
+    expect(alert).toHaveTextContent(`One file could not be read. b.csv: ${sentence}`)
+    expect(alert).toHaveTextContent('Go Back to remove it')
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+  })
+
+  it('#1127: on the column-chooser step a refused re-read is ONE alert, beside the chooser', async () => {
+    const sentence = 'Line 9 opens a value with a quotation mark that is never closed.'
+    api.preview
+      .mockRejectedValueOnce(new ApiError(400, { detail: 'over the cap' }, {}))
+      .mockRejectedValueOnce(new ApiError(400, { detail: sentence }, {}))
+    api.describeColumns.mockResolvedValue({
+      columns: [
+        { column_index: 0, column_name: 'Q001', sample_values: ['1'] },
+        { column_index: 1, column_name: 'Q002', sample_values: ['2'] },
+      ],
+      total_rows: 100, cells: 200, max_cells: 150,
+    })
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const { container } = render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/projects/1/datasets/import']}>
+          <Routes><Route path="/projects/:projectId/datasets/import" element={<DatasetImport />} /></Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    fireEvent.change(container.querySelector('#dataset-file-input')!, { target: { files: [new File(['x'], 'wide.csv')] } })
+    fireEvent.click(await screen.findByRole('button', { name: 'Next' }))
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Q001' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await waitFor(() => expect(screen.getAllByRole('alert').some(a => a.textContent?.includes(sentence))).toBe(true))
+    // The page's top alert and the chooser's own both rendered the same message.
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+  })
+
   it('a worksheet change on the configure step reads "Reading…", never "Importing…"', async () => {
     api.preview.mockResolvedValueOnce(preview(['Wave 1', 'Wave 2']))
     api.preview.mockReturnValueOnce(new Promise(() => {}))
     await openConfigure(new File(['Q1\n3\n'], 'waves.xlsx'))
     fireEvent.change(screen.getByLabelText('Worksheet'), { target: { value: 'Wave 2' } })
-    expect(await screen.findByRole('button', { name: 'Reading…' })).toBeDisabled()
+    // #1127: busy, not disabled (#1133's pattern) — the guard refuses a press.
+    expect(await screen.findByRole('button', { name: 'Reading…' })).toHaveAttribute('aria-disabled', 'true')
     expect(screen.queryByRole('button', { name: 'Importing…' })).toBeNull()
   })
 })

@@ -136,11 +136,16 @@ describe('the list', () => {
 })
 
 describe('while it is working', () => {
-  it('disables the controls and says so', () => {
-    setup({ busy: true })
-    expect(
-      screen.getByRole('button', { name: 'Reading the selected columns…' }),
-    ).toBeDisabled()
+  it('disables the controls and says so — Continue stays FOCUSABLE (#1127, #1133’s pattern)', () => {
+    const { onContinue } = setup({ busy: true })
+    const continueButton = screen.getByRole('button', { name: 'Reading the selected columns…' })
+    // Busy, not disabled: a refused re-read's alert must not arrive with focus on <body>.
+    expect(continueButton).not.toBeDisabled()
+    expect(continueButton).toHaveAttribute('aria-disabled', 'true')
+    expect(continueButton).toHaveAttribute('aria-busy', 'true')
+    // …and the guard is the refusal.
+    fireEvent.click(continueButton)
+    expect(onContinue).not.toHaveBeenCalled()
     expect(screen.getByRole('checkbox', { name: 'Q001' })).toBeDisabled()
   })
 })

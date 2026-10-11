@@ -388,7 +388,7 @@ _startup_settings = get_settings()
 app = FastAPI(
     title="Mixed Measures",
     description="Mixed-methods research analysis platform",
-    version="1.5.6",
+    version="1.5.7",
     lifespan=lifespan,
     docs_url="/docs" if _startup_settings.enable_api_docs else None,
     redoc_url="/redoc" if _startup_settings.enable_api_docs else None,
@@ -429,6 +429,35 @@ async def _enospc_handler(request: Request, exc: OSError):
     raise exc
 
 app.add_exception_handler(OSError, _enospc_handler)
+
+
+#: What the sqlite3 C driver says when a bound int is outside SQLite's 64-bit
+#: INTEGER range. SQLAlchemy does not wrap it, so it arrives bare. Pinned against the
+#: driver by `test_oversized_id_is_a_refusal.py`'s canary.
+SQLITE_INTEGER_OVERFLOW_MESSAGE = "Python int too large to convert to SQLite INTEGER"
+OVERSIZED_ID_DETAIL = "A number in this request is too large to be an id."
+
+
+async def _oversized_id_handler(request: Request, exc: OverflowError):
+    """An id past SQLite's 64-bit range → 400, not a generic 500 (#1128).
+
+    FastAPI's `int` is unbounded, so ``/api/projects/10000000000000000000000000000``
+    reached the database and the driver raised. ONE handler rather than a bound per
+    parameter, because the population is not only typed ints: 86 comma-separated
+    ``*_ids`` query parameters, JSON-in-form fields and tagged tokens (``"conv:7"``)
+    carry ids no annotation can bound, and the typed ones number ~790.
+
+    🔴 **Keyed on the DRIVER's exact message, and everything else re-raised** (the
+    `_enospc_handler` pattern above). An arithmetic overflow — ``int too large to
+    convert to float``, ``math range error`` and the rest, none of which shares this
+    text — is a bug, and must stay a 500 rather than read as "your request".
+    ⚠️ It cannot name the field, and a route's own ``except Exception`` answers first.
+    """
+    if str(exc) == SQLITE_INTEGER_OVERFLOW_MESSAGE:
+        return JSONResponse(status_code=400, content={"detail": OVERSIZED_ID_DETAIL})
+    raise exc
+
+app.add_exception_handler(OverflowError, _oversized_id_handler)
 
 
 # #1024: every request that can reach the database holds a restore-gate slot, and

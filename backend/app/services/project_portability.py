@@ -42,6 +42,7 @@ from .safety_copies import (  # #919, #977
     safety_copy_filename,
     write_safety_copy,
 )
+from .staleness import mark_metrics_stale  # #1168 door 5
 from .text_offsets import has_astral, utf16_to_codepoint
 from .text_similarity import similarity_ratio
 from .media_duration import MAX_MEDIA_OFFSET_SECONDS, sane_duration
@@ -2991,6 +2992,156 @@ def _extract_zip_member(
         shutil.copyfileobj(src, dst, length=1024 * 1024)
 
 
+def _file_entity_id(item: dict):
+    """An entity's id in the FILE. `_serialize_row` writes ``_original_id`` and never
+    ``id``; ``id`` is read only as a fallback for a hand-written file."""
+    return item.get("_original_id", item.get("id"))
+
+
+def _preflight_import_refusals(db: Session, data: dict, coder_mapping: dict | None) -> None:
+    """Every refusal an import can make from the FILE and the caller's coder decisions —
+    raised BEFORE anything is written (#1150 a).
+
+    🔴 **Before the safety copy, which is the point.** A merge or an overwrite writes a
+    full `.mmproject` of the target first (`_safety_export_before_overwrite`) and
+    nothing rotates those (#919). These five refusals ran AFTER it, so each refused
+    attempt left one more copy behind for a file that changed nothing — while the merge
+    branch promised *"no safety backup is written for a merge that's going to be
+    refused"*. They read only ``data`` (after a merge's blanking) and the decisions, so
+    nothing they need is written first. A new refusal that reads only the file belongs
+    HERE.
+
+    ⚠️ **Not in `/validate-import`, deliberately**: these need `project.json` parsed, and
+    on a v≤6 file that is the whole-document parse `merge_preview.json` exists to avoid.
+    All five are hand-edited, legacy or stale-screen states.
+    """
+    # 🔴 #1039 (d): a coder of the CONSENSUS kind is refused, and the whole file with
+    # it. No export writes one — the consensus layer's rows are filtered out
+    # (`CONSENSUS_ORIGIN`), so its owner never reaches `coders` — and
+    # `normalize_coder_type` accepts the system kinds, so a hand-edited file could
+    # otherwise mint one on an install that has none, which
+    # `get_or_create_consensus_user` would then adopt as THE layer, or name-match the
+    # real one and write the file's codings into it.
+    # ⚠️ ONLY consensus: an `unattributed` coder is exported legitimately (every owner of
+    # a non-consensus application travels), and mapping this one to a person instead
+    # would make a forged layer a voter.
+    for item in data.get("coders", []):
+        if item.get("coder_type") == CODER_TYPE_CONSENSUS:
+            raise ValueError(
+                f"This file lists “{item.get('username') or 'a coder'}” as the "
+                "consensus layer. No export includes that layer — the app rebuilds "
+                "it from the coders' own codings — so the file has been edited by "
+                "hand. Export the project again, or remove that coder from the file."
+            )
+
+    # A decision to MATCH a file coder onto a local one (the merge's confirm screen):
+    # the local coder must still exist, and #1034 — be of the same kind and, for a
+    # model, the same configuration. The screen offers only eligible targets, so this
+    # is the net for a script or a stale screen, and it names the way out.
+    for item in data.get("coders", []):
+        decision = (coder_mapping or {}).get(str(item["_original_id"]))
+        if not (decision and decision.get("action") == "match" and decision.get("target_user_id")):
+            continue
+        target_coder = db.query(User).filter(User.id == decision["target_user_id"]).first()
+        if target_coder is None:
+            raise ValueError(
+                f"Coder mapping points at a local coder (id {decision['target_user_id']}) "
+                "that no longer exists. Re-validate the import before merging."
+            )
+        refusal = coder_match_refusal(item, target_coder)
+        if refusal is not None:
+            raise ValueError(_coder_mismatch_sentence(item, target_coder, refusal))
+
+    # #289: 1:1 column-per-dataset on incoming equivalence group memberships. A valid
+    # export never carries a violation, but a legacy or hand-edited file could. Fail
+    # loudly rather than letting the partial unique index raise a confusing
+    # IntegrityError mid-import. A merge keeps `dataset_columns`, so it reaches this.
+    eg_dataset_seen: dict[tuple[int, int], int] = {}  # (eg_id, ds_id) -> the file's column id
+    eg_violations: list[dict] = []
+    for item in data.get("dataset_columns", []):
+        eg_id = item.get("equivalence_group_id")
+        ds_id = item.get("dataset_id")
+        col_id = _file_entity_id(item)
+        if eg_id is not None and ds_id is not None:
+            key = (eg_id, ds_id)
+            if key in eg_dataset_seen:
+                eg_violations.append({
+                    "equivalence_group_id": eg_id,
+                    "dataset_id": ds_id,
+                    "column_ids": [eg_dataset_seen[key], col_id],
+                })
+            else:
+                eg_dataset_seen[key] = col_id
+    if eg_violations:
+        raise ValueError(
+            "Cannot import project: equivalence groups must contain at most "
+            "one column per dataset, but the incoming file has "
+            f"{len(eg_violations)} violation(s): {eg_violations}. "
+            "This usually means the project was exported from an older "
+            "version of Mixed Measures before the 1:1 constraint was "
+            "enforced. Repair the source project (unlink the conflicting "
+            "columns, or consolidate them into a computed column) and "
+            "re-export before importing."
+        )
+
+    # #290: a cross-dataset domain must have every member linked via an equivalence
+    # group that bridges to another dataset in the same domain. Legacy projects from the
+    # pre-migration-025 era or hand-edited files could carry a violation; fail loudly
+    # rather than letting the runtime assertion in `resolve_dataset_domain` surprise the
+    # researcher later with an opaque error. A merge blanks the domains, so it never
+    # reaches this.
+    # 🔴 **The columns are keyed by `_file_entity_id` (#1150 a).** This read `"id"`,
+    # which no export writes, so every column landed under one `None` key, no member
+    # resolved, and the pre-flight never fired on a real file — the violation imported
+    # and met the runtime assertion instead.
+    col_to_ds_eg: dict[int, tuple[int | None, int | None]] = {}
+    for col in data.get("dataset_columns", []):
+        col_to_ds_eg[_file_entity_id(col)] = (
+            col.get("dataset_id"),
+            col.get("equivalence_group_id"),
+        )
+    domain_to_col_ids: dict[int, list[int]] = {}
+    for member in data.get("analysis_domain_members", []):
+        if member.get("member_type", "column") != "column":
+            continue
+        did = member.get("domain_id")
+        mid = member.get("member_id")
+        if did is None or mid is None:
+            continue
+        domain_to_col_ids.setdefault(did, []).append(mid)
+    domain_violations: list[dict] = []
+    for did, col_ids in domain_to_col_ids.items():
+        ds_set: set[int] = set()
+        eg_to_ds: dict[int, set[int]] = {}
+        member_info: list[tuple[int, int | None, int | None]] = []
+        for cid in col_ids:
+            meta = col_to_ds_eg.get(cid)
+            if meta is None:
+                continue
+            ds, eg = meta
+            if ds is not None:
+                ds_set.add(ds)
+                member_info.append((cid, ds, eg))
+                if eg is not None:
+                    eg_to_ds.setdefault(eg, set()).add(ds)
+        if len(ds_set) < 2:
+            continue  # single-dataset domain — constraint doesn't apply
+        for cid, ds, eg in member_info:
+            if eg is None or not (eg_to_ds.get(eg, set()) - {ds}):
+                domain_violations.append({"domain_id": did, "column_id": cid, "dataset_id": ds})
+    if domain_violations:
+        raise ValueError(
+            "Cannot import project: cross-dataset analysis domain members "
+            "must be linked via equivalence groups, but the incoming file "
+            f"has {len(domain_violations)} violation(s): {domain_violations}. "
+            "This usually means the project was exported from an older "
+            "version of Mixed Measures (before April 2026) when the "
+            "constraint wasn't enforced. Repair the source project by "
+            "pairing the unpaired columns via the mapping dialog, or "
+            "remove them from the analysis domain."
+        )
+
+
 def import_project(
     db: Session,
     file_path: Path,
@@ -3103,6 +3254,10 @@ def import_project(
                 data[_k] = []
             data["text_coding_config"] = None
             data["quote_board_config"] = None
+
+        # #1150 (a): every refusal the file or the coder decisions can earn, BEFORE the
+        # mode branch below writes the safety copy (merge, overwrite) or anything else.
+        _preflight_import_refusals(db, data, coder_mapping)
 
         remap: dict[str, dict[int, int]] = {
             "projects": {}, "participants": {}, "speakers": {},
@@ -3280,44 +3435,18 @@ def import_project(
         # `_file_coder_names` is shared with the merge preview, so the name the
         # confirm screen shows is the name the import writes.
         file_coder_names = _file_coder_names(data.get("coders", []))
+        # #1039 (d)'s consensus-coder refusal and #1034's decision refusals run in
+        # `_preflight_import_refusals`, before anything is written (#1150 a).
         for item in data.get("coders", []):
-            # 🔴 #1039 (d): a coder of the CONSENSUS kind is refused, and the whole
-            # file with it. No export writes one — the consensus layer's rows are
-            # filtered out (`CONSENSUS_ORIGIN`), so its owner never reaches
-            # `coders` — and `normalize_coder_type` accepts the system kinds, so a
-            # hand-edited file could otherwise mint one on an install that has none,
-            # which `get_or_create_consensus_user` would then adopt as THE layer, or
-            # name-match the real one and write the file's codings into it.
-            # ⚠️ ONLY consensus: an `unattributed` coder is exported legitimately
-            # (every owner of a non-consensus application travels), and mapping this
-            # one to a person instead would make a forged layer a voter.
-            if item.get("coder_type") == CODER_TYPE_CONSENSUS:
-                raise ValueError(
-                    f"This file lists “{item.get('username') or 'a coder'}” as the "
-                    "consensus layer. No export includes that layer — the app rebuilds "
-                    "it from the coders' own codings — so the file has been edited by "
-                    "hand. Export the project again, or remove that coder from the file."
-                )
             oid = item["_original_id"]
             name = item.get("username")
             reserved = file_coder_names - {name}
             decision = (coder_mapping or {}).get(str(oid)) if coder_mapping else None
 
             if decision and decision.get("action") == "match" and decision.get("target_user_id"):
-                target_coder = (
-                    db.query(User).filter(User.id == decision["target_user_id"]).first()
-                )
-                if target_coder is None:
-                    raise ValueError(
-                        f"Coder mapping points at a local coder (id {decision['target_user_id']}) "
-                        "that no longer exists. Re-validate the import before merging."
-                    )
-                # #1034: a decision is still refused across kinds or configurations —
-                # the confirm screen offers only eligible targets, so this is the net
-                # for a script or a stale screen, and it names the way out.
-                refusal = coder_match_refusal(item, target_coder)
-                if refusal is not None:
-                    raise ValueError(_coder_mismatch_sentence(item, target_coder, refusal))
+                # The pre-flight checked it exists and is of this coder's kind and
+                # configuration (#1034, #1150 a).
+                target_coder = db.query(User).filter(User.id == decision["target_user_id"]).one()
                 remap["coders"][oid] = target_coder.id
                 if decision.get("unarchive") and target_coder.archived:
                     target_coder.archived = False  # DEC-F: bring a colleague back into voting
@@ -3634,38 +3763,7 @@ def import_project(
             _add(EquivalenceGroup, item, {"project_id": pid}, "equivalence_groups")
 
         # ── l. DatasetColumns ──────────────────────────────────────
-        # Pre-flight: enforce 1:1 column-per-dataset on incoming equivalence
-        # group memberships. A valid export should never carry a violation,
-        # but a legacy or hand-edited .mmproject could. Fail loudly with a
-        # clear message rather than letting the schema constraint raise a
-        # confusing IntegrityError mid-import (see #289).
-        _eg_dataset_seen: dict[tuple[int, int], int] = {}  # (eg_id, ds_id) -> original column id
-        _eg_violations: list[dict] = []
-        for item in data.get("dataset_columns", []):
-            eg_id = item.get("equivalence_group_id")
-            ds_id = item.get("dataset_id")
-            col_id = item.get("id")
-            if eg_id is not None and ds_id is not None:
-                key = (eg_id, ds_id)
-                if key in _eg_dataset_seen:
-                    _eg_violations.append({
-                        "equivalence_group_id": eg_id,
-                        "dataset_id": ds_id,
-                        "column_ids": [_eg_dataset_seen[key], col_id],
-                    })
-                else:
-                    _eg_dataset_seen[key] = col_id
-        if _eg_violations:
-            raise ValueError(
-                "Cannot import project: equivalence groups must contain at most "
-                "one column per dataset, but the incoming file has "
-                f"{len(_eg_violations)} violation(s): {_eg_violations}. "
-                "This usually means the project was exported from an older "
-                "version of Mixed Measures before the 1:1 constraint was "
-                "enforced. Repair the source project (unlink the conflicting "
-                "columns, or consolidate them into a computed column) and "
-                "re-export before importing."
-            )
+        # The #289 1:1 pre-flight runs in `_preflight_import_refusals` (#1150 a).
 
         # #921, part 2 of 3 — the columns of a MATCHED managed dataset.
         #
@@ -4414,69 +4512,8 @@ def import_project(
             }, "memos")
 
         # ── t–u. AnalysisDomains & Members ────────────────────────
-        # Pre-flight: enforce #290 on incoming analysis domain
-        # members. A cross-dataset domain must have every member linked via
-        # an equivalence group that bridges to another dataset in the same
-        # domain. A valid export should never carry a violation, but legacy
-        # projects from the pre-migration-025 era or hand-edited .mmproject
-        # files could. Fail loudly with a clear message rather than letting
-        # the runtime assertion in resolve_dataset_domain surprise users
-        # later with an opaque ValueError.
-        _col_to_ds_eg: dict[int, tuple[int | None, int | None]] = {}
-        for _col in data.get("dataset_columns", []):
-            _col_to_ds_eg[_col.get("id")] = (
-                _col.get("dataset_id"),
-                _col.get("equivalence_group_id"),
-            )
-        _domain_to_col_ids: dict[int, list[int]] = {}
-        for _m in data.get("analysis_domain_members", []):
-            _mtype = _m.get("member_type", "column")
-            if _mtype != "column":
-                continue
-            _did = _m.get("domain_id")
-            _mid = _m.get("member_id")
-            if _did is None or _mid is None:
-                continue
-            _domain_to_col_ids.setdefault(_did, []).append(_mid)
-        _domain_violations: list[dict] = []
-        for _did, _col_ids in _domain_to_col_ids.items():
-            _ds_set: set[int] = set()
-            _eg_to_ds: dict[int, set[int]] = {}
-            _member_info: list[tuple[int, int | None, int | None]] = []
-            for _cid in _col_ids:
-                _meta = _col_to_ds_eg.get(_cid)
-                if _meta is None:
-                    continue
-                _ds, _eg = _meta
-                if _ds is not None:
-                    _ds_set.add(_ds)
-                    _member_info.append((_cid, _ds, _eg))
-                    if _eg is not None:
-                        _eg_to_ds.setdefault(_eg, set()).add(_ds)
-            if len(_ds_set) < 2:
-                continue  # single-dataset domain — constraint doesn't apply
-            for _cid, _ds, _eg in _member_info:
-                if _eg is None:
-                    _domain_violations.append({
-                        "domain_id": _did, "column_id": _cid, "dataset_id": _ds,
-                    })
-                    continue
-                if not (_eg_to_ds.get(_eg, set()) - {_ds}):
-                    _domain_violations.append({
-                        "domain_id": _did, "column_id": _cid, "dataset_id": _ds,
-                    })
-        if _domain_violations:
-            raise ValueError(
-                "Cannot import project: cross-dataset analysis domain members "
-                "must be linked via equivalence groups, but the incoming file "
-                f"has {len(_domain_violations)} violation(s): {_domain_violations}. "
-                "This usually means the project was exported from an older "
-                "version of Mixed Measures (before April 2026) when the "
-                "constraint wasn't enforced. Repair the source project by "
-                "pairing the unpaired columns via the mapping dialog, or "
-                "remove them from the analysis domain."
-            )
-
+        # The #290 cross-dataset pre-flight runs in `_preflight_import_refusals`
+        # (#1150 a).
         for item in data.get("analysis_domains", []):
             _add(AnalysisDomain, item, {"project_id": pid}, "analysis_domains")
 
@@ -4675,6 +4712,22 @@ def import_project(
                 .update({"stale": True}, synchronize_session="fetch")
             )
             db.flush()
+
+        # 🔴 #1168 door 5 — **a merge carries ROWS and CELLS into datasets the two
+        # projects share, not only codings.** The pass above is right to leave the
+        # target's metrics alone when nothing they read was written; it was wrong to
+        # assume nothing was. A saved result on a shared dataset that gained records
+        # or cells kept being served as current. Scoped to what this import WROTE
+        # (the #714 rule): the columns that received a cell. A merged ROW needs no
+        # arm of its own — every reader of a metric starts from a column's cells, so
+        # a record moves a metric only through the cells it brings, and those are
+        # here (a row-based arm was mutation-tested and decided nothing). After §x.5
+        # for the reason the pass above gives.
+        if import_mode == "merge" and inserted_value_columns:
+            db.flush()
+            metrics_marked_stale += mark_metrics_stale(
+                db, pid, column_ids=sorted(inserted_value_columns),
+            )
         if import_report is not None:
             import_report["metrics_marked_stale"] = metrics_marked_stale
 

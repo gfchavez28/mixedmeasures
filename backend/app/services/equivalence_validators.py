@@ -343,6 +343,8 @@ def assert_domains_intact_after_mutation(
 def assert_domains_intact_for_domain_ids(
     db: Session,
     domain_ids: list[int],
+    *,
+    excluding_column_ids=(),
 ) -> None:
     """Validate I2 cross-dataset pairing for domains identified by ID.
 
@@ -368,8 +370,16 @@ def assert_domains_intact_for_domain_ids(
     domain blocked the delete instead of the user having to cross-reference
     column IDs.
 
+    ``excluding_column_ids`` answers the question BEFORE the cascade runs:
+    each domain is validated as if those columns were already gone
+    (`services/column_cleanup.py::plan_column_removal`, #1175). That is the
+    same post-cascade state — a removed column is no longer a member, and the
+    survivors' own equivalence links do not change — so the delete
+    confirmation and the delete refuse with one function and one message.
+
     Args:
         domain_ids: Domain IDs to validate. Empty list short-circuits.
+        excluding_column_ids: member columns to treat as already removed.
 
     Raises:
         HTTPException(409): structured `cross_dataset_unpaired` detail
@@ -378,6 +388,7 @@ def assert_domains_intact_for_domain_ids(
     if not domain_ids:
         return
 
+    excluded = set(excluding_column_ids)
     for domain_id in domain_ids:
         member_col_ids = [
             row[0] for row in
@@ -387,6 +398,7 @@ def assert_domains_intact_for_domain_ids(
                 AnalysisDomainMember.member_type == "column",
             )
             .all()
+            if row[0] not in excluded
         ]
         if not member_col_ids:
             # Domain has no remaining members — caller's empty-domain

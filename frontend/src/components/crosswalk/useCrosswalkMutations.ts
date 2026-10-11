@@ -341,6 +341,10 @@ export function useCrosswalkMutations({
             total_valid_n: null,
             result_count: 0,
             real_group_count: 0,
+            // What this endpoint returns IS the group's scale score — the
+            // server's `create_scale_score_metric` chooses it by the same
+            // definition the list's flag reads (#1177).
+            is_scale_score: true,
             last_accessed_at: null,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
@@ -509,27 +513,19 @@ export function useCrosswalkMutations({
       toastEquivalenceError(err, 'Failed to update variable group')
     },
     onSuccess: async (_domain, { domainId, data }) => {
-      // Chained metric-rename cascade: if the name changed, update the
-      // ungrouped domain_aggregate metric (both grouping_column_id fields
-      // null). Grouped variants (user-authored "by X" breakdowns) must not
-      // be renamed — the two-NULL filter is load-bearing here.
+      // Chained metric-rename cascade: if the name changed, rename the group's
+      // scale score — the ONE metric the server flags (#1177). Other metrics of
+      // the group (a "by X" breakdown, a lookalike with answers excluded) keep
+      // their names. This filtered on the grouping fields, which a lookalike
+      // shares, and skipped the rename altogether once one existed.
       if (data.name) {
         try {
           const metricsRes = await metricsApi.list(projectId)
-          const candidates = metricsRes.metrics.filter(
-            (m) =>
-              m.metric_type === 'domain_aggregate' &&
-              m.input_source_type === 'dataset_domain' &&
-              m.input_source_id === domainId &&
-              m.grouping_column_id == null &&
-              m.grouping_column_id_2 == null,
+          const scaleScore = metricsRes.metrics.find(
+            (m) => m.is_scale_score && m.input_source_id === domainId,
           )
-          if (candidates.length > 1) {
-            console.warn(
-              `[crosswalk] Expected ≤1 ungrouped scale-score metric for domain ${domainId}, got ${candidates.length}. Skipping rename cascade.`,
-            )
-          } else if (candidates.length === 1) {
-            await metricsApi.update(projectId, candidates[0].id, { name: `${data.name} Score` })
+          if (scaleScore) {
+            await metricsApi.update(projectId, scaleScore.id, { name: `${data.name} Score` })
           }
         } catch (e) {
           console.warn('[crosswalk] Metric rename cascade failed', e)

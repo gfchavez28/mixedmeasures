@@ -28,7 +28,6 @@ from ..schemas.excerpt import SegmentExcerptInfo
 from ..schemas.common import AppliedCodeDetail
 from ..auth import get_current_user
 from ..services.audit import log_action
-from ..services.staleness import mark_metrics_stale
 from ..services.coding_layers import CONSENSUS_ORIGIN
 from ..services.coding_counts import coded_segment_count
 from .helpers import visible_segment_filter as _visible_segment_filter, _verify_conversation_ownership
@@ -253,9 +252,6 @@ async def update_segment(
         details=details
     )
 
-    # Mark metrics stale if text or speaker changed (affects qualitative analysis)
-    if data.text is not None or data.speaker_id is not None:
-        mark_metrics_stale(db, conversation.project_id)
     db.commit()
 
     # Reload with eager loading for response

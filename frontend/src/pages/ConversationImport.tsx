@@ -53,7 +53,11 @@ import {
   extractSpeakerMappings,
   isOrphanedParticipant,
   syncAutoNames,
+  UNREADABLE_FILE_PREFIX,
+  isBlockingFileWarning,
+  namingTheFile,
 } from '@/lib/conversation-import-utils'
+import { TranscriptOverlongNotice } from '@/components/TranscriptOverlongNotice'
 
 type Step = 'upload' | 'columns' | 'speakers' | 'importing' | 'results'
 
@@ -310,6 +314,12 @@ export default function ConversationImport() {
     return map
   }, [sharedSpeakers])
 
+  // #1127: each previewed file's too-long rows (an unquoted comma in the text).
+  const overlongByFile = useMemo(
+    () => files.map((f, i) => ({ name: f.name, report: filePreviews[i]?.overlong_records })),
+    [files, filePreviews],
+  )
+
   // Pending facilitator change for shared-speaker dialog
   const [pendingFacChange, setPendingFacChange] = useState<{
     speakerName: string
@@ -388,7 +398,17 @@ export default function ConversationImport() {
             return copy
           })
         })
-        .catch(() => setError('Failed to preview replacement file'))
+        .catch((err: unknown) => {
+          // #1127: the reader's sentence and the file it is about — this said
+          // "Failed to preview replacement file", naming neither. The mapping was
+          // built from the file just removed, so it goes too: back to the upload
+          // step, where the refused file can be removed or replaced.
+          const reason = err instanceof Error ? err.message : 'It could not be previewed.'
+          setFirstPreview(null)
+          setColumnMapping({})
+          setStep('upload')
+          setError(namingTheFile(newFiles[0].name, reason, true))
+        })
         .finally(() => setIsLoading(false))
     }
 
@@ -469,6 +489,10 @@ export default function ConversationImport() {
 
   // Preview remaining files and check column compatibility
   const handleColumnsNext = useCallback(async () => {
+    // #1127 — Continue stays focusable while it checks (`aria-disabled`), so this
+    // guard is the refusal (#754: `aria-disabled` changes what a button says, not
+    // what it does).
+    if (isLoading) return
     if (files.length <= 1) {
       setStep('speakers')
       return
@@ -485,7 +509,10 @@ export default function ConversationImport() {
     const newPreviews = [...filePreviews]
     const newMappings = [...fileSpeakerMappings]
     const newWarnings = [...columnWarnings]
-    const errors: string[] = []
+    // #1127: the files the reader REFUSED — named, with the reader's sentence, and
+    // blocking. Before, a refused file 2..N only carried an "Error:" warning, the
+    // wizard went on to Speakers and the import sent it anyway.
+    const unreadable: string[] = []
 
     for (let batchStart = 1; batchStart < files.length; batchStart += CONCURRENCY) {
       const batchEnd = Math.min(batchStart + CONCURRENCY, files.length)
@@ -508,7 +535,6 @@ export default function ConversationImport() {
 
           if (missingRequired.length > 0) {
             newWarnings[fileIdx] = `Missing required columns: ${missingRequired.join(', ')}`
-            errors.push(`${files[fileIdx].name}: missing ${missingRequired.join(', ')}`)
           } else {
             newWarnings[fileIdx] = null
             // Extract speakers
@@ -524,9 +550,9 @@ export default function ConversationImport() {
           }
         } else {
           newPreviews[fileIdx] = null
-          const errMsg = result.reason instanceof Error ? result.reason.message : 'Failed to parse'
-          newWarnings[fileIdx] = `Error: ${errMsg}`
-          errors.push(`${files[fileIdx].name}: ${errMsg}`)
+          const errMsg = result.reason instanceof Error ? result.reason.message : 'It could not be previewed.'
+          newWarnings[fileIdx] = `${UNREADABLE_FILE_PREFIX} ${errMsg}`
+          unreadable.push(namingTheFile(files[fileIdx].name, errMsg, true))
         }
       })
     }
@@ -536,19 +562,31 @@ export default function ConversationImport() {
     setColumnWarnings(newWarnings)
     setIsLoading(false)
 
-    // Block if any file has missing required columns
-    const hasBlockingErrors = newWarnings.some((w, i) => i > 0 && w && w.startsWith('Missing required'))
-    if (hasBlockingErrors) {
-      setError(`Some files are incompatible with the selected column mapping. Remove them or adjust your mapping.`)
+    // Block if any file was refused or misses a required column — each is listed
+    // below the preview with a Remove control.
+    const missingColumns = newWarnings.some((w, i) => i > 0 && w && w.startsWith('Missing required'))
+    if (unreadable.length > 0 || missingColumns) {
+      setError([
+        ...unreadable,
+        missingColumns
+          ? 'Some files are incompatible with the selected column mapping. Remove them or adjust your mapping.'
+          : null,
+        unreadable.length > 0 && !missingColumns
+          ? `Remove ${unreadable.length === 1 ? 'that file' : 'those files'} below, or correct ${unreadable.length === 1 ? 'it' : 'them'} and add ${unreadable.length === 1 ? 'it' : 'them'} again.`
+          : null,
+      ].filter(Boolean).join(' '))
       return
     }
 
     setStep('speakers')
-  }, [files, filePreviews, fileSpeakerMappings, columnWarnings, columnMapping, previewFile])
+  }, [files, filePreviews, fileSpeakerMappings, columnWarnings, columnMapping, previewFile, isLoading])
 
   // --- Speaker step continue ---
 
   const handleSpeakersContinue = useCallback(() => {
+    // #1127 — Import stays focusable while it works (`aria-disabled`): this is the
+    // refusal of a second press.
+    if (isLoading) return
     const finalMappings = [...fileSpeakerMappings]
     // #410: the visible name field wins — auto-naming happens live on the
     // Speakers step (effect above), never as a post-submission override.
@@ -561,7 +599,7 @@ export default function ConversationImport() {
       setStep('importing')
       handleBatchImport(newNames, finalMappings)
     }
-  }, [fileSpeakerMappings, files, fileConversationNames]) // eslint-disable-line react-hooks/exhaustive-deps -- handleBatchImport/handleSingleImport defined below; adding would cause TDZ error
+  }, [fileSpeakerMappings, files, fileConversationNames, isLoading]) // eslint-disable-line react-hooks/exhaustive-deps -- handleBatchImport/handleSingleImport defined below; adding would cause TDZ error
 
   // --- Import ---
 
@@ -1339,6 +1377,10 @@ export default function ConversationImport() {
                     </div>
                     <Button
                       onClick={async () => {
+                        // #1127 — Next stays focusable while it reads (`aria-disabled`),
+                        // so this guard is the refusal; a refused file's alert then
+                        // appears with focus still on Next (#1133's class).
+                        if (isLoading) return
                         setIsLoading(true)
                         setError('')
                         try {
@@ -1358,12 +1400,21 @@ export default function ConversationImport() {
                           })
                           setStep('columns')
                         } catch (err: unknown) {
-                          setError(err instanceof Error ? err.message : 'Failed to parse CSV')
+                          // #1127: name the file when several are listed — "Line 4 …"
+                          // alone does not say which one to open.
+                          setError(namingTheFile(
+                            files[0].name,
+                            err instanceof Error ? err.message : 'It could not be previewed.',
+                            files.length > 1,
+                          ))
                         } finally {
                           setIsLoading(false)
                         }
                       }}
-                      disabled={files.length === 0 || isLoading}
+                      disabled={files.length === 0}
+                      aria-disabled={isLoading || undefined}
+                      aria-busy={isLoading || undefined}
+                      className="aria-busy:cursor-wait aria-busy:opacity-50"
                     >
                       {isLoading ? 'Processing...' : 'Next'}
                     </Button>
@@ -1545,13 +1596,18 @@ export default function ConversationImport() {
                 </div>
               </div>
 
+              {/* #1127: rows an unquoted comma split — said before the import, by line. */}
+              <div className="mt-4">
+                <TranscriptOverlongNotice files={overlongByFile} />
+              </div>
+
               {/* Column warnings for multi-file */}
               {isMultiFile && columnWarnings.some(w => w) && (
                 <div className="space-y-2 mt-4">
                   <h4 className="font-medium text-sm text-mm-text">File compatibility</h4>
                   {columnWarnings.map((warning, i) => {
                     if (!warning || i === 0) return null
-                    const isError = warning.startsWith('Missing required') || warning.startsWith('Error:')
+                    const isError = isBlockingFileWarning(warning)
                     return (
                       <div
                         key={i}
@@ -1584,7 +1640,10 @@ export default function ConversationImport() {
                 </Button>
                 <Button
                   onClick={handleColumnsNext}
-                  disabled={!columnMapping.text || !columnMapping.speaker || isLoading}
+                  disabled={!columnMapping.text || !columnMapping.speaker}
+                  aria-disabled={isLoading || undefined}
+                  aria-busy={isLoading || undefined}
+                  className="aria-busy:cursor-wait aria-busy:opacity-50"
                 >
                   {isLoading ? 'Checking files...' : 'Continue'}
                 </Button>
@@ -1613,6 +1672,8 @@ export default function ConversationImport() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* #1127: by now every file is previewed, so every file's rows are known. */}
+              <TranscriptOverlongNotice files={overlongByFile} />
               {/* Shared speakers info banner (multi-file only) */}
               {isMultiFile && sharedSpeakers.length > 0 && (
                 <div className="p-3 bg-mm-blue/12 text-mm-blue-text rounded-lg text-sm flex items-start gap-2">
@@ -1702,7 +1763,7 @@ export default function ConversationImport() {
                     const isExpanded = expandedFileIndex === i
                     const validation = fileSpeakerValidation[i]
                     const warning = columnWarnings[i]
-                    const hasWarning = warning && (warning.startsWith('Error:') || warning.startsWith('Missing required'))
+                    const hasWarning = isBlockingFileWarning(warning)
 
                     return (
                       <div key={i} className="border rounded-lg overflow-hidden">
@@ -1835,7 +1896,10 @@ export default function ConversationImport() {
                 </Button>
                 <Button
                   onClick={handleSpeakersContinue}
-                  disabled={!speakersStepValid || isLoading}
+                  disabled={!speakersStepValid}
+                  aria-disabled={isLoading || undefined}
+                  aria-busy={isLoading || undefined}
+                  className="aria-busy:cursor-wait aria-busy:opacity-50"
                 >
                   {isLoading ? 'Importing...' : isMultiFile ? `Import ${files.length} Files` : 'Import'}
                 </Button>
@@ -1921,7 +1985,9 @@ export default function ConversationImport() {
                         <span className="text-mm-text-faint flex-shrink-0">{r.segmentCount} segments</span>
                       )}
                       {r.error && (
-                        <span className="text-red-500 text-xs truncate flex-shrink-0">{r.error}</span>
+                        // #1127: the reader's sentence is the remedy — wrapped, never
+                        // cut to an ellipsis a keyboard user cannot expand.
+                        <span className="text-red-600 dark:text-red-400 text-xs min-w-0 break-words">{r.error}</span>
                       )}
                     </div>
                   ))}
@@ -2059,14 +2125,14 @@ export default function ConversationImport() {
                       <div className="flex-1 min-w-0">
                         <div className="font-medium truncate">{r.conversationName}</div>
                         <div className="text-xs text-mm-text-muted">{r.fileName}</div>
+                        {r.error && (
+                          // #1127: the reader's sentence is the remedy — it wraps here
+                          // instead of being cut to 200px behind a hover-only `title`.
+                          <div className="text-xs text-red-600 dark:text-red-400 break-words mt-0.5">{r.error}</div>
+                        )}
                       </div>
                       {r.segmentCount != null && (
                         <span className="text-mm-text-muted flex-shrink-0">{r.segmentCount} segments</span>
-                      )}
-                      {r.error && (
-                        <span className="text-red-600 text-xs truncate max-w-[200px]" title={r.error}>
-                          {r.error}
-                        </span>
                       )}
                       {r.status === 'success' && r.conversationId && (
                         <Link

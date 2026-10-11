@@ -13,6 +13,7 @@ import type {
   EgRowData,
   UnlinkedRowData,
 } from './crosswalk-types'
+import type { MetricDefinitionSummaryResponse } from '@/lib/api'
 
 /**
  * Tests for the crosswalk's pure buildGrid function. Path A (#325) — every
@@ -607,5 +608,48 @@ describe('computeColumnIdsByDomain', () => {
     expect(result.get(50)!.has(1)).toBe(true)
     expect(result.get(60)!.has(2)).toBe(true)
     expect(result.get(50)!.has(2)).toBe(false)
+  })
+})
+
+// ─── #1177: the Σ badge reads the metric the server names ──────────────────
+
+describe('buildGrid — the scale score behind the Σ badge (#1177)', () => {
+  function summary(overrides: Partial<MetricDefinitionSummaryResponse>): MetricDefinitionSummaryResponse {
+    return {
+      id: 1, project_id: 1, name: 'Wellness Score', description: null,
+      metric_type: 'domain_aggregate', config: {}, input_source_type: 'dataset_domain',
+      input_source_id: 10, input_source_label: 'Wellness', grouping_column_id: null,
+      grouping_column_id_2: null, grouping_mode: null, exclude_values: null,
+      sequence_order: 0, origin: 'human', origin_context: 'crosswalk_auto', stale: false,
+      result_type: 'metric_summary', latest_computed_at: null, total_valid_n: null,
+      result_count: 1, real_group_count: 0, is_scale_score: true, last_accessed_at: null,
+      created_at: '2026-10-11T00:00:00', updated_at: '2026-10-11T00:00:00',
+      ...overrides,
+    }
+  }
+  // The aggregate with some answers excluded — the same grouping fields, listed
+  // AFTER the scale score, so a last-one-wins filter on those fields picks it.
+  const lookalike = summary({
+    id: 2, origin: 'auto', origin_context: 'quick-compute', exclude_values: ["Don't know"],
+    stale: true, is_scale_score: false,
+  })
+  const columns = [col(1, 100, 'Board', 'BQ1', 'Q1')]
+
+  it('a stale lookalike does not set the badge', () => {
+    const grid = buildGrid({
+      domains: [domain(10, 'Wellness', [1])], allColumns: columns, equivalenceGroups: [],
+      metrics: [summary({}), lookalike],
+    })
+    expect(grid.brackets[0].scale_score_metric_id).toBe(1)
+    expect(grid.brackets[0].scale_score_metric_state).toBe('ok')
+  })
+
+  it('a lookalike alone is no scale score', () => {
+    const grid = buildGrid({
+      domains: [domain(10, 'Wellness', [1])], allColumns: columns, equivalenceGroups: [],
+      metrics: [lookalike],
+    })
+    expect(grid.brackets[0].scale_score_metric_id).toBeNull()
+    expect(grid.brackets[0].scale_score_metric_state).toBe('missing')
   })
 })

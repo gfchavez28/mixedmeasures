@@ -204,30 +204,42 @@ AWKWARD_CSV = [
 ]
 
 
-def _reader_calls_in(source: str) -> list[tuple[int, str, str]]:
-    """Every `csv.reader(X)` in ``source``, as (lineno, the callee building X,
-    the dotted name of the def/class the call sits in — "" at module level)."""
+def _reader_calls_in(source: str) -> list[tuple[int, str, str, str, bool]]:
+    """Every CSV reader built in ``source``: `csv.reader(X)`, `csv.DictReader(X)` and
+    the shared `csv_reader(X)` (#1127), as (lineno, the callee building X, the dotted
+    name of the def/class the call sits in — "" at module level, which reader, and
+    whether it passes ``strict=True``)."""
     tree = ast.parse(source)
-    out: list[tuple[int, str, str]] = []
+    out: list[tuple[int, str, str, str, bool]] = []
+
+    def kind_of(func) -> str | None:
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "csv"
+            and func.attr in ("reader", "DictReader")
+        ):
+            return f"csv.{func.attr}"
+        if isinstance(func, ast.Name) and func.id == "csv_reader":
+            return "csv_reader"
+        return None
 
     def visit(node, scope: str) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 visit(child, f"{scope}.{child.name}" if scope else child.name)
                 continue
-            if (
-                isinstance(child, ast.Call)
-                and isinstance(child.func, ast.Attribute)
-                and child.func.attr == "reader"
-                and isinstance(child.func.value, ast.Name)
-                and child.func.value.id == "csv"
-            ):
+            if isinstance(child, ast.Call) and (kind := kind_of(child.func)):
                 arg = child.args[0] if child.args else None
                 name = ""
                 if isinstance(arg, ast.Call):
                     f = arg.func
                     name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
-                out.append((child.lineno, name, scope))
+                strict = any(
+                    k.arg == "strict" and isinstance(k.value, ast.Constant) and k.value.value is True
+                    for k in child.keywords
+                )
+                out.append((child.lineno, name, scope, kind, strict))
             visit(child, scope)
 
     visit(tree, "")
@@ -235,27 +247,36 @@ def _reader_calls_in(source: str) -> list[tuple[int, str, str]]:
 
 
 class TestOneReaderOfDatasetCsv:
-    """Every read of dataset CSV text goes through `CsvRecords`, and that one
-    reader goes through `_csv_lines`.
+    """Every read of imported CSV text goes through ONE strict reader, fed by
+    `_csv_lines` — the dataset doors through `CsvRecords`, plus the coding import and
+    (since #1127) the transcript import.
 
-    Two properties, one scan. `_csv_lines` exists to drop a 4-bytes-per-character
-    copy of the file (144 MB on a 36 MB upload), so a reader that bypasses it
-    costs memory silently; and since #983/#985 `CsvRecords` is what decides what a
-    RECORD is and notices a too-long one, so a reader that bypasses IT counts rows
-    by a different rule — the defect #983 was, between the preview and the import.
-    It covers the ROUTER too: both append steps read the text there, with
-    `csv.reader(io.StringIO(...))`, until #983.
+    Three properties, one scan. `_csv_lines` exists to drop a 4-bytes-per-character
+    copy of the file (144 MB on a 36 MB upload), so a reader that bypasses it costs
+    memory silently; since #983/#985 `CsvRecords` is what decides what a RECORD is and
+    notices a too-long one; and since #1127 `dataset_import.csv_reader` is the ONE
+    `csv.reader`, and it is STRICT — a reader built anywhere else in these modules is
+    a lenient one, where a stray quotation mark swallows records silently. The
+    transcript import had exactly that, a `csv.DictReader(io.StringIO(text))`, until
+    #1127; the append steps had `csv.reader(io.StringIO(...))` until #983.
 
     ⚠️ **AST, not a source scan.** `_csv_lines`'s own docstring and several
     comments write `io.StringIO(text)` in PROSE to explain why not to use it; a
     regex would report those as violations (#772's phantom class).
     """
 
+    APP = pathlib.Path(di.__file__).parent.parent
     MODULES = {
-        "services/dataset_import.py": pathlib.Path(di.__file__),
-        "routers/dataset.py": pathlib.Path(di.__file__).parent.parent / "routers" / "dataset.py",
+        "services/dataset_import.py": APP / "services" / "dataset_import.py",
+        "routers/dataset.py": APP / "routers" / "dataset.py",
+        "services/coding_import.py": APP / "services" / "coding_import.py",
+        "services/csv_import.py": APP / "services" / "csv_import.py",
     }
-    READER_SCOPE = "CsvRecords.__init__"
+    # Where `csv_reader` must be called — the population a blind scan would miss.
+    EXPECTED_CALLERS = {
+        ("services/dataset_import.py", "CsvRecords.__init__"),
+        ("services/coding_import.py", "parse_rows"),
+    }
 
     def _calls(self):
         return [
@@ -265,42 +286,76 @@ class TestOneReaderOfDatasetCsv:
         ]
 
     def test_the_population_is_found(self):
-        """A scan whose expected result is empty passes by finding nothing — so
-        it names what it must see: the one reader, where it lives."""
+        """A scan whose expected result is empty passes by finding nothing — so it
+        names what it must see: the one reader, and each place that calls it."""
         calls = self._calls()
-        assert ("services/dataset_import.py", self.READER_SCOPE) in {
-            (m, scope) for m, _ln, _n, scope in calls
-        }, f"CsvRecords' own csv.reader not found in {calls} — the scan has rotted"
+        found = {(m, scope, kind) for m, _ln, _n, scope, kind, _s in calls}
+        assert ("services/dataset_import.py", "csv_reader", "csv.reader") in found, (
+            f"the one csv.reader (in `csv_reader`) not found in {calls} — the scan has rotted"
+        )
+        callers = {(m, scope) for m, scope, kind in found if kind == "csv_reader"}
+        assert self.EXPECTED_CALLERS <= callers, (
+            f"csv_reader callers {callers} lack {self.EXPECTED_CALLERS - callers}"
+        )
+
+    def test_the_transcript_import_reads_through_CsvRecords(self):
+        """It holds no reader of its own — it reads `CsvRecords`, which is how it gets
+        the BOM strip, the record rule, the too-long report and the sentence."""
+        tree = ast.parse(self.MODULES["services/csv_import.py"].read_text())
+        assert any(
+            isinstance(n, ast.Call) and getattr(n.func, "id", None) == "CsvRecords"
+            for n in ast.walk(tree)
+        )
 
     def test_every_reader_is_the_one(self):
-        offenders = [c for c in self._calls() if c[3] != self.READER_SCOPE]
+        offenders = [
+            c for c in self._calls()
+            if c[4] != "csv_reader" and (c[0], c[3]) != ("services/dataset_import.py", "csv_reader")
+        ]
         assert offenders == [], (
-            f"csv.reader outside CsvRecords: {offenders}. Read dataset CSV text "
-            "through `CsvRecords` — it owns the record rule (#983), the too-long "
-            "report (#985) and the no-copy line reader."
+            f"a CSV reader outside `dataset_import.csv_reader`: {offenders}. Read "
+            "imported CSV text through `csv_reader` (strict, #1127) — for dataset text "
+            "through `CsvRecords`, which owns the record rule (#983) and the too-long "
+            "report (#985)."
         )
+
+    def test_the_one_reader_is_STRICT(self):
+        """The behaviour is pinned in `test_csv_strict_reading.py`; this pins the
+        argument, so a reader that loses it fails here with its line."""
+        ones = [c for c in self._calls() if c[4] == "csv.reader"]
+        assert ones and all(strict for *_rest, strict in ones), ones
 
     def test_no_reader_constructs_a_StringIO(self):
         offenders = [c for c in self._calls() if c[2] == "StringIO"]
         assert offenders == [], (
-            f"csv.reader(io.StringIO(...)) at {offenders} — that buffer is UCS-4 "
+            f"a CSV reader over io.StringIO(...) at {offenders} — that buffer is UCS-4 "
             "at 4.00 B/char (144 MB on a 36 MB file). Use _csv_lines(text)."
         )
+
+    def test_every_csv_reader_call_is_fed_by_csv_lines(self):
+        offenders = [c for c in self._calls() if c[4] == "csv_reader" and c[2] != "_csv_lines"]
+        assert offenders == [], offenders
 
     def test_the_scan_would_catch_one(self):
         """The predicate falsifiers: a matcher that never fires is a pass that
         means nothing, and the AST shapes above are easy to get subtly wrong."""
         planted = _reader_calls_in(
             "import csv, io\n"
+            "def csv_reader(lines):\n"
+            "    return csv.reader(lines, strict=True)\n"
             "class CsvRecords:\n"
             "    def __init__(self, t):\n"
-            "        self.r = csv.reader(_csv_lines(t))\n"
+            "        self.r = csv_reader(_csv_lines(t))\n"
             "def append_preview(t):\n"
             "    for r in csv.reader(io.StringIO(t)): pass\n"
+            "def preview_csv(t):\n"
+            "    return csv.DictReader(io.StringIO(t))\n"
         )
-        assert [(n, s) for _ln, n, s in planted] == [
-            ("_csv_lines", "CsvRecords.__init__"),
-            ("StringIO", "append_preview"),
+        assert [(n, s, k, strict) for _ln, n, s, k, strict in planted] == [
+            ("", "csv_reader", "csv.reader", True),
+            ("_csv_lines", "CsvRecords.__init__", "csv_reader", False),
+            ("StringIO", "append_preview", "csv.reader", False),
+            ("StringIO", "preview_csv", "csv.DictReader", False),
         ]
 
 

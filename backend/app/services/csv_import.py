@@ -1,8 +1,23 @@
-import csv
-import io
 from collections.abc import Generator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from .dataset_import import CsvRecords, OverlongRecords
 from .timestamp import parse_timestamp
+
+# 🔴 **A transcript reads through `CsvRecords`, the dataset doors' reader (#1127).**
+# It was a `csv.DictReader(io.StringIO(text))` of its own, and that reader had five
+# defects the dataset side had already fixed, each reproduced before this change:
+#   - a quotation mark that did not pair up merged the turns after it into one,
+#     silently (lenient reading — the reader is now strict, with a sentence and a line);
+#   - Excel's byte-order mark stayed in the first heading, so a batch mixing an Excel
+#     "CSV UTF-8" transcript with a plain one blocked on two names that look identical;
+#   - a short row padded with None, and the preview's `.strip()` answered 500 — so did
+#     a line of spaces;
+#   - a comma inside text that is not in quotation marks CUT the turn at the comma (the
+#     rest went under DictReader's `None` key and was dropped) — now REPORTED, at the
+#     preview and in the import's warnings, the dataset doors' #985 rule;
+#   - a duplicated heading read the LAST column (#973 (b')'s defect) — now the first.
+# Cells are POSITIONAL; a row is built from a heading → position map.
 
 
 @dataclass
@@ -14,6 +29,9 @@ class CSVPreviewResult:
     unique_speakers: list[str]
     detected_columns: dict  # Maps column types to header names
     unique_values_by_column: dict  # Maps column names to list of unique values
+    # #1127: rows with more values than headings — usually an unquoted comma in the
+    # text, which cuts the turn there. The dataset doors' payload shape (#985).
+    overlong_records: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -75,6 +93,25 @@ def detect_columns(headers: list[str]) -> dict:
     return detected
 
 
+def _heading_positions(headers: list[str]) -> dict[str, int]:
+    """Heading → column position, the FIRST column winning a duplicated heading."""
+    positions: dict[str, int] = {}
+    for index, heading in enumerate(headers):
+        positions.setdefault(heading, index)
+    return positions
+
+
+def _row(positions: dict[str, int], cells: list[str]) -> dict[str, str]:
+    """One record as heading → value; a cell a short row left off reads as empty."""
+    return {h: (cells[i] if i < len(cells) else "") for h, i in positions.items()}
+
+
+def _records(file_content: bytes, encoding: str) -> CsvRecords:
+    """The transcript's records — raises `CsvReadError` (a `csv.Error` AND a
+    `ValueError`) naming the line, for a file the reader refuses."""
+    return CsvRecords(file_content.decode(encoding))
+
+
 def preview_csv(
     file_content: bytes,
     encoding: str = 'utf-8',
@@ -91,26 +128,26 @@ def preview_csv(
     Returns:
         Preview result with headers, sample, and detected columns
     """
-    text = file_content.decode(encoding)
-    reader = csv.DictReader(io.StringIO(text))
-
-    headers = reader.fieldnames or []
+    records = _records(file_content, encoding)
+    headers = records.header
+    positions = _heading_positions(headers)
     detected_columns = detect_columns(headers)
 
     sample_rows = []
     total_rows = 0
 
     # Collect unique values for ALL columns (for speaker column remapping)
-    unique_values_by_column: dict[str, set[str]] = {h: set() for h in headers}
+    unique_values_by_column: dict[str, set[str]] = {h: set() for h in positions}
 
-    for row in reader:
+    for cells in records:
+        row = _row(positions, cells)
         total_rows += 1
         if len(sample_rows) < sample_size:
-            sample_rows.append(dict(row))
+            sample_rows.append(row)
 
         # Collect unique values for each column
-        for header in headers:
-            value = row.get(header, '').strip()
+        for header, raw in row.items():
+            value = raw.strip()
             if value:
                 unique_values_by_column[header].add(value)
 
@@ -127,7 +164,8 @@ def preview_csv(
         total_rows=total_rows,
         unique_speakers=unique_speakers,
         detected_columns=detected_columns,
-        unique_values_by_column=unique_values_sorted
+        unique_values_by_column=unique_values_sorted,
+        overlong_records=records.overlong.as_payload(),
     )
 
 
@@ -149,9 +187,17 @@ def parse_csv_streaming(
     Yields:
         ImportedSegment objects
     """
-    text = file_content.decode(encoding)
-    reader = csv.DictReader(io.StringIO(text))
+    yield from _segments(_records(file_content, encoding), column_mapping, speaker_mapping)
 
+
+def _segments(
+    records: CsvRecords,
+    column_mapping: dict,
+    speaker_mapping: dict,
+) -> Generator[ImportedSegment, None, None]:
+    """The turns of an already-opened transcript. `sequence_order` is the record's
+    index, a skipped empty turn included — the numbering `csv.DictReader` gave."""
+    positions = _heading_positions(records.header)
     speaker_col = column_mapping.get('speaker')
     text_col = column_mapping.get('text')
     start_time_col = column_mapping.get('start_time')
@@ -160,7 +206,8 @@ def parse_csv_streaming(
     if not text_col:
         raise ValueError("Text column must be specified")
 
-    for i, row in enumerate(reader):
+    for i, cells in enumerate(records):
+        row = _row(positions, cells)
         # Get text
         text_content = row.get(text_col, '').strip()
         if not text_content:
@@ -244,6 +291,22 @@ def _check_backward_timestamps(segments: list[ImportedSegment]) -> list[str]:
     return warnings
 
 
+def _overlong_warnings(overlong: OverlongRecords) -> list[str]:
+    """#1127: the too-long rows, as import warnings. A comma inside text that is not
+    in quotation marks splits the row there, so the text after it lands in the next
+    column or, past the last heading, is not imported at all."""
+    warnings = [
+        f"Line {example['line']:,} has more values than the file has headings "
+        f"({example['cells']} for {overlong.header_width}), so part of that row was not "
+        "imported — usually a comma inside the text that is not in quotation marks."
+        for example in overlong.examples
+    ]
+    extra = overlong.count - len(overlong.examples)
+    if extra > 0:
+        warnings.append(f"… and {extra:,} more row(s) like it.")
+    return warnings
+
+
 def import_csv_to_segments(
     file_content: bytes,
     column_mapping: dict,
@@ -265,7 +328,8 @@ def import_csv_to_segments(
         Tuple of (list of ImportedSegment, list of warning strings).
         Warnings include backward-timestamp detection (#356).
     """
-    segments = list(parse_csv_streaming(file_content, column_mapping, speaker_mapping, encoding))
+    records = _records(file_content, encoding)
+    segments = list(_segments(records, column_mapping, speaker_mapping))
 
     if normalize_times and segments:
         # Find minimum start time
@@ -285,6 +349,7 @@ def import_csv_to_segments(
 
     # #356: backward-timestamp warnings — run AFTER normalization so the
     # times shown in the warning match what the researcher sees in the UI.
-    warnings = _check_backward_timestamps(segments)
+    # #1127: the too-long rows first — they say text is MISSING, which outranks order.
+    warnings = _overlong_warnings(records.overlong) + _check_backward_timestamps(segments)
 
     return segments, warnings

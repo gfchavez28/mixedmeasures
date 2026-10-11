@@ -629,6 +629,68 @@ def resolve_dataset_column(
     return group_map
 
 
+def _domain_member_column_ids(db: Session, domain_id: int) -> list[int]:
+    """A variable group's member columns — every member is a column now."""
+    return list({
+        member_id for (member_id,) in
+        db.query(AnalysisDomainMember.member_id)
+        .filter(
+            AnalysisDomainMember.domain_id == domain_id,
+            AnalysisDomainMember.member_type == "column",
+        )
+        .all()
+    })
+
+
+def _apply_decompose_filter(metric_def, column_ids: list[int]) -> list[int]:
+    """Narrow a domain's columns to a decomposed metric's own items, if it has any."""
+    config = _parse_json(metric_def.config) or {}
+    decompose_col_ids = config.get("decompose_column_ids")
+    if not decompose_col_ids:
+        return column_ids
+    allowed = set(decompose_col_ids)
+    return [cid for cid in column_ids if cid in allowed]
+
+
+def effective_grouping_column_ids(
+    db: Session, metric_def: MetricDefinition, _cache: dict | None = None,
+) -> set[int]:
+    """Every column whose cells decide this metric's GROUPS (#1168 door 8).
+
+    🔴 **For a grouped variable-group metric that is more than the anchor.**
+    `resolve_dataset_domain` groups the rows of the group's OTHER datasets by a
+    sibling demographic column, matched to the anchor by equivalence group, then
+    subtype, then name (`_resolve_grouping_siblings`). The staleness marker knew
+    only `grouping_column_id`, so an edit to a sibling's cells moved the groups
+    with no marker. This answers through the SAME resolution compute uses — a
+    second implementation of the matching would drift from it.
+
+    A dataset-grouped metric (`grouping_mode="dataset"`) is grouped by dataset
+    NAMES, not cells, so it has none; the rename door marks it instead.
+    """
+    if metric_def.grouping_mode == "dataset" or metric_def.grouping_column_id is None:
+        return set()
+    anchors = {
+        cid for cid in (metric_def.grouping_column_id, metric_def.grouping_column_id_2)
+        if cid is not None
+    }
+    if metric_def.input_source_type != "dataset_domain":
+        return anchors
+    column_ids = _apply_decompose_filter(
+        metric_def, _domain_member_column_ids(db, metric_def.input_source_id),
+    )
+    if not column_ids:
+        return anchors
+    grouping = set(_resolve_grouping_siblings(
+        db, metric_def.grouping_column_id, column_ids, _cache=_cache,
+    ))
+    if metric_def.grouping_column_id_2 is not None:
+        grouping.update(_resolve_grouping_siblings(
+            db, metric_def.grouping_column_id_2, column_ids, _cache=_cache,
+        ))
+    return grouping
+
+
 def _resolve_grouping_siblings(
     db: Session,
     anchor_column_id: int,
@@ -973,23 +1035,7 @@ def resolve_dataset_domain(
     domain_id = metric_def.input_source_id
 
     # Query 1: Load domain members
-    members = (
-        db.query(AnalysisDomainMember)
-        .filter(AnalysisDomainMember.domain_id == domain_id)
-        .all()
-    )
-
-    if not members:
-        return {}
-
-    # Expand members to column IDs (all members are now column type)
-    direct_column_ids: set[int] = set()
-
-    for m in members:
-        if m.member_type == "column":
-            direct_column_ids.add(m.member_id)
-
-    all_column_ids = list(direct_column_ids)
+    all_column_ids = _domain_member_column_ids(db, domain_id)
     if not all_column_ids:
         return {}
 
@@ -1018,13 +1064,9 @@ def resolve_dataset_domain(
         _assert_domain_members_numeric_eligible(db, domain_id, all_column_ids)
 
     # If decompose_column_ids is set in config, filter to that subset
-    config = _parse_json(metric_def.config) or {}
-    decompose_col_ids = config.get("decompose_column_ids")
-    if decompose_col_ids:
-        allowed = set(decompose_col_ids)
-        all_column_ids = [cid for cid in all_column_ids if cid in allowed]
-        if not all_column_ids:
-            return {}
+    all_column_ids = _apply_decompose_filter(metric_def, all_column_ids)
+    if not all_column_ids:
+        return {}
 
     # Query 3: Load ALL DatasetValues for all columns at once
     all_values = (
@@ -1832,22 +1874,13 @@ def create_scale_score_metric(
       "aggregation": "mean"}` per directive GAP 3.1.
     """
     from sqlalchemy import func as sa_func
+    from .scale_scores import SCALE_SCORE_CONFIG, scale_score_metrics
 
-    # Idempotency: BOTH grouping fields must be NULL to identify the ungrouped
-    # scale score. A metric with grouping_column_id_2 set is a grouped variant
-    # (e.g., "Leadership by Department × Tenure") and must NOT be matched here.
-    existing = (
-        db.query(MetricDefinition)
-        .filter(
-            MetricDefinition.project_id == domain.project_id,
-            MetricDefinition.metric_type == "domain_aggregate",
-            MetricDefinition.input_source_type == "dataset_domain",
-            MetricDefinition.input_source_id == domain.id,
-            MetricDefinition.grouping_column_id.is_(None),
-            MetricDefinition.grouping_column_id_2.is_(None),
-        )
-        .first()
-    )
+    # Idempotency: THE scale score, as every reader of it chooses it (#1177). It
+    # was `.first()` over every ungrouped aggregate of the group, so a lookalike
+    # quick compute made (the aggregate with some answers excluded) could be
+    # returned — and recomputed — in place of the scale score the tabs read.
+    existing = scale_score_metrics(db, domain.project_id, [domain.id]).get(domain.id)
 
     if existing is not None:
         if not existing.stale:
@@ -1867,11 +1900,7 @@ def create_scale_score_metric(
 
     # Insert new. `config` is a Text column, not JSON — must json.dumps().
     # See foot-gun. Match pattern at backend/app/routers/metrics.py:335-348.
-    config_json = json.dumps({
-        "child_metric_type": "mean",
-        "child_config": {},
-        "aggregation": "mean",
-    })
+    config_json = json.dumps(SCALE_SCORE_CONFIG)
 
     max_order = (
         db.query(sa_func.max(MetricDefinition.sequence_order))

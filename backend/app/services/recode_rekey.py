@@ -270,7 +270,7 @@ def apply_rekey(
     """
     requested = list(dict.fromkeys(definition_ids))
     if not requested:
-        return {"updated": [], "renamed_keys": 0}
+        return {"updated": [], "renamed_keys": 0, "recomputed_column_ids": []}
 
     plan = {p.definition_id: p for p in plan_rekey(db, column)}
 
@@ -292,6 +292,7 @@ def apply_rekey(
     code_to_label = _column_dictionary(column)
     updated: list[int] = []
     renamed_keys = 0
+    recomputed_column_ids: list[int] = []
 
     for def_id in requested:
         item = plan[def_id]
@@ -318,7 +319,14 @@ def apply_rekey(
 
         if defn.is_primary:
             recompute_primary_value_numeric(db, defn, defn.column_id)
+            recomputed_column_ids.append(defn.column_id)
 
         updated.append(def_id)
 
-    return {"updated": updated, "renamed_keys": renamed_keys}
+    # #1168 door 4 — `recomputed_column_ids` is NOT on the wire (`RekeyResponse`):
+    # the router marks those columns stale and drops the key.
+    return {
+        "updated": updated,
+        "renamed_keys": renamed_keys,
+        "recomputed_column_ids": recomputed_column_ids,
+    }

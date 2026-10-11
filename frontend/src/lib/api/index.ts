@@ -154,6 +154,8 @@ export type {
   ProjectColumnListResponse,
   MissingValuesResult,
   BulkMissingValuesResult,
+  RemovalPlan,
+  RemovalPlanGroup,
 } from './datasets'
 
 // Crosswalk (Path A — atomic move-members)

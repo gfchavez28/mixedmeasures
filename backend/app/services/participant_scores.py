@@ -354,9 +354,9 @@ def sync_score_columns(db: Session, dataset: Dataset) -> tuple[int, int, int]:
             # other score stale, over a domain the researcher did not touch in
             # this action. `metrics.py::_assert_domain_members_paired` is the
             # documented second layer and fires at compute time instead.
-            metrics_removed += delete_column_references(
-                db, dataset.project_id, column.id, validate_domains=False,
-            )
+            metrics_removed += len(delete_column_references(
+                db, dataset.project_id, [column.id], validate_domains=False,
+            ).removed_metric_ids)
             db.delete(column)
             removed += 1
             continue

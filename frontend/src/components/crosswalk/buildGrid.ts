@@ -56,9 +56,10 @@ interface BuildGridInput {
    * query hasn't loaded yet.
    */
   reverseScoredColumnIds?: Set<number>
-  /** Project metrics summary. We filter for the ungrouped scale-score metric
-   * per domain (domain_aggregate + both grouping_column_id fields null) and
-   * derive `scale_score_metric_id` + `scale_score_metric_state` per bracket. */
+  /** Project metrics summary. Each domain's scale score is the metric the
+   * server flags `is_scale_score` (#1177 — a lookalike shares its grouping
+   * fields); we derive `scale_score_metric_id` + `scale_score_metric_state`
+   * per bracket from it. */
   metrics?: MetricDefinitionSummaryResponse[]
   /** Domain IDs whose last createScoreMetricMutation failed. Overrides any
    * state buildGrid would derive from `metrics` (usually 'missing') with
@@ -74,14 +75,12 @@ export function buildGrid({
   metrics = [],
   failedScoreMetricDomainIds = new Set(),
 }: BuildGridInput): CrosswalkGrid {
-  // Build a lookup from domain_id → ungrouped scale-score metric. Only the
-  // ungrouped variant qualifies (both grouping_column_id fields null).
+  // Build a lookup from domain_id → its scale score, as the server names it.
+  // Every ungrouped aggregate used to qualify (last one winning), so a lookalike
+  // with some answers excluded could set the Σ badge's state (#1177).
   const scoreMetricByDomain = new Map<number, MetricDefinitionSummaryResponse>()
   for (const m of metrics) {
-    if (m.metric_type !== 'domain_aggregate') continue
-    if (m.input_source_type !== 'dataset_domain') continue
-    if (m.grouping_column_id != null) continue
-    if (m.grouping_column_id_2 != null) continue
+    if (!m.is_scale_score) continue
     scoreMetricByDomain.set(m.input_source_id, m)
   }
 

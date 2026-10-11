@@ -1019,3 +1019,35 @@ class LinkByColumnRequest(BaseModel):
 
 class ColumnReorderRequest(BaseModel):
     ordered_column_ids: list[int]
+
+
+class RemovalPlanGroup(BaseModel):
+    id: int
+    name: str
+
+
+class RemovalPlanResponse(BaseModel):
+    """What deleting a variable or a dataset will remove, recalculate or refuse
+    (#1175) — computed by `services/column_cleanup.py::plan_column_removal`, the
+    function the delete itself executes, so the confirmation cannot disagree with
+    the click.
+
+    Names and counts only, never a cell value.
+    """
+
+    #: Saved statistics the researcher created (scale scores, saved metrics) that
+    #: read a removed variable or are grouped by one — named, because they are
+    #: work someone will look for again.
+    #: Quick compute's own cached results (`origin="auto"`) go too and are not
+    #: listed: any chart rebuilds them on demand, so naming them would only alarm.
+    saved_metrics_removed: list[str]
+    tests_removed: int
+    #: Variable groups that keep their other members and are recalculated.
+    groups_recalculated: list[RemovalPlanGroup]
+    #: Variable groups left with no member, removed with their statistics.
+    groups_removed: list[RemovalPlanGroup]
+    #: Why the delete would be refused, said before the click. None = allowed.
+    refusal: str | None = None
+    #: Computed variables whose formula uses this variable — the delete is
+    #: refused while any exist (single-variable plans only).
+    blocked_by: list[str] = Field(default_factory=list)

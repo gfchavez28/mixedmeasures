@@ -7,6 +7,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.7] - 2026-10-11
+
+### Changed
+
+- **A CSV file whose quotation marks don't pair up is now refused, with the line to
+  fix, instead of being read wrongly.** A value that opens with a quotation mark and
+  is never closed used to swallow the rows after it into one answer, without a word
+  — a survey could import with fewer respondents than it has, and a transcript could
+  run several turns together. Datasets, appended responses, transcripts and coding
+  imports all now stop at the preview and say which line holds the problem. A file
+  that imported before can now be refused: the same rule also refuses a quotation
+  mark inside a quoted value that is not doubled (`""`), and text right after a
+  closing quotation mark, both of which used to be read with the quotation marks
+  silently moved or dropped. A correctly quoted file reads exactly as before. A
+  file that separates its values with
+  semicolons or tabs is now told so, rather than told about its quotation marks.
+  (#1127)
+
+### Fixed
+
+- **Correlations, scatter plots and Comparisons always use a variable group's
+  scale score.** A variable group can hold more than one group aggregate — for
+  example one with some answers excluded, made when a chart's excluded answers
+  carried over to the Group Aggregate view. These pages could mix that
+  aggregate's per-record values into the scale score, so a correlation or a group
+  comparison could rest on the wrong numbers. The same mix-up could add a second
+  score column for one group to the Data view and the exported R data, keep the
+  "out of date" notice on screen after *Recompute scale scores*, set the scale
+  score badge on the Variable Groups page from the wrong aggregate, and stop a
+  group's rename from renaming its scale score. All of them now use the one scale
+  score. (#1177)
+- **The variable group picker on the Quantitative Analysis page names the group's
+  scale score instead of listing every group aggregate as a choice.** The list of
+  options changed nothing on the chart, and with only an aggregate that excluded
+  some answers it hid the *Create scale score* button. (#1179)
+- **Saved charts, tests and scale scores are now marked out of date whenever
+  the data behind them changes.** The app shows a saved result without
+  recalculating it until something marks it out of date, and several actions
+  changed the data without doing so: recalculating a computed variable;
+  deleting a variable or a dataset (for the variable groups that kept other
+  members); re-deriving or re-keying a recode; merging a project file that
+  brings new responses into a dataset both projects share; the repair of
+  reverse-scored recodes that runs when the app starts; changing a demographic
+  variable's type, subtype or short name, which decides how another dataset's
+  records are grouped; pairing or unpairing variables across datasets (for the
+  variable group's reliability test); moving a variable to another group in the
+  crosswalk (for the group it left); and renaming a dataset (for charts grouped
+  by dataset). Each now marks what it changed. (#1168, #1172)
+- **Deleting the variable a saved chart is split by now removes that chart**,
+  as deleting the variable it measures already did. The chart used to become a
+  chart of the whole sample that kept showing the old per-group numbers. (#1168)
+- **Deleting a variable group's last remaining variable now removes the group's
+  saved statistics and tests too**, instead of leaving them behind where
+  computing one failed. A deleted variable's own pairing across datasets is now
+  removed with it. (#1168, #1173)
+- **Editing a variable group's members no longer marks the members' own
+  statistics out of date.** Their numbers cannot change, so a test on one of
+  them no longer shows a false marker. (#1149)
+- **Changing the type of many variables at once is no longer reported as
+  failing while it succeeds, and needs far less memory.** Changing 40
+  variables of 100,000 records each took about 37 seconds — past the point
+  where the app stopped waiting and reported a failure, while the change went on
+  to finish — and held up to 1.3 GB of memory; the app now waits for it to
+  finish, and it stays near 140 MB however many variables are selected. The
+  Variables view now shows the wait — "Changing the type of 12 variables — 8s
+  elapsed." — and says when a change is refused. A response edited while the
+  change runs keeps the number its new type gives it. (#1145)
+- **Delete confirmations now say what else the delete removes.** Deleting a
+  variable or a dataset names the saved statistics, and counts the saved tests,
+  that go with it, and names the variable groups it recalculates or removes.
+  When the delete would be refused — a computed variable uses the variable, or
+  a group would be left with unpaired variables across datasets — the
+  confirmation says so before you press Delete, and Delete stays unavailable
+  with the reason. (#1175)
+- **Correlations, scatter plots and Comparisons say when a variable group's
+  scale score is out of date**, beside a *Recompute scale scores* button. They
+  show the stored scores without recalculating them, and used to give no sign
+  that those predated a change to the data. (#1176)
+- **The "out of date" markers can now be read by screen readers and seen
+  against light backgrounds.** They carried only a tooltip or the word "stale",
+  used a pale amber that failed contrast on light backgrounds, and pulsed even
+  with reduced motion turned on. They now announce "Out of date — recompute",
+  use a darker amber, and hold still when motion is reduced. Recalculating a
+  computed variable now shows the markers it raises straight away. (#1174)
+- **Transcripts saved by Excel as "CSV UTF-8" import alongside other
+  transcripts.** Excel starts such a file with an invisible marker, which the
+  transcript import kept as part of the first column's name, so a batch mixing
+  an Excel-saved transcript with another stopped at *Missing required columns:
+  Speaker ("Speaker")* — two names that looked the same. (#1181)
+- **A comma inside a transcript's text that isn't in quotation marks is now
+  reported.** It split the row there, so the turn imported cut short at the
+  comma, without a word. The preview now names each such line before you
+  import, and the import repeats it in its warnings. A row with fewer values
+  than headings, or a line of only spaces, no longer stops the preview with an
+  error, and when two columns share a heading the first one is read. (#1181)
+- **The transcript import names the file it could not read, and stops for
+  it.** With several transcripts, a file that could not be read was noted beside
+  it, the import went on, and it was sent anyway; the message never said which
+  file. It now names the file and its line, stays on the column step with a
+  *Remove* button for it, and the dataset import names each unreadable file in
+  the same way. The full message is shown in the results list instead of being
+  cut short. (#1182)
+- **The import buttons keep keyboard focus while they work.** *Next*,
+  *Continue* and *Import* on the transcript import, *Import* and the column
+  chooser's *Continue* on the dataset import, and *Select File* and *Append* on
+  the append page used to become unavailable while working, so a message that
+  the file could not be read arrived with focus lost from the page. (#1182)
+- **A project file that is going to be refused no longer leaves a safety copy
+  behind.** Merging or overwriting a project saves a full copy of it first;
+  five of the reasons a file is refused were checked only after that copy was
+  saved, so each refused attempt left one more copy in the backup folder. They
+  are all checked first now. (#1150)
+- **A project file with a variable group whose variables in different datasets
+  were never paired is refused at import, as intended.** The check read a field
+  the export does not write, so it never ran, and the file imported with a
+  variable group whose scale score could not be computed. (#1183)
+- **Coding Import gives each new coder the name typed for it when that name is
+  free.** With a coder called "Alice" already there, naming one new coder
+  "Alice" and another "Alice (2)" made "Alice (2)" and "Alice (2) (2)"; the
+  first now becomes "Alice (3)", and the page says so before you import. Two
+  model coders whose settings were typed in a different order are no longer
+  called different configurations. (#1150)
+- **A web address holding an impossibly large id gets a clear refusal instead
+  of a server error.** (#1128)
+- **The Mac app includes the licence notices of Electron and Chromium, the
+  software it runs on.** Their licences ask for the notices to travel with every
+  copy; the Windows and Linux installers already carried them, and the Mac app
+  now has them too, inside the app. (#1122)
+
 ## [1.5.6] - 2026-10-09
 
 ### Changed
@@ -2601,7 +2730,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.6...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.7...HEAD
+[1.5.7]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.6...v1.5.7
 [1.5.6]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.5...v1.5.6
 [1.5.5]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.4...v1.5.5
 [1.5.4]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.3...v1.5.4

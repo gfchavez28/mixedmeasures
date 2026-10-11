@@ -29,6 +29,7 @@ from ..auth import get_current_user
 from ..services import media_storage
 from ..services.audit import log_action
 from ..services.csv_import import preview_csv, import_csv_to_segments
+from ..services.dataset_import import CsvReadError
 from ..services.subtitle_import import (
     SubtitleImportError,
     is_subtitle_upload,
@@ -275,6 +276,10 @@ async def preview_csv_upload(
 
     try:
         result = preview_csv(content, encoding)
+    except CsvReadError as e:
+        # #1127: the reader's own sentence — which line, and what to fix — never the
+        # generic one below, which named neither (#1083's defect, on this side too).
+        raise HTTPException(status_code=400, detail=str(e))
     except (ValueError, csv.Error, UnicodeDecodeError) as e:
         logger.warning("CSV parse failed: %s", e)
         raise HTTPException(status_code=400, detail="Unable to parse CSV file. Check the file format and try again.")
@@ -285,7 +290,8 @@ async def preview_csv_upload(
         total_rows=result.total_rows,
         unique_speakers=result.unique_speakers,
         detected_columns=result.detected_columns,
-        unique_values_by_column=result.unique_values_by_column
+        unique_values_by_column=result.unique_values_by_column,
+        overlong_records=result.overlong_records,
     )
 
 
@@ -342,6 +348,8 @@ async def import_csv(
             speaker_mapping,
             "utf-8" if subtitle_encoding_override else config.encoding
         )
+    except CsvReadError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except (ValueError, csv.Error, UnicodeDecodeError, KeyError) as e:
         logger.warning("CSV parse failed: %s", e)
         raise HTTPException(status_code=400, detail="Unable to parse CSV file. Check the file format and try again.")

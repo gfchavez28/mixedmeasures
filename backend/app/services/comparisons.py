@@ -13,10 +13,10 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from ..models.dataset import Dataset, DatasetColumn, VALUE_NUMERIC_TYPES
-from ..models.metric import MetricDefinition
-from .correlations import _load_column_vectors, _load_domain_vectors
+from .correlations import _load_column_vectors, _load_domain_vectors, stale_score_domain_ids
 from .grouping import MISSING_GROUP_LABEL, load_grouping_values, order_value_labels
 from .metrics import _Z_975, _t_critical
+from .scale_scores import scale_score_metrics
 from .statistical_tests import (
     _classify_effect_cohens_d,
     _classify_effect_eta_squared,
@@ -217,18 +217,9 @@ def _diagnose_no_rows(db: Session, project_id: int, domain_ids: list[int]) -> st
     """
     if not domain_ids:
         return NO_VARIABLES
-    metric_ids = [
-        m.id for m in db.query(MetricDefinition.id)
-        .filter(
-            MetricDefinition.project_id == project_id,
-            MetricDefinition.metric_type == "domain_aggregate",
-            MetricDefinition.input_source_type == "dataset_domain",
-            MetricDefinition.input_source_id.in_(domain_ids),
-            MetricDefinition.grouping_column_id.is_(None),
-        )
-        .all()
-    ]
-    if not metric_ids:
+    # ⚠️ The SAME selection the loader read (#1177): a lookalike aggregate is not a
+    # scale score, so a group holding only one has none — the remedy is to create.
+    if not scale_score_metrics(db, project_id, domain_ids):
         return DOMAIN_SCORES_MISSING
     return DOMAIN_SCORES_NOT_COMPUTED
 
@@ -453,6 +444,11 @@ def compute_group_comparison(
         # branches on rows, and a field that only sometimes exists invites a
         # consumer to infer its absence means something.
         "unavailable_reason": None,
+        # #1168 R7 — the groups whose stored scale scores are out of date.
+        "stale_domain_ids": (
+            stale_score_domain_ids(db, [v[0] for v in var_info], project_id)
+            if source_type == "domain" else []
+        ),
     }
 
 

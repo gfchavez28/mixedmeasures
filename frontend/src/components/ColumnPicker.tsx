@@ -45,8 +45,6 @@ interface ColumnPickerProps {
   metrics?: MetricDefinitionSummaryResponse[]
   onCreateScoreMetric?: (domainId: number) => void
   isCreatingScoreMetric?: boolean
-  selectedMetricIdHint?: number | null
-  onPickMetric?: (metricId: number) => void
 }
 
 export function ColumnPicker({
@@ -65,8 +63,6 @@ export function ColumnPicker({
   metrics,
   onCreateScoreMetric,
   isCreatingScoreMetric,
-  selectedMetricIdHint,
-  onPickMetric,
 }: ColumnPickerProps) {
   const [search, setSearch] = useState('')
 
@@ -268,8 +264,6 @@ export function ColumnPicker({
             metrics={metrics}
             onCreateScoreMetric={onCreateScoreMetric}
             isCreatingScoreMetric={isCreatingScoreMetric}
-            selectedMetricIdHint={selectedMetricIdHint}
-            onPickMetric={onPickMetric}
           />
         )}
       </TabsContent>
@@ -582,8 +576,6 @@ function DomainsView({
   metrics,
   onCreateScoreMetric,
   isCreatingScoreMetric,
-  selectedMetricIdHint,
-  onPickMetric,
 }: {
   domains: AnalysisDomainItem[]
   selectedDomainIds: Set<number>
@@ -592,8 +584,6 @@ function DomainsView({
   metrics?: MetricDefinitionSummaryResponse[]
   onCreateScoreMetric?: (domainId: number) => void
   isCreatingScoreMetric?: boolean
-  selectedMetricIdHint?: number | null
-  onPickMetric?: (metricId: number) => void
 }) {
   const { focusedIndex, getItemProps, listProps } = useListKeyboardNav({
     itemCount: domains.length,
@@ -671,10 +661,8 @@ function DomainsView({
             <DomainPickerDetail
               domain={fullDomain}
               domainMetrics={metricsByDomain.get(d.id) ?? []}
-              selectedMetricIdHint={selectedMetricIdHint}
               onCreateScoreMetric={onCreateScoreMetric}
               isCreatingMetric={isCreatingScoreMetric ?? false}
-              onPickMetric={onPickMetric}
             />
           )}
         </div>

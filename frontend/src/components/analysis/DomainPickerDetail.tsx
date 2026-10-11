@@ -1,7 +1,8 @@
 import { useMemo } from 'react'
 import { Plus, AlertTriangle, HelpCircle } from 'lucide-react'
 import { resolveBracketColor, BRACKET_DOT_CLASS } from '@/components/crosswalk/bracket-color'
-import { isCrosswalkAuto, isUngroupedScaleScore, metricDisplayLabel } from '@/lib/metric-label'
+import { metricDisplayLabel } from '@/lib/metric-label'
+import { MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
 import { compareScales } from '@/lib/scale-comparison'
 import type { AnalysisDomainResponse, MetricDefinitionSummaryResponse } from '@/lib/api'
 
@@ -12,14 +13,16 @@ import type { AnalysisDomainResponse, MetricDefinitionSummaryResponse } from '@/
  *
  * Behavior:
  *   - Member preview: groups members by dataset name, truncates long lists
- *   - Scale-score state:
- *       no ungrouped domain_aggregate metric → "Create scale score" button
- *       exactly one → label preview (with `(auto)` suffix when applicable)
- *       multiple → radio list, ungrouped variant pre-selected
- *           (overridden by `selectedMetricIdHint` from `?metric_id=` URL)
+ *   - Scale-score state, from the metric the server flags `is_scale_score`:
+ *       none → "Create scale score" button
+ *       one  → label preview (with `(auto)` suffix when applicable)
  *
- * Foot-gun: filter requires BOTH grouping_column_id AND grouping_column_id_2
- * to be null. See `isUngroupedScaleScore` in lib/metric-label.ts.
+ * #1177: a group has ONE scale score. This used to list every ungrouped
+ * aggregate of the group as a radio group named "Scale-score metric for …" —
+ * a lookalike with some answers excluded among them, under the same label —
+ * and the choice changed nothing but the `?metric_id=` URL parameter, which
+ * no chart reads. With only a lookalike it showed "Scale score:" and hid the
+ * button, while Correlations and Comparisons (rightly) said there was none.
  */
 
 export interface DomainPickerDetailProps {
@@ -28,24 +31,18 @@ export interface DomainPickerDetailProps {
    * `input_source_type === 'dataset_domain'`. Caller does the filter once
    * to keep this component cheap to mount/unmount on row toggle. */
   domainMetrics: MetricDefinitionSummaryResponse[]
-  /** Optional URL-driven pre-selection of a specific metric variant. */
-  selectedMetricIdHint?: number | null
   /** Fires when the user clicks "Create scale score". Caller invokes the
    * domains/{id}/create-score-metric mutation. */
   onCreateScoreMetric: (domainId: number) => void
-  /** Disables the create button while the mutation is in flight. */
+  /** Holds the create button busy while the mutation is in flight. */
   isCreatingMetric: boolean
-  /** Optional: writing the chosen metric's id to `?metric_id=` URL param. */
-  onPickMetric?: (metricId: number) => void
 }
 
 export default function DomainPickerDetail({
   domain,
   domainMetrics,
-  selectedMetricIdHint,
   onCreateScoreMetric,
   isCreatingMetric,
-  onPickMetric,
 }: DomainPickerDetailProps) {
   const swatchColor = resolveBracketColor(domain.color)
 
@@ -62,11 +59,7 @@ export default function DomainPickerDetail({
     return Array.from(map.entries())
   }, [domain.members])
 
-  // Foot-gun: ungrouped scale-score metrics require BOTH grouping columns null
-  const ungroupedMetrics = useMemo(
-    () => domainMetrics.filter(isUngroupedScaleScore),
-    [domainMetrics],
-  )
+  const scaleScore = domainMetrics.find(m => m.is_scale_score)
 
   /**
    * #693 — do these items share a scale?
@@ -82,16 +75,6 @@ export default function DomainPickerDetail({
     () => compareScales(domain.members),
     [domain.members],
   )
-
-  // Pre-select: hint > the auto-origin ungrouped variant > first ungrouped
-  const activeMetricId = useMemo(() => {
-    if (selectedMetricIdHint && ungroupedMetrics.some(m => m.id === selectedMetricIdHint)) {
-      return selectedMetricIdHint
-    }
-    const auto = ungroupedMetrics.find(isCrosswalkAuto)
-    if (auto) return auto.id
-    return ungroupedMetrics[0]?.id ?? null
-  }, [selectedMetricIdHint, ungroupedMetrics])
 
   const renderMembers = () => {
     if (membersByDataset.length === 0) {
@@ -153,52 +136,28 @@ export default function DomainPickerDetail({
   }
 
   const renderMetricSection = () => {
-    if (ungroupedMetrics.length === 0) {
+    if (!scaleScore) {
+      // Busy is `aria-disabled` + a guard, never `disabled`: Chrome blurs a
+      // focused button that becomes disabled (#959).
       return (
         <button
           type="button"
           onClick={(e) => {
             e.stopPropagation()
+            if (isCreatingMetric) return
             onCreateScoreMetric(domain.id)
           }}
-          disabled={isCreatingMetric}
-          className="flex items-center gap-1 text-[11px] text-primary hover:underline disabled:text-mm-text-faint disabled:no-underline disabled:cursor-not-allowed"
+          aria-disabled={isCreatingMetric || undefined}
+          className={`flex items-center gap-1 text-[11px] text-primary hover:underline aria-disabled:no-underline ${MODE_DISABLED_CLASS}`}
         >
-          <Plus className="w-3 h-3" />
-          {isCreatingMetric ? 'Creating scale score...' : 'Create scale score'}
+          <Plus className="w-3 h-3" aria-hidden="true" />
+          {isCreatingMetric ? 'Creating scale score…' : 'Create scale score'}
         </button>
       )
     }
-    if (ungroupedMetrics.length === 1) {
-      const m = ungroupedMetrics[0]
-      return (
-        <div className="text-[11px] text-mm-text-muted">
-          Scale score: <span className="text-mm-text">{metricDisplayLabel(m)}</span>
-        </div>
-      )
-    }
-    // Multi-metric radio list
     return (
-      <div role="radiogroup" aria-label={`Scale-score metric for ${domain.name}`} className="space-y-0.5">
-        {ungroupedMetrics.map(m => (
-          <label
-            key={m.id}
-            className="flex items-center gap-1.5 text-[11px] text-mm-text cursor-pointer"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <input
-              type="radio"
-              name={`domain-metric-${domain.id}`}
-              value={m.id}
-              checked={activeMetricId === m.id}
-              onChange={() => onPickMetric?.(m.id)}
-              className="shrink-0"
-            />
-            <span className="truncate" title={metricDisplayLabel(m)}>
-              {metricDisplayLabel(m)}
-            </span>
-          </label>
-        ))}
+      <div className="text-[11px] text-mm-text-muted">
+        Scale score: <span className="text-mm-text">{metricDisplayLabel(scaleScore)}</span>
       </div>
     )
   }

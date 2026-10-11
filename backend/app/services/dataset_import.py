@@ -11,7 +11,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import islice
 from sqlalchemy import insert as sa_insert
@@ -793,6 +793,55 @@ def _csv_lines(text: str) -> Iterator[str]:
         start = nl + 1
 
 
+def csv_reader(lines: Iterable[str]):
+    """THE `csv.reader` of an imported CSV file — STRICT (#1127), for every reader.
+
+    🔴 **The default mode reads a value that opens with a quotation mark up to the
+    NEXT quotation mark in the file, wherever that is.** One stray quote swallowed the
+    records after it into one answer, silently, whenever the swallowed stretch stayed
+    under the field limit — 1 to 42 BES records per planted quote, measured. Strict
+    refuses the two shapes behind it: a quoted value never closed (`unexpected end of
+    data`) and a closing quote followed by anything but a comma or a line end (`','
+    expected after '"'`). The second is also what catches the stray quote MID-file:
+    the swallowing stops at the next quote, usually the OPENING quote of a legitimate
+    value, and the character after it is text.
+
+    ⚠️ **There is no "strict but tolerant of `"abc"x`" setting that keeps the catch** —
+    it is the same rule. Measured before choosing (2026-10-11b): over 635
+    comma-separated CSVs on the developer's machine strict refused only a file built
+    to be malformed, which the lenient reader MISREAD; `csv.writer` output — what the
+    `.xlsx`/`.sav`/subtitle adapters and the narrowing write — round-trips (20,000
+    random rows).
+
+    Every reader of imported CSV text calls this, never `csv.reader` itself — the
+    dataset doors through `CsvRecords`, the coding import, and the transcript import
+    (`test_dataset_preview_streaming.py::TestOneReaderOfDatasetCsv` holds all three
+    modules to it).
+    """
+    return csv.reader(lines, strict=True)
+
+
+def first_line_of(text: str) -> str:
+    """The file's first line — what `_separator_word` reads. (A file with old Mac
+    line endings is one "line"; its sentence is decided before the separator's.)"""
+    nl = text.find("\n")
+    return text if nl < 0 else text[:nl]
+
+
+def _separator_word(first_line: str | None) -> str | None:
+    """"semicolons" or "tabs" when the file's FIRST line has no comma but has one of
+    them — Excel writes "CSV" with the region's list separator, a semicolon in much of
+    Europe — else None. Read off the raw header line, so a semicolon inside an ANSWER
+    of a comma file never fires it."""
+    if not first_line or "," in first_line:
+        return None
+    if ";" in first_line:
+        return "semicolons"
+    if "\t" in first_line:
+        return "tabs"
+    return None
+
+
 class CsvReadError(csv.Error, ValueError):
     """A file the CSV reader cannot read, with a sentence saying where and why (#1083).
 
@@ -803,36 +852,66 @@ class CsvReadError(csv.Error, ValueError):
     """
 
 
-def csv_error_sentence(exc: csv.Error, where: str) -> str:
-    """What `csv.reader` refused, as guidance (#1083). ``where`` is "Line 7" or similar.
+def csv_error_sentence(exc: csv.Error, where: str, *, first_line: str | None = None) -> str:
+    """What `csv.reader` refused, as guidance (#1083, #1127). ``where`` is "Line 7" or
+    similar — the line the failing record STARTS on, which is where its opening
+    quotation mark is.
 
-    Two of the reader's errors have a cause a researcher can act on, and each is
-    named rather than echoed:
+    Each of the reader's errors with a cause a researcher can act on is named rather
+    than echoed:
 
+    - **A separator that is not a comma** (``first_line`` has semicolons or tabs and
+      no comma) — checked BEFORE the quote errors, because such a file trips the
+      quote rule on values that are well formed for their own separator, and a
+      sentence about quotation marks would send the researcher after the wrong fault.
+    - **`unexpected end of data`** (strict) — a quoted value never closed.
+    - **`',' expected after '"'`** (strict) — a quoted value that does not end where
+      it should: the closing quote is missing (a stray quote MID-file lands here, at
+      the next quote), a quote inside it is not doubled, or the closing quote is
+      followed by something other than a comma or a line end.
     - **`field larger than field limit`** — a value over `csv.field_size_limit()`
-      (131,072 characters). Almost always a quotation mark that opens a value and
-      never closes, so the rest of the file reads as one value.
+      (131,072 characters): a genuinely long value, or an unclosed quote with no
+      later quote before the limit.
     - **`new-line character seen in unquoted field`** — a carriage return inside a
       value. A file saved with old Mac line endings (a carriage return alone) is
       one long line of them, so every row fails at once.
 
     ⚠️ The limit is NOT raised to let a long value through. It is process-global
-    state shared by every reader in the app, and what it catches here is the
-    unclosed quote, which would otherwise swallow the rest of the file silently.
+    state shared by every reader in the app.
     """
     message = str(exc)
+    if "new-line character seen in unquoted field" in message:
+        return (
+            f"{where} has a line break inside a value that is not in quotes. A file "
+            "saved with old Mac line endings does this on every line — save it again "
+            "as “CSV UTF-8” and try again."
+        )
+    separator = _separator_word(first_line)
+    if separator is not None:
+        return (
+            f"{where} could not be read: this file seems to separate its values with "
+            f"{separator}, and Mixed Measures reads values separated by commas. Save it "
+            "again as CSV with commas between values and try again."
+        )
+    if "unexpected end of data" in message:
+        return (
+            f"{where} opens a value with a quotation mark that is never closed, so "
+            "everything after it would read as one value. Check the quotation marks on "
+            "that line."
+        )
+    if "expected after" in message:
+        return (
+            f"{where} has a value that starts with a quotation mark and does not end "
+            "where it should. A quoted value must close with a quotation mark followed "
+            "by a comma or the end of the line, and a quotation mark inside it must be "
+            'doubled (""). Check the quotation marks on that line.'
+        )
     if "field larger than field limit" in message:
         return (
             f"{where} holds a value longer than {csv.field_size_limit():,} characters, "
             "the most one value can be. That is usually a quotation mark that opens a "
             "value and is never closed, so everything after it reads as one value — "
             "check the quotation marks on that line."
-        )
-    if "new-line character seen in unquoted field" in message:
-        return (
-            f"{where} has a line break inside a value that is not in quotes. A file "
-            "saved with old Mac line endings does this on every line — save it again "
-            "as “CSV UTF-8” and try again."
         )
     return f"{where} could not be read as CSV ({message}). Check the file and try again."
 
@@ -913,17 +992,29 @@ class CsvRecords:
 
     🔴 **A file the reader cannot read raises `CsvReadError`, naming the line the
     failing record STARTS on (#1083)** — the same line the overlong report uses.
+    The reader is STRICT (`csv_reader`, #1127), so a quotation mark that does not pair
+    up is one of those files: before, it swallowed the records after it, silently.
+
+    🔴 **The transcript import reads through this class too (#1127)** — it gave it the
+    BOM strip, positional cells for a short row, the whitespace-line rule, the
+    too-long report and the sentence, all of which its `csv.DictReader` lacked.
 
     ⚠️ **Single-pass**, like the reader underneath it. ``overlong`` is complete
     only once the records have been read to the end.
     """
 
     def __init__(self, text: str):
-        self._reader = csv.reader(_csv_lines(_strip_bom(text)))
+        text = _strip_bom(text)
+        # For the separator arm of the sentence (#1127): a semicolon file trips the
+        # quote rule, and the fault to name is the separator.
+        self._first_line = first_line_of(text)
+        self._reader = csv_reader(_csv_lines(text))
         try:
             self.header: list[str] = next(self._reader, None) or []
         except csv.Error as exc:
-            raise CsvReadError(csv_error_sentence(exc, "Line 1 (the header)")) from exc
+            raise CsvReadError(csv_error_sentence(
+                exc, "Line 1 (the header)", first_line=self._first_line,
+            )) from exc
         self.width = len(self.header)
         self.overlong = OverlongRecords(header_width=self.width)
         self._started = False
@@ -950,7 +1041,9 @@ class CsvRecords:
             except StopIteration:
                 return
             except csv.Error as exc:
-                raise CsvReadError(csv_error_sentence(exc, f"Line {line:,}")) from exc
+                raise CsvReadError(csv_error_sentence(
+                    exc, f"Line {line:,}", first_line=self._first_line,
+                )) from exc
             previous_line = reader.line_num
             if not cells:
                 if width == 1:

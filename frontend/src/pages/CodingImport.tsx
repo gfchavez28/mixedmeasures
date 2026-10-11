@@ -37,7 +37,7 @@ import {
 import {
   CODER_NAME_MAX_LENGTH, coderOptionLabel, draftBlocker, effectiveNewName, initialDraft,
   mappingIntro, matchKeyOptions, namesSharingACoder, rowsToImport, sharedCreateConflicts,
-  takenNameSuffix, toDecision, type CoderDraft,
+  takenNameSuffix, toDecision, typedNewCoderNames, type CoderDraft,
 } from '@/lib/coding-import-mapping'
 import {
   PROBLEM_LIST_LIMIT, problemsCsv, problemsFilename, reasonSummary,
@@ -567,6 +567,7 @@ function MapStep({
   const matchedNoUnit = preview.units_matched === 0 && preview.rows_read > 0
   const matchedNoCode = preview.codes_matched === 0 && preview.codes_in_file > 0
   const shared = namesSharingACoder(drafts)
+  const typedNewNames = typedNewCoderNames(drafts)
   // #1099 — ONE count for the stat and the button, after the coder decisions.
   const toImport = rowsToImport(preview.coders, preview.will_apply, drafts)
   const blockers = [
@@ -665,6 +666,7 @@ function MapStep({
                 roster={roster}
                 rosterReady={rosterStatus === 'ready'}
                 sharedWith={shared.get(candidate.name) ?? []}
+                typedNewNames={typedNewNames}
                 onChange={(patch) => update(candidate.name, patch)}
               />
             )
@@ -718,7 +720,7 @@ function RequestError({ message }: { message: string }) {
 }
 
 function CoderRow({
-  rowId, candidate, draft, roster, rosterReady, sharedWith, onChange,
+  rowId, candidate, draft, roster, rosterReady, sharedWith, typedNewNames, onChange,
 }: {
   rowId: string
   candidate: CodingImportCoderCandidate
@@ -726,6 +728,8 @@ function CoderRow({
   roster: Coder[]
   rosterReady: boolean
   sharedWith: string[]
+  // #1150 (c): every name typed for a new coder, which the server reserves.
+  typedNewNames: ReadonlySet<string>
   onChange: (patch: Partial<CoderDraft>) => void
 }) {
   const chosen = draft.targetUserId != null
@@ -762,7 +766,7 @@ function CoderRow({
   // "Alice" became "Alice (2)" and "Alice (3)", and a colleague's name made a second
   // coder the researcher never knew about. One string, for the reason `hint` is one.
   const newName = effectiveNewName(candidate.name, draft)
-  const numbered = draft.action === 'create' ? takenNameSuffix(newName, roster) : null
+  const numbered = draft.action === 'create' ? takenNameSuffix(newName, roster, typedNewNames) : null
   const nameNote = draft.action !== 'create' ? '' : [
     numbered
       ? `A coder called “${newName}” already exists, so this one will be called “${numbered}”. `

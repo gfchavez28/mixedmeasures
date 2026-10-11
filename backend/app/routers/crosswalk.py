@@ -32,7 +32,7 @@ from ..services.equivalence_validators import (
     assert_cross_dataset_members_are_paired,
 )
 from ..services.metrics import compute_metric
-from ..services.staleness import mark_metrics_stale
+from ..services.staleness import grouping_sets, mark_metrics_stale, mark_pairing_stale
 
 from .auth import limiter
 from .equivalence import (
@@ -118,9 +118,10 @@ async def move_members(
       9. Post-mutation validators on target side: cross-dataset pairing
          (#290) + 1:1-per-dataset (#289).
      10. Source-EG cleanup: any previous EG that's now empty is auto-deleted.
-     11. Mark metrics stale via `mark_metrics_stale(column_ids=...)`. The
-         cascade reaches both source and target domain metrics + their
-         statistical tests.
+     11. Mark metrics stale by the source and target groups' ids (their
+         metrics and α tests), plus `mark_pairing_stale` for the pairing
+         change (#1172: marking by `column_ids` after the move reached only
+         the target).
      12. Synchronous recompute of affected `domain_aggregate` metrics
          (mirrors swap; failures keep the metric stale, do not abort the
          move).
@@ -224,6 +225,7 @@ async def move_members(
     # NULLs satisfy the partial index (which only covers WHERE eg_id IS NOT
     # NULL), so subsequent Phase B re-assignments don't collide. Same
     # rationale as `equivalence.py::swap_columns`.
+    before = grouping_sets(db, project_id)  # step 10 compares against it
     for col in columns:
         col.equivalence_group_id = None
     db.flush()
@@ -339,9 +341,20 @@ async def move_members(
         db.flush()
 
     # ── 10. Mark metrics stale ─────────────────────────────────────────
-    # The cascade keys on column_ids and reaches both source and target
-    # domain metrics + their statistical tests via the column→domain join.
-    mark_metrics_stale(db, project_id, column_ids=list(data.column_ids))
+    # 🔴 #1172 — by the groups' ids, captured before the move. This used to
+    # mark by `column_ids` AFTER the membership change, and the column→group
+    # join then found only the TARGET: the source group's metrics and α tests
+    # kept their old numbers, unmarked, and a failed recompute in step 11 left
+    # even its scale score unmarked. A move changes no cell, so the moved
+    # columns' own metrics are not marked (#1149).
+    moved_domain_ids = [
+        d.id for d in (source_domain, target_domain) if d is not None
+    ]
+    if moved_domain_ids:
+        mark_metrics_stale(db, project_id, domain_ids=moved_domain_ids)
+    # The pairing changed too: sibling grouping, and α in any other group that
+    # holds these columns.
+    mark_pairing_stale(db, project_id, data.column_ids, before)
 
     # ── 11. Synchronous metric recompute ───────────────────────────────
     affected_domain_ids: list[int] = []

@@ -17,6 +17,9 @@ export interface CorrelationMatrixResponse {
   matrix: CorrelationCell[][]
   adjusted_alpha: number | null
   num_comparisons: number
+  /** #1168 R7 — variable groups whose stored scale scores are out of date
+   *  (`StaleScaleScoresNotice`). `[]` when fresh or for a column request. */
+  stale_domain_ids: number[]
 }
 
 export interface RegressionResult {
@@ -40,6 +43,9 @@ export interface ScatterDataResponse {
   n: number
   regression: RegressionResult
   group_regressions: Record<string, RegressionResult> | null
+  /** #1168 R7 — as on `CorrelationMatrixResponse`. ⚠️ No client calls the
+   *  single-pair endpoint today; the type mirrors the server's. */
+  stale_domain_ids: number[]
 }
 
 export interface ScatterPair {
@@ -60,6 +66,8 @@ export interface ScatterMatrixResponse {
   full_labels: string[]
   pairs: ScatterPair[]
   truncated: boolean
+  /** #1168 R7 — as on `CorrelationMatrixResponse`. */
+  stale_domain_ids: number[]
 }
 
 // API functions - Correlations

@@ -178,8 +178,13 @@ export function DatasetColumnChooser({
       <div className="flex items-center gap-2">
         <Button
           type="button"
-          onClick={onContinue}
-          disabled={busy || selected.size === 0 || overBudget}
+          // #1127 — busy is `aria-disabled` + a guard, never `disabled` (#1133): a
+          // refused re-read's alert must not arrive with focus on <body>.
+          onClick={() => { if (!busy) onContinue() }}
+          disabled={selected.size === 0 || overBudget}
+          aria-disabled={busy || undefined}
+          aria-busy={busy || undefined}
+          className="aria-busy:cursor-wait aria-busy:opacity-50"
         >
           {busy ? 'Reading the selected columns…' : 'Continue'}
         </Button>

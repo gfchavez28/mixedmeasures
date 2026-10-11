@@ -249,3 +249,55 @@ def test_the_plan_detail_reads_as_english_not_machine_text(db_session):
     detail = plan_rederive(db_session, src)[0].detail
     assert "1 value would be updated" in detail
     assert "value(s)" not in detail
+
+
+class TestARederivedPrimaryMarksTheColumnsMetrics:
+    """#1168 door 4 — through the ROUTER, which owns the transaction and the mark.
+
+    A re-derived primary rewrites `value_numeric`, and quick compute serves a
+    metric's stored result until it is marked stale; the endpoint never marked.
+    """
+
+    def _world(self, db, *, primary):
+        from app.models.metric import MetricDefinition
+        from app.models.user import User
+
+        _project(db)
+        col = _column(db, 1)
+        db.add(DatasetRow(id=1, dataset_id=1)); db.flush()
+        db.add(DatasetValue(id=1, row_id=1, column_id=col.id, value_text="Always", value_numeric=5))
+        src = _def(db, col, {"Never": 1, "Always": 7}, def_id=1)
+        _def(db, col, {"Never": 1, "Always": 5}, def_id=2, source_id=1, primary=primary)
+        metric = MetricDefinition(
+            id=1, project_id=1, name="Mean Q1", metric_type="mean", config="{}",
+            input_source_type="dataset_column", input_source_id=col.id, stale=False,
+            origin="auto",
+        )
+        db.add(metric); db.flush()
+        return src, metric, db.query(User).filter_by(id=1).one()
+
+    def _rederive(self, db, src, user):
+        import asyncio
+        from app.routers.recode import rederive_dependents
+        from app.schemas.recode import RederiveRequest
+
+        return asyncio.run(rederive_dependents(
+            project_id=1, dataset_id=1, column_id=1, definition_id=src.id,
+            body=RederiveRequest(definition_ids=[2]), user=user, db=db,
+        ))
+
+    def test_a_rederived_primary_marks_the_metric_stale(self, db_session):
+        src, metric, user = self._world(db_session, primary=True)
+        out = self._rederive(db_session, src, user)
+        assert out["updated"] == [2]
+        assert "recomputed_column_ids" not in out, "an internal key reached the wire"
+        db_session.refresh(metric)
+        assert metric.stale is True
+
+    def test_a_rederived_non_primary_moves_no_number_and_marks_nothing(self, db_session):
+        """Over-mark falsifier: a non-primary definition's mapping is not what the
+        column's stored numbers come from."""
+        src, metric, user = self._world(db_session, primary=False)
+        self._rederive(db_session, src, user)
+        db_session.refresh(metric)
+        assert metric.stale is False

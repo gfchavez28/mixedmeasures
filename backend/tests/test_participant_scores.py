@@ -791,7 +791,7 @@ class TestTheReapDoesNotBlockTheRefresh:
 
         with pytest.raises(HTTPException) as exc:
             delete_column_references(
-                db, 1, score.id, validate_domains=True,
+                db, 1, [score.id], validate_domains=True,
             )
         assert exc.value.status_code == 409
         db.rollback()

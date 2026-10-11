@@ -32,6 +32,20 @@ export function countLabel(n: number, one: string, many: string): string {
   return `${n} ${plural(n, one, many)}`
 }
 
+/**
+ * Names in a sentence — `A`, `A and B`, `A, B and C` — and past `max`, the
+ * first `max` and how many more: `A, B, C and 2 more`. For the confirmations
+ * and notices that must name what they touch without growing a dialog without
+ * bound (#1175, #1139: the dialogs have no height limit).
+ */
+export function listNames(names: readonly string[], max = 3): string {
+  if (names.length > max) {
+    return `${names.slice(0, max).join(', ')} and ${names.length - max} more`
+  }
+  if (names.length <= 1) return names[0] ?? ''
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`

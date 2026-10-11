@@ -114,6 +114,7 @@ import { toast } from 'sonner'
 import { equivalenceApi } from '@/lib/api/equivalence'
 import { domainsApi } from '@/lib/api/analysis-domains'
 import { crosswalkApi } from '@/lib/api/crosswalk'
+import { metricsApi } from '@/lib/api/metrics'
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
@@ -1548,4 +1549,42 @@ describe('createDomainMutation + createScoreMetricMutation chain', () => {
       })
     },
   )
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #1177 — a rename renames the group's scale score, the metric the server names
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('updateDomainMutation rename cascade (#1177)', () => {
+  function summary(overrides: Partial<MetricDefinitionSummaryResponse>): MetricDefinitionSummaryResponse {
+    return {
+      id: 1, project_id: 1, name: 'Old Score', description: null,
+      metric_type: 'domain_aggregate', config: {}, input_source_type: 'dataset_domain',
+      input_source_id: 77, input_source_label: 'Old', grouping_column_id: null,
+      grouping_column_id_2: null, grouping_mode: null, exclude_values: null,
+      sequence_order: 0, origin: 'human', origin_context: 'crosswalk_auto', stale: false,
+      result_type: 'metric_summary', latest_computed_at: null, total_valid_n: null,
+      result_count: 1, real_group_count: 0, is_scale_score: true, last_accessed_at: null,
+      created_at: '2026-10-11T00:00:00Z', updated_at: '2026-10-11T00:00:00Z',
+      ...overrides,
+    }
+  }
+
+  it('renames the scale score beside a lookalike, and only the scale score', async () => {
+    // Two ungrouped aggregates of the group used to SKIP the rename altogether.
+    const { result } = setupHook()
+    const lookalike = summary({
+      id: 2, name: 'Domain Agg.: Old', origin: 'auto', origin_context: 'quick-compute',
+      exclude_values: ["Don't know"], is_scale_score: false,
+    })
+    vi.mocked(domainsApi.update).mockResolvedValueOnce(buildDomain(77, 'New'))
+    vi.mocked(metricsApi.list).mockResolvedValueOnce({ metrics: [summary({}), lookalike], total: 2 })
+    vi.mocked(metricsApi.update).mockResolvedValueOnce({} as never)
+
+    act(() => {
+      result.current.updateDomainMutation.mutate({ domainId: 77, data: { name: 'New' } })
+    })
+    await waitFor(() => expect(metricsApi.update).toHaveBeenCalledTimes(1))
+    expect(metricsApi.update).toHaveBeenCalledWith(1, 1, { name: 'New Score' })
+  })
 })

@@ -314,6 +314,18 @@ class TestScoreColumnProvenanceSurvivesImport:
         assert "{not json" in raw
 
 
+def _decomposed_metric(db, project_id):
+    """The decomposed metric the fixture carries, by name. ⚠️ It is not the only
+    metric of the imported project: a decomposed aggregate is not the group's
+    scale score (#1177), so the import's Tier 3 backfill gives the group one."""
+    return (
+        db.query(MetricDefinition)
+        .filter(MetricDefinition.project_id == project_id,
+                MetricDefinition.name == "Safety (decomposed)")
+        .one()
+    )
+
+
 class TestDecomposedMetricColumnIds:
     """#948 — `MetricDefinition.config.decompose_column_ids`."""
 
@@ -321,11 +333,7 @@ class TestDecomposedMetricColumnIds:
         db = source["db"]
         new_pid = _import_as_new(db, _export(db, tmp_path), tmp_path)
 
-        metric = (
-            db.query(MetricDefinition)
-            .filter(MetricDefinition.project_id == new_pid)
-            .one()
-        )
+        metric = _decomposed_metric(db, new_pid)
         config = json.loads(metric.config)
         new_cols = sorted(
             c.id for c in db.query(DatasetColumn)
@@ -343,10 +351,7 @@ class TestDecomposedMetricColumnIds:
         db = source["db"]
         new_pid = _import_as_new(db, _export(db, tmp_path), tmp_path)
 
-        config = json.loads(
-            db.query(MetricDefinition)
-            .filter(MetricDefinition.project_id == new_pid).one().config
-        )
+        config = json.loads(_decomposed_metric(db, new_pid).config)
         assert config["decompose_label"] == DECOMPOSE_LABEL
         assert config["child_metric_type"] == "mean"
         assert config["aggregation"] == "mean"

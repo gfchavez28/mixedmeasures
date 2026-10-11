@@ -643,7 +643,15 @@ export default function DatasetImport() {
     }
 
     if (errors.length > 0) {
-      setError(`${errors.length} file(s) had preview errors. You can remove them and continue.`)
+      // #1127: name each refused file and say why — this said "N file(s) had preview
+      // errors" and left the reasons in collapsed panels. A refused file blocks
+      // Import, and the way to remove it is Back.
+      setError(
+        `${errors.length === 1 ? 'One file' : `${errors.length} files`} could not be read. `
+        + `${errors.join(' · ')} `
+        + `Go Back to remove ${errors.length === 1 ? 'it' : 'them'} and import the rest, or correct `
+        + `${errors.length === 1 ? 'it' : 'them'} and add ${errors.length === 1 ? 'it' : 'them'} again.`,
+      )
       setStatusMessage(
         `${newConfigs.length - errors.length} of ${newConfigs.length} files read. ${errors.length} had errors.`,
       )
@@ -952,10 +960,12 @@ export default function DatasetImport() {
   // --- Import ---
 
   const handleImport = useCallback(async () => {
+    // #1127 — Import stays focusable while it works (`aria-disabled`, #1133's
+    // pattern), so this guard is what refuses a second press.
+    if (isLoading) return
     setError('')
-    // Busy BEFORE the snapshot's request (#1047): the Import button is disabled
-    // by `isLoading`, so a second press cannot start a second import while the
-    // count is answered.
+    // Busy BEFORE the snapshot's request (#1047), so a second press cannot start a
+    // second import while the count is answered.
     setOperation('import')
     setIsLoading(true)
     hadParticipantsRef.current = await projectHadParticipants(queryClient, id)
@@ -1029,7 +1039,7 @@ export default function DatasetImport() {
     // Both derive from `files` via useMemo and `files` is already a dep, so the
     // closure cannot currently go stale — they are listed so it still cannot if
     // either memo's own deps widen later.
-  }, [files, fileConfigs, id, buildColumnConfigs, queryClient, hasSlowFile, estimatedImportSeconds]) // eslint-disable-line react-hooks/exhaustive-deps -- handleBatchImport defined below; adding would cause TDZ error
+  }, [files, fileConfigs, id, buildColumnConfigs, queryClient, hasSlowFile, estimatedImportSeconds, isLoading]) // eslint-disable-line react-hooks/exhaustive-deps -- handleBatchImport defined below; adding would cause TDZ error
 
   const handleBatchImport = useCallback(async () => {
     cancelledRef.current = false
@@ -1533,7 +1543,9 @@ export default function DatasetImport() {
           {stepIndex >= 0 ? `Step ${stepIndex + 1} of ${steps.length}: ${steps[stepIndex].label}` : ''}
         </h2>
 
-        {error && (
+        {/* #1127: the column chooser shows its own alert beside its buttons — this one
+            on that step was the same message twice, two `role="alert"`s. */}
+        {error && step !== 'choose-columns' && (
           <div role="alert" className="mb-6 p-4 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 rounded-lg flex items-start gap-2">
             <CircleAlert className="w-5 h-5 flex-shrink-0 mt-0.5" />
             <span>{error}</span>
@@ -1734,8 +1746,13 @@ export default function DatasetImport() {
                     </Button>
                     <Button
                       onClick={handleImport}
-                      disabled={!configureStepValid || isLoading}
-                      className="bg-mm-orange-fill hover:opacity-90 text-mm-on-fill relative overflow-hidden"
+                      // #1127 — busy is `aria-disabled` + the handler's guard, never
+                      // `disabled` (#1133): a refused import's alert must not arrive
+                      // with focus on <body>.
+                      disabled={!configureStepValid}
+                      aria-disabled={isLoading || undefined}
+                      aria-busy={isLoading || undefined}
+                      className="bg-mm-orange-fill hover:opacity-90 text-mm-on-fill relative overflow-hidden aria-busy:cursor-wait"
                     >
                       {isLoading && (
                         <span
@@ -1854,8 +1871,13 @@ export default function DatasetImport() {
                     </Button>
                     <Button
                       onClick={handleImport}
-                      disabled={!configureStepValid || isLoading}
-                      className="bg-mm-orange-fill hover:opacity-90 text-mm-on-fill relative overflow-hidden"
+                      // #1127 — busy is `aria-disabled` + the handler's guard, never
+                      // `disabled` (#1133): a refused import's alert must not arrive
+                      // with focus on <body>.
+                      disabled={!configureStepValid}
+                      aria-disabled={isLoading || undefined}
+                      aria-busy={isLoading || undefined}
+                      className="bg-mm-orange-fill hover:opacity-90 text-mm-on-fill relative overflow-hidden aria-busy:cursor-wait"
                     >
                       {isLoading && (
                         <span
@@ -1929,7 +1951,8 @@ export default function DatasetImport() {
                         </span>
                       )}
                       {r.error && (
-                        <span className="text-red-500 text-xs truncate flex-shrink-0">{r.error}</span>
+                        // #1127: the sentence is the remedy — wrapped, not cut.
+                        <span className="text-red-600 dark:text-red-400 text-xs min-w-0 break-words">{r.error}</span>
                       )}
                     </div>
                   ))}
@@ -2085,7 +2108,9 @@ export default function DatasetImport() {
                           </span>
                         )}
                         {r.error && (
-                          <span className="text-red-600 text-xs truncate max-w-[200px]" title={r.error}>
+                          // #1127: the sentence is the remedy — it wraps instead of
+                          // being cut to 200px behind a hover-only `title`.
+                          <span className="text-red-600 dark:text-red-400 text-xs min-w-0 break-words">
                             {r.error}
                           </span>
                         )}

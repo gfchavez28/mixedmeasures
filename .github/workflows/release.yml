@@ -8,13 +8,13 @@
 # signing creds are present), and uploads the installer + auto-update manifest to a
 # DRAFT GitHub Release. You review the draft and click "Publish" to ship.
 #
-# RELATIONSHIP TO ci.yml: ci.yml is the fast per-push feedback loop (tests only, no
-# packaging). THIS workflow does packaging only.
+# RELATIONSHIP TO ci.yml: ci.yml is the fast feedback loop (tests only, no packaging;
+# since #1095 a push runs only the areas it can affect). THIS workflow does packaging only.
 #
 # ⚠️ Updated 2026-08-09 — the old line here ("ci.yml runs the dep audits advisory;
 # here they block the build") is NO LONGER TRUE. All three PRODUCTION dep audits are
 # now hard gates in BOTH workflows, running identical commands, so a shipping CVE
-# fails at push rather than at cut. What ci.yml keeps that this workflow does not is
+# fails in CI rather than at cut (since #1095: at the next run of that area, or weekly). What ci.yml keeps that this workflow does not is
 # the FRONTEND FULL-TREE advisory audit (#632) — dev-toolchain advisories stay
 # visible per-push without ever blocking. That single asymmetry is the deliberate
 # one; the production gates are deliberately identical.
@@ -197,6 +197,18 @@ jobs:
       - name: Electron dependency audit (HARD gate, production deps)
         working-directory: electron
         run: npm audit --omit=dev --audit-level=high
+
+      # #1094: Electron's OWN advisories against the locked runtime, which every audit
+      # above skips (`electron` is a devDependency) and which the global database has
+      # missed (#1093: v1.5.3 and v1.5.4 shipped 42.8.1 while four advisories named it).
+      # The same script as ci.yml's electron job; see the note there. A hit stops the
+      # release before anything is packaged — review it (RELEASING §1b), then move the
+      # runtime or add a REVIEWED entry with its reason. Fails closed, like every step here.
+      - name: Electron runtime advisories (HARD gate, the shipped runtime)
+        working-directory: electron
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/electron-advisories.js
 
   # ── Package: one runner per platform/arch ───────────────────────────────────
   # The backend is a NATIVE PyInstaller bundle, so each arch must build on its own
@@ -492,6 +504,26 @@ jobs:
           if [ -z "${TARGET:-}" ] || [ ! -e "$TARGET" ]; then echo "❌ no packaged app found for ${{ matrix.eb_target }}"; exit 1; fi
           node scripts/check-fuses.js "$TARGET"
 
+      # 3a1b) Electron's and Chromium's licence notices travel with the app (#1122). Their
+      #       licences ask for it, and nothing looked: electron-builder ≤ 26.15.3 deleted both
+      #       files on macOS, so the published v1.5.5 and v1.5.6 Mac apps carried neither, with
+      #       every gate green. 26.16.1+ puts them in Contents/Resources (inside the signature's
+      #       seal); win and linux keep them at the top of the unpacked app, which the
+      #       installers pack. check-notices.js reads them from what this leg built. The mac
+      #       ZIP is held to the same .app by the update-zip step below.
+      - name: Verify — the app carries Electron's and Chromium's licence notices
+        timeout-minutes: 5
+        working-directory: electron
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.eb_target }}" = "mac" ]; then
+            TARGET="$(find release -maxdepth 4 -name '*.app' -print -quit)"
+          else
+            TARGET="release/${{ matrix.eb_target }}-unpacked"
+          fi
+          if [ -z "${TARGET:-}" ] || [ ! -e "$TARGET" ]; then echo "❌ no packaged app found for ${{ matrix.eb_target }}"; exit 1; fi
+          node scripts/check-notices.js "$TARGET"
+
       # 3a2) Notarize + staple the DMG itself (macOS, signed path only). electron-builder
       #      notarizes & staples the .app but NOT the .dmg container, so `stapler validate`
       #      on the dmg fails the Gatekeeper gate below (the rc2 finding). Submit the dmg to
@@ -559,6 +591,116 @@ jobs:
           # a failure inside `local x=$(…)`, and nothing here is in a pipeline).
           DARWIN="$(node scripts/macos-floor.js check "$APP")"
           node scripts/update-manifest.js min-os release/latest-mac.yml "$DARWIN"
+
+      # 3a2c) The update ZIP, unpacked the way Squirrel.Mac unpacks it, is the app that was
+      #       built (#1122). Installed Macs update from the zip, never the dmg — and every gate
+      #       above reads the built .app, not the zip. electron-builder 26.15.4 changed the tool
+      #       that makes it (Info-ZIP `zip -y` → 7-Zip 24.09 with `-snl`); upstream's regression
+      #       test checks symlinks on an unsigned x64 app and nothing else. Squirrel.Mac (Electron
+      #       44.5.1 vendors it at 8d808803) runs `/usr/bin/ditto -xk` with only DITTOABORT=1 in
+      #       its environment (SQRLZipArchiver.m), then accepts the bundle only if
+      #       SecStaticCodeCheckValidityWithErrors(kSecCSCheckNestedCode | kSecCSStrictValidate |
+      #       kSecCSCheckAllArchitectures, the RUNNING app's designated requirement) passes
+      #       (SQRLCodeSignature.m). A refusal is silent: the app says "Could not download the
+      #       update" and retries every four hours, so a bad zip stops every Mac from updating.
+      #       This step:
+      #         1. unpacks the zip exactly so and requires it to BE the built app — every path,
+      #            type, symlink target, read/execute bit and SHA-256 (scripts/bundle-tree.js).
+      #            Squirrel does not check permissions: a lost +x installs, then cannot start;
+      #         2. proves the comparison discriminates, every run: the built app zipped by
+      #            Info-ZIP WITH -y (how ≤ 26.15.3 made it) must compare identical, and WITHOUT
+      #            -y (symlinks followed — upstream #9846, "bundle format is ambiguous") must not;
+      #         3. signed path: Squirrel's own check through codesign — the same three flags
+      #            (--deep, --strict, --all-architectures), against the designated requirement of
+      #            the last PUBLISHED release (what an installed Mac is running), unpacked the
+      #            same way from its own zip.
+      #       What it cannot reproduce: a running app's dynamic requirement, Squirrel's download
+      #       from electron-updater's local server, ShipIt's swap on quit, and the updated app's
+      #       first launch. RELEASING §4b still owes a real in-app update after publishing.
+      #       Placed BEFORE the per-arch manifest upload: a failure here leaves the draft with
+      #       no mac manifest, so finalize-mac-manifest fails and the draft cannot be shipped.
+      - name: Verify — the update zip unpacks to the built app, as Squirrel.Mac unpacks it (macOS)
+        if: matrix.eb_target == 'mac'
+        timeout-minutes: 15
+        working-directory: electron
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SIGNED: ${{ secrets.CSC_LINK != '' }}
+        run: |
+          set -uo pipefail   # NOT -e: run every check, aggregate, decide at the end
+          APP="$(find release -maxdepth 4 -name '*.app' -print -quit)"
+          ZIPS=( release/*-mac-*.zip )
+          if [ -z "${APP:-}" ] || [ "${#ZIPS[@]}" -ne 1 ] || [ ! -f "${ZIPS[0]}" ]; then
+            echo "❌ expected one .app and exactly one mac zip under release/ (zips: ${ZIPS[*]})"; exit 1
+          fi
+          ZIP="${ZIPS[0]}"
+          ID="$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")"
+          W="$(mktemp -d "$RUNNER_TEMP/update-zip.XXXXXX")"
+          echo "zip: $ZIP   app: $APP   bundle id: $ID   signed=$SIGNED"
+
+          fail=0
+          hard() { echo "❌ $*"; fail=1; }
+          soft() { if [ "$SIGNED" = "true" ]; then echo "❌ $*  (signed build MUST pass)"; fail=1; else echo "⚠️  $*  — expected on the unsigned path"; fi; }
+
+          # Squirrel's unpack, then the bundle whose CFBundleIdentifier is the running app's.
+          # Prints that bundle's path; fails when ditto fails or no such bundle is there.
+          unpack() {  # unpack <zip> <dir>
+            mkdir -p "$2" && env -i DITTOABORT=1 /usr/bin/ditto -xk "$1" "$2" || return 1
+            local b
+            for b in "$2"/*.app; do
+              if [ "$(plutil -extract CFBundleIdentifier raw "$b/Contents/Info.plist" 2>/dev/null)" = "$ID" ]; then echo "$b"; return 0; fi
+            done
+            return 1
+          }
+
+          # 1) The release zip.
+          if NEW="$(unpack "$ZIP" "$W/new")"; then
+            node scripts/bundle-tree.js compare "$APP" "$NEW" || hard "the update zip does not unpack to the built app"
+          else
+            hard "ditto -xk could not unpack $ZIP, or it holds no bundle with id $ID"; NEW=""
+          fi
+
+          # 2) Controls: the comparison must accept a faithful zip and catch a dereferencing one.
+          ( cd "$(dirname "$APP")" && /usr/bin/zip -qry0 "$W/ctl-links.zip" "$(basename "$APP")" \
+                                   && /usr/bin/zip -qr0 "$W/ctl-deref.zip" "$(basename "$APP")" ) || hard "could not build the control zips"
+          if G="$(unpack "$W/ctl-links.zip" "$W/ctl-links")" && node scripts/bundle-tree.js compare "$APP" "$G" >/dev/null 2>&1; then
+            echo "✅ control: Info-ZIP with -y (links kept) compares identical"
+          else hard "control: a faithful zip (Info-ZIP -y) did NOT compare identical — the comparison cannot be trusted"; fi
+          if B="$(unpack "$W/ctl-deref.zip" "$W/ctl-deref")" && ! node scripts/bundle-tree.js compare "$APP" "$B" >/dev/null 2>&1; then
+            echo "✅ control: Info-ZIP without -y (links followed, #9846) is caught"
+          else hard "control: a zip that follows symlinks was NOT caught — the comparison cannot be trusted"; B=""; fi
+
+          # 3) Squirrel's acceptance, through codesign: --deep = kSecCSCheckNestedCode, --strict =
+          #    kSecCSStrictValidate, --all-architectures = kSecCSCheckAllArchitectures, -R = the
+          #    requirement (a leading "=" marks requirement TEXT, so it is passed as its own word).
+          PREV_TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName 2>/dev/null || true)"
+          DR=""
+          if [ -n "$PREV_TAG" ] \
+             && gh release download "$PREV_TAG" --repo "$GITHUB_REPOSITORY" --pattern '*-mac-arm64.zip' --dir "$W/prev-zip" \
+             && PREV="$(unpack "$W"/prev-zip/*.zip "$W/prev")"; then
+            DR="$(codesign -d -r- "$PREV" 2>&1 | sed -n 's/^#* *designated => //p')"
+          fi
+          echo "designated requirement of ${PREV_TAG:-<no published release>} (the app an installed Mac runs): ${DR:-<none read>}"
+          if [ -z "$DR" ]; then
+            soft "could not read the designated requirement of the last published release"
+          elif [ -n "$NEW" ]; then
+            if codesign --verify --deep --strict --all-architectures -R "=$DR" "$NEW"; then
+              echo "✅ Squirrel's check: the unpacked update satisfies $PREV_TAG's designated requirement"
+            else soft "Squirrel's check: the unpacked update FAILS $PREV_TAG's designated requirement — every Mac would refuse it"; fi
+            if [ -n "$B" ]; then
+              if codesign --verify --deep --strict --all-architectures -R "=$DR" "$B" >/dev/null 2>&1; then
+                echo "⚠️  the symlink-following control PASSED codesign: the tree comparison is the only guard of that shape"
+              else echo "✅ control: codesign refuses the symlink-following zip, as Squirrel would"; fi
+            fi
+          fi
+          if [ -n "$NEW" ]; then
+            if xcrun stapler validate "$NEW" >/dev/null 2>&1; then echo "✅ the stapled ticket survives the zip"; else soft "stapler validate failed on the unpacked update"; fi
+            if spctl --assess --type execute "$NEW" >/dev/null 2>&1; then echo "✅ Gatekeeper accepts the unpacked update"; else soft "spctl refuses the unpacked update"; fi
+          fi
+
+          rm -rf "$W"
+          if [ "$fail" = "1" ]; then echo "UPDATE ZIP GATE: ❌ FAIL"; exit 1; fi
+          echo "UPDATE ZIP GATE: ✅ PASS ($([ "$SIGNED" = "true" ] && echo 'signed — enforced' || echo 'unsigned — signature checks informational'))"
 
       # 3a3) Publish this arch's update manifest under an ARCH-SPECIFIC name (#29 S1).
       #      Each mac leg generates a latest-mac.yml listing only its OWN arch's files;

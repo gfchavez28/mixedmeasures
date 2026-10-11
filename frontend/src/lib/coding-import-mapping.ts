@@ -205,7 +205,7 @@ export function sharedCreateConflicts(drafts: Record<string, CoderDraft>): strin
       continue
     }
     if (drafts[first].coderType === 'ai') {
-      const config = (n: string) => JSON.stringify(provenanceFromDraft(drafts[n]))
+      const config = (n: string) => canonicalJson(provenanceFromDraft(drafts[n]))
       const differs = rest.find(n => config(n) !== config(first))
       if (differs !== undefined) {
         out.push(`“${first}” and “${differs}” are both to become a new model called “${newName}”, `
@@ -225,13 +225,44 @@ export function sharedCreateConflicts(drafts: Record<string, CoderDraft>): strin
  * did not know it. Predicted from the roster the picker already holds.
  * ⚠️ The roster lists people and models, not the two system layers, so a new coder
  * named "Consensus" or "Unattributed" is numbered without this saying so.
+ *
+ * 🔴 **`typedNewNames` — every name typed for a NEW coder on this page (#1150 c).** The
+ * server reserves them all before numbering any (`coding_import.resolve_coders`, the
+ * `.mmproject` merge's #1071 rule), so "Alice" skips "Alice (3)" when another card typed
+ * it. This card's own name is not reserved against itself, as the server's is not.
  */
-export function takenNameSuffix(newName: string, roster: readonly Coder[]): string | null {
+export function takenNameSuffix(
+  newName: string, roster: readonly Coder[], typedNewNames: ReadonlySet<string> = new Set(),
+): string | null {
   const taken = new Set(roster.map(c => c.username))
   if (!taken.has(newName)) return null
+  const unavailable = (name: string) => taken.has(name) || (name !== newName && typedNewNames.has(name))
   let n = 2
-  while (taken.has(`${newName} (${n})`)) n += 1
+  while (unavailable(`${newName} (${n})`)) n += 1
   return `${newName} (${n})`
+}
+
+/** The names typed for a NEW coder across the page — what `takenNameSuffix` reserves. */
+export function typedNewCoderNames(drafts: Record<string, CoderDraft>): Set<string> {
+  return new Set(
+    Object.entries(drafts)
+      .filter(([, draft]) => draft.action === 'create')
+      .map(([name, draft]) => effectiveNewName(name, draft)),
+  )
+}
+
+/**
+ * A value as JSON with every object's keys SORTED, recursively — so two configurations
+ * compare as the server compares them (dicts, #1150 b). `parseParameters` keeps the
+ * order a researcher typed, and `JSON.stringify` keeps it too.
+ */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v !== null && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(
+        Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+      )
+      : v)
 }
 
 /**

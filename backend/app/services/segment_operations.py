@@ -14,7 +14,6 @@ from ..models.code_application import CodeApplication
 from ..models.note import Note
 from ..models.excerpt import Excerpt
 from .audit import log_action
-from .staleness import mark_metrics_stale
 from .consensus import consensus_enabled
 from .consensus_staleness import mark_consensus_stale
 from .coding_layers import CONSENSUS_ORIGIN
@@ -374,7 +373,6 @@ def merge_segments(
         details={"merged_segment_ids": segment_ids, "soft_deleted_count": deleted_count},
     )
     _mark_consensus_stale_for_parent(db, project_id, parent_type, parent_id)
-    mark_metrics_stale(db, project_id)
     db.commit()
 
     # Reload with eager loading
@@ -480,7 +478,6 @@ def unmerge_segment(
         details={"restored_segment_ids": original_ids, "restored_count": num_originals},
     )
     _mark_consensus_stale_for_parent(db, project_id, parent_type, parent_id)
-    mark_metrics_stale(db, project_id)
     db.commit()
 
     restored = db.query(Segment).filter(
@@ -659,7 +656,6 @@ def _split_single(db, r, parent_type, parent_id, project_id, user_id, report=Non
         },
     )
     _mark_consensus_stale_for_parent(db, project_id, parent_type, parent_id)
-    mark_metrics_stale(db, project_id)
     db.commit()
 
     result = db.query(Segment).filter(
@@ -860,7 +856,6 @@ def _split_multi(db, ranges, parent_type, parent_id, project_id, user_id, report
         },
     )
     _mark_consensus_stale_for_parent(db, project_id, parent_type, parent_id)
-    mark_metrics_stale(db, project_id)
     db.commit()
 
     result = db.query(Segment).filter(
@@ -1016,7 +1011,6 @@ def unsplit_segment(
         details={"restored_segment_id": original.id, "deleted_split_ids": split_ids},
     )
     _mark_consensus_stale_for_parent(db, project_id, parent_type, parent_id)
-    mark_metrics_stale(db, project_id)
     db.commit()
 
     restored = db.query(Segment).filter(
@@ -1039,8 +1033,9 @@ def unsplit_segment(
 # ops' soft-delete machinery exactly (merged_into_id / split_into_id +
 # is_*_result) so visibility, portability, and the REUSED unmerge_segment work
 # identically. Frozen-ness (D22) is enforced at the ROUTER (409), like the cut.
-# No mark_metrics_stale here (deliberate): no metric reads clip structure — the
-# text ops' call serves transcript-fed surfaces observations don't have.
+# No mark_metrics_stale here, nor on the text ops (#1149 b): a metric reads only
+# dataset columns and variable groups (`ck_metric_definition_source_type`), never a
+# segment, so a segment op has no metric to mark.
 
 
 def _clip_or_404(db: Session, observation_id: int, segment_id: int) -> Segment:

@@ -113,13 +113,6 @@ export function useAnalysisUrlState() {
 
   const decompose = searchParams.get('decompose') === '1'
 
-  // Hint param written by crosswalk Σ-badge navigation (`navigateToScaleScore`)
-  // and DomainPickerDetail's multi-metric radio. Pre-selects a specific
-  // domain_aggregate metric variant when a domain has more than one. AnalysisView
-  // does not strip unknown params on filter changes (see useAnalysisUrlState.ts
-  // setUrlParam — it reads `prev` and only mutates the targeted key), so the
-  // hint survives subsequent filter changes.
-  const metricIdHint = parseIntParam(searchParams.get('metric_id'))
 
   const sortOrder = (searchParams.get('sort') || 'none') as SortOrder
   const display = (searchParams.get('display') || 'percentage') as 'percentage' | 'count'
@@ -199,7 +192,6 @@ export function useAnalysisUrlState() {
     activeMaterialId,
     // Selection state
     columnsRaw, domainsRaw, metricType, selectedColumnIds, selectedDomainIds, decompose,
-    metricIdHint,
     // Chart display state
     sortOrder, display, scaling,
     showChartN, showGroupN, showVariableN, showSampleSizes, showCI,

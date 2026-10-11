@@ -41,6 +41,8 @@ from ..schemas.dataset import (
     DatasetListResponse,
     DatasetUpdate,
     ParticipantDatasetRefreshResponse,
+    RemovalPlanGroup,
+    RemovalPlanResponse,
     DatasetColumnResponse,
     DatasetValueResponse,
     DatasetRowDetail,
@@ -110,7 +112,6 @@ from ..services.sav_import import (
 )
 from ..services.value_labels import build_code_to_label, resolve_labelled_cell
 from ..services.missing_values import column_missing_rules, is_missing, parse_missing_rules  # #592
-from ..models.equivalence_group import EquivalenceGroup
 from ..schemas.equivalence import ProjectColumnInfo, ProjectColumnListResponse
 from ..services.recode import (
     apply_definition_to_column,
@@ -119,11 +120,16 @@ from ..services.recode import (
     definition_reflection_offset,
 )
 from ..services.recode_ranges import parse_ranges
+from ..services.scale_scores import scale_score_metrics  # #1177
 from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
 from ..models.metric import MetricDefinition
 from ..models.row_score import RowScore
-from ..models.statistical_test import StatisticalTest
-from ..services.staleness import mark_metrics_stale
+from ..services.staleness import (
+    grouping_sets,
+    mark_dataset_grouped_metrics_stale,
+    mark_metrics_stale,
+    mark_regrouped_metrics_stale,
+)
 from ..services.column_retype import plan_rederived_cells, write_rederived_cells  # #1079 (b)
 from ..services.append_duplicates import (  # #1014
     DuplicateCheck,
@@ -155,8 +161,11 @@ from ..services.participant_scores import (
     refresh_participant_dataset,
     wait_for_participant_table_turn,
 )
-from ..services.equivalence_validators import assert_domains_intact_for_domain_ids
-from ..services.column_cleanup import delete_column_references
+from ..services.column_cleanup import (
+    ColumnRemovalPlan,
+    delete_column_references,
+    plan_column_removal,
+)
 from ..services.computed_columns import (
     ExpressionError as ComputedExpressionError,
     parse as parse_expression,
@@ -1262,8 +1271,13 @@ async def update_dataset(
     """Update dataset name and/or description."""
     ds = _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
+    renamed = "name" in data.model_fields_set and data.name != ds.name
     for field in data.model_fields_set:
         setattr(ds, field, getattr(data, field))
+    if renamed:
+        # A variable group grouped BY DATASET labels its groups with dataset
+        # names, so its saved result shows the old name until recomputed.
+        mark_dataset_grouped_metrics_stale(db, project_id, dataset_id)
 
     # #898 — BEFORE the commit, not after. `log_action` only `db.add`s the entry;
     # it never commits. `get_db` only CLOSES the session, so an entry added after
@@ -1295,6 +1309,66 @@ async def update_dataset(
     return _dataset_to_response(ds, column_count=col_count, row_count=row_count)
 
 
+def _removal_plan_response(
+    db: Session, plan: ColumnRemovalPlan, blocked_by: list[str] | None = None,
+) -> RemovalPlanResponse:
+    """The removal plan as the delete confirmations read it — names and counts."""
+    # Quick compute's own metrics are `origin="auto"`: a cache any chart rebuilds.
+    # Everything else was created on purpose, and is named.
+    saved = [
+        name for (name,) in
+        db.query(MetricDefinition.name)
+        .filter(
+            MetricDefinition.id.in_(plan.removed_metric_ids),
+            MetricDefinition.origin != "auto",
+        )
+        .order_by(MetricDefinition.name)
+        .all()
+    ] if plan.removed_metric_ids else []
+    names = {
+        d_id: name for d_id, name in
+        db.query(AnalysisDomain.id, AnalysisDomain.name)
+        .filter(AnalysisDomain.id.in_(plan.recalculated_domain_ids + plan.emptied_domain_ids))
+        .all()
+    } if (plan.recalculated_domain_ids or plan.emptied_domain_ids) else {}
+    refusal = None
+    if plan.refusal is not None:
+        detail = plan.refusal.detail
+        refusal = detail.get("message") if isinstance(detail, dict) else str(detail)
+    return RemovalPlanResponse(
+        saved_metrics_removed=saved,
+        tests_removed=len(plan.test_ids),
+        groups_recalculated=[
+            RemovalPlanGroup(id=d, name=names.get(d, f"#{d}")) for d in plan.recalculated_domain_ids
+        ],
+        groups_removed=[
+            RemovalPlanGroup(id=d, name=names.get(d, f"#{d}")) for d in plan.emptied_domain_ids
+        ],
+        refusal=refusal,
+        blocked_by=blocked_by or [],
+    )
+
+
+@router.get("/{dataset_id}/removal-plan", response_model=RemovalPlanResponse)
+def get_dataset_removal_plan(
+    project_id: int,
+    dataset_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """What deleting this dataset would remove, recalculate or refuse (#1175).
+
+    Read-only, and computed by the function the delete runs. Plain `def`: it
+    reads every column of the dataset.
+    """
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    column_ids = [
+        r[0] for r in
+        db.query(DatasetColumn.id).filter(DatasetColumn.dataset_id == dataset_id).all()
+    ]
+    return _removal_plan_response(db, plan_column_removal(db, project_id, column_ids))
+
+
 @router.delete("/{dataset_id}")
 async def delete_dataset(
     project_id: int,
@@ -1306,122 +1380,19 @@ async def delete_dataset(
     dataset = _get_dataset_or_404(db, project_id, dataset_id, user.id)
     _refuse_if_managed(dataset, ACTION_DELETE_DATASET)
 
-    # Unlink any equivalence group references before deletion
-    db.query(DatasetColumn).filter(
-        DatasetColumn.dataset_id == dataset_id,
-        DatasetColumn.equivalence_group_id.isnot(None),
-    ).update({DatasetColumn.equivalence_group_id: None}, synchronize_session="fetch")
-
-    # Clean up analysis domain memberships referencing this dataset's columns
+    # 🔴 The ONE column cascade (`services/column_cleanup.py`), scoped to every
+    # column of the dataset. This endpoint carried its own inline copy of the
+    # six steps until the saved-statistics batch (2026-10-10), which had to
+    # change both copies the same three ways (#1168 doors 2–3) — so it calls
+    # the service instead. A surviving cross-dataset group left unpaired is
+    # refused with 409 `cross_dataset_unpaired` before anything is written.
     column_ids = [
         r[0] for r in
         db.query(DatasetColumn.id)
         .filter(DatasetColumn.dataset_id == dataset_id)
         .all()
     ]
-
-    # #298 cascade subset: capture domain IDs that contain any of these columns
-    # BEFORE the cleanup deletes the AnalysisDomainMember rows. After cleanup,
-    # the column-driven validator can't find these domains (zero member rows
-    # match), so we drive validation by the captured domain IDs.
-    affected_domain_ids: list[int] = []
-    if column_ids:
-        affected_domain_ids = [
-            r[0] for r in
-            db.query(AnalysisDomainMember.domain_id)
-            .filter(
-                AnalysisDomainMember.member_type == "column",
-                AnalysisDomainMember.member_id.in_(column_ids),
-            )
-            .distinct()
-            .all()
-        ]
-
-    if column_ids:
-        db.query(AnalysisDomainMember).filter(
-            AnalysisDomainMember.member_type == "column",
-            AnalysisDomainMember.member_id.in_(column_ids),
-        ).delete(synchronize_session="fetch")
-
-        # Orphan cleanup: delete statistical tests targeting metrics about to be deleted
-        col_metric_ids = [
-            r[0] for r in db.query(MetricDefinition.id).filter(
-                MetricDefinition.input_source_type == "dataset_column",
-                MetricDefinition.input_source_id.in_(column_ids),
-            ).all()
-        ]
-        if col_metric_ids:
-            db.query(StatisticalTest).filter(
-                StatisticalTest.target_type == "metric_definition",
-                StatisticalTest.target_id.in_(col_metric_ids),
-            ).delete(synchronize_session="fetch")
-
-        # Clean up metric definitions referencing this dataset's columns
-        db.query(MetricDefinition).filter(
-            MetricDefinition.input_source_type == "dataset_column",
-            MetricDefinition.input_source_id.in_(column_ids),
-        ).delete(synchronize_session="fetch")
-
-    # Delete equivalence groups that now have 0 linked columns
-    empty_group_ids = [
-        g.id for g in
-        db.query(EquivalenceGroup)
-        .outerjoin(DatasetColumn, DatasetColumn.equivalence_group_id == EquivalenceGroup.id)
-        .filter(EquivalenceGroup.project_id == project_id)
-        .group_by(EquivalenceGroup.id)
-        .having(func.count(DatasetColumn.id) == 0)
-        .all()
-    ]
-    if empty_group_ids:
-        db.query(EquivalenceGroup).filter(
-            EquivalenceGroup.id.in_(empty_group_ids),
-        ).delete(synchronize_session="fetch")
-
-    # #298 cascade subset: validate that surviving cross-dataset domains are
-    # still I2-paired now that this dataset's columns + their EG links are gone.
-    # Empty domains are skipped by the helper — the empty-domain cleanup below
-    # handles them. Failure raises 409 cross_dataset_unpaired and rolls back.
-    db.flush()
-    assert_domains_intact_for_domain_ids(db, affected_domain_ids)
-
-    # Delete analysis domains that now have 0 members
-    empty_domain_ids = [
-        d.id for d in
-        db.query(AnalysisDomain)
-        .outerjoin(AnalysisDomainMember)
-        .filter(AnalysisDomain.project_id == project_id)
-        .group_by(AnalysisDomain.id)
-        .having(func.count(AnalysisDomainMember.id) == 0)
-        .all()
-    ]
-    if empty_domain_ids:
-        # Orphan cleanup: delete statistical tests targeting these domains
-        db.query(StatisticalTest).filter(
-            StatisticalTest.target_type == "analysis_domain",
-            StatisticalTest.target_id.in_(empty_domain_ids),
-        ).delete(synchronize_session="fetch")
-
-        # Orphan cleanup: delete statistical tests targeting domain metrics about to be deleted
-        domain_metric_ids = [
-            r[0] for r in db.query(MetricDefinition.id).filter(
-                MetricDefinition.input_source_type == "dataset_domain",
-                MetricDefinition.input_source_id.in_(empty_domain_ids),
-            ).all()
-        ]
-        if domain_metric_ids:
-            db.query(StatisticalTest).filter(
-                StatisticalTest.target_type == "metric_definition",
-                StatisticalTest.target_id.in_(domain_metric_ids),
-            ).delete(synchronize_session="fetch")
-
-        # Clean up metrics referencing these domains
-        db.query(MetricDefinition).filter(
-            MetricDefinition.input_source_type == "dataset_domain",
-            MetricDefinition.input_source_id.in_(empty_domain_ids),
-        ).delete(synchronize_session="fetch")
-        db.query(AnalysisDomain).filter(
-            AnalysisDomain.id.in_(empty_domain_ids),
-        ).delete(synchronize_session="fetch")
+    delete_column_references(db, project_id, column_ids, validate_domains=True)
 
     log_action(
         db,
@@ -2377,7 +2348,11 @@ async def update_column_subtype(
             detail="Column must be of type 'demographic' to set a subtype",
         )
 
+    # #1168 door 8 — the subtype is tier 2 of the sibling match, so it decides
+    # which column groups another dataset's rows in a grouped variable group.
+    before = grouping_sets(db, project_id)
     column.demographic_subtype = req.demographic_subtype
+    mark_regrouped_metrics_stale(db, project_id, before)
 
     log_action(
         db,
@@ -2429,6 +2404,8 @@ async def update_column_header(
 
     changed_text = False
 
+    # #1168 door 8 — the short name is tier 3 of the sibling match.
+    before = grouping_sets(db, project_id) if req.column_name is not None else None
     if req.column_name is not None:
         column.column_name = req.column_name.strip() or None
 
@@ -2444,6 +2421,8 @@ async def update_column_header(
 
     if changed_text:
         mark_metrics_stale(db, project_id, column_ids=[column_id])
+    if before is not None:
+        mark_regrouped_metrics_stale(db, project_id, before)
 
     log_action(
         db,
@@ -2644,6 +2623,64 @@ async def create_manual_column(
     return _column_to_response(new_col)
 
 
+def _computed_dependent_names(db: Session, dataset_id: int, column_id: int) -> list[str]:
+    """The computed columns whose formula uses this column — both column deletes
+    refuse while any exist, and the removal plan names them first (#1175).
+
+    Excludes the column itself: a self-reference is validator-rejected, but it
+    must not block its own delete (#361).
+    """
+    names: list[str] = []
+    for cc in (
+        db.query(DatasetColumn)
+        .filter(
+            DatasetColumn.dataset_id == dataset_id,
+            DatasetColumn.id != column_id,
+            DatasetColumn.expression.isnot(None),
+        )
+        .all()
+    ):
+        if cc.depends_on_column_ids:
+            try:
+                if column_id in json.loads(cc.depends_on_column_ids):
+                    names.append(cc.column_text)
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return names
+
+
+@router.get(
+    "/{dataset_id}/columns/{column_id}/removal-plan",
+    response_model=RemovalPlanResponse,
+)
+def get_column_removal_plan(
+    project_id: int,
+    dataset_id: int,
+    column_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """What deleting this variable would remove, recalculate or refuse (#1175).
+
+    Read-only, and computed by the function the delete runs, so *Delete
+    variable* can say before the click what the click does.
+    """
+    _get_project_or_404(db, project_id, user.id)
+    _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    exists = (
+        db.query(DatasetColumn.id)
+        .filter(DatasetColumn.id == column_id, DatasetColumn.dataset_id == dataset_id)
+        .first()
+    )
+    if not exists:
+        raise HTTPException(status_code=404, detail="Column not found")
+    return _removal_plan_response(
+        db,
+        plan_column_removal(db, project_id, [column_id]),
+        blocked_by=_computed_dependent_names(db, dataset_id, column_id),
+    )
+
+
 @router.patch(
     "/{dataset_id}/columns/{column_id}/manual",
     response_model=DatasetColumnResponse,
@@ -2677,6 +2714,10 @@ def update_manual_column(
         raise HTTPException(status_code=404, detail="Column not found")
     if column.source != "manual":
         raise HTTPException(status_code=403, detail="Only manual columns can be edited")
+
+    # #1168 door 8 — a type change to or from demographic, or a new subtype,
+    # changes which column is a grouped variable group's sibling.
+    before = grouping_sets(db, project_id)
 
     # Validate new type if changing
     retyped = False
@@ -2751,6 +2792,7 @@ def update_manual_column(
         write_rederived_cells(db, plan_rederived_cells(db, column))
         db.flush()
         mark_metrics_stale(db, project_id, column_ids=[column_id])
+    mark_regrouped_metrics_stale(db, project_id, before)
 
     log_action(
         db,
@@ -2795,23 +2837,7 @@ async def delete_manual_column(
         raise HTTPException(status_code=403, detail="Only manual columns can be deleted")
 
     # Block deletion if this column is referenced by computed columns
-    computed_deps = (
-        db.query(DatasetColumn)
-        .filter(
-            DatasetColumn.dataset_id == dataset_id,
-            DatasetColumn.expression.isnot(None),
-        )
-        .all()
-    )
-    dep_names = []
-    for cc in computed_deps:
-        if cc.depends_on_column_ids:
-            try:
-                dep_ids = json.loads(cc.depends_on_column_ids)
-                if column_id in dep_ids:
-                    dep_names.append(cc.column_text)
-            except (json.JSONDecodeError, TypeError):
-                pass
+    dep_names = _computed_dependent_names(db, dataset_id, column_id)
     if dep_names:
         raise HTTPException(
             status_code=409,
@@ -2862,7 +2888,7 @@ def _cascade_delete_column_refs(db: Session, project_id: int, column_id: int):
     differently and has to say so at its own call site.
     """
     delete_column_references(
-        db, project_id, column_id, validate_domains=True,
+        db, project_id, [column_id], validate_domains=True,
     )
 
 
@@ -2917,18 +2943,11 @@ async def get_domain_scores(
     )
     current_dataset_name = current_dataset.name if current_dataset else None
 
-    # Find ungrouped domain_aggregate metrics for these domains
-    metrics = (
-        db.query(MetricDefinition)
-        .filter(
-            MetricDefinition.project_id == project_id,
-            MetricDefinition.metric_type == "domain_aggregate",
-            MetricDefinition.input_source_type == "dataset_domain",
-            MetricDefinition.input_source_id.in_(domain_ids),
-            MetricDefinition.grouping_column_id.is_(None),
-            MetricDefinition.grouping_column_id_2.is_(None),
-        )
-        .all()
+    # Each group's scale score — ONE column per group (#1177). Every ungrouped
+    # `domain_aggregate` used to qualify, so a lookalike (the aggregate with some
+    # answers excluded) became a second column under the same group's name.
+    metrics = sorted(
+        scale_score_metrics(db, project_id, domain_ids).values(), key=lambda m: m.id,
     )
     if not metrics:
         return {"domain_scores": []}
@@ -3240,6 +3259,8 @@ async def update_computed_column(
     except ComputedExpressionError as e:
         raise HTTPException(status_code=400, detail=f"Expression error: {e}")
 
+    # #1168 door 8 — a retype to or from demographic changes who is a sibling.
+    before = grouping_sets(db, project_id) if req.column_type else None
     old_expression = column.expression
     column.expression = req.expression
     column.depends_on_column_ids = json.dumps(result.dependency_ids)
@@ -3252,6 +3273,8 @@ async def update_computed_column(
     except ComputedExpressionError as e:
         raise HTTPException(status_code=400, detail=f"Expression error: {e}")
     mark_metrics_stale(db, project_id, column_ids=[column_id])
+    if before is not None:
+        mark_regrouped_metrics_stale(db, project_id, before)
 
     log_action(
         db,
@@ -3298,6 +3321,12 @@ async def recompute_column(
     except ComputedExpressionError as e:
         raise HTTPException(status_code=400, detail=f"Expression error: {e}")
     column.stale = False
+    # #1168 door 1 — this rewrites every cell of the column, and it is the moment
+    # they move: an edit to an INPUT marks this column's metrics one level deep
+    # (the column is only flagged then), so a column computed FROM this one is
+    # marked here, when its own input actually changes.
+    db.flush()
+    mark_metrics_stale(db, project_id, column_ids=[column_id])
     db.commit()
     return {"status": "ok", "rows_evaluated": count}
 
@@ -3332,24 +3361,7 @@ async def delete_computed_column(
     # Annualized_Base silently orphans FTE_Adjusted_Annual, whose expression
     # then references a column that no longer exists. Exclude self so a column's
     # own (validator-rejected, but defensively) self-reference can't block it.
-    computed_deps = (
-        db.query(DatasetColumn)
-        .filter(
-            DatasetColumn.dataset_id == dataset_id,
-            DatasetColumn.id != column_id,
-            DatasetColumn.expression.isnot(None),
-        )
-        .all()
-    )
-    dep_names = []
-    for cc in computed_deps:
-        if cc.depends_on_column_ids:
-            try:
-                dep_ids = json.loads(cc.depends_on_column_ids)
-                if column_id in dep_ids:
-                    dep_names.append(cc.column_text)
-            except (json.JSONDecodeError, TypeError):
-                pass
+    dep_names = _computed_dependent_names(db, dataset_id, column_id)
     if dep_names:
         raise HTTPException(
             status_code=409,

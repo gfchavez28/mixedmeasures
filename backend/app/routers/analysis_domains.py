@@ -41,7 +41,7 @@ from ..services.equivalence_validators import (
     assert_cross_dataset_members_are_paired,
     assert_domain_members_numeric_eligible,
 )
-from ..services.staleness import mark_metrics_stale
+from ..services.staleness import grouping_sets, mark_metrics_stale, mark_pairing_stale
 from ..services.audit import log_action
 
 from .helpers import _get_project_or_404
@@ -1077,6 +1077,9 @@ async def bulk_create_domains(
     next_order = (max_order or 0) + 1
 
     created_domains: list[AnalysisDomain] = []
+    # #1168 door 8 — an inline pairing re-pairs columns an EXISTING variable
+    # group may already hold (α items, sibling grouping), as `create_group` does.
+    before = grouping_sets(db, project_id) if has_inline_egs else None
     for d_data in data.domains:
         # Create inline EGs first so members reference fresh links
         for eg_data in d_data.equivalence_groups:
@@ -1149,6 +1152,12 @@ async def bulk_create_domains(
         )
         created_domains.append(domain)
 
+    if before is not None:
+        mark_pairing_stale(
+            db, project_id,
+            [cid for d in data.domains for eg in d.equivalence_groups for cid in eg.column_ids],
+            before,
+        )
     db.commit()
 
     responses = _build_domain_responses(created_domains, db)

@@ -64,6 +64,10 @@ export interface MetricDefinitionSummaryResponse {
   result_count: number
   /** #506: non-null-group results only (excludes the None/missing bucket) */
   real_group_count: number
+  /** #1177: this metric is its variable group's scale score — the one metric the
+   * server reads for the group everywhere (`services/scale_scores.py`). Read it;
+   * never re-derive it from the grouping fields, which a lookalike shares. */
+  is_scale_score: boolean
   last_accessed_at: string | null
   created_at: string
   updated_at: string

@@ -53,7 +53,9 @@ import {
 import { Button } from '@/components/ui/button'
 import { ColumnFormDialog } from '@/components/ColumnFormDialog'
 import { DeleteVariableDialog } from '@/components/DeleteVariableDialog'
+import { OutOfDateDot, OUT_OF_DATE_DOT_COLOR } from '@/components/OutOfDateDot'
 import { useDeleteVariable } from '@/hooks/useDeleteVariable'
+import { useRecomputeColumn } from '@/hooks/useRecomputeColumn'
 import { modeDisabledProps, MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
 import { SortableColumnHeader, DataRow } from '@/components/DatasetGridComponents'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
@@ -1077,14 +1079,9 @@ export default function DatasetView() {
     ),
   })
 
-  const recomputeMut = useMutation({
-    mutationFn: (columnId: number) => datasetsApi.recomputeColumn(pid, iid, columnId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })
-      queryClient.invalidateQueries({ queryKey: ['dataset-columns', pid, iid] })
-    },
-    onError: (err: Error) => toast.error(extractApiError(err, 'Failed to recompute column')),
-  })
+  // #1174 — shared with the Variables view, and it refreshes the saved
+  // statistics' out-of-date markers the recompute raises.
+  const recomputeMut = useRecomputeColumn(pid, iid, 'Failed to recompute column')
 
   // Phase 4.6: ambient-pill context-menu "Remove from group" wires here.
   // Calls crosswalk move-members with target_mode='strip' to fully unassign
@@ -1375,10 +1372,12 @@ export default function DatasetView() {
                   presentational), and colour-plus-a-dot is a WCAG 1.4.1
                   use-of-colour problem regardless — so the words carry it for
                   everyone rather than a shape carrying it for some. */}
+              {/* #1174 — the same fill and motion as `OutOfDateDot`, kept
+                  decorative here for the reason above. */}
               {freshness.stale && (
                 <span
                   aria-hidden="true"
-                  className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"
+                  className={`w-1.5 h-1.5 rounded-full ${OUT_OF_DATE_DOT_COLOR} motion-safe:animate-pulse`}
                 />
               )}
               <span className={freshness.stale ? 'text-amber-600 dark:text-amber-400' : undefined}>
@@ -1675,9 +1674,7 @@ export default function DatasetView() {
                       </div>
                       <div className="flex items-center justify-center gap-1 mt-0.5">
                         <span className="text-[10px] text-mm-text-faint">Score</span>
-                        {ds.stale && (
-                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" title="Stale — recompute in Analysis" />
-                        )}
+                        {ds.stale && <OutOfDateDot label="Out of date — recompute in Analysis" />}
                       </div>
                     </th>
                   ))}

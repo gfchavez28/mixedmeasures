@@ -256,11 +256,12 @@ class TestParser:
         import ast
         import inspect
         tree = ast.parse(inspect.getsource(ci))
+        # #1127: the parser builds its reader through the shared STRICT `csv_reader`.
         readers = [
             n for n in ast.walk(tree)
-            if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "reader"
+            if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "csv_reader"
         ]
-        assert readers, "the parser's csv.reader call was not found"
+        assert readers, "the parser's csv_reader call was not found"
         for call in readers:
             assert isinstance(call.args[0], ast.Call)
             assert getattr(call.args[0].func, "id", None) == "_csv_lines"
@@ -2141,6 +2142,32 @@ class TestNamesCreatedUnderOneNameAreOneCoder:
         new = db.query(User).filter(User.username == "Alice (2)").one()
         assert len(_rows_for(db, pid, new.id)) == 2
         assert _rows_for(db, pid, 79) == []
+
+    def test_a_typed_name_is_RESERVED_before_another_is_numbered(self, db_session):
+        """#1150 (c): with an existing "Alice", creating "Alice" and "Alice (2)" made
+        "Alice (2)" and "Alice (2) (2)" — the first create took the name the second was
+        typed as. Every typed name is reserved before any is numbered (the `.mmproject`
+        merge's #1071 rule), so each name the researcher typed is the name it gets when
+        it is free; the page predicts the same (`takenNameSuffix`).
+
+        ⚠️ The filed direction — key `created` by the RESOLVED name — would have made
+        "Alice (2)" JOIN the first coder, while the page showed two."""
+        db = db_session
+        pid = _segment_project(db)
+        _coder(db, 79, "Alice")
+        plan = _plan(
+            db, pid, "unit_id,coder,code\nseg-200-0,A,Trust\nseg-200-1,B,Risk\n",
+            target_kind=ci.TARGET_SEGMENTS,
+        )
+        report = ci.apply_plan(db, pid, plan, {
+            "A": ci.CoderDecision("create", new_username="Alice"),
+            "B": ci.CoderDecision("create", new_username="Alice (2)"),
+        })
+        assert report.coders_created == 2
+        by_name = {u.username: u.id for u in db.query(User).filter(User.username.like("Alice%"))}
+        assert sorted(by_name) == ["Alice", "Alice (2)", "Alice (3)"]
+        assert len(_rows_for(db, pid, by_name["Alice (2)"])) == 1
+        assert len(_rows_for(db, pid, by_name["Alice (3)"])) == 1
 
     def test_a_PERSON_and_a_MODEL_under_one_name_are_refused_naming_both(self, db_session):
         db = db_session

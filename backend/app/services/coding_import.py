@@ -98,7 +98,7 @@ from . import code_sets as code_set_rules
 from . import machine_coder
 from . import magnitude as magnitude_rules
 from .coding_layers import build_effective_code_map, project_scoped_segments
-from .dataset_import import _csv_lines, csv_error_sentence
+from .dataset_import import _csv_lines, csv_error_sentence, csv_reader, first_line_of
 from .id_set import in_id_set
 from .identifier_match import group_unique_by_key, normalize_key
 from .segment_groups import group_targets_by_segment
@@ -290,16 +290,26 @@ def parse_rows(text: str) -> list[ParsedRow]:
     docstring said "every physical line" until #1083, which was never what the
     count did.
 
-    🔴 **A file the reader refuses is a `CodingImportError` naming the row (#1083
-    b)** — it reached the researcher as a 500. Two shapes do it: a value over the
-    reader's 131,072-character limit (an unclosed quotation mark, or a very long
-    passage in the export's text column) and old Mac line endings.
+    🔴 **A file the reader refuses is a `CodingImportError` naming the line (#1083
+    b)** — it reached the researcher as a 500. The shapes: a value over the reader's
+    131,072-character limit (a very long passage in the export's text column), old
+    Mac line endings, and since #1127 a quotation mark that does not pair up.
+
+    🔴 **A READ refusal is the exception: it names the PHYSICAL line the refused record
+    starts on (#1127)**, as the dataset doors do. A quotation-mark fault is fixed in a
+    text editor — a spreadsheet mis-reads the same file — and the line holding the
+    opening quote is the one to open. The two numbers differ only after a quoted value
+    with a line break, which is exactly the export's passage text.
+
+    🔴 **The reader is STRICT (`csv_reader`, #1127)** — a quotation mark that does not
+    pair up is refused here, where it used to fold the rows after it into one cell.
 
     ⚠️ **`_csv_lines`, never `io.StringIO(text)`** (#1039 i): the latter stores its
     buffer at 4 bytes per character, so a 49 MB file cost ~190 MB before a row was
     read — and before the row cap below could refuse it.
     """
-    reader = csv.reader(_csv_lines(text))
+    first_line = first_line_of(text)
+    reader = csv_reader(_csv_lines(text))
     try:
         header = next(reader)
     except StopIteration:
@@ -307,7 +317,9 @@ def parse_rows(text: str) -> list[ParsedRow]:
     except csv.Error as exc:
         # Old Mac line endings fail HERE: the whole file is one line, so the header
         # read is where the reader meets the first carriage return.
-        raise CodingImportError(csv_error_sentence(exc, "Line 1 (the header)")) from None
+        raise CodingImportError(csv_error_sentence(
+            exc, "Line 1 (the header)", first_line=first_line,
+        )) from None
 
     positions: dict[str, int] = {}
     spelled: dict[str, str] = {}
@@ -344,6 +356,9 @@ def parse_rows(text: str) -> list[ParsedRow]:
 
     rows: list[ParsedRow] = []
     line = 1
+    # `line_num` counts physical lines consumed, so a quoted passage spanning three
+    # lines moves it by three; a record STARTS on the line after the previous one ended.
+    previous_physical = reader.line_num
     while True:
         line += 1
         try:
@@ -351,7 +366,9 @@ def parse_rows(text: str) -> list[ParsedRow]:
         except StopIteration:
             break
         except csv.Error as exc:
-            sentence = csv_error_sentence(exc, f"Line {line:,}")
+            sentence = csv_error_sentence(
+                exc, f"Line {previous_physical + 1:,}", first_line=first_line,
+            )
             if "field larger than field limit" in str(exc):
                 sentence += (
                     " This import reads only the " + ", ".join(REQUIRED_HEADERS + OPTIONAL_HEADERS)
@@ -360,6 +377,7 @@ def parse_rows(text: str) -> list[ParsedRow]:
                     "try again."
                 )
             raise CodingImportError(sentence) from None
+        previous_physical = reader.line_num
         if not any((c or "").strip() for c in raw_row):
             continue
         rows.append(ParsedRow(
@@ -1251,6 +1269,11 @@ def _coder_candidates(
 # ── Applying ─────────────────────────────────────────────────────────────────
 
 
+def _new_coder_name(file_name: str, decision: CoderDecision) -> str:
+    """The name a `create` decision asks for — what the page shows as typed."""
+    return (decision.new_username or file_name).strip() or "Coder"
+
+
 def resolve_coders(
     db: Session, plan: ImportPlan, decisions: dict[str, CoderDecision],
 ) -> tuple[dict[str, int | None], ImportReport]:
@@ -1288,6 +1311,17 @@ def resolve_coders(
             + ", ".join(f"“{n}”" for n in sorted(missing))
             + "."
         )
+
+    # 🔴 #1150 (c): every name typed for a NEW coder is reserved before any is
+    # numbered — the `.mmproject` merge's #1071 rule. With an existing "Alice", creating
+    # "Alice" and "Alice (2)" made "Alice (2)" and "Alice (2) (2)": the first create took
+    # the name the second was typed as. The page's `takenNameSuffix` reserves the same
+    # names, so it predicts the name written here.
+    typed_new_names = {
+        _new_coder_name(candidate.name, decisions[candidate.name])
+        for candidate in plan.coders
+        if decisions[candidate.name].action == "create"
+    }
 
     for candidate in plan.coders:
         decision = decisions[candidate.name]
@@ -1336,7 +1370,7 @@ def resolve_coders(
             report.coders_matched += 1
             continue
         if decision.action == "create":
-            base = (decision.new_username or candidate.name).strip() or "Coder"
+            base = _new_coder_name(candidate.name, decision)
             if len(base) > CODER_NAME_MAX_LENGTH:
                 raise CodingImportError(
                     f"“{base[:40]}…” is longer than {CODER_NAME_MAX_LENGTH} "
@@ -1378,7 +1412,7 @@ def resolve_coders(
                 resolved[candidate.name] = user_id
                 continue
             coder = User(
-                username=unique_username(db, base),
+                username=unique_username(db, base, typed_new_names - {base}),
                 password_hash=None,
                 is_admin=False,
                 coder_type=coder_type,

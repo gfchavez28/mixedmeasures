@@ -47,6 +47,10 @@ class CorrelationMatrixResponse(BaseModel):
     matrix: list[list[CorrelationCell]]
     adjusted_alpha: float | None = None
     num_comparisons: int
+    #: #1168 R7 — the variable groups whose stored per-record scale scores are
+    #: OUT OF DATE (a member's cells moved since they were computed). Read, never
+    #: recomputed, here; the client names them beside the recompute action.
+    stale_domain_ids: list[int] = []
 
 
 class RegressionResult(BaseModel):
@@ -70,6 +74,10 @@ class ScatterDataResponse(BaseModel):
     n: int
     regression: RegressionResult
     group_regressions: dict[str, RegressionResult] | None = None
+    #: #1168 R7 — the variable groups whose stored per-record scale scores are
+    #: OUT OF DATE (a member's cells moved since they were computed). Read, never
+    #: recomputed, here; the client names them beside the recompute action.
+    stale_domain_ids: list[int] = []
 
 
 class ScatterPair(BaseModel):
@@ -90,3 +98,7 @@ class ScatterMatrixResponse(BaseModel):
     full_labels: list[str]
     pairs: list[ScatterPair]
     truncated: bool = False
+    #: #1168 R7 — the variable groups whose stored per-record scale scores are
+    #: OUT OF DATE (a member's cells moved since they were computed). Read, never
+    #: recomputed, here; the client names them beside the recompute action.
+    stale_domain_ids: list[int] = []

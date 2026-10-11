@@ -116,6 +116,7 @@ describe('fail-closed: no chart may reintroduce role="img"', () => {
   /** Genuinely-opaque graphics: no children to suppress, so the role is right. */
   const ALLOWED = new Map<string, string>([
     ['components/MMLogo.tsx', 'the logo — one graphic, no inner content'],
+    ['components/OutOfDateDot.tsx', 'a status dot with no children — its name is the whole content (#1174)'],
     ['components/SegmentRow.tsx', 'segment-group bar: a decorative rule with a name'],
     ['components/qualitative-analysis/ContentByCode.tsx', 'quote glyphs (#559 named icons)'],
     ['pages/ConversationsListPage.tsx', 'media badge — name carries type+filename+size (#559)'],

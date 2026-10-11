@@ -37,6 +37,7 @@ import {
 import { computeInvalidAnalysisParams } from '@/lib/analysis-url-params'
 import { pickGroupDifferenceTest, groupDifferenceTestLabel } from '@/lib/group-test-pick'
 import { ChartErrorBoundary } from '@/components/ChartErrorBoundary'
+import { OutOfDateDot } from '@/components/OutOfDateDot'
 import ChartTypeToolbar from '@/components/charts/ChartTypeToolbar'
 import AnalysisChartRenderer from '@/components/analysis/AnalysisChartRenderer'
 import { compareScales, type ScaleAgreement } from '@/lib/scale-comparison'
@@ -187,7 +188,6 @@ export default function AnalysisView() {
     dqView, dqIncludeNA, dqIncludeEmpty, dqSort,
     activeMaterialId,
     columnsRaw, domainsRaw, metricType, selectedColumnIds, selectedDomainIds, decompose,
-    metricIdHint,
     sortOrder, display, scaling, showChartN, showGroupN, showVariableN, showSampleSizes, showCI, chartTypeParam,
     groupingColumnId, groupingColumnId2, groupingMode, excludeValues,
     divergingMode, divergingCenter,
@@ -1379,8 +1379,6 @@ export default function AnalysisView() {
             metricsList={allMetrics}
             onCreateScoreMetric={(domainId) => createScoreMetricMutation.mutate(domainId)}
             isCreatingScoreMetric={createScoreMetricMutation.isPending}
-            selectedMetricIdHint={metricIdHint}
-            onPickMetric={(metricId) => setUrlParam('metric_id', String(metricId))}
             selectedMetrics={selectedMetrics}
             hasAnySelection={hasAnySelection}
             isComputing={isComputing}
@@ -1535,6 +1533,7 @@ export default function AnalysisView() {
                 rcFormatting={rcFormatting}
                 postHocExpanded={postHocExpanded}
                 onPostHocToggle={() => setPostHocExpanded(v => !v)}
+                domains={domainsData?.domains}
                 setUrlParam={setUrlParam}
               />
             ) : activeTab === 'data_quality' ? (
@@ -1698,10 +1697,14 @@ export default function AnalysisView() {
                   {relevantTests.length > 0 && (
                     <span className="text-xs text-mm-text-faint ml-1">({relevantTests.length})</span>
                   )}
+                  {/* #1174 — this button is named by its CONTENT, so the dot's
+                      label joins its name. The text-node space keeps it a word
+                      apart: margin is not a space (#908). */}
                   {relevantTests.some(t => t.stale) && (
-                    <span className="ml-1 w-2 h-2 rounded-full bg-amber-400 inline-block" title="Some tests are stale">
-                      <span className="sr-only">stale</span>
-                    </span>
+                    <>
+                      {' '}
+                      <OutOfDateDot size="md" className="ml-1" label="Some tests are out of date" />
+                    </>
                   )}
                 </button>
                 {statsExpanded && (
@@ -1751,10 +1754,9 @@ export default function AnalysisView() {
                             {test.target_label && (
                               <span className="text-mm-text-faint">— {test.target_label}</span>
                             )}
+                            {/* #1174 — the row's Compute button is the fix. */}
                             {test.stale && (
-                              <span className="ml-1 w-2 h-2 rounded-full bg-amber-400 inline-block flex-shrink-0" title="Stale — recompute needed">
-                                <span className="sr-only">stale</span>
-                              </span>
+                              <OutOfDateDot size="md" className="ml-1" label="Out of date — compute it again" />
                             )}
                           </div>
                           <div className="text-mm-text-secondary mt-0.5 font-mono text-xs">

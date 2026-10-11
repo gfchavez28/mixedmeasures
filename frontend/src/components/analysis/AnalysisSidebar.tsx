@@ -193,8 +193,6 @@ export interface AnalysisSidebarProps {
   metricsList?: MetricDefinitionSummaryResponse[]
   onCreateScoreMetric?: (domainId: number) => void
   isCreatingScoreMetric?: boolean
-  selectedMetricIdHint?: number | null
-  onPickMetric?: (metricId: number) => void
 
   // Descriptives tab — chart options
   selectedMetrics: MetricDefinitionResponse[]
@@ -323,7 +321,6 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
     materials, activeMaterialId, onLoadMaterial, onDeleteMaterial, onRenameMaterial, onReorderMaterials,
     selectedColumnIds, selectedDomainIds,
     domainsFull, metricsList, onCreateScoreMetric, isCreatingScoreMetric,
-    selectedMetricIdHint, onPickMetric,
     selectedMetrics, hasAnySelection, isComputing,
     chartType, metricType, sortOrder, display, scaling, scaleOrder,
     groupingColumnId, groupingColumnId2, groupingMode,
@@ -629,8 +626,6 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
             metrics={metricsList}
             onCreateScoreMetric={onCreateScoreMetric}
             isCreatingScoreMetric={isCreatingScoreMetric}
-            selectedMetricIdHint={selectedMetricIdHint}
-            onPickMetric={onPickMetric}
           />
         )}
       </div>

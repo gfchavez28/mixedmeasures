@@ -273,7 +273,7 @@ class TestApply:
         col = _column(db_session)
         _def(db_session, col, {"1": 1, "2": 2}, def_id=2)
         _relabel(db_session, col)
-        assert apply_rekey(db_session, col, []) == {"updated": [], "renamed_keys": 0}
+        assert apply_rekey(db_session, col, []) == {"updated": [], "renamed_keys": 0, "recomputed_column_ids": []}
 
 
 class TestTheEndpointsAreWired:
@@ -364,3 +364,51 @@ class TestTheOffsetIsNeverHandRolled:
         # Strip the module docstring, which discusses the rule in prose.
         body = code.split('"""', 2)[-1]
         assert "min(" not in body and "max(" not in body
+
+
+class TestARekeyedPrimaryMarksTheColumnsMetrics:
+    """#1168 door 4 — a re-keyed PRIMARY re-applies, so the column's numbers move."""
+
+    def _world(self, db, *, primary):
+        from app.models.metric import MetricDefinition
+
+        col = _column(db)
+        _relabel(db, col)
+        if primary:
+            auto = db.query(RecodeDefinition).filter_by(is_primary=True).one()
+            auto.is_primary = False
+        _def(db, col, {"1": 5, "2": 4, "3": 3, "4": 2, "5": 1},
+             def_id=9, primary=primary, name="flipped")
+        metric = MetricDefinition(
+            id=1, project_id=1, name="Mean Q1", metric_type="mean", config="{}",
+            input_source_type="dataset_column", input_source_id=col.id, stale=False,
+            origin="auto",
+        )
+        db.add(metric); db.flush()
+        return col, metric
+
+    def _rekey(self, db, col):
+        import asyncio
+        from app.models.user import User
+        from app.routers.recode import rekey_column_definitions
+        from app.schemas.recode import RekeyRequest
+
+        return asyncio.run(rekey_column_definitions(
+            project_id=1, dataset_id=1, column_id=col.id,
+            body=RekeyRequest(definition_ids=[9]),
+            user=db.query(User).filter_by(id=1).one(), db=db,
+        ))
+
+    def test_a_rekeyed_primary_marks_the_metric_stale(self, db_session):
+        col, metric = self._world(db_session, primary=True)
+        out = self._rekey(db_session, col)
+        assert out["updated"] == [9]
+        assert "recomputed_column_ids" not in out, "an internal key reached the wire"
+        db_session.refresh(metric)
+        assert metric.stale is True
+
+    def test_a_rekeyed_non_primary_marks_nothing(self, db_session):
+        col, metric = self._world(db_session, primary=False)
+        self._rekey(db_session, col)
+        db_session.refresh(metric)
+        assert metric.stale is False

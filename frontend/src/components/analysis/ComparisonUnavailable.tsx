@@ -1,8 +1,6 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { toast } from 'sonner'
 import { Info } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { domainsApi } from '@/lib/api'
+import { useRecomputeScaleScores } from '@/hooks/useRecomputeScaleScores'
 import {
   describeUnavailable,
   isComputableScoreReason,
@@ -31,33 +29,18 @@ interface ComparisonUnavailableProps {
 export default function ComparisonUnavailable({
   pid, reason, domainIds,
 }: ComparisonUnavailableProps) {
-  const queryClient = useQueryClient()
   const copy = describeUnavailable(reason)
 
   // #823(c)'s undiscoverable fix, made discoverable. The endpoint is idempotent
   // and retries the compute on a stale metric, so it covers BOTH score reasons
-  // (`…_missing` creates it, `…_not_computed` recomputes it).
-  //
-  // ⚠️ **It computes on a POST, never on the comparison's GET.** Recompute on
-  // read is the hazard this codebase already decided against (DEC-C: a GET that
-  // writes races the write-side sweep on SQLite).
+  // (`…_missing` creates it, `…_not_computed` recomputes it). Shared with the
+  // out-of-date notice (`useRecomputeScaleScores`, which says why it is a POST).
   //
   // ⚠️ Known gap, deliberately not chased here: a metric that is NOT stale but
   // has no `RowScore` rows (the per-record score block is error-isolated, so it
   // can fail while the main result succeeds) makes this a no-op — the message
   // simply stays, which is today's behaviour with a better sentence.
-  const computeScores = useMutation({
-    mutationFn: async () => {
-      for (const domainId of domainIds) {
-        await domainsApi.createScoreMetric(pid, domainId)
-      }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['group-comparison'] })
-      queryClient.invalidateQueries({ queryKey: ['metrics', pid] })
-    },
-    onError: () => toast.error('Could not compute the scale score.'),
-  })
+  const computeScores = useRecomputeScaleScores(pid)
 
   const canCompute = isComputableScoreReason(reason) && domainIds.length > 0
 
@@ -74,7 +57,7 @@ export default function ComparisonUnavailable({
           variant="outline"
           className="mt-1 text-xs"
           disabled={computeScores.isPending}
-          onClick={() => computeScores.mutate()}
+          onClick={() => computeScores.mutate(domainIds)}
         >
           {computeScores.isPending ? 'Computing…' : 'Compute the scale score'}
         </Button>

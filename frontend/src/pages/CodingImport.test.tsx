@@ -745,6 +745,31 @@ describe('a NEW coder’s name (#1082 b)', () => {
   })
 })
 
+describe('#1150 (c) — a name another card TYPED is skipped when numbering', () => {
+  it('the page predicts the name the server writes', async () => {
+    // An existing "Alice". Card 1 creates "Alice" (taken → numbered), card 2 creates
+    // "Alice (2)". The server reserves every typed name before numbering, so card 1
+    // becomes "Alice (3)" — and the page must say so, not "Alice (2)".
+    setup([{ id: 1, username: 'Alice', coder_type: 'human' }])
+    api.preview.mockResolvedValue({
+      ...PREVIEW,
+      rows_read: 5,
+      will_apply: 5,
+      coders: [
+        { ...PREVIEW.coders[0], name: 'A' },
+        { ...PREVIEW.coders[0], name: 'B', row_count: 2, rows_to_apply: 2 },
+      ],
+    })
+    await reachMapStep()
+    await waitFor(() => expect(api.listCoders).toHaveBeenCalled())
+    const names = screen.getAllByRole('textbox', { name: 'Name' })
+    fireEvent.change(names[1], { target: { value: 'Alice (2)' } })
+    fireEvent.change(names[0], { target: { value: 'Alice' } })
+    await waitFor(() => expect(names[0]).toHaveAccessibleDescription(
+      /A coder called “Alice” already exists, so this one will be called “Alice \(3\)”\./))
+  })
+})
+
 describe('where focus goes between steps (a11y sweep, 2026-09-23)', () => {
   // Measured in Chrome: both step-advancing buttons unmount themselves, so focus
   // fell to <body> at each transition, and a successful import raises no toast —

@@ -88,7 +88,19 @@ the single-page app that the backend serves same-origin at
   in a range its `REVIEWED` list does not excuse. The dependency audits cannot
   see the runtime (`electron` is a devDependency), and the global advisory
   database has missed Electron's advisories before. Dependency-free; it uses
-  `GITHUB_TOKEN` when set. Not packaged: `build.files` does not name it.
+  `GITHUB_TOKEN` when set. Not packaged: `build.files` does not name it. It runs
+  in `ci.yml`'s electron job and in `release.yml`'s `verify` job.
+- `scripts/check-notices.js` — release-pipeline tool (#1122): fails when the
+  packaged app lacks Electron's licence (`LICENSE.electron.txt`) or Chromium's
+  notices (`LICENSES.chromium.html`) — in `Contents/Resources` on macOS, at the
+  top of the unpacked app elsewhere. electron-builder up to 26.15.3 deleted both
+  from every Mac app, with every gate green. Dependency-free, unit-tested.
+- `scripts/bundle-tree.js` — release-pipeline tool (#1122): compares two app
+  folders path by path (type, symlink target, read/execute bits, SHA-256). The
+  mac leg unpacks the update zip the way Squirrel.Mac does (`ditto -xk`) and
+  requires it to be the built app, because installed Macs update from that zip
+  and nothing else reads it. Dependency-free; its tests use real symlinks and
+  modes.
 
 ## 🔴 `build.files` is a deny-by-default allow-list — and nothing but a launch tests it (#761)
 

@@ -13,7 +13,7 @@ import { sortSources, type SortDirection, type SourceSortKey } from '@/lib/sourc
 import SourceListToolbar from '@/components/SourceListToolbar'
 import { DATE_AND_NAME_SORTS, SOURCE_TAB_CLASS } from '@/lib/source-list-toolbar'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
-import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { DeleteDatasetDialog } from '@/components/DeleteDatasetDialog'
 import InlineEditableText from '@/components/InlineEditableText'
 import {
   ContextMenu,
@@ -588,20 +588,12 @@ export default function DatasetsListPage() {
         </DialogContent>
       </Dialog>
 
-      <ConfirmDialog
-        open={deleteDataset !== null}
-        onOpenChange={(open) => { if (!open) setDeleteDataset(null) }}
-        title="Delete Dataset"
-        description={`Delete "${deleteDataset?.name}"? All columns, rows, recodes, and associated data will be permanently removed.`}
-        confirmLabel="Delete"
-        loading={deleteMutation.isPending}
-        loadingLabel="Deleting..."
-        onConfirm={() => {
-          if (deleteDataset !== null) {
-            deleteMutation.mutate(deleteDataset.id)
-          }
-        }}
-        destructive
+      <DeleteDatasetDialog
+        projectId={projectId}
+        dataset={deleteDataset}
+        isPending={deleteMutation.isPending}
+        onCancel={() => setDeleteDataset(null)}
+        onConfirm={(datasetId) => deleteMutation.mutate(datasetId)}
       />
     </div>
   )
