@@ -184,9 +184,13 @@ export default function SoftwareUpdateSection() {
               />
               Check for updates automatically
             </label>
+            {/* #1288: it said the check sends "this app's version and platform …
+                nothing else". electron-updater sends no version, and adds a random id
+                it keeps per installation (`x-user-staging-id`, `.updaterId`) to every
+                check — read in the installed package, 6.8.10. */}
             <p className="text-xs text-mm-text-muted mt-1.5">
-              Checking sends this app's version and platform to github.com — nothing
-              else ever leaves this machine.
+              Checking asks github.com for the newest release. It sends no project
+              data; the update library adds a random identifier for this installation.
             </p>
           </div>
         </>

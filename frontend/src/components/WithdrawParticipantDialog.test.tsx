@@ -9,12 +9,19 @@
 import '@testing-library/jest-dom/vitest'
 import { useState } from 'react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, cleanup, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent, within } from '@testing-library/react'
 import WithdrawParticipantDialog from './WithdrawParticipantDialog'
 import { removedSummary, keptSummary } from '@/lib/withdrawal-copy'
 import type { WithdrawalReport } from '@/lib/api'
+import type { ListLoad } from '@/lib/list-status'
+import { DIALOG_FITS_VIEWPORT } from '@/components/ConfirmDialog'
 
 afterEach(cleanup)
+
+const load = (status: ListLoad['status'], over: Partial<ListLoad> = {}): ListLoad => ({
+  status, error: status === 'failed' ? new Error('boom') : null, retry: vi.fn(), retrying: false, ...over,
+})
+const P07 = { identifier: 'P07', display_name: null }
 
 const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   participant_id: 1, identifier: 'P07', display_name: 'Maria', role: null,
@@ -31,11 +38,11 @@ const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   ...over,
 })
 
-function setup(r: WithdrawalReport | null = report()) {
+function setup(r: WithdrawalReport | null = report(), reportLoad = load(r ? 'ready' : 'loading')) {
   const onConfirm = vi.fn()
   render(
     <WithdrawParticipantDialog
-      open identifier="P07" report={r} isPending={false}
+      open participant={P07} report={r} reportLoad={reportLoad} isPending={false}
       onCancel={vi.fn()} onConfirm={onConfirm}
     />,
   )
@@ -170,15 +177,85 @@ describe('#1131 — the dialog’s description carries the decision', () => {
   })
 })
 
+/**
+ * #1152 — the confirm waits for THIS opening's report. It enabled on whatever the
+ * cache held; the page now hands it `null` until its own read answers. While it
+ * waits it is `aria-disabled` + guarded (a native `disabled` would blur it when the
+ * page's report goes back to loading as the dialog closes), its name unchanged.
+ */
 describe('the control', () => {
-  it('waits for the report before enabling the action', () => {
-    setup(null)
-    expect(screen.getByRole('button', { name: /Back up and remove/ })).toBeDisabled()
+  it('waits for the report: unavailable, still focusable, named as ever — and a press does nothing', () => {
+    const onConfirm = setup(null)
+    const confirm = screen.getByRole('button', { name: 'Back up and remove' })
+    expect(confirm).toHaveAttribute('aria-disabled', 'true')
+    expect(confirm).not.toBeDisabled()
+    expect(confirm).not.toHaveAttribute('aria-busy')
+    fireEvent.click(confirm)
+    expect(onConfirm).not.toHaveBeenCalled()
+    // The dialog stays open: the guard prevented Radix's Close as well.
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
   })
 
-  it('enables once the report has arrived', () => {
+  it('POSITIVE CONTROL: once the report has arrived it is available and acts', () => {
+    const onConfirm = setup()
+    const confirm = screen.getByRole('button', { name: 'Back up and remove' })
+    expect(confirm).not.toHaveAttribute('aria-disabled')
+    fireEvent.click(confirm)
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('says it is checking through the shared loading line, inside the description', () => {
+    setup(null, load('loading'))
+    const dialog = screen.getByRole('alertdialog')
+    // `LoadingNotice` — a `role="status"` line (and the slow-load hint after 10 s).
+    expect(within(dialog).getByRole('status')).toHaveTextContent('Checking what would be removed…')
+    expect(dialog).toHaveAccessibleDescription(/Checking what would be removed…/)
+  })
+
+  it('a report that could not be read says so, offers a Retry, and the confirm still refuses', () => {
+    const failed = load('failed')
+    const onConfirm = setup(null, failed)
+    expect(screen.getByRole('alert')).toHaveTextContent('What would be removed could not be checked.')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(failed.retry).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Back up and remove' }))
+    expect(onConfirm).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * #1139 — the dialog fits the window, and its title names the person clicked.
+ * jsdom computes no layout: these pin the TECHNIQUE (the class, the call); the
+ * sizes are measured live at 640×360.
+ */
+describe('#1139 — it fits the window and names the person', () => {
+  it('is capped at the window and scrolls inside it (`DIALOG_FITS_VIEWPORT`)', () => {
     setup()
-    expect(screen.getByRole('button', { name: /Back up and remove/ })).toBeEnabled()
+    const dialog = screen.getByRole('alertdialog')
+    for (const c of DIALOG_FITS_VIEWPORT.split(' ')) expect(dialog).toHaveClass(c)
+  })
+
+  it('its list region gives up its own scroller on a short window, so ONE thing scrolls', () => {
+    setup()
+    const region = screen.getByText('This will be removed').closest('div')!.parentElement!
+    expect(region).toHaveClass('max-h-72', 'overflow-y-auto')
+    expect(region).toHaveClass('[@media(max-height:480px)]:max-h-none', '[@media(max-height:480px)]:overflow-visible')
+  })
+
+  it('the title names the person, with the identifier beside it', () => {
+    render(
+      <WithdrawParticipantDialog
+        open participant={{ identifier: 'E-01', display_name: 'Amara Okafor' }}
+        report={report()} reportLoad={load('ready')} isPending={false}
+        onCancel={vi.fn()} onConfirm={vi.fn()}
+      />,
+    )
+    expect(screen.getByRole('alertdialog', { name: 'Remove Amara Okafor’s data? (E-01)' })).toBeInTheDocument()
+  })
+
+  it('with no display name, the identifier once', () => {
+    setup()
+    expect(screen.getByRole('alertdialog', { name: 'Remove P07’s data?' })).toBeInTheDocument()
   })
 })
 
@@ -188,12 +265,33 @@ function Harness({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () 
   const [pending, setPending] = useState(false)
   return (
     <WithdrawParticipantDialog
-      open identifier="P07" report={report()} isPending={pending}
+      open participant={P07} report={report()} reportLoad={load('ready')} isPending={pending}
       onCancel={onCancel}
       onConfirm={() => { onConfirm(); setPending(true) }}
     />
   )
 }
+
+describe('#1139 — the busy button is kept in view', () => {
+  it('scrolls the confirm into view (nearest) when the work starts, and not before', () => {
+    const spy = vi.fn()
+    HTMLElement.prototype.scrollIntoView = spy
+    try {
+      render(<Harness onConfirm={vi.fn()} onCancel={vi.fn()} />)
+      expect(spy).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button', { name: 'Back up and remove' }))
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy).toHaveBeenCalledWith({ block: 'nearest' })
+      const busy = screen.getByRole('button', { name: /Removing/ })
+      expect(spy.mock.contexts[0]).toBe(busy)
+      // …and stops short of the dialog's edge: `block: 'nearest'` ignores the
+      // scroller's padding (flush at 307–343 in a box ending at 344, measured).
+      expect(busy).toHaveClass('scroll-mb-6')
+    } finally {
+      delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView
+    }
+  })
+})
 
 describe('while the backup and the removal run (#1025)', () => {
   /**

@@ -41,7 +41,13 @@ from ..services.equivalence_validators import (
     assert_cross_dataset_members_are_paired,
     assert_domain_members_numeric_eligible,
 )
-from ..services.staleness import grouping_sets, mark_metrics_stale, mark_pairing_stale
+from ..services.staleness import (
+    grouping_sets,
+    mark_metrics_stale,
+    mark_pairing_stale,
+    mark_reordered_split_half_stale,
+    split_half_item_order,
+)
 from ..services.audit import log_action
 
 from .helpers import _get_project_or_404
@@ -499,6 +505,10 @@ async def reorder_members(
     Mirrors the pattern of `reorder_domains` above but at the member level
     inside a single domain. Used by the Tier 3 crosswalk's row drag-reorder
     within a bracket (`reorderRowsMutation` — see Phase 3.5 + §8 item 11).
+
+    A new order marks the group's split-half tests out of date and nothing else
+    (#1228): the order decides split-half's halves, while α and the metrics
+    cannot move with it (#1149).
     """
     _get_project_or_404(db, project_id, user.id)
     domain = _get_domain_or_404(db, project_id, domain_id)
@@ -536,12 +546,17 @@ async def reorder_members(
             },
         )
 
+    # #1228: the item order decides split-half's odd/even halves (#710), so read
+    # it before the updates and mark the group's split-half tests if it moved.
+    before = split_half_item_order(db, domain_id)
+
     # Apply the new ordering
     for i, member_id in enumerate(submitted_ids):
         db.query(AnalysisDomainMember).filter(
             AnalysisDomainMember.id == member_id,
             AnalysisDomainMember.domain_id == domain_id,
         ).update({"sequence_order": i}, synchronize_session="fetch")
+    mark_reordered_split_half_stale(db, project_id, domain_id, before)
 
     log_action(
         db,

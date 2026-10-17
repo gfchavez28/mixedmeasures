@@ -18,6 +18,7 @@ from app.services.backup import (
     get_backup_status,
     cleanup_old_backups,
     STALE_HOURS,
+    RestoreNotStarted,
 )
 from tests.backup_support import stamp_revision
 
@@ -422,57 +423,58 @@ def test_get_backup_status_recent(tmp_path):
 # ── #357 next_backup_at computation ────────────────────────────────────────
 
 
-def test_get_backup_status_next_backup_at_computed_with_interval(tmp_path):
-    """When interval_hours is provided, next_backup_at = last_backup + interval."""
-    db_path = tmp_path / "test.db"
-    _create_test_db(db_path)
-    docs_dir = tmp_path / "documents"
-    docs_dir.mkdir()
-    backup_dir = tmp_path / "backups"
+def _named(folder, kind: str, taken: datetime):
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{kind}_{taken.strftime('%Y%m%d_%H%M%S')}.mmbackup"
+    path.write_bytes(b"PK")
+    return path
 
-    create_backup(db_path, docs_dir, tmp_path / "media", backup_dir, "manual")
+
+def test_get_backup_status_next_backup_at_computed_with_interval(tmp_path):
+    """#1186: next = the newest AUTOMATIC backup's taken time (its name) + interval —
+    the time the loop will actually take one. It was the newest backup of ANY type,
+    by mtime, so a manual download postponed a schedule it does not touch."""
+    backup_dir = tmp_path / "backups"
+    taken = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0)
+    _named(backup_dir, "auto", taken)
+    _named(backup_dir, "manual", taken + timedelta(minutes=30))
 
     status = get_backup_status(backup_dir, interval_hours=4)
-    assert status.last_backup_at is not None
-    assert status.next_backup_at is not None
-    # next should be 4h after last
-    last = datetime.fromisoformat(status.last_backup_at)
     nxt = datetime.fromisoformat(status.next_backup_at)
-    delta = (nxt - last).total_seconds()
-    assert abs(delta - 4 * 3600) < 1, f"Expected ~4h delta, got {delta}s"
+    assert nxt == taken + timedelta(hours=4)
 
 
-def test_get_backup_status_next_backup_at_null_when_no_backups(tmp_path):
-    """No backups exist → next_backup_at is None (can't project from nothing)."""
+def test_get_backup_status_next_backup_at_is_now_when_no_backups(tmp_path):
+    """No automatic backup yet → one is due now: the loop WILL take one after its
+    settle (#1186). It said None, and Settings then promised nothing at all."""
     backup_dir = tmp_path / "backups"
     backup_dir.mkdir()
+    before = datetime.now(timezone.utc)
     status = get_backup_status(backup_dir, interval_hours=4)
     assert status.last_backup_at is None
-    assert status.next_backup_at is None
+    nxt = datetime.fromisoformat(status.next_backup_at)
+    assert before - timedelta(seconds=1) <= nxt <= datetime.now(timezone.utc) + timedelta(seconds=1)
+    # Off is still off.
+    assert get_backup_status(backup_dir, interval_hours=0).next_backup_at is None
 
 
 def test_get_backup_status_advances_after_new_backup(tmp_path):
-    """A new backup advances last_backup_at, which advances next_backup_at.
-    Models the 'Backup now' UX: after manual trigger, the displayed countdown
-    refreshes to reflect the new schedule."""
+    """Backup now writes an `auto`, so the next automatic backup moves to an interval
+    after it — the folder is re-read, no state to refresh (#357, #1186)."""
     db_path = tmp_path / "test.db"
     _create_test_db(db_path)
     docs_dir = tmp_path / "documents"
     docs_dir.mkdir()
     backup_dir = tmp_path / "backups"
+    _named(backup_dir, "auto", (datetime.now(timezone.utc) - timedelta(hours=3)).replace(microsecond=0))
+    first_next = datetime.fromisoformat(get_backup_status(backup_dir, interval_hours=4).next_backup_at)
 
     create_backup(db_path, docs_dir, tmp_path / "media", backup_dir, "auto")
-    first_status = get_backup_status(backup_dir, interval_hours=4)
-    first_next = datetime.fromisoformat(first_status.next_backup_at)
+    second_next = datetime.fromisoformat(get_backup_status(backup_dir, interval_hours=4).next_backup_at)
 
-    # Force a small delay before the next backup so mtime advances
-    time.sleep(0.05)
-    create_backup(db_path, docs_dir, tmp_path / "media", backup_dir, "auto")
-    second_status = get_backup_status(backup_dir, interval_hours=4)
-    second_next = datetime.fromisoformat(second_status.next_backup_at)
-
-    # The second backup is later → its next is later too
-    assert second_next > first_next, "next_backup_at should advance after a fresh backup"
+    assert second_next - first_next >= timedelta(hours=3) - timedelta(seconds=2), (
+        "next_backup_at should move to an interval after the fresh backup"
+    )
 
 
 # ── cleanup_old_backups (rotate) ──────────────────────────────────────────
@@ -485,7 +487,7 @@ def test_rotate_backups_under_limit(tmp_path):
     time.sleep(0.05)
     _create_fake_backup(backup_dir, "manual", "20260101_000002")
 
-    deleted = cleanup_old_backups(backup_dir, "manual", max_count=5)
+    deleted = cleanup_old_backups(backup_dir, "manual", max_count=5, keep=None)
     assert deleted == 0
     assert len(list(backup_dir.glob("manual_*.mmbackup"))) == 2
 
@@ -499,7 +501,7 @@ def test_rotate_backups_over_limit(tmp_path):
         filenames.append(fn)
         time.sleep(0.05)  # ensure distinct mtimes
 
-    deleted = cleanup_old_backups(backup_dir, "manual", max_count=2)
+    deleted = cleanup_old_backups(backup_dir, "manual", max_count=2, keep=None)
     assert deleted == 2
     remaining = list(backup_dir.glob("manual_*.mmbackup"))
     assert len(remaining) == 2
@@ -519,7 +521,7 @@ def test_rotate_backups_respects_type(tmp_path):
         _create_fake_backup(backup_dir, "auto", f"20260102_{i:06d}")
         time.sleep(0.05)
 
-    deleted = cleanup_old_backups(backup_dir, "manual", max_count=1)
+    deleted = cleanup_old_backups(backup_dir, "manual", max_count=1, keep=None)
     assert deleted == 2
     assert len(list(backup_dir.glob("manual_*.mmbackup"))) == 1
     # Auto backups untouched
@@ -635,7 +637,8 @@ def test_restore_removes_wal_shm(tmp_path):
 
 
 def test_restore_invalid_backup_raises(tmp_path):
-    """Restore with an invalid backup raises ValueError."""
+    """Restore with an invalid backup stops before anything, and says so (#1140: it
+    said only "Invalid backup: not a valid ZIP file", never that nothing changed)."""
     live_db = tmp_path / "live.db"
     _create_test_db(live_db)
     docs_dir = tmp_path / "documents"
@@ -645,8 +648,10 @@ def test_restore_invalid_backup_raises(tmp_path):
     bad_zip = tmp_path / "bad.mmbackup"
     bad_zip.write_text("not a zip")
 
-    with pytest.raises(ValueError, match="not a valid ZIP file"):
+    with pytest.raises(RestoreNotStarted, match="not a valid ZIP file") as exc:
         restore_from_backup(bad_zip, live_db, docs_dir, tmp_path / "media", backup_dir)
+    assert "did not start" in str(exc.value) and "Nothing was changed" in str(exc.value)
+    assert exc.value.status_code == 400
 
 
 def test_restore_unreadable_db_fails_before_pre_restore_backup(tmp_path):
@@ -663,8 +668,11 @@ def test_restore_unreadable_db_fails_before_pre_restore_backup(tmp_path):
     bad_backup = tmp_path / "garbage_db.mmbackup"
     _make_backup_with_db_bytes(bad_backup, b"not a database" * 64)
 
-    with pytest.raises(ValueError, match="could not be opened"):
+    with pytest.raises(RestoreNotStarted, match="could not be opened") as exc:
         restore_from_backup(bad_backup, live_db, docs_dir, tmp_path / "media", backup_dir)
+    assert "Nothing was changed" in str(exc.value) and exc.value.status_code == 400
+    # No pre-restore backup, so no clause pointing at one.
+    assert "Before a restore" not in str(exc.value)
 
     # Fail-fast: no pre-restore safety backup was wasted on the doomed restore,
     # and the live DB is untouched.

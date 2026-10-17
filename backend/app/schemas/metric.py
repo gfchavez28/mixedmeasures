@@ -425,6 +425,10 @@ class MatrixColumnInfo(BaseModel):
     metric_id: int
     label: str
     metric_type: str
+    # #1229: the matrix serves STORED per-record scores and recomputes nothing
+    # (DEC-C), so a metric marked out of date is served as it was. Required, not
+    # defaulted: a default of False would be a freshness claim nobody made.
+    stale: bool
 
 
 class MatrixRowItem(BaseModel):

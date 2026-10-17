@@ -235,7 +235,7 @@ class TestTheBackgroundWritersStandAside:
         import app.main as app_main
 
         wrote: list[str] = []
-        monkeypatch.setattr(backup_service, "create_backup", lambda *a, **k: wrote.append(a[4]))
+        monkeypatch.setattr(backup_service, "create_backup", lambda *a, **k: (wrote.append(a[4]), SimpleNamespace(filename="x.mmbackup"))[1])
         with db_gate.exclusive(timeout=1):
             ran = app_main._run_auto_backup(tmp_path / "x.db", tmp_path, tmp_path, tmp_path, 5)
         assert ran is False and wrote == []
@@ -252,7 +252,7 @@ class TestTheBackgroundWritersStandAside:
         db = tmp_path / "live.db"
         db.write_bytes(b"x")
         wrote: list[str] = []
-        monkeypatch.setattr(backup_service, "create_backup", lambda *a, **k: wrote.append(a[4]))
+        monkeypatch.setattr(backup_service, "create_backup", lambda *a, **k: (wrote.append(a[4]), SimpleNamespace(filename="x.mmbackup"))[1])
         monkeypatch.setattr(app_main.get_settings(), "mm_database_path", str(db), raising=False)
         monkeypatch.setattr(app_main, "get_backup_dir", lambda: tmp_path / "b")
         with db_gate.exclusive(timeout=1):

@@ -28,12 +28,18 @@ import {
   datasetsApi,
   speakersApi,
   type Participant,
-  type Dataset, retryUnanswered} from '@/lib/api'
+  type Dataset,
+  type LinkableRow,
+  isServerRefusal,
+  retryUnanswered,
+  serverDetailMessage,
+} from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
+import { invalidateAfterParticipantLinkChange } from '@/lib/participant-link-cache'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { LoadState } from '@/components/LoadStatus'
 import { toast } from 'sonner'
-import { filterLinkableRows, linkableRowDetail } from '@/lib/linkable-rows'
+import { DatasetRecordPicker } from '@/components/DatasetRecordPicker'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -50,6 +56,58 @@ import {
 import WithdrawParticipantDialog from '@/components/WithdrawParticipantDialog'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import {
+  deleteConfirmTitle, participantNameWithId, type ParticipantNaming,
+} from '@/lib/participant-naming'
+
+/** A participant a confirmation acts on — its id and the row's names (#1139). */
+type ConfirmTarget = ParticipantNaming & { id: number }
+
+/** Taken from the row as the dialog opens: the names are fixed for its life. */
+const confirmTarget = (p: Participant): ConfirmTarget =>
+  ({ id: p.id, identifier: p.identifier, display_name: p.display_name })
+
+/** Before any confirm has opened (its content is not rendered then). */
+const NO_ONE: ParticipantNaming = { identifier: '', display_name: null }
+
+/**
+ * 🔴 #1152 — the report a CONFIRMATION reads (the withdrawal and the record delete).
+ *
+ * They read the key the detail panel reads, `['withdrawal-report', projectId, id]`,
+ * and so showed whatever the panel had cached — 60 s fresh by the app default,
+ * minutes old once the panel had been left open. Reproduced live: after a document was made
+ * about a participant on the Documents page, the delete confirm said they had "no
+ * linked transcript turns, responses or documents" (the delete clears that
+ * document's subject, #1110) and the withdrawal's button enabled at once.
+ *
+ * The report reads ≥ 10 inputs, so no enumeration of the writers can keep a cache
+ * of it true (`backend-invariants.md` §5b): the guarantee is on the READ side.
+ *
+ * - Its OWN key (the `'confirm'` tail), so nothing another surface cached can
+ *   answer for it — and still under the prefix every invalidation names.
+ * - `gcTime: 0`: the id goes `null` when the dialog closes, the old entry loses
+ *   its only observer and is dropped, and the next opening asks again and says so.
+ *   `staleTime: 0`: while it is OPEN, coming back to the window (or the network)
+ *   asks again — the researcher may have changed the project elsewhere meanwhile.
+ *   The pair is `useRemovalPlan`'s shape (#1175); each has its own test.
+ * - ⚠️ `refetchOnMount: 'always'` on the SHARED key does NOT do this — this
+ *   observer mounts with the page and only changes key (probe: 0 refetches either
+ *   way, Batch 4 review §5).
+ *
+ * `enabled` only while a dialog is open; the dialogs read the load only while open,
+ * so the disabled case (loading forever) is never shown.
+ */
+function useConfirmReport(projectId: number, participantId: number | null) {
+  const query = useQuery({
+    queryKey: ['withdrawal-report', projectId, participantId, 'confirm'],
+    queryFn: () => participantsApi.withdrawalReport(projectId, participantId!),
+    enabled: participantId !== null,
+    staleTime: 0,
+    gcTime: 0,
+  })
+  const load = useListLoad(query)
+  return { report: query.data ?? null, load }
+}
 
 /**
  * #1088 — the table and the detail panel share a row only when there is room
@@ -110,7 +168,12 @@ export default function ParticipantsPage() {
 
   // Selection + confirm state
   const [selectedParticipantId, setSelectedParticipantId] = useState<number | null>(null)
-  const [deleteParticipant, setDeleteParticipant] = useState<{ id: number; identifier: string } | null>(null)
+  const [deleteParticipant, setDeleteParticipant] = useState<ConfirmTarget | null>(null)
+  // The person each confirm's TITLE names (#1139), kept after it closes: the
+  // content fades out for 200 ms once `open` goes false, and a title built from
+  // the cleared target read "Remove ’s data?" while it did.
+  const [deleteShown, setDeleteShown] = useState<ConfirmTarget | null>(null)
+  const [withdrawShown, setWithdrawShown] = useState<ConfirmTarget | null>(null)
 
   // Orphan filter + bulk-delete state
   const [showOrphansOnly, setShowOrphansOnly] = useState(false)
@@ -166,10 +229,16 @@ export default function ParticipantsPage() {
   const updateParticipantMutation = useMutation({
     mutationFn: ({ participantId, data }: { participantId: number; data: { identifier?: string; display_name?: string; role?: string } }) =>
       participantsApi.update(projectId, participantId, data),
-    onSuccess: () => {
+    onSuccess: (_result, { participantId }) => {
       queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
       queryClient.invalidateQueries({ queryKey: ['speakers', projectId] })
       queryClient.invalidateQueries({ predicate: (query) => query.queryKey[0] === 'segments' })
+      // #1152 — the open panel and the withdrawal report both carry the name. A
+      // rename refreshed the list alone: CONFIRMED live, the panel heading still
+      // said "Jonas Berg" while the withdrawal confirm's title said "Remove Jonas
+      // Bergström's data?" over a body naming "Jonas Berg".
+      queryClient.invalidateQueries({ queryKey: ['participant-detail', participantId] })
+      queryClient.invalidateQueries({ queryKey: ['withdrawal-report', projectId] })
     },
   })
 
@@ -224,20 +293,15 @@ export default function ParticipantsPage() {
    * the WRONG behaviour for a withdrawal request. Conflating them is how a
    * researcher ends up believing a request was honoured.
    */
-  const [withdrawParticipant, setWithdrawParticipant] = useState<
-    { id: number; identifier: string } | null
-  >(null)
+  const [withdrawParticipant, setWithdrawParticipant] = useState<ConfirmTarget | null>(null)
 
-  const { data: withdrawReport } = useQuery({
-    queryKey: ['withdrawal-report', projectId, withdrawParticipant?.id],
-    queryFn: () => participantsApi.withdrawalReport(projectId, withdrawParticipant!.id),
-    enabled: withdrawParticipant !== null,
-  })
+  const withdrawConfirm = useConfirmReport(projectId, withdrawParticipant?.id ?? null)
 
   const withdrawMutation = useMutation({
-    mutationFn: (participantId: number) =>
-      participantsApi.withdraw(projectId, participantId),
-    onSuccess: (res, participantId) => {
+    mutationFn: (target: ConfirmTarget) =>
+      participantsApi.withdraw(projectId, target.id),
+    onSuccess: (res, target) => {
+      const participantId = target.id
       void queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
       // Their turns and responses changed, so anything reading conversations or
       // datasets is now stale.
@@ -245,8 +309,9 @@ export default function ParticipantsPage() {
       void queryClient.invalidateQueries({ queryKey: ['dataset'] })
       // #1123 — and a document about them no longer says so.
       void queryClient.invalidateQueries({ queryKey: ['documents', projectId] })
+      // #1139 — the person, as the dialog named them; it said "E-01 removed".
       toast.success(
-        `${res.identifier} removed. Backup saved as ${res.backup_filename}.`,
+        `${participantNameWithId(target)} removed. Backup saved as ${res.backup_filename}.`,
         {
           description: withdrawalDoneNote(res.documents_unlinked),
           duration: 12000,
@@ -263,11 +328,8 @@ export default function ParticipantsPage() {
     },
   })
 
-  const { data: pendingReport } = useQuery({
-    queryKey: ['withdrawal-report', projectId, deleteParticipant?.id],
-    queryFn: () => participantsApi.withdrawalReport(projectId, deleteParticipant!.id),
-    enabled: deleteParticipant !== null,
-  })
+  const deleteConfirm = useConfirmReport(projectId, deleteParticipant?.id ?? null)
+  const deleteLocations = deleteConfirm.report ? withdrawalLocations(deleteConfirm.report) : []
 
   const orphanCount = participants.filter(isOrphanedParticipant).length
 
@@ -662,13 +724,20 @@ export default function ParticipantsPage() {
                         ref={selectAllRef}
                         checked={allVisibleSelected ? true : selectedCount > 0 ? 'indeterminate' : false}
                         onCheckedChange={toggleSelectAll}
+                        // #1165 — with no row shown it read "Select the 0
+                        // participants shown" and did nothing. Natively disabled:
+                        // a search that matches no one is a passing state, so it
+                        // earns no tab stop (`mode-disabled.ts`'s transient arm).
+                        disabled={renderedParticipants.length === 0}
                         // a11y-name-sweep run 10: "all" only when the table shows
                         // everyone. A search or the filter that leaves the rest
                         // unshown is not the page's cap (`hiddenCount`), and the
                         // box still selects only the rows on screen.
-                        aria-label={renderedParticipants.length < participants.length
-                          ? `Select the ${renderedParticipants.length.toLocaleString()} participant${renderedParticipants.length === 1 ? '' : 's'} shown`
-                          : 'Select all participants'}
+                        aria-label={renderedParticipants.length === 0
+                          ? 'Select participants (none are shown)'
+                          : renderedParticipants.length < participants.length
+                            ? `Select the ${renderedParticipants.length.toLocaleString()} participant${renderedParticipants.length === 1 ? '' : 's'} shown`
+                            : 'Select all participants'}
                       />
                     </th>
                     {/* A floor for the Name column: the names may wrap (a long
@@ -708,8 +777,16 @@ export default function ParticipantsPage() {
                         else openPanel(participant.id, viaKeyboard)
                       }}
                       onUpdate={(data) => updateParticipantMutation.mutate({ participantId: participant.id, data })}
-                      onWithdraw={() => setWithdrawParticipant({ id: participant.id, identifier: participant.identifier })}
-                      onDelete={() => setDeleteParticipant({ id: participant.id, identifier: participant.identifier })}
+                      onWithdraw={() => {
+                        const target = confirmTarget(participant)
+                        setWithdrawParticipant(target)
+                        setWithdrawShown(target)
+                      }}
+                      onDelete={() => {
+                        const target = confirmTarget(participant)
+                        setDeleteParticipant(target)
+                        setDeleteShown(target)
+                      }}
                     />
                   ))}
                 </tbody>
@@ -750,13 +827,41 @@ export default function ParticipantsPage() {
         )}
       </div>
 
-      {/* Delete confirm */}
+      {/* Delete confirm.
+          #1139 — capped at the window (a few more source lines put its title and
+          buttons off a 640×360 window), titled with the person, and the list of
+          what stays is in `details`: as `children` it sat OUTSIDE the accessible
+          description, so a reader heard the sentence and then "Cancel" (#955 d).
+          #1152 — the report is this opening's own (`useConfirmReport`); until it
+          answers the sentence is the count-free form, the shared loading line
+          says it is checking, and Delete refuses. */}
       <ConfirmDialog
         open={deleteParticipant !== null}
         onOpenChange={(open) => { if (!open) setDeleteParticipant(null) }}
-        title="Delete Participant"
-        description={describeDeleteConsequence(pendingReport ?? null)}
+        title={deleteConfirmTitle(deleteShown ?? NO_ONE)}
+        description={describeDeleteConsequence(deleteConfirm.report)}
+        details={deleteConfirm.report === null ? (
+          <LoadState
+            load={deleteConfirm.load}
+            size="panel"
+            loadingLabel="Checking what would be removed…"
+            failedTitle="What would be removed could not be checked."
+          />
+        ) : deleteLocations.length > 0 ? (
+          <div className="text-xs text-mm-text-secondary">
+            <p className="text-mm-text-faint mb-1">
+              Data that stays in the project:
+            </p>
+            <ul className="space-y-0.5">
+              {deleteLocations.map(line => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          </div>
+        ) : undefined}
         confirmLabel="Delete record"
+        confirmWaiting={deleteConfirm.report === null}
+        fitViewport
         onConfirm={() => {
           if (deleteParticipant !== null) {
             deleteParticipantMutation.mutate(deleteParticipant.id)
@@ -764,40 +869,30 @@ export default function ParticipantsPage() {
           setDeleteParticipant(null)
         }}
         destructive
-      >
-        {pendingReport && withdrawalLocations(pendingReport).length > 0 && (
-          <div className="text-xs text-mm-text-secondary">
-            <p className="text-mm-text-faint mb-1">
-              Data that stays in the project:
-            </p>
-            <ul className="space-y-0.5">
-              {withdrawalLocations(pendingReport).map(line => (
-                <li key={line}>{line}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </ConfirmDialog>
+      />
 
       {/* #702(3) — honour a withdrawal request. */}
       <WithdrawParticipantDialog
         open={withdrawParticipant !== null}
-        identifier={withdrawParticipant?.identifier ?? ''}
-        report={withdrawReport ?? null}
+        participant={withdrawShown ?? NO_ONE}
+        report={withdrawConfirm.report}
+        reportLoad={withdrawConfirm.load}
         isPending={withdrawMutation.isPending}
         onCancel={() => setWithdrawParticipant(null)}
         onConfirm={() => {
-          if (withdrawParticipant) withdrawMutation.mutate(withdrawParticipant.id)
+          if (withdrawParticipant) withdrawMutation.mutate(withdrawParticipant)
         }}
       />
 
-      {/* Bulk delete confirm */}
+      {/* Bulk delete confirm — capped too (#1139): its names stop at three, but
+          the sentence is long and the window may be short. */}
       <ConfirmDialog
         open={bulkDeleteOpen}
         onOpenChange={(open) => { if (!open) setBulkDeleteOpen(false) }}
         title={`Delete ${selectedCount} participant${selectedCount === 1 ? '' : 's'}`}
         description={bulkDeleteDescription(selectedCount, selectedNames, selectedDocumentCount)}
         confirmLabel="Delete"
+        fitViewport
         onConfirm={() => {
           bulkDeleteMutation.mutate(selectedShownIds)
           setBulkDeleteOpen(false)
@@ -1045,13 +1140,21 @@ function ParticipantDetailPanel({
 }) {
   const queryClient = useQueryClient()
   const [linkingDatasetId, setLinkingDatasetId] = useState<number | null>(null)
-  const [linkSearch, setLinkSearch] = useState('')
+  /** #1053 — a refused link's sentence, shown in the picker (it used to be the
+   *  app-wide "Something went wrong", hiding the server's reason). */
+  const [linkError, setLinkError] = useState<string | null>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const linkSelectRef = useRef<HTMLSelectElement>(null)
 
   const detailQuery = useQuery({
     queryKey: ['participant-detail', participantId],
     queryFn: () => participantsApi.getDetail(projectId, participantId),
+    // #1152 — asked again on every OPEN. It is keyed per participant and this
+    // panel mounts when it opens, so 'always' does fire here (unlike on the page's
+    // confirm queries, which never remount); without it a panel re-opened inside
+    // the 60 s staleTime showed what it cached before a door it never hears of
+    // (a document's subject, a delete elsewhere) moved the person's links.
+    refetchOnMount: 'always',
   })
   const detail = detailQuery.data
   /** #963 — a failed load said "Loading..." for as long as the panel was open. */
@@ -1072,23 +1175,6 @@ function ParticipantDetailPanel({
     // Once per participant: the panel is keyed on it, and both inputs are
     // fixed for the life of one panel.
   }, [takeFocus, panelRef])
-
-  const linkableQuery = useQuery({
-    queryKey: ['linkable-rows', projectId, linkingDatasetId],
-    queryFn: () => datasetsApi.linkableRows(projectId, linkingDatasetId!),
-    enabled: !!linkingDatasetId,
-  })
-  const linkableData = linkableQuery.data
-  /**
-   * #963 Tier 2 — *"No rows found"* over an unanswered list, in the one place a
-   * researcher goes to link a participant to their dataset record.
-   *
-   * ⚠️ Fed by a query in this DETAIL component, so the page-level gate Tier 1
-   * added does NOT cover it. The disabled case is decided by the render: this
-   * whole block is inside the `linkingDatasetId` branch, which is the same flag
-   * the query is `enabled` on.
-   */
-  const linkableLoad = useListLoad(linkableQuery)
 
   /**
    * #1130 — a link or an unlink unmounts the control that made it (the record
@@ -1111,28 +1197,36 @@ function ParticipantDetailPanel({
   }, [landingRequest])
 
   // #1130 — the withdrawal summary below is a list of what is LINKED; a link or
-  // an unlink that did not refresh it left it naming the old set.
-  const invalidateAfterLinkChange = () => {
-    queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
-    queryClient.invalidateQueries({ queryKey: ['withdrawal-report', projectId] })
-    queryClient.invalidateQueries({ predicate: (q) => (q.queryKey[0] as string)?.startsWith?.('dataset') })
-    // Resolves once the panel's own detail has refetched — when an unlinked
-    // record's row, and the Unlink that was focused, actually go.
-    return queryClient.invalidateQueries({ queryKey: ['participant-detail', participantId] })
-  }
+  // an unlink that did not refresh it left it naming the old set. The set is
+  // shared by every link door since #1054 (it also refreshes the record picker,
+  // which offered the just-linked record again). Resolves once the detail has
+  // refetched — when an unlinked record's row, and the Unlink that was focused,
+  // actually go.
+  const invalidateAfterLinkChange = () => invalidateAfterParticipantLinkChange(queryClient, projectId)
 
   // 🔴 The two acts lose focus at DIFFERENT moments, so each lands when its own
   // control goes: a link unmounts the picker at once, an unlink's row goes only
   // when the detail refetch lands. Driven live, a one-frame landing after an
   // unlink saw the Unlink still there, stood down, and focus then fell to <body>.
   const linkMutation = useMutation({
-    mutationFn: ({ datasetId, rowId }: { datasetId: number; rowId: number }) =>
-      participantsApi.linkDatasetRow(projectId, participantId, datasetId, rowId),
-    onSuccess: () => {
+    mutationFn: ({ datasetId, row }: { datasetId: number; row: LinkableRow; datasetName: string }) =>
+      participantsApi.linkDatasetRow(projectId, participantId, datasetId, row.row_id),
+    onMutate: () => setLinkError(null),
+    onSuccess: (_data, { row, datasetName }) => {
       void invalidateAfterLinkChange()
       setLinkingDatasetId(null)
-      setLinkSearch('')
       landOnLinkedDatasets()
+      toast.success(`Linked ${row.row_identifier || `row ${row.row_id}`} in ${datasetName}`)
+    },
+    // #1053 §3.3 — the server's sentence (a record someone else took a moment
+    // ago, a table the tool keeps), never the app-wide "Something went wrong".
+    // The picker is refreshed, so a record that was taken now shows as taken.
+    onError: (err, { datasetId }) => {
+      setLinkError(
+        (isServerRefusal(err) ? serverDetailMessage(err) : null)
+          ?? 'The record could not be linked. Try again.',
+      )
+      void queryClient.invalidateQueries({ queryKey: ['linkable-rows', projectId, datasetId] })
     },
   })
 
@@ -1161,7 +1255,7 @@ function ParticipantDetailPanel({
 
   const stopLinking = () => {
     setLinkingDatasetId(null)
-    setLinkSearch('')
+    setLinkError(null)
     // The picker's own controls unmount; its opener stays.
     requestAnimationFrame(() => linkSelectRef.current?.focus())
   }
@@ -1434,112 +1528,21 @@ function ParticipantDetailPanel({
               </div>
             )
           })()
-        ) : (() => {
-          const linkingName = datasets.find(d => d.id === linkingDatasetId)?.name ?? 'this dataset'
-          const filteredRows = filterLinkableRows(linkableData?.rows || [], linkSearch)
-          return (
-          <div className="mt-2 border border-mm-border-subtle rounded bg-mm-surface">
-            <div className="p-1.5 border-b border-mm-border-subtle flex items-center gap-1">
-              <span className="text-[11px] text-mm-text-muted truncate max-w-[120px]" title={linkingName}>
-                {linkingName}
-              </span>
-              <a
-                href={`/projects/${projectId}/datasets/${linkingDatasetId}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-center w-6 h-6 rounded text-mm-text-faint hover:text-mm-blue-text flex-shrink-0"
-                aria-label={`Open dataset "${linkingName}" in new tab`}
-                title="Open dataset in new tab"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <ExternalLink className="w-3 h-3" aria-hidden="true" />
-              </a>
-              <div className="flex-1" />
-              <button
-                type="button"
-                onClick={stopLinking}
-                className="inline-flex items-center justify-center w-6 h-6 rounded text-mm-text-faint hover:text-mm-text-secondary flex-shrink-0"
-                aria-label="Stop linking"
-                title="Stop linking"
-              >
-                <X className="w-3 h-3" aria-hidden="true" />
-              </button>
-            </div>
-            <div className="p-2 border-b border-mm-border-subtle">
-              <input
-                type="text"
-                value={linkSearch}
-                onChange={(e) => setLinkSearch(e.target.value)}
-                // Escape leaves the PICKER, not the whole panel.
-                onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); stopLinking() } }}
-                placeholder="Search rows..."
-                aria-label={`Search ${linkingName} records`}
-                className="w-full text-xs border border-mm-border-subtle rounded px-2 py-1 bg-mm-surface text-mm-text"
-                autoFocus
-              />
-            </div>
-            <div className="max-h-48 overflow-y-auto divide-y divide-mm-border-subtle">
-              {filteredRows.map(row => {
-                const isLinked = !!row.linked_participant_name
-                // #418: identifying values (Student_ID, names, School, …),
-                // not just demographic-typed ones
-                const demoText = linkableRowDetail(row)
-                return (
-                  <button
-                    type="button"
-                    key={row.row_id}
-                    // #1130 — busy is `aria-disabled` + the guard, never
-                    // `disabled` (#959 §4); a record someone else holds stays
-                    // natively disabled, which is permanent, not a busy state.
-                    disabled={isLinked}
-                    aria-disabled={(!isLinked && linkMutation.isPending) || undefined}
-                    onClick={() => {
-                      if (linkMutation.isPending) return
-                      linkMutation.mutate({ datasetId: linkingDatasetId!, rowId: row.row_id })
-                    }}
-                    className={`w-full text-left px-2 py-1.5 text-xs ${
-                      isLinked
-                        ? 'text-mm-text-faint bg-mm-bg cursor-not-allowed'
-                        : 'hover:bg-mm-surface-hover cursor-pointer text-mm-text'
-                    }`}
-                  >
-                    {/* #1130 — the parts are joined by TEXT spaces, not margins
-                        alone: a margin is not a space, so the name read
-                        "R001North(P001)" (#908's rule). And a taken record says
-                        so in words, as the grid's picker does. */}
-                    <span className="font-medium">{row.row_identifier || `Row ${row.row_id}`}</span>
-                    {demoText && <>{' '}<span className="text-mm-text-faint">{demoText}</span></>}
-                    {isLinked && (
-                      <>
-                        {' '}
-                        {/* The words are ONE text node: a space at the edge of
-                            an inline span is dropped by name computation
-                            (measured in jsdom: "already linked toP009"). */}
-                        <span className="text-mm-text-faint" aria-hidden="true">({row.linked_participant_name})</span>
-                        <span className="sr-only">{`(already linked to ${row.linked_participant_name})`}</span>
-                      </>
-                    )}
-                  </button>
-                )
-              })}
-              {linkableLoad.status !== 'ready' ? (
-                <LoadState
-                  load={linkableLoad}
-                  loadingLabel="Loading records…"
-                  failedTitle="This dataset's records could not be loaded"
-                  size="panel"
-                />
-              ) : filteredRows.length === 0 ? (
-                /* Two different facts: an empty dataset and a search that
-                   matched nothing. The old copy said the first of both. */
-                <p className="text-xs text-mm-text-faint p-2 text-center">
-                  {linkSearch ? 'No records match your search' : 'No records in this dataset'}
-                </p>
-              ) : null}
-            </div>
-          </div>
-          )
-        })()}
+        ) : (
+          <DatasetRecordPicker
+            projectId={projectId}
+            datasetId={linkingDatasetId}
+            datasetName={datasets.find(d => d.id === linkingDatasetId)?.name ?? 'this dataset'}
+            busy={linkMutation.isPending}
+            linkError={linkError}
+            onPick={(row) => linkMutation.mutate({
+              datasetId: linkingDatasetId,
+              row,
+              datasetName: datasets.find(d => d.id === linkingDatasetId)?.name ?? 'this dataset',
+            })}
+            onClose={stopLinking}
+          />
+        )}
       </div>
 
       {/* Demographics summary — scoped to actual DEMOGRAPHIC-typed columns
@@ -1620,6 +1623,8 @@ function WithdrawalSection({
   const { data: report } = useQuery({
     queryKey: ['withdrawal-report', projectId, participantId],
     queryFn: () => participantsApi.withdrawalReport(projectId, participantId),
+    // #1152 — asked again each time the panel opens, like its detail above.
+    refetchOnMount: 'always',
   })
   if (!report) return null
 

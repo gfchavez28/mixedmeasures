@@ -9,10 +9,12 @@ import { readFileSync } from 'fs'
 import { resolve } from 'path'
 import {
   MAX_IMPORT_FILE_BYTES, MAX_IMPORT_FILE_LABEL, MAX_PROJECT_FILE_BYTES,
-  checkImportFiles, oversizeFilesMessage, partitionBySizeLimit,
+  checkImportFiles, fileLimitLabel, oversizeFilesMessage, partitionBySizeLimit,
 } from './upload-limits'
 import { MAX_DATASET_UPLOAD_SIZE } from './dataset-import-formats'
+import { MAX_MEDIA_SIZE } from './media-constants'
 import { stripComments } from './strip-comments'
+import { sourceFiles, srcRel } from '@/test-support/source-tree'
 
 const file = (name: string, size: number) => ({ name, size })
 
@@ -63,6 +65,11 @@ describe('checkImportFiles (#1012)', () => {
     expect(r.message).toBe('“notes.docx” is not a dataset file. This page imports CSV.')
   })
 
+  it('#1263: a door whose page imports something else says its own sentence for the formats', () => {
+    const r = checkImportFiles([file('notes.docx', 10)], { ...opts, formatSentence: 'A table can be CSV.' })
+    expect(r.message).toBe('“notes.docx” is not a dataset file. A table can be CSV.')
+  })
+
   it('keeps the good files and reports BOTH refusals in one sentence', () => {
     const good = file('a.csv', 10)
     const r = checkImportFiles(
@@ -110,4 +117,62 @@ describe('every import wizard', () => {
       if (!NO_50MB_NOTE.has(page)) expect(src).toMatch(/<UploadLimitNote\b/)
     })
   }
+})
+
+describe('fileLimitLabel — one spelling per limit (#1161)', () => {
+  it('says MB under 1 GiB and GB from it, never "4096 MB"', () => {
+    expect(fileLimitLabel(MAX_IMPORT_FILE_BYTES)).toBe('50 MB')
+    expect(fileLimitLabel(MAX_PROJECT_FILE_BYTES)).toBe('500 MB')
+    expect(fileLimitLabel(MAX_MEDIA_SIZE)).toBe('4 GB')
+    expect(fileLimitLabel(1024 ** 3)).toBe('1 GB')
+  })
+})
+
+/**
+ * POPULATION, counted by PICKER (#1161). The wizard block above passes a page
+ * that calls `checkImportFiles(` ANYWHERE — Observation and Conversation passed it
+ * on their cue and transcript pickers while their RECORDING pickers ran a
+ * size-first check that named no file. So this counts the thing that does the
+ * picking: every `<input type="file">` taking recordings sits in a file that runs
+ * the recording arm of the one check (`validateMediaFile` / `chooseOneRecording`),
+ * and the two sentences that were each a page's own copy are gone.
+ */
+describe('every recording picker (#1161)', () => {
+  const MEDIA_INPUT = /accept=\{(?:OBSERVATION_)?MEDIA_ACCEPT\}/
+  const RECORDING_CHECK = /\b(?:validateMediaFile|chooseOneRecording)\(/
+  const RETIRED = [/isn't a recording/, /Recording exceeds/]
+
+  const files = sourceFiles({ ext: 'tsx', floor: 100 })
+  const pickers: { rel: string; src: string }[] = []
+  const retiredHits: string[] = []
+  for (const abs of files) {
+    const raw = readFileSync(abs, 'utf-8')
+    if (!raw.includes('MEDIA_ACCEPT}') && !RETIRED.some(r => r.test(raw))) continue
+    const src = stripComments(raw)
+    if (MEDIA_INPUT.test(src)) pickers.push({ rel: srcRel(abs), src })
+    for (const r of RETIRED) if (r.test(src)) retiredHits.push(`${srcRel(abs)}: ${r}`)
+  }
+
+  it('finds the four pickers (self-check: the scan can see its population)', () => {
+    expect(pickers.map(p => p.rel).sort()).toEqual(expect.arrayContaining([
+      'pages/CodingWorkbench.tsx', 'pages/ConversationImport.tsx',
+      'pages/ConversationsListPage.tsx', 'pages/ObservationImport.tsx',
+    ]))
+  })
+
+  it('each runs the recording check, not merely some other file check', () => {
+    const missing = pickers.filter(p => !RECORDING_CHECK.test(p.src)).map(p => p.rel)
+    expect(missing).toEqual([])
+  })
+
+  it('no page hand-writes a recording refusal of its own', () => {
+    expect(retiredHits).toEqual([])
+  })
+
+  it('the predicates fire on the shapes they look for (falsifier)', () => {
+    expect(MEDIA_INPUT.test('<input type="file" accept={OBSERVATION_MEDIA_ACCEPT} />')).toBe(true)
+    expect(MEDIA_INPUT.test('<input type="file" accept={CUE_FILE_ACCEPT} />')).toBe(false)
+    expect(RECORDING_CHECK.test('const v = validateMediaFile(file)')).toBe(true)
+    expect(RECORDING_CHECK.test("checkImportFiles([f], { noun: 'cue' })")).toBe(false)
+  })
 })

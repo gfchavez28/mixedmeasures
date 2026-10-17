@@ -359,7 +359,7 @@ def test_linkable_rows_labels_two_sided(db_session):
         cells=(("Maple School", None), ("99", 99.0), ("Prefer not to say", None)),
     )
     user = db_session.query(User).filter(User.id == 1).one()
-    out = _run(get_linkable_rows(project_id=1, dataset_id=1, user=user, db=db_session))
+    out = get_linkable_rows(project_id=1, dataset_id=1, user=user, db=db_session)  # `def` since #1053
     by_row = {r["row_id"]: r["display_values"] for r in out["rows"]}
     assert by_row[100] == ["Maple School"]
     assert by_row[101] == [], "declared-missing 99 was spent on a row label"

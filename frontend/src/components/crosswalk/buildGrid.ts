@@ -213,11 +213,17 @@ export function buildGrid({
     const egIdsSeen = new Set<number>()
     const datasetsInDomain = new Set<number>()
 
-    // domain.members is server-ordered by sequence_order via the SQLAlchemy
-    // relationship's `order_by` clause. Trust that order; tiebreak on id.
-    const sortedMembers = [...domain.members].sort((a, b) => a.id - b.id)
-
-    for (const member of sortedMembers) {
+    // #1260 — the rows are the group's ITEMS in the order the server sends:
+    // `AnalysisDomain.members` is ordered by `sequence_order`, the order the
+    // reorder control writes and the one split-half splits by (#710) and the R
+    // export reproduces (#1244). This re-sorted by member id while its comment
+    // said the opposite, so a reorder could not be seen, a second reorder undid the
+    // first (`handleReorderRow` rebuilds the order from these rows), and the order
+    // that decides a saved coefficient was shown nowhere. The member payload
+    // carries no `sequence_order` of its own, so the array order IS the order —
+    // never sort it here. An equivalence row sits where its FIRST member does,
+    // which is also where the split puts the item.
+    for (const member of domain.members) {
       if (member.member_type !== 'column') continue
       const col = columnsById.get(member.member_id)
       if (!col) continue  // stale reference; skip silently

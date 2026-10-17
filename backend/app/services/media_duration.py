@@ -109,7 +109,7 @@ def _mp4_duration(filepath: Path) -> float | None:
 
     We parse this ourselves because **tinytag cannot read `.mov` or `.webm` at
     all** — it dispatches on extension/brand, and neither appears in its
-    SUPPORTED_FILE_EXTENSIONS (verified against tinytag 2.2.1), so both formats
+    SUPPORTED_FILE_EXTENSIONS (verified against tinytag 2.2.1 and again 2.3.2), so both formats
     silently yielded `media_duration_seconds = None`. For a Conversation that was
     harmless (the recording is a playback aid and the browser reports its own
     duration), which is why it went unnoticed. For an Observation the recording

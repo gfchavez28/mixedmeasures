@@ -3,6 +3,7 @@ relationships, refresh, stale indicators, duplication."""
 
 import json
 import logging
+from datetime import datetime, timezone
 
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session, selectinload
@@ -766,14 +767,32 @@ def create_snapshot(db: Session, canvas_id: int, name: str) -> CanvasSnapshot:
     db.flush()
 
     # Enforce rotation limit — ordering per SNAPSHOT_ROTATION_ORDER (#750).
+    #
+    # 🔴 #1199 — two rules the backup rotations share (`services/backup.py::
+    # cleanup_old_backups`, `database.py::_backup_database`):
+    # (a) the snapshot just created is NEVER a candidate. It is what the caller is
+    #     about to report as saved — and, from `restore_snapshot`, the only way back
+    #     from the restore about to replace the canvas.
+    # (b) a `created_at` later than now orders OLDER than every believable one (each
+    #     group keeps SNAPSHOT_ROTATION_ORDER — a stable sort). Every row was written
+    #     before now, so a future one was stamped by a clock that was ahead, or is
+    #     read after this one was set back. Ordered by `created_at` alone, ten such
+    #     rows outranked every new snapshot until their date: each new one was
+    #     deleted at creation, and a restore's "Pre-restore" undo point was gone
+    #     before the canvas was replaced (executed, 2026-10-14b).
+    # `created_at` is SQLite's CURRENT_TIMESTAMP: naive UTC.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     all_snapshots = (
         db.query(CanvasSnapshot)
         .filter(CanvasSnapshot.canvas_id == canvas_id)
         .order_by(*SNAPSHOT_ROTATION_ORDER)
         .all()
     )
-    if len(all_snapshots) > SNAPSHOT_MAX:
-        for old in all_snapshots[: len(all_snapshots) - SNAPSHOT_MAX]:
+    excess = len(all_snapshots) - SNAPSHOT_MAX
+    if excess > 0:
+        candidates = [s for s in all_snapshots if s.id != snapshot.id]
+        candidates.sort(key=lambda s: s.created_at <= now)
+        for old in candidates[:excess]:
             db.delete(old)
         db.flush()
 
@@ -791,9 +810,9 @@ def list_snapshots(db: Session, canvas_id: int) -> list[CanvasSnapshot]:
 
 def restore_snapshot(db: Session, canvas: Canvas,
                      snapshot: CanvasSnapshot) -> None:
-    from datetime import datetime, timezone
-
-    # Auto-create pre-restore snapshot
+    # Auto-create pre-restore snapshot — `create_snapshot` never rotates away the
+    # one it has just created (#1199), so this undo point exists before anything
+    # below replaces the canvas.
     now = datetime.now(timezone.utc)
     create_snapshot(db, canvas.id, f"Pre-restore \u2014 {now:%Y-%m-%d %H:%M}")
 

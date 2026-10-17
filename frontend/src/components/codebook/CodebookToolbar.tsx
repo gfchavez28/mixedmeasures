@@ -6,9 +6,14 @@ import type { CodebookTreeResponse } from '@/lib/api'
 import type { Diagnostics } from '@/lib/codebook-utils'
 import SegmentedControl from '@/components/ui/segmented-control'
 import FreezeCodebookButton from '@/components/codebook/FreezeCodebookButton'
+import { toast } from 'sonner'
 import { MMCODEBOOK_ACCEPT } from '@/lib/mm-formats'
+import { codebookFileRefusal } from '@/lib/mm-file-refusal'
 
 // ── Constants ────────────────────────────────────────────────────────────────
+
+/** A busy icon button: dimmed while it refuses, the wait cursor while it works. */
+const BUSY_ICON_BUTTON = 'aria-disabled:opacity-50 aria-busy:cursor-wait'
 
 const MODE_OPTIONS = [
   { value: 'tree' as const, label: 'Tree' },
@@ -49,6 +54,8 @@ interface CodebookToolbarProps {
   onExportCodebook?: (format: 'native' | 'qdc') => void
   onImportCodebook?: (file: File) => void
   isExportingCodebook?: boolean
+  /** #1203 — an import is running: the button stays focusable and refuses. */
+  isImportingCodebook?: boolean
   /** Max segment count across all codes (from unfiltered data) for range slider bounds */
   dataSegMax: number
 }
@@ -72,6 +79,7 @@ export default function CodebookToolbar({
   onExportCodebook,
   onImportCodebook,
   isExportingCodebook,
+  isImportingCodebook,
   treeData,
   dataSegMax,
 }: CodebookToolbarProps) {
@@ -179,12 +187,16 @@ export default function CodebookToolbar({
           </button>
         )}
 
+        {/* #1203 — busy is `aria-disabled` + `aria-busy` + the click guard, never
+            `disabled` (#965): Chrome blurs a focused button that becomes disabled,
+            leaving a keyboard user on <body> for the whole request. */}
         {onExportCodebook && (
           <>
             <button
-              onClick={() => onExportCodebook('native')}
-              disabled={isExportingCodebook}
-              className="p-1.5 rounded-md text-mm-text-muted hover:text-mm-text-secondary hover:bg-mm-surface transition-colors disabled:opacity-50"
+              onClick={() => { if (!isExportingCodebook) onExportCodebook('native') }}
+              aria-disabled={isExportingCodebook || undefined}
+              aria-busy={isExportingCodebook || undefined}
+              className={`p-1.5 rounded-md text-mm-text-muted hover:text-mm-text-secondary hover:bg-mm-surface transition-colors ${BUSY_ICON_BUTTON}`}
               title="Export codebook (.mmcodebook)"
               aria-label="Export codebook as Mixed Measures format"
             >
@@ -202,13 +214,21 @@ export default function CodebookToolbar({
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0]
-                if (file) onImportCodebook(file)
                 e.target.value = ''
+                if (!file) return
+                // #1203 — refused at selection, before anything is uploaded, in
+                // this page's channel (its import refusals are toasts). A `.mmbackup`
+                // answered a 500 and a CSV "Expecting value: line 1 column 1".
+                const refusal = codebookFileRefusal(file)
+                if (refusal) { toast.error(refusal, { duration: 10_000 }); return }
+                onImportCodebook(file)
               }}
             />
             <button
-              onClick={() => importFileRef.current?.click()}
-              className="p-1.5 rounded-md text-mm-text-muted hover:text-mm-text-secondary hover:bg-mm-surface transition-colors"
+              onClick={() => { if (!isImportingCodebook) importFileRef.current?.click() }}
+              aria-disabled={isImportingCodebook || undefined}
+              aria-busy={isImportingCodebook || undefined}
+              className={`p-1.5 rounded-md text-mm-text-muted hover:text-mm-text-secondary hover:bg-mm-surface transition-colors ${BUSY_ICON_BUTTON}`}
               title="Import codebook (.mmcodebook or .qdc)"
               aria-label="Import codebook"
             >

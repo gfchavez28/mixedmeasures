@@ -14,17 +14,38 @@ import { OutOfDateDot, OUT_OF_DATE_DOT_COLOR } from './OutOfDateDot'
 afterEach(cleanup)
 
 describe('OutOfDateDot', () => {
-  it('is a named image — "out of date", not a title and not "stale"', () => {
+  it('is a named image — "out of date", not "stale"', () => {
     render(<OutOfDateDot />)
     const dot = screen.getByRole('img', { name: /out of date/i })
     expect(dot).toHaveAccessibleName('Out of date — recompute')
-    expect(dot).not.toHaveAttribute('title')
     expect(dot.textContent).toBe('')
   })
 
-  it('takes a variant name for a site whose fix is elsewhere', () => {
-    render(<OutOfDateDot label="Out of date — recompute in Analysis" />)
-    expect(screen.getByRole('img', { name: 'Out of date — recompute in Analysis' })).toBeInTheDocument()
+  /**
+   * #1261 — the name is for the tree; a sighted researcher needs the same words on
+   * hover. This test asserted the ABSENCE of a `title` (#1174's first version) —
+   * pinning the state that left the dot unexplained on screen.
+   */
+  it('carries the same words as its hover title, for every label', () => {
+    for (const label of [undefined, 'Out of date — recompute in Analysis']) {
+      render(<OutOfDateDot label={label} />)
+      const dot = screen.getByRole('img', { name: /out of date/i })
+      const words = label ?? 'Out of date — recompute'
+      // The pointer hovers the drawn dot, and its title is the name's words.
+      const drawn = dot.firstElementChild as HTMLElement
+      expect(drawn).toHaveAttribute('title', words)
+      expect(drawn).toHaveAttribute('aria-hidden', 'true')
+      cleanup()
+    }
+  })
+
+  it('#1261 — the hover title is NOT also its description (the words would be exposed twice)', () => {
+    // A `title` beside the `aria-label` on one element: Chrome measured name AND
+    // description both set to the sentence. The named element carries no title.
+    render(<OutOfDateDot />)
+    const dot = screen.getByRole('img', { name: /out of date/i })
+    expect(dot).not.toHaveAttribute('title')
+    expect(dot).toHaveAccessibleDescription('')
   })
 
   it('is NOT a tab stop — a static badge, one per row would cost a stop per row (#559)', () => {
@@ -36,7 +57,8 @@ describe('OutOfDateDot', () => {
 
   it('pulses only under motion-safe, never bare', () => {
     render(<OutOfDateDot />)
-    const classes = screen.getByRole('img', { name: /out of date/i }).className.split(/\s+/)
+    const drawn = screen.getByRole('img', { name: /out of date/i }).firstElementChild as HTMLElement
+    const classes = drawn.className.split(/\s+/)
     expect(classes).toContain('motion-safe:animate-pulse')
     expect(classes).not.toContain('animate-pulse')
   })

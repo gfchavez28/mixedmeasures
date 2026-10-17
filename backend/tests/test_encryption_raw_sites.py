@@ -354,8 +354,10 @@ def test_encrypted_restore_foreign_backup_rejected_before_mutation(enc, tmp_path
 
     # Simulate a different machine: same backup file, a DIFFERENT active key.
     monkeypatch.setenv("MM_ENCRYPTION_KEY", WRONG)
-    with pytest.raises(ValueError, match="could not be opened"):
+    # #1140: every stop before the swap is `RestoreNotStarted`, and says so.
+    with pytest.raises(backup.RestoreNotStarted, match="could not be opened") as exc:
         backup.restore_from_backup(backups / info.filename, enc, docs, media, backups)
+    assert "Nothing was changed" in str(exc.value) and exc.value.status_code == 400
 
     # Fail-fast: no pre-restore safety backup was written, live DB untouched.
     assert list(backups.glob("pre_restore_*.mmbackup")) == []

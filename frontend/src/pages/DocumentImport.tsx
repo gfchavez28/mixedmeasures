@@ -15,6 +15,7 @@ import { DOCUMENT_ACCEPT, DOCUMENT_FORMAT_LABEL, isSupportedDocumentFile } from 
 import { checkImportFiles } from '@/lib/upload-limits'
 import { useStepFocus } from '@/hooks/useStepFocus'
 import UploadLimitNote from '@/components/UploadLimitNote'
+import ImportStepRail from '@/components/ImportStepRail'
 import { toast } from 'sonner'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
 
@@ -87,6 +88,17 @@ export default function DocumentImport() {
     ...(isMultiFile ? [{ key: 'importing' as Step, label: 'Import' }] : []),
     { key: 'results', label: 'Results' },
   ]
+
+  // #1184: where each step sits on the rail. A single-file import passes through
+  // `importing`, which is not on its rail: Configure is done and the import is on
+  // its way to Results, so Results is current (`findIndex` gave −1, and the rail
+  // read as not started while the document imported).
+  const railAt: Record<Step, Step> = {
+    upload: 'upload',
+    segmentation: 'segmentation',
+    importing: isMultiFile ? 'importing' : 'results',
+    results: 'results',
+  }
 
   const stepIndex = steps.findIndex(s => s.key === step)
   const stepHeadingRef = useStepFocus(step)
@@ -213,27 +225,15 @@ export default function DocumentImport() {
         <span className="text-sm font-medium text-mm-text">Import</span>
       </div>
 
-      {/* Step indicator */}
-      <nav aria-label="Import progress" className="flex items-center justify-between mb-8">
-        {steps.map((s, i) => (
-          <div key={s.key} className="flex items-center" aria-current={stepIndex === i ? 'step' : undefined}>
-            <div className={cn(
-              'w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium',
-              stepIndex === i
-                ? 'bg-purple-600 text-white'
-                : stepIndex > i
-                  ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
-                  : 'bg-mm-bg text-mm-text-faint'
-            )}>
-              {i + 1}
-            </div>
-            <span className="ml-2 text-sm font-medium">{s.label}</span>
-            {i < steps.length - 1 && (
-              <ChevronRight className="w-4 h-4 mx-4 text-mm-text-faint" />
-            )}
-          </div>
-        ))}
-      </nav>
+      {/* #1184: the shared rail — which also moves this page off the raw
+          `bg-purple-600 text-white` onto the purple fill tokens (#1009/#1016). */}
+      <ImportStepRail
+        label="Import progress"
+        steps={steps}
+        current={railAt[step]}
+        accent="purple"
+        className="mb-8"
+      />
 
       {/* #1011: where focus lands when the step changes. A single-file import
           passes through `importing`, which is not on the rail. */}

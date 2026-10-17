@@ -1152,3 +1152,135 @@ def test_declared_rules_round_trip_in_real_r(db_session):
     assert actual["grade_has_99"] == 0.0, "declared 99 became an R value"
     assert actual["grade_has_pnts"] == 1.0, "REPLACE text lost on the way to R"
     assert actual["consent_has_na"] == 1.0, "[]-kept N/A lost on the way to R"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #1244 — split-half in the variable group's OWN order, not column-id order.
+#
+# Since #710 the group's item order decides split-half's odd/even halves. The
+# export sorted the items by column id, which every fixture above happens to
+# share with the group order (members added in id order), so the round-trip
+# could not see it: after a reorder the app showed r = −0.13 and the script
+# printed 1.0. This fixture's group order is NOT its id order.
+# ═══════════════════════════════════════════════════════════════════════════
+
+ORDER_PID = 961
+ORDER_DOMAIN = 9620
+ID_ORDER_DOMAIN = 9621
+#: Column ids rise A < B < C < D; the group lists them A, C, B, D.
+ORDER_COLS = {"ItemA": 9611, "ItemB": 9612, "ItemC": 9613, "ItemD": 9614}
+GROUP_ORDER = ["ItemA", "ItemC", "ItemB", "ItemD"]
+#: Ten complete records, found by a seeded search over 1..5 items for a fixture
+#: where both splits give a POSITIVE correlation that differs from the other's:
+#: group order → halves A,B | C,D, r ≈ 0.45; id order → halves A,C | B,D,
+#: r ≈ 0.76.
+ORDER_DATA = {
+    "ItemA": [5, 5, 1, 4, 4, 2, 5, 5, 5, 4],
+    "ItemB": [5, 3, 2, 4, 2, 1, 5, 4, 5, 4],
+    "ItemC": [5, 4, 1, 5, 4, 5, 5, 2, 4, 5],
+    "ItemD": [4, 3, 1, 3, 5, 1, 5, 1, 2, 5],
+}
+
+
+def _seed_reordered_group(db):
+    db.add(Project(id=ORDER_PID, name="Reordered group", user_id=1))
+    db.flush()
+    db.add(Dataset(id=9610, project_id=ORDER_PID, name="Survey"))
+    db.flush()
+    labels = json.dumps(["1", "2", "3", "4", "5"])
+    for seq, (name, cid) in enumerate(ORDER_COLS.items()):
+        db.add(DatasetColumn(id=cid, dataset_id=9610, column_code=name, column_name=name,
+                             column_text=name, column_type="ordinal", scale_labels=labels,
+                             sequence_order=seq, display_order=seq))
+    db.flush()
+    for r in range(10):
+        db.add(DatasetRow(id=96100 + r, dataset_id=9610))
+        db.flush()
+        for name, cid in ORDER_COLS.items():
+            v = ORDER_DATA[name][r]
+            db.add(DatasetValue(row_id=96100 + r, column_id=cid,
+                                value_text=str(v), value_numeric=float(v)))
+    # The state a reorder leaves — or a group whose items were added in this order.
+    db.add(AnalysisDomain(id=ORDER_DOMAIN, project_id=ORDER_PID, name="Scale", sequence_order=0))
+    db.flush()
+    for seq, name in enumerate(GROUP_ORDER):
+        db.add(AnalysisDomainMember(domain_id=ORDER_DOMAIN, member_type="column",
+                                    member_id=ORDER_COLS[name], sequence_order=seq))
+    db.add(StatisticalTest(id=9630, project_id=ORDER_PID, test_type="split_half",
+                           target_type="analysis_domain", target_id=ORDER_DOMAIN,
+                           config="{}", result_data="{}"))
+    db.flush()
+    return db.get(User, 1)
+
+
+_ORDER_RUNNER = r'''
+invisible(capture.output(suppressWarnings(suppressMessages(
+  source("__SETUP__", echo = FALSE)
+))))
+emit <- function(k, v) cat("RT", k, format(v, digits = 12, scientific = TRUE), "\n")
+emit("sh_r", sh_r); emit("sh_sb", sh_sb)
+'''
+
+
+@pytest.mark.skipif(not r_support.HAS_R, reason=r_support.SKIP_REASON_R)
+def test_split_half_follows_the_groups_order_not_column_ids(db_session):
+    """#1244: the exported split-half reproduces the app's on a group whose order
+    is not its column-id order.
+
+    ⚠️ Both splits give a POSITIVE r on purpose. The app clamps a negative
+    Spearman–Brown to 0 and the R script does not (#1245, outside this fix), so
+    a fixture where either split went negative could pass or fail on the clamp
+    rather than on the split.
+    """
+    db = db_session
+    user = _seed_reordered_group(db)
+    app = compute_statistical_test(db, db.get(StatisticalTest, 9630))
+    assert app["half1_items"] == ["ItemA", "ItemB"]  # the group's order decided it
+
+    raw = asyncio.run(_export_zip_bytes(ORDER_PID, user, db))
+    with tempfile.TemporaryDirectory() as d:
+        workdir = Path(d)
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            zf.extractall(workdir)
+            setup_name = next(n for n in zf.namelist() if n.endswith(".R"))
+        script_text = (workdir / setup_name).read_text(encoding="utf-8")
+        frame = re.search(r"\w+_items <- data\.frame\((.*?)\n\)", script_text, re.S)
+        assert frame, "the export emitted no split-half item frame"
+        emitted = re.findall(r'c\("(\w+)"\)', frame.group(1))
+        assert emitted == [name.lower() for name in GROUP_ORDER], emitted
+
+        runner = workdir / "runner.R"
+        runner.write_text(_ORDER_RUNNER.replace("__SETUP__", setup_name), encoding="utf-8")
+        proc = subprocess.run(
+            [r_support.RSCRIPT, runner.name],
+            cwd=str(workdir), capture_output=True, text=True, timeout=300,
+        )
+        assert proc.returncode == 0, (
+            f"exported R script failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+        actual = {}
+        for line in proc.stdout.splitlines():
+            m = re.match(r"^RT (\w+)\s+([-\d.eE+]+)\s*$", line.strip())
+            if m:
+                actual[m.group(1)] = float(m.group(2))
+
+    assert actual["sh_r"] == pytest.approx(app["split_half_r"], abs=0.001)
+    assert actual["sh_sb"] == pytest.approx(app["spearman_brown"], abs=0.001)
+
+    # Discrimination: the column-id order gives a different positive coefficient,
+    # so the assertions above could not pass on the old sort. Read through the
+    # app's own computation, on a second group over the same items in id order
+    # (added after the export, so the script carries one split-half).
+    db.add(AnalysisDomain(id=ID_ORDER_DOMAIN, project_id=ORDER_PID, name="Id order",
+                          sequence_order=1))
+    db.flush()
+    for seq, cid in enumerate(sorted(ORDER_COLS.values())):
+        db.add(AnalysisDomainMember(domain_id=ID_ORDER_DOMAIN, member_type="column",
+                                    member_id=cid, sequence_order=seq))
+    db.add(StatisticalTest(id=9631, project_id=ORDER_PID, test_type="split_half",
+                           target_type="analysis_domain", target_id=ID_ORDER_DOMAIN,
+                           config="{}"))
+    db.flush()
+    by_id = compute_statistical_test(db, db.get(StatisticalTest, 9631))
+    assert app["split_half_r"] > 0 and by_id["split_half_r"] > 0
+    assert abs(app["split_half_r"] - by_id["split_half_r"]) > 0.2

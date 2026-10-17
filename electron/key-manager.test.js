@@ -11,8 +11,11 @@ const {
   importRecoveryKey,
   saveRecoveryKeyToFile,
   recoveryKeySaveOptions,
+  recoveryKeyFileContents,
+  startFreshAdvice,
   RECOVERY_KEY_FILE_NAME,
 } = require('./key-manager')
+const { MAX_FATAL_CHARS } = require('./fatal-error')
 const path = require('node:path')
 
 const KEY_FILE = '/userData/mm-encryption.key'
@@ -285,6 +288,78 @@ test('resolveKey: plaintext DB beats keyring-unavailable in reason specificity',
   const fs = makeFs({ [DB_FILE]: PLAINTEXT_DB })
   const r = resolveKey({ safeStorage: makeSafeStorage({ backend: 'basic_text' }), keyFilePath: KEY_FILE, dbFilePath: DB_FILE, fs, randomBytes: fixedRandom })
   assert.equal(r.reason, 'existing_plaintext_db')
+})
+
+// --- What the key errors and the recovery file tell a researcher (#1120, #1185) --
+//
+// These sentences reach the crash dialog verbatim (fatal-error.js::crashDialogText's
+// startupError arm), and nothing else pinned them: the tests above assert `e.code`.
+
+/** The message `resolveKey` throws for one stored state. */
+function keyErrorMessage({ seed, safeStorage, dbFilePath = DB_FILE }) {
+  try {
+    resolveKey({ safeStorage, keyFilePath: KEY_FILE, dbFilePath, fs: makeFs(seed), randomBytes: fixedRandom })
+  } catch (e) {
+    return e.message
+  }
+  assert.fail('resolveKey did not throw')
+}
+
+const DATA_FOLDER = path.dirname(DB_FILE)
+const KEYRING_DOWN = { seed: { [KEY_FILE]: Buffer.from('ENC:' + FIXED_KEY) }, safeStorage: makeSafeStorage({ available: false }) }
+const KEY_DAMAGED = { seed: { [KEY_FILE]: Buffer.from('ENC:not-a-valid-key') }, safeStorage: makeSafeStorage() }
+const KEY_MISSING = { seed: { [DB_FILE]: ENCRYPTED_DB }, safeStorage: makeSafeStorage() }
+
+test('#1120: the keyring-unavailable error offers no recovery key — one cannot be stored without the keyring', () => {
+  const msg = keyErrorMessage(KEYRING_DOWN)
+  assert.doesNotMatch(msg, /recovery key/i)
+  assert.match(msg, /Start the system keyring/)
+  assert.match(msg, /still on this computer, unchanged/)
+})
+
+test('#1185: a missing key file says to set the whole FOLDER aside, by its path — never "the database file"', () => {
+  const msg = keyErrorMessage(KEY_MISSING)
+  assert.doesNotMatch(msg, /database file aside/)
+  assert.match(msg, /choose Quit, rename the folder below/)
+  assert.ok(msg.endsWith(`The folder is:\n${DATA_FOLDER}`), msg)
+})
+
+test('#1120: a damaged key file gets a next step, and names the folder', () => {
+  const msg = keyErrorMessage(KEY_DAMAGED)
+  assert.match(msg, /^The stored encryption key file is damaged/)
+  assert.match(msg, /If you saved a recovery key, keep that file\./)
+  assert.ok(msg.endsWith(`The folder is:\n${DATA_FOLDER}`), msg)
+})
+
+test('#1185: the start-fresh advice names the folder that HOLDS the database, not the database', () => {
+  const advice = startFreshAdvice(path.join('/home/me/.config/Mixed Measures', 'mixedmeasures.db'))
+  assert.ok(advice.endsWith('The folder is:\n/home/me/.config/Mixed Measures'), advice)
+  assert.doesNotMatch(advice, /mixedmeasures\.db/)
+})
+
+test('#1185: with a long folder path every key error still fits the crash dialog whole', () => {
+  // truncateForDialog cuts a message at its END, which is where the folder is — so
+  // a cut message would name a folder that does not exist.
+  const folder = '/' + 'a-deeply-nested-folder/'.repeat(12) + 'Mixed Measures'
+  const db = path.join(folder, 'mixedmeasures.db')
+  const states = [
+    KEYRING_DOWN,
+    KEY_DAMAGED,
+    { seed: { [db]: ENCRYPTED_DB }, safeStorage: makeSafeStorage() },
+  ]
+  for (const state of states) {
+    const msg = keyErrorMessage({ ...state, dbFilePath: db })
+    assert.ok(msg.length <= MAX_FATAL_CHARS, `${msg.length} chars: ${msg}`)
+  }
+  assert.ok(keyErrorMessage({ seed: { [db]: ENCRYPTED_DB }, safeStorage: makeSafeStorage(), dbFilePath: db }).endsWith(folder))
+})
+
+test('#1120: the recovery file does not send a researcher to a new machine with it — a project file is the way', () => {
+  const text = recoveryKeyFileContents(FIXED_KEY)
+  assert.doesNotMatch(text, /new machine/i)
+  assert.match(text, /keychain is lost or reset\./)
+  assert.match(text, /Export Project \(\.mmproject\) for each project, then Import Project/)
+  assert.match(text, new RegExp(`Recovery key: ${FIXED_KEY}`))
 })
 
 test('resolveKey: missing dbFilePath is a wiring error, not a silent skip', () => {

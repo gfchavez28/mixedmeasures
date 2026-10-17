@@ -1372,3 +1372,100 @@ def test_snapshot_rotation_breaks_created_at_ties_deterministically(db_session):
         "the rotation orders by created_at alone, so which snapshot counts as "
         f"oldest is undefined among the tied rows: {ordered_cols}"
     )
+
+
+# ── #1199: a clock set back must not rotate away the snapshot just taken ─────
+#
+# `created_at` is the database's CURRENT_TIMESTAMP (naive UTC). After a clock is
+# set back, rows written earlier carry stamps LATER than now, and ordered by
+# `created_at` they outranked every new snapshot: each was deleted at creation,
+# and a restore's "Pre-restore" undo point was gone before the canvas was replaced.
+
+from datetime import datetime as _dt, timedelta as _td
+
+import app.services.canvas as canvas_service
+from app.services.canvas import SNAPSHOT_MAX
+
+_FUTURE = _dt(2030, 1, 1)
+
+
+def _put_snapshot(db, canvas_id, name, created_at, themes=()):
+    data = {"format_version": 1, "themes": [
+        {"id": 1000 + i, "name": n, "doc_order": i} for i, n in enumerate(themes)
+    ], "relationships": [], "pending_items": []}
+    s = CanvasSnapshot(canvas_id=canvas_id, name=name, snapshot_data=json.dumps(data),
+                       theme_count=len(themes), created_at=created_at)
+    db.add(s)
+    db.flush()
+    return s
+
+
+def _clock_reads(monkeypatch, at):
+    """The rotation's `now` reads `at` (UTC); the INSERT's CURRENT_TIMESTAMP does not."""
+    class Fixed(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return at.replace(tzinfo=tz) if tz is not None else at
+    monkeypatch.setattr(canvas_service, "datetime", Fixed)
+
+
+def test_a_new_snapshot_survives_ten_future_dated_ones(db_session):
+    p = _create_project(db_session)
+    c = _create_canvas(db_session, p.id)
+    future = [_put_snapshot(db_session, c.id, f"f{i}", _FUTURE + _td(hours=i)).id for i in range(10)]
+
+    new = create_snapshot(db_session, c.id, "taken after the clock was set back")
+
+    ids = {s.id for s in list_snapshots(db_session, c.id)}
+    assert new.id in ids, "the rotation deleted the snapshot it had just created"
+    assert len(ids) == SNAPSHOT_MAX
+    assert future[0] not in ids, "the oldest future-dated snapshot is the one to go"
+
+
+def test_future_dated_snapshots_rotate_out_before_real_older_ones(db_session):
+    """Kills the removal of rule (b): never deleting the new one is not enough — by
+    `created_at` the two REAL older snapshots would go before eight future ones."""
+    p = _create_project(db_session)
+    c = _create_canvas(db_session, p.id)
+    real = [_put_snapshot(db_session, c.id, f"r{i}", _dt(2026, 10, 1 + i)).id for i in range(2)]
+    future = [_put_snapshot(db_session, c.id, f"f{i}", _FUTURE + _td(hours=i)).id for i in range(8)]
+
+    create_snapshot(db_session, c.id, "new")
+
+    ids = {s.id for s in list_snapshots(db_session, c.id)}
+    assert set(real) <= ids, "a real snapshot was rotated out ahead of a future-dated one"
+    assert future[0] not in ids and set(future[1:]) <= ids
+
+
+def test_the_snapshot_just_created_survives_when_its_own_stamp_reads_future(db_session, monkeypatch):
+    """Kills the removal of rule (a). The rotation's clock reads 2000, so EVERY row —
+    the one just inserted too — is "future"; (b) alone orders the new one (the
+    earliest of them) first and deletes it."""
+    p = _create_project(db_session)
+    c = _create_canvas(db_session, p.id)
+    for i in range(10):
+        _put_snapshot(db_session, c.id, f"f{i}", _FUTURE + _td(hours=i))
+    _clock_reads(monkeypatch, _dt(2000, 1, 1))
+
+    new = create_snapshot(db_session, c.id, "new")
+
+    assert new.id in {s.id for s in list_snapshots(db_session, c.id)}
+
+
+def test_a_restore_keeps_its_undo_point_under_a_clock_set_back(db_session):
+    """The door: restoring with ten future-dated snapshots kept the canvas from
+    the snapshot and deleted the "Pre-restore" one at creation — no way back."""
+    p = _create_project(db_session)
+    c = _create_canvas(db_session, p.id)
+    create_theme(db_session, c.id, "Work before the restore")
+    target = _put_snapshot(db_session, c.id, "target", _FUTURE, themes=("Restored A",))
+    for i in range(1, 10):
+        _put_snapshot(db_session, c.id, f"f{i}", _FUTURE + _td(hours=i))
+
+    restore_snapshot(db_session, c, target)
+
+    pre = [s for s in list_snapshots(db_session, c.id) if s.name.startswith("Pre-restore")]
+    assert len(pre) == 1, "the restore's undo point was rotated away"
+    assert [t["name"] for t in json.loads(pre[0].snapshot_data)["themes"]] == ["Work before the restore"]
+    themes = db_session.query(CanvasTheme).filter(CanvasTheme.canvas_id == c.id).all()
+    assert [t.name for t in themes] == ["Restored A"]

@@ -1,10 +1,10 @@
 """Project portability API — export/import projects and codebooks."""
 
+import errno
 import json
 import logging
 import os
 import re
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -326,6 +326,24 @@ async def validate_import_endpoint(
             os.unlink(tmp_path)
 
 
+def _import_failure(import_mode: str, *, disk_full: bool) -> str:
+    """What a failed import says (#1225). "Nothing was changed" is true since the files are
+    staged: a failure before the commit changes neither the database nor a file (the safety
+    copy, if one was written, is a NEW file). A merge names itself, because the Merge page
+    shows the server's sentence first (#1232) and a merge is not "an import" to the
+    researcher who pressed Merge."""
+    merging = import_mode == "merge"
+    if disk_full:
+        what, verb = ("merge this file", "merge") if merging else ("import this project", "import")
+        return (
+            f"There is not enough free disk space to {what}. Nothing was changed. "
+            f"Free some space and {verb} the file again."
+        )
+    failed = ("The merge could not be completed" if merging
+              else "Project import failed")
+    return f"{failed}, and nothing was changed. Check server logs for details."
+
+
 @router.post("/import-project", response_model=ProjectImportResult)
 async def import_project_endpoint(
     file: UploadFile,
@@ -438,19 +456,11 @@ async def import_project_endpoint(
             }),
         )
         db.add(audit)
-        db.commit()
-
-        # J3-1 overwrite: imported files were written under the NEW project id; the
-        # deleted target's files still sit under its OLD id. Clean them up post-commit.
-        # (Merge writes into the SAME project id, so no stale-dir cleanup — overwrite only.)
-        if import_mode == "overwrite" and target_project_id is not None and target_project_id != new_id:
-            for base in (get_documents_dir(), get_media_dir()):
-                old_dir = base / str(target_project_id)
-                try:
-                    if old_dir.is_dir():
-                        shutil.rmtree(old_dir)
-                except Exception:
-                    logger.warning("Failed to clean up overwritten project files at %s", old_dir)
+        # #1225: the import's staged files are moved into place by the session's
+        # `after_commit` (and an overwrite's replaced folders set aside and removed —
+        # what this endpoint used to `rmtree` itself, and only when the ids differed).
+        # Off the event loop: that removal can be gigabytes.
+        await run_in_threadpool(db.commit)
 
         return ProjectImportResult(
             project_id=new_id,
@@ -462,15 +472,22 @@ async def import_project_endpoint(
         )
     except MergeDivergenceError as e:
         # Track J · J3-2c: structured refusal (per-source / per-code diff) for the UI.
-        db.rollback()
+        # (A rollback discards the import's staged files — off the loop, #1225.)
+        await run_in_threadpool(db.rollback)
         raise HTTPException(409, detail=e.payload)
     except ValueError as e:
-        db.rollback()
+        await run_in_threadpool(db.rollback)
         raise HTTPException(400, str(e))
-    except Exception as e:
-        db.rollback()
+    except OSError as e:
+        await run_in_threadpool(db.rollback)
         logger.error("Project import failed: %s", e, exc_info=True)
-        raise HTTPException(500, "Project import failed. Check server logs for details.")
+        if e.errno == errno.ENOSPC:
+            raise HTTPException(507, _import_failure(import_mode, disk_full=True))
+        raise HTTPException(500, _import_failure(import_mode, disk_full=False))
+    except Exception as e:
+        await run_in_threadpool(db.rollback)
+        logger.error("Project import failed: %s", e, exc_info=True)
+        raise HTTPException(500, _import_failure(import_mode, disk_full=False))
     finally:
         if tmp_path.exists():
             os.unlink(tmp_path)
@@ -549,6 +566,22 @@ async def export_codebook_endpoint(
 
 # ── Codebook import ─────────────────────────────────────────────────────
 
+#: The codebook upload's cap. Named because the client refuses an over-limit file at
+#: SELECTION (#1203), so its number must be this one —
+#: `frontend/src/lib/upload-limits.ts::MAX_CODEBOOK_FILE_BYTES`, held together by
+#: `test_upload_limit_mirror.py`.
+MAX_CODEBOOK_UPLOAD_SIZE = 10 * 1024 * 1024
+
+
+def _not_a_codebook(filename: str | None) -> str:
+    """The refusal for a file that is not a codebook of either kind (#1203)."""
+    named = f"“{filename}”" if filename else "That file"
+    return (
+        f"{named} is not a codebook file. Import codebook takes a Mixed Measures "
+        "codebook (.mmcodebook) or a REFI-QDA codebook (.qdc)."
+    )
+
+
 @router.post("/{project_id}/import-codebook", response_model=CodebookImportResult)
 async def import_codebook_endpoint(
     project_id: int,
@@ -561,27 +594,42 @@ async def import_codebook_endpoint(
     # all — it passed project_id straight to the import service, so under
     # multi-tenant auth a file holder could inject codes into any project.
     _get_project_or_404(db, project_id, user.id)
-    content = await read_upload_with_limit(file, 10 * 1024 * 1024)
+    content = await read_upload_with_limit(file, MAX_CODEBOOK_UPLOAD_SIZE)
     # "utf-8-sig" strips a leading BOM if present and is byte-identical to "utf-8"
     # when absent. REQUIRED for foreign files: QualCoder writes its codebook with
     # encoding='utf-8-sig' (refi.py::export_codebook), and a plain utf-8 decode
     # leaves U+FEFF at the head — which str.lstrip() does NOT remove (it is not
     # whitespace), so the XML sniff below missed and every QualCoder .qdc was
     # rejected as malformed JSON: "Unexpected UTF-8 BOM". #760.
-    content_str = content.decode("utf-8-sig")
+    #
+    # #1203: what is not a codebook is refused HERE, in a sentence naming the file,
+    # never inside the `try` below — its `except Exception` turns an HTTPException
+    # into a 500. A binary file (a project or a backup is a ZIP) answered a 500
+    # from this decode, which sat outside that `try`; a CSV toasted the parser's
+    # "Expecting value: line 1 column 1 (char 0)"; a JSON list a 500 from `.get`.
+    try:
+        content_str = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(400, _not_a_codebook(file.filename))
 
     # Detect format by content (XML vs JSON)
     is_xml = content_str.lstrip().startswith("<?xml") or content_str.lstrip().startswith("<")
+    if not is_xml:
+        try:
+            data = json.loads(content_str)
+        except json.JSONDecodeError:
+            raise HTTPException(400, _not_a_codebook(file.filename))
+        if not isinstance(data, dict) or data.get("format_type") != "mmcodebook":
+            raise HTTPException(400, _not_a_codebook(file.filename))
 
     try:
         if is_xml:
             counts = import_codebook_qdc(db, project_id, content_str)
             fmt = "qdc"
         else:
-            data = json.loads(content_str)
             counts = import_codebook_native(db, project_id, data)
             fmt = "native"
-    except (ValueError, json.JSONDecodeError) as e:
+    except ValueError as e:
         db.rollback()
         raise HTTPException(400, str(e))
     except Exception as e:

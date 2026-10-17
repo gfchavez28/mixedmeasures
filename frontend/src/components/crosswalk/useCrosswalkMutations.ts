@@ -266,10 +266,22 @@ interface UseCrosswalkMutationsOptions {
 
 // ─── Invalidation helpers ─────────────────────────────────────────────────────
 
+/** The saved statistical tests (α, split-half, t-test, ANOVA) live on the
+ * Analysis page, under one key. Every crosswalk door that changes a group's
+ * membership, pairing or item ORDER marks some of them out of date on the
+ * server (#1228: a reorder moves split-half), and the list's five-minute
+ * `staleTime` (`AnalysisView`) would otherwise show the cached, unmarked list on
+ * a return within it. Inactive on this page, so invalidating it costs no
+ * request. */
+function invalidateSavedTests(qc: QueryClient, pid: number) {
+  qc.invalidateQueries({ queryKey: ['statistical-tests', pid] })
+}
+
 function invalidateCore(qc: QueryClient, pid: number) {
   qc.invalidateQueries({ queryKey: ['project-columns', pid] })
   qc.invalidateQueries({ queryKey: ['equivalence-groups', pid] })
   qc.invalidateQueries({ queryKey: ['analysis-domains', pid] })
+  invalidateSavedTests(qc, pid)
 }
 
 function invalidateWithMetrics(qc: QueryClient, pid: number) {
@@ -744,6 +756,8 @@ export function useCrosswalkMutations({
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['analysis-domains', projectId] })
+      // #1228: the item order decides split-half's halves; the server marks it.
+      invalidateSavedTests(queryClient, projectId)
     },
   })
 

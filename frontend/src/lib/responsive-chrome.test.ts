@@ -793,3 +793,82 @@ describe('#998 — the panel rail yields at a short viewport instead of starving
     expect("className={cn('flex-[2]', PANEL_EXPANDED)}").not.toMatch(/'flex-(?:\[2\]|1) min-h-0'/)
   })
 })
+
+/**
+ * #1180 — the analysis sidebars have a PIXEL floor, and it fits under their ceiling.
+ *
+ * Both pages sized the sidebar in percent only (22 / min 15 / max 32), so at 640×360
+ * it was 136 px and the group detail's button wrapped to three lines. Measured on the
+ * live page at 640: 136 → 200 px, the main area 483 → 419. jsdom computes no layout,
+ * so this pins TECHNIQUE: one shared size object, a px minimum, and the arithmetic
+ * that keeps that minimum below the percentage maximum at the narrowest group.
+ */
+describe('#1180 — the analysis sidebars have a pixel floor under their ceiling', () => {
+  it('the floor is pixels and the ceiling, as a percentage of the narrowest group, is above it', async () => {
+    const { ANALYSIS_SIDEBAR_PANEL, NARROWEST_ANALYSIS_GROUP_PX } = await import('./analysis-sidebar')
+    // react-resizable-panels: a string ending `px` is pixels; a unit-less string is percent.
+    expect(ANALYSIS_SIDEBAR_PANEL.minSize).toMatch(/^\d+px$/)
+    expect(ANALYSIS_SIDEBAR_PANEL.maxSize).toMatch(/^\d+$/)
+    const floorPx = parseInt(ANALYSIS_SIDEBAR_PANEL.minSize, 10)
+    const ceilingPx = (Number(ANALYSIS_SIDEBAR_PANEL.maxSize) / 100) * NARROWEST_ANALYSIS_GROUP_PX
+    // 32% of 623 is 199 — a ceiling BELOW a 200-px floor. That inversion is the trap.
+    expect(floorPx, `min ${floorPx}px exceeds max ${ceilingPx.toFixed(0)}px at a ${NARROWEST_ANALYSIS_GROUP_PX}px group`)
+      .toBeLessThanOrEqual(ceilingPx)
+    expect(NARROWEST_ANALYSIS_GROUP_PX).toBe(623)
+  })
+
+  it('the sidebar holds its PIXEL width across a window resize, so the floor cannot ratchet it', async () => {
+    // Measured: with the default relative behaviour, a visit at 640 raised the stored
+    // 22% to 32% and the sidebar came back ~410 px wide at 1280.
+    const { ANALYSIS_SIDEBAR_PANEL, ANALYSIS_DEFAULT_LAYOUT } = await import('./analysis-sidebar')
+    expect(ANALYSIS_SIDEBAR_PANEL.groupResizeBehavior).toBe('preserve-pixel-size')
+    expect(ANALYSIS_DEFAULT_LAYOUT.sidebar).toBe(Number(ANALYSIS_SIDEBAR_PANEL.defaultSize))
+    expect(ANALYSIS_DEFAULT_LAYOUT.sidebar + ANALYSIS_DEFAULT_LAYOUT.main).toBe(100)
+  })
+
+  it('both analysis pages size the sidebar from the ONE object, with no literal of their own', () => {
+    const pages = ['pages/AnalysisView.tsx', 'pages/QualitativeAnalysisView.tsx']
+    for (const rel of pages) {
+      const src = stripComments(read(rel))
+      const panels = src.match(/<Panel\s+id="sidebar"[^>]*>/g) ?? []
+      expect(panels, `${rel}: the sidebar Panel was not found — has it moved?`).toHaveLength(1)
+      expect(panels[0]).toContain('{...ANALYSIS_SIDEBAR_PANEL}')
+      expect(panels[0]).not.toMatch(/\b(?:minSize|maxSize|defaultSize|groupResizeBehavior)=/)
+      // A first visit has no stored layout; without one handed in, the library sized
+      // the floor against a ~568-px mount-time group and opened the sidebar at 449 px.
+      expect(src).toMatch(/defaultLayout=\{defaultLayout \?\? ANALYSIS_DEFAULT_LAYOUT\}/)
+    }
+  })
+
+  it('no default OptionRow puts a checkbox beside its label — it ran off a 200-px sidebar', () => {
+    // MEASURED at the floor: "Show individual variables" kept its width and the
+    // control column squeezed to 0, so "Split by variable" ran 72 px past the edge.
+    // A Select truncates; a checkbox's text cannot. Such a row is `fullWidth`.
+    const files = sourceFiles({ ext: 'tsx', floor: 100 }).filter(f => readFileSync(f, 'utf8').includes('<OptionRow'))
+    expect(files.length, 'the OptionRow call sites vanished — has it moved?').toBeGreaterThanOrEqual(2)
+    const offenders: string[] = []
+    let rows = 0
+    for (const abs of files) {
+      const src = stripComments(readFileSync(abs, 'utf8'))
+      for (const m of src.matchAll(/<OptionRow\b([^>]*)>([\s\S]*?)<\/OptionRow>/g)) {
+        rows++
+        if (!/\bfullWidth\b/.test(m[1]) && /type="checkbox"|<Checkbox\b|<Switch\b/.test(m[2])) {
+          offenders.push(`${srcRel(abs)}: ${m[1].trim().slice(0, 60)}`)
+        }
+      }
+    }
+    expect(rows, 'the scan found no OptionRow bodies — has the shape changed?').toBeGreaterThanOrEqual(20)
+    expect(offenders).toEqual([])
+  })
+
+  it("the group detail's indent leaves the button room at the floor", () => {
+    // 58 px of chrome (pl-8 + pr-3 + ml-3 + the rule) left Create scale score 111 of
+    // the 113 px it needs at 200; pl-4 + ml-2 gives back 20.
+    const src = stripComments(read('components/analysis/DomainPickerDetail.tsx'))
+    const cls = src.match(/data-testid=\{`domain-picker-detail-\$\{domain\.id\}`\}\s*className="([^"]+)"/)
+    expect(cls, 'the detail container was not found — has it moved?').toBeTruthy()
+    expect(cls![1]).toMatch(/\bpl-4\b/)
+    expect(cls![1]).toMatch(/\bml-2\b/)
+    expect(cls![1]).not.toMatch(/\bpl-8\b|\bml-3\b/)
+  })
+})

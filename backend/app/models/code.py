@@ -69,7 +69,9 @@ class Code(Base):
 
     # Relationships
     project = relationship("Project", back_populates="codes")
-    applications = relationship("CodeApplication", back_populates="code", cascade="all, delete-orphan")
+    # #1035: passive (project.py explains). `merge_codes` still flushes its
+    # reassignment before deleting the source code — see the comment there.
+    applications = relationship("CodeApplication", back_populates="code", cascade="all, delete-orphan", passive_deletes=True)
     category = relationship("CodeCategory", back_populates="codes")
     code_equivalence_group = relationship("CodeEquivalenceGroup", back_populates="codes")
     code_set = relationship("CodeSet", back_populates="codes")

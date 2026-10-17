@@ -17,7 +17,15 @@ import { provenanceFromDraft, type MachineAccess } from '@/lib/machine-coder'
 export const CODER_NAME_MAX_LENGTH = 50
 
 export interface CoderDraft {
-  action: 'match' | 'create' | 'skip'
+  /**
+   * 🔴 `null` = not answered yet (#1193). A name that is the same as an existing
+   * coder's starts here — never at `match` — and Import waits for the answer.
+   */
+  action: 'match' | 'create' | 'skip' | null
+  /**
+   * The coder a `match` lands on. Pre-set to the same-name coder when one exists,
+   * so choosing *An existing coder* is one click — but nothing is chosen until then.
+   */
   targetUserId: number | null
   /**
    * `match` onto an ARCHIVED coder: bring them back (#1031 c). Pre-set when the
@@ -42,14 +50,17 @@ export interface CoderDraft {
 
 export function initialDraft(candidate: CodingImportCoderCandidate): CoderDraft {
   return {
-    // 🔴 A confident local match is PRE-SELECTED but never applied on its own —
-    // the researcher still presses Import, which is what makes the mapping a
-    // decision rather than a default (the merge's R3 rule).
+    // 🔴 #1193 (decided 2026-10-13) — a same-name coder is NOT pre-selected. It was
+    // (the merge's R3 rule, "pressing Import confirms it"), and every install's
+    // default coder is called "Researcher", so a colleague's file chose the
+    // importing researcher's OWN coder — and a wrong match replaces that coder's
+    // code-set values and ratings, with no safety copy on this path. The name
+    // starts unanswered; the same-name coder is one click away (`targetUserId`).
     // ⚠️ A name with NOTHING to import starts at skip (found by driving): it was
     // asked for a kind, and "create" added an empty coder to the roster — or, on
     // an archived match, brought a coder back for no codings at all.
     action: candidate.rows_to_apply === 0 ? 'skip'
-      : candidate.local_user_id != null ? 'match' : 'create',
+      : candidate.local_user_id != null ? null : 'create',
     targetUserId: candidate.local_user_id,
     unarchive: candidate.local_user_id != null && candidate.local_archived,
     newUsername: candidate.name,
@@ -62,35 +73,25 @@ export function initialDraft(candidate: CodingImportCoderCandidate): CoderDraft 
 }
 
 /**
- * The mapping step's introduction — true of what `initialDraft` did (#1158).
+ * The mapping step's introduction (#1158, #1193).
  *
- * 🔴 It read *"Nothing is matched by name on your behalf"* above a card that had a
- * same-name coder ALREADY CHOSEN, on the screen that exists to get attribution right
- * (provenance, STRATEGY's question 3). The pre-selection is deliberate — pressing
- * Import is what makes it a decision (the merge's R3 rule) — so for 1.5.6 the COPY
- * changes, and whether to drop the default stays open. Counted from `initialDraft`
- * itself, so the sentence cannot disagree with the radios it introduces.
+ * #1158 shipped the copy route in 1.5.6: the page pre-selected a same-name coder
+ * under *"Nothing is matched by name on your behalf"*, so the sentence was
+ * counted from `initialDraft` to say what it had chosen. #1193 dropped the
+ * pre-selection itself, which makes the original sentence TRUE again — and
+ * `initialDraft` never starts a name at `match` (pinned by its test), so there is
+ * nothing left to count.
  */
-export function mappingIntro(candidates: readonly CodingImportCoderCandidate[]): string {
-  const preselected = candidates.filter(c => initialDraft(c).action === 'match').length
-  const lead = 'Every name in the file needs an answer.'
-  if (preselected === 0) {
-    return `${lead} Nothing is matched by name on your behalf — a name that looks like a `
-      + 'colleague’s is not evidence that it is theirs.'
-  }
-  if (preselected === 1) {
-    return `${lead} One name is the same as an existing coder’s, so that coder is chosen for `
-      + 'it to start with. Check it before you import — a name that looks like a colleague’s '
-      + 'is not evidence that the codings are theirs, and pressing Import confirms it.'
-  }
-  return `${lead} ${preselected} names are the same as existing coders’, so those coders are `
-    + 'chosen for them to start with. Check each one before you import — a name that looks '
-    + 'like a colleague’s is not evidence that the codings are theirs, and pressing Import '
-    + 'confirms each choice.'
-}
+export const MAPPING_INTRO =
+  'Every name in the file needs an answer. Nothing is matched by name on your behalf — '
+  + 'a name that looks like a colleague’s is not evidence that the codings are theirs.'
 
 /** The draft → the payload. Call only once `draftBlocker` is null. */
 export function toDecision(draft: CoderDraft): CodingImportDecision {
+  if (draft.action === null) {
+    // `draftBlocker` refuses an unanswered name first, so this is a wiring bug.
+    throw new Error('toDecision: this name has not been answered')
+  }
   if (draft.action === 'skip') return { action: 'skip' }
   if (draft.action === 'match') {
     return {
@@ -122,6 +123,11 @@ export function effectiveNewName(name: string, draft: CoderDraft): string {
  * its description (the upload step's `previewBlocker` shape).
  */
 export function draftBlocker(name: string, draft: CoderDraft): string | null {
+  if (draft.action === null) {
+    // #1193 — the radios this answers read *An existing coder* / *A new coder* /
+    // *Do not import these*.
+    return `Choose whether “${name}” is an existing coder, a new coder, or not imported.`
+  }
   if (draft.action === 'match' && draft.targetUserId == null) {
     return `Choose which coder “${name}” is.`
   }

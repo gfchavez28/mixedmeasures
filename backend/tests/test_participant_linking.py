@@ -103,9 +103,9 @@ def test_auto_fill_role_empty_string_value(db_session):
     assert participant.role is None
 
 
-# ── #418: linkable-rows payload carries identifying labels + full search text ──
-
-import asyncio
+# ── #418: linkable-rows carries identifying labels, and a search reaches every value ──
+# (#1053: the search moved to the server — `q` — so "every value is searchable"
+# is asserted by searching, not by reading a `search_text` the payload no longer has.)
 
 from app.models.user import User
 from app.routers.dataset import get_linkable_rows
@@ -113,8 +113,8 @@ from app.routers.dataset import get_linkable_rows
 
 def test_linkable_rows_display_and_search_values(db_session):
     """A dataset with NO demographic columns (Teacher_ID/School typed nominal)
-    must still yield identifying display_values and a search_text covering
-    every column's value — #418's blind-picker regression."""
+    must still yield identifying display_values, and a search must reach every
+    column's value — #418's blind-picker regression."""
     db = db_session
     db.add(Project(id=5, name="Fidelity", user_id=1))
     db.add(Dataset(id=5, project_id=5, name="Implementation Fidelity"))
@@ -137,17 +137,16 @@ def test_linkable_rows_display_and_search_values(db_session):
     db.flush()
     user = db.get(User, 1)
 
-    result = asyncio.run(get_linkable_rows(project_id=5, dataset_id=5, user=user, db=db))
+    result = get_linkable_rows(project_id=5, dataset_id=5, user=user, db=db)
     assert len(result["rows"]) == 1
     r = result["rows"][0]
     # Label: identifying (nominal/open_text/demographic) values, not numeric scores
     assert r["display_values"] == ["T05", "Maple Ridge"]
-    # Search: EVERY value, lowercased — "t05", "maple", and even the score match
-    assert "t05" in r["search_text"]
-    assert "maple ridge" in r["search_text"]
-    assert "74" in r["search_text"]
-    # The pre-#418 shape is preserved for demographic-typed columns (none here)
-    assert r["demographic_values"] == []
+    # Search: EVERY value, case folded — "t05", "maple", and even the score match
+    for term in ("t05", "maple ridge", "74"):
+        found = get_linkable_rows(project_id=5, dataset_id=5, user=user, db=db, q=term)
+        assert [x["row_id"] for x in found["rows"]] == [50], term
+    assert get_linkable_rows(project_id=5, dataset_id=5, user=user, db=db, q="zzz")["rows"] == []
 
 
 def test_linkable_rows_display_values_capped_at_three(db_session):
@@ -165,10 +164,13 @@ def test_linkable_rows_display_values_capped_at_three(db_session):
     db.flush()
     user = db.get(User, 1)
 
-    result = asyncio.run(get_linkable_rows(project_id=6, dataset_id=6, user=user, db=db))
+    result = get_linkable_rows(project_id=6, dataset_id=6, user=user, db=db)
     r = result["rows"][0]
     assert r["display_values"] == ["v0", "v1", "v2"]
-    assert all(f"v{i}" in r["search_text"] for i in range(5))
+    # The label stops at three; the search does not.
+    for i in range(5):
+        found = get_linkable_rows(project_id=6, dataset_id=6, user=user, db=db, q=f"v{i}")
+        assert [x["row_id"] for x in found["rows"]] == [60], i
 
 
 def test_linked_speaker_conversations_carry_id_and_name(db_session):

@@ -40,5 +40,33 @@ export function isSupportedProjectFile(filename: string): boolean {
 /** The `accept` attribute for a codebook import file input. */
 export const MMCODEBOOK_ACCEPT = '.mmcodebook,.qdc'
 
+/** Human-readable name for Import codebook's refusal sentence (#1203). */
+export const MMCODEBOOK_FORMAT_LABEL =
+  'a Mixed Measures codebook (.mmcodebook) or a REFI-QDA codebook (.qdc)'
+
+/**
+ * True when a picked file is a codebook (#1203) — either kind `MMCODEBOOK_ACCEPT`
+ * offers. Case-insensitive like the others: the server sniffs the CONTENT, not
+ * the name, so `CODES.QDC` imports fine.
+ */
+export function isSupportedCodebookFile(filename: string): boolean {
+  const name = filename.toLowerCase()
+  return name.endsWith('.mmcodebook') || name.endsWith('.qdc')
+}
+
 /** The `accept` attribute for a backup-restore file input. */
 export const MMBACKUP_ACCEPT = '.mmbackup'
+
+/** Human-readable name for Restore from a file's refusal sentence (#1163). */
+export const MMBACKUP_FORMAT_LABEL = 'a Mixed Measures backup (.mmbackup)'
+
+/**
+ * True when a picked file is a backup (#1163) — so Restore from a file refuses a
+ * wrong file itself, before it is uploaded. `accept` is only a hint to the picker:
+ * a 3 MB `interview.mp4` was POSTed whole and staged before the server said no.
+ * Case-insensitive, like `isSupportedProjectFile`: the server ignores case, and so
+ * does Chromium's `accept`, so `COPY.MMBACKUP` previews fine.
+ */
+export function isSupportedBackupFile(filename: string): boolean {
+  return filename.toLowerCase().endsWith('.mmbackup')
+}

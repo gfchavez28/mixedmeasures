@@ -12,7 +12,8 @@
  * - **`role="img"` + `aria-label`, and NO tab stop** — a static badge
  *   (the internal design notes, #559): a per-row focusable badge costs a
  *   keyboard user one stop per row for what the name already says in browse
- *   mode. `role="img"` is right here because there are no children to hide —
+ *   mode. `role="img"` is right here because its one child is the drawn dot,
+ *   itself `aria-hidden` (#1261) — nothing worth reading is made presentational.
  *   `ChartFigure.test.tsx`'s allowlist carries this file for that reason.
  * - **`motion-safe:animate-pulse`, never bare** — the pulse is the attention
  *   cue, and under `prefers-reduced-motion` the dot is simply steady.
@@ -46,10 +47,22 @@ export function OutOfDateDot({
   className?: string
 }) {
   return (
-    <span
-      role="img"
-      aria-label={label}
-      className={`inline-block shrink-0 rounded-full ${size === 'md' ? 'w-2 h-2' : 'w-1.5 h-1.5'} ${OUT_OF_DATE_DOT_COLOR} motion-safe:animate-pulse ${className}`.trim()}
-    />
+    // #1261 — the hover words for the eye, the name for the tree: the same sentence,
+    // on two elements. #1174 gave the dot its name and dropped the `title`s its sites
+    // had carried ("Stale — recompute"), so a sighted researcher saw an unexplained
+    // pulsing dot, or hovered onto the parent's title (a formula, a group's name).
+    // ⚠️ NOT a `title` beside the `aria-label` on one element: Chrome exposes that
+    // title as the DESCRIPTION too (measured — name and description both "Out of date
+    // — recompute in Analysis"), the words exposed twice; whether a reader speaks
+    // both is unverified (name-sweep run 12, #1287). The title sits on the
+    // aria-hidden dot inside, which is what the pointer hovers; a hidden element
+    // describes nothing. Its own title wins over a parent's on the dot.
+    <span role="img" aria-label={label} className={`inline-flex shrink-0 ${className}`.trim()}>
+      <span
+        aria-hidden="true"
+        title={label}
+        className={`inline-block rounded-full ${size === 'md' ? 'w-2 h-2' : 'w-1.5 h-1.5'} ${OUT_OF_DATE_DOT_COLOR} motion-safe:animate-pulse`}
+      />
+    </span>
   )
 }

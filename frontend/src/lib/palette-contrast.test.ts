@@ -56,6 +56,7 @@ import {
   TAILWIND_REFERENCE_RATIOS, AA_NORMAL, type Rgb,
 } from './contrast'
 import { SRC_DIR, sourceFiles } from '@/test-support/source-tree'
+import { stripComments } from './strip-comments'
 
 const SRC = SRC_DIR
 const PALETTE = parseTailwindPalette(
@@ -111,44 +112,55 @@ function expandBranches(chunk: string): string[] {
 }
 const UTIL_RE = new RegExp(String.raw`\b((?:[a-z-]+:)*)(text|bg)-(${HUES})-(\d{2,3})(?:/(\d{1,3}))?\b`, 'g')
 
-function scan() {
-  const pairs = new Map<string, Pair>()
-  const unparseable = new Set<string>()
+/**
+ * Every class string in one file, as (fg, bg) pairs — read from the file with its
+ * comments BLANKED (#1208). `STRING_RE` pairs quotes and backticks over raw text, and
+ * a comment's apostrophe or backtick shifts every pairing after it: at `23ea77c7`
+ * `ByTextTable.tsx` read as 89 pairs where its class strings hold 17, two of them
+ * (`amber-700 on orange-50`, `orange-700 on amber-100`) painted nowhere — passing
+ * only because both clear AA. `stripComments` blanks in place, so offsets survive.
+ */
+function addPairs(text: string, fileName: string, pairs: Map<string, Pair>, unparseable: Set<string>) {
+  const src = stripComments(text, fileName)
+  for (const m of src.matchAll(STRING_RE)) {
+    const raw = m[1] ?? m[2] ?? m[3] ?? ''
+    // ⚠️ Test for a PALETTE utility, not for `text-`: the app is full of
+    // `text-mm-*` tokens, and a looser test drags every one of them into the
+    // unparseable set the moment its string also uses an arbitrary variant.
+    if (!new RegExp(UTIL_RE.source).test(raw)) continue
+    // An arbitrary variant makes the prefix chain unreadable — record the file
+    // and skip, rather than filing its utilities under a guessed theme.
+    if (raw.includes('[&')) { unparseable.add(fileName.split('/').pop()!); continue }
 
-  for (const file of sourceFiles({ ext: 'both', floor: 250 })) {
-    const src = readFileSync(file, 'utf8')
-    for (const m of src.matchAll(STRING_RE)) {
-      const raw = m[1] ?? m[2] ?? m[3] ?? ''
-      // ⚠️ Test for a PALETTE utility, not for `text-`: the app is full of
-      // `text-mm-*` tokens, and a looser test drags every one of them into the
-      // unparseable set the moment its string also uses an arbitrary variant.
-      if (!new RegExp(UTIL_RE.source).test(raw)) continue
-      // An arbitrary variant makes the prefix chain unreadable — record the file
-      // and skip, rather than filing its utilities under a guessed theme.
-      if (raw.includes('[&')) { unparseable.add(file.split('/').pop()!); continue }
-
-      for (const chunk of expandBranches(raw)) {
-        const parsed = [...chunk.matchAll(UTIL_RE)].map(u => {
-          const parts = (u[1] ?? '').split(':').filter(Boolean)
-          return {
-            theme: (parts.includes('dark') ? 'dark' : 'light') as 'light' | 'dark',
-            // Resting text over a HOVER background is a combination nobody
-            // sees, so a pair is real only when both halves share the state.
-            state: parts.filter(p => p !== 'dark').sort().join('.'),
-            kind: u[2], shade: `${u[3]}-${u[4]}`, alpha: u[5] ? Number(u[5]) : null,
-          }
-        })
-        for (const fg of parsed.filter(p => p.kind === 'text')) {
-          for (const bg of parsed.filter(p => p.kind === 'bg')) {
-            if (fg.theme !== bg.theme || fg.state !== bg.state) continue
-            const key = `${fg.theme}|${fg.shade}|${bg.shade}|${bg.alpha ?? ''}`
-            const found = pairs.get(key)
-            if (found) found.count++
-            else pairs.set(key, { theme: fg.theme, fg: fg.shade, bg: bg.shade, alpha: bg.alpha, count: 1 })
-          }
+    for (const chunk of expandBranches(raw)) {
+      const parsed = [...chunk.matchAll(UTIL_RE)].map(u => {
+        const parts = (u[1] ?? '').split(':').filter(Boolean)
+        return {
+          theme: (parts.includes('dark') ? 'dark' : 'light') as 'light' | 'dark',
+          // Resting text over a HOVER background is a combination nobody
+          // sees, so a pair is real only when both halves share the state.
+          state: parts.filter(p => p !== 'dark').sort().join('.'),
+          kind: u[2], shade: `${u[3]}-${u[4]}`, alpha: u[5] ? Number(u[5]) : null,
+        }
+      })
+      for (const fg of parsed.filter(p => p.kind === 'text')) {
+        for (const bg of parsed.filter(p => p.kind === 'bg')) {
+          if (fg.theme !== bg.theme || fg.state !== bg.state) continue
+          const key = `${fg.theme}|${fg.shade}|${bg.shade}|${bg.alpha ?? ''}`
+          const found = pairs.get(key)
+          if (found) found.count++
+          else pairs.set(key, { theme: fg.theme, fg: fg.shade, bg: bg.shade, alpha: bg.alpha, count: 1 })
         }
       }
     }
+  }
+}
+
+function scan() {
+  const pairs = new Map<string, Pair>()
+  const unparseable = new Set<string>()
+  for (const file of sourceFiles({ ext: 'both', floor: 250 })) {
+    addPairs(readFileSync(file, 'utf8'), file, pairs, unparseable)
   }
   return { pairs: [...pairs.values()], unparseable }
 }
@@ -178,6 +190,24 @@ describe('#728 — the scan can see, and says when it cannot', () => {
     expect(PALETTE.size, 'tailwindcss/theme.css parsed no palette entries').toBeGreaterThan(200)
     expect(PALETTE.get('amber-600')).toBeDefined()
     expect(pairs.length, 'the source walk found almost no colour pairs').toBeGreaterThan(100)
+  })
+
+  /**
+   * #1208 — the scan reads code, not commentary. A comment holding an apostrophe and a
+   * backtick used to shift every quote pairing after it, so two real class strings
+   * read as one and paired one's text with the other's background.
+   */
+  it('reads class strings, never a pairing a comment invents', () => {
+    const fixture = [
+      "// don't trust `this",
+      "const a = <span className=\"bg-orange-50 text-orange-700\">A</span>",
+      "const b = <span className=\"bg-amber-100 text-amber-700\">B</span>",
+      "// the other `half",
+    ].join('\n')
+    const found = new Map<string, Pair>()
+    addPairs(fixture, 'fixture.tsx', found, new Set())
+    expect([...found.values()].map(p => `${p.fg} on ${p.bg}`).sort())
+      .toEqual(['amber-700 on amber-100', 'orange-700 on orange-50'])
   })
 
   it('resolves every pair it reports on', () => {

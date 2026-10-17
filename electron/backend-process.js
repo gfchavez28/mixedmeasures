@@ -5,6 +5,7 @@
 const net = require('node:net')
 const http = require('node:http')
 const path = require('node:path')
+const { backendSpawnFailureMessage } = require('./fatal-error')
 
 // Single source for the on-disk DB filename: buildSpawnEnv points the backend
 // at it, and key-manager's first-run sniff (an internal audit/M2) inspects it —
@@ -174,8 +175,8 @@ function waitForHealth(port, { timeoutMs = 60_000, intervalMs = 300, isExited = 
  *   period if it hasn't exited.
  * - Windows: no SIGTERM; taskkill the whole process tree (/T) forcefully (/F).
  *   NOTE: this is a hard kill, so the graceful shutdown backup does NOT run on
- *   Windows (packaging plan gotcha — the 4h periodic auto-backup is the
- *   mitigation). A PyInstaller onedir on Windows is a bootloader + child python
+ *   Windows (packaging plan gotcha — the automatic backup is the mitigation; since
+ *   #1186 it is taken ~2 min after launch whenever the last is an interval old). A PyInstaller onedir on Windows is a bootloader + child python
  *   process, so a plain child.kill() would orphan python; the tree-kill avoids that.
  *
  * #554a — THE WINDOWS KILL MUST BLOCK. It used to `spawn` taskkill and return
@@ -222,6 +223,28 @@ function stopBackend(
   }, graceMs)
 }
 
+/**
+ * #1236 — start the engine, and give a start failure Node THROWS the same guidance as
+ * one it REPORTS.
+ *
+ * `spawn()` emits 'error' for five codes only (EACCES, EAGAIN, EMFILE, ENFILE, ENOENT —
+ * read from Node 24's own `ChildProcess.prototype.spawn`) and throws every other one
+ * synchronously, before a listener can be attached. On Windows that is where an engine
+ * blocked by security software lands: libuv 1.52.1 maps ERROR_ACCESS_DENIED to EPERM
+ * and every code it does not list to UNKNOWN (`src/win/error.c`). Thrown, the failure
+ * reached `startup()`'s catch as "spawn EPERM". Re-thrown here as the guidance, it
+ * reaches the same catch and the crash dialog's "failed to start" arm, verbatim.
+ *
+ * `spawn` is injected so the throw can be tested without Electron.
+ */
+function spawnEngine(spawn, exe, options) {
+  try {
+    return spawn(exe, [], options)
+  } catch (err) {
+    throw new Error(backendSpawnFailureMessage(err, exe))
+  }
+}
+
 module.exports = {
   DB_FILE_NAME,
   freePort,
@@ -229,6 +252,7 @@ module.exports = {
   resolveAppPort,
   resolveBackendExe,
   buildSpawnEnv,
+  spawnEngine,
   waitForHealth,
   stopBackend,
 }

@@ -642,11 +642,13 @@ function DomainsView({
             onClick={() => onToggleDomain(d.id)}
             onMouseEnter={itemProps.onMouseEnter}
           >
+            {/* #1169: named like the Variables tab's checkbox — it had no name at all. */}
             <Checkbox
               checked={isSelected}
               onCheckedChange={() => onToggleDomain(d.id)}
               className="shrink-0 mt-0.5"
               onClick={e => e.stopPropagation()}
+              aria-label={d.name}
             />
             <div className="flex-1 min-w-0">
               <span className="text-xs text-mm-text leading-tight" title={d.name}>

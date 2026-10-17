@@ -669,12 +669,14 @@ async def merge_codes(
                 elif app.dataset_value_id is not None:
                     moved_values.add((app.dataset_value_id, app.user_id))
 
-    # Flush the reassignment (and dup deletes) BEFORE deleting the source code.
-    # Without this, the source-Code delete fires `Code.applications`'
-    # cascade="all, delete-orphan" (+ the DB ON DELETE CASCADE on code_id) against
-    # rows whose reassigning UPDATE is still pending — sweeping the just-reassigned
-    # applications. Flushing first writes code_id=target, so the source then owns
-    # no applications and the cascade is a no-op. (Data-loss bug, fixed 2026-06-22.)
+    # Flush the reassignment (and dup deletes) BEFORE deleting the source code
+    # (#439). Until #1035 `Code.applications` was a LOADING cascade: the source's
+    # delete read its applications while their reassigning UPDATE was still
+    # pending, and swept the just-reassigned rows (data loss, fixed 2026-06-22).
+    # The relationship is passive now, so nothing is loaded and the unit of work
+    # happens to write the UPDATE before the source's DELETE — this flush is what
+    # makes that order ours rather than the unit of work's. Keep it: the #439 test
+    # pins the OUTCOME and can no longer see the flush removed.
     db.flush()
 
     # 🔴 #1081 (a) — a merge is the one coding write that does NOT go through the

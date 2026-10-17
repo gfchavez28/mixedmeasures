@@ -52,9 +52,12 @@ class Segment(Base):
     observation = relationship("Observation", back_populates="segments")
     speaker = relationship("Speaker", back_populates="segments")
     group = relationship("SegmentGroup", back_populates="segments")
-    code_applications = relationship("CodeApplication", back_populates="segment", cascade="all, delete-orphan")
+    # #1035: the two CASCADE collections are passive (project.py explains).
+    # `attached_notes` is `ON DELETE SET NULL` and must NOT be: a passive SET NULL
+    # relationship leaves a loaded note reading the deleted segment's id.
+    code_applications = relationship("CodeApplication", back_populates="segment", cascade="all, delete-orphan", passive_deletes=True)
     attached_notes = relationship("Note", back_populates="segment")
-    excerpts = relationship("Excerpt", back_populates="segment", cascade="all, delete-orphan")
+    excerpts = relationship("Excerpt", back_populates="segment", cascade="all, delete-orphan", passive_deletes=True)
 
     # Self-referencing relationship for merge tracking
     original_segments = relationship(

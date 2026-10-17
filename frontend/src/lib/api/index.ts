@@ -63,6 +63,8 @@ export type {
   DatasetRowInfo,
   LinkedDemographicValue,
   LinkableRow,
+  LinkableRowMatch,
+  LinkableRowsPage,
   WithdrawalReport,
   WithdrawalOutcome,
 } from './participants'

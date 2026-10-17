@@ -37,7 +37,46 @@ def _future_mmproject_bytes(version: int = CURRENT_FORMAT_VERSION + 1) -> bytes:
     return buf.getvalue()
 
 
+def _older_mmproject_bytes(version: int = 1, app_version: str = "1.0.0") -> bytes:
+    """A manifest shaped like the website's v1.0.0 example (#1117): every field the
+    confirmation's response model requires, with that file's own counts."""
+    buf = io.BytesIO()
+    manifest = {
+        "format_version": version, "format_type": "mmproject", "app_version": app_version,
+        "created_at": "2026-06-10T00:00:00+00:00",
+        "project_name": "Math Curriculum Evaluation",
+        "project_summary": {
+            "conversation_count": 12, "dataset_count": 3, "document_count": 2,
+            "code_count": 31, "category_count": 6, "memo_count": 0,
+            "participant_count": 30, "excerpt_count": 0,
+        },
+    }
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("manifest.json", json.dumps(manifest))
+        zf.writestr("project.json", "{}")
+    return buf.getvalue()
+
+
 # ── Service layer ────────────────────────────────────────────────────────
+
+
+class TestAnOlderFileIsNotACaution:
+    """#1117: an older format used to preview with *"Some data may not import
+    correctly"* and the exporting version as a second warning, in an amber box — for
+    every file from 1.5.3 or earlier, the website's own example among them. The import
+    brings an older format forward and drops nothing, so neither is a warning; the
+    version rides the manifest, which the confirmation shows as a fact."""
+
+    @pytest.mark.parametrize("version", range(1, CURRENT_FORMAT_VERSION))
+    def test_an_older_format_previews_with_no_warning(self, tmp_path, version):
+        from app.services.project_portability import validate_project_file
+
+        file_path = tmp_path / f"v{version}.mmproject"
+        file_path.write_bytes(_older_mmproject_bytes(version))
+        result = validate_project_file(file_path)
+        assert result["warnings"] == []
+        # The fact the warning carried is still there, for the confirmation to show.
+        assert result["manifest"]["app_version"] == "1.0.0"
 
 
 class TestImportProjectFormatGate:
@@ -129,6 +168,18 @@ class TestImportEndpointsFormatGate:
         )
         assert resp.status_code == 400, resp.text
         assert "newer version" in resp.json()["detail"]
+
+    def test_validate_import_older_file_reaches_the_wire_with_no_warning(self, client):
+        """#1117, at the response layer the confirmation reads."""
+        csrf = _csrf(client)
+        resp = client.post(
+            "/api/projects/validate-import",
+            files={"file": ("v1.mmproject", _older_mmproject_bytes(1), "application/zip")},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["warnings"] == []
+        assert resp.json()["manifest"]["app_version"] == "1.0.0"
 
     def test_import_project_missing_manifest_400(self, client):
         """Friendly 400, not a KeyError 500, for a manifest-less zip."""

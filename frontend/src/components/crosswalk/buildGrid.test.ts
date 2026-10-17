@@ -422,6 +422,39 @@ describe('buildGrid', () => {
   // surface from `dataset_count`, computed from the same set used to derive
   // `is_cross_dataset` (`datasetsInDomain.size`).
 
+  /**
+   * #1260 — the rows are the group's items in the order the SERVER sends, which is
+   * the order split-half splits by and the R export reproduces. Every other fixture
+   * here lists members in the order of their ids, so a sort by id was invisible to
+   * them; these members are in an order that agrees with neither the member ids nor
+   * the column ids — the state a reorder leaves.
+   */
+  it('#1260 — renders members in the server’s order, never re-sorted by id', () => {
+    const columns = [1, 2, 3, 4].map(n => col(n, 10, 'Board', `Q${n}`, `Item ${n}`))
+    const d = domain(1, 'Wellbeing scale', [1, 2, 3, 4])
+    // The server's order after "move Q4 to the top, then Q3 above Q2".
+    d.members = [d.members[3], d.members[0], d.members[2], d.members[1]]
+    const grid = buildGrid({ domains: [d], allColumns: columns, equivalenceGroups: [] })
+    const rows = grid.brackets[0].rows as UnlinkedRowData[]
+    expect(rows.map(r => r.column_id)).toEqual([4, 1, 3, 2])
+    // …and the ids really disagree with it, so the fixture can tell the two apart.
+    expect(d.members.map(m => m.id)).not.toEqual([...d.members.map(m => m.id)].sort((a, b) => a - b))
+  })
+
+  it('#1260 — an equivalence row sits where its FIRST member does', () => {
+    const columns = [
+      col(1, 10, 'Wave 1', 'Q1', 'Trust', { equivalence_group_id: 100 }),
+      col(2, 11, 'Wave 2', 'Q1', 'Trust', { equivalence_group_id: 100 }),
+      col(3, 10, 'Wave 1', 'Q2', 'Safety', { equivalence_group_id: 200 }),
+      col(4, 11, 'Wave 2', 'Q2', 'Safety', { equivalence_group_id: 200 }),
+    ]
+    const d = domain(1, 'Climate', [1, 2, 3, 4])
+    // Safety's members were moved above Trust's.
+    d.members = [d.members[2], d.members[3], d.members[0], d.members[1]]
+    const grid = buildGrid({ domains: [d], allColumns: columns, equivalenceGroups: [eg(100, 'Q1'), eg(200, 'Q2')] })
+    expect((grid.brackets[0].rows as EgRowData[]).map(r => r.equivalence_group_id)).toEqual([200, 100])
+  })
+
   it('exposes dataset_count = 1 for a single-dataset bracket', () => {
     const columns = [
       col(1, 10, 'Board', 'Q1', 'A'),

@@ -1,6 +1,6 @@
 import api from './client'
 import { datasetUploadTimeoutMs } from '../dataset-import-formats'
-import type { LinkableRow } from './participants'
+import type { LinkableRowsPage } from './participants'
 import type { RecodeRange } from '../recode-ranges'
 import type { ManagedSpec } from '../magnitude-rollup-basis'
 
@@ -1033,10 +1033,21 @@ export const datasetsApi = {
         timeout: datasetUploadTimeoutMs(file.size) },
     ).then(res => res.data)
   },
+  /** #1054: NO client timeout — 7 s on BES's 122,382 records, and it commits in
+   * batches, so giving up would leave a half-linked dataset the page called a
+   * failure. */
   linkByColumn: (projectId: number, datasetId: number, columnId: number) =>
     api.post<ParticipantLinkReport>(
       `/projects/${projectId}/datasets/${datasetId}/link-by-column`,
-      { column_id: columnId }
+      { column_id: columnId },
+      { timeout: 0 },
+    ).then(res => res.data),
+  /** #1054 (D6): what Link by column WOULD do — the same plan, nothing written.
+   * Reads only (0.8 s on BES), so the default timeout stands. */
+  previewLinkByColumn: (projectId: number, datasetId: number, columnId: number) =>
+    api.post<ParticipantLinkReport>(
+      `/projects/${projectId}/datasets/${datasetId}/link-by-column/preview`,
+      { column_id: columnId },
     ).then(res => res.data),
   appendImport: (projectId: number, datasetId: number, file: File, config: {
     column_mapping: Array<{ csv_column_index: number; column_id: number }>
@@ -1079,9 +1090,16 @@ export const datasetsApi = {
     api.delete(`/projects/${projectId}/datasets/${datasetId}/rows/${rowId}`).then(res => res.data),
   allColumns: (projectId: number, params?: { ungrouped?: boolean; dataset_id?: number; search?: string }) =>
     api.get<ProjectColumnListResponse>(`/projects/${projectId}/datasets/columns`, { params }).then(res => res.data),
-  linkableRows: (projectId: number, datasetId: number) =>
-    api.get<{ rows: LinkableRow[] }>(
-      `/projects/${projectId}/datasets/${datasetId}/linkable-rows`
+  /** #1053 — one page of the records `q` matches; the server searches and ranks. */
+  linkableRows: (
+    projectId: number,
+    datasetId: number,
+    params: { q: string; limit: number; offset: number },
+    signal?: AbortSignal,
+  ) =>
+    api.get<LinkableRowsPage>(
+      `/projects/${projectId}/datasets/${datasetId}/linkable-rows`,
+      { params, signal },
     ).then(res => res.data),
   updateColumnSubtype: (projectId: number, datasetId: number, columnId: number, demographicSubtype: string | null) =>
     api.patch(

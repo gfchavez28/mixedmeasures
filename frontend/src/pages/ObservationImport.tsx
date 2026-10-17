@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { ChevronRight, FileInput, X, AlertTriangle, Film } from 'lucide-react'
+import { FileInput, X, AlertTriangle, Film } from 'lucide-react'
 
 import { observationsApi, mediaApi } from '@/lib/api'
 import type { SegmentationMode, ClipPreviewResponse } from '@/lib/api'
@@ -17,6 +17,7 @@ import { formatBytes, countLabel } from '@/lib/format'
 import { formatTimestamp } from '@/lib/utils'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
 import { consumePendingImportFiles } from '@/lib/pending-import-files'
+import { forgetCachedProjectPages } from '@/lib/project-cache'
 import SourceKindPanel from '@/components/SourceKindPanel'
 import {
   SEGMENTATION_FREEZE_REVERSIBLE,
@@ -24,35 +25,23 @@ import {
   OPEN_CONSEQUENCES,
   FREEZE_BEFORE_YOU_DISTRIBUTE,
 } from '@/lib/source-kind-copy'
-import { validateMediaFile, describeMediaUploadError } from '@/lib/media-constants'
+import { validateMediaFile, chooseOneRecording, describeMediaUploadError } from '@/lib/media-constants'
 import {
   OBSERVATION_MEDIA_ACCEPT,
   OBSERVATION_MEDIA_FORMAT_LABEL,
-  isSupportedObservationMedia,
   CUE_FILE_ACCEPT,
   CUE_FILE_FORMAT_LABEL,
   isSupportedCueFile,
 } from '@/lib/observation-import-formats'
 import { checkImportFiles } from '@/lib/upload-limits'
 import { useStepFocus } from '@/hooks/useStepFocus'
+import { MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
 import UploadLimitNote from '@/components/UploadLimitNote'
+import ImportStepRail from '@/components/ImportStepRail'
+
+const BUSY_BUTTON_CLASS = 'aria-busy:cursor-wait aria-busy:opacity-50'
 
 type Step = 'upload' | 'setup' | 'confirm' | 'results'
-
-/**
- * `confirm` exists because the wizard used to commit blind (#638): it created,
- * attached and CUT in one click, so a cue file's clip count, its warnings, and
- * the MAX_CLIPS refusal all arrived only after the clips were written.
- *
- * It is skipped for `none` — there is nothing to preview when the answer is
- * "no clips" — so the progress rail legitimately jumps setup → results there.
- */
-const STEPS: { key: Step; label: string }[] = [
-  { key: 'upload', label: 'Upload' },
-  { key: 'setup', label: 'Set up clips' },
-  { key: 'confirm', label: 'Confirm clips' },
-  { key: 'results', label: 'Results' },
-]
 
 const MODES: { key: SegmentationMode; label: string; hint: string }[] = [
   {
@@ -162,7 +151,29 @@ export default function ObservationImport() {
   // (it ran on mount, skipping the Skip-to-main-content link).
   const headingRef = useStepFocus(step)
 
-  const stepIndex = STEPS.findIndex(s => s.key === step)
+  /**
+   * `confirm` exists because the wizard used to commit blind (#638): it created,
+   * attached and CUT in one click, so a cue file's clip count, its warnings, and
+   * the MAX_CLIPS refusal all arrived only after the clips were written.
+   *
+   * It is skipped for `none` — there is nothing to preview when the answer is
+   * "no clips" — so it is on the rail only when the mode previews (#1184). The
+   * rail was a constant, so *Start empty* drew the skipped step as DONE, and with
+   * "completed" now spoken that would be a false sentence. The rail changes
+   * length while on Set up, as Conversation's does when a recording is added.
+   */
+  const steps: { key: Step; label: string }[] = [
+    { key: 'upload', label: 'Upload' },
+    { key: 'setup', label: 'Set up clips' },
+    ...(mode !== 'none' ? [{ key: 'confirm' as Step, label: 'Confirm clips' }] : []),
+    { key: 'results', label: 'Results' },
+  ]
+  const railAt: Record<Step, Step> = {
+    upload: 'upload',
+    setup: 'setup',
+    confirm: mode !== 'none' ? 'confirm' : 'results',
+    results: 'results',
+  }
 
   // Mirrors `staged` for `chooseFile`, which must not take it as a dependency:
   // the handoff effect calls chooseFile exactly once and re-running on a staged
@@ -196,14 +207,16 @@ export default function ObservationImport() {
       stagedRef.current = null
       setStaged(null)
       setPreview(null)
+      // #1226: the next observation created takes this id back.
       observationsApi.remove(projectId, prior.id).catch(() => {})
+        .finally(() => forgetCachedProjectPages(queryClient))
     }
 
     setFile(picked)
     setDuration(null)
     setPreviewUnplayable(false)
     if (!name.trim()) setName(picked.name.replace(/\.[^.]+$/, ''))
-  }, [name, projectId])
+  }, [name, projectId, queryClient])
 
   const dragHandlers = {
     onDragOver: (e: React.DragEvent) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' },
@@ -217,12 +230,12 @@ export default function ObservationImport() {
       e.preventDefault()
       dragCounterRef.current = 0
       setIsDragOver(false)
-      const dropped = Array.from(e.dataTransfer.files).filter(f => isSupportedObservationMedia(f.name))
-      if (dropped.length === 0) {
-        toast.error(`That file isn't a recording we can read. Accepted: ${OBSERVATION_MEDIA_FORMAT_LABEL}`)
-        return
-      }
-      chooseFile(dropped[0])
+      // An observation IS one recording. Every dropped file goes through the one
+      // check, the first accepted is taken, and the sentence names the rest (#1161 —
+      // this had its own sentence and kept dropped[0] in silence).
+      const { file: taken, message } = chooseOneRecording(Array.from(e.dataTransfer.files))
+      if (message) toast.error(message)
+      if (taken) chooseFile(taken)
     },
   }
 
@@ -266,7 +279,9 @@ export default function ObservationImport() {
    * retry instead of re-uploading gigabytes.
    */
   async function handleStageAndPreview() {
-    if (!file) return
+    // The button stays focusable while busy (#1195), so this guard is what stops a
+    // second press from creating a second observation.
+    if (!file || busy) return
     setBusy(true)
     setPreviewError(null)
 
@@ -319,6 +334,7 @@ export default function ObservationImport() {
         // The recording never landed, so the row is an empty shell. Remove it, or
         // three retries leave three nameless observations behind.
         await observationsApi.remove(projectId, observationId).catch(() => {})
+        forgetCachedProjectPages(queryClient) // #1226: its id is handed out again
         if (mountedRef.current) setStaged(null)
       }
       setPreviewError(message)
@@ -352,7 +368,7 @@ export default function ObservationImport() {
   }
 
   async function handleConfirmCut() {
-    if (!staged) return
+    if (!staged || busy) return
     setBusy(true)
     setPreviewError(null)
     try {
@@ -383,25 +399,13 @@ export default function ObservationImport() {
 
   return (
     <div className="p-6 max-w-3xl mx-auto">
-      <nav aria-label="Import progress" className="flex items-center justify-between mb-8">
-        {STEPS.map((s, i) => (
-          <div key={s.key} className="flex items-center" aria-current={stepIndex === i ? 'step' : undefined}>
-            <div className={cn(
-              'w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium',
-              stepIndex === i
-                ? 'bg-mm-teal-fill text-mm-on-fill'
-                : stepIndex > i
-                  ? 'bg-mm-teal/15 text-mm-teal-text'
-                  : 'bg-mm-bg text-mm-text-faint',
-            )}>
-              <span className="sr-only">Step {i + 1} of {STEPS.length}: </span>
-              <span aria-hidden>{i + 1}</span>
-            </div>
-            <span className="ml-2 text-sm font-medium">{s.label}</span>
-            {i < STEPS.length - 1 && <ChevronRight className="w-4 h-4 mx-4 text-mm-text-faint" aria-hidden />}
-          </div>
-        ))}
-      </nav>
+      <ImportStepRail
+        label="Import progress"
+        steps={steps}
+        current={railAt[step]}
+        accent="teal"
+        className="mb-8"
+      />
 
       {step === 'upload' && <SourceKindPanel current="observation" projectId={projectId} />}
 
@@ -638,20 +642,34 @@ export default function ObservationImport() {
               </div>
             )}
 
+            {/* #1195: an alert, or a refused preview is silent — the transcript
+              * wizard's error slot got the same in #1012. */}
             {previewError && (
-              <div className="flex items-start gap-2 p-3 rounded-md bg-amber-50 dark:bg-amber-900/20 text-sm">
+              <div role="alert" className="flex items-start gap-2 p-3 rounded-md bg-amber-50 dark:bg-amber-900/20 text-sm">
                 <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" aria-hidden />
                 <span className="text-mm-text">{previewError}</span>
               </div>
             )}
 
+            {/* #1195: busy is `aria-disabled` + `aria-busy` + the handler's own guard,
+              * never native `disabled` — a focused button that becomes disabled blurs,
+              * and the refusal then arrives with focus on <body>. Native `disabled`
+              * stays for the transient precondition only (no cue file yet). */}
             <div className="flex justify-between">
-              <Button variant="outline" onClick={() => setStep('upload')} disabled={busy}>
+              <Button
+                variant="outline"
+                onClick={() => { if (!busy) setStep('upload') }}
+                aria-disabled={busy || undefined}
+                className={MODE_DISABLED_CLASS}
+              >
                 Back
               </Button>
               <Button
                 onClick={handleStageAndPreview}
-                disabled={busy || (mode === 'cue_list' && !cueFile)}
+                disabled={mode === 'cue_list' && !cueFile}
+                aria-disabled={busy || undefined}
+                aria-busy={busy || undefined}
+                className={BUSY_BUTTON_CLASS}
               >
                 {busy
                   ? (staged ? 'Working out the clips…' : 'Uploading recording…')
@@ -725,7 +743,7 @@ export default function ObservationImport() {
             </p>
 
             {previewError && (
-              <div className="flex items-start gap-2 p-3 rounded-md bg-amber-50 dark:bg-amber-900/20 text-sm">
+              <div role="alert" className="flex items-start gap-2 p-3 rounded-md bg-amber-50 dark:bg-amber-900/20 text-sm">
                 <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" aria-hidden />
                 <span className="text-mm-text">{previewError}</span>
               </div>
@@ -734,10 +752,20 @@ export default function ObservationImport() {
             <div className="flex justify-between">
               {/* Back keeps the recording staged — changing the interval and
                 * previewing again must never re-upload. */}
-              <Button variant="outline" onClick={() => setStep('setup')} disabled={busy}>
+              <Button
+                variant="outline"
+                onClick={() => { if (!busy) setStep('setup') }}
+                aria-disabled={busy || undefined}
+                className={MODE_DISABLED_CLASS}
+              >
                 Back
               </Button>
-              <Button onClick={handleConfirmCut} disabled={busy}>
+              <Button
+                onClick={handleConfirmCut}
+                aria-disabled={busy || undefined}
+                aria-busy={busy || undefined}
+                className={BUSY_BUTTON_CLASS}
+              >
                 {busy ? 'Cutting clips…' : `Cut ${countLabel(preview.total_segments, 'clip', 'clips')}`}
               </Button>
             </div>

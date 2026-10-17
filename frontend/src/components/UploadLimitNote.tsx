@@ -1,6 +1,5 @@
 import { MAX_IMPORT_FILE_BYTES, fileLimitLabel } from '@/lib/upload-limits'
 import { MAX_MEDIA_SIZE } from '@/lib/media-constants'
-import { formatBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 /**
@@ -29,7 +28,8 @@ export default function UploadLimitNote({
   maxBytes?: number
   className?: string
 }) {
-  const recordingLimit = formatBytes(MAX_MEDIA_SIZE)
+  // The refusal's own spelling ("4 GB"), not `formatBytes`' "4.0 GB" (#1161).
+  const recordingLimit = fileLimitLabel(MAX_MEDIA_SIZE)
   const text = noun
     ? `Mixed Measures can import ${noun} of up to ${fileLimitLabel(maxBytes)} each`
       + (recordings ? `; recordings can be up to ${recordingLimit}.` : '.')

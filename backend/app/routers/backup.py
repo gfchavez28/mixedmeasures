@@ -1,5 +1,6 @@
 """Backup and restore API endpoints."""
 
+import errno
 import logging
 import os
 import shutil
@@ -8,6 +9,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
@@ -89,6 +91,32 @@ BACKUP_WRITE_FAILED = (
 )
 
 
+#: Which side of the swap a refused or failed restore is on (#1140), for the dialog:
+#: `not-started` — nothing was changed, so trying again is safe and the page need not
+#: be held · `partway` — the data was replaced in part, so the way back is the
+#: "Before a restore" backup and a second press of Restore must not be offered. A
+#: failure whose side is not known carries no header, and the dialog treats it as
+#: `partway`. A header rather than a structured body so `detail` stays the sentence.
+RESTORE_OUTCOME_HEADER = "X-MM-Restore-Outcome"
+#: The pre-restore backup's `created_at`, on a `partway` failure.
+PRE_RESTORE_TAKEN_AT_HEADER = "X-MM-Pre-Restore-Taken-At"
+NOT_STARTED = {RESTORE_OUTCOME_HEADER: "not-started"}
+
+#: The restore door's own 404 (#1140): between the preview and the confirm, the
+#: 4-hourly rotation or Backup now can delete the oldest automatic backup.
+RESTORE_BACKUP_GONE = (
+    "The restore did not start: this backup is no longer in the backups folder — it may "
+    "have been deleted, or replaced by a newer automatic backup, since it was previewed. "
+    "Nothing was changed."
+)
+
+#: A preview that ran out of disk while extracting the database to check it.
+CHECK_NO_SPACE = (
+    "There is not enough free disk space to check this backup. Nothing was changed. "
+    "Free some disk space, then try again."
+)
+
+
 def _busy_backup_refusal(e: DatabaseBusyError, *, nothing: str) -> HTTPException:
     """#1025: a backup that cannot be complete is refused, not written.
 
@@ -149,9 +177,9 @@ async def _stream_upload_to_temp(file: UploadFile, max_size: int = MAX_UPLOAD_SI
 
 @router.get("/status", response_model=BackupStatus)
 async def backup_status(user: User = Depends(get_current_user)):
-    """Get backup status summary. #357: now includes `next_backup_at`
-    computed as `last_backup_at + auto_backup_interval_hours` so the UI
-    can render a freshness label instead of a stale-only amber dot."""
+    """Get backup status summary. #357: includes `next_backup_at` — since #1186 the
+    time the automatic loop will actually take its next backup — so the UI can render
+    a freshness label instead of a stale-only amber dot."""
     _, _, _, backup_dir = _get_paths()
     settings = get_settings()
     return get_backup_status(
@@ -170,8 +198,9 @@ async def backup_now(
 
     Distinct from `POST /create` (which creates + streams a file response
     for the share-with-someone-else flow). This endpoint creates a snapshot
-    that counts toward the same 5-backup auto rotation — researchers can
-    use it as "give me a fresh insurance snapshot before a big change".
+    that counts toward the same automatic rotation (`MM_AUTO_BACKUP_MAX_COUNT`), so
+    once that is full it replaces the oldest automatic backup — and, since #1186,
+    postpones the next automatic one by an interval (the loop re-reads the folder).
 
     Returns the updated `BackupStatus` so the frontend can immediately
     re-render the freshness label without waiting for the next polling
@@ -190,6 +219,7 @@ async def backup_now(
         )
         await asyncio.to_thread(
             cleanup_old_backups, backup_dir, "auto", settings.auto_backup_max_count,
+            keep=info.filename,
         )
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
@@ -224,13 +254,16 @@ async def backup_list(user: User = Depends(get_current_user)):
     return list_backups(backup_dir)
 
 
-def _backup_or_error(backup_dir: Path, filename: str) -> Path:
+def _backup_or_error(
+    backup_dir: Path, filename: str, *, gone: str = "That backup no longer exists.",
+    headers: dict | None = None,
+) -> Path:
     try:
         return find_backup(backup_dir, filename)
     except BackupNameError:
-        raise HTTPException(400, "That is not a backup file.")
+        raise HTTPException(400, "That is not a backup file.", headers=headers)
     except FileNotFoundError:
-        raise HTTPException(404, "That backup no longer exists.")
+        raise HTTPException(404, gone, headers=headers)
 
 
 @router.get("/archives/{filename}")
@@ -280,6 +313,10 @@ def backup_validate_local(
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except OSError as e:
+        if e.errno == errno.ENOSPC:
+            raise HTTPException(507, CHECK_NO_SPACE)
+        raise
 
 
 @router.post("/archives/{filename}/restore")
@@ -310,7 +347,7 @@ def backup_restore_local(
     _, _, _, backup_dir = _get_paths()
     # Refused BEFORE the gate: "that is not a backup" must not first stop every
     # other request and tear down the connection pool.
-    path = _backup_or_error(backup_dir, filename)
+    path = _backup_or_error(backup_dir, filename, gone=RESTORE_BACKUP_GONE, headers=NOT_STARTED)
     return _restore_in_place(
         path, db=db, user_id=user.id,
         audit_details={"filename": path.name, "source": "backup_folder"},
@@ -367,7 +404,23 @@ def _restore_in_place(
                 entity_type="system",
                 details=json.dumps(audit_details),
             ))
-            db.commit()
+            try:
+                db.commit()
+            except OperationalError as e:
+                # Before anything: another program holds the write lock (#1140). It
+                # reached the generic arm as SQLAlchemy's own text and a URL.
+                db.rollback()
+                if "locked" in str(e).lower():
+                    raise RestoreNotStarted(
+                        "The restore did not start: another program is writing to the "
+                        "Mixed Measures database. Nothing was changed. Close any other "
+                        "program that has the database open, then restore again.",
+                        status_code=409,
+                    ) from e
+                raise RestoreNotStarted(
+                    f"The restore did not start: it could not be recorded ({e.orig}). "
+                    "Nothing was changed."
+                ) from e
             db.close()
             engine.dispose()
             try:
@@ -375,6 +428,12 @@ def _restore_in_place(
                     zip_path, db_path, docs_dir, media_dir, backup_dir,
                     expansion_limit=expansion_limit,
                 )
+            except _STOPPED_BEFORE_THE_SWAP as e:
+                # #1202: the database that holds `restore_started` is still the live
+                # one, so the stop is recorded beside it — before the dispose below,
+                # still inside the gate. Never raises.
+                _record_a_restore_that_did_not_start(audit_details, user_id, e)
+                raise
             finally:
                 # Whether the swap finished or failed partway, the file may have
                 # changed under the pool.
@@ -395,7 +454,7 @@ def _restore_in_place(
         # Nothing was changed: another restore holds the gate, or other work did
         # not finish in time. 409, not 503 — the request was understood and it is
         # the state of THIS install that refuses it.
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, str(e), headers=NOT_STARTED)
     except DatabaseBusyError as e:
         # #1025: the pre-restore backup is taken before anything is staged or
         # swapped, and it is complete or refused — only another program's lock
@@ -406,25 +465,33 @@ def _restore_in_place(
             f"data that a restore takes first could not be made. Nothing was changed. "
             f"If another program has the Mixed Measures database open, close it, then "
             f"try again."
-        ))
+        ), headers=NOT_STARTED)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e), headers=NOT_STARTED)
     except FileNotFoundError as e:
-        raise HTTPException(404, str(e))
+        raise HTTPException(404, str(e), headers=NOT_STARTED)
     except RestoreNotStarted as e:
         # #1036 d: stopped BEFORE the swap — said as such, never as "failed partway".
+        # #1140: with its own status (400 unreadable · 404 gone · 409 another program ·
+        # 507 a full disk) and the header saying a second try is safe.
         logger.error("Restore stopped before replacing anything: %s", e)
-        raise HTTPException(500, str(e))
+        raise HTTPException(e.status_code, str(e), headers=NOT_STARTED)
     except RestoreError as e:
         # #550: name the escape hatch rather than pointing at server logs — and
         # since #971 that instruction is one a researcher can actually follow,
         # from the same Backup history list they started in.
+        # #1140: by what Backup history SHOWS, never the filename — its digits are
+        # UTC and disagreed with every row by the zone offset. The time rides a
+        # header, for the dialog to say in the list's own words.
         logger.error("Restore failed: %s", e)
+        headers = {RESTORE_OUTCOME_HEADER: "partway"}
+        if e.pre_restore_taken_at:
+            headers[PRE_RESTORE_TAKEN_AT_HEADER] = e.pre_restore_taken_at
         raise HTTPException(500, (
-            "Restore failed partway. Your previous data was saved as "
-            f"'{e.pre_restore_filename}' before the restore began — restore that "
-            "backup from Backup history to return to the prior state."
-        ))
+            "Restore failed partway. Your data as it was before the restore was saved "
+            "first, as the latest “Before a restore” backup in Backup history — restore "
+            "that backup to return to the prior state."
+        ), headers=headers)
     except Exception as e:
         # Every known failure has its own arm above, so which side of the swap this
         # is on is not known here — and "check the server logs" sent a desktop user
@@ -434,6 +501,46 @@ def _restore_in_place(
             f"The restore failed ({type(e).__name__}: {e}). If it had begun replacing "
             "your data, a “Before a restore” backup of it is in Backup history."
         ))
+
+
+#: What `restore_from_backup` raises when it stopped before replacing anything — the
+#: exceptions the router answers with `not-started` (the arms above). `RestoreError`
+#: (partway) is not among them: the database holding `restore_started` may no longer
+#: be the live one.
+_STOPPED_BEFORE_THE_SWAP = (
+    RestoreNotStarted, RestoreRefused, DatabaseBusyError, ValueError, FileNotFoundError,
+)
+
+
+def _record_a_restore_that_did_not_start(audit_details: dict, user_id: int, error: BaseException) -> None:
+    """Pair `restore_started` with `restore_not_started` when the restore stopped
+    before the swap (#1202).
+
+    The started row is committed before `restore_from_backup` runs its own checks, so
+    a refused restore — a backup gone or damaged, a full disk, another program holding
+    the file, a restore running in another process — left a trail that read exactly
+    like a restore that died partway. Nothing was swapped, so the live database is the
+    one holding the started row, and `user_id` still names the same person in it.
+
+    Never raises, and never replaces the refusal being reported: when the refusal was
+    another program's lock, this write waits out SQLite's busy timeout and fails too,
+    and that is logged, not raised.
+    """
+    try:
+        with SessionLocal() as session:
+            session.add(AuditEntry(
+                user_id=user_id,
+                action="restore_not_started",
+                entity_type="system",
+                details=json.dumps({
+                    **audit_details,
+                    "error": type(error).__name__,
+                    "reason": str(error)[:500],
+                }),
+            ))
+            session.commit()
+    except Exception as e:
+        logger.warning("A restore did not start, and that could not be recorded: %s", e)
 
 
 def _record_the_restore_in_the_restored_database(audit_details: dict, pre_restore_info) -> None:
@@ -655,11 +762,12 @@ def backup_create(
 
     # #982: this type never rotated, and its server copy is a DUPLICATE — the file
     # is streamed to the researcher's downloads below, and this is the one type
-    # that includes video by default. Rotating AFTER the create is safe: the
-    # rotation keeps the newest `MANUAL_BACKUP_MAX_COUNT`, which always includes
-    # the archive this response is about to stream.
+    # that includes video by default. Rotating AFTER the create is safe because the
+    # rotation is TOLD which archive this response is about to stream (#1199): "the
+    # newest N always includes it" was false under a clock set back, and the response
+    # then streamed a deleted file (a 500 after the audit row said it was created).
     try:
-        cleanup_old_backups(backup_dir, "manual", MANUAL_BACKUP_MAX_COUNT)
+        cleanup_old_backups(backup_dir, "manual", MANUAL_BACKUP_MAX_COUNT, keep=info.filename)
     except Exception as e:
         # Never fail a backup over failing to delete an older one.
         logger.warning("Could not rotate old manual backups: %s", e)
@@ -704,6 +812,10 @@ async def backup_validate(
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except OSError as e:
+        if e.errno == errno.ENOSPC:
+            raise HTTPException(507, CHECK_NO_SPACE)
+        raise
     finally:
         os.unlink(tmp_path)
 
@@ -724,7 +836,19 @@ async def backup_restore(
     and protected nothing — sync endpoints already in the threadpool, and the
     consensus sweep's thread, kept their connections to the old file (#1024).
     """
-    tmp_path = await _stream_upload_to_temp(file)
+    # The upload's own refusals come before anything too, and say so to the dialog
+    # (#1140) — a 5xx without the header is read there as "may have begun".
+    try:
+        tmp_path = await _stream_upload_to_temp(file)
+    except HTTPException as e:
+        raise HTTPException(e.status_code, e.detail, headers=NOT_STARTED) from e
+    except OSError as e:
+        if e.errno == errno.ENOSPC:
+            raise HTTPException(507, (
+                "The restore did not start: there is not enough free disk space to receive "
+                "the backup. Nothing was changed. Free some disk space, then try again."
+            ), headers=NOT_STARTED) from e
+        raise
     try:
         return await asyncio.to_thread(
             _restore_in_place, tmp_path, db=db, user_id=user.id,

@@ -19,6 +19,7 @@ import {
 import { formatBytes } from '@/lib/format'
 import { formatTimestamp } from '@/lib/utils'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { forgetCachedProjectPages } from '@/lib/project-cache'
 import { SOURCE_KIND_ONE_LINER } from '@/lib/source-kind-copy'
 import { sortSources, type SortDirection, type SourceSortKey } from '@/lib/source-list-sort'
 import SourceListToolbar from '@/components/SourceListToolbar'
@@ -73,16 +74,22 @@ export default function ObservationsListPage() {
     mutationFn: (id: number) => observationsApi.remove(projectId, id),
     onSuccess: () => {
       setDeleteId(null)
+      toast.success('Observation deleted')
+    },
+    // #1226: the next observation created takes this id, and this one's
+    // workbench (`['observation', pid, oid]`, `['observation-segments', pid, oid]`)
+    // is still cached. On SETTLED, with the refresh: a delete the client stopped
+    // waiting for may have finished.
+    onSettled: () => {
+      forgetCachedProjectPages(queryClient)
       queryClient.invalidateQueries({ queryKey: ['observations', projectId] })
       queryClient.invalidateQueries({ queryKey: ['project-summary', projectId] })
-      // The TopRail tab count reads this. (The conversations list omits it —
-      // don't inherit that; its count badge goes stale after a delete.)
+      // The TopRail tab count reads this.
       queryClient.invalidateQueries({ queryKey: ['project', projectId] })
       // Deleting an observation deletes its clips AND every code on them, which
       // staleizes the cross-surface derived counts (search, codebook tree, IRR,
       // coverage…). Not needed on CREATE — an empty observation carries no codes.
       invalidateDerivedCounts(queryClient, projectId)
-      toast.success('Observation deleted')
     },
     onError: () => toast.error('Could not delete the observation.'),
   })

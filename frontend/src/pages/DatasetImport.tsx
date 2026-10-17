@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect, useId } from 'react'
 import { useParams, useNavigate, Link } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert, Tags } from 'lucide-react'
+import { FileInput, Check, ChevronDown, CircleAlert, X, FileText, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert, Tags } from 'lucide-react'
 import { retryUnanswered, datasetsApi, type DatasetPreviewResponse, type DatasetColumnPreview, type DatasetColumnsResponse, type DatasetColumnConfig, type OverlongRecords, type ParticipantLinkReport } from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
 import { Button } from '@/components/ui/button'
@@ -27,9 +27,11 @@ import {
 import { checkImportFiles } from '@/lib/upload-limits'
 import { useStepFocus } from '@/hooks/useStepFocus'
 import { projectHadParticipants } from '@/lib/participant-snapshot'
+import { invalidateAfterParticipantLinkChange } from '@/lib/participant-link-cache'
 import ParticipantLinkNote from '@/components/ParticipantLinkNote'
 import { countLabel, formatBytes, plural } from '@/lib/format'
 import UploadLimitNote from '@/components/UploadLimitNote'
+import ImportStepRail from '@/components/ImportStepRail'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
 import { OverlongRecordsNotice } from '@/components/OverlongRecordsNotice'
 
@@ -991,9 +993,8 @@ export default function DatasetImport() {
         })
         queryClient.invalidateQueries({ queryKey: ['datasets', id] })
         queryClient.invalidateQueries({ queryKey: ['project', id] })
-        if (result.participant_link_report) {
-          queryClient.invalidateQueries({ queryKey: ['participants', id] })
-        }
+        // #1054: the shared set every link door uses.
+        if (result.participant_link_report) void invalidateAfterParticipantLinkChange(queryClient, id)
 
         // Show single-file results inline
         setImportProgress({
@@ -1114,9 +1115,7 @@ export default function DatasetImport() {
     // Invalidate queries
     queryClient.invalidateQueries({ queryKey: ['datasets', id] })
     queryClient.invalidateQueries({ queryKey: ['project', id] })
-    if (results.some(r => r.linkReport)) {
-      queryClient.invalidateQueries({ queryKey: ['participants', id] })
-    }
+    if (results.some(r => r.linkReport)) void invalidateAfterParticipantLinkChange(queryClient, id)
 
     // #1011: say it finished — the status region otherwise still holds the
     // last "Still working" line, which is what a reader hears on the results.
@@ -1153,6 +1152,16 @@ export default function DatasetImport() {
     ...(isMultiFile ? [{ key: 'importing' as Step, label: 'Import' }] : []),
     { key: 'results', label: 'Results' },
   ]
+
+  // #1184: where each step sits on the rail. Only a multi-file import passes
+  // through `importing`; were a single file ever to, it is on its way to Results.
+  const railAt: Record<Step, Step> = {
+    upload: 'upload',
+    'choose-columns': 'choose-columns',
+    configure: 'configure',
+    importing: isMultiFile ? 'importing' : 'results',
+    results: 'results',
+  }
 
   const stepIndex = steps.findIndex(s => s.key === step)
   const stepHeadingRef = useStepFocus(step)
@@ -1509,33 +1518,13 @@ export default function DatasetImport() {
             for sighted users (the button label and the hint below it). */}
         <div role="status" aria-live="polite" className="sr-only">{statusMessage}</div>
 
-        {/* Progress Steps */}
-        <nav aria-label="Import progress" className="flex items-center justify-between mb-8">
-          {steps.map((s, i) => (
-            <div key={s.key} className="flex items-center" aria-current={stepIndex === i ? 'step' : undefined}>
-              <div
-                className={cn(
-                  'w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium',
-                  stepIndex === i
-                    ? 'bg-mm-orange-fill text-mm-on-fill'
-                    : stepIndex > i
-                    ? 'bg-[hsl(var(--mm-orange)/0.15)] text-[hsl(var(--mm-orange-text))]'
-                    : 'bg-mm-border-subtle text-mm-text-secondary'
-                )}
-              >
-                {stepIndex > i ? (
-                  <Check className="w-4 h-4" />
-                ) : (
-                  i + 1
-                )}
-              </div>
-              <span className="ml-2 text-sm font-medium">{s.label}</span>
-              {i < steps.length - 1 && (
-                <ChevronRight className="w-4 h-4 mx-4 text-mm-text-faint" />
-              )}
-            </div>
-          ))}
-        </nav>
+        <ImportStepRail
+          label="Import progress"
+          steps={steps}
+          current={railAt[step]}
+          accent="orange"
+          className="mb-8"
+        />
 
         {/* #1011: the element focus lands on when the step changes — visually
             hidden, because the rail above already shows the step on screen. */}

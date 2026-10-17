@@ -3,11 +3,32 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 interface UseListKeyboardNavOptions {
   /** Number of items in the list */
   itemCount: number
-  /** Called when Enter or Space is pressed on a focused item */
+  /** Called when Enter — or Space, unless focus is in a text field — is pressed on a focused item */
   onSelect?: (index: number) => void
   /** Disable keyboard handling (e.g. when popover is closed). Default true. */
   enabled?: boolean
 }
+
+/**
+ * A field the researcher TYPES into: Space there is a character, never "choose".
+ *
+ * The data grid's participant picker wires this hook's handler to its search box,
+ * so a name typed, an arrow pressed, then a space (or a space typed while the
+ * pointer rested on a result, which sets the highlight on hover) LINKED the
+ * highlighted participant to the record — overwriting its link, with no message
+ * and no undo (MEASURED, 2026-10-14). Enter still chooses: in a search box it has
+ * no character to insert, and it is the documented way to pick a highlighted
+ * option. `lib/keyboard-scope.ts`' rule, from the other side: a text field owns
+ * every key it types.
+ */
+function isTextEntry(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  if (target.isContentEditable || target.tagName === 'TEXTAREA') return true
+  if (target.tagName !== 'INPUT') return false
+  return !NON_TEXT_INPUTS.has((target as HTMLInputElement).type)
+}
+
+const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'range', 'color'])
 
 /**
  * Shared keyboard navigation for flat lists.
@@ -52,7 +73,7 @@ export function useListKeyboardNav({
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
       setFocusedIndex(prev => Math.max(prev - 1, 0))
-    } else if ((e.key === 'Enter' || e.key === ' ') && focusedIndex >= 0) {
+    } else if ((e.key === 'Enter' || (e.key === ' ' && !isTextEntry(e.target))) && focusedIndex >= 0) {
       e.preventDefault()
       onSelect?.(focusedIndex)
     } else if (e.key === 'Escape') {

@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
-import { FileInput, Check, ChevronRight, TriangleAlert, Link2, FileQuestion, CircleAlert } from 'lucide-react'
+import { FileInput, Check, TriangleAlert, Link2, FileQuestion, CircleAlert } from 'lucide-react'
 import {
   datasetsApi,
   type DatasetAppendPreviewResponse,
@@ -25,10 +25,12 @@ import { checkImportFiles } from '@/lib/upload-limits'
 import { describeAppendDuplicates } from '@/lib/append-duplicates'
 import { useStepFocus } from '@/hooks/useStepFocus'
 import UploadLimitNote from '@/components/UploadLimitNote'
+import ImportStepRail from '@/components/ImportStepRail'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
 import { OverlongRecordsNotice } from '@/components/OverlongRecordsNotice'
 import ParticipantLinkNote from '@/components/ParticipantLinkNote'
 import { projectHadParticipants } from '@/lib/participant-snapshot'
+import { invalidateAfterParticipantLinkChange } from '@/lib/participant-link-cache'
 
 type Step = 'upload' | 'review' | 'results'
 
@@ -146,9 +148,8 @@ export default function AppendImport() {
       queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, did] })
       queryClient.invalidateQueries({ queryKey: ['datasets', pid] })
       queryClient.invalidateQueries({ queryKey: ['dataset', pid, did] })
-      if (result.participant_link_report) {
-        queryClient.invalidateQueries({ queryKey: ['participants', pid] })
-      }
+      // #1054: the shared set every link door uses.
+      if (result.participant_link_report) void invalidateAfterParticipantLinkChange(queryClient, pid)
     },
     onError: (err: unknown) => {
       setError(describeDatasetUploadError(err))
@@ -170,36 +171,14 @@ export default function AppendImport() {
   return (
     <div className="h-full overflow-auto">
       <div className="max-w-5xl mx-auto px-4 py-6">
-        {/* Progress Steps */}
-        <nav aria-label="Import progress" className="flex items-center justify-between mb-8">
-          {steps.map((s, i) => {
-            const currentIndex = steps.findIndex((x) => x.key === step)
-            return (
-              <div key={s.key} className="flex items-center" aria-current={currentIndex === i ? 'step' : undefined}>
-                <div
-                  className={cn(
-                    'w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium',
-                    currentIndex === i
-                      ? 'bg-mm-orange-fill text-mm-on-fill'
-                      : currentIndex > i
-                      ? 'bg-[hsl(var(--mm-orange)/0.15)] text-[hsl(var(--mm-orange-text))]'
-                      : 'bg-mm-border-subtle text-mm-text-secondary'
-                  )}
-                >
-                  {currentIndex > i ? (
-                    <Check className="w-4 h-4" />
-                  ) : (
-                    i + 1
-                  )}
-                </div>
-                <span className="ml-2 text-sm font-medium">{s.label}</span>
-                {i < steps.length - 1 && (
-                  <ChevronRight className="w-4 h-4 mx-4 text-mm-text-faint" />
-                )}
-              </div>
-            )
-          })}
-        </nav>
+        {/* #1184: every step is on this rail, so the step IS its rail key. */}
+        <ImportStepRail
+          label="Import progress"
+          steps={steps}
+          current={step}
+          accent="orange"
+          className="mb-8"
+        />
 
         {/* #1011: where focus lands when the step changes (the pressed button
             unmounts, which used to drop focus to <body>). */}

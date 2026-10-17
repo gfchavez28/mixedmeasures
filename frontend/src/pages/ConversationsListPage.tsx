@@ -9,6 +9,7 @@ import { useListLoad } from '@/hooks/useListLoad'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { LoadState } from '@/components/LoadStatus'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
+import { forgetCachedProjectPages } from '@/lib/project-cache'
 import { TRANSCRIPT_FORMAT_LABEL } from '@/lib/conversation-import-formats'
 import { routeDroppedFiles } from '@/lib/import-routing'
 import { DROPPED_RECORDING_TITLE, DROPPED_RECORDING_DETAIL } from '@/lib/source-kind-copy'
@@ -74,8 +75,18 @@ export default function ConversationsListPage() {
     mutationFn: (conversationId: number) => conversationsApi.delete(projectId, conversationId),
     onSuccess: () => {
       setDeleteConversationId(null)
+    },
+    // #1226: SQLite hands this id to the next conversation created, and this
+    // one's workbench (`['conversation', pid, cid]`, `['segments', cid]`,
+    // `['notes', cid]`) is still cached — DRIVEN: the new one's page painted the
+    // deleted transcript, and a quote landed on a passage nobody saw. On SETTLED:
+    // a delete the client stopped waiting for may have finished. `['project', …]`
+    // carries the TopRail count, which stayed at the old number.
+    onSettled: () => {
+      forgetCachedProjectPages(queryClient)
       queryClient.invalidateQueries({ queryKey: ['conversations', projectId] })
       queryClient.invalidateQueries({ queryKey: ['project-summary', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['project', projectId] })
     },
   })
 

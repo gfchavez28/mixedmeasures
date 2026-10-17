@@ -2,13 +2,20 @@ import { useEffect, useId, useRef, type RefObject } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { LoaderCircle } from 'lucide-react'
 import { backupApi, type RestorePreview, type RestoreResult } from '@/lib/api'
+import { restoreFailureOutcome } from '@/lib/api/backup'
 import { serverDetailMessage } from '@/lib/api/error-utils'
 import { formatBytes } from '@/lib/format'
 import { formatTakenAt } from '@/lib/safety-copies'
-import { describeBackup } from '@/lib/backup-history'
+import {
+  backupContentsSentence,
+  describeBackup,
+  partwayFailureSentence,
+  sourceCountsPhrase,
+} from '@/lib/backup-history'
 import { holdPageForRestoreOutcome } from '@/lib/restore-outcome-hold'
-import { useElapsedSeconds } from '@/hooks/useElapsedSeconds'
-import { ANNOUNCE_EVERY_SECONDS, elapsedOnlyNote, stillWorkingMessage } from '@/lib/elapsed-progress'
+import { useKeepInViewWhen } from '@/hooks/useKeepInViewWhen'
+import LongWaitStatus from '@/components/LongWaitStatus'
+import { DIALOG_FITS_VIEWPORT } from '@/components/ConfirmDialog'
 import { Button } from '@/components/ui/button'
 import {
   AlertDialog,
@@ -50,30 +57,20 @@ function reloadApp() {
  * closed the moment Restore was pressed, so a restore that runs for minutes showed
  * nothing — which invited editing during it (#1024) or quitting halfway.
  *
- * The shared long-wait helpers (`lib/elapsed-progress.ts`), WITHOUT an estimate:
+ * The shared `LongWaitStatus` (since #1054), WITHOUT an estimate:
  * nobody has timed a restore on real data, and its length depends on the size of
  * the recordings as much as the database. Mounted only while the restore runs, so
  * each run starts its clock at zero.
  */
 function RestoringStatus() {
-  const elapsed = useElapsedSeconds(true)
-  const bucket = Math.floor(elapsed / ANNOUNCE_EVERY_SECONDS)
-  // The spoken line changes only when a 30-second bucket is crossed.
-  const spoken = bucket === 0
-    ? 'Restoring. Keep Mixed Measures open until this finishes.'
-    : stillWorkingMessage(bucket * ANNOUNCE_EVERY_SECONDS, false)
   return (
-    <div className="rounded-md border border-mm-border-subtle bg-mm-bg p-3 space-y-1.5 text-sm">
-      <p className="flex items-center gap-2 font-medium text-mm-text">
-        <LoaderCircle className="w-4 h-4 animate-spin" aria-hidden="true" /> Restoring…
-      </p>
-      <p className="text-mm-text-muted">
-        Your current data is saved as a backup first, then replaced. It takes longer the
-        larger the backup is. Keep Mixed Measures open until it finishes.
-      </p>
-      <p className="text-xs text-mm-text-muted" aria-hidden="true">{elapsedOnlyNote(elapsed)}</p>
-      <p role="status" className="sr-only">{spoken}</p>
-    </div>
+    <LongWaitStatus
+      label="Restoring…"
+      firstAnnouncement="Restoring. Keep Mixed Measures open until this finishes."
+    >
+      Your current data is saved as a backup first, then replaced. It takes longer the
+      larger the backup is. Keep Mixed Measures open until it finishes.
+    </LongWaitStatus>
   )
 }
 
@@ -107,9 +104,20 @@ interface RestoreBackupDialogProps {
  * - **failed** keeps the server's sentence ON SCREEN. A failure partway names the
  *   backup to restore from; a toast that vanishes is the wrong place for the one
  *   instruction that matters. The list is refreshed when the dialog closes, so
- *   that backup is there.
+ *   that backup is there. #1140: the server says WHICH side of the swap it stopped
+ *   on (`restoreFailureOutcome`). Before it (`not-started`) nothing changed, so
+ *   Restore stays — a retry is safe — and the page is not held. After it, or when
+ *   the side is unknown, Restore is GONE: the sentence says to restore a DIFFERENT
+ *   backup, and a second press of this one ran a whole second restore (driven,
+ *   2026-10-14 — focus had stayed on Restore, so a second Enter did it).
  * - While an outcome shows, the page fetches nothing (the `onlineManager` effect
- *   below says why, and what driving it found).
+ *   below says why, and what driving it found) — except after `not-started`.
+ * - #1139: capped at the window and scrolling inside (`DIALOG_FITS_VIEWPORT`). At
+ *   640×360 it ran off both edges in every state but the restored one; at
+ *   1280×800 the confirm did from ~18 projects. Two things then keep the part that
+ *   matters on screen: the footer is scrolled back into view when the wait panel
+ *   appears above it, and a failure moves focus to Close, which scrolls Close and
+ *   the sentence above it into view.
  */
 export default function RestoreBackupDialog({
   source,
@@ -120,6 +128,7 @@ export default function RestoreBackupDialog({
   const queryClient = useQueryClient()
   const doneTextId = useId()
   const reloadRef = useRef<HTMLButtonElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
 
   const restore = useMutation<RestoreResult, Error, RestoreVars>({
     // The video facts ride the VARIABLES, not the preview prop, so the finished
@@ -134,13 +143,31 @@ export default function RestoreBackupDialog({
   })
 
   const restored = restore.isSuccess
-  const showingOutcome = restore.isSuccess || restore.isError
+  const failed = restore.isError
+  const outcome = failed ? restoreFailureOutcome(restore.error) : null
+  // #1140: the ONE failure after which pressing Restore again is safe. A failure
+  // with no header is read as partway — a restore may have begun.
+  const retrySafe = outcome?.side === 'not-started'
+  const holdPage = restored || (failed && !retrySafe)
 
   useEffect(() => {
     // The Reload button is a NEW element, so moving focus to it is what makes a
     // screen reader say it — and its description — at all.
     if (restored) reloadRef.current?.focus()
   }, [restored])
+
+  useEffect(() => {
+    // #1139 — after ANY failure, focus goes to Close. Left on Restore, a second
+    // Enter ran a full second restore (driven, 2026-10-14), and at 640×360 the
+    // failure sentence sat below the fold with the focused button out of view:
+    // focusing Close scrolls it, and the alert just above it, into view.
+    if (failed) cancelRef.current?.focus()
+  }, [failed])
+
+  // #1139 — the wait panel is inserted ABOVE the footer while the dialog's scroll
+  // position stays put, so the focused "Restoring…" button slid below the visible
+  // part of a capped dialog (measured at 640×360: 439–475 px in a box ending at 344).
+  useKeepInViewWhen(restore.isPending, cancelRef)
 
   useEffect(() => {
     // 🔴 While an outcome is on screen, NOTHING on the page may fetch. After a
@@ -155,12 +182,14 @@ export default function RestoreBackupDialog({
     // #1084 (a): the hold replaces TanStack's own `online` listener (a reconnect
     // undid a plain `setOnline(false)`) and holds `client.ts`'s 401 reload for any
     // request that does not go through React Query.
-    if (!showingOutcome) return
+    // #1140: NOT after a `not-started` failure — the database was never replaced,
+    // so the session is still one it knows, and holding the page would only stop
+    // the rest of Settings refreshing while the researcher reads and retries.
+    if (!holdPage) return
     return holdPageForRestoreOutcome()
-  }, [showingOutcome])
+  }, [holdPage])
 
   const close = () => {
-    const failed = restore.isError
     // A closed dialog must not reopen showing the LAST restore's outcome.
     restore.reset()
     onClose()
@@ -184,7 +213,13 @@ export default function RestoreBackupDialog({
     })
   }
 
-  const failure = restore.isError ? (serverDetailMessage(restore.error) ?? NO_ANSWER_MESSAGE) : null
+  // A partway failure names its way back as Backup history shows it, when the
+  // server sent the time (#1140); otherwise the server's sentence, else ours.
+  const failure = !failed
+    ? null
+    : outcome?.preRestoreTakenAt
+      ? partwayFailureSentence(formatTakenAt(outcome.preRestoreTakenAt))
+      : (serverDetailMessage(restore.error) ?? NO_ANSWER_MESSAGE)
 
   return (
     <AlertDialog
@@ -196,10 +231,10 @@ export default function RestoreBackupDialog({
         if (!open) close()
       }}
     >
-      <AlertDialogContent>
+      <AlertDialogContent className={DIALOG_FITS_VIEWPORT}>
         {restored && restore.data ? (
           <RestoredView
-            sourceName={source?.name ?? 'The backup'}
+            sourceName={source ? (source.kind === 'local' ? `The ${source.name}` : source.name) : 'The backup'}
             result={restore.data}
             vars={restore.variables}
             doneTextId={doneTextId}
@@ -217,14 +252,25 @@ export default function RestoreBackupDialog({
                       * "this backup" is the same sentence for a file the researcher
                       * just picked and one chosen from a list of five that differ
                       * only by when they were taken. */}
+                    {/* A backup from the list is named as a phrase (`backupTitle`:
+                      * “Automatic” backup from …), so it takes "the"; a picked file is
+                      * its filename and does not (10-14: "the contents of “Automatic”
+                      * backup from …"). */}
                     This will replace all current data with the contents of{' '}
+                    {source?.kind === 'local' ? 'the ' : ''}
                     <span className="font-medium text-mm-text">{source?.name ?? 'this backup'}</span>
                     . A safety backup will be created automatically before restoring.
                   </p>
-                  {preview && <PreviewDetails preview={preview} />}
+                  {preview && <PreviewSummary preview={preview} />}
                 </div>
               </AlertDialogDescription>
             </AlertDialogHeader>
+
+            {/* Outside the description (#1160): every project line was read aloud
+              * when the dialog opened — eighteen of them on a real install. The
+              * totals and the warnings above are what a reader must hear; this is
+              * the detail, there to be read on screen or in browse mode. */}
+            {preview && <PreviewDetails preview={preview} />}
 
             {restore.isPending && <RestoringStatus />}
             {failure && (
@@ -242,27 +288,40 @@ export default function RestoreBackupDialog({
               * the confirm's is `handleConfirm`'s guard, Cancel's the Root's
               * `onOpenChange`. */}
             <AlertDialogFooter>
-              <AlertDialogCancel aria-disabled={restore.isPending || undefined}>
-                {restore.isError ? 'Close' : 'Cancel'}
-              </AlertDialogCancel>
-              <AlertDialogAction
-                onClick={(e) => {
-                  e.preventDefault()
-                  handleConfirm()
-                }}
+              {/* `scroll-mb-6` = the dialog's own bottom padding: scrolled into view
+                * by `useKeepInViewWhen` or by the focus move after a failure, the
+                * footer otherwise landed flush against the dialog's edge (measured
+                * at 1280×800: buttons 747–783 in a box ending at 784). */}
+              <AlertDialogCancel
+                ref={cancelRef}
                 aria-disabled={restore.isPending || undefined}
-                aria-busy={restore.isPending || undefined}
-                className="bg-red-600 hover:bg-red-700 text-white"
+                className="scroll-mb-6"
               >
-                {restore.isPending ? (
-                  <>
-                    <LoaderCircle className="w-3.5 h-3.5 mr-1.5 animate-spin" aria-hidden="true" />
-                    Restoring...
-                  </>
-                ) : (
-                  'Restore'
-                )}
-              </AlertDialogAction>
+                {failed ? 'Close' : 'Cancel'}
+              </AlertDialogCancel>
+              {/* #1140: gone after a failure that may have replaced anything — the
+                * sentence above names a DIFFERENT backup to restore. Kept after
+                * `not-started`, where nothing changed and a retry is safe. */}
+              {(!failed || retrySafe) && (
+                <AlertDialogAction
+                  onClick={(e) => {
+                    e.preventDefault()
+                    handleConfirm()
+                  }}
+                  aria-disabled={restore.isPending || undefined}
+                  aria-busy={restore.isPending || undefined}
+                  className="bg-red-600 hover:bg-red-700 text-white"
+                >
+                  {restore.isPending ? (
+                    <>
+                      <LoaderCircle className="w-3.5 h-3.5 mr-1.5 animate-spin" aria-hidden="true" />
+                      Restoring...
+                    </>
+                  ) : (
+                    'Restore'
+                  )}
+                </AlertDialogAction>
+              )}
             </AlertDialogFooter>
           </>
         )}
@@ -271,66 +330,82 @@ export default function RestoreBackupDialog({
   )
 }
 
-function PreviewDetails({ preview }: { preview: RestorePreview }) {
+/** What a reader must hear when the dialog opens — inside its description: what the
+ * backup holds in total, that the list could not be read when that is so, and the
+ * server's warnings (an older version to upgrade, video left out, too little disk). */
+function PreviewSummary({ preview }: { preview: RestorePreview }) {
   const m = preview.manifest
+  // Null for an empty list — the unavailable case (the server writes `[]` beside the
+  // flag) and an older backup's silent failure alike claim nothing (#961).
+  const contents = backupContentsSentence(m.project_summaries)
   return (
-    <div className="rounded-md border border-mm-border-subtle bg-mm-bg p-3 text-sm space-y-2">
-      <div className="flex justify-between">
-        <span className="text-mm-text-muted">Created</span>
-        <span className="text-mm-text">{new Date(m.created_at).toLocaleString()}</span>
-      </div>
-      <div className="flex justify-between">
-        <span className="text-mm-text-muted">App version</span>
-        <span className="text-mm-text">{m.app_version}</span>
-      </div>
-      <div className="flex justify-between">
-        <span className="text-mm-text-muted">Database size</span>
-        <span className="text-mm-text">{formatBytes(m.db_size_bytes)}</span>
-      </div>
-      <div className="flex justify-between">
-        <span className="text-mm-text-muted">Documents</span>
-        <span className="text-mm-text">{m.document_count}</span>
-      </div>
-      <div className="flex justify-between">
-        <span className="text-mm-text-muted">Recordings</span>
-        <span className="text-mm-text">
-          {m.media_file_count ?? 0}
-          {m.video_files_excluded > 0 && ` (${m.video_files_excluded} video excluded)`}
-        </span>
-      </div>
+    <>
+      {contents && <p>{contents}</p>}
       {/* #1039 (k) — said, not left as an absent section: an empty list here read
           as "this backup holds nothing". An empty list WITHOUT the flag stays
           silent, because a backup taken before the flag existed cannot tell its
           own failure from an install with no projects. */}
       {m.project_summaries_unavailable && (
-        <p className="text-xs text-mm-text-secondary">
-          <span className="text-mm-text-muted">Projects:</span>{' '}
-          the project list could not be read when this backup was made, so it is not
-          shown here. The backup can still be restored.
+        <p>
+          The project list could not be read when this backup was made, so what it
+          holds is not shown here. The backup can still be restored.
         </p>
-      )}
-      {m.project_summaries.length > 0 && (
-        <div>
-          <span className="text-mm-text-muted text-xs">Projects:</span>
-          <ul className="mt-1 space-y-0.5">
-            {m.project_summaries.map((p, i) => (
-              <li key={i} className="text-mm-text text-xs">
-                {/* #1132 — a TEXT space: a margin is not one, so the dialog's
-                    description read "…2024–26(3 conv, …" (#908's rule). */}
-                {p.name}{' '}
-                <span className="text-mm-text-faint">
-                  ({p.conversation_count} conv, {p.dataset_count} ds, {p.document_count} doc, {p.observation_count} obs)
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
       )}
       {preview.warnings.length > 0 && (
         <div className="rounded border border-amber-300 dark:border-amber-600 bg-amber-50 dark:bg-amber-900/20 p-2 space-y-1">
           {preview.warnings.map((w, i) => (
             <p key={i} className="text-xs text-amber-800 dark:text-amber-300">{w}</p>
           ))}
+        </div>
+      )}
+    </>
+  )
+}
+
+function PreviewDetails({ preview }: { preview: RestorePreview }) {
+  const m = preview.manifest
+  return (
+    <div className="rounded-md border border-mm-border-subtle bg-mm-bg p-3 text-sm space-y-2">
+      <div className="flex justify-between gap-3">
+        <span className="text-mm-text-muted">Created</span>
+        {/* #1164 (c): the formatter the sentence naming this backup uses, so the
+            two agree to the second (and an unparseable stamp shows as itself,
+            never "Invalid Date"). */}
+        <span className="text-mm-text text-right">{formatTakenAt(m.created_at)}</span>
+      </div>
+      <div className="flex justify-between gap-3">
+        <span className="text-mm-text-muted">App version</span>
+        <span className="text-mm-text">{m.app_version}</span>
+      </div>
+      <div className="flex justify-between gap-3">
+        <span className="text-mm-text-muted">Database size</span>
+        <span className="text-mm-text">{formatBytes(m.db_size_bytes)}</span>
+      </div>
+      {/* #1160: no Documents row — the manifest's `document_count` counts FILES
+          (each document's extracted images too), so it sat at 69 over projects
+          totalling 4; the project lines below carry the documents. Recordings are
+          counted from the archive's members, not `media_file_count` (which counts
+          canvas images and half-finished uploads as recordings). */}
+      <div className="flex justify-between gap-3">
+        <span className="text-mm-text-muted">Recordings</span>
+        <span className="text-mm-text text-right">
+          {preview.recording_count.toLocaleString()}
+          {m.video_files_excluded > 0 && ` (${m.video_files_excluded.toLocaleString()} video not included)`}
+        </span>
+      </div>
+      {m.project_summaries.length > 0 && (
+        <div>
+          <span className="text-mm-text-muted text-xs">Projects:</span>
+          <ul className="mt-1 space-y-0.5">
+            {m.project_summaries.map((p, i) => (
+              <li key={i} className="text-mm-text text-xs">
+                {/* #1132 — a TEXT separator: a margin is not one, so the dialog's
+                    description read "…2024–26(3 conv, …" (#908's rule). */}
+                {p.name}{' — '}
+                <span className="text-mm-text-faint">{sourceCountsPhrase(p)}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>
@@ -365,8 +440,10 @@ function RestoredView({
           <div>
             <div id={doneTextId} className="space-y-3">
               <p>
+                {/* #1139 (r3 N3): not "Mixed Measures reloads…" — nothing reloads
+                    until the button below is pressed. */}
                 <span className="font-medium text-mm-text">{sourceName}</span> has been restored.
-                Mixed Measures reloads to open the restored data.
+                Reload Mixed Measures to open the restored data.
               </p>
               <p>
                 The data you had before this restore was saved first, as the “{beforeLabel}”

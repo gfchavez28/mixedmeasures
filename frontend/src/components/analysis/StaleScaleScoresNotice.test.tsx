@@ -44,9 +44,15 @@ function mount(staleDomainIds: number[], client = new QueryClient()) {
 describe('staleScaleScoresSentence', () => {
   it('names the groups from the page list', () => {
     expect(staleScaleScoresSentence([4, 6], DOMAINS))
-      .toBe('Out of date: the Wellbeing and Local scale scores were computed before their data changed.')
+      .toBe('Out of date: the scale scores for “Wellbeing” and “Local” were computed before their data changed.')
     expect(staleScaleScoresSentence([8], DOMAINS))
-      .toBe('Out of date: the Trust scale score was computed before its data changed.')
+      .toBe('Out of date: the scale score for “Trust” was computed before its data changed.')
+  })
+
+  it('#1262 — a name that ends in "scale" never reads "scale scale score"', () => {
+    const sentence = staleScaleScoresSentence([5], [{ id: 5, name: 'Wellbeing scale' }])
+    expect(sentence).toBe('Out of date: the scale score for “Wellbeing scale” was computed before its data changed.')
+    expect(sentence).not.toMatch(/scale scale/)
   })
 
   it('counts rather than guesses when the list cannot name one yet', () => {
@@ -61,7 +67,7 @@ describe('#1168 R7 — the out-of-date notice', () => {
   it('renders from the payload, naming the groups, with the recompute', () => {
     mount([4, 6])
     expect(screen.getByText(
-      'Out of date: the Wellbeing and Local scale scores were computed before their data changed.',
+      'Out of date: the scale scores for “Wellbeing” and “Local” were computed before their data changed.',
     )).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Recompute scale scores' })).toBeInTheDocument()
   })

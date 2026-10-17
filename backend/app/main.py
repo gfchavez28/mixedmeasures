@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from .config import get_settings, get_documents_dir, get_media_dir, get_backup_dir, dist_dir
 
 def configure_app_logging() -> None:
@@ -97,11 +97,11 @@ def _run_auto_backup(db_path: Path, docs_dir: Path, media_dir: Path, backup_dir:
         sweep_abandoned_staging(backup_dir)
         # Auto rotation excludes video (slab 5 policy: 4h × 5-rotation would
         # multiply multi-GB recordings; restore preserves them).
-        create_backup(
+        info = create_backup(
             db_path, docs_dir, media_dir, backup_dir, "auto", False,
             busy_wait_seconds=AUTO_BACKUP_BUSY_WAIT_SECONDS,
         )
-        cleanup_old_backups(backup_dir, "auto", max_count)
+        cleanup_old_backups(backup_dir, "auto", max_count, keep=info.filename)
         return True
     finally:
         db_gate.leave()
@@ -148,14 +148,50 @@ async def _auto_backup_turn(settings) -> float:
     return interval
 
 
-async def _auto_backup_loop():
-    """Periodic auto-backup loop. Runs as a background task — only when the interval
-    is above zero (`0` turns automatic backups off, #1043)."""
+async def _auto_backup_loop(*, sleep=asyncio.sleep, clock=None):
+    """The automatic backup, on a DUE schedule (#1186). A background task, started only
+    when the interval is above zero (`0` turns automatic backups off, #1043).
+
+    It used to sleep a full interval before its first turn, from every launch — so a
+    session shorter than the interval took none, and on Windows (no on-quit backup)
+    short sessions took none at all. Now: wait `AUTO_BACKUP_SETTLE_SECONDS`, then take
+    one only when the newest automatic backup in the folder is an interval old; on
+    every wake, read the folder again, so *Backup now* postpones the next.
+
+    🔴 **After a turn it sleeps the turn's own delay BEFORE reading the folder again.**
+    A failed backup writes nothing, so the folder still says "due": re-read at once,
+    a full disk would back up in a tight loop — #1043's 640 backups, with failures.
+    🔴 **A folder that cannot be read does not end the task** — it is treated as due,
+    so the turn runs and logs why; an exception here would have ended automatic
+    backups for the rest of the session, silently.
+
+    `sleep` and `clock` are for the tests, which drive it without sleeping.
+    """
+    from .services.backup import (
+        AUTO_BACKUP_SETTLE_SECONDS,
+        next_automatic_backup_at,
+        note_automatic_backup_wait,
+    )
+    clock = clock or (lambda: datetime.now(timezone.utc))
     settings = get_settings()
-    delay = settings.auto_backup_interval_hours * 3600
-    while True:
-        await asyncio.sleep(delay)
-        delay = await _auto_backup_turn(settings)
+    hours = settings.auto_backup_interval_hours
+    wait = min(AUTO_BACKUP_SETTLE_SECONDS, hours * 3600)
+    try:
+        while True:
+            note_automatic_backup_wait(clock() + timedelta(seconds=wait))
+            await sleep(wait)
+            now = clock()
+            try:
+                due = next_automatic_backup_at(get_backup_dir(), hours, now=now)
+                wait = (due - now).total_seconds()
+            except Exception as e:
+                logger.warning("Could not read the backup folder to schedule a backup: %s", e)
+                wait = 0.0
+            if wait > 0:
+                continue
+            wait = await _auto_backup_turn(settings)
+    finally:
+        note_automatic_backup_wait(None)
 
 
 #: Stale markers whose recompute raised, carried from tick to tick so the next
@@ -250,12 +286,14 @@ def _shutdown_backup():
                 # #1025: a short wait — the desktop shell kills the backend 5 s
                 # after asking it to stop, and a refused copy is better than one
                 # that silently lacks the session's last work.
-                create_backup(
+                info = create_backup(
                     db_path, docs_dir, media_dir, backup_dir, "shutdown",
                     include_video=False,
                     busy_wait_seconds=SHUTDOWN_BACKUP_BUSY_WAIT_SECONDS,
                 )
-                cleanup_old_backups(backup_dir, "shutdown", SHUTDOWN_BACKUP_MAX_COUNT)
+                cleanup_old_backups(
+                    backup_dir, "shutdown", SHUTDOWN_BACKUP_MAX_COUNT, keep=info.filename,
+                )
             finally:
                 db_gate.leave()
             logger.info("Shutdown backup completed")
@@ -344,6 +382,11 @@ async def lifespan(app: FastAPI):
         # back only at the next restore, unless a restore that outlived its app is
         # still running in another process (the restore lock, #1142). Neither raises.
         sweep_abandoned_staging(get_backup_dir())
+        # #1225: what an import stopped before (or between) its commit and the move into
+        # place left beside the data folders. Narrowed to the import's own prefix — that
+        # folder also holds the restore's fixed-name staging, which is not ours to judge.
+        from .services.project_portability import IMPORT_STAGING_PREFIX
+        sweep_abandoned_staging(get_documents_dir().parent, prefix=IMPORT_STAGING_PREFIX)
         recover_interrupted_restore(
             Path(_settings_at_start.mm_database_path), get_media_dir()
         )
@@ -359,7 +402,7 @@ async def lifespan(app: FastAPI):
         emit_fatal_startup(exc)
         raise
 
-    # Start periodic auto-backup + consensus staleness sweep
+    # Start the automatic backup (a DUE schedule, #1186) + consensus staleness sweep
     tasks = [asyncio.create_task(_consensus_sweep_loop())]
     if get_settings().auto_backup_interval_hours > 0:
         tasks.append(asyncio.create_task(_auto_backup_loop()))

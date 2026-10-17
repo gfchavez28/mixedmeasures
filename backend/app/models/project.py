@@ -38,26 +38,35 @@ class Project(Base):
     # NOTE: CASCADE means deleting a user deletes their projects. For cloud/multi-tenant
     # deployment, consider changing to SET NULL to preserve data when deactivating users.
     user = relationship("User", back_populates="projects")
-    documents = relationship("Document", back_populates="project", cascade="all, delete-orphan")
-    conversations = relationship("Conversation", back_populates="project", cascade="all, delete-orphan")
-    observations = relationship("Observation", back_populates="project", cascade="all, delete-orphan")
-    codes = relationship("Code", back_populates="project", cascade="all, delete-orphan")
-    categories = relationship("CodeCategory", back_populates="project", cascade="all, delete-orphan")
-    memos = relationship("Memo", back_populates="project", cascade="all, delete-orphan")
-    speakers = relationship("Speaker", back_populates="project", cascade="all, delete-orphan")
-    participants = relationship("Participant", back_populates="project", cascade="all, delete-orphan")
-    datasets = relationship("Dataset", back_populates="project", cascade="all, delete-orphan")
-    equivalence_groups = relationship("EquivalenceGroup", back_populates="project", cascade="all, delete-orphan")
-    code_equivalence_groups = relationship("CodeEquivalenceGroup", back_populates="project", cascade="all, delete-orphan")
-    code_sets = relationship("CodeSet", back_populates="project", cascade="all, delete-orphan")
-    analysis_domains = relationship("AnalysisDomain", back_populates="project", cascade="all, delete-orphan")
-    metric_definitions = relationship("MetricDefinition", back_populates="project", cascade="all, delete-orphan")
-    material_collections = relationship("MaterialCollection", back_populates="project", cascade="all, delete-orphan")
-    statistical_tests = relationship("StatisticalTest", back_populates="project", cascade="all, delete-orphan")
+    # 🔴 #1035: `passive_deletes=True` on EVERY collection below. Without it,
+    # `db.delete(project)` loads each child as an ORM object, and each child's own
+    # non-passive cascades load theirs — 11.3 min and 6.49 GB to delete a
+    # 300-interview project, measured. Every FK behind these is `ON DELETE CASCADE`
+    # in the model AND the migrated schema, and `PRAGMA foreign_keys=ON` is set on
+    # every connection, so the database deletes what the ORM no longer loads. A
+    # collection that IS loaded is still deleted by the ORM. The ORDER of the big
+    # deletes lives in `services/project_deletion.py`. A new collection here takes
+    # the flag too — `test_project_deletion.py` derives the set from the mapper.
+    documents = relationship("Document", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    conversations = relationship("Conversation", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    observations = relationship("Observation", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    codes = relationship("Code", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    categories = relationship("CodeCategory", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    memos = relationship("Memo", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    speakers = relationship("Speaker", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    participants = relationship("Participant", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    datasets = relationship("Dataset", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    equivalence_groups = relationship("EquivalenceGroup", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    code_equivalence_groups = relationship("CodeEquivalenceGroup", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    code_sets = relationship("CodeSet", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    analysis_domains = relationship("AnalysisDomain", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    metric_definitions = relationship("MetricDefinition", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    material_collections = relationship("MaterialCollection", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    statistical_tests = relationship("StatisticalTest", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
     text_coding_config = relationship("TextCodingConfig", back_populates="project",
-                                       uselist=False, cascade="all, delete-orphan")
-    excerpts = relationship("Excerpt", back_populates="project", cascade="all, delete-orphan")
-    scratchpad_entries = relationship("ScratchpadEntry", back_populates="project", cascade="all, delete-orphan")
+                                       uselist=False, cascade="all, delete-orphan", passive_deletes=True)
+    excerpts = relationship("Excerpt", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
+    scratchpad_entries = relationship("ScratchpadEntry", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)
     quote_board_config = relationship("QuoteBoardConfig", back_populates="project",
-                                       uselist=False, cascade="all, delete-orphan")
-    canvases = relationship("Canvas", back_populates="project", cascade="all, delete-orphan")
+                                       uselist=False, cascade="all, delete-orphan", passive_deletes=True)
+    canvases = relationship("Canvas", back_populates="project", cascade="all, delete-orphan", passive_deletes=True)

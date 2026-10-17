@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useRef, type ReactNode } from 'react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -10,6 +10,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { MODE_DISABLED_CLASS, modeDisabledProps } from '@/lib/mode-disabled'
+import { useKeepInViewWhen } from '@/hooks/useKeepInViewWhen'
 
 interface ConfirmDialogProps {
   open: boolean
@@ -51,7 +52,22 @@ interface ConfirmDialogProps {
    * the dialog OPENS (focus starts on Cancel): a confirm that turns `disabled`
    * while focused drops focus to `<body>` (#959) — that is `loading`'s job. */
   confirmUnavailable?: boolean
+  /** What the confirm acts on is still being READ as the dialog opens (#1152: the
+   * withdrawal report behind the participant delete) — `aria-disabled` + the click
+   * guard, with its name UNCHANGED (#770: a wait is transient state). Say what it
+   * waits for in `details` (a `LoadState`). Unlike `confirmUnavailable`'s native
+   * `disabled`, it may come back on while the confirm is focused — the page's query
+   * goes back to loading as the dialog closes — without Chrome blurring it (#959). */
+  confirmWaiting?: boolean
+  /** The dialog may grow while it is open (a long wait under it): cap it at the
+   * viewport and scroll inside, rather than run off a short window. Measured at
+   * 640×360 (#1035): the project delete's wait made the dialog 416 px tall, title
+   * and buttons cut off, nothing scrolling. */
+  fitViewport?: boolean
 }
+
+/** A dialog held within the viewport, scrolling inside it — `fitViewport`'s class. */
+export const DIALOG_FITS_VIEWPORT = 'max-h-[calc(100dvh-2rem)] overflow-y-auto'
 
 export function ConfirmDialog({
   open,
@@ -68,6 +84,8 @@ export function ConfirmDialog({
   onCloseAutoFocus,
   confirmBlockedReason = null,
   confirmUnavailable = false,
+  confirmWaiting = false,
+  fitViewport = false,
 }: ConfirmDialogProps) {
   const confirmText = loading ? (loadingLabel || 'Deleting...') : confirmLabel
   // ⚠️ The click guard is the load-bearing half of a block (#754): the mode arm's
@@ -79,13 +97,31 @@ export function ConfirmDialog({
     unavailable: confirmUnavailable,
     onActivate: (e) => {
       e.preventDefault()
-      if (loading) return
+      if (loading || confirmWaiting) return
       onConfirm()
     },
   })
+  /*
+   * #1139 — a `fitViewport` dialog opens scrolled to its top, and starting the work
+   * puts a wait above the footer while the scroll position stays put: the focused
+   * busy button ("Deleting…") moved below the visible part of the dialog (measured
+   * on the restore and withdrawal confirms; Batch 1a's three `fitViewport` dialogs —
+   * the project delete, Link by column, the overwrite import — share the shape).
+   * The confirm is the element: it is the focused one, and the footer is one row
+   * from 640 px (`sm:flex-row`). Harmless on a dialog that already fits.
+   * ⚠️ `block: 'nearest'` ignores the scroller's padding, so the button landed
+   * FLUSH on the dialog's bottom edge (measured on the restore confirm: 747–783 in
+   * a box ending at 784); `scroll-mb-6` on the target gives it back the dialog's
+   * own 24 px (`p-6`).
+   */
+  const confirmRef = useRef<HTMLButtonElement>(null)
+  useKeepInViewWhen(loading, confirmRef)
   return (
     <AlertDialog open={open} onOpenChange={loading ? undefined : onOpenChange}>
-      <AlertDialogContent onCloseAutoFocus={onCloseAutoFocus}>
+      <AlertDialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
+        className={fitViewport ? DIALOG_FITS_VIEWPORT : undefined}
+      >
         <AlertDialogHeader>
           <AlertDialogTitle>{title}</AlertDialogTitle>
           {details ? (
@@ -114,11 +150,14 @@ export function ConfirmDialog({
           <AlertDialogCancel aria-disabled={loading || undefined}>Cancel</AlertDialogCancel>
           <AlertDialogAction
             {...confirm}
-            aria-disabled={loading || confirm['aria-disabled']}
+            ref={confirmRef}
+            aria-disabled={loading || confirmWaiting || confirm['aria-disabled']}
             className={[
+              // #1139 — the keep-in-view target stops 24 px short of the edge.
+              'scroll-mb-6',
               destructive ? 'bg-red-600 hover:bg-red-700 focus:ring-red-600' : '',
-              confirmBlockedReason ? MODE_DISABLED_CLASS : '',
-            ].join(' ').trim() || undefined}
+              confirmBlockedReason || (confirmWaiting && !loading) ? MODE_DISABLED_CLASS : '',
+            ].join(' ').trim()}
           >
             {confirmText}
           </AlertDialogAction>

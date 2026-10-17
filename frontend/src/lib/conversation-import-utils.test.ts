@@ -5,8 +5,8 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  generateParticipantName, isBlockingFileWarning, isOrphanedParticipant, namingTheFile, syncAutoNames,
-  UNREADABLE_FILE_PREFIX, type SpeakerMapping,
+  fileCheckRefusal, generateParticipantName, isBlockingFileWarning, isOrphanedParticipant, namingTheFile,
+  syncAutoNames, UNREADABLE_FILE_PREFIX, type SpeakerMapping,
 } from './conversation-import-utils'
 
 const speaker = (name: string, isFacilitator = false): SpeakerMapping =>
@@ -102,5 +102,34 @@ describe('#1127 — a refused transcript is named, and blocks', () => {
     expect(isBlockingFileWarning('Missing required columns: Text ("Text")')).toBe(true)
     expect(isBlockingFileWarning('Optional columns missing: End Time (will be skipped)')).toBe(false)
     expect(isBlockingFileWarning(null)).toBe(false)
+  })
+})
+
+describe('fileCheckRefusal (#1259 — composed from the files still listed)', () => {
+  const names = ['a.csv', 'b.csv', 'c.csv']
+  const refused = (why: string) => `${UNREADABLE_FILE_PREFIX} ${why}`
+  const MISSING = 'Missing required columns: Text ("Text")'
+
+  it('names each refused file with its own sentence, in file order', () => {
+    expect(fileCheckRefusal(names, [null, refused('Line 2 …'), null]))
+      .toBe('“b.csv”: Line 2 … Remove that file below, or correct it and add it again.')
+    expect(fileCheckRefusal(names, [null, refused('Line 2 …'), refused('Line 9 …')]))
+      .toBe('“b.csv”: Line 2 … “c.csv”: Line 9 … Remove those files below, or correct them and add them again.')
+  })
+
+  it('a missing column says the mapping sentence, and then no "Remove that file" sentence', () => {
+    expect(fileCheckRefusal(names, [null, MISSING, null]))
+      .toBe('Some files are incompatible with the selected column mapping. Remove them or adjust your mapping.')
+    expect(fileCheckRefusal(names, [null, refused('Line 2 …'), MISSING]))
+      .toBe('“b.csv”: Line 2 … Some files are incompatible with the selected column mapping. Remove them or adjust your mapping.')
+  })
+
+  it('is empty when nothing listed blocks — including after the refused file is gone', () => {
+    expect(fileCheckRefusal(['a.csv'], [null])).toBe('')
+    expect(fileCheckRefusal(names, [null, 'Optional columns missing: End Time (will be skipped)', null])).toBe('')
+  })
+
+  it('never reads the first file, which the mapping came from', () => {
+    expect(fileCheckRefusal(names, [refused('Line 2 …'), MISSING, null])).not.toContain('a.csv')
   })
 })

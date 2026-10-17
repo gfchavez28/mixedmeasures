@@ -39,11 +39,15 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 export default function BackupHistorySection({
   onRestore,
   restoreBusy = false,
+  checkingFilename = null,
 }: {
   /** Opens the shared restore preview + confirmation for this backup. */
   onRestore: (backup: BackupInfo) => void
   /** A restore or a preview is already running, from either door. */
   restoreBusy?: boolean
+  /** #1162: the backup whose preview is being read — its row's Restore shows the
+   * wait. The other rows only refuse (`restoreBusy`). */
+  checkingFilename?: string | null
 }) {
   const queryClient = useQueryClient()
   const listId = useId()
@@ -151,6 +155,7 @@ export default function BackupHistorySection({
                   // for the same reason the safety copies' names do (#919).
                   const rowName = backupRowName(backup, takenAt)
                   const isDownloading = downloading === backup.filename
+                  const isChecking = checkingFilename === backup.filename
                   return (
                     <li
                       key={backup.filename}
@@ -170,16 +175,25 @@ export default function BackupHistorySection({
                           type="button"
                           variant="outline"
                           size="sm"
-                          className="h-7 px-2 text-xs"
+                          className="h-7 px-2 text-xs aria-busy:cursor-wait aria-busy:opacity-50"
                           onClick={() => { if (!restoreBusy) onRestore(backup) }}
                           // `aria-disabled` + a click guard, never `disabled`:
                           // Chrome blurs a focused button that becomes disabled
                           // (#754/#959 §4), and a preview takes seconds on a
                           // large backup.
                           aria-disabled={restoreBusy || undefined}
+                          // #1162: the wait shows HERE, on the row pressed — it
+                          // showed on Restore from a file. The name and the visible
+                          // word do not change (#770: a name that changes is re-read;
+                          // WCAG 2.5.3: the visible label stays in the name).
+                          aria-busy={isChecking || undefined}
                           aria-label={`Restore from ${rowName}`}
                         >
-                          <ArchiveRestore className="w-3.5 h-3.5 mr-1" aria-hidden="true" />
+                          {isChecking ? (
+                            <LoaderCircle className="w-3.5 h-3.5 mr-1 animate-spin" aria-hidden="true" />
+                          ) : (
+                            <ArchiveRestore className="w-3.5 h-3.5 mr-1" aria-hidden="true" />
+                          )}
                           Restore
                         </Button>
                         <Button

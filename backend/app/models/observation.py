@@ -63,8 +63,10 @@ class Observation(Base):
 
     # Relationships
     project = relationship("Project", back_populates="observations")
+    # #1035: passive — the database's ON DELETE CASCADE removes what is not loaded
+    # (project.py explains; never on a SET NULL relationship).
     segments = relationship(
         "Segment", back_populates="observation",
-        cascade="all, delete-orphan", order_by="Segment.sequence_order",
+        cascade="all, delete-orphan", passive_deletes=True, order_by="Segment.sequence_order",
     )
-    notes = relationship("Note", back_populates="observation", cascade="all, delete-orphan")
+    notes = relationship("Note", back_populates="observation", cascade="all, delete-orphan", passive_deletes=True)

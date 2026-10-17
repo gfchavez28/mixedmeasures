@@ -46,6 +46,16 @@ def test_the_client_project_file_limit_is_the_servers():
     assert PROJECT_MAX != MAX_UPLOAD_SIZE  # the two limits are distinct on purpose
 
 
+def test_the_client_codebook_limit_is_the_servers():
+    # #1203: Import codebook refuses an over-limit file at SELECTION and states the
+    # limit in its sentence, so its number must be the endpoint's.
+    from app.routers.project_portability import MAX_CODEBOOK_UPLOAD_SIZE
+
+    client = _client_limit("MAX_CODEBOOK_FILE_BYTES")
+    assert client > 1024 * 1024  # the parse read a real number
+    assert client == MAX_CODEBOOK_UPLOAD_SIZE
+
+
 def test_the_client_backup_upload_limit_is_the_servers():
     # #1039 (j): Settings refuses an over-limit .mmbackup at SELECTION and names
     # the limit on the page, so its number must be the restore endpoint's. Both

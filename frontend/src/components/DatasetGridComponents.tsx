@@ -208,7 +208,8 @@ export function ColumnHeaderContent({
         {isComputed && (
           <span title={column.expression || 'Computed column'} className="flex items-center gap-0.5">
             <FunctionSquare className="w-3 h-3 text-violet-500" />
-            {/* #1174 — a name, not a `title`; the column menu's Recompute is the fix. */}
+            {/* #1174 / #1261 — the dot carries its name AND its own hover title (it
+                wins over the formula's on the dot); the column menu's Recompute is the fix. */}
             {column.stale && <OutOfDateDot />}
           </span>
         )}

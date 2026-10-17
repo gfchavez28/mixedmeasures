@@ -17,8 +17,14 @@ export interface BackupManifest {
   created_at: string
   backup_type: string
   db_size_bytes: number
+  /** Every FILE under `documents/` — each document's extracted images included — so
+   * not a count of documents (#1160: "Documents 69" sat over projects totalling 4).
+   * The per-project `document_count`s are the documents. Not shown in the preview. */
   document_count: number
-  /** Recordings in the ZIP (audio + any included video). */
+  /** Every FILE under `media/` — recordings, but also canvas images and any upload
+   * still in flight when the backup was taken — so NOT a count of recordings
+   * (#1160). `RestorePreview.recording_count` is. Older builds read it as written,
+   * which is why its meaning stays. */
   media_file_count: number
   /** #551: video recordings were excluded when this backup was created (the
    * periodic auto-backup policy) — the restore preview and post-restore toast
@@ -38,9 +44,10 @@ export interface BackupStatus {
   backup_count: number
   total_size_bytes: number
   is_stale: boolean
-  /** #357: ISO timestamp of when the next automatic backup is expected to run
-   * (computed as last_backup_at + interval). Null when no backups exist yet.
-   * Used by TopRail freshness label + Settings page countdown. */
+  /** #357: ISO timestamp of when the next automatic backup will be taken — #1186:
+   * the server's own schedule (the newest automatic backup + the interval, never in
+   * the past). Null only when automatic backups are off. Used by the TopRail
+   * freshness label + Settings page countdown. */
   next_backup_at: string | null
   /** #1043: THIS install's automatic schedule, so the Settings sentences state it
    * rather than assume the defaults. `0` hours = automatic backups are OFF. Null
@@ -66,6 +73,44 @@ export const MAX_BACKUP_UPLOAD_BYTES = 500 * 1024 * 1024
 export interface RestorePreview {
   manifest: BackupManifest
   warnings: string[]
+  /** #1160: the recordings the archive carries, counted by the server from its
+   * members at preview (`media/{project}/{owner}/original.*`) — true for every
+   * backup ever written, where the manifest's `media_file_count` counts files. */
+  recording_count: number
+}
+
+/**
+ * #1140 — which side of the database swap a failed restore stopped on.
+ *
+ * - `not-started` — nothing was changed: the backup did not read, it was gone,
+ *   another program held the database, the disk was full. A second press is safe
+ *   and the session is the one the database knows, so the page need not be held.
+ * - `partway` — the data was replaced in part; the way back is the "Before a
+ *   restore" backup, whose time rides `preRestoreTakenAt` when the server knew it.
+ * - `unknown` — no header (an unanticipated 500, a 503, no answer at all), read as
+ *   `partway` by every caller: the cautious side, since a restore may have begun.
+ */
+export type RestoreFailureSide = 'not-started' | 'partway' | 'unknown'
+
+/**
+ * The ONE reader of a restore failure's outcome headers (`routers/backup.py`'s
+ * `X-MM-Restore-Outcome` and `X-MM-Pre-Restore-Taken-At`). Duck-typed like
+ * `serverDetailMessage`. The names are LOWER-case because `client.ts` builds
+ * `response.headers` by iterating a `Headers`, which yields lower-case names (the
+ * Fetch spec); a request that never answered has no headers and reads `unknown`.
+ */
+export function restoreFailureOutcome(err: unknown): {
+  side: RestoreFailureSide
+  preRestoreTakenAt: string | null
+} {
+  const headers = (err as { response?: { headers?: Record<string, string> } } | null)
+    ?.response?.headers
+  const outcome = headers?.['x-mm-restore-outcome']
+  if (outcome === 'not-started') return { side: 'not-started', preRestoreTakenAt: null }
+  if (outcome === 'partway') {
+    return { side: 'partway', preRestoreTakenAt: headers?.['x-mm-pre-restore-taken-at'] ?? null }
+  }
+  return { side: 'unknown', preRestoreTakenAt: null }
 }
 
 /** What a finished restore reports: the backup of the data it replaced, which is
@@ -136,8 +181,9 @@ export const backupApi = {
       })),
 
   /** #357: trigger an auto-prefix snapshot without download. Counts toward
-   * the same automatic rotation (`MM_AUTO_BACKUP_MAX_COUNT`, 5 by default). Returns the refreshed BackupStatus so
-   * the UI can re-render without waiting for the polling tick. */
+   * the same automatic rotation (`MM_AUTO_BACKUP_MAX_COUNT`, 5 by default), and
+   * postpones the next automatic backup by an interval (#1186). Returns the refreshed
+   * BackupStatus so the UI can re-render without waiting for the polling tick. */
   now: () =>
     api.post<BackupStatus>('/backup/now', null, { timeout: 120_000 }).then(r => r.data),
 

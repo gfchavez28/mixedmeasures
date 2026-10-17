@@ -595,6 +595,7 @@ class TestPortabilityWithMedia:
         import_media_dir = tmp_path / "import_media"
 
         new_id, _name = import_project(db, export_path, docs_dir, import_media_dir, user_id=1)
+        db.commit()  # #1225: an import's files land with its commit
 
         imported = db.query(Conversation).filter(Conversation.project_id == new_id).one()
         assert imported.media_type == "video"

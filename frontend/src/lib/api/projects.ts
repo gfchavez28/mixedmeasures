@@ -125,7 +125,11 @@ export const projectsApi = {
     api.post<Project>('/projects', data).then(res => res.data),
   update: (id: number, data: Partial<Project>) =>
     api.patch<Project>(`/projects/${id}`, data).then(res => res.data),
-  delete: (id: number) => api.delete(`/projects/${id}`).then(res => res.data),
+  /** #1035: NO client timeout. A large project's delete measured 11-24 s (and an
+   * 11-minute delete before the fix) against the 30 s default — the page said it
+   * failed while the server finished it, and a second press queued a second
+   * DELETE. Giving up does not stop the server (#1025's rule). */
+  delete: (id: number) => api.delete(`/projects/${id}`, { timeout: 0 }).then(res => res.data),
   /** Track J · J3-1: toggle the codebook freeze soft-lock. */
   setCodebookFreeze: (id: number, frozen: boolean) =>
     api.post<Project>(`/projects/${id}/codebook/freeze`, { frozen }).then(res => res.data),

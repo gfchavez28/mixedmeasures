@@ -289,6 +289,62 @@ def mark_metrics_stale(
     return total
 
 
+def split_half_item_order(db: Session, domain_id: int) -> list[int]:
+    """A variable group's member columns in the order split-half SPLITS them.
+
+    Read through `statistical_tests._order_columns_by_domain_sequence` itself —
+    the sort `compute_split_half` uses — so "did the order move?" cannot be
+    answered by a second copy of the rule (#733).
+    """
+    from .statistical_tests import _order_columns_by_domain_sequence
+
+    member_ids = [
+        member_id for (member_id,) in
+        db.query(AnalysisDomainMember.member_id)
+        .filter(
+            AnalysisDomainMember.domain_id == domain_id,
+            AnalysisDomainMember.member_type == "column",
+        )
+        .all()
+    ]
+    return _order_columns_by_domain_sequence(db, domain_id, member_ids)
+
+
+def mark_reordered_split_half_stale(
+    db: Session, project_id: int, domain_id: int, before: list[int],
+) -> int:
+    """After a reorder of a variable group's items (#1228): its SPLIT-HALF tests.
+
+    Since #710 the item order decides split-half's odd/even halves, so a reorder
+    moves a saved coefficient (measured r 1.0 → −0.13). Nothing else reads the
+    order: Cronbach's α and every metric are order-invariant, so they are NOT
+    marked (#1149 — a marker on a number that cannot have moved). A submission
+    that leaves the order as it was marks nothing.
+
+    ⚠️ Keyed on the ORDER, not on the odd/even partition: a reorder that keeps
+    both halves' membership (two items swapped within one half) is marked
+    although its coefficient cannot move. The partition would need the data
+    (a member with no cells drops out of the split), and a member-only partition
+    can UNDER-mark; the order cannot.
+
+    The reorder writes with `Query.update`, which runs at once, so there is no
+    pending change to flush (a `db.flush()` here was mutation-tested: it survives).
+    """
+    if split_half_item_order(db, domain_id) == before:
+        return 0
+    return (
+        db.query(StatisticalTest)
+        .filter(
+            StatisticalTest.project_id == project_id,
+            StatisticalTest.test_type == "split_half",
+            StatisticalTest.target_type == "analysis_domain",
+            StatisticalTest.target_id == domain_id,
+            StatisticalTest.stale == False,  # noqa: E712
+        )
+        .update({"stale": True}, synchronize_session="fetch")
+    )
+
+
 def _mark_metric_ids_stale(db: Session, metric_ids) -> int:
     """Mark exactly these metrics stale, with their tests."""
     ids = sorted({int(i) for i in metric_ids})

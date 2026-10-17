@@ -72,15 +72,35 @@ export interface ParticipantDetail extends Participant {
   linked_demographics: LinkedDemographicValue[]
 }
 
+/** #1053 — which value a search matched, when the record's label does not show it. */
+export interface LinkableRowMatch {
+  column_id: number
+  column_label: string
+  excerpt: string
+}
+
+/** One record in the participant panel's record picker (#418, #1053). */
 export interface LinkableRow {
   row_id: number
   row_identifier: string | null
+  linked_participant_id: number | null
   linked_participant_name: string | null
-  demographic_values: Array<{ label: string; value: string | null }>
-  /** #418: up to 3 identifying text-ish values for the row label. */
+  /** #418: up to 3 identifying values for the row label, missing values skipped. */
   display_values: string[]
-  /** #418: every value_text in the row, space-joined + lowercased, for search. */
-  search_text: string
+  matched: LinkableRowMatch | null
+}
+
+/**
+ * #1053 — ONE page of the records a search matched, best first. `total` counts
+ * every match, never the page. `link_refusal` is set for a table the tool keeps
+ * (#1157); that page carries no rows.
+ */
+export interface LinkableRowsPage {
+  rows: LinkableRow[]
+  total: number
+  limit: number
+  offset: number
+  link_refusal: string | null
 }
 
 // API functions - Participants

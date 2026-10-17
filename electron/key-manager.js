@@ -60,6 +60,28 @@ function encryptionBackendUsable(safeStorage) {
 }
 
 /**
+ * How to start over without losing anything, for a startup error whose data cannot be
+ * opened (#1185). The WHOLE app-data folder, never the database file alone: the folder
+ * also holds the documents and recordings (`data/`, filed under each project's number)
+ * and the backups, and a fresh database numbers its projects from 1 again — so the new
+ * project 1 would sit on the old project 1's files (deleting it removes that folder,
+ * `routers/projects.py::delete_project`), and the new backups would rotate the old ones
+ * away. Renamed, everything stays together. Quit comes first: the running app may hold
+ * files in the folder open, and Windows refuses to rename a folder while one is.
+ *
+ * The folder is the database's own (`main.js` puts the database in userData), and it
+ * goes LAST, after a blank line: the crash dialog cuts a long message at its end
+ * (`fatal-error.js::truncateForDialog`), and *Copy details* is how the path is copied.
+ */
+function startFreshAdvice(dbFilePath) {
+  return (
+    'To start fresh instead, choose Quit, rename the folder below (for example to ' +
+    '"Mixed Measures (old)"), and open Mixed Measures again. Keep the renamed folder: ' +
+    `it holds your data.\n\nThe folder is:\n${path.dirname(dbFilePath)}`
+  )
+}
+
+/**
  * Resolve the database key. Outcomes:
  *  - { mode: 'encrypted', keyHex }  → run the backend with this key
  *  - { mode: 'plaintext', reason }  → first run with no usable keyring; the
@@ -80,10 +102,13 @@ function resolveKey({ safeStorage, keyFilePath, dbFilePath, fs, randomBytes }) {
     // A key file means an encrypted DB almost certainly exists — the key MUST
     // be recoverable, or we'd risk migrating/serving over unreadable data.
     if (!usable) {
+      // No recovery-key clause here (#1120): the key must be stored through the
+      // keyring, so a recovery key cannot help until the keyring is back.
       const err = new Error(
         'A stored encryption key exists but the system keyring is unavailable, ' +
-        'so your encrypted data cannot be opened. Start the system keyring (or ' +
-        'restore from your recovery key) and relaunch Mixed Measures.',
+        'so your encrypted data cannot be opened. Your data is still on this ' +
+        'computer, unchanged. Start the system keyring (on Linux, a Secret Service ' +
+        'such as GNOME Keyring) and relaunch Mixed Measures.',
       )
       err.code = 'KEYRING_UNAVAILABLE_WITH_EXISTING_KEY'
       throw err
@@ -100,7 +125,12 @@ function resolveKey({ safeStorage, keyFilePath, dbFilePath, fs, randomBytes }) {
       throw err
     }
     if (!KEY_HEX_RE.test(keyHex)) {
-      const err = new Error('The stored encryption key is malformed.')
+      // #1120: this used to end at "malformed", the one key error with no next step.
+      const err = new Error(
+        'The stored encryption key file is damaged, so your encrypted data cannot ' +
+        'be opened. Your data is still on this computer, unchanged. If you saved a ' +
+        'recovery key, keep that file. ' + startFreshAdvice(dbFilePath),
+      )
       err.code = 'KEY_MALFORMED'
       throw err
     }
@@ -125,8 +155,10 @@ function resolveKey({ safeStorage, keyFilePath, dbFilePath, fs, randomBytes }) {
       'This device has an encrypted Mixed Measures database, but its stored ' +
       'encryption key file is missing (it may have been deleted, or the app data ' +
       'was partially restored from another machine). A newly generated key cannot ' +
-      'open the existing data — restore using your recovery key, or move the ' +
-      'database file aside to start fresh.',
+      'open the existing data — restore using your recovery key. ' +
+      // #1185: it said to move "the database file" aside, which leaves the old
+      // projects' documents, recordings and backups where a fresh start reuses them.
+      startFreshAdvice(dbFilePath),
     )
     err.code = 'KEY_FILE_MISSING_FOR_ENCRYPTED_DB'
     throw err
@@ -163,14 +195,25 @@ function exportRecoveryKey({ safeStorage, keyFilePath, fs }) {
  * The contents written to a recovery-key file. Plain text so the user can store
  * it in a password manager; the 64-hex IS the key, so the file is as sensitive
  * as the database itself.
+ *
+ * #1120: moving to another computer is a project file's job, not this key's — the
+ * encryption plan decided that backups stay on the machine that made them and that
+ * `.mmproject` is the way between machines (SECURITY.md says the same). The file
+ * used to name a new machine as a reason to keep it. The "import this key when
+ * prompted" line stays: the at-startup import that makes it true is 1.5.8's, and a
+ * file saved now is read after that.
  */
 function recoveryKeyFileContents(keyHex) {
   return [
     'Mixed Measures — at-rest encryption recovery key',
     '',
     'Keep this file private. It is the ONLY way to recover your encrypted',
-    'database if this computer\'s system keychain is lost, reset, or you move',
-    'to a new machine. Anyone with this key can decrypt a backup of your data.',
+    'database if this computer\'s system keychain is lost or reset. Anyone',
+    'with this key can decrypt a backup of your data.',
+    '',
+    'To move your projects to another computer you do not need this key: use',
+    'Export Project (.mmproject) for each project, then Import Project on the',
+    'other computer.',
     '',
     'To recover: reinstall Mixed Measures and import this key when prompted.',
     '',
@@ -251,6 +294,7 @@ function importRecoveryKey(keyHex, { safeStorage, keyFilePath, fs }) {
 module.exports = {
   KEY_HEX_RE,
   RECOVERY_KEY_FILE_NAME,
+  startFreshAdvice,
   recoveryKeySaveOptions,
   encryptionBackendUsable,
   inspectDatabaseFile,

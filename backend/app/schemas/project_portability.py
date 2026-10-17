@@ -209,3 +209,8 @@ class CodebookImportResult(BaseModel):
     codes_uncategorized: int
     # #869 (d): codes created WITH their declared rating scale.
     scales_imported: int = 0
+    # #1222: the native import has counted the code sets it creates since row 48
+    # (2026-09-21) and this model never declared it — production dropped it in
+    # silence, and under pytest's `extra='forbid'` every successful native import
+    # through the ENDPOINT answered 500 (none was tested there until #1203's).
+    code_sets_created: int = 0

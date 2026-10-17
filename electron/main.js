@@ -19,6 +19,7 @@ const {
   resolveAppPort,
   resolveBackendExe,
   buildSpawnEnv,
+  spawnEngine,
   waitForHealth,
   stopBackend,
 } = require('./backend-process')
@@ -154,7 +155,9 @@ function startBackend(port, encryptionKeyHex, loopbackToken) {
     encryptionKeyHex,
     loopbackToken,
   })
-  const child = spawn(exe, [], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+  // #1236: a start failure Node THROWS (EPERM, UNKNOWN…) comes out of here as the same
+  // guidance as one it reports below, and `startup()`'s catch shows it.
+  const child = spawnEngine(spawn, exe, { env, stdio: ['ignore', 'pipe', 'pipe'] })
   // #716: the backend marks a fatal STARTUP failure with MM-FATAL so its recovery
   // instructions can reach the crash dialog instead of dying in a pipe. Everything
   // still passes through to our own stderr unchanged — this only observes.
@@ -186,8 +189,10 @@ function startBackend(port, encryptionKeyHex, loopbackToken) {
   })
   child.on('close', (code, signal) => report(code, signal))
   // #1143 — an engine that cannot be STARTED (missing — an antivirus quarantine, a
-  // damaged install — or not permitted to run) emits 'error' and NEITHER 'exit' nor
-  // 'close'. Unhandled, that was Electron's raw "A JavaScript error occurred" box,
+  // damaged install — or not permitted to run) emits 'error' and no exit code; 'close'
+  // follows it (measured, Node 24.18 — harmless, `crashReported` latches). Only five codes
+  // arrive here; the rest are thrown, and `spawnEngine` above handles those (#1236).
+  // Unhandled, that was Electron's raw "A JavaScript error occurred" box,
   // then waitForHealth's full 60 s, then a dialog naming the symptom. Now one crash
   // dialog at once, naming the engine and what to check.
   child.on('error', (err) => {

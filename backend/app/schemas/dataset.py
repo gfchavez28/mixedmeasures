@@ -753,6 +753,38 @@ class BulkLinkResponse(BaseModel):
     skipped: list[BulkLinkSkippedItem]
 
 
+class LinkableRowMatch(BaseModel):
+    """Which value a search matched, when the record's label does not show it (#1053)."""
+    column_id: int
+    column_label: str
+    excerpt: str
+
+
+class LinkableRow(BaseModel):
+    """One record in the participant panel's record picker (#418, #1053)."""
+    row_id: int
+    row_identifier: str | None
+    linked_participant_id: int | None
+    linked_participant_name: str | None
+    #: Up to three identifying values, missing values skipped (#418, #592).
+    display_values: list[str]
+    matched: LinkableRowMatch | None
+
+
+class LinkableRowsPage(BaseModel):
+    """One page of the records a search matched, and how many there are (#1053).
+
+    ``total`` counts every match, not the page. ``link_refusal`` is the sentence
+    for a table the tool maintains (#1157) — its records link themselves, and the
+    page then carries no rows.
+    """
+    rows: list[LinkableRow]
+    total: int
+    limit: int
+    offset: int
+    link_refusal: str | None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Manual column schemas
 # ═══════════════════════════════════════════════════════════════════════════════

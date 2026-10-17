@@ -1103,8 +1103,13 @@ export default function ChartOptionsPanel({
                 </OptionRow>
               )}
 
+              {/* #1180: `fullWidth`, so the checkbox sits under its heading. Side by side
+                  the two need ~270 px, and at the sidebar's 200-px floor the control
+                  column squeezed to 0 and "Split by variable" ran 72 px past the
+                  sidebar's edge. The default branch also wrapped this <label> in the
+                  row's own <label> — nested labels; the group now names the set. */}
               {canDecompose && (
-                <OptionRow icon={Columns3} label="Show individual variables">
+                <OptionRow icon={Columns3} label="Show individual variables" fullWidth>
                   <label className="flex items-center gap-1.5 text-mm-text-secondary cursor-pointer">
                     <input
                       type="checkbox"

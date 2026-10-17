@@ -8,6 +8,7 @@ import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { LoadState } from '@/components/LoadStatus'
 import { toast } from 'sonner'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
+import { forgetCachedProjectPages } from '@/lib/project-cache'
 import { DATASET_FORMAT_LABEL, isSupportedDatasetFile } from '@/lib/dataset-import-formats'
 import { sortSources, type SortDirection, type SourceSortKey } from '@/lib/source-list-sort'
 import SourceListToolbar from '@/components/SourceListToolbar'
@@ -132,8 +133,17 @@ export default function DatasetsListPage() {
     mutationFn: (datasetId: number) => datasetsApi.delete(projectId, datasetId),
     onSuccess: () => {
       setDeleteDataset(null)
+    },
+    // #1226: the next dataset created takes this id, and this one's grid
+    // (`['dataset', pid, did]`, `['dataset-data', pid, did, offset]`) is still
+    // cached. On SETTLED: a large dataset's delete can outlast the client's wait
+    // and still finish. `['project', …]` carries the TopRail count, which stayed
+    // at the old number.
+    onSettled: () => {
+      forgetCachedProjectPages(queryClient)
       queryClient.invalidateQueries({ queryKey: ['datasets', projectId] })
       queryClient.invalidateQueries({ queryKey: ['project-summary', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['project', projectId] })
     },
     onError: (err: Error) => toast.error(extractApiError(err, 'Failed to delete dataset')),
   })

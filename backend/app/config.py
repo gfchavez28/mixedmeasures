@@ -1,8 +1,10 @@
 from pydantic_settings import BaseSettings
-from pydantic import ConfigDict, Field, AliasChoices
+from pydantic import ConfigDict, Field, AliasChoices, ValidationError
 from functools import lru_cache
 from pathlib import Path
 import sys
+
+from .startup_errors import FatalStartupError
 
 
 class Settings(BaseSettings):
@@ -70,9 +72,80 @@ class Settings(BaseSettings):
     mm_multiuser_auth_enabled: bool = False
 
 
+class SettingsError(FatalStartupError):
+    """An `MM_*` setting holds a value of the wrong kind (#1200). Shown verbatim in the
+    packaged app's crash dialog, so it is written as the fix."""
+
+
+#: What a setting must be, said for the two whose meaning a sentence can add (#1043's
+#: words). Every other whole-number or true/false setting gets the generic clause.
+_SETTING_HINTS = {
+    "auto_backup_interval_hours": (
+        "Set it to how many whole hours apart automatic backups are taken (the default "
+        "is 4), or to 0 to turn them off"
+    ),
+    "auto_backup_max_count": (
+        "Set it to how many automatic backups to keep (the default is 5, and it must be "
+        "at least 1)"
+    ),
+}
+
+
+def _field_and_variable(loc: str) -> tuple[str, str]:
+    """The field an error is about, and the variable that supplied it.
+
+    ⚠️ pydantic reports the FIRST alias whichever one was set (measured: a bare
+    `AUTO_BACKUP_MAX_COUNT=five` is reported as `mm_auto_backup_max_count`), so the
+    variable named is the one present in the environment, in alias order — the order
+    pydantic-settings reads them in. A value from the `.env` file names the first.
+    """
+    import os
+
+    environ = {k.lower() for k in os.environ}
+    for field, info in Settings.model_fields.items():
+        choices = list(getattr(info.validation_alias, "choices", None) or [field])
+        if loc in choices or loc == field:
+            present = [c for c in choices if c.lower() in environ]
+            return field, (present[0] if present else choices[0]).upper()
+    return loc, loc.upper()
+
+
+def _setting_sentence(error: dict) -> str:
+    """One sentence for one pydantic error: the variable as it was read, its value, and
+    what it must be."""
+    field, name = _field_and_variable(str(error["loc"][0]) if error.get("loc") else "")
+    value = str(error.get("input", ""))
+    shown = value if len(value) <= 40 else value[:39] + "…"
+    kind = error.get("type", "")
+    if kind.startswith("int"):
+        what, fix = "a whole number", _SETTING_HINTS.get(field, "Set it to a whole number")
+    elif kind.startswith("bool"):
+        what, fix = "true or false", "Set it to true or false"
+    else:
+        what, fix = "a value Mixed Measures can read", "Correct it"
+    said = f"is set to “{shown}”, which is not {what}" if value.strip() else f"is set but empty, and must be {what}"
+    return f"{name} {said}. {fix}, or remove it."
+
+
+def load_settings() -> Settings:
+    """`Settings()`, with a value of the wrong kind refused in words (#1200).
+
+    `get_settings()` first runs at IMPORT (`database.py`'s module-level `settings`),
+    outside the lifespan's report, so a pydantic `ValidationError` there was a
+    traceback — and in the packaged app, "the local engine exited unexpectedly". As a
+    `FatalStartupError` its sentence reaches the crash dialog through `run_server.py`,
+    and it is the last line of the traceback a server's log shows.
+    """
+    try:
+        return Settings()
+    except ValidationError as e:
+        sentences = " ".join(_setting_sentence(err) for err in e.errors())
+        raise SettingsError(f"{sentences} Then start Mixed Measures again.") from e
+
+
 @lru_cache()
 def get_settings() -> Settings:
-    return Settings()
+    return load_settings()
 
 
 def get_documents_dir() -> Path:

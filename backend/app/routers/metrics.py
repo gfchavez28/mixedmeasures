@@ -916,6 +916,10 @@ async def cross_tabulation(
     )
 
 
+#: Appended to an out-of-date column's heading in the record-matrix CSV (#1229).
+MATRIX_OUT_OF_DATE_SUFFIX = " (out of date)"
+
+
 @router.get("/row-matrix", response_model=RowMatrixResponse)
 def get_row_matrix(
     project_id: int,
@@ -988,6 +992,7 @@ def get_row_matrix(
             metric_id=m.id,
             label=label,
             metric_type=m.metric_type,
+            stale=bool(m.stale),
         ))
         metric_id_list.append(m.id)
 
@@ -1059,9 +1064,12 @@ def get_row_matrix_csv(
     writer = csv.writer(output)
 
     # Header row — col.label originates from user-typed metric/column names.
+    # #1229: the CSV is the ONLY form of this matrix a researcher receives (the
+    # client never reads the JSON), so an out-of-date column says so in the file.
     header = ["row_id", "dataset"]
     for col in matrix.columns:
-        header.append(csv_safe(col.label))
+        label = f"{col.label}{MATRIX_OUT_OF_DATE_SUFFIX}" if col.stale else col.label
+        header.append(csv_safe(label))
     writer.writerow(header)
 
     # Data rows

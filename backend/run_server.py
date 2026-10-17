@@ -74,7 +74,17 @@ def main() -> None:
         return
 
     import uvicorn
-    from app.main import app
+    from app.startup_errors import emit_fatal_startup
+
+    # #1200: a failure while IMPORTING the app — a setting of the wrong kind
+    # (`config.SettingsError`), an engine that cannot be built — happens before the
+    # lifespan's report exists, so it reached the crash dialog as "the local engine
+    # exited unexpectedly". Reported here the lifespan's way: marked, then re-raised.
+    try:
+        from app.main import app
+    except Exception as exc:
+        emit_fatal_startup(exc)
+        raise
 
     port = int(os.environ.get("MM_PORT", "8000"))
     uvicorn.run(app, host="127.0.0.1", port=port, reload=False, log_level="info")

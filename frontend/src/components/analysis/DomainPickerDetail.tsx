@@ -162,10 +162,13 @@ export default function DomainPickerDetail({
     )
   }
 
+  // #1180: the indent was `pl-8 … ml-3` — 58 px of chrome in a sidebar that can be
+  // 200 px wide, where *Create scale score* needs 113 and got 111. `pl-4 … ml-2`
+  // gives back 20 px; the coloured rule still marks the detail as the group's.
   return (
     <div
       data-testid={`domain-picker-detail-${domain.id}`}
-      className="pl-8 pr-3 pb-2 pt-1 border-l-2 ml-3 space-y-1.5"
+      className="pl-4 pr-3 pb-2 pt-1 border-l-2 ml-2 space-y-1.5"
       style={{ borderColor: swatchColor }}
       onClick={(e) => e.stopPropagation()}
     >

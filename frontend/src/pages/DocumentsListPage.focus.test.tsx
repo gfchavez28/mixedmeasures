@@ -19,7 +19,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router'
 
 const listDocuments = vi.fn()
-const updateDocument = vi.fn()
+// #1152 — the subject travels through its own named request now.
+const setSubject = vi.fn()
 const listParticipants = vi.fn()
 
 vi.mock('@/lib/api', async () => {
@@ -32,7 +33,7 @@ vi.mock('@/lib/api', async () => {
     documentsApi: {
       ...actual.documentsApi,
       list: (...a: unknown[]) => listDocuments(...a),
-      update: (...a: unknown[]) => updateDocument(...a),
+      setSubject: (...a: unknown[]) => setSubject(...a),
     },
     participantsApi: {
       ...actual.participantsApi,
@@ -68,10 +69,13 @@ const participants = {
   ],
 }
 
+let lastClient: QueryClient
+
 function renderPage() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
+  lastClient = client
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter>
@@ -87,7 +91,7 @@ const card = (id: number) =>
 beforeEach(() => {
   listDocuments.mockResolvedValue(documents)
   listParticipants.mockResolvedValue(participants)
-  updateDocument.mockResolvedValue({ ...documents[1], participant_id: 7 })
+  setSubject.mockResolvedValue({ ...documents[1], participant_id: 7 })
   // The refetch that follows the mutation returns the UPDATED row, as a server
   // would. ⚠️ Without this the payload is deeply equal to the previous one and
   // React Query hands back the SAME array reference — which is how the first
@@ -110,10 +114,34 @@ describe('setting a document subject', () => {
     // ...then pick a participant in the dialog.
     fireEvent.click(await screen.findByText('Amara Okafor'))
 
-    await waitFor(() => expect(updateDocument).toHaveBeenCalledWith(
-      1, 12, { participant_id: 7 },
-    ))
+    await waitFor(() => expect(setSubject).toHaveBeenCalledWith(1, 12, 7))
     await waitFor(() => expect(document.activeElement).toBe(card(12)))
+  })
+
+  /**
+   * #1152 — a subject is a participant link. This door refreshed the participant
+   * LIST and nothing else, so the panel and the withdrawal report (which the delete
+   * confirm reads) still said the person was linked to no document. It goes through
+   * the shared set now — keeping its own two keys and the qual surfaces' one.
+   */
+  it('refreshes what every participant-link door refreshes, and still its own document reads', async () => {
+    renderPage()
+    await screen.findByText('Workplan B')
+    const spy = vi.spyOn(lastClient, 'invalidateQueries')
+
+    fireEvent.contextMenu(card(12)!)
+    fireEvent.click(await screen.findByText('Set subject…'))
+    fireEvent.click(await screen.findByText('Amara Okafor'))
+
+    await waitFor(() => expect(setSubject).toHaveBeenCalled())
+    await waitFor(() => {
+      const keys = spy.mock.calls.map(([f]) => (f as { queryKey?: unknown[] } | undefined)?.queryKey)
+      expect(keys).toEqual(expect.arrayContaining([
+        ['documents', 1], ['document', 1, 12],
+        ['participants', 1], ['participant-detail'], ['withdrawal-report', 1],
+        ['qual-source-frequencies', 1],
+      ]))
+    })
   })
 
   it('does not steal focus to a DIFFERENT card', async () => {

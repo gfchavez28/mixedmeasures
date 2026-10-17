@@ -190,8 +190,15 @@ function backendSpawnFailureMessage(err, exePath) {
       + `settings, or reinstall Mixed Measures.${where}`
   }
   const reason = code || (err && err.message) || 'an unknown error'
-  return `Mixed Measures could not start its engine (“${file}”): ${reason}. `
-    + `Reinstalling Mixed Measures may fix this.${where}`
+  // #1236 (D19): UNKNOWN is libuv's code for every Windows error it does not list, which
+  // is where an antivirus or policy block at launch likely lands (ERROR_VIRUS_INFECTED,
+  // ERROR_ACCESS_DISABLED_BY_POLICY). The cause is not known, so the sentence is
+  // conditional — and a reinstall alone would be blocked again by the same software.
+  const remedy = code === 'UNKNOWN'
+    ? `If your antivirus or security settings list “${file}”, allow it; otherwise `
+      + 'reinstalling Mixed Measures may fix this.'
+    : 'Reinstalling Mixed Measures may fix this.'
+  return `Mixed Measures could not start its engine (“${file}”): ${reason}. ${remedy}${where}`
 }
 
 /** What "Copy details" puts on the clipboard — the whole dialog, as support would want it. */

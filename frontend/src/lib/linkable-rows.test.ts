@@ -1,59 +1,71 @@
-// #418 regression: the link picker must label rows with identifying values
-// and search across every value in the row — previously both used
-// demographic-typed values only ("S001"/"T05"/"Maple" found nothing).
+// #418 / #1053 — what a record's row says in the participant panel's picker, and
+// what the picker says about the list. The SEARCH itself moved to the server
+// (`backend/tests/test_linkable_rows_search.py` pins what matches and in what
+// order); nothing here filters.
 import { describe, expect, it } from 'vitest'
 
 import type { LinkableRow } from './api/participants'
-import { filterLinkableRows, linkableRowDetail } from './linkable-rows'
+import {
+  RECORD_PAGE_SIZE,
+  linkableRowDetail,
+  linkableRowMatch,
+  recordPickerCount,
+  showMoreCount,
+} from './linkable-rows'
 
 const row = (over: Partial<LinkableRow>): LinkableRow => ({
   row_id: 1,
   row_identifier: 'R0001',
+  linked_participant_id: null,
   linked_participant_name: null,
-  demographic_values: [],
   display_values: [],
-  search_text: '',
+  matched: null,
   ...over,
 })
 
 describe('linkableRowDetail', () => {
-  it('joins display_values', () => {
-    expect(linkableRowDetail(row({ display_values: ['T05', 'Maple Ridge'] }))).toBe(
-      'T05 · Maple Ridge',
-    )
-  })
-
-  it('falls back to demographic values for a stale cache shape', () => {
-    const r = row({
-      display_values: undefined as unknown as string[],
-      demographic_values: [{ label: 'Gender', value: 'Female' }, { label: 'Age', value: null }],
-    })
-    expect(linkableRowDetail(r)).toBe('Female')
+  it('joins the identifying values', () => {
+    expect(linkableRowDetail(row({ display_values: ['T05', 'Maple Ridge'] }))).toBe('T05 · Maple Ridge')
+    expect(linkableRowDetail(row({}))).toBe('')
   })
 })
 
-describe('filterLinkableRows', () => {
-  const rows = [
-    row({ row_id: 1, search_text: 's001 maple ridge 63 72 t01' }),
-    row({ row_id: 2, row_identifier: 'R0002', search_text: 's002 brookside 70 81 t05' }),
-  ]
-
-  it('matches any value in the row (student id, school, teacher id, score)', () => {
-    expect(filterLinkableRows(rows, 'S001').map(r => r.row_id)).toEqual([1])
-    expect(filterLinkableRows(rows, 'brookside').map(r => r.row_id)).toEqual([2])
-    expect(filterLinkableRows(rows, 'T05').map(r => r.row_id)).toEqual([2])
-    expect(filterLinkableRows(rows, '63').map(r => r.row_id)).toEqual([1])
+describe('linkableRowMatch', () => {
+  it('names the column the search matched and shows its words', () => {
+    const matched = { column_id: 4, column_label: 'Marital status', excerpt: '…never married…' }
+    expect(linkableRowMatch(row({ matched }))).toBe('Marital status: …never married…')
   })
 
-  it('still matches the row identifier', () => {
-    expect(filterLinkableRows(rows, 'R0002').map(r => r.row_id)).toEqual([2])
+  it('says nothing when the label already shows the match', () => {
+    expect(linkableRowMatch(row({}))).toBeNull()
+  })
+})
+
+describe('recordPickerCount — the count line', () => {
+  it('tells an empty dataset from a search that matched nothing (#963 Tier 2)', () => {
+    expect(recordPickerCount(0, 0, '', 'Census')).toBe('This dataset has no records.')
+    expect(recordPickerCount(0, 0, '  zz  ', 'Census')).toBe('No records in Census match “zz”.')
   })
 
-  it('empty query returns all rows', () => {
-    expect(filterLinkableRows(rows, '  ')).toHaveLength(2)
+  it('says how many there are when all are shown', () => {
+    expect(recordPickerCount(3, 3, '', 'Census')).toBe('3 records.')
+    expect(recordPickerCount(1, 1, '', 'Census')).toBe('1 record.')
+    expect(recordPickerCount(2, 2, 'ana', 'Census')).toBe('2 records match.')
+    expect(recordPickerCount(1, 1, 'ana', 'Census')).toBe('1 record matches.')
   })
 
-  it('no match returns empty', () => {
-    expect(filterLinkableRows(rows, 'zzz')).toHaveLength(0)
+  it('says a bounded page is bounded, and what reaches the rest (#844, #1045)', () => {
+    expect(recordPickerCount(50, 75699, '', 'GSS'))
+      .toBe(`Showing 50 of ${(75699).toLocaleString()} records. Search to find the others.`)
+    expect(recordPickerCount(100, 12079, '23', 'GSS'))
+      .toBe(`Showing 100 of ${(12079).toLocaleString()} records that match. Keep typing to narrow the list.`)
+  })
+})
+
+describe('showMoreCount', () => {
+  it('is one page, or what is left', () => {
+    expect(showMoreCount(50, 1000)).toBe(RECORD_PAGE_SIZE)
+    expect(showMoreCount(50, 60)).toBe(10)
+    expect(showMoreCount(60, 60)).toBe(0)
   })
 })

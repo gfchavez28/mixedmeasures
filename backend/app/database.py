@@ -99,7 +99,93 @@ class DatabaseUnreadableError(FatalStartupError):
     corruption. Either way the startup migration MUST NOT proceed — baselining
     over an unreadable-but-real database would destroy data (packaging plan
     Phase 0.5). This is a latent data-loss guard independent of encryption.
+
+    ⚠️ Two messages ride this type (#953). `_get_current_revision` raises a
+    DIAGNOSTIC, because the restore reads backups through it and puts its text in
+    a restore's own sentence (`services/backup.py::_bring_to_this_version`); the
+    startup callers re-raise with `unreadable_database_guidance`, which is what the
+    crash dialog shows.
     """
+
+
+#: The driver's own words for the four causes behind an unreadable database —
+#: MEASURED 2026-10-12 with `sqlite3` and `sqlcipher3` on scratch files (#953). The
+#: startup guidance keys on them, so `test_unreadable_database_guidance.py` binds
+#: each one for real: a driver that rewords one fails there, not in a dialog.
+UNREADABLE_LOCKED = "database is locked"  # another program holds it (after 5 s)
+UNREADABLE_NO_ACCESS = "unable to open database file"  # permissions; a folder at the path
+UNREADABLE_DAMAGED = "database disk image is malformed"  # damage, key correct
+#: Wrong key, a database from another installation, an encrypted file in a plaintext
+#: install (or the reverse), garbage — the driver cannot tell these apart.
+UNREADABLE_NOT_A_DATABASE = "file is not a database"
+
+#: Where the crash dialog sends a researcher whose database will not open (#953). A
+#: private address, because the message carries a path — and the website's privacy
+#: page already names it beside GitHub Issues.
+HELP_CONTACT = "contact@mixedmeasures.com"
+
+
+def driver_message(err: BaseException) -> str:
+    """The database driver's own words: SQLAlchemy wraps them in `.orig`."""
+    return str(getattr(err, "orig", None) or err).strip()
+
+
+def unreadable_database_guidance(db_path: Path, driver_text: str) -> str:
+    """What the crash dialog says when the database will not open (#953).
+
+    ONE line, at most `startup_errors.MAX_FATAL_MESSAGE_CHARS`, cut from the END —
+    so the file, its size and the driver's words go LAST, and the guidance leaves
+    room for a long path (`test_unreadable_database_guidance.py` holds it to that).
+
+    🔴 **No do-it-yourself restore, by decision (2026-10-12).** Renaming the file
+    and restoring a backup from Settings works, but a `-wal` left beside the renamed
+    file is replayed into the new one, the old projects' files sit under the numbers
+    a new project takes until the restore runs (#1185), and a Windows install may
+    have no backup at all (#1186). A *Restore the newest backup* button is 1.5.8's,
+    beside the recovery-key import (#1120). Unlike the shell's key messages
+    (`electron/key-manager.js::startFreshAdvice`), this one does NOT say to rename
+    the folder: the key here is fine, so the backups in the folder are the way
+    back, and a fresh folder would mint a key that cannot open them.
+    """
+    if UNREADABLE_LOCKED in driver_text:
+        lead = (
+            "Another program has the Mixed Measures database open, so it could not be "
+            "read. Nothing has been changed. Close the other program (a backup, sync or "
+            "security tool, or another copy of Mixed Measures) and open Mixed Measures again."
+        )
+    elif UNREADABLE_NO_ACCESS in driver_text:
+        lead = (
+            "Mixed Measures is not allowed to open its database file. Nothing has been "
+            "changed. Check that your account can read and change the file and that "
+            "security software is not blocking it, then open Mixed Measures again."
+        )
+    else:
+        if UNREADABLE_DAMAGED in driver_text:
+            what = "The Mixed Measures database is damaged and could not be read."
+        elif UNREADABLE_NOT_A_DATABASE in driver_text:
+            what = (
+                "The Mixed Measures database could not be read: it may be damaged, or "
+                "copied from another computer or installation (it opens only with the "
+                "key it was made with)."
+            )
+        else:
+            what = "The Mixed Measures database could not be read."
+        backup_dir = get_backup_dir()
+        backups = (
+            "the “backups” folder beside it"
+            if Path(backup_dir).resolve().parent == Path(db_path).resolve().parent
+            else str(backup_dir)
+        )
+        lead = (
+            f"{what} Nothing has been changed or deleted; keep the file, and {backups}. "
+            f"For help, email {HELP_CONTACT} with this message (Copy details copies it), "
+            "but never your recovery key or your database."
+        )
+    try:
+        size = f"{Path(db_path).stat().st_size} bytes"
+    except OSError:
+        size = "size unknown"
+    return f"{lead} The file is: {db_path} ({size}; {driver_text})."
 
 
 class Base(DeclarativeBase):
@@ -551,14 +637,32 @@ def _backup_database(db_path: Path) -> Path | None:
     # It globbed `f"{stem}_*.db"`, which for the stem `dev` also matched another
     # database's copies (`dev_bes_20260101_000000.db`) — and sorted by name, those
     # read as NEWER (`b` > `2`), so the rotation could delete the copy just written.
+    #
+    # 🔴 **And never the copy just written (#1199)** — it is the one guard on the
+    # migration about to run. Ordered by name, five copies stamped later than now (a
+    # clock set back: a reset, a manual change) outranked it, so it was deleted here
+    # and `command.upgrade` ran with no copy behind it (executed). A stamp later than
+    # now orders older than every believable one, as in `services/backup.py`'s rotation.
     try:
+        now = datetime.now(timezone.utc)
+
+        def believable(p: Path) -> bool:
+            m = _PRE_MIGRATION_RE.match(p.name)
+            try:
+                stamp = datetime.strptime(m["date"] + m["time"], "%Y%m%d%H%M%S")
+            except ValueError:
+                return False
+            return stamp.replace(tzinfo=timezone.utc) <= now
+
         own = sorted(
             (p for p in backup_dir.iterdir()
-             if (m := _PRE_MIGRATION_RE.match(p.name)) is not None and m["stem"] == db_path.stem),
+             if (m := _PRE_MIGRATION_RE.match(p.name)) is not None and m["stem"] == db_path.stem
+             and p.name != backup_path.name),
             key=lambda p: p.name,
             reverse=True,
         )
-        for old in own[5:]:
+        own.sort(key=lambda p: not believable(p))  # stable: each group keeps name order
+        for old in own[4:]:  # four older copies beside the one just written
             old.unlink(missing_ok=True)
             _remove_side_files_of(old)
     except OSError as e:
@@ -582,10 +686,17 @@ def _probe_engine_readable():
         with engine.connect() as conn:
             conn.execute(_text("SELECT count(*) FROM sqlite_master"))
     except (DatabaseError, OperationalError) as e:
+        # #953: the same guidance as `run_migrations`' — reached only after the raw
+        # read AND the migration engine read the file with this key, so it guards the
+        # app's own engine diverging from them, and the researcher's options are the
+        # same. The diagnostic stays in the log.
+        logger.error(
+            "Database at %s opened but could not be read by the application engine "
+            "(corruption, or a wrong/missing encryption key): %s",
+            settings.mm_database_path, e,
+        )
         raise DatabaseUnreadableError(
-            f"Database at {settings.mm_database_path} opened but could not be read "
-            f"by the application engine (corruption, or a wrong/missing encryption "
-            f"key): {e}"
+            unreadable_database_guidance(Path(settings.mm_database_path), driver_message(e))
         ) from e
 
 
@@ -669,16 +780,19 @@ def run_migrations():
     db_path = Path(settings.mm_database_path)
     try:
         current_rev = _get_current_revision(db_path)
-    except DatabaseUnreadableError:
+    except DatabaseUnreadableError as exc:
         # Refuse to migrate over a real-but-unreadable DB (corruption / wrong
         # encryption key). Surfacing this loudly at startup is the correct
         # outcome — far better than baselining and destroying the data.
         logger.error(
-            "Refusing to run migrations: the database exists but could not be "
-            "opened (corruption, or under encryption a wrong/missing key). "
-            "No migration was applied; existing data is untouched."
+            "Refusing to run migrations: %s No migration was applied; existing data "
+            "is untouched.", exc,
         )
-        raise
+        # #953: the reader's message is a diagnostic (the restore shares the reader
+        # and quotes it); the crash dialog gets guidance, composed here.
+        raise DatabaseUnreadableError(
+            unreadable_database_guidance(db_path, driver_message(exc.__cause__ or exc))
+        ) from exc
 
     # Is a migration ACTUALLY pending? (#920)
     #

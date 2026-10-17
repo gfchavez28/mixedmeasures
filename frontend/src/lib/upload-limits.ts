@@ -44,8 +44,22 @@ export function partitionBySizeLimit<T extends { size: number }>(
  */
 export const MAX_PROJECT_FILE_BYTES = 500 * 1024 * 1024
 
-/** A limit as the pages state it (`50 MB`, `500 MB`) — one spelling for the note and the refusal. */
-export const fileLimitLabel = (maxBytes: number) => `${maxBytes / (1024 * 1024)} MB`
+/**
+ * 10 MB — the codebook import's limit (#1203), mirroring backend
+ * `routers/project_portability.py::MAX_CODEBOOK_UPLOAD_SIZE`
+ * (`test_upload_limit_mirror.py` reads both). Written as a
+ * product of integers on ONE line: that test parses it by regex.
+ */
+export const MAX_CODEBOOK_FILE_BYTES = 10 * 1024 * 1024
+
+/**
+ * A limit as the pages state it (`50 MB`, `500 MB`, `4 GB`) — one spelling for the note
+ * and the refusal. A limit of 1 GiB or more is said in GB (#1161): the recording limit
+ * read "4096 MB" through this, while three other places spelled it "4.0 GB", "4GB" and
+ * "4 GB".
+ */
+export const fileLimitLabel = (maxBytes: number) =>
+  maxBytes >= 1024 ** 3 ? `${maxBytes / 1024 ** 3} GB` : `${maxBytes / (1024 * 1024)} MB`
 const labelFor = fileLimitLabel
 
 /**
@@ -74,6 +88,9 @@ export function oversizeFilesMessage(
  *
  * ⚠️ Type is checked before size: a 900 MB video dropped on a dataset page is the
  * wrong kind of file, and "too large" would send the researcher to trim it.
+ *
+ * Recordings come through here too, by `media-constants.ts::validateMediaFile` /
+ * `chooseOneRecording` (#1161) — the four recording pickers, with their 4 GB limit.
  */
 export function checkImportFiles<T extends { name: string; size: number }>(
   files: T[],
@@ -84,6 +101,10 @@ export function checkImportFiles<T extends { name: string; size: number }>(
     /** What this page imports, for the sentence: "dataset", "transcript", "document". */
     noun: string
     maxBytes?: number
+    /** The door's own sentence for the formats, where the wizard's "This page
+     * imports …" would be false (#1263: a picker that ATTACHES a recording, on a page
+     * that imports transcripts or nothing at all). Defaults to the wizard's. */
+    formatSentence?: string
   },
 ): { accepted: T[]; message: string } {
   const wrongType = files.filter(f => !opts.isSupported(f.name))
@@ -96,7 +117,7 @@ export function checkImportFiles<T extends { name: string; size: number }>(
     const named = wrongType.map(f => `“${f.name}”`).join(', ')
     const isAre = wrongType.length === 1 ? 'is not a' : 'are not'
     const noun = wrongType.length === 1 ? `${opts.noun} file` : `${opts.noun} files`
-    parts.push(`${named} ${isAre} ${noun}. This page imports ${opts.formatLabel}.`)
+    parts.push(`${named} ${isAre} ${noun}. ${opts.formatSentence ?? `This page imports ${opts.formatLabel}.`}`)
   }
   if (oversize.length > 0) parts.push(oversizeFilesMessage(oversize, opts.maxBytes))
   return { accepted, message: parts.join(' ') }

@@ -3021,8 +3021,10 @@ def import_dataset_csv(
             raise ValueError(
                 "participant_link_column_index must reference a non-skipped identifier column"
             )
-        # Function-level import: participant_linking imports _is_na from this
-        # module at top level, so the reverse edge must stay lazy.
+        # Function-level import, kept from when participant_linking imported _is_na
+        # from this module (it no longer does — #592 moved that to missing_values).
+        # One apply inside this import's own transaction (#1054: `commit_every`
+        # unset), so the plan cannot change under it.
         from .participant_linking import link_rows_by_identifier_column
 
         participant_link_report = link_rows_by_identifier_column(

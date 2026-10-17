@@ -13,8 +13,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from pydantic import ValidationError
-from sqlalchemy import and_, case, func, or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import case, func
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from ..auth import get_current_user
@@ -78,7 +78,14 @@ from ..schemas.dataset import (
     DatasetAppendResponse,
     ColumnReorderRequest,
     LinkByColumnRequest,
+    LinkableRowsPage,
     ParticipantLinkReport,
+)
+from ..services.linkable_rows import (  # #1053
+    LINKABLE_PAGE_SIZE,
+    MAX_LINKABLE_PAGE_SIZE,
+    MAX_SEARCH_TERM_LENGTH,
+    search_linkable_rows,
 )
 from ..models.recode import RecodeDefinition, RecodeType
 from ..services.dataset_import import (
@@ -138,10 +145,12 @@ from ..services.append_duplicates import (  # #1014
 )
 from ..services.dataset_rows import (  # #897 / row 47
     create_manual_row,
+    dataset_row_order,
     format_record_identifier,
     materialise_manual_cells,
     next_record_number,
     parse_record_identifier,
+    rows_before,
 )
 from ..services.participant_dataset import (
     ACTION_ADD_ROW,
@@ -176,8 +185,16 @@ from ..services.computed_columns import (
 )
 from ..services.audit import log_action
 from ..services.participant_linking import (
+    LINK_STOPPED_ERROR,
+    LINK_WRITE_BATCH,
+    LinkBusy,
+    LinkStopped,
     auto_fill_role_from_linked_row,
+    link_report,
     link_rows_by_identifier_column,
+    link_stopped_sentence,
+    link_turn,
+    plan_identifier_links,
 )
 
 router = APIRouter(
@@ -1550,52 +1567,9 @@ async def get_row(
 DATASET_PAGE_SIZE = 200
 MAX_DATASET_PAGE_SIZE = 1_000
 
-
-def dataset_row_order():
-    """THE grid's row ordering, in one place (#834/#835).
-
-    ⚠️ **Single-sourced because a second reader now exists.** `get_dataset_data`
-    returns a PAGE at an offset, and `get_row_position` answers "which page holds
-    this row?" — a question that is only answerable against the SAME ordering.
-    Two hand-written `order_by` clauses would agree today and diverge the first
-    time either is touched, and the failure is silent: the jump simply lands on
-    the wrong page, which reads as "the record isn't there".
-
-    ⚠️ **The two-key shape is load-bearing and is NOT `id` alone.** MEASURED
-    2026-08-25: `submitted_at` is NULL for 100% of rows in all eight local
-    datasets, so `ORDER BY id` and this clause agree on every corpus that exists
-    — a coincidence, not a contract. A dataset imported with submission
-    timestamps orders by those first, and a position resolver written against
-    `id` would then be wrong for every row. Do not "simplify" this to `id`
-    because the corpus cannot tell the difference.
-    """
-    return (DatasetRow.submitted_at.asc().nulls_last(), DatasetRow.id.asc())
-
-
-def rows_before(dataset_id: int, row: DatasetRow):
-    """The count-filter for rows that sort BEFORE ``row`` under `dataset_row_order`.
-
-    Expresses the same two-key ordering as a boolean, which is what turns an
-    ordering into an ordinal. Kept beside the ordering it mirrors so the pair
-    cannot drift.
-
-    NULLS LAST means a NULL-``submitted_at`` row sorts after every dated one, so
-    the two branches are genuinely different predicates rather than one with a
-    coalesce.
-    """
-    if row.submitted_at is None:
-        # Every dated row precedes it, then NULL-dated rows with a lower id.
-        return or_(
-            DatasetRow.submitted_at.isnot(None),
-            and_(DatasetRow.submitted_at.is_(None), DatasetRow.id < row.id),
-        )
-    return and_(
-        DatasetRow.submitted_at.isnot(None),
-        or_(
-            DatasetRow.submitted_at < row.submitted_at,
-            and_(DatasetRow.submitted_at == row.submitted_at, DatasetRow.id < row.id),
-        ),
-    )
+# `dataset_row_order` and `rows_before` live in `services/dataset_rows.py` since
+# #1053 (imported above): the record picker's search is a SERVICE and orders its
+# page the same way, and a service must not import a router.
 
 
 @router.get(
@@ -2138,8 +2112,38 @@ async def bulk_link_participants(
     return BulkLinkResponse(linked=linked, unlinked=unlinked, skipped=skipped)
 
 
+@router.post("/{dataset_id}/link-by-column/preview", response_model=ParticipantLinkReport)
+def preview_link_by_column(
+    project_id: int,
+    dataset_id: int,
+    payload: LinkByColumnRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """#1054 (D6) — what Link by column WOULD do, read and decided but not written.
+
+    One click can create a participant per record (122,382 on BES), and undoing
+    that is a delete per participant, so the client asks first and the
+    confirmation names the numbers. The SAME plan the act writes
+    (`plan_identifier_links`), so the confirmation cannot disagree with the click
+    except by what changes in between (#795). Plain `def`: ~1-2 s of reads on BES.
+    """
+    _get_project_or_404(db, project_id, user.id)
+    dataset = _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    _refuse_if_managed(dataset, ACTION_LINK_PARTICIPANTS)
+    try:
+        plan = plan_identifier_links(
+            db, project_id=project_id, dataset_id=dataset_id, column_id=payload.column_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.rollback()  # it wrote nothing; end the read
+    return ParticipantLinkReport(**link_report(plan, len(plan.to_link), len(plan.to_create)))
+
+
 @router.post("/{dataset_id}/link-by-column", response_model=ParticipantLinkReport)
-async def link_by_column(
+def link_by_column(
     project_id: int,
     dataset_id: int,
     payload: LinkByColumnRequest,
@@ -2151,161 +2155,114 @@ async def link_by_column(
     with linking opted out). Processes UNLINKED rows only — a manual link is
     user intent and is never overwritten (the service counts them
     ``already_linked``). Same service, same semantics as import-time linking.
+
+    🔴 #1054: plain `def`, and the link COMMITS every `LINK_WRITE_BATCH` records.
+    It held the event loop 76 s on BES as `async def`; as `def` in one
+    transaction it held SQLite's write lock long enough that 9 of 17 concurrent
+    writes failed at the 5 s timeout. Batched, the longest hold was 0.35 s. An
+    interrupted link leaves some records linked; running it again finishes it.
+    One link at a time per project (`link_turn`): a second answers 409 at once.
     """
     _get_project_or_404(db, project_id, user.id)
     dataset = _get_dataset_or_404(db, project_id, dataset_id, user.id)
     _refuse_if_managed(dataset, ACTION_LINK_PARTICIPANTS)
 
     try:
-        report = link_rows_by_identifier_column(
-            db,
-            project_id=project_id,
-            dataset_id=dataset_id,
-            column_id=payload.column_id,
-        )
+        with link_turn(project_id):
+            report = link_rows_by_identifier_column(
+                db,
+                project_id=project_id,
+                dataset_id=dataset_id,
+                column_id=payload.column_id,
+                commit_every=LINK_WRITE_BATCH,
+            )
+    except LinkBusy as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
+        # Before any batch committed: the column check refused (a re-plan after
+        # the dataset was deleted meets no column — say what happened).
+        gone = db.query(Dataset.id).filter(Dataset.id == dataset_id).first() is None
         db.rollback()
+        if gone:
+            raise HTTPException(status_code=404, detail="Dataset not found")
         raise HTTPException(status_code=400, detail=str(e))
+    except LinkStopped as e:
+        # #1231: some batches committed, then the link could not go on. What
+        # committed is real and stays — record it, and answer with the count. The
+        # service rolled back the batch in flight before it raised.
+        if e.reason == LINK_STOPPED_ERROR:
+            # It used to be a 500 whose traceback reached the log; keep that.
+            logger.error("Link by column stopped part-way", exc_info=e.__cause__)
+        gone = db.query(Dataset.id).filter(Dataset.id == dataset_id).first() is None
+        _record_link(db, project_id, dataset_id, user.id, {
+            "column_id": payload.column_id, "linked": e.linked, "created": e.created,
+            "stopped": True, "reason": e.reason,
+        })
+        if gone:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        raise HTTPException(status_code=409, detail=link_stopped_sentence(e))
 
-    log_action(
-        db,
-        action="participants_linked_by_column",
-        entity_type="dataset",
-        entity_id=dataset_id,
-        user_id=user.id,
-        project_id=project_id,
-        details={
-            "column_id": payload.column_id,
-            "linked": report["linked"],
-            "created": report["created"],
-            "matched": report["matched"],
-            "skipped_duplicate": report["skipped_duplicate"],
-            "skipped_conflict": report["skipped_conflict"],
-        },
-    )
-    db.commit()
-
+    _record_link(db, project_id, dataset_id, user.id, {
+        "column_id": payload.column_id,
+        "linked": report["linked"],
+        "created": report["created"],
+        "matched": report["matched"],
+        "skipped_duplicate": report["skipped_duplicate"],
+        "skipped_conflict": report["skipped_conflict"],
+    })
     return ParticipantLinkReport(**report)
+
+
+def _record_link(db: Session, project_id: int, dataset_id: int, user_id: int, details: dict) -> None:
+    """The audit entry of a Link by column, written AFTER its batches committed (#1231).
+
+    Its own short transaction, so it can meet the same lock that stopped the link
+    (a project delete holds it 11-27 s). The link's work is done either way, so a
+    refused entry is logged and the answer still states what happened — failing
+    the request here turned a finished link into "could not be linked".
+    """
+    try:
+        log_action(
+            db,
+            action="participants_linked_by_column",
+            entity_type="dataset",
+            entity_id=dataset_id,
+            user_id=user_id,
+            project_id=project_id,
+            details=details,
+        )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        logger.warning(
+            "Link by column: its audit entry could not be written (%s)", details, exc_info=True,
+        )
 
 
 # ── Linkable rows endpoint ───────────────────────────────────────────────
 
 
-@router.get("/{dataset_id}/linkable-rows")
-async def get_linkable_rows(
+@router.get("/{dataset_id}/linkable-rows", response_model=LinkableRowsPage)
+def get_linkable_rows(
     project_id: int,
     dataset_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # ⚠️ New parameters LAST and `Annotated[...] = <value>` — direct-call tests
+    # pass the first four by keyword and would otherwise receive a `Query` object
+    # as the value (`get_dataset_data`'s note).
+    q: Annotated[str, Query(max_length=MAX_SEARCH_TERM_LENGTH)] = "",
+    limit: Annotated[int, Query(ge=1, le=MAX_LINKABLE_PAGE_SIZE)] = LINKABLE_PAGE_SIZE,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ):
-    """Get all rows from a dataset with linking status, display labels, and
-    searchable values (#418)."""
-    _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    """One page of the records a participant can be linked to, matching ``q`` (#1053).
 
-    # 1. Get the dataset's columns once; demographic subset keeps the labeled
-    #    values shape, text-ish identifying columns drive display_values (#418
-    #    — a row labeled only by its demographic values is anonymous when a
-    #    dataset has none, e.g. Teacher_ID/School typed nominal).
-    all_cols = (
-        db.query(DatasetColumn)
-        .filter(DatasetColumn.dataset_id == dataset_id)
-        .order_by(DatasetColumn.sequence_order)
-        .all()
-    )
-    demo_cols = [c for c in all_cols if c.column_type == ColumnType.DEMOGRAPHIC]
-    # #414: identifier columns are the BEST row label — they exist to name rows.
-    identifying_types = {ColumnType.IDENTIFIER, ColumnType.OPEN_TEXT, ColumnType.NOMINAL, ColumnType.DEMOGRAPHIC}
-    identifying_col_ids = [c.id for c in all_cols if c.column_type in identifying_types]
-    # #592: per-column missing rules for the label skip below (parsed once);
-    # #1048: an open-text label is judged by the whole-answer defaults.
-    linkable_rules_by_col = {
-        c.id: column_missing_rules(c)
-        for c in all_cols if c.column_type in identifying_types
-    }
-
-    # 2. Get all rows with optional participant
-    rows = (
-        db.query(DatasetRow)
-        .outerjoin(Participant, DatasetRow.participant_id == Participant.id)
-        .filter(DatasetRow.dataset_id == dataset_id)
-        .order_by(DatasetRow.id)
-        .all()
-    )
-
-    # 3. Get ALL values for the rows — display labels come from identifying
-    #    columns; search must cover every column's value_text (#418: searching
-    #    "S001"/"T05"/"Maple" previously found nothing).
-    values: dict[tuple[int, int], str | None] = {}
-    row_ids = [r.id for r in rows]
-    if row_ids and all_cols:
-        vals = (
-            db.query(DatasetValue)
-            .filter(
-                DatasetValue.row_id.in_(row_ids),
-                DatasetValue.column_id.in_([c.id for c in all_cols]),
-            )
-            .all()
-        )
-        for v in vals:
-            values[(v.row_id, v.column_id)] = v.value_text
-
-    # 4. Build participant name map
-    participant_ids = [r.participant_id for r in rows if r.participant_id]
-    participant_names: dict[int, str] = {}
-    if participant_ids:
-        participants = (
-            db.query(Participant)
-            .filter(Participant.id.in_(participant_ids))
-            .all()
-        )
-        participant_names = {
-            p.id: p.display_name or p.identifier for p in participants
-        }
-
-    # 5. Build response
-    result_rows = []
-    for row in rows:
-        demo_vals = []
-        for col in demo_cols:
-            label = col.demographic_subtype or col.column_text
-            demo_vals.append({
-                "label": label,
-                "value": values.get((row.id, col.id)),
-            })
-
-        # #418: up to 3 identifying values for the row label — skip missing
-        # values (a slot spent on "N/A" identifies nothing; #592:
-        # column-aware) and truncate long open-text values so notes don't
-        # flood the label.
-        display_values: list[str] = []
-        for col_id in identifying_col_ids:
-            val = values.get((row.id, col_id))
-            if val and val.strip() and not is_missing(val, linkable_rules_by_col.get(col_id)):
-                cleaned = val.strip()
-                if len(cleaned) > 40:
-                    cleaned = cleaned[:39].rstrip() + "…"
-                display_values.append(cleaned)
-                if len(display_values) >= 3:
-                    break
-        # … and every value for search.
-        search_parts = []
-        for col in all_cols:
-            val = values.get((row.id, col.id))
-            if val and val.strip():
-                search_parts.append(val.strip())
-        search_text = " ".join(search_parts).lower()
-
-        result_rows.append({
-            "row_id": row.id,
-            "row_identifier": row.row_identifier,
-            "linked_participant_name": participant_names.get(row.participant_id) if row.participant_id else None,
-            "demographic_values": demo_vals,
-            "display_values": display_values,
-            "search_text": search_text,
-        })
-
-    return {"rows": result_rows}
+    `services/linkable_rows.py` owns the search, the ranking and the labels. ``def``,
+    not ``async def``: it awaits nothing, and the old version held the event loop
+    for the whole read — 70 s on GSS (`test_endpoint_event_loop.py`).
+    """
+    dataset = _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    return search_linkable_rows(db, dataset, q=q, limit=limit, offset=offset)
 
 
 # ── Column subtype endpoint ──────────────────────────────────────────────

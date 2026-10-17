@@ -266,19 +266,29 @@ across, leaving the original and its coding untouched.
 
 ### Export and reproduce
 - **CSV** and **Excel** (`.xlsx`) of data and results.
-- A **runnable R script** (`.R`) that reproduces the tool's own statistics in R
-  (t-test, ANOVA + Tukey, correlations, chi²/Cramér's V, Mann-Whitney,
-  Kruskal-Wallis, Cronbach's alpha, split-half, descriptives) — verified by a
-  round-trip test that R's numbers match the app's.
+- A **runnable R script** (`.R`) that reproduces, in R, the statistics in your
+  **saved** analyses — t-test, ANOVA + Tukey, correlations, chi²/Cramér's V,
+  Mann-Whitney, Kruskal-Wallis, Cronbach's alpha, split-half, and descriptives
+  (with the margin of error on frequencies) — and the agreement between coders on
+  codes, ratings and code sets (Krippendorff's alpha; Cohen's kappa and percent
+  agreement when there are two coders). Each is verified by a round-trip test that
+  R's numbers match the app's. **Not in the script:** effect sizes, assumption
+  checks, Fisher's exact test, the missing-data diagnostics (Little's MCAR test
+  among them), trend lines, box plots and Q–Q plots, confidence
+  intervals on means and on agreement, kappa and percent agreement with three or
+  more coders, the agreement measures for recordings, the Model comparison
+  tab, and the qualitative analysis figures. Unsaved analyses are not exported.
 - **Canvas export** to Word (`.docx`), HTML, and PDF, with charts embedded as
   images.
 - **REFI-QDA codebook** (`.qdc`) — export and import your codebook in the open
   cross-tool standard, so codes, hierarchy, descriptions and colours move between
   Mixed Measures and other QDA tools that read the REFI-QDA codebook format.
 - **`.mmproject`** — a complete, database-agnostic project archive for moving a
-  whole project between machines or instances. A file saved by a newer version
-  than the one opening it is refused with a message rather than half-read, so
-  colleagues exchanging project files should be on the same version.
+  whole project between machines or instances. A file in a newer format than the
+  version opening it can read is refused with a message saying to update, rather
+  than half-read; a file from a newer version that writes the same format imports,
+  and anything that version added may not come across — so colleagues exchanging
+  project files should be on the same version.
 
 ## What it is *not*
 
@@ -298,15 +308,17 @@ Being honest about scope:
   identities. (Separate researchers with unrelated projects on a shared computer
   should still use separate operating-system accounts.)
 - **Not cloud-based.** Everything runs locally against a local database. Moving a
-  project between machines is a manual file transfer (`.mmproject` / backup).
+  project between machines is a manual file transfer (`.mmproject`); in the
+  desktop app a backup opens only in the installation that made it.
 - **No generative AI, and nothing leaves your computer.** Mixed Measures 1.x sends
   your data nowhere and contains no generative AI — it doesn't analyze your data,
   write your findings, or upload anything. It can *import* labels a model produced
   elsewhere (see Codings, above) — it records where they came from and keeps them
   out of every agreement figure, but it never runs a model. Every result comes from a conventional,
   documented method you can inspect and check, computed locally and
-  deterministically, and reproducible in the exported R script; that holds for any
-  statistical method added to the 1.x line. A future 2.x will introduce generative
+  deterministically. The exported R script reproduces the statistics listed under
+  *Export and reproduce* above, each checked against R by an automated test, and a
+  statistic joins the script only with such a test. A future 2.x will introduce generative
   AI — local-first, off by default, and separable from the build.
   *(AI coding tools did assist in **building** Mixed Measures — an honest note about
   development, distinct from what the product does.)*
@@ -360,22 +372,24 @@ Being honest about scope:
 - **Fully local.** Your research data never leaves the machine — no telemetry,
   no analytics, no external CDNs (fonts are self-hosted). The browser
   content-security-policy is locked to `self`. The desktop app's one outbound
-  call is its update check against github.com, which carries only the app's
-  version and platform — nothing else; it can be switched off in
+  connection is to github.com, to check for and download updates. It carries no
+  project data; the update library adds a random identifier it creates once for
+  this installation. The check can be switched off in
   **Settings → Software update**, and the app works fully offline.
 - **No accounts, no sign-in.** The desktop app opens straight into your workspace
   as a single local researcher — there is no login screen or password. Your
-  operating-system account is the security boundary; an optional inactivity
-  timeout is available for shared computers.
+  operating-system account is the security boundary: on a shared computer, lock
+  or sign out of it when you step away.
 - **The database is encrypted at rest in the desktop app.** Packaged builds
   encrypt the SQLite database with SQLCipher (AES-256), using a random
   per-install key held in your OS keychain (macOS Keychain / Windows DPAPI /
   Linux Secret Service) — a copied or synced database file is unreadable without
   it. If no OS keychain is available, the app says so plainly and runs
-  unencrypted rather than storing a key insecurely. Two honest limits: inside a
-  `.mmbackup` archive the database is ciphertext but documents/media are not,
-  and encryption does not defend against software already running as *your* OS
-  user — full-disk encryption (FileVault / BitLocker) is the answer there.
+  unencrypted rather than storing a key insecurely. Two honest limits: only the
+  database is encrypted — the documents and recordings you import are kept
+  beside it as ordinary files, and inside a `.mmbackup` archive too — and
+  encryption does not defend against software already running as *your* OS
+  user; full-disk encryption (FileVault / BitLocker) is the answer for both.
   Development builds run from source use a plaintext database for
   inspectability. See [SECURITY.md](SECURITY.md) for the full posture.
   **If your data is sensitive, also store it on an encrypted disk / user profile
@@ -433,9 +447,9 @@ Common ones — see `backend/app/config.py` for the full list:
 | `MM_DATABASE_PATH` | `dev.db` | SQLite database file |
 | `MM_DATA_DIR` | `data` | Parent of `documents/` and `media/` |
 | `MM_BACKUP_DIR` | `backups` | Backup storage |
-| `MM_INACTIVITY_TIMEOUT_MINUTES` | `0` (off) | Auto-logout on a shared machine (e.g. `30`) |
+| `MM_INACTIVITY_TIMEOUT_MINUTES` | `0` (off) | Ends a session after this many idle minutes (e.g. `30`); with no sign-in screen the app starts a new one at once, so it does not lock a shared machine |
 | `MM_COOKIE_SECURE` | `false` | Set `true` when serving over HTTPS |
-| `MM_AUTO_BACKUP_INTERVAL_HOURS` | `4` | Hours between periodic automatic backups; `0` turns them off |
+| `MM_AUTO_BACKUP_INTERVAL_HOURS` | `4` | Automatic backups are at least this many whole hours apart — one a few minutes after start when the last is older, then one per interval while running; `0` turns them off |
 | `MM_AUTO_BACKUP_MAX_COUNT` | `5` | How many automatic backups are kept before the oldest is rotated out (at least `1`) |
 | `MM_SESSION_EXPIRE_HOURS` | `24` | Session lifetime (multi-user mode) |
 | `MM_CSRF_ENABLED` | `true` | CSRF protection on state-changing requests; leave on |
@@ -461,22 +475,27 @@ guidance, and dependency policy.
 ## Backups & data safety
 
 Qualitative coding is irreplaceable manual work, so the app keeps several backup
-mechanisms: automatic pre-migration backups, periodic auto-backups, a snapshot
-taken when the app closes (on macOS and Linux — on Windows the app stops its
-engine at once when it quits, so the periodic backups are the cover there), and
+mechanisms: automatic pre-migration backups, automatic backups (a few minutes
+after the app opens whenever the last one is more than four hours old, then every
+four hours while it stays open), a snapshot taken when the app closes (on macOS and
+Linux — on Windows the app stops its engine at once when it quits, so the automatic
+backups are the cover there), and
 user-triggered `.mmbackup` archives (database +
 documents + media) with a validate-and-preview restore flow. *Settings → Backup
-& Data → Backup history* lists them all, and any one can be restored, downloaded
-or deleted from there — restoring from that list is not held to the upload limit,
-because nothing is copied or uploaded; a backup brought from another computer is
-limited to 500 MB. Periodic auto-backups exclude **video** recordings so a
+& Data → Backup history* lists the `.mmbackup` archives, and any one can be
+restored, downloaded or deleted from there — restoring from that list is not held
+to the upload limit, because nothing is copied or uploaded; a backup file picked
+with *Restore from a file* is limited to 500 MB. In the desktop app a backup opens
+only in the installation that made it, so use `.mmproject` to move projects to
+another computer. Automatic backups exclude **video** recordings so a
 multi-gigabyte project doesn't multiply across the backup rotation — downloaded
 backups can include video, and restoring never deletes video files already on
-disk. The snapshot taken on closing is kept separately from the 4-hourly ones,
+disk. The snapshot taken on closing is kept separately from the automatic ones,
 so restarting the app does not use up the automatic backups that cover your
 working day. Project exports (`.mmproject`) can likewise
-include or exclude recordings; a media-less archive re-imports cleanly with
-recordings re-attachable. Before a merge or an overwrite changes a project, a
+include or exclude recordings; a media-less archive re-imports cleanly, and a
+conversation's recording can be attached again afterwards (an observation's
+cannot yet). Before a merge or an overwrite changes a project, a
 full copy of it is written first — *Settings → Backup & Data* lists those safety
 copies with their project, date and size, and lets you download one to bring it
 back or delete the ones you no longer need. Back up regularly, and keep a copy

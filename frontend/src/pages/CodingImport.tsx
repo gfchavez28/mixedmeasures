@@ -2,7 +2,7 @@ import { useId, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  FileInput, LoaderCircle, CircleCheck, TriangleAlert, Bot, User as UserIcon, Download, Check, ChevronRight,
+  FileInput, LoaderCircle, CircleCheck, TriangleAlert, Bot, User as UserIcon, Download,
 } from 'lucide-react'
 import {
   authApi, codingImportApi, datasetsApi, textCodingApi,
@@ -36,7 +36,7 @@ import {
 } from '@/lib/coding-import-formats'
 import {
   CODER_NAME_MAX_LENGTH, coderOptionLabel, draftBlocker, effectiveNewName, initialDraft,
-  mappingIntro, matchKeyOptions, namesSharingACoder, rowsToImport, sharedCreateConflicts,
+  MAPPING_INTRO, matchKeyOptions, namesSharingACoder, rowsToImport, sharedCreateConflicts,
   takenNameSuffix, toDecision, typedNewCoderNames, type CoderDraft,
 } from '@/lib/coding-import-mapping'
 import {
@@ -49,6 +49,7 @@ import { serverDetailMessage } from '@/lib/api/error-utils'
 import { checkImportFiles } from '@/lib/upload-limits'
 import { useStepFocus } from '@/hooks/useStepFocus'
 import UploadLimitNote from '@/components/UploadLimitNote'
+import ImportStepRail from '@/components/ImportStepRail'
 
 /**
  * Bulk import of code applications (queue row 49).
@@ -279,27 +280,8 @@ export default function CodingImport() {
           coder decisions", and opened from a link it left the app entirely. Every
           exit now names a fixed destination, MergeProject's shape. */}
       <h1 className="text-lg font-semibold text-mm-text">Import codings</h1>
-      <nav aria-label="Import progress" className="flex items-center flex-wrap gap-y-2">
-        {STEP_RAIL.map((s, i) => {
-          const current = STEP_RAIL.findIndex(r => r.key === step)
-          return (
-            <div key={s.key} className="flex items-center" aria-current={current === i ? 'step' : undefined}>
-              <div className={cn(
-                'w-7 h-7 rounded-full flex items-center justify-center text-sm font-medium',
-                current === i ? 'bg-primary text-primary-foreground'
-                  : current > i ? 'bg-primary/15 text-primary'
-                  : 'bg-mm-border-subtle text-mm-text-secondary',
-              )}>
-                {current > i ? <Check className="w-4 h-4" aria-hidden="true" /> : i + 1}
-              </div>
-              <span className="ml-2 text-sm font-medium">{s.label}</span>
-              {i < STEP_RAIL.length - 1 && (
-                <ChevronRight className="w-4 h-4 mx-3 text-mm-text-faint" aria-hidden="true" />
-              )}
-            </div>
-          )
-        })}
-      </nav>
+      {/* #1184: the shared rail. Every step is on it, so the step IS its rail key. */}
+      <ImportStepRail label="Import progress" steps={STEP_RAIL} current={step} accent="primary" />
       {/* The step's own heading and the element focus lands on (above). Visually
           hidden because each card already titles itself; what was missing was a
           place to move TO — and a level 2, since the cards' titles are level 3. */}
@@ -644,8 +626,8 @@ function MapStep({
       <Card>
         <CardHeader>
           <CardTitle>Whose codings are these?</CardTitle>
-          {/* #1158 — what `initialDraft` did, said: it pre-selects a same-name coder. */}
-          <CardDescription>{mappingIntro(preview.coders)}</CardDescription>
+          {/* #1193 — nothing is pre-selected, so the sentence is true as written. */}
+          <CardDescription>{MAPPING_INTRO}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {rosterStatus !== 'ready' && (
@@ -737,6 +719,7 @@ function CoderRow({
     : null
   const isNameMatch = draft.targetUserId != null && draft.targetUserId === candidate.local_user_id
   const hintId = `${rowId}-target-hint`
+  const sameNameId = `${rowId}-same-name`
   const kindNoteId = `${rowId}-kind-note`
   const nameNoteId = `${rowId}-name-note`
   // ONE string, never sentences as sibling JSX fragments: the space between two
@@ -781,8 +764,20 @@ function CoderRow({
       : null,
   ].filter(Boolean).join(' ')
 
+  // #1193 — an unanswered name that is the same as an existing coder's says so,
+  // so the choice is made knowing what the match would be. One string (`hint`'s rule).
+  const sameName = draft.action === null && candidate.local_user_id != null
+    ? `A coder called “${candidate.name}” already exists, with `
+      + `${candidate.local_application_count.toLocaleString()} `
+      + `${plural(candidate.local_application_count, 'coding', 'codings')} across your projects. `
+      + 'Choose An existing coder only if these codings are theirs.'
+    : null
+
   return (
-    <fieldset className="rounded-md border border-border p-3 space-y-3">
+    <fieldset
+      className="rounded-md border border-border p-3 space-y-3"
+      aria-describedby={sameName ? sameNameId : undefined}
+    >
       <legend className="px-1 text-sm font-medium text-mm-text">
         {candidate.name}{' '}
         <span className="font-normal text-mm-text-muted">
@@ -799,6 +794,10 @@ function CoderRow({
           Every row for this name is listed below as not importable, so it is left out
           unless you choose otherwise.
         </p>
+      )}
+
+      {sameName && (
+        <p id={sameNameId} className="text-xs text-mm-text-muted">{sameName}</p>
       )}
 
       <div className="flex flex-wrap gap-3 text-sm">

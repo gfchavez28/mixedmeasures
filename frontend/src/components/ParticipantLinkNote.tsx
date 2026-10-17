@@ -40,12 +40,12 @@ export default function ParticipantLinkNote({
   if (report.skipped_duplicate > 0) {
     const examples = report.duplicate_values.slice(0, 3).join(', ')
     skippedParts.push(
-      `${report.skipped_duplicate} with a duplicated ID${examples ? ` (${examples})` : ''}`,
+      `${report.skipped_duplicate.toLocaleString()} with a duplicated ID${examples ? ` (${examples})` : ''}`,
     )
   }
-  if (report.skipped_missing > 0) skippedParts.push(`${report.skipped_missing} with a blank or N/A ID`)
+  if (report.skipped_missing > 0) skippedParts.push(`${report.skipped_missing.toLocaleString()} with a blank or N/A ID`)
   if (report.skipped_conflict > 0) {
-    skippedParts.push(`${report.skipped_conflict} whose participant is already linked to another record`)
+    skippedParts.push(`${report.skipped_conflict.toLocaleString()} whose participant is already linked to another record`)
   }
   // #963 — `!== false`, not truthiness: `undefined` means the participant list
   // never answered, and suppressing the callout then is the unsafe direction.
@@ -57,9 +57,9 @@ export default function ParticipantLinkNote({
         {report.linked === 1 ? '1 record linked' : `${report.linked.toLocaleString()} records linked`}
         {report.linked > 0 && (
           <>
-            {' '}({report.created > 0 && `${report.created} new`}
+            {' '}({report.created > 0 && `${report.created.toLocaleString()} new`}
             {report.created > 0 && report.matched > 0 && ', '}
-            {report.matched > 0 && `${report.matched} matched to existing`})
+            {report.matched > 0 && `${report.matched.toLocaleString()} matched to existing`})
           </>
         )}
       </div>
@@ -71,7 +71,7 @@ export default function ParticipantLinkNote({
           <TriangleAlert className="w-3.5 h-3.5 flex-shrink-0 mt-px" aria-hidden="true" />
           <span>
             None of these IDs matched the participants already in this project, so{' '}
-            {report.created === 1 ? 'a new participant was' : `${report.created} new participants were`} created.
+            {report.created === 1 ? 'a new participant was' : `${report.created.toLocaleString()} new participants were`} created.
             If these records belong to people already here, review and merge them on the{' '}
             <Link to={`/projects/${projectId}/participants`} className="underline">
               Participants page

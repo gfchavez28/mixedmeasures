@@ -332,8 +332,11 @@ async def delete_observation(
     db: Session = Depends(get_db),
 ):
     observation = _get_observation_or_404(db, project_id, observation_id, user.id)
-    # Media dir removed AFTER the DB delete commits (mirrors delete_conversation);
-    # a leftover dir on rmtree failure is harmless (no DB row references it).
+    # Media dir removed AFTER the DB delete commits (mirrors delete_conversation). A
+    # leftover dir on rmtree failure is NOT harmless: SQLite hands this id to the next
+    # observation, which finds the folder. An import no longer adopts it (#1225 judges an
+    # imported recording by its staged file) and an upload replaces it; #1247 is the same
+    # residue at the document upload.
     media_dir = media_storage.media_owner_dir(
         project_id, media_storage.OBSERVATION, observation_id
     )

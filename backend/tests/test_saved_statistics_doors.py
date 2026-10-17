@@ -517,6 +517,101 @@ def test_1172_moving_a_variable_marks_the_group_it_left(db_session):
     assert _stale(db_session, MetricDefinition, 1) is False  # B's own mean: no cell moved
 
 
+# ── #1228: reordering a variable group's items ───────────────────────────────
+
+
+def _split_half_world(db):
+    """One four-item group (9) — and a second group (8) over the SAME four
+    columns, to show the mark stays with the group that was reordered.
+
+    The data are the audit probe's: items A and B agree, C and D agree, and the
+    two pairs disagree, so the split A,C | B,D gives r = 1.0 and A,B | C,D gives
+    a negative r. A fixture on which every split agrees could not show the
+    number moving.
+    """
+    from app.services.metrics import compute_metric
+    from app.services.statistical_tests import compute_statistical_test
+
+    db.add(Project(id=1, name="Scale", user_id=1))
+    db.add(Dataset(id=1, project_id=1, name="Survey"))
+    db.flush()
+    data = {31: [1, 2, 3, 4, 5, 4, 3, 2], 32: [1, 2, 3, 4, 5, 4, 3, 2],
+            33: [5, 1, 4, 2, 3, 5, 1, 4], 34: [5, 1, 4, 2, 3, 5, 1, 4]}
+    for i, (cid, code) in enumerate(zip(data, "ABCD")):
+        db.add(DatasetColumn(id=cid, dataset_id=1, column_code=code, column_text=code,
+                             column_name=code, column_type=ColumnType.ORDINAL,
+                             sequence_order=i, display_order=i))
+    db.add_all([AnalysisDomain(id=9, project_id=1, name="Scale"),
+                AnalysisDomain(id=8, project_id=1, name="Same items")])
+    db.flush()
+    for domain_id in (9, 8):
+        for i, cid in enumerate(data):
+            db.add(AnalysisDomainMember(domain_id=domain_id, member_type="column",
+                                        member_id=cid, sequence_order=i))
+    for r in range(8):
+        db.add(DatasetRow(id=100 + r, dataset_id=1))
+        db.flush()
+        for cid, values in data.items():
+            db.add(DatasetValue(row_id=100 + r, column_id=cid,
+                                value_text=str(values[r]), value_numeric=float(values[r])))
+    db.add(MetricDefinition(id=9, project_id=1, name="Scale score", metric_type="domain_aggregate",
+                            config="{}", input_source_type="dataset_domain", input_source_id=9,
+                            stale=False, origin="human"))
+    db.add_all([
+        StatisticalTest(id=11, project_id=1, test_type="split_half",
+                        target_type="analysis_domain", target_id=9, config="{}"),
+        StatisticalTest(id=12, project_id=1, test_type="cronbachs_alpha",
+                        target_type="analysis_domain", target_id=9, config="{}"),
+        StatisticalTest(id=13, project_id=1, test_type="split_half",
+                        target_type="analysis_domain", target_id=8, config="{}"),
+    ])
+    db.flush()
+    compute_metric(db, db.get(MetricDefinition, 9))
+    for test_id in (11, 12, 13):
+        compute_statistical_test(db, db.get(StatisticalTest, test_id))
+    db.commit()
+
+
+def _member_ids(db, domain_id):
+    return [m.id for m in db.query(AnalysisDomainMember)
+            .filter_by(domain_id=domain_id).order_by(AnalysisDomainMember.sequence_order)]
+
+
+def test_1228_reordering_a_groups_items_marks_its_split_half_test(db_session):
+    """Reproduced 2026-10-15 (audit probe 1): the reorder committed with no
+    marker, so the saved r = 1.0 read as current while its items gave −0.13."""
+    from app.routers.analysis_domains import reorder_members
+    from app.schemas.analysis_domain import DomainMemberReorderRequest
+    from app.services.statistical_tests import compute_statistical_test
+
+    _split_half_world(db_session)
+    before = json.loads(db_session.get(StatisticalTest, 11).result_data)
+    a, b, c, d = _member_ids(db_session, 9)
+    _run(reorder_members(1, 9, DomainMemberReorderRequest(member_ids=[a, c, b, d]),
+                         user=_user(db_session), db=db_session))
+
+    assert _stale(db_session, StatisticalTest, 11) is True
+    # α and the scale score cannot move with the order (#1149) …
+    assert _stale(db_session, StatisticalTest, 12) is False
+    assert _stale(db_session, MetricDefinition, 9) is False
+    # … nor can another group's split, though it holds the same columns.
+    assert _stale(db_session, StatisticalTest, 13) is False
+    # The discrimination: the number really moved, so the mark is not decoration.
+    after = compute_statistical_test(db_session, db_session.get(StatisticalTest, 11))
+    assert before["split_half_r"] == 1.0
+    assert after["split_half_r"] < 0
+
+
+def test_1228_a_reorder_that_keeps_the_order_marks_nothing(db_session):
+    from app.routers.analysis_domains import reorder_members
+    from app.schemas.analysis_domain import DomainMemberReorderRequest
+
+    _split_half_world(db_session)
+    _run(reorder_members(1, 9, DomainMemberReorderRequest(member_ids=_member_ids(db_session, 9)),
+                         user=_user(db_session), db=db_session))
+    assert _stale(db_session, StatisticalTest, 11) is False
+
+
 # ── Decision 5: a dataset rename ─────────────────────────────────────────────
 
 
@@ -788,6 +883,92 @@ def test_r7_an_out_of_date_scale_score_is_served_and_now_said_to_be(db_session):
     fresh = matrix()
     assert fresh["stale_domain_ids"] == []
     assert fresh["matrix"][0][1]["r"] != r_before
+
+
+# ── #1229: the two score readers #1176 did not reach ─────────────────────────
+
+
+async def _collect_bytes(response) -> bytes:
+    parts = [c async for c in response.body_iterator]
+    return b"".join(p if isinstance(p, bytes) else p.encode() for p in parts)
+
+
+async def _collect(response) -> str:
+    return (await _collect_bytes(response)).decode("utf-8")
+
+
+def _r_export_members(db) -> dict[str, str]:
+    import io
+    import zipfile
+
+    from app.routers.export_r import export_r_data
+
+    raw = _run(_collect_bytes(export_r_data(project_id=1, user=_user(db), db=db)))
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        return {n: zf.read(n).decode("utf-8") for n in zf.namelist()}
+
+
+def _edit_local_member(db):
+    """A member cell edit through the real door — it marks Local's score (3) stale."""
+    from app.routers.dataset import update_value
+    from app.schemas.dataset import ValueUpdate
+
+    value_id = db.query(DatasetValue.id).filter_by(row_id=3, column_id=12).scalar()
+    _run(update_value(1, 1, value_id, ValueUpdate(value_text="60"), user=_user(db), db=db))
+    assert _stale(db, MetricDefinition, 3) is True
+
+
+def test_1229_the_r_export_names_an_out_of_date_score_column(db_session):
+    """Reproduced 2026-10-15 (audit probe 4): after a member's cell moved, the
+    export's score column still held the old scores and the script said nothing."""
+    from app.services.metrics import compute_metric
+
+    _world(db_session)
+    compute_metric(db_session, db_session.get(MetricDefinition, 3))   # Local: scored
+    db_session.flush()
+
+    def script():
+        return next(t for n, t in _r_export_members(db_session).items() if n.endswith(".R"))
+
+    assert "are out of date" not in script()          # control: a current score is not named
+    _edit_local_member(db_session)
+    # Lonely (6) is out of date AND was never computed: the NA note names it, this one must not.
+    db_session.get(MetricDefinition, 6).stale = True
+    db_session.flush()
+
+    text = script()
+    notes = [line for line in text.splitlines() if "are out of date" in line]
+    assert len(notes) == 1, "the script must name the out-of-date score column"
+    assert notes[0].endswith(": local_score")
+    na_note = next(line for line in text.splitlines() if "entirely NA" in line)
+    assert "lonely_score" in na_note
+
+
+def test_1229_the_record_matrix_marks_an_out_of_date_column(db_session):
+    """The matrix reaches the researcher only as a CSV (`metricsApi.rowMatrix(…,
+    'csv')` at both call sites), so the file's heading is where it must say so."""
+    from app.routers.metrics import get_row_matrix, get_row_matrix_csv
+    from app.services.metrics import compute_metric
+
+    _world(db_session)
+    for metric_id in (3, 6):
+        compute_metric(db_session, db_session.get(MetricDefinition, metric_id))
+    db_session.flush()
+    _edit_local_member(db_session)
+
+    columns = {c.metric_id: c for c in get_row_matrix(1, None, _user(db_session), db_session).columns}
+    assert getattr(columns[3], "stale", None) is True
+    assert getattr(columns[6], "stale", None) is False
+
+    def header():
+        csv_text = _run(_collect(get_row_matrix_csv(1, None, _user(db_session), db_session)))
+        return csv_text.splitlines()[0].split(",")
+
+    assert header()[2:] == ["Local (out of date)", "Lonely"]
+    # The marked heading is still defanged: a group name is the researcher's text.
+    db_session.get(AnalysisDomain, 2).name = "=Local"
+    db_session.flush()
+    assert header()[2] == "'=Local (out of date)"
 
 
 # ── The fold: `delete_dataset` on the shared service changes only what it meant to ──

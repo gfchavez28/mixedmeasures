@@ -1,17 +1,20 @@
 import { useState, useCallback, useMemo, useRef, useEffect, useId } from 'react'
 import { useParams, useNavigate, Link } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { FileInput, Check, ChevronRight, ChevronDown, CircleAlert, X, FileText, Video, Volume2, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert } from 'lucide-react'
+import { FileInput, ChevronDown, CircleAlert, X, FileText, Video, Volume2, LoaderCircle, CircleCheck, CircleX, Ban, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import { countLabel } from '@/lib/format'
 import { conversationsApi, participantsApi, mediaApi, retryUnanswered, type Participant } from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
-import { validateMediaFile, MEDIA_ACCEPT, MEDIA_FORMAT_LABEL, describeMediaUploadError, isVideoFilename } from '@/lib/media-constants'
+import { invalidateAfterParticipantLinkChange } from '@/lib/participant-link-cache'
+import { validateMediaFile, chooseOneRecording, MEDIA_ACCEPT, MEDIA_FORMAT_LABEL, describeMediaUploadError, isVideoFilename } from '@/lib/media-constants'
 import { formatBytes } from '@/lib/format'
 import { TRANSCRIPT_ACCEPT, TRANSCRIPT_FORMAT_LABEL, isSupportedTranscriptFile } from '@/lib/conversation-import-formats'
 import { checkImportFiles } from '@/lib/upload-limits'
 import { useStepFocus } from '@/hooks/useStepFocus'
 import UploadLimitNote from '@/components/UploadLimitNote'
+import ImportStepRail from '@/components/ImportStepRail'
+import { AFTER_LAST_STEP } from '@/lib/step-rail'
 import { openPickerFromZoneClick } from '@/lib/drop-zone'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -56,6 +59,7 @@ import {
   UNREADABLE_FILE_PREFIX,
   isBlockingFileWarning,
   namingTheFile,
+  fileCheckRefusal,
 } from '@/lib/conversation-import-utils'
 import { TranscriptOverlongNotice } from '@/components/TranscriptOverlongNotice'
 
@@ -92,6 +96,15 @@ export default function ConversationImport() {
   const [files, setFiles] = useState<File[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
+  // #1259 — the upload step's preview refusal is about ONE file; this says which,
+  // and with what words, so removing that file can clear exactly that sentence.
+  const previewRefusalRef = useRef<{ file: File; text: string } | null>(null)
+  // #1259 — a Remove unmounts with its file and dropped focus to <body>; the landing
+  // runs as an EFFECT after the commit that removed it (#1130's rule: never a frame
+  // guess), and only when focus was actually lost.
+  const [removeLanding, setRemoveLanding] = useState<{ index: number; n: number } | null>(null)
+  const pageRef = useRef<HTMLDivElement>(null)
+  const primaryActionRef = useRef<HTMLButtonElement>(null)
 
   // Slab 1: an optional recording to attach after a single-file transcript
   // import (uploaded in Slab 2). Kept even in multi-file mode (D-1), but only
@@ -368,16 +381,31 @@ export default function ConversationImport() {
 
   const handleRemoveFile = useCallback((index: number) => {
     const newFiles = files.filter((_, i) => i !== index)
+    const newWarnings = columnWarnings.filter((_, i) => i !== index)
     setFiles(newFiles)
     setFilePreviews(prev => prev.filter((_, i) => i !== index))
     setFileSpeakerMappings(prev => prev.filter((_, i) => i !== index))
     setFileConversationNames(prev => prev.filter((_, i) => i !== index))
-    setColumnWarnings(prev => prev.filter((_, i) => i !== index))
+    setColumnWarnings(newWarnings)
     userEditedNames.current = new Set(
       [...userEditedNames.current]
         .filter(i2 => i2 !== index)
         .map(i2 => i2 > index ? i2 - 1 : i2)
     )
+
+    // #1259 — removing a file removes what it caused. On the Columns step the
+    // only refusal is the check's, recomposed from the files left (it said "Remove
+    // that file below" after the file had gone). On the upload step a preview
+    // refusal names ONE file, and goes with that file — compared by identity and
+    // by text, so a later, different sentence is never cleared by mistake.
+    if (step === 'columns') {
+      setError(fileCheckRefusal(newFiles.map(f => f.name), newWarnings))
+    } else if (previewRefusalRef.current?.file === files[index] && previewRefusalRef.current.text === error) {
+      setError('')
+      previewRefusalRef.current = null
+    }
+    // The pressed Remove unmounts with its file: land focus after the commit.
+    setRemoveLanding(n => ({ index, n: (n?.n ?? 0) + 1 }))
 
     // If we removed the first file and we're past upload, re-preview the new first
     if (index === 0 && newFiles.length > 0 && firstPreview) {
@@ -404,10 +432,12 @@ export default function ConversationImport() {
           // built from the file just removed, so it goes too: back to the upload
           // step, where the refused file can be removed or replaced.
           const reason = err instanceof Error ? err.message : 'It could not be previewed.'
+          const text = namingTheFile(newFiles[0].name, reason, true)
           setFirstPreview(null)
           setColumnMapping({})
           setStep('upload')
-          setError(namingTheFile(newFiles[0].name, reason, true))
+          setError(text)
+          previewRefusalRef.current = { file: newFiles[0], text }
         })
         .finally(() => setIsLoading(false))
     }
@@ -417,7 +447,7 @@ export default function ConversationImport() {
       setFirstPreview(null)
       setColumnMapping({})
     }
-  }, [files, previewFile, firstPreview])
+  }, [files, columnWarnings, step, error, previewFile, firstPreview])
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -448,10 +478,16 @@ export default function ConversationImport() {
     stageRecording(file)
   }, [stageRecording])
 
+  // The slot holds ONE recording: every dropped file is checked, the first accepted
+  // is staged, and the sentence names what was left out (#1161 — it kept files[0]
+  // and dropped the rest in silence).
   const handleRecordingDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
-    stageRecording(e.dataTransfer.files?.[0])
-  }, [stageRecording])
+    const { file, message } = chooseOneRecording(Array.from(e.dataTransfer.files ?? []))
+    if (!file && !message) return
+    setRecordingError(message || null)
+    setMediaFile(file)
+  }, [])
 
   // --- Column mapping ---
 
@@ -494,6 +530,9 @@ export default function ConversationImport() {
     // what it does).
     if (isLoading) return
     if (files.length <= 1) {
+      // #1259: no `setError('')` here, deliberately — the refusal that used to ride
+      // into Speakers is recomposed (to nothing) by the Remove that left one file,
+      // and a clear here survived mutation-testing: there is nothing left for it to do.
       setStep('speakers')
       return
     }
@@ -508,11 +547,11 @@ export default function ConversationImport() {
     const CONCURRENCY = 5
     const newPreviews = [...filePreviews]
     const newMappings = [...fileSpeakerMappings]
+    // #1127: a file the reader REFUSED carries its sentence as a blocking warning
+    // (`UNREADABLE_FILE_PREFIX`), named in the refusal below. Before, a refused file
+    // 2..N only carried an "Error:" warning, the wizard went on to Speakers and the
+    // import sent it anyway.
     const newWarnings = [...columnWarnings]
-    // #1127: the files the reader REFUSED — named, with the reader's sentence, and
-    // blocking. Before, a refused file 2..N only carried an "Error:" warning, the
-    // wizard went on to Speakers and the import sent it anyway.
-    const unreadable: string[] = []
 
     for (let batchStart = 1; batchStart < files.length; batchStart += CONCURRENCY) {
       const batchEnd = Math.min(batchStart + CONCURRENCY, files.length)
@@ -552,7 +591,6 @@ export default function ConversationImport() {
           newPreviews[fileIdx] = null
           const errMsg = result.reason instanceof Error ? result.reason.message : 'It could not be previewed.'
           newWarnings[fileIdx] = `${UNREADABLE_FILE_PREFIX} ${errMsg}`
-          unreadable.push(namingTheFile(files[fileIdx].name, errMsg, true))
         }
       })
     }
@@ -563,18 +601,11 @@ export default function ConversationImport() {
     setIsLoading(false)
 
     // Block if any file was refused or misses a required column — each is listed
-    // below the preview with a Remove control.
-    const missingColumns = newWarnings.some((w, i) => i > 0 && w && w.startsWith('Missing required'))
-    if (unreadable.length > 0 || missingColumns) {
-      setError([
-        ...unreadable,
-        missingColumns
-          ? 'Some files are incompatible with the selected column mapping. Remove them or adjust your mapping.'
-          : null,
-        unreadable.length > 0 && !missingColumns
-          ? `Remove ${unreadable.length === 1 ? 'that file' : 'those files'} below, or correct ${unreadable.length === 1 ? 'it' : 'them'} and add ${unreadable.length === 1 ? 'it' : 'them'} again.`
-          : null,
-      ].filter(Boolean).join(' '))
+    // below the preview with a Remove control. #1259: composed from the warnings,
+    // so a Remove recomposes it from the files that are left.
+    const refusal = fileCheckRefusal(files.map(f => f.name), newWarnings)
+    if (refusal) {
+      setError(refusal)
       return
     }
 
@@ -615,7 +646,10 @@ export default function ConversationImport() {
       const { conversation, warnings } = result
       queryClient.invalidateQueries({ queryKey: ['project', id] })
       queryClient.invalidateQueries({ queryKey: ['conversations', id] })
-      queryClient.invalidateQueries({ queryKey: ['participants', id] })
+      // #1152 — the import links its speakers to participants (and makes new
+      // ones), so it is a participant-link door: the list alone left the panel
+      // and the withdrawal report saying the person was linked to nothing.
+      void invalidateAfterParticipantLinkChange(queryClient, id)
 
       const finishTranscriptOnly = () => {
         if (!mountedRef.current) {
@@ -805,7 +839,8 @@ export default function ConversationImport() {
     // Invalidate queries
     queryClient.invalidateQueries({ queryKey: ['project', id] })
     queryClient.invalidateQueries({ queryKey: ['conversations', id] })
-    queryClient.invalidateQueries({ queryKey: ['participants', id] })
+    // #1152 — speaker links are participant links (see the single import).
+    void invalidateAfterParticipantLinkChange(queryClient, id)
 
     setStep('results')
   }, [files, id, columnMapping, queryClient])
@@ -898,8 +933,32 @@ export default function ConversationImport() {
     ...(isMultiFile ? [{ key: 'results' as Step, label: 'Results' }] : []),
   ]
 
+  // #1184: where each step sits on the rail. A single-file import reaches
+  // `results` (warnings, or a recording that would not attach) without it being on
+  // the rail — it is past the last step, not before the first (`findIndex` gave −1
+  // and the rail read as not started).
+  const railAt: Record<Step, Step | typeof AFTER_LAST_STEP> = {
+    upload: 'upload',
+    columns: 'columns',
+    speakers: 'speakers',
+    importing: isMultiFile || willAttachRecording ? 'importing' : AFTER_LAST_STEP,
+    results: isMultiFile ? 'results' : AFTER_LAST_STEP,
+  }
+
   const stepIndex = steps.findIndex(s => s.key === step)
   const stepHeadingRef = useStepFocus(step)
+
+  // #1259 — after a Remove, the next file's Remove (the one that took the removed
+  // file's place, else the last), else the step's own button, else the step heading.
+  // Only when focus was lost: a step change has already put it on the heading.
+  useEffect(() => {
+    if (!removeLanding) return
+    const active = document.activeElement
+    if (active && active !== document.body && active.isConnected) return
+    const removes = Array.from(pageRef.current?.querySelectorAll<HTMLElement>('[data-remove-file-index]') ?? [])
+    const next = removes.find(el => Number(el.dataset.removeFileIndex) >= removeLanding.index) ?? removes[removes.length - 1]
+    ;(next ?? primaryActionRef.current ?? stepHeadingRef.current)?.focus()
+  }, [removeLanding, stepHeadingRef])
 
   // --- Render helpers ---
 
@@ -1075,35 +1134,15 @@ export default function ConversationImport() {
   )
 
   return (
-    <div className="h-full overflow-auto">
+    <div ref={pageRef} className="h-full overflow-auto">
       <div className="max-w-3xl mx-auto px-4 py-6">
-        {/* Progress Steps */}
-        <nav aria-label="Import progress" className="flex items-center justify-between mb-8">
-          {steps.map((s, i) => (
-            <div key={s.key} className="flex items-center" aria-current={stepIndex === i ? 'step' : undefined}>
-              <div
-                className={cn(
-                  'w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium',
-                  stepIndex === i
-                    ? 'bg-primary text-primary-foreground'
-                    : stepIndex > i
-                    ? 'bg-primary/15 text-primary'
-                    : 'bg-mm-border-subtle text-mm-text-secondary'
-                )}
-              >
-                {stepIndex > i ? (
-                  <Check className="w-4 h-4" />
-                ) : (
-                  i + 1
-                )}
-              </div>
-              <span className="ml-2 text-sm font-medium">{s.label}</span>
-              {i < steps.length - 1 && (
-                <ChevronRight className="w-4 h-4 mx-4 text-mm-text-faint" />
-              )}
-            </div>
-          ))}
-        </nav>
+        <ImportStepRail
+          label="Import progress"
+          steps={steps}
+          current={railAt[step]}
+          accent="primary"
+          className="mb-8"
+        />
 
         {/* #1011: where focus lands when the step changes. A step not on the rail
             (a single-file import's results) still gets a heading to land on. */}
@@ -1337,6 +1376,7 @@ export default function ConversationImport() {
                       </span>
                       <button
                         onClick={() => handleRemoveFile(i)}
+                        data-remove-file-index={i}
                         className="p-1 hover:bg-mm-surface-hover rounded"
                         aria-label={`Remove ${f.name}`}
                         title={`Remove ${f.name}`}
@@ -1402,15 +1442,19 @@ export default function ConversationImport() {
                         } catch (err: unknown) {
                           // #1127: name the file when several are listed — "Line 4 …"
                           // alone does not say which one to open.
-                          setError(namingTheFile(
+                          const text = namingTheFile(
                             files[0].name,
                             err instanceof Error ? err.message : 'It could not be previewed.',
                             files.length > 1,
-                          ))
+                          )
+                          setError(text)
+                          // #1259 — removing this file takes this sentence with it.
+                          previewRefusalRef.current = { file: files[0], text }
                         } finally {
                           setIsLoading(false)
                         }
                       }}
+                      ref={primaryActionRef}
                       disabled={files.length === 0}
                       aria-disabled={isLoading || undefined}
                       aria-busy={isLoading || undefined}
@@ -1622,6 +1666,7 @@ export default function ConversationImport() {
                         {isError && (
                           <button
                             onClick={() => handleRemoveFile(i)}
+                            data-remove-file-index={i}
                             className="ml-auto text-red-600 hover:text-red-800 text-xs underline"
                             aria-label={`Remove ${files[i].name}`}
                           >
@@ -1639,6 +1684,7 @@ export default function ConversationImport() {
                   Back
                 </Button>
                 <Button
+                  ref={primaryActionRef}
                   onClick={handleColumnsNext}
                   disabled={!columnMapping.text || !columnMapping.speaker}
                   aria-disabled={isLoading || undefined}

@@ -236,7 +236,7 @@ describe('the mapping step', () => {
       .toBeInTheDocument()
   })
 
-  it('defaults an unknown name to CREATE, and a known one to MATCH', async () => {
+  it('#1193: an unknown name defaults to CREATE; a same-name coder starts UNANSWERED, one click away', async () => {
     setup()
     api.preview.mockResolvedValue({
       ...PREVIEW,
@@ -249,25 +249,30 @@ describe('the mapping step', () => {
     const groups = screen.getAllByRole('group')
     const machineGroup = groups.find(g => g.textContent?.includes('GPT-4o'))!
     const aliceGroup = groups.find(g => g.textContent?.includes('Alice'))!
-    expect(
-      within(machineGroup).getByRole('radio', { name: /A new coder/ }),
-    ).toBeChecked()
-    expect(
-      within(aliceGroup).getByRole('radio', { name: /An existing coder/ }),
-    ).toBeChecked()
+    expect(within(machineGroup).getByRole('radio', { name: /A new coder/ })).toBeChecked()
+    // Nothing chosen for Alice: every install's default coder shares a name with
+    // every colleague's, and a wrong match replaces set values and ratings.
+    for (const radio of within(aliceGroup).getAllByRole('radio')) expect(radio).not.toBeChecked()
+    // The group says who the same-name coder is before anything is chosen.
+    expect(aliceGroup).toHaveAccessibleDescription(
+      /A coder called “Alice” already exists, with 0 codings across your projects\. Choose An existing coder only if these codings are theirs\./)
+    // Import waits, saying why.
+    expect(screen.getByText(/Choose whether “Alice” is an existing coder, a new coder, or not imported\./))
+      .toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Import/ })).toBeDisabled()
+    // One click: the same-name coder is already in the picker.
+    fireEvent.click(within(aliceGroup).getByRole('radio', { name: /An existing coder/ }))
     // The picker carries the note about who that coder already is — the fact the
     // choice turns on — as its DESCRIPTION, not as a paragraph a reader moving
     // by form control never reaches (2026-09-23 sweep).
     expect(
       within(aliceGroup).getByRole('combobox', { name: 'Which coder' }),
     ).toHaveAccessibleDescription(/already exists, with 0 codings across your projects/)
-    // #1158 — and the card says so, where it used to say nothing was matched.
-    expect(screen.getByText(/One name is the same as an existing coder’s, so that coder is chosen/))
-      .toBeInTheDocument()
-    expect(screen.queryByText(/Nothing is matched by name on your behalf/)).toBeNull()
+    expect(screen.queryByText(/Choose whether “Alice”/)).toBeNull()
+    expect(screen.getByText(/Nothing is matched by name on your behalf/)).toBeInTheDocument()
   })
 
-  it('#1158: with no same-name coder the card still says nothing is matched', async () => {
+  it('#1158/#1193: the card says nothing is matched — and with no same-name coder, too', async () => {
     setup()
     api.preview.mockResolvedValue(PREVIEW)
     await reachMapStep()
@@ -417,6 +422,13 @@ describe('a new coder’s kind (#1038 h)', () => {
   })
 })
 
+/** #1193 — a same-name coder starts unanswered: choose *An existing coder* for
+ *  the `index`th card (or every card), as a researcher now must. */
+function chooseExistingCoder(index?: number) {
+  const radios = screen.getAllByRole('radio', { name: /An existing coder/ })
+  for (const radio of index === undefined ? radios : [radios[index]]) fireEvent.click(radio)
+}
+
 describe('an archived coder (#1031 c)', () => {
   const ROSTER = [
     { id: 1, username: 'Alice', coder_type: 'human' },
@@ -431,12 +443,13 @@ describe('an archived coder (#1031 c)', () => {
   }
 
   it('🔴 is SHOWN in the picker, said to be archived, and offered back', async () => {
-    // The picker listed the ACTIVE roster only, so a pre-selected archived match
-    // showed the placeholder — and the import wrote onto a coder hidden by
-    // default and left out of reliability and the model table.
+    // The picker listed the ACTIVE roster only, so an archived match showed the
+    // placeholder — and the import wrote onto a coder hidden by default and left
+    // out of reliability and the model table.
     setup(ROSTER)
     api.preview.mockResolvedValue(ARCHIVED_MATCH)
     await reachMapStep()
+    chooseExistingCoder()
     expect(await screen.findByRole('combobox', { name: 'Which coder' }))
       .toHaveTextContent('Old run · model (archived)')
     // The ARCHIVE-INCLUSIVE roster was asked for — the mock ignores arguments,
@@ -452,6 +465,7 @@ describe('an archived coder (#1031 c)', () => {
     api.preview.mockResolvedValue(ARCHIVED_MATCH)
     api.run.mockResolvedValue({ ...RESULT, coders_unarchived: 1 })
     await reachMapStep()
+    chooseExistingCoder()
     fireEvent.click(await screen.findByRole('checkbox', { name: /Bring “Old run” back/ }))
     expect(screen.getByRole('checkbox', { name: /Bring “Old run” back/ }))
       .toHaveAccessibleDescription(/hidden by default and left out of reliability/)
@@ -467,6 +481,7 @@ describe('an archived coder (#1031 c)', () => {
     setup(ROSTER)
     api.preview.mockResolvedValue(ARCHIVED_MATCH)
     await reachMapStep()
+    chooseExistingCoder()
     expect(await screen.findByRole('combobox', { name: 'Which coder' }))
       .toHaveAccessibleDescription(/is a model: its codings are compared on the Model comparison tab/)
   })
@@ -475,8 +490,8 @@ describe('an archived coder (#1031 c)', () => {
 describe('two names onto one coder (#1039 i)', () => {
   it('says so beside each, before the import rather than after', async () => {
     // Both rows arrive pointing at coder 1 (a Radix Select cannot be driven in
-    // jsdom, so the two drafts are seeded through the preview's own matches);
-    // the rule itself is `namesSharingACoder`, unit-tested beside it.
+    // jsdom, so the two drafts are seeded through the preview's own matches and
+    // one click each — #1193); the rule itself is `namesSharingACoder`, unit-tested beside it.
     setup()
     api.preview.mockResolvedValue({
       ...PREVIEW,
@@ -486,6 +501,7 @@ describe('two names onto one coder (#1039 i)', () => {
       ],
     })
     await reachMapStep()
+    chooseExistingCoder()
     const pickers = await screen.findAllByRole('combobox', { name: 'Which coder' })
     expect(pickers).toHaveLength(2)
     expect(pickers[0]).toHaveAccessibleDescription(/“alice” also goes to this coder/)
@@ -510,6 +526,7 @@ describe('two names onto one coder (#1039 i)', () => {
       ],
     })
     await reachMapStep()
+    chooseExistingCoder()
     const pickers = await screen.findAllByRole('combobox', { name: 'Which coder' })
     const note = (i: number) => document.getElementById(pickers[i].getAttribute('aria-describedby')!)!
     expect(note(0).childNodes).toHaveLength(1)
@@ -540,6 +557,7 @@ describe('#1099 — the Import button counts what the DECISIONS will send', () =
     setup()
     api.preview.mockResolvedValue(TWO)
     await reachMapStep()
+    chooseExistingCoder(0)  // Alice (#1193)
     expect(screen.getByRole('button', { name: /^Import 6 rows$/ })).toBeDisabled()  // Model B's kind
     fireEvent.click(screen.getAllByRole('radio', { name: 'Do not import these' })[1])
     const button = screen.getByRole('button', { name: /^Import 3 rows$/ })
@@ -568,6 +586,7 @@ describe('#1099 — the Import button counts what the DECISIONS will send', () =
       coders: [TWO.coders[0], { ...TWO.coders[1], local_user_id: 1, local_coder_type: 'human' }],
     })
     await reachMapStep()
+    chooseExistingCoder()
     expect(screen.getByRole('button', { name: /^Import up to 6 rows$/ })).toBeEnabled()
   })
 

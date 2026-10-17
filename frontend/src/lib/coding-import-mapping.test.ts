@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { Coder, CodingImportCoderCandidate, ProjectColumnInfo } from '@/lib/api'
 import {
-  CODER_NAME_MAX_LENGTH, coderOptionLabel, draftBlocker, initialDraft, mappingIntro,
+  CODER_NAME_MAX_LENGTH, MAPPING_INTRO, coderOptionLabel, draftBlocker, initialDraft,
   matchKeyOptions, namesSharingACoder, sharedCreateConflicts, takenNameSuffix,
   toDecision, type CoderDraft,
 } from './coding-import-mapping'
@@ -13,11 +13,30 @@ const candidate = (over: Partial<CodingImportCoderCandidate> = {}): CodingImport
 })
 
 describe('initialDraft', () => {
-  it('pre-selects a name match, and CREATE for an unknown name', () => {
+  it('🔴 #1193: a name match starts UNANSWERED with its coder one click away; CREATE for an unknown name', () => {
     expect(initialDraft(candidate()).action).toBe('create')
     expect(initialDraft(candidate({ local_user_id: 4 }))).toMatchObject({
-      action: 'match', targetUserId: 4,
+      action: null, targetUserId: 4,
     })
+    expect(draftBlocker('Researcher', initialDraft(candidate({ local_user_id: 4 }))))
+      .toBe('Choose whether “Researcher” is an existing coder, a new coder, or not imported.')
+    // Answered "An existing coder" with nothing else touched: the same-name coder.
+    const answered: CoderDraft = { ...initialDraft(candidate({ local_user_id: 4 })), action: 'match' }
+    expect(draftBlocker('Researcher', answered)).toBeNull()
+    expect(toDecision(answered)).toEqual({ action: 'match', target_user_id: 4 })
+  })
+
+  it('🔴 #1193: NO candidate shape starts at match — the intro says so unconditionally', () => {
+    const shapes = [
+      candidate(), candidate({ local_user_id: 4 }), candidate({ local_user_id: 4, local_archived: true }),
+      candidate({ local_user_id: 4, local_coder_type: 'ai' }), candidate({ rows_to_apply: 0, local_user_id: 4 }),
+    ]
+    expect(shapes.map(c => initialDraft(c).action)).not.toContain('match')
+    expect(MAPPING_INTRO).toMatch(/Nothing is matched by name on your behalf/)
+  })
+
+  it('an unanswered name never becomes a decision', () => {
+    expect(() => toDecision(initialDraft(candidate({ local_user_id: 4 })))).toThrow(/not been answered/)
   })
 
   it('starts a name with NOTHING to import at skip — no kind to ask, no empty coder', () => {
@@ -38,32 +57,8 @@ describe('initialDraft', () => {
   })
 })
 
-describe('mappingIntro (#1158)', () => {
-  it('keeps "nothing is matched" ONLY when nothing starts matched', () => {
-    expect(mappingIntro([candidate(), candidate({ name: 'B' })]))
-      .toMatch(/Nothing is matched by name on your behalf/)
-    // A same-name coder for a name with nothing to import starts at SKIP, so it is
-    // not a pre-selection either (#1064).
-    expect(mappingIntro([candidate({ local_user_id: 4, rows_to_apply: 0 })]))
-      .toMatch(/Nothing is matched by name on your behalf/)
-  })
-
-  it('says a same-name coder IS chosen when one is, and that Import confirms it', () => {
-    const one = mappingIntro([candidate({ local_user_id: 4 }), candidate({ name: 'B' })])
-    expect(one).not.toMatch(/Nothing is matched/)
-    expect(one).toMatch(/One name is the same as an existing coder’s, so that coder is chosen for it to start with/)
-    expect(one).toMatch(/pressing Import confirms it\.$/)
-  })
-
-  it('counts several', () => {
-    const two = mappingIntro([candidate({ local_user_id: 4 }), candidate({ name: 'B', local_user_id: 5 })])
-    expect(two).toMatch(/2 names are the same as existing coders’, so those coders are chosen/)
-    expect(two).toMatch(/confirms each choice\.$/)
-  })
-})
-
 describe('toDecision', () => {
-  const base = initialDraft(candidate({ local_user_id: 4 }))
+  const base: CoderDraft = { ...initialDraft(candidate({ local_user_id: 4 })), action: 'match' }
 
   it('carries `unarchive` only when it is asked for', () => {
     expect(toDecision(base)).toEqual({ action: 'match', target_user_id: 4 })

@@ -15,7 +15,8 @@ swapped the files must still say so.
 ⚠️ **Startup waits for this list** (Electron's `/health` probe is not answered
 until the lifespan finishes), so a repair must cost a settled install a few
 queries — never a scan of the data. #1069's is gated on column metadata for
-exactly that reason.
+exactly that reason; #1230's walks one index (`audit_entries.project_id`) and
+writes only where a read found something.
 """
 
 import logging
@@ -73,6 +74,28 @@ def repair_missing_value_numbers(session_factory) -> None:
         db.close()
 
 
+def repair_deleted_project_audit(session_factory) -> None:
+    """#1230 — remove the entries an older build left behind when it deleted a project.
+
+    Before #1230 a delete kept them, so the next project given the same id listed them in
+    its Excel export. `audit.repair_project_audit_rows` owns the rule (decided without a
+    clock); a settled install pays a few indexed queries. Never raises.
+    """
+    from .audit import repair_project_audit_rows
+
+    db = session_factory()
+    try:
+        removed = repair_project_audit_rows(db)
+        db.commit()
+        if removed:
+            logger.info("Audit repair (#1230): removed %d entries of deleted projects", removed)
+    except Exception:
+        db.rollback()
+        logger.exception("Audit repair (#1230) failed; skipping")
+    finally:
+        db.close()
+
+
 def run_data_repairs(session_factory) -> None:
     """Every repair, in order. Blocking (the media backfill opens files), so an
     async caller runs it in a worker thread."""
@@ -80,4 +103,5 @@ def run_data_repairs(session_factory) -> None:
 
     repair_reverse_recodes(session_factory)
     repair_missing_value_numbers(session_factory)
+    repair_deleted_project_audit(session_factory)
     run_media_duration_backfill(session_factory)

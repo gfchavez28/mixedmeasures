@@ -342,13 +342,23 @@ for (const code of ['EACCES', 'EPERM']) {
 }
 
 test('any other failure says what the OS said, and never claims a cause it was not given', () => {
-  const err = Object.assign(new Error('spawn UNKNOWN'), { code: 'UNKNOWN' })
+  const err = Object.assign(new Error('spawn ENOTDIR'), { code: 'ENOTDIR' })
   const text = backendSpawnFailureMessage(err, WIN_EXE)
-  assert.match(text, /could not start its engine \(“mm-backend\.exe”\): UNKNOWN\./)
-  assert.doesNotMatch(text, /quarantin|security software/)
+  assert.match(text, /could not start its engine \(“mm-backend\.exe”\): ENOTDIR\. Reinstalling/)
+  assert.doesNotMatch(text, /quarantin|security|antivirus/)
   // With no code at all, the message stands in; with no path, the file is named generically.
   assert.match(backendSpawnFailureMessage(new Error('boom'), null), /\(“mm-backend”\): boom\./)
   assert.doesNotMatch(backendSpawnFailureMessage(new Error('boom'), null), /should be at/)
+})
+
+test('UNKNOWN — where Windows puts an antivirus or policy block — names the check as a condition (#1236, D19)', () => {
+  // libuv maps every Windows error it does not list to UNKNOWN; reinstalling alone would be
+  // blocked again by the same software. The cause is NOT known, so it is never asserted.
+  const err = Object.assign(new Error('spawn UNKNOWN'), { code: 'UNKNOWN' })
+  const text = backendSpawnFailureMessage(err, WIN_EXE)
+  assert.match(text, /could not start its engine \(“mm-backend\.exe”\): UNKNOWN\. If your antivirus or security settings list “mm-backend\.exe”, allow it; otherwise reinstalling Mixed Measures may fix this\./)
+  assert.doesNotMatch(text, /quarantin|may be blocking|security software/)
+  assert.ok(text.endsWith(`The engine should be at:\n${WIN_EXE}`), 'the path is the last line, on its own')
 })
 
 test('the crash dialog shows that sentence verbatim under "failed to start"', () => {
@@ -374,4 +384,52 @@ test('main.js handles a failed START: one dialog at once, nothing left to kill',
   assert.match(handler, /backendExited = true/, 'waitForHealth would wait out its full 60 s')
   assert.match(handler, /if \(backend === child\) backend = null/, "stopBackend would run `taskkill /pid undefined`")
   assert.match(handler, /reportCrash\(\{ error: new Error\(backendSpawnFailureMessage\(err, exe\)\) \}\)/)
+})
+
+// ── #1236 — a start failure Node THROWS rather than reports ───────────────────
+
+const { spawnEngine } = require('./backend-process')
+
+test('Node itself THROWS an engine start it does not report — the mechanism, measured', {
+  skip: process.platform === 'win32' && 'ENOTDIR under a regular file is a POSIX shape',
+}, () => {
+  // A path THROUGH a regular file: Node throws ENOTDIR synchronously (it emits 'error'
+  // for five codes only). The real `spawn`, so this fails if Node ever changes the rule.
+  const throughAFile = path.join(__filename, 'mm-backend')
+  const { spawn } = require('node:child_process')
+  assert.throws(() => spawn(throughAFile, [], { stdio: 'ignore' }), { code: 'ENOTDIR' })
+  // …and spawnEngine turns that throw into the guidance, naming the engine and its path.
+  assert.throws(
+    () => spawnEngine(spawn, throughAFile, { stdio: 'ignore' }),
+    (err) => /could not start its engine \(“mm-backend”\): ENOTDIR\./.test(err.message)
+      && err.message.endsWith(`The engine should be at:\n${throughAFile}`),
+  )
+})
+
+test('a THROWN EPERM — Windows\' ERROR_ACCESS_DENIED — reaches the not-allowed sentence', () => {
+  const throws = () => { throw Object.assign(new Error('spawn EPERM'), { code: 'EPERM', errno: -4048 }) }
+  assert.throws(
+    () => spawnEngine(throws, WIN_EXE, {}),
+    (err) => /was not allowed to start its engine \(“mm-backend\.exe”\)/.test(err.message),
+  )
+})
+
+test('a start Node REPORTS is not intercepted: the child comes back, listeners still attach', () => {
+  const child = { pid: undefined }
+  const calls = []
+  const spawn = (...args) => { calls.push(args); return child }
+  assert.strictEqual(spawnEngine(spawn, WIN_EXE, { env: { A: '1' } }), child)
+  assert.deepStrictEqual(calls, [[WIN_EXE, [], { env: { A: '1' } }]])
+})
+
+test('main.js starts the engine ONLY through spawnEngine, and its throw reaches reportCrash', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8').replace(/(^|[^:])\/\/.*$/gm, '$1')
+  const body = main.slice(main.indexOf('function startBackend('), main.indexOf('function reportCrash('))
+  assert.match(body, /const child = spawnEngine\(spawn, exe, \{/)
+  assert.doesNotMatch(body, /(^|[^A-Za-z])spawn\(exe/m, 'a bare spawn(exe…) bypasses #1236')
+  // The throw leaves startBackend before `backend` is assigned, so nothing is left to kill,
+  // and startup()'s catch routes it to the one reporter.
+  const startup = main.slice(main.indexOf('async function startup()'))
+  assert.match(startup, /backend = startBackend\(/)
+  assert.match(startup, /\} catch \(err\) \{[\s\S]*?reportCrash\(\{ error: err \}\)/)
 })

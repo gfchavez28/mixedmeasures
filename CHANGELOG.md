@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.5.7] - 2026-10-11
+## [1.5.7] - 2026-10-17
 
 ### Changed
 
@@ -20,59 +20,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that imported before can now be refused: the same rule also refuses a quotation
   mark inside a quoted value that is not doubled (`""`), and text right after a
   closing quotation mark, both of which used to be read with the quotation marks
-  silently moved or dropped. A correctly quoted file reads exactly as before. A
-  file that separates its values with
-  semicolons or tabs is now told so, rather than told about its quotation marks.
-  (#1127)
+  silently moved or dropped. The rule changes nothing in a file whose quotation
+  marks are correct. When a refused file seems to separate its values with
+  semicolons or tabs, the message says that instead of pointing at its quotation
+  marks. (#1127)
+- **The document import's step bar uses the app's document purple in both
+  themes.** Its current step was a stronger purple with white text; in dark mode
+  it is now a lighter purple with a dark number, like the other imports' bars.
+  (#1184)
 
 ### Fixed
 
+- **Deleting a large project takes seconds instead of minutes, and the
+  confirmation says what is being deleted.** A project with hundreds of coded
+  interviews or a survey of over a hundred thousand records took from one to
+  eleven minutes to delete and could use several gigabytes of memory; it now takes
+  10–30 seconds. The confirmation names the project and what it holds, offers to
+  archive it instead, and while it works says what it is doing and how long it has
+  taken; it says "Deleted …" when done. If Mixed Measures does not answer it says
+  so, rather than "Something went wrong" while the delete went on to finish.
+  Replacing a project from an imported file deletes the old copy the same way.
+  (#1035)
+- **While a project file is being imported, pressing Escape no longer closes the
+  dialog with the import still running unseen.** The dialog says what it is doing
+  and how long it has taken, and says why when a file is refused rather than
+  "Project import failed". (#1035)
+- **Linking a dataset's records to participants by an ID variable no longer
+  freezes the app, and asks first.** On a survey of 122,382 records it held every
+  other screen for over a minute; it now takes a few seconds while other work
+  carries on. Before it starts, it says how many participants it will create, how
+  many records it will match to people already in the project, which records will
+  stay unlinked and why; the result stays on the page until dismissed. It no
+  longer says the link failed while the link goes on to finish, and pressing it
+  twice no longer starts it twice. After any link or unlink, the record picker
+  on the Participants page stops offering a record that was just linked. (#1054)
+- **Choosing a dataset record for a participant works on large surveys.** On the
+  Participants page, *Link to dataset* used to load every record of the dataset at
+  once — on a survey of 75,699 records it froze the app for over a minute and never
+  finished. It now shows 50 records at a time, best matches first, with *Show 50
+  more* for the next 50, and a search still reaches the record ID and every answer
+  the record holds. When
+  the match is in an answer the row does not otherwise show, the row says which
+  question it was and quotes the words. If a record can't be linked — someone else
+  took it a moment ago — the picker says why instead of "Something went wrong",
+  and shows the record as taken. (#1053)
+- **Importing a colleague's codings no longer assumes that a coder with the same
+  name is the same person.** Every copy of Mixed Measures starts with a coder
+  called "Researcher", so a colleague's file was matched to your own coder unless
+  you noticed and changed it — and importing then replaced that coder's choices in
+  code sets and their ratings. A name that matches an existing coder now starts
+  unanswered: the page says who that coder is and how many codings they hold, and
+  Import waits until you choose. Choosing them is one click. (#1193)
+- **On the Participants page, a search that matches no one no longer offers a
+  "Select the 0 participants shown" box** that did nothing; it is switched off
+  until a search shows someone. (#1165)
+- **A role is filled in from a linked record only when the record holds one.**
+  Linking a record to a participant with no role copies the record's role answer
+  — and it copied "N/A", a code the variable declares missing, spaces around the
+  answer, or an answer longer than a role can hold. Those are now skipped or
+  trimmed, and with two role variables the first one is used every time. (#1054)
 - **Correlations, scatter plots and Comparisons always use a variable group's
   scale score.** A variable group can hold more than one group aggregate — for
   example one with some answers excluded, made when a chart's excluded answers
   carried over to the Group Aggregate view. These pages could mix that
   aggregate's per-record values into the scale score, so a correlation or a group
   comparison could rest on the wrong numbers. The same mix-up could add a second
-  score column for one group to the Data view and the exported R data, keep the
-  "out of date" notice on screen after *Recompute scale scores*, set the scale
-  score badge on the Variable Groups page from the wrong aggregate, and stop a
+  score column for one group to the Data view and the exported R data, set the
+  scale score badge on the Variable Groups page from the wrong aggregate, and stop a
   group's rename from renaming its scale score. All of them now use the one scale
   score. (#1177)
 - **The variable group picker on the Quantitative Analysis page names the group's
   scale score instead of listing every group aggregate as a choice.** The list of
   options changed nothing on the chart, and with only an aggregate that excluded
   some answers it hid the *Create scale score* button. (#1179)
-- **Saved charts, tests and scale scores are now marked out of date whenever
-  the data behind them changes.** The app shows a saved result without
-  recalculating it until something marks it out of date, and several actions
-  changed the data without doing so: recalculating a computed variable;
-  deleting a variable or a dataset (for the variable groups that kept other
-  members); re-deriving or re-keying a recode; merging a project file that
-  brings new responses into a dataset both projects share; the repair of
-  reverse-scored recodes that runs when the app starts; changing a demographic
-  variable's type, subtype or short name, which decides how another dataset's
-  records are grouped; pairing or unpairing variables across datasets (for the
-  variable group's reliability test); moving a variable to another group in the
-  crosswalk (for the group it left); and renaming a dataset (for charts grouped
-  by dataset). Each now marks what it changed. (#1168, #1172)
-- **Deleting the variable a saved chart is split by now removes that chart**,
-  as deleting the variable it measures already did. The chart used to become a
-  chart of the whole sample that kept showing the old per-group numbers. (#1168)
+- **Saved charts, tests and scale scores are now marked out of date whenever the
+  data behind them changes.** The app shows a saved result without recalculating
+  it until something marks it out of date, and several actions changed the data
+  without doing so: recalculating a computed variable; deleting a variable or a
+  dataset (for the variable groups that kept other members); re-deriving or
+  re-keying a recode; merging a project file that brings new responses into a
+  dataset both projects share; the repair of reverse-scored recodes that runs when
+  the app starts; changing a demographic variable's type, subtype or short name,
+  which decides how another dataset's records are grouped; pairing or unpairing
+  variables across datasets (for the variable group's reliability test); moving a
+  variable to another group on the Variable Groups page (for the group it left);
+  and renaming a dataset (for charts grouped by dataset). Each now marks what it
+  changed. (#1168, #1172)
+- **Deleting the variable a saved statistic is split by now removes that
+  statistic and its tests**, as deleting the variable it measures already did. It
+  used to become a statistic of the whole sample that kept the old per-group
+  numbers. (#1168)
 - **Deleting a variable group's last remaining variable now removes the group's
   saved statistics and tests too**, instead of leaving them behind where
-  computing one failed. A deleted variable's own pairing across datasets is now
-  removed with it. (#1168, #1173)
-- **Editing a variable group's members no longer marks the members' own
-  statistics out of date.** Their numbers cannot change, so a test on one of
-  them no longer shows a false marker. (#1149)
+  computing one failed. (#1168)
+- **Adding or removing a variable group's members, or moving a variable to another
+  group, no longer marks the members' own statistics out of date.** Their numbers
+  cannot change, so a test on one of them no longer shows a false marker. (#1149)
 - **Changing the type of many variables at once is no longer reported as
   failing while it succeeds, and needs far less memory.** Changing 40
-  variables of 100,000 records each took about 37 seconds — past the point
+  variables of 100,000 records each took about 40 seconds — past the point
   where the app stopped waiting and reported a failure, while the change went on
   to finish — and held up to 1.3 GB of memory; the app now waits for it to
   finish, and it stays near 140 MB however many variables are selected. The
   Variables view now shows the wait — "Changing the type of 12 variables — 8s
-  elapsed." — and says when a change is refused. A response edited while the
+  elapsed." — and says why a change is refused. A response edited while the
   change runs keeps the number its new type gives it. (#1145)
 - **Delete confirmations now say what else the delete removes.** Deleting a
   variable or a dataset names the saved statistics, and counts the saved tests,
@@ -86,39 +137,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   show the stored scores without recalculating them, and used to give no sign
   that those predated a change to the data. (#1176)
 - **The "out of date" markers can now be read by screen readers and seen
-  against light backgrounds.** They carried only a tooltip or the word "stale",
-  used a pale amber that failed contrast on light backgrounds, and pulsed even
-  with reduced motion turned on. They now announce "Out of date — recompute",
-  use a darker amber, and hold still when motion is reduced. Recalculating a
-  computed variable now shows the markers it raises straight away. (#1174)
+  against light backgrounds.** They carried only hover words or the word
+  "stale", used a pale amber that failed contrast on light backgrounds, and
+  pulsed even with reduced motion turned on. They now say what is out of date
+  and what fixes it — "Out of date — recompute" on a computed variable, "Out of
+  date — compute it again" on a saved test — to screen readers and on hover, use
+  a darker amber in the Data view and in Analysis, and hold still when motion is
+  reduced. (#1174, #1261)
 - **Transcripts saved by Excel as "CSV UTF-8" import alongside other
   transcripts.** Excel starts such a file with an invisible marker, which the
   transcript import kept as part of the first column's name, so a batch mixing
   an Excel-saved transcript with another stopped at *Missing required columns:
   Speaker ("Speaker")* — two names that looked the same. (#1181)
 - **A comma inside a transcript's text that isn't in quotation marks is now
-  reported.** It split the row there, so the turn imported cut short at the
-  comma, without a word. The preview now names each such line before you
-  import, and the import repeats it in its warnings. A row with fewer values
-  than headings, or a line of only spaces, no longer stops the preview with an
-  error, and when two columns share a heading the first one is read. (#1181)
-- **The transcript import names the file it could not read, and stops for
-  it.** With several transcripts, a file that could not be read was noted beside
-  it, the import went on, and it was sent anyway; the message never said which
-  file. It now names the file and its line, stays on the column step with a
-  *Remove* button for it, and the dataset import names each unreadable file in
-  the same way. The full message is shown in the results list instead of being
+  reported.** It split the row there, so the turn imported cut short at the comma,
+  without a word. The preview now counts such rows and names the first ten by line
+  before you import, and the import repeats them in its warnings. A row with fewer
+  values than headings, or a line of only spaces, no longer stops the preview with
+  an error, and when two columns share a heading the first one is read. (#1181)
+- **With several transcripts, the import names the file it could not read, and
+  stops for it.** A file that could not be read was noted beside it, the import
+  went on, and it was sent anyway; the message never said which file. It now names
+  the file — and the line, where the problem is on one — stays on the column step
+  with a *Remove* button for it, and the dataset import names each unreadable file
+  in the same way. The full message is shown in the results list instead of being
   cut short. (#1182)
 - **The import buttons keep keyboard focus while they work.** *Next*,
   *Continue* and *Import* on the transcript import, *Import* and the column
   chooser's *Continue* on the dataset import, and *Select File* and *Append* on
   the append page used to become unavailable while working, so a message that
   the file could not be read arrived with focus lost from the page. (#1182)
-- **A project file that is going to be refused no longer leaves a safety copy
-  behind.** Merging or overwriting a project saves a full copy of it first;
-  five of the reasons a file is refused were checked only after that copy was
-  saved, so each refused attempt left one more copy in the backup folder. They
-  are all checked first now. (#1150)
+- **Four kinds of refused project file no longer leave a safety copy
+  behind.** Merging or overwriting a project saves a full copy of it first; four
+  of the reasons a file is refused were checked only after that copy was saved,
+  so each refused attempt left one more copy in the backup folder. They are
+  checked first now. (#1150)
 - **A project file with a variable group whose variables in different datasets
   were never paired is refused at import, as intended.** The check read a field
   the export does not write, so it never ran, and the file imported with a
@@ -127,14 +180,259 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   free.** With a coder called "Alice" already there, naming one new coder
   "Alice" and another "Alice (2)" made "Alice (2)" and "Alice (2) (2)"; the
   first now becomes "Alice (3)", and the page says so before you import. Two
-  model coders whose settings were typed in a different order are no longer
-  called different configurations. (#1150)
+  names in the file that are to become one new model coder are no longer refused
+  as different configurations when the same settings were typed in a different
+  order. (#1150)
 - **A web address holding an impossibly large id gets a clear refusal instead
   of a server error.** (#1128)
 - **The Mac app includes the licence notices of Electron and Chromium, the
   software it runs on.** Their licences ask for the notices to travel with every
   copy; the Windows and Linux installers already carried them, and the Mac app
   now has them too, inside the app. (#1122)
+- **When the app cannot find its encryption key, it says how to start fresh
+  without putting anything at risk, and names the folder.** It used to suggest
+  moving only the database file aside. That leaves the old projects' documents,
+  recordings and backups in place, where a fresh start reuses their places: a
+  new project's recording could replace an old one, and deleting the new project
+  could remove the old one's files. The message now says to quit, rename the
+  whole data folder and keep it. A key file that opens but no longer holds a
+  valid key now gets the same advice instead of a one-line diagnosis (one the
+  system keyring cannot unlock at all still gets the earlier message), and the
+  message for an unavailable system
+  keyring no longer suggests a recovery key, which cannot be stored without the
+  keyring. (#1185, #1120)
+- **When the database will not open, the message now says why and what to do.**
+  It used to end at the database engine's own words ("file is not a database").
+  It now tells apart a database another program has open, one the app is not
+  allowed to read, and one that is damaged or was copied from another computer;
+  says that nothing has been changed; and, for a damaged or copied one, says to
+  keep the
+  file and the backups and where to ask for help — privately, and never with
+  your recovery key. (#953)
+- **A project file from an earlier version no longer warns that some data may
+  not import correctly.** Every file made with 1.5.3 or earlier — the website's
+  example project among them — opened with that caution, though an older file
+  imports completely. The confirmation now says which version made the file,
+  as a plain fact. (#1117)
+- **The recovery key no longer says it is how you move to a new computer.** The
+  saved recovery-key file and the note under *Save recovery key…* in Settings
+  both said so; a backup opens only on the computer that made it, and moving
+  projects is what *Export Project (.mmproject)* is for. Both now say that.
+  (#1120)
+- **The Software update setting says what an update check sends.** It said a
+  check sends "this app's version and platform … nothing else". The update
+  library sends no version, and adds a random identifier it keeps for this
+  installation; no project data is sent. The README and SECURITY.md now say the
+  same. (#1288)
+- **The step bar at the top of every import fits a small window and says which
+  steps are done.** On a narrow window the bar of a multi-file transcript import,
+  or of a multi-file dataset import that asks you to choose columns, ran past the
+  edge of the page; now every import's bar shows the current step's name with a
+  circle for each of the others, and shows every name when there is room. A screen
+  reader hears each finished step as "completed". The bar no longer shows every
+  step as not started on a screen it does not list (a single-transcript import
+  that ends with warnings, a single document while it imports), and *Start empty*
+  in the observation import no longer shows *Confirm clips* — a step it skips — as
+  done. (#1184)
+- **Choosing the wrong file as a recording names the file.** All four places a
+  recording is added — the observation import, the transcript import's recording,
+  and *Attach Recording* on the conversations list and in the coding workbench —
+  said only which formats are accepted, and checked a file's size before its type.
+  They now say *"“notes.pdf” is not a recording file"* and what a recording can
+  be (or that it is over the limit, with its size), and the limit reads "4 GB"
+  wherever it is stated.
+  Dropping several recordings where one goes takes the first and says which were
+  not added. (#1161)
+- **The observation import keeps your place while it works and says when a
+  preview is refused.** *Preview clips*, *Create observation* and *Cut clips* no
+  longer drop keyboard focus to the top of the page while they run, and a refused
+  preview or cut is announced. (#1195)
+- **The analysis sidebar is usable in a small window.** On both analysis pages
+  the sidebar was about 136 pixels wide at 640×360; on the Quantitative page a
+  variable group's name read a word per line and *Create scale score* wrapped to
+  three lines. It now
+  keeps at least 200 pixels, holds its width when the window is resized, and the
+  group's checkbox is named after the group for screen readers. (#1180, #1169)
+- **Automatic backups are taken on short sessions too.** The first automatic
+  backup came only after Mixed Measures had stayed open for four hours, and on
+  Windows closing the app takes no backup — so someone who worked in one- or
+  two-hour sittings on Windows could have no automatic backups at all. Now a
+  backup is taken a couple of minutes after the app opens whenever the last
+  automatic one is more than four hours old, and every four hours while it stays
+  open; opening and closing the app often still takes at most one automatic
+  backup every four hours, so the automatic ones are not used up. *Backup now*
+  counts as the latest automatic backup, so the next one comes four hours after
+  it. The "next
+  automatic backup" time in Settings and the top bar is now when it will actually
+  be taken; it could show a time that had already passed. (#1186)
+- **A restore that stops before changing anything now says so, and why.** If the
+  backup could no longer be read when the restore began — changed or damaged since
+  its preview — it said only "Invalid backup: not a valid ZIP file"; a damaged part
+  inside a backup, a full disk while checking it, or another program writing to the
+  database was reported as a technical error, mostly without saying that nothing
+  had changed. Each now says what stopped the restore, that nothing was changed,
+  and where the copy of your data it saved first is, when it got that far. The
+  preview of a backup with a damaged part inside also says so, instead of
+  "Internal Server Error". (#1140)
+- **A restore whose database swap fails no longer loses a recent change made by
+  another program.** If another program — a second copy of Mixed Measures or a
+  database tool — had the database open on macOS or Linux, the restore deleted the
+  database's working files before replacing it, so if the replacement then failed,
+  a change that program had just saved could be lost. The files are now set aside
+  and put back, and the restore says that nothing was changed. (#1140)
+- **"Restore failed partway" names the backup to recover from the way Backup
+  history shows it**, instead of by a file name whose time was in UTC and so
+  differed from every row in the list. (#1140)
+- **Backups no longer carry a recording that was still being uploaded.** A
+  half-written recording file was included in every backup, including automatic
+  ones that leave video out, and a restore put it back as a stray file. (#1160)
+- **The restore confirmation fits the window.** On a small window its heading and
+  the sentence saying which backup ran off the top of the screen and its buttons
+  off the bottom, with nothing to scroll; with many projects it did so on an
+  ordinary window too. It now scrolls inside itself, keeps its buttons in view
+  while the restore runs, and after a failure moves to *Close*, so pressing Enter
+  again no longer starts a second restore. (#1139)
+- **After a restore that stopped before changing anything, *Restore* stays
+  available to try again; after one that failed partway it is withdrawn,** and the
+  message names the "Before a restore" backup to return to by the time Backup
+  history shows. "Restored" now says to reload, since nothing reloads until you
+  press the button. (#1140, #1139)
+- **The restore preview counts recordings, not files.** It showed "Documents 69"
+  above a list of projects holding 4 documents, and counted canvas images as
+  recordings. The file count is gone, *Recordings* counts recordings, and one line
+  says what the backup holds in all. The time the backup was taken is written as
+  Backup history writes it, and each project is described in full words with
+  thousands separators. (#1160, #1164)
+- **The withdrawal and delete confirmations on the Participants page fit a small
+  window**, and *Back up and remove* stays in view while the withdrawal runs. They
+  name the person — "Remove Amara Okafor’s
+  data? (E-01)" — and screen readers now hear the delete confirmation's list of
+  the data that stays in the project. (#1139)
+- **The withdrawal and delete confirmations check what would be removed each time
+  they open**, say "Checking what would be removed…" until they know, and only
+  then let you confirm. Opened just after a document was made about the person,
+  they could leave it out — the delete confirmation then said the delete removed
+  "the record only". The participant panel re-reads when it opens, a rename updates
+  it, and setting a document's subject or importing conversations refreshes it.
+  (#1152)
+- **The next automatic backup shows its date when it is not today**, in Settings
+  and in the top bar; with no backups yet, Settings says when the first one is due.
+  (#1186)
+- **Checking a backup from Backup history shows the wait on that row**, not on
+  *Restore from a file*, which nobody had pressed. (#1162)
+- ***Restore from a file* refuses a file that is not a `.mmbackup` before
+  uploading it,** and says why under the button; a project file is pointed to
+  *Import Project*. It used to upload the whole file first and then answer
+  "Invalid backup: not a valid ZIP file" or "missing database.db". (#1163)
+- **Backup & Data says what it means.** Both *On quit* backups claimed to be from
+  when Mixed Measures "last" closed; the help called *Backup now* "an extra fresh
+  snapshot" though it takes a place among the automatic backups (and now moves the
+  next one); the upload limit read "500.0 MB". The help no longer runs off a short
+  window. (#1164)
+- **Pressing Space in the data grid's participant search types a space.** After
+  an arrow key — or with the pointer resting on a name — Space linked the
+  highlighted participant to the record instead — replacing any link it had —
+  with no message. Enter still picks the highlighted name. (#1197)
+- **Duplicating an archived project asks first**, as duplicating an active one
+  does — a copy has its own identity and cannot be merged back. The project cards
+  show large counts with thousands separators. (#1198)
+- **A computer clock set back no longer deletes the backup just taken.** After a
+  clock was reset or moved back, the backups written while it was ahead looked
+  newer than every new one, so each new automatic backup — and *Backup now*, and
+  the backup taken before installing an update — was deleted the moment it was
+  written while the app said it was saved, and *Download Backup* failed. The
+  backup just taken is now always kept, and one dated in the future is the first
+  to go. The same holds for the copy of the database taken before an upgrade and
+  for canvas snapshots, where restoring a snapshot could lose its own undo point.
+  A backup dated more than an hour later than the computer's clock no longer reads
+  as "Last backup: just now"; when every backup is dated that way, Settings and
+  the backup icon say so. (#1199)
+- **After importing, replacing, creating, duplicating, deleting or merging a
+  project, its pages show the project as it now is.** A page opened soon after
+  could show the replaced copy — or, because a new project can reuse an old one's
+  number, a deleted project's name or text — until it reloaded. (#1206)
+- **Import Project and Import codebook refuse the wrong kind of file straight
+  away, and say why.** A backup, a codebook, a whole project or an over-size file
+  is named for what it is, with where it belongs, before anything is uploaded. A
+  project file in a newer format than this version reads now says to update,
+  instead of "Invalid project file" (Merge said it "could not be read"), and a
+  codebook import given the wrong file says so instead of an unexplained error.
+  Import Project and Export codebook keep keyboard focus while they work, and
+  Import codebook shows that it is busy. (#1203)
+- **With no backups yet, the backup icon says when the first automatic one is
+  due.** (#1210)
+- **Importing a codebook says how many code sets it created.** (#1222)
+- **A setting of the wrong kind is explained when Mixed Measures starts.** A value
+  such as `0.5` for the automatic-backup interval, set on a server or in the
+  computer's environment, stopped the app with a technical error; it now says which
+  setting, what it holds and what it must be. (#1200)
+- **A project import that fails no longer damages the recordings and documents of
+  the project you kept, and a merge keeps your recordings.** If replacing your
+  copy of a project, or merging a colleague's copy into it, failed partway — a
+  damaged file, a full disk — a recording or document of the project you kept
+  could be left empty or cut short while the project looked intact. A merge also
+  replaced your recordings with your colleague's
+  copies even when it succeeded. Now nothing on disk changes until the import has
+  succeeded, and a merge adds only the recordings and documents of sources that
+  are new to your project. A damaged project file or a full disk is refused in
+  words that say nothing was changed. A new project imported after a deletion no
+  longer takes over a recording the deleted project left on disk. (#1225, #1241)
+- **A deleted project's history no longer appears in another project's Excel
+  export.** The Audit Trail sheet could list the entries of a project deleted
+  earlier — participants' identifiers included — when a new, imported or duplicated
+  project was given the same internal number. A deleted project's entries now go
+  with it, and Mixed Measures removes those an earlier version left behind when it
+  starts. Replacing your copy of a project from a file keeps its history. (#1230)
+- **When security software blocks Mixed Measures' engine from starting, the
+  message says what to check** instead of "spawn EPERM". (#1236)
+- **After you delete a conversation, document, observation or dataset, the next
+  one you create no longer shows the deleted one's transcript, text, clips or
+  records.** A new item can be given the deleted one's internal number, and its
+  page showed what Mixed Measures still remembered of the old one — a quote made
+  there could land on a passage you never saw. The count in the top bar now also
+  updates after a conversation or a dataset is deleted. (#1226)
+- **When a merge is refused, the Merge page says why,** in Mixed Measures' own
+  words, instead of "Merge failed". If Mixed Measures did not answer, the page says
+  it is not known whether the merge finished and what to check, instead of
+  offering to merge the same file again. (#1232)
+- **Reordering a variable group's items marks its saved split-half test out of
+  date, and the R export splits the items in the group's order.** The order
+  decides which items fall in each half, so a reorder changed the result while the
+  saved test still read as current. The R script split the items in the order the
+  variables were created, so after a reorder — or whenever the two orders differ —
+  it reproduced a different coefficient from the one the app showed. (#1228, #1244)
+- **The R data export and the record × variable matrix say when a scale score is
+  out of date.** A score whose answers changed after it was computed was exported
+  without a word, beside the item columns it no longer agrees with. The R script's
+  notes now name such columns, and in the matrix file an out-of-date column's
+  heading ends "(out of date)". (#1229)
+- **Importing a project file as a new copy no longer shows "Working…" on
+  *Overwrite my copy*.** The button you pressed now shows that it is busy. (#1258)
+- **Removing a transcript that Conversation Import refused also removes its
+  message.** The message stayed on screen after the file had gone, still asking
+  you to remove it, and could follow you onto the next step. Keyboard focus now
+  moves to the next file's *Remove*, or to *Continue* (*Next* on the first step),
+  instead of being lost. (#1259)
+- **The Variable Groups page shows a variable group's items in the order you
+  set.** It listed them in the order they were added to the group, so moving an
+  item seemed to do nothing, and a second move undid the first. That order decides
+  how a split-half test divides the items, and the R script follows it, so the
+  order the results use is now the one on screen. (#1260)
+- **For screen-reader users:** a saved test's *Compute* and *Delete* buttons say
+  which test they act on (#1281); the *Add Statistical Test* dialog's group and
+  metric pickers have names (#1282); and on the Variable Groups page the rows
+  count from 1, with each row's reorder control naming its variable and saying
+  "Move" rather than "Drag" (#1283).
+
+### Security
+
+- **Updated the library that reads a recording's length** (tinytag 2.2.1 → 2.3.2).
+  The old version could get stuck forever on a deliberately malformed M4A file
+  (CVE-2026-104266) — when attaching it as a recording, or when Mixed Measures
+  starts and fills in recording lengths it does not yet know. The new version also
+  reads an MP3's length more accurately: the old one could read it slightly long,
+  by about five seconds on a 47-minute recording. Lengths already stored are not
+  changed. (#1257)
 
 ## [1.5.6] - 2026-10-09
 

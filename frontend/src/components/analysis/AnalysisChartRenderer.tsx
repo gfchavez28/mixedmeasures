@@ -235,8 +235,11 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
    * ⚠️ **The disclosure this was built for is not missing; it is elsewhere, on the
    * surfaces that read stored scores and never recompute:** the Data view's
    * domain-score column and the crosswalk bracket (both render `stale`), the Excel
-   * export (a Stale column plus an amber fill), the R export (names any score
-   * column it emits with nothing behind it), the import toast and the audit entry —
+   * export (a Stale column plus an amber fill), the R export (a note naming each
+   * score column that is out of date, #1229, and each it emits with nothing behind
+   * it, #958), the record × variable matrix CSV (an out-of-date column's heading
+   * says so, #1229), the Relationships & Comparisons results (they name the groups
+   * whose scores are out of date, #1176), the import toast and the audit entry —
    * and, since this removal, the variable-group correlation matrix, which was
    * reporting `insufficient_n` for scores that had simply never been computed.
    */

@@ -33,14 +33,14 @@ Please include, as far as you can:
 
 ## Supported versions
 
-Until the first stable release, only the latest `main` is supported. After v1.0,
-security fixes target the most recent released minor version.
+Security fixes ship in the next release of the current `1.x` line; the desktop app
+updates itself unless that is switched off.
 
 | Version | Supported |
 |---------|-----------|
-| `main` (pre-release) | ✅ |
-| Latest released `1.x` (after v1.0) | ✅ |
-| Older releases | ❌ — please upgrade |
+| Latest `1.x` release | ✅ |
+| `main` (development) | ✅ — fixes land here first |
+| Older releases | ❌ — please update |
 
 ## Threat model & security posture
 
@@ -49,8 +49,11 @@ this document.
 
 **The design:** Mixed Measures runs entirely on the user's own machine. It sends no
 telemetry or analytics and loads no external content. The desktop app's one outbound
-connection is its update check against github.com, which carries only the app's
-version and platform and can be switched off in **Settings → Software update**. The
+connection is to github.com, to check for and download updates. Those requests carry
+no project data: the check asks for the newest release's update file for your
+platform, and the update library (electron-updater) adds a random identifier it
+creates once per installation, used for staged roll-outs. The check can be switched
+off in **Settings → Software update**. The
 backend serves only to the local frontend, with a content-security
 policy locked to same-origin and standard security headers
 (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
@@ -59,14 +62,16 @@ policy locked to same-origin and standard security headers
 **Sessions** are local-first: the desktop app auto-provisions a single local
 researcher (no login screen — your operating-system account is the boundary), with
 server-side sessions in HttpOnly cookies, CSRF tokens on all state-changing
-requests, loopback-only Host validation, and an optional inactivity timeout.
+requests, and loopback-only Host validation.
 Project access is owner-scoped and enforced on every project endpoint.
 
 **The desktop app's own program** (since 1.5.6): the installed app cannot be run as
-a plain script engine, have code injected through an environment variable, or have a
-debugger attached, and on macOS and Windows it refuses to start if the code of its
-desktop shell has been altered. That check does not cover the analysis engine and
-interface installed beside the shell.
+a plain script engine, have code injected through an environment variable, or have
+Node's debugger attached to its main process, and on macOS and Windows it refuses to
+start if the code of its desktop shell has been altered. That check does not cover
+the analysis engine and interface installed beside the shell. Someone already running
+as you can still start the app with Chromium's remote-debugging switch and inspect its
+window — the same-user limit below.
 
 **At-rest encryption (v1.0) and its limits:**
 
@@ -78,6 +83,8 @@ interface installed beside the shell.
   unavailable, the app tells you and runs unencrypted rather than storing a key
   insecurely. Development builds run from source use a plaintext database for
   inspectability.
+- **Only the database is encrypted.** The documents and recordings you import are
+  stored beside it as ordinary files.
 - **It does not defend against your own OS user.** At-rest encryption protects
   against *another* OS account or a copied file — not an attacker already running as
   you. Full-disk encryption (FileVault / BitLocker) is the honest answer there.
@@ -100,7 +107,7 @@ interface installed beside the shell.
 - **A running app's local port is reachable by other accounts, and guarded by a
   per-launch secret.** While the app is open, its backend listens on a local
   (loopback) port — and loopback is shared by every OS account on the machine, not
-  just yours. A running app serves decrypted data, so since v1.0.1 the desktop app
+  just yours. A running app serves decrypted data, so since v1.0.0 the desktop app
   gives its backend a new random secret at each launch, and the backend refuses any
   data request that does not carry it: another account connecting to that port
   cannot read or change project data. A backend run from source for development has

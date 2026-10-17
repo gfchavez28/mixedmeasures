@@ -201,6 +201,10 @@ export interface MatrixColumnInfo {
   metric_id: number
   label: string
   metric_type: string
+  /** #1229 — the stored scores predate a change to their inputs. No client screen
+   * reads the JSON matrix today (both callers download the CSV, whose heading
+   * carries the same fact); declared so the mirror matches the wire. */
+  stale: boolean
 }
 
 export interface MatrixRowItem {

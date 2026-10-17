@@ -146,12 +146,26 @@ export const documentsApi = {
     ).then(res => res.data)
   },
 
-  /** ⚠️ `participant_id: null` is a MEANINGFUL value — it unlinks. The backend
+  /** A rename or a description. The subject is NOT sent here — see `setSubject`. */
+  update: (projectId: number, documentId: number, data: { name?: string; description?: string }) =>
+    api.patch<DocumentListItem>(`/projects/${projectId}/documents/${documentId}`, data).then(res => res.data),
+
+  /** Row 46 — who the document is about; `null` unlinks.
+   *
+   *  ⚠️ `participant_id: null` is a MEANINGFUL value — it unlinks. The backend
    *  applies `model_dump(exclude_unset=True)`, so OMITTING the key leaves the
    *  link alone while sending an explicit `null` clears it. Do not "clean" a
-   *  null out of this payload. */
-  update: (projectId: number, documentId: number, data: { name?: string; description?: string; participant_id?: number | null }) =>
-    api.patch<DocumentListItem>(`/projects/${projectId}/documents/${documentId}`, data).then(res => res.data),
+   *  null out of this payload.
+   *
+   *  #1152 — its own NAMED request, because it is a participant-link door: a
+   *  caller must refresh through `invalidateAfterParticipantLinkChange`, and
+   *  `participant-link-cache.test.ts` finds the doors by the request they send.
+   *  `update` no longer takes the field, so a subject cannot travel unnoticed. */
+  setSubject: (projectId: number, documentId: number, participantId: number | null) =>
+    api.patch<DocumentListItem>(
+      `/projects/${projectId}/documents/${documentId}`,
+      { participant_id: participantId },
+    ).then(res => res.data),
 
   remove: (projectId: number, documentId: number) =>
     api.delete(`/projects/${projectId}/documents/${documentId}`).then(res => res.data),

@@ -434,10 +434,11 @@ def test_link_by_column_endpoint_links_only_unlinked_rows(db_session):
     rows[1].participant_id = manual.id  # pre-existing manual link
     db.flush()
 
-    resp = asyncio.run(link_by_column(
+    # #1054: `link_by_column` is plain `def` now — called directly, never asyncio.run.
+    resp = link_by_column(
         project_id=PROJECT_ID, dataset_id=ds.id,
         payload=LinkByColumnRequest(column_id=id_col.id), user=user, db=db,
-    ))
+    )
     assert resp.linked == 1 and resp.created == 1
     assert resp.already_linked == 1
     assert rows[1].participant_id == manual.id  # manual link never overwritten
@@ -452,10 +453,10 @@ def test_link_by_column_endpoint_rejects_non_identifier(db_session):
     score_col = _score_column(db, ds)
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(link_by_column(
+        link_by_column(
             project_id=PROJECT_ID, dataset_id=ds.id,
             payload=LinkByColumnRequest(column_id=score_col.id), user=user, db=db,
-        ))
+        )
     assert exc.value.status_code == 400
 
 

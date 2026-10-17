@@ -3,13 +3,16 @@ import { useParams, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { LoadState } from '@/components/LoadStatus'
 import UploadLimitNote from '@/components/UploadLimitNote'
+import ImportStepRail from '@/components/ImportStepRail'
 import { useListLoad } from '@/hooks/useListLoad'
 import {
-  Bot, GitMerge, Check, ChevronRight, Users, TriangleAlert, Sparkles, Info,
+  Bot, GitMerge, Check, Users, TriangleAlert, Sparkles, Info,
   CircleAlert, LoaderCircle, ArrowLeft, FileInput, Link2, ArrowRight,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { projectPortabilityApi, codesApi, ApiError } from '@/lib/api'
+import { projectPortabilityApi, codesApi, ApiError, serverDetailMessage } from '@/lib/api'
+import { forgetCachedProjectPages } from '@/lib/project-cache'
+import { mergeFailure } from '@/lib/project-lifecycle-copy'
 import type {
   ImportValidationResult, MergeCoderPreview, MergeCodePreview, MergeReport,
   MergeDivergenceDetail, MergeDivergenceKind, CoderMappingDecision, CodeMappingDecision, Code,
@@ -50,7 +53,7 @@ import {
   SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 
-type Step = 'loading' | 'upload' | 'confirm' | 'reconcile' | 'review' | 'merging' | 'report' | 'diverged'
+type Step = 'loading' | 'upload' | 'confirm' | 'reconcile' | 'review' | 'merging' | 'report' | 'diverged' | 'unknown'
 
 /** Steps that are a spinner rather than a place to be: moving focus onto one
  *  only to move it again a moment later announces nothing (#935). */
@@ -141,6 +144,8 @@ export default function MergeProject() {
   // The recovery snapshot's filename, so the sentence promising one can NAME it.
   const [safetyBackup, setSafetyBackup] = useState<string | null>(null)
   const [divergence, setDivergence] = useState<MergeDivergenceDetail | null>(null)
+  // #1232 — the sentence for a merge the client stopped waiting for (`unknown`).
+  const [unknownOutcome, setUnknownOutcome] = useState<string | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const uploadRef = useRef<HTMLInputElement>(null)
   const resolvedRef = useRef(false)
@@ -238,8 +243,11 @@ export default function MergeProject() {
         return
       }
       seedFromValidation(v, f)
-    } catch {
-      setUploadError('That file could not be read as an .mmproject.')
+    } catch (err) {
+      // #1203: the server's sentence first — a file from a newer version WAS read,
+      // and "could not be read" sent the researcher looking for a damaged file
+      // instead of an update.
+      setUploadError(serverDetailMessage(err) ?? 'That file could not be read as an .mmproject.')
     }
   }, [targetId, seedFromValidation])
 
@@ -275,14 +283,15 @@ export default function MergeProject() {
         codeMapping: buildCodeMapping(codesPreview, codeDecisions),
       })
       // The merge changed codings, the roster, the codebook, and every analysis surface
-      // for this project — invalidate the roster + anything keyed on this project id.
+      // for this project. #1206: every page not on screen is FORGOTTEN and this one
+      // refetches — the `includes(targetId)` predicate this replaces missed the
+      // entity-first keys (`['segments', cid]` carries no project id) and only
+      // invalidated, so a page opened next still painted the pre-merge copy first.
+      forgetCachedProjectPages(queryClient, { refreshActive: true })
       queryClient.invalidateQueries({ queryKey: ['projects'] })
       // #964: RESET, not invalidate — an invalidated roster keeps serving the
       // pre-merge coders as an answer until the refetch lands.
       void resetCoderRoster(queryClient)
-      queryClient.invalidateQueries({
-        predicate: q => Array.isArray(q.queryKey) && q.queryKey.includes(targetId),
-      })
       // #919: the merge wrote a safety copy, and Settings lists them.
       queryClient.invalidateQueries({ queryKey: SAFETY_COPIES_QUERY_KEY })
       setReport(result.merge_report)
@@ -298,8 +307,27 @@ export default function MergeProject() {
         setDivergence(detail)
         setStep('diverged')
       } else {
-        toast.error('Merge failed. Your project was not changed.')
-        setStep('review')
+        // #1232 — the server's sentence (#977's merge refusals reached no screen),
+        // else what is known. The Dashboard's import catch is the model: a request
+        // the client gave up on may have finished, so the pages are forgotten and
+        // the one on screen refetches (#1206) — on every failure, as there.
+        const failure = mergeFailure(err)
+        forgetCachedProjectPages(queryClient, { refreshActive: true })
+        queryClient.invalidateQueries({ queryKey: ['projects'] })
+        // A merge that got past its refusals wrote its safety copy first (#919),
+        // whether or not it then finished; Settings lists them.
+        queryClient.invalidateQueries({ queryKey: SAFETY_COPIES_QUERY_KEY })
+        if (failure.unknown) {
+          // #964: a merge that finished created the file's coders.
+          void resetCoderRoster(queryClient)
+          // Never back to Review: its Merge button would send the same decisions
+          // again, and a finished merge repeated adds every new coder twice (#1246).
+          setUnknownOutcome(failure.sentence)
+          setStep('unknown')
+        } else {
+          toast.error(failure.sentence, { duration: 10_000 })
+          setStep('review')
+        }
       }
     }
   }, [file, targetId, mergeCoders, decisions, renames, codesPreview, codeDecisions, queryClient])
@@ -308,19 +336,22 @@ export default function MergeProject() {
   const incomingLabel = mergeCoders.length === 1 ? mergeCoders[0].username : 'Incoming file'
 
   // Dynamic stepper: drop "Reconcile codes" when the codebook is shared-frozen.
+  // #1184: the shared rail takes `{ key, label }`; here the label IS the key, and
+  // `labelForStep` is the total mapping every wizard now writes (this one was the
+  // model).
   const showChoose = step === 'upload' || step === 'loading'
   const steps = [
     ...(showChoose ? ['Choose file'] : []),
     'Confirm coders',
     ...(hasCodesToReconcile ? ['Reconcile codes'] : []),
     'Review', 'Done',
-  ]
+  ].map(label => ({ key: label, label }))
+  // #1232: `unknown` stays on Review — "Done" would say the merge finished.
   const labelForStep: Record<Step, string> = {
     loading: 'Choose file', upload: 'Choose file', confirm: 'Confirm coders',
     reconcile: 'Reconcile codes', review: 'Review', merging: 'Review',
-    report: 'Done', diverged: 'Review',
+    report: 'Done', diverged: 'Review', unknown: 'Review',
   }
-  const stepIndex = Math.max(0, steps.indexOf(labelForStep[step]))
 
   /**
    * #935 — where focus goes when the step changes.
@@ -359,22 +390,13 @@ export default function MergeProject() {
         </p>
 
         {/* Progress steps */}
-        <nav aria-label="Merge progress" className="flex items-center flex-wrap gap-y-2 mb-8">
-          {steps.map((s, i) => (
-            <div key={s} className="flex items-center" aria-current={stepIndex === i ? 'step' : undefined}>
-              <div className={cn(
-                'w-7 h-7 rounded-full flex items-center justify-center text-sm font-medium',
-                stepIndex === i ? 'bg-primary text-primary-foreground'
-                  : stepIndex > i ? 'bg-primary/15 text-primary'
-                  : 'bg-mm-border-subtle text-mm-text-secondary',
-              )}>
-                {stepIndex > i ? <Check className="w-4 h-4" /> : i + 1}
-              </div>
-              <span className="ml-2 text-sm font-medium">{s}</span>
-              {i < steps.length - 1 && <ChevronRight className="w-4 h-4 mx-3 text-mm-text-faint" />}
-            </div>
-          ))}
-        </nav>
+        <ImportStepRail
+          label="Merge progress"
+          steps={steps}
+          current={labelForStep[step]}
+          accent="primary"
+          className="mb-8"
+        />
 
         {step === 'loading' && (
           <div className="flex items-center justify-center py-16 text-mm-text-muted">
@@ -398,9 +420,9 @@ export default function MergeProject() {
         {/* #935 — the step's own heading, and the element focus lands on when the
             step changes. Visually hidden because the progress nav above already
             shows the step name on screen; what was missing was a HEADING to move
-            to, not a second copy of the label. `report` and `diverged` render
-            their own visible <h2> and take the same ref. */}
-        {!['loading', 'merging', 'report', 'diverged'].includes(step) && (
+            to, not a second copy of the label. `report`, `diverged` and
+            `unknown` render their own visible <h2> and take the same ref. */}
+        {!['loading', 'merging', 'report', 'diverged', 'unknown'].includes(step) && (
           <h2 ref={headingRef} tabIndex={-1} className="sr-only scroll-mt-24">
             {labelForStep[step]}
           </h2>
@@ -493,6 +515,14 @@ export default function MergeProject() {
         {step === 'diverged' && divergence && (
           <DivergedStep
             divergence={divergence}
+            onBack={() => navigate(`/projects/${targetId}/overview`)}
+            headingRef={headingRef}
+          />
+        )}
+
+        {step === 'unknown' && unknownOutcome && (
+          <UnknownOutcomeStep
+            sentence={unknownOutcome}
             onBack={() => navigate(`/projects/${targetId}/overview`)}
             headingRef={headingRef}
           />
@@ -1189,6 +1219,41 @@ function DivergedStep({ divergence, onBack, headingRef }: {
           </>
         )}
 
+        <div className="flex items-center pt-1">
+          <Button variant="outline" onClick={onBack}><ArrowLeft className="w-4 h-4 mr-1.5" /> Back to project</Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// ── Unknown-outcome step (#1232) ─────────────────────────────────────────────
+
+/**
+ * A merge the client stopped waiting for (a 15-minute timeout, or a dropped
+ * connection). The server keeps working once the client gives up, so the merge
+ * may have finished, and nothing on this page can tell.
+ *
+ * 🔴 **Terminal, with no Merge button.** It went back to Review, one press from
+ * sending the same decisions again — and a finished merge repeated adds every
+ * coder chosen as NEW a second time, with all of their codings (#1246). The only
+ * way on is the project, where the researcher can look.
+ */
+function UnknownOutcomeStep({ sentence, onBack, headingRef }: {
+  sentence: string
+  onBack: () => void
+  headingRef?: React.Ref<HTMLHeadingElement>
+}) {
+  return (
+    <Card>
+      <CardContent className="py-6 space-y-4">
+        <div className="flex items-center gap-2 text-mm-text">
+          <TriangleAlert className="w-5 h-5 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+          <h2 ref={headingRef} tabIndex={-1} className="text-lg font-medium scroll-mt-24">
+            Whether the merge finished is not known
+          </h2>
+        </div>
+        <p className="text-sm text-mm-text-muted">{sentence}</p>
         <div className="flex items-center pt-1">
           <Button variant="outline" onClick={onBack}><ArrowLeft className="w-4 h-4 mr-1.5" /> Back to project</Button>
         </div>

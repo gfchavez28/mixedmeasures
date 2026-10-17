@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import shutil
@@ -48,13 +49,14 @@ from ..services.project_portability import (  # #974 — the disclosure shares t
 from .helpers import visible_segment_filter, _get_project_or_404
 from ..schemas.segment import SpeakerResponse, SpeakerColorUpdateRequest
 from ..auth import get_current_user
-from ..services.audit import log_action
+from ..services.audit import PROJECT_DELETED_ACTION, forget_project_audit, log_action
 from ..services.coding_counts import (
     coded_segment_counts,
     coded_segment_count_for_project,
     participant_segment_counts,
 )
 from ..services.coding_coverage import project_coder_counts
+from ..services.project_deletion import delete_project_tree
 
 logger = logging.getLogger(__name__)
 
@@ -185,8 +187,9 @@ async def list_projects(
 
     def _last_activity(p: Project):
         # Floor by updated_at/created_at so it never regresses below the row's own
-        # timestamps; the created_at floor also discards any orphaned audit rows from a
-        # since-deleted project that reused this id (AuditEntry has no project FK).
+        # timestamps. A deleted project's entries are removed with it (#1230), so none
+        # reach a project that reuses its id — a floor alone could not exclude them, as
+        # an import copies the file's created_at.
         return max(t for t in (audit_max.get(p.id), p.updated_at, p.created_at) if t is not None)
 
     # Most-recently-active first (stable: ties keep the SQL updated_at.desc() order).
@@ -694,44 +697,57 @@ async def set_codebook_freeze(
     return project_to_response(project, db)
 
 
+def _remove_project_folders(project_id: int) -> None:
+    """Remove the project's documents and recordings from disk; failures are only logged."""
+    for folder, what in (
+        (get_documents_dir() / str(project_id), "document"),
+        (get_media_dir() / str(project_id), "media"),
+    ):
+        try:
+            if folder.is_dir():
+                shutil.rmtree(folder)
+        except Exception:
+            logger.warning("Failed to clean up project %s files at %s", what, folder)
+
+
 @router.delete("/{project_id}")
 async def delete_project(
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Delete a project and all associated data."""
+    """Delete a project and all associated data.
+
+    🔴 Deliberately `async def` (#1035, #837) — NOT in `MUST_BE_SYNC`. The delete
+    holds SQLite's write lock for its whole transaction (11-27 s on the scale
+    corpus). As `def` it runs BESIDE other requests, and they fail at the 5 s busy
+    timeout: another session's edit, and a plain GET whose activity stamp is due
+    (`get_current_user` commits on the event loop) — both 500'd, driven over HTTP.
+    On the loop, every request waits instead and none fails. `def` waits for a
+    chunked delete with a resumable marker (1.5.8+).
+    """
     project = _get_project_or_404(db, project_id, user.id)
 
     project_name = project.name
 
     log_action(
         db,
-        action="deleted",
+        action=PROJECT_DELETED_ACTION,
         entity_type="project",
         entity_id=project.id,
         user_id=user.id,
         details={"name": project_name}
     )
 
-    db.delete(project)
+    delete_project_tree(db, project)
+    # #1230: its entries go with it — the next project may be given this id.
+    forget_project_audit(db, project_id)
     db.commit()
 
-    # Clean up document files on disk
-    project_docs_dir = get_documents_dir() / str(project_id)
-    try:
-        if project_docs_dir.is_dir():
-            shutil.rmtree(project_docs_dir)
-    except Exception:
-        logger.warning("Failed to clean up project document files at %s", project_docs_dir)
-
-    # Clean up media files on disk
-    project_media_dir = get_media_dir() / str(project_id)
-    try:
-        if project_media_dir.is_dir():
-            shutil.rmtree(project_media_dir)
-    except Exception:
-        logger.warning("Failed to clean up project media files at %s", project_media_dir)
+    # After the commit, so a failure here leaves a deleted project with stray
+    # folders (logged), never folders deleted under a project that still exists.
+    # Off the event loop: a recordings folder can hold gigabytes.
+    await asyncio.to_thread(_remove_project_folders, project_id)
 
     return {"status": "ok", "deleted_id": project_id}
 

@@ -1100,6 +1100,7 @@ class TestObservationPortability:
         (src / "original.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"payload" * 100)
 
         new_pid = self._export_import(db, old_pid, media_dir=media_dir)
+        db.commit()  # #1225: an import's files land with its commit
         new_obs = db.query(Observation).filter(Observation.project_id == new_pid).one()
 
         landed = media_dir / str(new_pid) / f"obs-{new_obs.id}" / "original.mp4"
@@ -1618,7 +1619,7 @@ class TestImportProject:
         dest_dir = tmp_path / "dest_docs"
         dest_dir.mkdir()
         new_id, _ = import_project(db_session, tmp_file, dest_dir, user_id=1)
-        db_session.flush()
+        db_session.commit()  # #1225: an import's files land with its commit
 
         # Find the new document ID
         new_doc = db_session.query(Document).filter(

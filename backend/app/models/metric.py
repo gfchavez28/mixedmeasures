@@ -50,16 +50,20 @@ class MetricDefinition(Base):
     project = relationship("Project", back_populates="metric_definitions")
     grouping_column = relationship("DatasetColumn", foreign_keys=[grouping_column_id])
     grouping_column_2 = relationship("DatasetColumn", foreign_keys=[grouping_column_id_2])
+    # #1035: passive (project.py explains) — one GSS metric holds 75,699 row scores,
+    # and deleting it loaded every one (3.1 s / 232 MB → 0.25 s, measured).
     results = relationship(
         "ComputedResult",
         back_populates="metric_definition",
         cascade="all, delete-orphan",
+        passive_deletes=True,
         order_by="ComputedResult.group_value",
     )
     row_scores = relationship(
         "RowScore",
         back_populates="metric_definition",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     __table_args__ = (

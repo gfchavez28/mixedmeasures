@@ -35,6 +35,7 @@ from ..services.coding_layers import (
 )
 from ..services.metrics import resolve_input_source_labels
 from ..services.scale_scores import scale_score_metrics  # #1177
+from ..services.statistical_tests import _order_columns_by_domain_sequence  # #1244
 from ..services.grouping import load_grouping_values, order_value_labels
 from ..services.missing_values import column_missing_rules, is_missing
 from ..services.recode import (
@@ -1002,6 +1003,25 @@ def _build_r_script(
             "# Recompute them in Mixed Measures (Analysis > Compute All) and export again."
         )
 
+    # #1229 — the OTHER question: a column that HAS scores, computed before something they
+    # are computed from changed. The export serves the stored scores (DEC-C: nothing is
+    # recomputed for an export), so the CSV can carry a score that disagrees with the item
+    # columns beside it. `stale` is the metric's own flag, set at Step 4; a column with no
+    # scores at all is the note above and is not repeated here.
+    out_of_date = [
+        d for d in domain_score_cols if d.get("stale") and d.get("has_scores", True)
+    ]
+    if out_of_date:
+        script_notes.append(
+            "# The following variable-group score column(s) are out of date: something they "
+            "are computed from changed after they were computed, so they may not agree with "
+            "the item columns in this file: "
+            + ", ".join(sorted(_escape_r_string(d["r_name"]) for d in out_of_date))
+        )
+        script_notes.append(
+            "# Recompute them in Mixed Measures (Analysis) and export again."
+        )
+
     # Equivalence groups
     if equiv_groups:
         toc_sections.append("Equivalence groups")
@@ -1305,11 +1325,17 @@ def _build_r_script(
                 # Target is analysis_domain. #495a: mirror the app's compute
                 # (statistical_tests.build_row_item_matrix + EG collapse):
                 # equivalence-group members become ONE item per record via
-                # coalesce, items ordered by sorted column id with EGs at
-                # first appearance, then LISTWISE deletion. The old emission
+                # coalesce, items in the group's OWN order with EGs at first
+                # appearance, then LISTWISE deletion. The old emission
                 # ran psych::alpha over the raw stacked columns — on a
                 # cross-dataset domain every row is half-NA and R errors
                 # ("no complete element pairs") while the tool shows a number.
+                #
+                # #1244: the order is read through the app's own sort,
+                # `_order_columns_by_domain_sequence`. Since #710 the group's
+                # order decides split-half's odd/even halves; this sorted by
+                # column id, so after a reorder the app showed r = −0.13 and
+                # the script printed 1.0.
                 dom_name = all_domain_name_map.get(st.target_id)
                 member_rows = (
                     db.query(DatasetColumn.id, DatasetColumn.equivalence_group_id)
@@ -1325,7 +1351,9 @@ def _build_r_script(
                 )
                 items: list[list[str]] = []  # each item = r_names to coalesce
                 eg_slot: dict[int, int] = {}
-                for col_id, eg_id in sorted(member_rows, key=lambda r: r[0]):
+                eg_of = dict(member_rows)
+                for col_id in _order_columns_by_domain_sequence(db, st.target_id, eg_of):
+                    eg_id = eg_of[col_id]
                     meta = col_meta.get(col_id)
                     if not meta:
                         continue
@@ -2817,6 +2845,8 @@ def export_r_data(
                 "metric_id": m.id,
                 "r_name": r_name,
                 "domain_name": dname,
+                # #1229: read here, where the metric is in hand, for the script's notes.
+                "stale": bool(m.stale),
             })
             domain_metric_ids.append(m.id)
 

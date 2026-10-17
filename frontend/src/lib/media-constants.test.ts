@@ -6,6 +6,7 @@ import {
   VIDEO_EXTENSIONS,
   isVideoFilename,
   validateMediaFile,
+  chooseOneRecording,
   mediaUploadTimeoutMs,
   describeMediaUploadError,
 } from './media-constants'
@@ -26,18 +27,47 @@ describe('validateMediaFile', () => {
     }
   })
 
-  it('rejects unknown or missing extensions with the format message', () => {
-    const bad = validateMediaFile(fakeFile('notes.txt', 1024))
-    expect(bad.ok).toBe(false)
-    if (!bad.ok) expect(bad.error).toContain('Accepted formats')
+  it('#1161: names a wrong file and says what a recording may be — #1012\'s sentence', () => {
+    const bad = validateMediaFile(fakeFile('notes.pdf', 1024))
+    expect(bad).toEqual({
+      ok: false,
+      error: '“notes.pdf” is not a recording file. A recording can be MP3, M4A, WAV audio; MP4, MOV, WebM video.',
+    })
     expect(validateMediaFile(fakeFile('noext', 1024)).ok).toBe(false)
   })
 
-  it('accepts a file exactly at the cap and rejects one over it', () => {
+  /**
+   * #1263 (a) — four pickers share this sentence and two of them ATTACH a recording
+   * (the Conversations list's and the workbench's), where "This page imports …" was
+   * false. The drop path (`chooseOneRecording`) says the same.
+   */
+  it('#1263: no recording door says "This page imports" — it says what a recording can be', () => {
+    const picked = validateMediaFile(fakeFile('notes.pdf', 1024))
+    const dropped = chooseOneRecording([fakeFile('notes.pdf', 10)]).message
+    for (const message of [picked.ok ? '' : picked.error, dropped]) {
+      expect(message).toContain('A recording can be MP3, M4A, WAV audio; MP4, MOV, WebM video.')
+      expect(message).not.toMatch(/This page imports/)
+    }
+  })
+
+  it('accepts a file exactly at the cap and refuses one over it, naming it and the limit as "4 GB"', () => {
     expect(validateMediaFile(fakeFile('rec.mp4', MAX_MEDIA_SIZE)).ok).toBe(true)
     const over = validateMediaFile(fakeFile('rec.mp4', MAX_MEDIA_SIZE + 1))
     expect(over.ok).toBe(false)
-    if (!over.ok) expect(over.error).toContain('4GB')
+    if (!over.ok) {
+      expect(over.error).toMatch(/^“rec\.mp4” \(4\.0 GB\) was not added\./)
+      expect(over.error).toContain('files of 4 GB or smaller')
+      expect(over.error).not.toMatch(/4096|4GB|4\.0 GB or/)
+    }
+  })
+
+  it('#1161: judges TYPE before size — a 5 GB .zip is not a recording, never "too large"', () => {
+    const r = validateMediaFile(fakeFile('archive.zip', 5 * 1024 ** 3))
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.error).toMatch(/“archive\.zip” is not a recording file/)
+      expect(r.error).not.toMatch(/GB or smaller|not added/)
+    }
   })
 
   it('MEDIA_ACCEPT lists both dotted extensions and MIME types', () => {
@@ -46,6 +76,36 @@ describe('validateMediaFile', () => {
     }
     expect(MEDIA_ACCEPT).toContain('video/mp4')
     expect(MEDIA_ACCEPT).toContain('audio/mpeg')
+  })
+})
+
+describe('chooseOneRecording (#1161 — a drop on a one-recording slot)', () => {
+  it('takes the only recording and says nothing', () => {
+    const a = fakeFile('a.mp4', 10)
+    expect(chooseOneRecording([a])).toEqual({ file: a, message: '' })
+  })
+
+  it('takes the FIRST of several and names the ones left out', () => {
+    const [a, b, c] = [fakeFile('a.mp4', 10), fakeFile('b.mov', 10), fakeFile('c.wav', 10)]
+    const r = chooseOneRecording([a, b, c])
+    expect(r.file).toBe(a)
+    expect(r.message).toBe('Only one recording can be added — “b.mov”, “c.wav” were not added.')
+    expect(chooseOneRecording([a, b]).message).toBe('Only one recording can be added — “b.mov” was not added.')
+  })
+
+  it('skips a refused file to the first ACCEPTED one, and says both things', () => {
+    const [pdf, big, ok] = [fakeFile('notes.pdf', 10), fakeFile('huge.mp4', MAX_MEDIA_SIZE + 1), fakeFile('ok.m4a', 10)]
+    const r = chooseOneRecording([pdf, big, ok])
+    expect(r.file).toBe(ok)
+    expect(r.message).toMatch(/^“notes\.pdf” is not a recording file\. .* “huge\.mp4” \(4\.0 GB\) was not added\./)
+    expect(r.message).not.toMatch(/Only one recording/)
+  })
+
+  it('takes nothing when nothing is a recording, and says why', () => {
+    const r = chooseOneRecording([fakeFile('notes.pdf', 10)])
+    expect(r.file).toBeNull()
+    expect(r.message).toMatch(/is not a recording file/)
+    expect(chooseOneRecording([])).toEqual({ file: null, message: '' })
   })
 })
 
@@ -121,6 +181,8 @@ describe('describeMediaUploadError', () => {
     const m = describeMediaUploadError(new ApiError(507, {}, {}))
     expect(m).toMatch(/disk space/i)
     expect(m).not.toMatch(/request failed/i)
+    // #1161: the limit in the 413 fallback is the one spelling the pickers use.
+    expect(describeMediaUploadError(new ApiError(413, {}, {}))).toBe('This recording is over the 4 GB limit.')
   })
   it('maps a timeout abort to a timed-out message', () => {
     const e = new Error('aborted'); e.name = 'TimeoutError'

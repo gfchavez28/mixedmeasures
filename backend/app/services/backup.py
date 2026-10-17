@@ -16,6 +16,7 @@ import shutil
 import tempfile
 import time
 import zipfile
+import zlib
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -37,6 +38,7 @@ from ..database import (
 from ..models.conversation import VIDEO_FORMATS
 from ..startup_errors import FatalStartupError
 from .archive_safety import MAX_ARCHIVE_EXPANDED_BYTES, assert_expanded_size_within_limit
+from .media_storage import parse_media_owner_segment
 from .restore_gate import RestoreRefused
 from ..schemas.backup import (
     BackupInfo,
@@ -51,6 +53,9 @@ logger = logging.getLogger(__name__)
 APP_VERSION = "1.5.7"
 MANIFEST_FORMAT_VERSION = 1
 STALE_HOURS = 24
+#: How far ahead of this clock a backup's MODIFICATION time may read and still count
+#: as fresh (#1199) — the filesystem's clock, not ours (see `get_backup_status`).
+MTIME_CLOCK_SKEW = timedelta(hours=1)
 
 
 class RestoreError(RuntimeError):
@@ -61,9 +66,15 @@ class RestoreError(RuntimeError):
     recovery is the worst moment for a silent escape hatch).
     """
 
-    def __init__(self, message: str, pre_restore_filename: str):
+    def __init__(
+        self, message: str, pre_restore_filename: str, *, pre_restore_taken_at: str | None = None,
+    ):
         super().__init__(message)
         self.pre_restore_filename = pre_restore_filename
+        #: When that backup was taken (its name's UTC instant), so the screen can name
+        #: it the way Backup history does — never by a filename whose digits are UTC
+        #: and disagree with every row by the zone offset (#1140).
+        self.pre_restore_taken_at = pre_restore_taken_at
 
 
 class RestoreNotStarted(RuntimeError):
@@ -77,11 +88,146 @@ class RestoreNotStarted(RuntimeError):
 
     `pre_restore_filename` is set when the copy WAS written before the stop, so the
     sentence can say where that copy is (on a full disk it is the space to free).
+
+    #1140: EVERY failure before the swap arrives here, whatever its type — the
+    `replacing` marker alone decides the side (`_restore_holding_the_lock`).
+    `status_code` is the router's answer: 400 a backup that cannot be read · 404 one
+    that is gone · 409 another program · 507 a full disk · 500 otherwise.
     """
 
-    def __init__(self, message: str, pre_restore_filename: str | None = None):
+    def __init__(
+        self, message: str, pre_restore_filename: str | None = None, *, status_code: int = 500,
+    ):
         super().__init__(message)
         self.pre_restore_filename = pre_restore_filename
+        self.status_code = status_code
+
+
+class BackupDamaged(ValueError):
+    """The archive cannot be read as a backup (#1140): not a ZIP, a member that is
+    missing or damaged, a manifest that does not parse, a database that will not open.
+
+    `str()` is the PREVIEW's sentence, unchanged; `reason` is the short clause the
+    restore's own sentence carries ("part of it is damaged"), because the restore
+    has to say more than the preview did — that nothing was changed, and that a
+    file which previewed a moment ago has changed since.
+    """
+
+    def __init__(self, message: str, reason: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+class BackupGone(ValueError):
+    """The backup file is not there any more — a rotation can delete the oldest
+    automatic backup while its preview is open (#1140)."""
+
+
+class BackupVersionRefused(ValueError):
+    """A backup whose data this build cannot read (#1026). Its sentence already says
+    nothing has been changed, so the restore passes it through verbatim."""
+
+
+class BackupUpgradeFailed(ValueError):
+    """An older backup's staged database could not be brought to this version (#1026).
+    `detail` is the migration's own error, when there was one."""
+
+    def __init__(self, message: str, detail: str | None = None):
+        super().__init__(message)
+        self.detail = detail
+
+
+#: The clause a restore that stopped AFTER writing its pre-restore backup ends with.
+_SAVED_FIRST = (
+    " The copy of your data the restore saved first is in Backup history as the "
+    "latest “Before a restore” backup, and can be deleted if you do not need it."
+)
+
+#: What a damaged archive raises while it is read, beside `BackupDamaged` itself: a
+#: member whose deflate stream is corrupt (`zlib.error`), one cut short (`EOFError`),
+#: a CRC mismatch (`BadZipFile`). They used to reach the preview as a plain-text 500.
+_ARCHIVE_DAMAGE = (zipfile.BadZipFile, zlib.error, EOFError)
+
+
+def _is_enospc(e: BaseException) -> bool:
+    return isinstance(e, OSError) and e.errno == errno.ENOSPC
+
+
+def _not_started(
+    e: BaseException, *, phase: str, pre_restore_filename: str | None = None,
+) -> RestoreNotStarted:
+    """The sentence for a restore that stopped before replacing anything (#1140).
+
+    Per SHAPE, not one sentence for all: a backup that will not read when the restore
+    re-checks it ("check") is not a backup damaged deep inside ("unpack"), and neither
+    is a database file another program holds ("swap"). Each says that nothing was
+    changed, and — once the pre-restore backup exists — where that copy is.
+    """
+    copy = _SAVED_FIRST if pre_restore_filename else ""
+
+    def stop(message: str, status: int) -> RestoreNotStarted:
+        return RestoreNotStarted(message + copy, pre_restore_filename, status_code=status)
+
+    if isinstance(e, BackupGone):
+        return stop(
+            "The restore did not start: this backup is no longer in the backups folder — "
+            "it may have been deleted, or replaced by a newer automatic backup, since it "
+            "was previewed. Nothing was changed.", 404,
+        )
+    if isinstance(e, BackupVersionRefused):
+        return stop(str(e), 400)
+    if isinstance(e, BackupUpgradeFailed):
+        return stop(
+            "The restore did not start: this backup's data could not be upgraded to this "
+            "version of Mixed Measures" + (f" ({e.detail})" if e.detail else "")
+            + ". Nothing was changed.", 500,
+        )
+    damaged = isinstance(e, BackupDamaged) or isinstance(e, _ARCHIVE_DAMAGE)
+    reason = e.reason if isinstance(e, BackupDamaged) else "part of it is damaged"
+    if damaged and phase == "check":
+        return stop(
+            f"The restore did not start: this backup could not be read ({reason}). "
+            "Nothing was changed. If it could be previewed a moment ago, the file has been "
+            "changed or damaged since — choose it again to check, or restore a different "
+            "backup.", 400,
+        )
+    if damaged:
+        return stop(
+            f"The restore stopped before replacing anything: this backup could not be "
+            f"unpacked ({reason}). Nothing was changed. The backup file is damaged — "
+            "restore a different backup.", 400,
+        )
+    if _is_enospc(e):
+        what = {
+            "check": "did not start: there is not enough free disk space to check the "
+                     "backup before restoring it",
+            "unpack": "stopped before replacing anything: the disk ran out of space while "
+                      "the backup was being unpacked",
+        }.get(phase, "stopped before replacing anything: the disk ran out of space")
+        return stop(
+            f"The restore {what}. Nothing was changed. Free some disk space, then try "
+            "again.", 507,
+        )
+    if phase == "swap":
+        if isinstance(e, PermissionError):
+            return stop(
+                "The restore stopped before replacing anything: the database file could "
+                "not be replaced because another program has it open — a second copy of "
+                "Mixed Measures, a database tool, or backup, sync or antivirus software. "
+                "Nothing was changed. Close that program, then restore again.", 409,
+            )
+        return stop(
+            "The restore stopped before replacing anything: the database file could not "
+            f"be replaced ({e}). Nothing was changed.", 500,
+        )
+    if phase == "check":
+        cause = str(e).rstrip(".") or type(e).__name__
+        return stop(f"The restore did not start ({cause}). Nothing was changed.", 400
+                    if isinstance(e, ValueError) else 500)
+    return stop(
+        f"The restore stopped before replacing anything: the backup could not be unpacked "
+        f"({e}). Nothing was changed.", 400 if isinstance(e, ValueError) else 500,
+    )
 
 
 class BackupSettingsError(FatalStartupError):
@@ -136,6 +282,10 @@ def check_backup_settings(interval_hours: int, max_count: int) -> None:
 # removes the ones nobody is writing any more.
 
 STAGING_SUFFIX = ".partial"
+
+#: The media seam's in-flight suffix (`routers/media.py`: `.upload-*.part`,
+#: `.copy-*.part`) — a different writer's, so not `is_staging_name`'s.
+_MEDIA_IN_FLIGHT_SUFFIX = ".part"
 
 #: SQLite's companion files, which a staged database can leave beside itself when
 #: its writer is killed mid-copy (`snapshot_database_file` writes through SQLite).
@@ -439,7 +589,9 @@ def _reseat_keep_dir(keep_dir: Path, media_dir: Path) -> None:
 #:   the rest fit; a backup the kill still interrupts writes nothing a list can see,
 #:   rotates nothing out, and leaves only staging the next start sweeps.
 #:   (On Windows the shell's quit is `taskkill /F`, so no on-quit backup is taken
-#:   there at all — the 4-hourly one is that platform's cover.)
+#:   there at all — the automatic one is that platform's cover, and since #1186 it is
+#:   taken a couple of minutes after launch whenever the last is an interval old, not
+#:   only after the app has stayed open for a whole interval.)
 BACKUP_BUSY_WAIT_SECONDS = 20.0
 AUTO_BACKUP_BUSY_WAIT_SECONDS = 30.0
 AUTO_BACKUP_BUSY_RETRY_SECONDS = 300.0
@@ -587,6 +739,29 @@ def parse_backup_name(filename: str) -> re.Match | None:
     return _BACKUP_NAME_RE.match(filename)
 
 
+def _name_stamp(match: re.Match) -> datetime | None:
+    """The UTC instant in a backup's NAME, or None when its digits are not a date."""
+    try:
+        stamp = datetime.strptime(match["date"] + match["time"], "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+    return stamp.replace(tzinfo=timezone.utc)
+
+
+def stamp_is_believable(match: re.Match, now: datetime) -> bool:
+    """Whether a backup's name stamp can be read as WHEN it was taken (#1199, #1186).
+
+    A stamp later than `now` cannot be: every file in the folder was written before
+    now in real time, so a future stamp means the clock that named it was ahead (or
+    this one is now behind — a reset, a manual change, a folder from a machine whose
+    clock differed). The automatic schedule does not count one as a recent backup,
+    and the rotation treats one as OLDER than every believable stamp. ONE predicate,
+    so the two cannot disagree about which file is the newest.
+    """
+    stamp = _name_stamp(match)
+    return stamp is not None and stamp <= now
+
+
 def _taken_at(match: re.Match, path: Path) -> str:
     """When a backup was taken: the UTC stamp in its NAME (#1039 f).
 
@@ -609,10 +784,12 @@ def _taken_at(match: re.Match, path: Path) -> str:
 def backup_files(backup_dir: Path) -> list[Path]:
     """Every well-formed backup in the folder, newest first.
 
-    Newest is decided by the NAME, with the modification time only as a
-    tiebreaker: the name is written in the same call as the file, while copying
-    the folder to another machine rewrites every mtime (`safety_copies._taken_at`
-    makes the same choice for the same reason).
+    Newest is decided by the NAME alone — its stamp, then its `-n` tail, then the
+    whole name; the modification time plays no part: the name is written in the
+    same call as the file, while copying the folder to another machine rewrites
+    every mtime (`safety_copies._taken_at` makes the same choice for the same
+    reason). A stamp later than now keeps its place here (the LIST shows dates in
+    order); only `cleanup_old_backups` reorders it (#1199).
 
     🔴 **Within one second the `-n` tail is compared NUMERICALLY, and an absent
     tail is 1 — the first file of that second, not the last.** A plain string
@@ -685,16 +862,18 @@ def _assert_backup_db_readable(db_path: Path) -> None:
         try:
             result = conn.execute("PRAGMA integrity_check").fetchone()
         except Exception as e:
-            raise ValueError(
+            raise BackupDamaged(
                 "This backup's database could not be opened. It may be from "
                 "another computer, created by an unencrypted version of the app, "
-                "or corrupted."
+                "or corrupted.",
+                "its database could not be opened",
             ) from e
         if not result or result[0] != "ok":
             detail = result[0] if result else "unknown"
-            raise ValueError(
+            raise BackupDamaged(
                 f"This backup's database failed its integrity check ({detail}). "
-                "The file appears to be corrupted."
+                "The file appears to be corrupted.",
+                "its database failed its integrity check",
             )
     finally:
         conn.close()
@@ -733,10 +912,12 @@ def _backup_schema(db_file: Path, backup_version: str) -> str:
     try:
         revision = database_file_revision(db_file)
     except Exception as e:  # unreadable: `_assert_backup_db_readable` normally says so first
-        raise ValueError("This backup's database could not be opened.") from e
+        raise BackupDamaged(
+            "This backup's database could not be opened.", "its database could not be opened",
+        ) from e
     status = classify_revision(revision)
     if status == "unknown":
-        raise ValueError(_unreadable_version_message(backup_version, revision))
+        raise BackupVersionRefused(_unreadable_version_message(backup_version, revision))
     return status
 
 
@@ -760,12 +941,13 @@ def _bring_to_this_version(db_file: Path, backup_version: str) -> None:
         upgrade_database_file(db_file)
     except Exception as e:
         logger.error("Could not upgrade the backup's database: %s", e)
-        raise ValueError(
+        raise BackupUpgradeFailed(
             "This backup's data could not be upgraded to this version of Mixed Measures "
-            f"({e}). Nothing has been changed."
+            f"({e}). Nothing has been changed.",
+            str(e),
         ) from e
     if _backup_schema(db_file, backup_version) != "current":
-        raise ValueError(
+        raise BackupUpgradeFailed(
             "This backup's data could not be upgraded to this version of Mixed Measures. "
             "Nothing has been changed."
         )
@@ -880,6 +1062,13 @@ def create_backup(
             for root, _dirs, files in os.walk(media_dir):
                 for f in files:
                     file_path = Path(root) / f
+                    # A recording still being written (`routers/media.py` stages an
+                    # upload or a copy as a hidden `.part` beside its destination) is
+                    # not a recording: carried, it was restored into `media/` as a
+                    # stray file — by "video excluded" backups too, whose filter keys
+                    # on the suffix and `.part` is not a video's (#1160).
+                    if f.startswith(".") and f.endswith(_MEDIA_IN_FLIGHT_SUFFIX):
+                        continue
                     if not include_video and file_path.suffix.lstrip(".").lower() in VIDEO_FORMATS:
                         video_excluded_count += 1
                         continue
@@ -972,16 +1161,28 @@ def validate_backup(
     replaces anything).
     """
     if not zip_path.exists():
-        raise ValueError("Backup file not found")
+        raise BackupGone("Backup file not found")
 
+    # Not a ZIP at all is said as such; a ZIP that breaks while it is READ — a member
+    # whose deflate stream or CRC is wrong, one cut short — is "damaged" (#1140). Both
+    # used to share the first sentence, and the second reached the preview as a
+    # plain-text 500 (`zlib.error` is not a `BadZipFile`).
     try:
-        with zipfile.ZipFile(str(zip_path), "r") as zf:
+        archive = zipfile.ZipFile(str(zip_path), "r")
+    except zipfile.BadZipFile:
+        raise BackupDamaged(
+            "Invalid backup: not a valid ZIP file", "it is not a valid ZIP file",
+        ) from None
+    try:
+        with archive as zf:
             names = zf.namelist()
 
             if "manifest.json" not in names:
-                raise ValueError("Invalid backup: missing manifest.json")
+                raise BackupDamaged(
+                    "Invalid backup: missing manifest.json", "it has no manifest.json",
+                )
             if "database.db" not in names:
-                raise ValueError("Invalid backup: missing database.db")
+                raise BackupDamaged("Invalid backup: missing database.db", "it has no database.db")
 
             # Zip-slip prevention. ⚠️ This path is NOT vulnerable the way
             # `project_portability.py`'s was (#688): restore extracts with
@@ -996,7 +1197,10 @@ def validate_backup(
             # be swapped for `archive_safety.assert_member_within`.
             for name in names:
                 if name.startswith("/") or ".." in name:
-                    raise ValueError(f"Invalid backup: suspicious path '{name}'")
+                    raise BackupDamaged(
+                        f"Invalid backup: suspicious path '{name}'",
+                        "it holds a file path that is not allowed",
+                    )
 
             # #696: the archive is bounded; its expansion was not. Refuse here, at
             # validate time, so a bomb is rejected BEFORE the pre-restore safety
@@ -1007,8 +1211,16 @@ def validate_backup(
             else:
                 expanded = sum(i.file_size for i in zf.infolist())
 
-            manifest_data = json.loads(zf.read("manifest.json"))
-            manifest = BackupManifest(**manifest_data)
+            # A manifest that is not JSON, not an object, or not the shape read here was
+            # answered with the parser's own words (or a 500, for a non-object).
+            try:
+                manifest_data = json.loads(zf.read("manifest.json"))
+                manifest = BackupManifest(**manifest_data)
+            except (ValueError, TypeError) as e:
+                raise BackupDamaged(
+                    "Invalid backup: its manifest.json could not be read.",
+                    "its manifest.json could not be read",
+                ) from e
 
             warnings: list[str] = []
             if free_bytes is not None and expanded > free_bytes:
@@ -1073,9 +1285,35 @@ def validate_backup(
             finally:
                 shutil.rmtree(probe_dir, ignore_errors=True)
 
-            return RestorePreview(manifest=manifest, warnings=warnings)
-    except zipfile.BadZipFile:
-        raise ValueError("Invalid backup: not a valid ZIP file")
+            return RestorePreview(
+                manifest=manifest, warnings=warnings, recording_count=_recording_count(names),
+            )
+    except _ARCHIVE_DAMAGE as e:
+        raise BackupDamaged(
+            "Invalid backup: part of it is damaged and cannot be read.", "part of it is damaged",
+        ) from e
+
+
+def _recording_count(names: list[str]) -> int:
+    """How many RECORDINGS the archive carries, counted from its members (#1160).
+
+    The manifest's `media_file_count` is every file under `media/` — canvas images and
+    in-flight uploads included — and `document_count` every file under `documents/`,
+    extracted images included, so the preview's "Documents 69" sat over a project list
+    totalling 4. A recording is `media/{project}/{owner}/original.{fmt}` whose owner
+    segment names a conversation or an observation; counted here, at preview, it is
+    true for every backup ever written, with no change to the manifest's format.
+    """
+    count = 0
+    for name in names:
+        parts = name.split("/")
+        if (
+            len(parts) == 4 and parts[0] == "media" and parts[1].isdigit()
+            and parse_media_owner_segment(parts[2]) is not None
+            and parts[3].startswith("original.")
+        ):
+            count += 1
+    return count
 
 
 def restore_from_backup(
@@ -1128,6 +1366,34 @@ def restore_from_backup(
         )
 
 
+def _set_side_files_aside(db_path: Path, folder: Path) -> list[tuple[Path, Path]]:
+    """Move the live database's `-journal`/`-wal`/`-shm` into `folder` (#1140 b).
+
+    One rename each, on the database's own filesystem (`folder` is the restore's
+    database staging, beside it). ALL OR NOTHING: if one will not move — on Windows
+    whenever another process holds it — the ones already moved go back, then it
+    raises. Returns `(aside, original)` pairs for `_put_side_files_back`.
+    """
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for side in _SQLITE_SIDE_FILES:
+            original = Path(f"{db_path}{side}")
+            if not os.path.lexists(original):
+                continue
+            aside = folder / f"live{side}"
+            os.replace(original, aside)
+            moved.append((aside, original))
+    except BaseException:
+        _put_side_files_back(moved)
+        raise
+    return moved
+
+
+def _put_side_files_back(moved: list[tuple[Path, Path]]) -> None:
+    for aside, original in reversed(moved):
+        os.replace(aside, original)
+
+
 def _restore_holding_the_lock(
     zip_path: Path,
     db_path: Path,
@@ -1137,9 +1403,22 @@ def _restore_holding_the_lock(
     *,
     expansion_limit: int | None,
 ) -> BackupInfo:
-    """`restore_from_backup`'s body, run while the restore lock is held (or cannot be)."""
+    """`restore_from_backup`'s body, run while the restore lock is held (or cannot be).
+
+    🔴 **#1140: every failure before the swap is `RestoreNotStarted`, whatever its
+    type, and the `replacing` marker ALONE decides the side.** A `ValueError` used to
+    pass ahead of that check ("validation-shaped errors keep their 400"), so a backup
+    that would not read when the restore re-checked it said only "Invalid backup: not
+    a valid ZIP file" — never that nothing had changed — and the population around it
+    (a damaged member's `zlib.error`, a full disk while checking, the staging folder
+    that could not be made) reached the researcher as a raw 500. `_not_started` says
+    each in its own words.
+    """
     # Validate first — which also refuses a backup this build cannot read (#1026).
-    preview = validate_backup(zip_path, expansion_limit=expansion_limit)
+    try:
+        preview = validate_backup(zip_path, expansion_limit=expansion_limit)
+    except Exception as e:
+        raise _not_started(e, phase="check") from e
 
     # Create pre-restore safety backup (includes media files).
     # Busy and missing keep their own meanings at the router; anything else here is
@@ -1152,48 +1431,53 @@ def _restore_holding_the_lock(
         logger.error("Restore not started: the pre-restore backup failed: %s", e)
         cause = (
             "there is not enough free disk space"
-            if isinstance(e, OSError) and e.errno == errno.ENOSPC
+            if _is_enospc(e)
             else f"it could not be written ({e})"
         )
         raise RestoreNotStarted(
             "The restore did not start: the copy of your current data that a restore "
             f"saves first could not be made, because {cause}. Nothing was changed. "
-            "Free some disk space, then try again."
+            "Free some disk space, then try again.",
+            status_code=507 if _is_enospc(e) else 500,
         ) from e
     logger.info("Pre-restore backup created: %s", pre_restore_info.filename)
 
-    media_dir.parent.mkdir(parents=True, exist_ok=True)
-    docs_dir.parent.mkdir(parents=True, exist_ok=True)
     tmp_video_keep = media_dir.parent / VIDEO_KEEP_DIR_NAME
-    # A leftover keep-dir means a prior restore crashed after moving video
-    # out — it may hold the ONLY copy of those recordings. Re-seat it before
-    # doing anything else; NEVER delete it wholesale (#550: the old entry
-    # rmtree here is what turned a failed restore + retry into data loss).
-    _reseat_keep_dir(tmp_video_keep, media_dir)
-
     # Media and document staging: siblings of what they replace. A leftover stage
     # dir holds only COPIES extracted from some backup (unlike the keep-dir), so
     # clearing it on entry is safe.
     media_stage = media_dir.parent / MEDIA_STAGE_DIR_NAME
     docs_stage = docs_dir.parent / DOCS_STAGE_DIR_NAME
-    for stage in (media_stage, docs_stage):
-        if stage.exists():
-            shutil.rmtree(str(stage), ignore_errors=True)
-
-    # 🔴 The database stages BESIDE THE LIVE DATABASE (#1036 b), never in OS temp.
-    # From OS temp, `shutil.move` was a rename only when temp shared the filesystem
-    # AND the platform renamed over an existing file; on Windows `os.rename` refuses
-    # an existing destination, so it fell back to a COPY over the live file — the
-    # install's database rewritten in place, and a quit or a full disk partway left
-    # it malformed. Beside it, the swap is `os.replace`: one atomic rename on every
-    # platform. The migration that brings an older backup up to date (#1026) runs on
-    # this staged file too, so its transient space is on the database's own disk.
-    db_stage = _staging_dir(
-        db_path.parent if str(db_path.parent) else Path("."),
-        _restore_db_staging_label(db_path),
-    )
+    db_stage: Path | None = None
+    phase = "prepare"
     replacing = False
     try:
+        media_dir.parent.mkdir(parents=True, exist_ok=True)
+        docs_dir.parent.mkdir(parents=True, exist_ok=True)
+        # A leftover keep-dir means a prior restore crashed after moving video
+        # out — it may hold the ONLY copy of those recordings. Re-seat it before
+        # doing anything else; NEVER delete it wholesale (#550: the old entry
+        # rmtree here is what turned a failed restore + retry into data loss).
+        _reseat_keep_dir(tmp_video_keep, media_dir)
+        for stage in (media_stage, docs_stage):
+            if stage.exists():
+                shutil.rmtree(str(stage), ignore_errors=True)
+
+        # 🔴 The database stages BESIDE THE LIVE DATABASE (#1036 b), never in OS temp.
+        # From OS temp, `shutil.move` was a rename only when temp shared the filesystem
+        # AND the platform renamed over an existing file; on Windows `os.rename` refuses
+        # an existing destination, so it fell back to a COPY over the live file — the
+        # install's database rewritten in place, and a quit or a full disk partway left
+        # it malformed. Beside it, the swap is `os.replace`: one atomic rename on every
+        # platform. The migration that brings an older backup up to date (#1026) runs on
+        # this staged file too, so its transient space is on the database's own disk.
+        # (Inside the `try` since #1140: made outside it, a failure here was a raw 500
+        # that never named the pre-restore backup just written.)
+        db_stage = _staging_dir(
+            db_path.parent if str(db_path.parent) else Path("."),
+            _restore_db_staging_label(db_path),
+        )
+        phase = "unpack"
         with zipfile.ZipFile(str(zip_path), "r") as zf:
             # Zip-slip prevention during extraction (see validate_backup for why
             # this path is safe by virtue of `zf.extract`, and what would change
@@ -1201,7 +1485,10 @@ def _restore_holding_the_lock(
             # reachable independently.
             for member in zf.namelist():
                 if member.startswith("/") or ".." in member:
-                    raise ValueError(f"Suspicious path in backup: {member}")
+                    raise BackupDamaged(
+                        f"Suspicious path in backup: {member}",
+                        "it holds a file path that is not allowed",
+                    )
 
             # #696: re-check the expansion cap on the destructive path too, for a
             # file from outside. The staging design (#550) already makes an ENOSPC
@@ -1238,20 +1525,39 @@ def _restore_holding_the_lock(
                 zf.extract(member, media_stage)
             tmp_media = media_stage / "media"
 
-        # ---- Destructive phase: renames and rmtrees only from here on.
+        # ---- The swap. The old database's companion files must not stay beside the
+        # new file — a `-wal` left there is replayed into it on the next open, another
+        # database's pages. Named by appending, never `with_suffix`, which only worked
+        # for a database whose name ends `.db`.
+        #
+        # 🔴 **They are SET ASIDE, not deleted, and the marker is set only once the
+        # swap has happened (#1140 b).** "None should exist, and what one held is in
+        # the pre-restore backup" is true of THIS process — its pool is disposed and
+        # its last close checkpointed — but not of another one: a second backend
+        # (#1142) or a database tool holding a connection keeps committed pages in the
+        # `-wal`, and on macOS/Linux an unlink succeeds under it. EXECUTED: a child
+        # process's committed row lived only in the `-wal`; the restore deleted it,
+        # the swap then failed, and the untouched live file no longer had the row —
+        # under a sentence that would have said "Nothing was changed". Set aside, a
+        # failed swap puts them back and that sentence is true. (On Windows a held
+        # `-wal` refuses to move, so the set-aside itself fails, and nothing moved.)
+        phase = "swap"
+        set_aside = _set_side_files_aside(db_path, db_stage)
+        try:
+            os.replace(staged_db, db_path)
+        except BaseException:
+            try:
+                _put_side_files_back(set_aside)
+            except BaseException:
+                # The live database is where it was but its companions are not: a
+                # change, so the pre-restore backup is the way back ("partway").
+                replacing = True
+                raise
+            raise
+
+        # ---- Destructive phase: renames and rmtrees only from here on. The old
+        # companions now sit in `db_stage`, removed with it below.
         replacing = True
-
-        # The old database's companion files go FIRST. Left beside the new file, a
-        # `-wal` would be replayed into it on the next open — another database's
-        # pages. None should exist (every connection was closed, and the last close
-        # checkpoints and removes them), and what one held is in the pre-restore
-        # backup, which reads through the WAL. Named by appending, never
-        # `with_suffix`, which only worked for a database whose name ends `.db`.
-        for side in _SQLITE_SIDE_FILES:
-            Path(f"{db_path}{side}").unlink(missing_ok=True)
-
-        # Replace the database: one atomic rename, on every platform (#1036 b).
-        os.replace(staged_db, db_path)
 
         # Replace documents directory
         if docs_dir.exists():
@@ -1309,39 +1615,113 @@ def _restore_holding_the_lock(
         _reseat_keep_dir(tmp_video_keep, media_dir)
         logger.error(
             "Restore failed (%s): %s. Pre-restore backup: %s",
-            "partway" if replacing else "before replacing anything",
+            "partway" if replacing else f"before replacing anything, at {phase}",
             e, pre_restore_info.filename,
         )
-        if isinstance(e, ValueError):
-            raise  # validation-shaped errors keep their 400 semantics
         if not replacing:
             # #1036 d: a corrupt member or a full disk while UNPACKING used to be
             # reported as "failed partway … restore that backup" — an instruction to
-            # undo a change that had not happened.
-            cause = (
-                "the disk ran out of space while the backup was being unpacked"
-                if isinstance(e, OSError) and e.errno == errno.ENOSPC
-                else f"the backup could not be unpacked ({e})"
-            )
-            raise RestoreNotStarted(
-                f"The restore stopped before replacing anything: {cause}. Nothing was "
-                "changed. The copy of your data it saved first is in Backup history as "
-                "the latest “Before a restore” backup, and can be deleted if you do not "
-                "need it.",
-                pre_restore_info.filename,
+            # undo a change that had not happened. #1140: so did every other failure
+            # before the swap, by falling to the router's generic arm.
+            raise _not_started(
+                e, phase=phase, pre_restore_filename=pre_restore_info.filename,
             ) from e
         raise RestoreError(
             f"Restore failed partway ({e}). Your previous data was saved to "
             f"backup '{pre_restore_info.filename}' before the restore began.",
             pre_restore_info.filename,
+            pre_restore_taken_at=pre_restore_info.created_at,
         ) from e
     finally:
         # Restore historically did not clean up — a failed restore leaked the full
         # extracted payload into OS temp. Every stage holds only copies (the staged
-        # database is gone once it is swapped in), so unconditional cleanup is safe.
-        shutil.rmtree(db_stage, ignore_errors=True)
+        # database is gone once it is swapped in; the old companions set aside beside
+        # it are the replaced database's), so unconditional cleanup is safe.
+        if db_stage is not None:
+            shutil.rmtree(db_stage, ignore_errors=True)
         shutil.rmtree(str(docs_stage), ignore_errors=True)
         shutil.rmtree(str(media_stage), ignore_errors=True)
+
+
+# ── The automatic schedule: DUE, not periodic (#1186) ──────────────────────
+#
+# The loop used to sleep a full interval before its first turn, and every launch
+# started a new loop — so a backup needed ONE LAUNCH to stay open for four hours. On
+# Windows, whose quit is `taskkill /F` and takes no on-quit backup, a researcher who
+# works in one- or two-hour sittings had none at all, while Settings showed a "next
+# backup" time that was never going to come.
+#
+# Now the question is whether one is DUE: after a short settle, the loop takes an
+# automatic backup when the newest `auto` in the folder is an interval old, and
+# re-reads the folder every time it wakes, so *Backup now* (which writes `auto`)
+# postpones the next. ⚠️ **This is not the refuted "has anything changed?" skip**
+# (rules §4) — it asks whether TIME has passed, which the folder answers exactly. A
+# backup after EVERY launch was the other option and is #920's failure: five launches
+# replace the whole automatic window; here ten launches in an hour take one.
+
+#: How long after start the loop waits before its first look at the folder. Every
+#: piece of startup work (migrations and their pre-migration copy, the staging sweep,
+#: the interrupted-restore re-seat, session cleanup, the data repairs) has finished
+#: inside the lifespan before the loop is started, so the settle buys only a quiet
+#: first load. Short on purpose: at 5 minutes a 3-minute Windows session still got none.
+AUTO_BACKUP_SETTLE_SECONDS = 120.0
+
+#: When the running loop will next look — the settle, a retry after a busy turn, the
+#: interval after a failed one — set by `main._auto_backup_loop` before every sleep
+#: and cleared when it stops. The status states it, so "next automatic backup" is
+#: when the loop will actually act, never a moment it has already slept past.
+_auto_backup_not_before: datetime | None = None
+
+
+def note_automatic_backup_wait(when: datetime | None) -> None:
+    global _auto_backup_not_before
+    _auto_backup_not_before = when
+
+
+def newest_automatic_backup_at(
+    backup_dir: Path, *, now: datetime, files: list[Path] | None = None,
+) -> datetime | None:
+    """When the newest automatic backup was TAKEN — its NAME's UTC stamp.
+
+    🔴 **The name, not the modification time.** The rotation already decides "newest"
+    by the name (`backup_files`), so the schedule and the rotation agree on which file
+    that is; and copying the folder to another computer rewrites every mtime, so by
+    mtime a copied folder read as freshly backed up. (`get_backup_status`'s freshness
+    line keeps the mtime on purpose — "when did THIS machine last back up" is another
+    question.)
+
+    🔴 **A stamp later than `now` is skipped.** It is not evidence of a recent backup
+    (a clock that was ahead, a folder from a machine whose clock was), and counted, it
+    postponed every automatic backup until its date — a clamp on the SLEEP did not
+    help, because a loop that re-reads the folder found the same file each time.
+    """
+    for path in files if files is not None else backup_files(backup_dir):
+        match = _BACKUP_NAME_RE.match(path.name)
+        if match is None or match["type"] != "auto":
+            continue
+        if not stamp_is_believable(match, now):  # #1199: the rotation's predicate too
+            continue
+        return _name_stamp(match)
+    return None
+
+
+def next_automatic_backup_at(
+    backup_dir: Path,
+    interval_hours: int | None,
+    *,
+    now: datetime,
+    not_before: datetime | None = None,
+    files: list[Path] | None = None,
+) -> datetime | None:
+    """THE one answer to "when is the next automatic backup?" (#1186): the loop sleeps
+    until it, and `BackupStatus.next_backup_at` states it. None when automatic backups
+    are off; never in the past — an overdue one is due NOW (or when the loop next
+    looks, `not_before`)."""
+    if not interval_hours or interval_hours <= 0:
+        return None
+    newest = newest_automatic_backup_at(backup_dir, now=now, files=files)
+    due = now if newest is None else newest + timedelta(hours=interval_hours)
+    return max(due, now, not_before or now)
 
 
 def get_backup_status(
@@ -1351,30 +1731,33 @@ def get_backup_status(
 ) -> BackupStatus:
     """Get backup status summary.
 
-    #357: when `interval_hours` is provided (auto-backup cadence), computes
-    `next_backup_at = last_backup_at + interval_hours`. Manual "Backup now"
-    actions advance `last_backup_at` (the file's mtime), so the next status
-    query naturally reports a refreshed `next_backup_at` — no module-level
-    state needed; the disk is the source of truth.
+    `next_backup_at` comes from `next_automatic_backup_at` — the function the loop
+    itself sleeps by (#1186), so the time Settings and the top bar show is when the
+    next automatic backup will be taken. It used to be the newest backup of ANY type
+    plus the interval, while the loop slept from LAUNCH: after a short session the
+    displayed time had passed with no backup taken, and a manual download postponed a
+    schedule it did not touch.
 
     #1043: both schedule values ride the status as given, so the Settings screen
     states THIS install's schedule — "every 4 hours, keeping 5" was written into
     its sentences, and `0` (automatic backups off) would have read as on.
-
-    The lifespan loop's actual sleep schedule is independent of this
-    calculation (it sleeps from process start), so after a manual backup
-    the displayed `next_backup_at` may be slightly out of sync with when
-    the loop actually wakes. The auto-loop just creates a new backup
-    whenever it wakes, which is strictly safer than under-backing-up.
     """
     schedule = {"auto_backup_interval_hours": interval_hours, "auto_backup_max_count": max_count}
+
+    def next_at(files: list[Path]) -> str | None:
+        nxt = next_automatic_backup_at(
+            backup_dir, interval_hours, now=datetime.now(timezone.utc),
+            not_before=_auto_backup_not_before, files=files,
+        )
+        return nxt.isoformat() if nxt is not None else None
+
     if not backup_dir.exists():
         return BackupStatus(
             last_backup_at=None,
             backup_count=0,
             total_size_bytes=0,
             is_stale=True,
-            next_backup_at=None,
+            next_backup_at=next_at([]),
             **schedule,
         )
 
@@ -1389,7 +1772,7 @@ def get_backup_status(
             backup_count=0,
             total_size_bytes=0,
             is_stale=True,
-            next_backup_at=None,
+            next_backup_at=next_at(backups),
             **schedule,
         )
 
@@ -1397,22 +1780,29 @@ def get_backup_status(
     # answers "when did THIS machine last take a backup", which is what the stale
     # dot is about. `backup_files` orders by name, so the newest is re-chosen by
     # mtime here rather than taking its first element. Only MEMBERSHIP changed.
-    latest_mtime = max(
-        datetime.fromtimestamp(b.stat().st_mtime, tz=timezone.utc) for b in backups
-    )
+    # #1199: an mtime later than now is no evidence of a recent backup, as a name
+    # stamp is not (`stamp_is_believable`). Counted, one future-dated file — a
+    # never-rotating "Before a restore" one is enough — said "Last backup: just now"
+    # and held the stale warning off until its date, whatever else happened.
+    # ⚠️ With a tolerance, unlike the name: an mtime is the FILESYSTEM's clock (FAT
+    # rounds up to 2 s; a network share stamps by its server's clock), so a backup
+    # written a moment ago can read a little ahead.
+    now = datetime.now(timezone.utc)
+    believable = [
+        m for b in backups
+        if (m := datetime.fromtimestamp(b.stat().st_mtime, tz=timezone.utc))
+        <= now + MTIME_CLOCK_SKEW
+    ]
+    latest_mtime = max(believable) if believable else None
     total_size = sum(b.stat().st_size for b in backups)
-    is_stale = (datetime.now(timezone.utc) - latest_mtime) > timedelta(hours=STALE_HOURS)
-
-    next_backup_at: str | None = None
-    if interval_hours is not None and interval_hours > 0:
-        next_backup_at = (latest_mtime + timedelta(hours=interval_hours)).isoformat()
+    is_stale = latest_mtime is None or (now - latest_mtime) > timedelta(hours=STALE_HOURS)
 
     return BackupStatus(
-        last_backup_at=latest_mtime.isoformat(),
+        last_backup_at=latest_mtime.isoformat() if latest_mtime else None,
         backup_count=len(backups),
         total_size_bytes=total_size,
         is_stale=is_stale,
-        next_backup_at=next_backup_at,
+        next_backup_at=next_at(backups),
         **schedule,
     )
 
@@ -1448,10 +1838,32 @@ def list_backups(backup_dir: Path) -> list[BackupInfo]:
     return result
 
 
-def cleanup_old_backups(backup_dir: Path, backup_type: str, max_count: int = 5) -> int:
+def cleanup_old_backups(
+    backup_dir: Path,
+    backup_type: str,
+    max_count: int = 5,
+    *,
+    keep: str | None,
+    now: datetime | None = None,
+) -> int:
     """Keep the `max_count` most recent backups of one type, delete the rest.
 
     Returns the number actually deleted.
+
+    🔴 **`keep` — the archive the caller just wrote — is never deleted (#1199).**
+    Required, so a new caller decides. Twice an ORDERING defect made the rotation
+    delete the backup it had just written while the caller reported it saved: the
+    `-n` tail compared as text (#982) and a clock set back (#1199). Keeping it by
+    name makes that impossible whatever the order gets wrong next; the rest share
+    `max_count - 1` slots. `None` for a rotation that wrote nothing.
+
+    🔴 **A stamp later than `now` orders OLDER than every believable one (#1199)**
+    (`stamp_is_believable`, the schedule's predicate). Every file here was written
+    before now, so a future stamp is a past write by a clock that was ahead — or by a
+    right clock, read after this one was set back. Ordered by name it outranked every
+    new backup until its date: five such files deleted each new automatic backup the
+    moment it was written. Among themselves, and among the believable ones, the name
+    order stands.
 
     Recency is decided by the NAME rather than the modification time. Copying a
     backup folder to a new machine rewrites every mtime, in arbitrary order — so
@@ -1472,12 +1884,17 @@ def cleanup_old_backups(backup_dir: Path, backup_type: str, max_count: int = 5) 
     if not backup_dir.exists():
         return 0
 
+    now = now or datetime.now(timezone.utc)
     backups = [
-        p for p in backup_files(backup_dir)
+        (p, m) for p in backup_files(backup_dir)
         if (m := parse_backup_name(p.name)) is not None and m["type"] == backup_type
     ]
+    # `backup_files` is newest-first by name; a STABLE sort moves every unbelievable
+    # stamp behind every believable one and keeps each group's own order.
+    backups.sort(key=lambda pm: not stamp_is_believable(pm[1], now))
+    ordered = [p for p, _ in backups if p.name == keep] + [p for p, _ in backups if p.name != keep]
     deleted = 0
-    for old in backups[max_count:]:
+    for old in ordered[max_count:]:
         try:
             old.unlink(missing_ok=True)
         except OSError as e:

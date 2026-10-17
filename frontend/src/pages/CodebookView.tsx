@@ -31,6 +31,7 @@ import MergeCodesDialog from '@/components/codebook/MergeCodesDialog'
 import MergeCategoriesDialog from '@/components/codebook/MergeCategoriesDialog'
 import GroupIntoCategoryDialog from '@/components/codebook/GroupIntoCategoryDialog'
 import { exportAsPng } from '@/lib/chart-export'
+import { countLabel } from '@/lib/format'
 
 const MAX_UNDO_STACK = 10
 
@@ -994,6 +995,11 @@ export default function CodebookView() {
   // ── Codebook import/export ───────────────────────────────────────────
 
   const [isExportingCodebook, setIsExportingCodebook] = useState(false)
+  // #1203 — the import had no busy state: a second pick during a slow import sent
+  // a second import. The handler's own refusal is a REF (its `useCallback` would
+  // read a stale state); the state drives the button's `aria-disabled`/`aria-busy`.
+  const [isImportingCodebook, setIsImportingCodebook] = useState(false)
+  const importingCodebookRef = useRef(false)
 
   const handleExportCodebook = useCallback(async (format: 'native' | 'qdc') => {
     setIsExportingCodebook(true)
@@ -1011,11 +1017,18 @@ export default function CodebookView() {
   }, [projectId])
 
   const handleImportCodebook = useCallback(async (file: File) => {
+    if (importingCodebookRef.current) return
+    importingCodebookRef.current = true
+    setIsImportingCodebook(true)
     try {
       const counts = await projectPortabilityApi.importCodebook(projectId, file)
       const parts: string[] = []
       if (counts.codes_created > 0) parts.push(`${counts.codes_created} codes created`)
       if (counts.scales_imported > 0) parts.push(`${counts.scales_imported} with a rating scale`)
+      // #1222: counted by the server since row 48, never declared, so never said.
+      if (counts.code_sets_created > 0) {
+        parts.push(countLabel(counts.code_sets_created, 'code set created', 'code sets created'))
+      }
       if (counts.categories_created > 0) parts.push(`${counts.categories_created} categories created`)
       if (counts.codes_skipped > 0) parts.push(`${counts.codes_skipped} codes skipped`)
       if (counts.codes_uncategorized > 0) parts.push(`${counts.codes_uncategorized} codes left uncategorized`)
@@ -1027,7 +1040,12 @@ export default function CodebookView() {
       // The import returns actionable 400s ("Invalid XML: …", "No <Codes>
       // element found…", the depth/count caps) — surface them rather than
       // swallowing the only diagnosis the researcher gets.
-      toast.error(extractApiError(err, 'Codebook import failed'))
+      // #1203: held 10 s like the toolbar's own refusal — the server's sentence for a
+      // file that is not a codebook is the same two sentences (driven: ~4 s by default).
+      toast.error(extractApiError(err, 'Codebook import failed'), { duration: 10_000 })
+    } finally {
+      importingCodebookRef.current = false
+      setIsImportingCodebook(false)
     }
   }, [projectId, queryClient])
 
@@ -1055,6 +1073,7 @@ export default function CodebookView() {
         onExportCodebook={handleExportCodebook}
         onImportCodebook={handleImportCodebook}
         isExportingCodebook={isExportingCodebook}
+        isImportingCodebook={isImportingCodebook}
         dataSegMax={dataSegMax}
       />
 

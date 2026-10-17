@@ -47,11 +47,13 @@ class BackupStatus(BaseModel):
     backup_count: int
     total_size_bytes: int
     is_stale: bool
-    # #357: when the next automatic backup is expected to run. Computed as
-    # `last_backup_at + auto_backup_interval_hours` — the value the auto-loop
-    # would target. Null when no backups exist yet. Used by the TopRail
-    # freshness label + Settings backup section to give researchers a
-    # countdown ("Next auto at 4:30 PM") instead of an opaque amber dot.
+    # #357: when the next automatic backup will be taken. #1186: from
+    # `services.backup.next_automatic_backup_at`, the function the auto-loop itself
+    # sleeps by — the newest AUTOMATIC backup's taken time + the interval, never in
+    # the past, and the loop's own wait while it settles. Null only when automatic
+    # backups are off (it was null with no backups, and the newest of ANY type +
+    # the interval otherwise, while the loop slept from launch). Used by the TopRail
+    # freshness label + Settings backup section.
     next_backup_at: str | None = None
     # #1043: THIS install's automatic schedule, so the Settings screen states it
     # rather than writing "every 4 hours, keeping the 5 most recent" into its
@@ -111,3 +113,6 @@ class SafetyCopyPageResponse(BaseModel):
 class RestorePreview(BaseModel):
     manifest: BackupManifest
     warnings: list[str]
+    #: Recordings the archive carries, counted from its members at preview (#1160) —
+    #: unlike `manifest.media_file_count`, which counts every file under `media/`.
+    recording_count: int = 0

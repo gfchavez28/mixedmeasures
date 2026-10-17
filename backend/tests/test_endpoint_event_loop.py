@@ -41,7 +41,8 @@ from app.routers.auth import archive_coder, unarchive_coder
 from app.routers.backup import backup_create
 from app.routers.participants import list_participants, withdraw_participant
 from app.routers.dataset import (
-    append_import, create_participants_dataset, import_dataset, refresh_participants_dataset,
+    append_import, create_participants_dataset, get_linkable_rows, import_dataset,
+    link_by_column, preview_link_by_column, refresh_participants_dataset,
     update_manual_column,
 )
 from app.routers.export_excel import export_datasets_excel, export_study_excel
@@ -127,7 +128,26 @@ MUST_BE_SYNC = [
     (archive_coder, "1.47s marking 168,729 passages for the main coder; 0.63s / 160,801 "
                     "for the second"),
     (unarchive_coder, "the same marking as archive_coder, reversed"),
+    # #1054, 2026-10-13 — Link by column on BES (122,382 records), over HTTP on a
+    # scratch copy, /health every 200 ms. ⚠️ `def` ALONE was worse than the loop:
+    # one transaction held the write lock ~66 s and 9 of 17 concurrent writes 500'd
+    # at the 5 s timeout. It is `def` because the link now COMMITS every 5,000.
+    (link_by_column, "76.18s frozen for a 76.4s link; batched as def 7.0s [0.20s], "
+                     "14 of 14 concurrent writes through (build, 2026-10-13)"),
+    (preview_link_by_column, "the link's plan, reads only: 0.75-0.82s on BES over HTTP"),
+    # #1053, 2026-10-13 — the record picker. As `async def` it read every record
+    # and value of the dataset ON the loop: GSS 70.3s (the app frozen throughout),
+    # BES 27.1s. Now one ranked page; the search itself still reads the dataset's
+    # values, so it stays off the loop.
+    (get_linkable_rows, "GSS 70.3s frozen loading every record; as def one page over HTTP "
+                        "0.07-3.5s on GSS, 0.05-1.2s on BES, worst /health 0.04s (build, 2026-10-13c)"),
 ]
+
+# 🔴 NOT here, deliberately: `routers/projects.py::delete_project` (#1035) stays
+# `async def`. Its delete is ONE transaction holding the write lock 11-27 s on the
+# scale corpus; as `def` another session's edit AND a GET whose activity stamp was
+# due both 500'd at the 5 s timeout (driven over HTTP, 2026-10-13). On the loop
+# every request waits and none fails. Chunked deletes with a marker come first.
 
 # Endpoints that genuinely await I/O and therefore CANNOT take that treatment.
 MUST_STAY_ASYNC = [

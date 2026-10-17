@@ -395,6 +395,10 @@ def test_merge_codes_skips_real_same_coder_duplicate(db_session):
 #     code_id=target UPDATE was still pending, sweeping them. The merge reported
 #     merged=N but the applications vanished. Fix: flush before deleting source.
 #     Reproduces single-coder too (orthogonal to per-coder layers).
+#     ⚠️ Since #1035 (`Code.applications` passive) this pins the OUTCOME, not the
+#     flush: with nothing loaded, the unit of work writes the reassigning UPDATE
+#     before the source's DELETE, so removing the flush leaves this test GREEN
+#     (measured 2026-10-13). The flush stays in `merge_codes` for its own reason.
 # ═══════════════════════════════════════════════════════════════════════════
 
 

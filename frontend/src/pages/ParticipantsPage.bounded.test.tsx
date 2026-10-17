@@ -160,7 +160,21 @@ describe('#1052 — the Participants table is bounded', () => {
     expect(screen.getByRole('checkbox', { name: 'Select the 10 participants shown' })).toBeInTheDocument()
     fireEvent.change(search, { target: { value: 'p00044' } })
     await waitFor(() => expect(rows()).toHaveLength(1))
-    expect(screen.getByRole('checkbox', { name: 'Select the 1 participant shown' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Select the 1 participant shown' })).toBeEnabled()
+  })
+
+  it('#1165 — a search matching no one leaves select-all off, and says why, instead of "Select the 0"', async () => {
+    renderPage(45)
+    await screen.findByText('P00001')
+    const search = screen.getByRole('textbox', { name: 'Search participants by name, ID or role' })
+    fireEvent.change(search, { target: { value: 'zzz' } })
+    await screen.findByText('No participants match “zzz”.')
+    expect(screen.queryByRole('checkbox', { name: /Select the 0/ })).toBeNull()
+    const box = screen.getByRole('checkbox', { name: 'Select participants (none are shown)' })
+    expect(box).toBeDisabled()
+    // POSITIVE CONTROL: clearing the search gives it back.
+    fireEvent.change(search, { target: { value: '' } })
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Select the 20 participants shown' })).toBeEnabled())
   })
 
   it('POSITIVE CONTROL: a small project shows everyone, with no note and the plain select-all', async () => {

@@ -5,8 +5,10 @@ import { FileInput, Trash2, FileText, UserRound } from 'lucide-react'
 import { documentsApi, type DocumentListItem, retryUnanswered} from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
+import { invalidateAfterParticipantLinkChange } from '@/lib/participant-link-cache'
 import { LoadState } from '@/components/LoadStatus'
 import { setPendingImportFiles } from '@/lib/pending-import-files'
+import { forgetCachedProjectPages } from '@/lib/project-cache'
 import { DOCUMENT_FORMAT_LABEL } from '@/lib/document-import-formats'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { sortSources } from '@/lib/source-list-sort'
@@ -128,6 +130,13 @@ export default function DocumentsListPage() {
     mutationFn: (documentId: number) => documentsApi.remove(projectId, documentId),
     onSuccess: () => {
       setDeleteDocumentId(null)
+    },
+    // #1226: the next document created takes this id, and this one's reader
+    // (`['document', pid, did]`, `['document-notes', pid, did]`) is still cached —
+    // DRIVEN: the new document showed the deleted one's text. On SETTLED: a
+    // delete the client stopped waiting for may have finished.
+    onSettled: () => {
+      forgetCachedProjectPages(queryClient)
       queryClient.invalidateQueries({ queryKey: ['documents', projectId] })
       queryClient.invalidateQueries({ queryKey: ['project-summary', projectId] })
       queryClient.invalidateQueries({ queryKey: ['project', projectId] })
@@ -159,13 +168,15 @@ export default function DocumentsListPage() {
   const subjectMutation = useMutation({
     mutationFn: ({ id, participantId }: { id: number; participantId: number | null }) =>
       // ⚠️ `null` is sent deliberately — it is the unlink, not an omission.
-      documentsApi.update(projectId, id, { participant_id: participantId }),
+      documentsApi.setSubject(projectId, id, participantId),
     onSuccess: (_result, variables) => {
       queryClient.invalidateQueries({ queryKey: ['documents', projectId] })
       queryClient.invalidateQueries({ queryKey: ['document', projectId, variables.id] })
-      queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
-      // The document is now groupable (or no longer is) on the qual surfaces.
-      queryClient.invalidateQueries({ queryKey: ['qual-source-frequencies', projectId] })
+      // #1152 — a participant-link door, so it refreshes what every link door
+      // refreshes: the participant list, the open panel, the withdrawal report
+      // (which the delete confirm read as "no linked documents" after this),
+      // and what the qual surfaces can group by (it did that one by hand).
+      void invalidateAfterParticipantLinkChange(queryClient, projectId)
       // #932 — hand focus back to the card this was about, once it re-renders.
       refocusDocumentIdRef.current = variables.id
     },

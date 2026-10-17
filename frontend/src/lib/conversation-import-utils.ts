@@ -33,6 +33,42 @@ export function namingTheFile(fileName: string, message: string, manyFiles: bool
   return manyFiles ? `“${fileName}”: ${message}` : message
 }
 
+/**
+ * #1259 — the Columns step's refusal, from the per-file warnings of the files
+ * still listed (index 0 is the file the mapping was read from, never checked here).
+ *
+ * The check and a Remove compose it through this one function, so removing the
+ * refused file removes its sentence: the refusal was set once by the check and
+ * nothing cleared it, so after the researcher did exactly what it asked it still
+ * said "Remove that file below" — and the next step opened with it at the top.
+ * Empty when nothing listed blocks.
+ */
+export function fileCheckRefusal(
+  fileNames: readonly string[],
+  warnings: readonly (string | null | undefined)[],
+): string {
+  const unreadable: string[] = []
+  let missingColumns = false
+  warnings.forEach((warning, i) => {
+    if (i === 0 || !warning) return
+    if (warning.startsWith(UNREADABLE_FILE_PREFIX)) {
+      unreadable.push(namingTheFile(fileNames[i], warning.slice(UNREADABLE_FILE_PREFIX.length + 1), true))
+    } else if (warning.startsWith('Missing required')) {
+      missingColumns = true
+    }
+  })
+  const one = unreadable.length === 1
+  return [
+    ...unreadable,
+    missingColumns
+      ? 'Some files are incompatible with the selected column mapping. Remove them or adjust your mapping.'
+      : null,
+    unreadable.length > 0 && !missingColumns
+      ? `Remove ${one ? 'that file' : 'those files'} below, or correct ${one ? 'it' : 'them'} and add ${one ? 'it' : 'them'} again.`
+      : null,
+  ].filter(Boolean).join(' ')
+}
+
 export interface SpeakerMapping {
   original_label: string
   normalized_name: string

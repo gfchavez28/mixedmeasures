@@ -13,16 +13,21 @@
  *   under the sentence;
  * - when it fails, the server's sentence stays on screen and the backup list is
  *   refreshed, because a failure partway names a backup that list did not have;
- * - closing resets it, so the next dialog does not open on the last outcome.
+ * - closing resets it, so the next dialog does not open on the last outcome;
+ * - #1139/#1140: it fits the window, keeps its footer in view when the wait starts,
+ *   moves focus to Close after a failure, and after one that may have replaced
+ *   anything offers no second Restore — while a failure that changed nothing keeps
+ *   Restore and does not hold the page.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { useState } from 'react'
 import { QueryClient, QueryClientProvider, onlineManager } from '@tanstack/react-query'
 import type { RestorePreview, RestoreResult } from '@/lib/api'
 import { ApiError } from '@/lib/api/client'
 import { formatTakenAt } from '@/lib/safety-copies'
+import { DIALOG_FITS_VIEWPORT } from '@/components/ConfirmDialog'
 
 const restore = vi.fn()
 const restoreLocal = vi.fn()
@@ -47,6 +52,7 @@ function preview(
   videoFiles: number | null = null,
   summariesUnavailable = false,
   summaries: RestorePreview['manifest']['project_summaries'] = [],
+  warnings: string[] = [],
 ): RestorePreview {
   return {
     manifest: {
@@ -55,15 +61,36 @@ function preview(
       created_at: '2026-09-20T02:07:36+00:00',
       backup_type: 'auto',
       db_size_bytes: 1024,
-      document_count: 2,
-      media_file_count: 1,
+      // #1160: FILE counts, deliberately unlike anything the preview should show —
+      // 12 = 2 documents × 5 extracted images + 2; 6 = 3 recordings + 2 canvas
+      // images + 1 half-finished upload (the review's fixture).
+      document_count: 12,
+      media_file_count: 6,
       video_excluded: videoFiles !== null,
       video_files_excluded: videoFiles ?? 0,
       project_summaries: summaries,
       project_summaries_unavailable: summariesUnavailable,
     },
-    warnings: [],
+    warnings,
+    recording_count: 3,
   }
+}
+
+/** The shape `client.ts` throws: header names lower-cased, as `Headers` iterates them. */
+function restoreFailure(status: number, detail: string, headers: Record<string, string> = {}) {
+  return new ApiError(status, { detail }, headers)
+}
+
+const NOT_STARTED_DETAIL =
+  'The restore did not start: this backup could not be read (it is not a valid ZIP file). ' +
+  'Nothing was changed.'
+const PARTWAY_DETAIL =
+  'Restore failed partway. Your data as it was before the restore was saved first, as the ' +
+  'latest “Before a restore” backup in Backup history — restore that backup to return to the prior state.'
+
+const NORTHGATE = {
+  name: 'Northgate Health, 2024–26', conversation_count: 3, dataset_count: 1,
+  document_count: 15, observation_count: 2,
 }
 
 const RESULT: RestoreResult = {
@@ -88,6 +115,7 @@ function Harness({
   videoFiles = null,
   summariesUnavailable = false,
   summaries = [],
+  warnings = [],
   onClose,
   onReload,
 }: {
@@ -95,6 +123,7 @@ function Harness({
   videoFiles?: number | null
   summariesUnavailable?: boolean
   summaries?: RestorePreview['manifest']['project_summaries']
+  warnings?: string[]
   onClose: () => void
   onReload: () => void
 }) {
@@ -104,7 +133,7 @@ function Harness({
       <button type="button" onClick={() => setOpen(true)}>reopen</button>
       <RestoreBackupDialog
         source={open ? source : null}
-        preview={open ? preview(videoFiles, summariesUnavailable, summaries) : null}
+        preview={open ? preview(videoFiles, summariesUnavailable, summaries, warnings) : null}
         onClose={() => {
           onClose()
           setOpen(false)
@@ -120,6 +149,7 @@ function renderDialog(props: {
   videoFiles?: number | null
   summariesUnavailable?: boolean
   summaries?: RestorePreview['manifest']['project_summaries']
+  warnings?: string[]
 } = {}) {
   // `main.tsx`'s mutation default, which toasts "Something went wrong" over any
   // error a mutation does not handle itself.
@@ -147,15 +177,95 @@ afterEach(() => {
   // Module-global state: a test that ends on an outcome must not leave the next
   // one offline.
   onlineManager.setOnline(true)
+  delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView
 })
 
 describe('RestoreBackupDialog', () => {
-  it('#1132: a project and its counts are separated by a SPACE in the description, not a margin', () => {
-    renderDialog({ summaries: [{
-      name: 'Northgate Health, 2024–26', conversation_count: 3, dataset_count: 1,
-      document_count: 15, observation_count: 2,
-    }] })
-    expect(dialog()).toHaveAccessibleDescription(/Northgate Health, 2024–26 \(3 conv, 1 ds, 15 doc, 2 obs\)/)
+  it('#1132/#1164 (c): a project line is in full words, separated from its name by TEXT', () => {
+    renderDialog({ summaries: [NORTHGATE] })
+    // A text separator, not a margin: the computed text read "…2024–26(3 conv, …".
+    expect(screen.getByText(/^Northgate Health/).textContent).toBe(
+      'Northgate Health, 2024–26 — 3 conversations, 1 dataset, 15 documents, 2 observations',
+    )
+  })
+
+  it('#1164 (c): thousands separators and plurals; a kind with none is left out', () => {
+    renderDialog({ summaries: [
+      { name: 'Survey', conversation_count: 1, dataset_count: 0, document_count: 1204, observation_count: 0 },
+      { name: 'Empty', conversation_count: 0, dataset_count: 0, document_count: 0, observation_count: 0 },
+    ] })
+    expect(screen.getByText(/^Survey/).textContent).toBe(
+      `Survey — 1 conversation, ${(1204).toLocaleString()} documents`,
+    )
+    expect(screen.getByText(/^Empty/).textContent).toBe(
+      'Empty — no conversations, datasets, documents or observations',
+    )
+  })
+
+  it('#1160: the description carries the TOTALS, and not one line per project', () => {
+    renderDialog({ summaries: [NORTHGATE, { ...NORTHGATE, name: 'Riverside' }] })
+    expect(dialog()).toHaveAccessibleDescription(
+      /This backup holds 2 projects: 6 conversations, 2 datasets, 30 documents, 4 observations\./,
+    )
+    // The lines are on screen, outside the description a reader hears on open.
+    expect(screen.getByText(/^Riverside/)).toBeInTheDocument()
+    expect(dialog()).not.toHaveAccessibleDescription(/Riverside/)
+  })
+
+  it('names a backup from the list WITH its article — "the contents of the “Automatic” backup …"', () => {
+    renderDialog()
+    expect(dialog()).toHaveAccessibleDescription(
+      new RegExp(`with the contents of the ${LOCAL.name}\\.`),
+    )
+  })
+
+  it('#1160: the server’s warnings stay in the description', () => {
+    renderDialog({ warnings: ['This backup was made by an earlier version of Mixed Measures (1.5.3).'] })
+    expect(dialog()).toHaveAccessibleDescription(/made by an earlier version of Mixed Measures \(1\.5\.3\)/)
+  })
+
+  it('#1160: no Documents row, and Recordings counts RECORDINGS, not files', () => {
+    renderDialog({ videoFiles: 2 })
+    // `document_count` (12) counts each document's extracted images; the project
+    // lines carry the documents.
+    expect(screen.queryByText('Documents')).not.toBeInTheDocument()
+    expect(screen.queryByText(/\b12\b/)).not.toBeInTheDocument()
+    // `media_file_count` (6) counts canvas images and partial uploads as recordings.
+    expect(screen.getByText('Recordings').parentElement).toHaveTextContent(
+      /^Recordings3 \(2 video not included\)$/,
+    )
+  })
+
+  it('#1164 (c): Created is said the way the sentence naming a backup says it', () => {
+    renderDialog()
+    expect(screen.getByText('Created').parentElement).toHaveTextContent(
+      `Created${formatTakenAt('2026-09-20T02:07:36+00:00')}`,
+    )
+  })
+
+  it('#1139: it is held within the window in every state, and scrolls inside', async () => {
+    restoreLocal.mockResolvedValue(RESULT)
+    renderDialog()
+    for (const cls of DIALOG_FITS_VIEWPORT.split(' ')) expect(dialog()).toHaveClass(cls)
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
+    await screen.findByRole('heading', { name: 'Restore complete' })
+    for (const cls of DIALOG_FITS_VIEWPORT.split(' ')) expect(dialog()).toHaveClass(cls)
+  })
+
+  it('#1139: the footer is scrolled back into view when the wait appears above it', async () => {
+    const scrolled: Element[] = []
+    HTMLElement.prototype.scrollIntoView = function (this: Element) { scrolled.push(this) }
+    const pending = deferred<RestoreResult>()
+    restoreLocal.mockReturnValue(pending.promise)
+    renderDialog()
+    expect(scrolled).toEqual([])
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
+    await screen.findByRole('button', { name: 'Restoring...' })
+    expect(scrolled).toEqual([screen.getByRole('button', { name: 'Cancel' })])
+    // …leaving the dialog's own bottom padding visible below it (technique only:
+    // jsdom has no layout; measured flush against the edge without it).
+    expect(scrolled[0]).toHaveClass('scroll-mb-6')
+    await act(async () => pending.resolve(RESULT))
   })
 
   it('stays open while the restore runs, and says it is running (#1037)', async () => {
@@ -200,7 +310,11 @@ describe('RestoreBackupDialog', () => {
 
     expect(await screen.findByRole('heading', { name: 'Restore complete' })).toBeInTheDocument()
     expect(screen.getByText(/has been restored/)).toHaveTextContent(
-      `${LOCAL.name} has been restored.`,
+      `The ${LOCAL.name} has been restored.`,
+    )
+    // #1139 (r3 N3): nothing reloads until the button is pressed, so it says so.
+    expect(screen.getByText(/has been restored/)).toHaveTextContent(
+      'Reload Mixed Measures to open the restored data.',
     )
     expect(screen.getByText(/was saved first/)).toHaveTextContent(
       `as the “Before a restore” backup from ${formatTakenAt(RESULT.pre_restore_taken_at)}`,
@@ -265,14 +379,17 @@ describe('RestoreBackupDialog', () => {
 
   it('#1039 (k) — says the project list could not be read, rather than showing no section', async () => {
     renderDialog({ summariesUnavailable: true })
-    expect(screen.getByText(/the project list could not be read when this backup was made/))
-      .toBeInTheDocument()
+    expect(dialog()).toHaveAccessibleDescription(
+      /The project list could not be read when this backup was made/,
+    )
+    expect(dialog()).not.toHaveAccessibleDescription(/This backup holds/)
   })
 
   it('#1039 (k) — an empty list WITHOUT the flag claims nothing (an older backup looks the same)', () => {
     renderDialog()
     expect(screen.queryByText(/Projects:/)).not.toBeInTheDocument()
     expect(screen.queryByText(/could not be read/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/This backup holds/)).not.toBeInTheDocument()
   })
 
   it('says nothing about video when a backup left none out', async () => {
@@ -280,22 +397,23 @@ describe('RestoreBackupDialog', () => {
     // include 0 video recordings" on a project with no video at all.
     restoreLocal.mockResolvedValue(RESULT)
     renderDialog({ videoFiles: 0 })
-    expect(screen.getByText('Recordings').parentElement).toHaveTextContent(/^Recordings1$/)
+    expect(screen.getByText('Recordings').parentElement).toHaveTextContent(/^Recordings3$/)
     fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
     await screen.findByRole('heading', { name: 'Restore complete' })
     expect(screen.queryByText(/video recording/)).not.toBeInTheDocument()
   })
 
   it('keeps a failure on screen, refreshes the list once it is read, and resets', async () => {
-    const detail =
-      "Restore failed partway. Your previous data was saved as 'pre_restore_20260924_213000.mmbackup' " +
-      'before the restore began — restore that backup from Backup history to return to the prior state.'
-    restoreLocal.mockRejectedValue(new ApiError(500, { detail }, {}))
+    // A partway failure from a server that did not know the backup's time: its own
+    // sentence, verbatim.
+    restoreLocal.mockRejectedValue(
+      restoreFailure(500, PARTWAY_DETAIL, { 'x-mm-restore-outcome': 'partway' }),
+    )
     const { invalidate, onClose, defaultMutationError } = renderDialog()
 
     fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(detail)
+    expect(await screen.findByRole('alert')).toHaveTextContent(PARTWAY_DETAIL)
     expect(dialog()).toBeInTheDocument()
     // …and not ALSO a generic "Something went wrong" toast over it.
     expect(defaultMutationError).not.toHaveBeenCalled()
@@ -318,13 +436,76 @@ describe('RestoreBackupDialog', () => {
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
   })
 
-  it('says what it does not know when no answer came back', async () => {
+  it('says what it does not know when no answer came back — and offers no second restore', async () => {
     restoreLocal.mockRejectedValue(new TypeError('Failed to fetch'))
     renderDialog()
     fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
     expect(await screen.findByRole('alert')).toHaveTextContent(
       /whether the restore finished is not known/,
     )
+    expect(screen.queryByRole('button', { name: 'Restore' })).not.toBeInTheDocument()
+    expect(onlineManager.isOnline()).toBe(false)
+  })
+
+  describe('#1139/#1140 — after a failure', () => {
+    it('focus is on Close, so a second Enter cannot run the restore again', async () => {
+      restoreLocal.mockRejectedValue(
+        restoreFailure(500, PARTWAY_DETAIL, { 'x-mm-restore-outcome': 'partway' }),
+      )
+      renderDialog()
+      const confirm = screen.getByRole('button', { name: 'Restore' })
+      confirm.focus()
+      fireEvent.click(confirm)
+      await screen.findByRole('alert')
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Close' })).toHaveFocus())
+    })
+
+    it('PARTWAY: Restore is gone, the page stays held, and the way back is named by its time', async () => {
+      const takenAt = '2026-10-14T12:12:45+00:00'
+      restoreLocal.mockRejectedValue(restoreFailure(500, PARTWAY_DETAIL, {
+        'x-mm-restore-outcome': 'partway',
+        'x-mm-pre-restore-taken-at': takenAt,
+      }))
+      renderDialog()
+      fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
+      const alert = await screen.findByRole('alert')
+      // As Backup history shows it — the filename's UTC digits disagreed with
+      // every row by the zone offset (#1140, r3 N1).
+      expect(alert).toHaveTextContent(
+        `as the “Before a restore” backup from ${formatTakenAt(takenAt)} in Backup history`,
+      )
+      expect(alert).not.toHaveTextContent(/latest/)
+      expect(within(dialog()!).queryByRole('button', { name: 'Restore' })).not.toBeInTheDocument()
+      expect(onlineManager.isOnline()).toBe(false)
+    })
+
+    it('UNKNOWN side (no header): read as partway — no second Restore, the page held', async () => {
+      restoreLocal.mockRejectedValue(restoreFailure(500, 'The restore failed (OSError: x).'))
+      renderDialog()
+      fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('The restore failed (OSError: x).')
+      expect(screen.queryByRole('button', { name: 'Restore' })).not.toBeInTheDocument()
+      expect(onlineManager.isOnline()).toBe(false)
+    })
+
+    it('NOT STARTED: the server’s sentence, Restore kept for a retry, and the page not held', async () => {
+      restoreLocal
+        .mockRejectedValueOnce(restoreFailure(400, NOT_STARTED_DETAIL, { 'x-mm-restore-outcome': 'not-started' }))
+        .mockResolvedValueOnce(RESULT)
+      const { invalidate } = renderDialog()
+      fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent(NOT_STARTED_DETAIL)
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Close' })).toHaveFocus())
+      // Nothing was replaced, so the session is one the database knows: nothing to
+      // hold, and the rest of the page may refresh while this is read.
+      expect(onlineManager.isOnline()).toBe(true)
+      expect(invalidate).not.toHaveBeenCalled()
+
+      // …and trying again is safe, so it is offered.
+      fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
+      expect(await screen.findByRole('heading', { name: 'Restore complete' })).toBeInTheDocument()
+      expect(restoreLocal).toHaveBeenCalledTimes(2)
+    })
   })
 
   it('restores an uploaded file through the upload door', async () => {

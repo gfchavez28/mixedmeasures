@@ -301,13 +301,9 @@ describe('#963 Tier 2 — the load-state wiring on the surfaces with no harness'
       ready: "scratchpadLoad.status !== 'ready'",
       claim: 'Use Jot to capture thoughts',
     },
-    {
-      file: 'pages/ParticipantsPage.tsx',
-      sentinel: "queryKey: ['linkable-rows', projectId, linkingDatasetId]",
-      load: 'linkableLoad',
-      ready: "linkableLoad.status !== 'ready'",
-      claim: 'No records in this dataset',
-    },
+    // The Participants panel's record picker left this table with #1053: it is
+    // `components/DatasetRecordPicker.tsx` now, which jsdom CAN render, so its
+    // three states are rendered in `DatasetRecordPicker.test.tsx` instead.
     {
       file: 'pages/CodebookView.tsx',
       sentinel: "queryKey: ['text-columns', projectId]",
@@ -334,7 +330,8 @@ describe('#963 Tier 2 — the load-state wiring on the surfaces with no harness'
   )
 
   it('scans a non-empty population', () => {
-    expect(T2_SURFACES).toHaveLength(7)
+    // 6 since #1053: the Participants record picker moved to a rendered component.
+    expect(T2_SURFACES).toHaveLength(6)
   })
 
   for (const s of T2_SURFACES) {

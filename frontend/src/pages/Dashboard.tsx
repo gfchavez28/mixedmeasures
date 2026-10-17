@@ -17,13 +17,14 @@ import { useCoderSwitch } from '@/hooks/useCoderSwitch'
 import { useCreateCoder } from '@/hooks/useCreateCoder'
 import { coderColor } from '@/lib/coder-color'
 import { plural, countLabel } from '@/lib/format'
-import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { ConfirmDialog, DIALOG_FITS_VIEWPORT } from '@/components/ConfirmDialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import MMLogo from '@/components/MMLogo'
 import InlineEditableText from '@/components/InlineEditableText'
+import ProjectFileOrigin from '@/components/ProjectFileOrigin'
 import { formatRelativeTime } from '@/lib/format'
 import { MMPROJECT_ACCEPT } from '@/lib/mm-formats'
 import {
@@ -53,7 +54,13 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { toastProjectExportError } from '@/lib/project-export-error'
+import LongWaitStatus from '@/components/LongWaitStatus'
+import { useKeepInViewWhen } from '@/hooks/useKeepInViewWhen'
+import { importFailureSentence, validateFailureSentence } from '@/lib/project-lifecycle-copy'
+import ProjectDeleteDialog from '@/components/ProjectDeleteDialog'
 import { SAFETY_COPIES_QUERY_KEY } from '@/lib/safety-copies'
+import { projectFileRefusal } from '@/lib/mm-file-refusal'
+import { forgetCachedProjectPages } from '@/lib/project-cache'
 
 /**
  * #459 — Dashboard coder switcher. The TopRail only lives inside a project, so the
@@ -194,6 +201,24 @@ function staleToast(result: ProjectImportResult): { description: string } | unde
   return note ? { description: note } : undefined
 }
 
+/**
+ * #1258 — the import wait's words, from the mode the researcher PRESSED. Only an
+ * overwrite replaces anything; a new copy beside an existing one says so, because
+ * the dialog has just offered to replace that project and the researcher chose not to.
+ */
+function importWaitLabel(mode: ProjectImportMode | null): string {
+  return mode === 'overwrite' ? 'Replacing your copy…' : 'Importing…'
+}
+
+function importWaitSentence(mode: ProjectImportMode | null, copyExistsHere: boolean): string {
+  if (mode === 'overwrite') {
+    return 'A safety copy of your project is saved first, then it is replaced. A large project takes a few minutes.'
+  }
+  return copyExistsHere
+    ? 'It is imported as a separate project; your copy here is not changed. A large project takes a few minutes.'
+    : 'A large project takes a few minutes.'
+}
+
 export default function Dashboard() {
   const { isDark, toggleTheme } = useTheme()
   const navigate = useNavigate()
@@ -213,23 +238,57 @@ export default function Dashboard() {
   const [importPreview, setImportPreview] = useState<ImportValidationResult | null>(null)
   const [importValidating, setImportValidating] = useState(false)
   const [importLoading, setImportLoading] = useState(false)
+  // #1258 — the mode PRESSED, which the wait's words and the busy button key on.
+  // They keyed on `existing_project` (the file's project exists here), so *Import
+  // as new copy* said "Replacing your copy… then it is replaced" while it made a
+  // copy and left the project untouched.
+  const [importMode, setImportMode] = useState<ProjectImportMode | null>(null)
+  // #1258 — the pressed button, kept in view when the wait panel opens above the
+  // footer (#1139's recipe: the capped dialog keeps its scroll position, so the
+  // focused busy button slid below its bottom edge at 640×360).
+  const busyButtonRef = useRef<HTMLButtonElement>(null)
+  useKeepInViewWhen(importLoading, busyButtonRef)
+  const busyRef = (mode: ProjectImportMode) => (importMode === mode ? busyButtonRef : undefined)
+  // #1203 — why the last picked file did not reach the preview, said under the
+  // header row (Settings' Restore from a file is the model). `key` remounts the
+  // alert, so the same refusal twice is announced twice.
+  const [importRefusal, setImportRefusal] = useState<{ text: string; key: number } | null>(null)
+  const refusalSeq = useRef(0)
+  // The handler's own refusal while a check runs. A REF, not `importValidating`:
+  // this callback's deps are `[]`, so it would read the state it was created with.
+  const validatingRef = useRef(false)
 
   const handleImportFileSelect = useCallback(async (file: File) => {
+    if (validatingRef.current) return
+    const refuse = (text: string) => setImportRefusal({ text, key: ++refusalSeq.current })
+    // 🔴 Refused HERE, before the upload starts (#1203): a `notes.txt` was POSTed
+    // whole and a 520 MB file sent whole before the server's 413. Cleared on the
+    // next pick that passes.
+    const refusal = projectFileRefusal(file)
+    if (refusal) { refuse(refusal); return }
+    setImportRefusal(null)
+    validatingRef.current = true
     setImportFile(file)
     setImportValidating(true)
     try {
       const result = await projectPortabilityApi.validateImport(file)
       setImportPreview(result)
-    } catch {
-      toast.error('Invalid project file')
+    } catch (err) {
+      // The server's sentence — "created by a newer version … Please update to
+      // import it" was toasted as "Invalid project file".
+      refuse(validateFailureSentence(err, file.name))
       setImportFile(null)
     } finally {
+      validatingRef.current = false
       setImportValidating(false)
     }
   }, [])
 
   const handleImportConfirm = useCallback(async (mode: ProjectImportMode = 'new') => {
-    if (!importFile) return
+    // #1035 review §4 #8: the buttons stay focusable while it runs (aria-disabled,
+    // #965), so the guard is what refuses a second press.
+    if (!importFile || importLoading) return
+    setImportMode(mode)
     setImportLoading(true)
     try {
       const targetProjectId = importPreview?.existing_project?.id
@@ -237,6 +296,10 @@ export default function Dashboard() {
         mode,
         targetProjectId: mode === 'overwrite' ? targetProjectId : undefined,
       })
+      // #1206: before the navigate below — an overwrite comes back under the SAME
+      // ids, and a new copy can take a deleted project's, so a cached page of the
+      // old copy would be shown as this one.
+      forgetCachedProjectPages(queryClient)
       queryClient.invalidateQueries({ queryKey: ['projects'] })
       // #964: an import creates the file's coders on this install, and a stale
       // one-coder roster turns blind mode off in the project just imported.
@@ -270,24 +333,31 @@ export default function Dashboard() {
       setImportFile(null)
       setImportPreview(null)
       navigate(`/projects/${result.project_id}/overview`)
-    } catch {
-      toast.error('Project import failed')
+    } catch (err) {
+      // The server's reason (a refused file says why), or — when no answer came —
+      // that nobody knows yet; the list is refreshed either way, because an
+      // overwrite the client gave up on may still have finished.
+      toast.error(importFailureSentence(err), { duration: 10_000 })
+      // …and so may have replaced the cached pages' project (#1206).
+      forgetCachedProjectPages(queryClient)
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
     } finally {
       setImportLoading(false)
+      setImportMode(null)
     }
-  }, [importFile, importPreview, queryClient, navigate])
+  }, [importFile, importLoading, importPreview, queryClient, navigate])
 
   // Track J · J3-2: merge is a multi-step flow, so hand the file + validate result
   // off to the full-page merge page (a File can't ride a route param) and navigate.
   const handleMergeStart = useCallback(() => {
-    if (!importFile || !importPreview?.existing_project) return
+    if (importLoading || !importFile || !importPreview?.existing_project) return
     const targetId = importPreview.existing_project.id
     setPendingMerge(importFile, importPreview, targetId)
     setImportFile(null)
     setImportPreview(null)
     if (importFileRef.current) importFileRef.current.value = ''
     navigate(`/projects/${targetId}/merge`)
-  }, [importFile, importPreview, navigate])
+  }, [importFile, importLoading, importPreview, navigate])
 
   const handleImportCancel = useCallback(() => {
     setImportFile(null)
@@ -313,6 +383,9 @@ export default function Dashboard() {
   const createMutation = useMutation({
     mutationFn: projectsApi.create,
     onSuccess: (project) => {
+      // #1206: a new project can take a deleted one's id — its cached pages
+      // showed the deleted project's name.
+      forgetCachedProjectPages(queryClient)
       queryClient.invalidateQueries({ queryKey: ['projects'] })
       setIsNewProjectOpen(false)
       setNewProjectName('')
@@ -321,13 +394,9 @@ export default function Dashboard() {
     },
   })
 
-  const deleteMutation = useMutation({
-    mutationFn: projectsApi.delete,
-    onSuccess: () => {
-      setDeleteProjectId(null)
-      queryClient.invalidateQueries({ queryKey: ['projects'] })
-    },
-  })
+  const deleteTarget = deleteProjectId !== null
+    ? data?.projects.find(p => p.id === deleteProjectId) ?? null
+    : null
 
   const updateProjectMutation = useMutation({
     mutationFn: ({ id, data }: { id: number; data: Partial<Pick<Project, 'name' | 'description' | 'status'>> }) =>
@@ -350,6 +419,7 @@ export default function Dashboard() {
   const duplicateMutation = useMutation({
     mutationFn: (projectId: number) => projectPortabilityApi.duplicateProject(projectId),
     onSuccess: (result) => {
+      forgetCachedProjectPages(queryClient)  // #1206: the copy may take a reused id
       queryClient.invalidateQueries({ queryKey: ['projects'] })
       setDuplicateProjectId(null)
       toast.success(`Duplicated as "${result.project_name}"`, staleToast(result))
@@ -369,6 +439,23 @@ export default function Dashboard() {
 
   const activeProjects = data?.projects.filter(s => s.status === 'active') || []
   const archivedProjects = data?.projects.filter(s => s.status === 'archived') || []
+
+  // ONE builder for both lists' cards. The archived list wrote its own, and its
+  // Duplicate called the mutation directly — skipping #482's confirmation (a copy
+  // has its own identity and cannot be merged back) — with `duplicating` unscoped,
+  // so every archived card read "Duplicating…" during any duplicate (10-14).
+  const cardProps = (project: Project) => ({
+    project,
+    onArchive: () => archiveMutation.mutate(project),
+    onDelete: () => setDeleteProjectId(project.id),
+    onDuplicate: () => setDuplicateProjectId(project.id),
+    duplicating: duplicateMutation.isPending && duplicateProjectId === project.id,
+    editingProject,
+    onRename: (id: number, field: 'name' | 'description') => setEditingProject({ id, field }),
+    onUpdate: (id: number, data: Partial<Pick<Project, 'name' | 'description'>>) =>
+      updateProjectMutation.mutate({ id, data }),
+    onEditEnd: () => setEditingProject(null),
+  })
 
   return (
     <div className="min-h-screen bg-mm-bg">
@@ -416,10 +503,15 @@ export default function Dashboard() {
                 e.target.value = ''
               }}
             />
+            {/* #1203 — busy is `aria-disabled` + `aria-busy` + the click guard, never
+                `disabled` (#965): Chrome blurred the focused button 58 ms after the
+                pick, so focus sat on <body> for the check and the preview dialog's
+                focus return (#959) had no opener. */}
             <button
-              onClick={() => importFileRef.current?.click()}
-              disabled={importValidating}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-sm font-medium border border-border text-mm-text bg-mm-surface hover:bg-mm-surface-hover transition-colors disabled:opacity-50"
+              onClick={() => { if (!importValidating) importFileRef.current?.click() }}
+              aria-disabled={importValidating || undefined}
+              aria-busy={importValidating || undefined}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-sm font-medium border border-border text-mm-text bg-mm-surface hover:bg-mm-surface-hover transition-colors aria-disabled:opacity-50 aria-busy:cursor-wait"
             >
               <FileInput className="w-4 h-4" />
               {importValidating ? 'Validating...' : 'Import Project'}
@@ -473,9 +565,22 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {/* #1203 — why the picked file was refused, under the button that picked
+            it. Focus stays on that button; the alert announces. Red-700, not the
+            600 Settings uses on its white card: this sits on the grey page
+            (`mm-bg`), where 600 measures about 4.0:1. */}
+        {importRefusal && (
+          <p key={importRefusal.key} role="alert" className="-mt-4 mb-4 text-sm text-red-700 dark:text-red-400 leading-relaxed">
+            {importRefusal.text}
+          </p>
+        )}
+
         {/* Import Preview AlertDialog */}
-        <AlertDialog open={importPreview !== null} onOpenChange={(open) => { if (!open) handleImportCancel() }}>
-          <AlertDialogContent className="max-w-xl">
+        {/* #1035 review §4 #8 — Escape closed this mid-import (the import ran on,
+            unseen), and the buttons went natively `disabled`, which drops focus to
+            <body> (#965). The Root refuses a close while it runs. */}
+        <AlertDialog open={importPreview !== null} onOpenChange={(open) => { if (!open && !importLoading) handleImportCancel() }}>
+          <AlertDialogContent className={`max-w-xl ${DIALOG_FITS_VIEWPORT}`}>
             <AlertDialogHeader>
               <AlertDialogTitle>Import Project</AlertDialogTitle>
               <AlertDialogDescription asChild>
@@ -528,6 +633,7 @@ export default function Dashboard() {
                       <span>{countLabel(importPreview.manifest.project_summary.canvas_count, 'canvas', 'canvases')}</span>
                     </div>
                   )}
+                  <ProjectFileOrigin appVersion={importPreview?.manifest?.app_version} />
                   {importPreview?.warnings && importPreview.warnings.length > 0 && (
                     <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-md p-2.5 text-xs text-amber-800 dark:text-amber-200">
                       {importPreview.warnings.map((w, i) => <p key={i}>{w}</p>)}
@@ -536,35 +642,60 @@ export default function Dashboard() {
                 </div>
               </AlertDialogDescription>
             </AlertDialogHeader>
+            {importLoading && (
+              <LongWaitStatus
+                label={importWaitLabel(importMode)}
+                firstAnnouncement="Importing the project. Keep Mixed Measures open until this finishes."
+              >
+                {importWaitSentence(importMode, !!importPreview?.existing_project)}
+              </LongWaitStatus>
+            )}
             <AlertDialogFooter className="flex-wrap gap-2 sm:space-x-0">
-              <AlertDialogCancel disabled={importLoading}>Cancel</AlertDialogCancel>
+              <AlertDialogCancel aria-disabled={importLoading || undefined}>Cancel</AlertDialogCancel>
               {importPreview?.existing_project ? (
                 <>
+                  {/* #1258 — the busy word goes on the button that was PRESSED;
+                      `scroll-mb-6` is #1139's: `block: 'nearest'` ignores the
+                      dialog's padding and would land the button flush on its edge. */}
                   <Button
+                    ref={busyRef('new')}
                     variant="outline"
+                    className="scroll-mb-6"
                     onClick={() => handleImportConfirm('new')}
-                    disabled={importLoading}
+                    aria-disabled={importLoading || undefined}
+                    aria-busy={(importLoading && importMode === 'new') || undefined}
                   >
-                    Import as new copy
+                    {importLoading && importMode === 'new' ? 'Importing…' : 'Import as new copy'}
                   </Button>
                   <Button
+                    ref={busyRef('overwrite')}
                     variant="destructive"
+                    className="scroll-mb-6"
                     onClick={() => handleImportConfirm('overwrite')}
-                    disabled={importLoading}
+                    aria-disabled={importLoading || undefined}
+                    aria-busy={(importLoading && importMode === 'overwrite') || undefined}
                   >
-                    {importLoading ? 'Working…' : 'Overwrite my copy'}
+                    {importLoading && importMode === 'overwrite' ? 'Working…' : 'Overwrite my copy'}
                   </Button>
                   <Button
                     variant="default"
                     onClick={handleMergeStart}
-                    disabled={importLoading}
+                    aria-disabled={importLoading || undefined}
                   >
                     Merge coding in…
                   </Button>
                 </>
               ) : (
-                <AlertDialogAction onClick={() => handleImportConfirm('new')} disabled={importLoading}>
-                  {importLoading ? 'Importing...' : 'Import'}
+                // `preventDefault`: an AlertDialogAction is a Close, and this one
+                // must stay open while the import runs.
+                <AlertDialogAction
+                  ref={busyRef('new')}
+                  className="scroll-mb-6"
+                  onClick={(e) => { e.preventDefault(); void handleImportConfirm('new') }}
+                  aria-disabled={importLoading || undefined}
+                  aria-busy={importLoading || undefined}
+                >
+                  {importLoading ? 'Importing…' : 'Import'}
                 </AlertDialogAction>
               )}
             </AlertDialogFooter>
@@ -611,18 +742,7 @@ export default function Dashboard() {
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
               {activeProjects.map((project) => (
-                <ProjectCard
-                  key={project.id}
-                  project={project}
-                  onArchive={() => archiveMutation.mutate(project)}
-                  onDelete={() => setDeleteProjectId(project.id)}
-                  onDuplicate={() => setDuplicateProjectId(project.id)}
-                  duplicating={duplicateMutation.isPending && duplicateProjectId === project.id}
-                  editingProject={editingProject}
-                  onRename={(id, field) => setEditingProject({ id, field })}
-                  onUpdate={(id, data) => updateProjectMutation.mutate({ id, data })}
-                  onEditEnd={() => setEditingProject(null)}
-                />
+                <ProjectCard key={project.id} {...cardProps(project)} />
               ))}
             </div>
 
@@ -631,18 +751,7 @@ export default function Dashboard() {
                 <h3 className="text-sm font-medium text-mm-text-muted mb-3">Archived</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 opacity-60">
                   {archivedProjects.map((project) => (
-                    <ProjectCard
-                      key={project.id}
-                      project={project}
-                      onArchive={() => archiveMutation.mutate(project)}
-                      onDelete={() => setDeleteProjectId(project.id)}
-                      onDuplicate={() => duplicateMutation.mutate(project.id)}
-                      duplicating={duplicateMutation.isPending}
-                      editingProject={editingProject}
-                      onRename={(id, field) => setEditingProject({ id, field })}
-                      onUpdate={(id, data) => updateProjectMutation.mutate({ id, data })}
-                      onEditEnd={() => setEditingProject(null)}
-                    />
+                    <ProjectCard key={project.id} {...cardProps(project)} />
                   ))}
                 </div>
               </>
@@ -651,18 +760,12 @@ export default function Dashboard() {
         )}
       </main>
 
-      <ConfirmDialog
-        open={deleteProjectId !== null}
-        onOpenChange={(open) => { if (!open) setDeleteProjectId(null) }}
-        title="Delete project"
-        description="Are you sure you want to delete this project? This cannot be undone."
-        loading={deleteMutation.isPending}
-        loadingLabel="Deleting..."
-        onConfirm={() => {
-          if (deleteProjectId !== null) {
-            deleteMutation.mutate(deleteProjectId)
-          }
-        }}
+      {/* #1035 — names the project and what it holds, offers Archive, says the
+          wait; no client time limit on the request. */}
+      <ProjectDeleteDialog
+        project={deleteTarget}
+        onClose={() => setDeleteProjectId(null)}
+        onArchive={(project) => archiveMutation.mutate(project)}
       />
 
       {/* #482: duplicate is an INDEPENDENT copy — set expectations up front so no one
@@ -757,17 +860,17 @@ function ProjectCard({
                 participants/coders below stay conditional because they are not
                 sources. Accents match TopRail's per-workspace colors. */}
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-mm-text-muted">
-              <span><strong className="text-mm-green-text">{project.conversation_count}</strong> {plural(project.conversation_count, 'conversation', 'conversations')}</span>
-              <span><strong className="text-mm-purple-text">{project.document_count}</strong> {plural(project.document_count, 'document', 'documents')}</span>
-              <span><strong className="text-mm-orange-text">{project.dataset_count}</strong> {plural(project.dataset_count, 'dataset', 'datasets')}</span>
-              <span><strong className="text-mm-teal-text">{project.observation_count}</strong> {plural(project.observation_count, 'observation', 'observations')}</span>
+              <span><strong className="text-mm-green-text">{project.conversation_count.toLocaleString()}</strong> {plural(project.conversation_count, 'conversation', 'conversations')}</span>
+              <span><strong className="text-mm-purple-text">{project.document_count.toLocaleString()}</strong> {plural(project.document_count, 'document', 'documents')}</span>
+              <span><strong className="text-mm-orange-text">{project.dataset_count.toLocaleString()}</strong> {plural(project.dataset_count, 'dataset', 'datasets')}</span>
+              <span><strong className="text-mm-teal-text">{project.observation_count.toLocaleString()}</strong> {plural(project.observation_count, 'observation', 'observations')}</span>
               {project.participant_count > 0 && (
-                <span><strong className="text-mm-text">{project.participant_count}</strong> {plural(project.participant_count, 'participant', 'participants')}</span>
+                <span><strong className="text-mm-text">{project.participant_count.toLocaleString()}</strong> {plural(project.participant_count, 'participant', 'participants')}</span>
               )}
               {/* Track J · Group A (#1): only surfaces on multi-coder projects — a
                   solo "1 coder" on every project would just be noise. */}
               {project.coder_count > 1 && (
-                <span><strong className="text-mm-text">{project.coder_count}</strong> coders</span>
+                <span><strong className="text-mm-text">{project.coder_count.toLocaleString()}</strong> coders</span>
               )}
             </div>
           </div>

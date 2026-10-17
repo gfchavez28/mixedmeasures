@@ -258,6 +258,8 @@ export interface CodebookImportResult {
   codes_uncategorized: number
   /** #869 (d): codes created WITH their declared rating scale. */
   scales_imported: number
+  /** #1222: code sets the import created (row 48) — returned since then, declared now. */
+  code_sets_created: number
 }
 
 // ── API ────────────────────────────────────────────────────────────────

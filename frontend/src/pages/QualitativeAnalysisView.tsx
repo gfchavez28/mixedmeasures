@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback, useEffect, useRef, type KeyboardEvent a
 import { useParams, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle, useDefaultLayout } from 'react-resizable-panels'
+import { ANALYSIS_DEFAULT_LAYOUT, ANALYSIS_SIDEBAR_PANEL } from '@/lib/analysis-sidebar'
 import {
   Download,
   ChevronDown,
@@ -1336,12 +1337,12 @@ export default function QualitativeAnalysisView() {
       ) : (
       <PanelGroup
         orientation="horizontal"
-        defaultLayout={defaultLayout}
+        defaultLayout={defaultLayout ?? ANALYSIS_DEFAULT_LAYOUT}
         onLayoutChanged={onLayoutChanged}
         className="flex-1"
       >
         {/* Sidebar */}
-        <Panel id="sidebar" defaultSize="22" minSize="15" maxSize="32">
+        <Panel id="sidebar" {...ANALYSIS_SIDEBAR_PANEL}>
           <div className="h-full bg-mm-surface border-r flex flex-col overflow-y-auto">
             {/* Section 1: Palette (hidden on Quote Board) */}
             {qa.tab !== 'quoteboard' && <div className={`border-b shrink-0 ${materialsOpen ? 'max-h-[200px]' : ''}`}>

@@ -62,11 +62,11 @@ const ON_QUIT: BackupInfo = {
   backup_type: 'shutdown',
 }
 
-function renderSection(onRestore = vi.fn(), restoreBusy = false) {
+function renderSection(onRestore = vi.fn(), restoreBusy = false, checkingFilename: string | null = null) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const utils = render(
     <QueryClientProvider client={client}>
-      <BackupHistorySection onRestore={onRestore} restoreBusy={restoreBusy} />
+      <BackupHistorySection onRestore={onRestore} restoreBusy={restoreBusy} checkingFilename={checkingFilename} />
     </QueryClientProvider>,
   )
   return { ...utils, onRestore }
@@ -139,7 +139,8 @@ describe('BackupHistorySection', () => {
     // The description, not just the name: both of the first two are automatic.
     // #1132 — and *Backup now* writes the first kind too, so it says so.
     expect(rows[0]).toHaveTextContent('taken on the automatic schedule or with Backup now')
-    expect(rows[1]).toHaveTextContent('taken when Mixed Measures last closed')
+    // #1164 (a): not "LAST closed" — that was false of every on-quit row but one.
+    expect(rows[1]).toHaveTextContent('taken when Mixed Measures closed')
   })
 
   it('🔴 names every control by its own row', async () => {
@@ -184,6 +185,23 @@ describe('BackupHistorySection', () => {
     expect(button).not.toBeDisabled()
     fireEvent.click(button)
     expect(onRestore).not.toHaveBeenCalled()
+  })
+
+  it('#1162 — the wait shows on the row that was pressed, and its name does not change', async () => {
+    list.mockResolvedValue([AUTO, ON_QUIT])
+    renderSection(vi.fn(), true, ON_QUIT.filename)
+    await openHistory()
+    const [auto, onQuit] = await screen.findAllByRole('button', { name: /^Restore from / })
+    expect(onQuit).toHaveAttribute('aria-busy', 'true')
+    // #770: transient state never rides in the name; WCAG 2.5.3: the visible word
+    // stays in it. Only the icon changes (a spinner, hidden from the tree).
+    expect(onQuit).toHaveAccessibleName(`Restore from the “On quit” backup from ${formatTakenAt(ON_QUIT.created_at)}`)
+    expect(onQuit).toHaveTextContent(/^Restore$/)
+    expect(onQuit.querySelector('svg')).toHaveClass('animate-spin')
+    // The other rows only refuse — they are not the one being read.
+    expect(auto).not.toHaveAttribute('aria-busy')
+    expect(auto).toHaveAttribute('aria-disabled', 'true')
+    expect(auto.querySelector('svg')).not.toHaveClass('animate-spin')
   })
 
   it('downloads the backup it was asked for', async () => {

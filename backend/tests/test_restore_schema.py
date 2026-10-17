@@ -42,7 +42,9 @@ from app.database import (
     upgrade_database_file,
 )
 from app.routers import backup as backup_router
-from app.services.backup import APP_VERSION, create_backup, restore_from_backup, validate_backup
+from app.services.backup import (
+    APP_VERSION, RestoreNotStarted, create_backup, restore_from_backup, validate_backup,
+)
 from app.services.restore_gate import DatabaseGate
 from tests.backup_support import head_revision, stamp_revision
 
@@ -207,11 +209,14 @@ class TestAnOlderBackup:
             raise RuntimeError("simulated migration failure")
 
         monkeypatch.setattr(backup_service, "upgrade_database_file", fails)
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(RestoreNotStarted) as exc:
             restore_from_backup(archive, install.db, install.docs, install.media, install.backups)
 
         assert "could not be upgraded" in str(exc.value)
-        assert "Nothing has been changed" in str(exc.value)
+        assert "simulated migration failure" in str(exc.value)
+        assert "Nothing was changed" in str(exc.value)
+        # #1140: the pre-restore backup WAS written by then, and the sentence says where.
+        assert "“Before a restore” backup" in str(exc.value)
         assert _digest(install.db) == live_before
         assert database_file_revision(install.db) == head_revision()
 
@@ -225,7 +230,7 @@ class TestAnOlderBackup:
         live_before = _digest(install.db)
         monkeypatch.setattr(backup_service, "upgrade_database_file", lambda path: None)
 
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(RestoreNotStarted) as exc:
             restore_from_backup(archive, install.db, install.docs, install.media, install.backups)
 
         assert "could not be upgraded" in str(exc.value)
@@ -250,9 +255,11 @@ class TestABackupThisBuildCannotRead:
         assert APP_VERSION in message
         assert "Nothing has been changed" in message
 
-        with pytest.raises(ValueError) as restore_exc:
+        with pytest.raises(RestoreNotStarted) as restore_exc:
             restore_from_backup(archive, install.db, install.docs, install.media, install.backups)
+        # Verbatim: the refusal already says nothing has been changed (#1140).
         assert str(restore_exc.value) == message
+        assert restore_exc.value.status_code == 400
         assert _digest(install.db) == live_before
         assert not list(install.backups.glob("pre_restore_*")), (
             "a pre-restore backup was taken for a restore that was always going to be refused"

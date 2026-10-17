@@ -27,7 +27,9 @@ const linkableRows = vi.fn()
 const DEFAULT_DATASETS = [{ id: 5, name: 'Survey' }, { id: 6, name: 'Census' }]
 const listDatasets = vi.fn()
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async () => ({
+  // #1053 — the panel reads a refused link's sentence through the real helpers.
+  ...await vi.importActual<object>('@/lib/api/error-utils'),
   participantsApi: {
     list: (...a: unknown[]) => listParticipants(...a),
     delete: () => Promise.resolve(),
@@ -49,6 +51,7 @@ vi.mock('@/layouts/ProjectLayout', () => ({ useProjectLayout: () => ({ projectId
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 import ParticipantsPage from './ParticipantsPage'
+import { toast } from 'sonner'
 
 beforeEach(() => {
   listDatasets.mockImplementation(() => Promise.resolve({ datasets: DEFAULT_DATASETS }))
@@ -114,7 +117,14 @@ function renderPage(people: Participant[]) {
       total_items: 1 + p.linked_documents.length * 2,
     }))
   })
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  // The app's own mutation default (`main.tsx`): a mutation with no `onError` of
+  // its own falls to this generic toast — what a refused link used to show (#1053).
+  const qc = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { onError: () => toast.error('Something went wrong. Please try again.') },
+    },
+  })
   lastClient = qc
   return render(
     <QueryClientProvider client={qc}>
@@ -323,7 +333,8 @@ describe('#1091 — what else the panel must survive', () => {
     await screen.findByRole('heading', { level: 2, name: 'P001' })
     fireEvent.click(screen.getByRole('button', { name: "Remove P001's data (withdrawal request)" }))
     const confirm = await screen.findByRole('button', { name: /Back up and remove/ })
-    await waitFor(() => expect(confirm).toBeEnabled())
+    // #1152 — it waits for its own report as `aria-disabled` (never `disabled`).
+    await waitFor(() => expect(confirm).not.toHaveAttribute('aria-disabled'))
     fireEvent.click(confirm)
     await waitFor(() => expect(withdraw).toHaveBeenCalled())
     await waitFor(() => expect(screen.queryByRole('complementary')).toBeNull())
@@ -366,11 +377,13 @@ describe('#1124 — the panel’s controls say what they act on', () => {
  * Census (id 6) holds R001 (taken by P009) and R002 (free).
  */
 describe('#1130 — linking a record from the panel', () => {
+  // #1053 — one page of the server's search (`LinkableRowsPage`).
   const census = {
     rows: [
-      { row_id: 21, row_identifier: 'R001', display_values: ['North'], linked_participant_name: 'P009' },
-      { row_id: 22, row_identifier: 'R002', display_values: ['South'], linked_participant_name: null },
+      { row_id: 21, row_identifier: 'R001', display_values: ['North'], linked_participant_id: 9, linked_participant_name: 'P009', matched: null },
+      { row_id: 22, row_identifier: 'R002', display_values: ['South'], linked_participant_id: null, linked_participant_name: null, matched: null },
     ],
+    total: 2, limit: 50, offset: 0, link_refusal: null,
   }
 
   async function openCensusPicker(over: Partial<Participant> = {}) {
@@ -440,6 +453,30 @@ describe('#1130 — linking a record from the panel', () => {
     // synchronously this passes with the guard deleted (mutation-proven, run 11).
     await act(async () => { await new Promise(r => setTimeout(r, 0)) })
     expect(linkDatasetRow).toHaveBeenCalledTimes(1)
+  })
+
+  it('a link says what it linked', async () => {
+    linkDatasetRow.mockResolvedValue({})
+    const panel = await openCensusPicker()
+    fireEvent.click(await within(panel).findByRole('button', { name: 'R002 South' }))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Linked R002 in Census'))
+  })
+
+  it('#1053 — a refused link says WHY in the picker, and refreshes it so the record shows as taken', async () => {
+    // Before: no `onError`, so the app-wide "Something went wrong" hid the 409.
+    vi.mocked(toast.error).mockClear()
+    linkDatasetRow.mockRejectedValue(Object.assign(new Error('refused'), {
+      status: 409, response: { data: { detail: 'Record R002 is already linked to P010.' } },
+    }))
+    const panel = await openCensusPicker()
+    await within(panel).findByRole('button', { name: 'R002 South' })
+    const asked = linkableRows.mock.calls.length
+    fireEvent.click(within(panel).getByRole('button', { name: 'R002 South' }))
+    expect(await within(panel).findByRole('alert')).toHaveTextContent('Record R002 is already linked to P010.')
+    await waitFor(() => expect(linkableRows.mock.calls.length).toBeGreaterThan(asked))
+    // The picker stays open on a refusal — the researcher picks another record.
+    expect(within(panel).getByRole('textbox', { name: 'Search Census records' })).toBeInTheDocument()
+    expect(toast.error).not.toHaveBeenCalled()
   })
 
   it('a link refreshes the withdrawal summary, which lists what is linked', async () => {

@@ -112,7 +112,8 @@ export const EquivalenceRow = memo(function EquivalenceRow({
   isDatasetDotMuted,
   onToggleDatasetMute,
 }: EquivalenceRowProps) {
-  const ariaLabel = `${bracketName}, row ${rowIndex} of ${rowCount}: ${row.auto_label}`
+  // a11y-name-sweep run 12: counted from 1 — "row 0 of 7" was the index, read out.
+  const ariaLabel = `${bracketName}, row ${rowIndex + 1} of ${rowCount}: ${row.auto_label}`
 
   const canMoveUp = rowIndex > 0
   const canMoveDown = rowIndex < rowCount - 1
@@ -272,7 +273,10 @@ export const EquivalenceRow = memo(function EquivalenceRow({
           <button
             type="button"
             tabIndex={0}
-            aria-label={`Drag row ${rowIndex} of ${rowCount}. Ctrl+Shift+Up or Down to reorder.`}
+            // a11y-name-sweep run 12: "Move", not "Drag" — this grip takes keys only (no
+            // pointer listener; the mouse path is the menu's Move up/down), and the name
+            // is a claim about the act (#912). It names its item, and counts from 1.
+            aria-label={`Move ${row.auto_label}, row ${rowIndex + 1} of ${rowCount}. Ctrl+Shift+Up or Down to reorder.`}
             className="absolute left-0.5 top-1/2 -translate-y-1/2 text-mm-text-muted opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity cursor-grab focus-visible:ring-2 focus-visible:ring-ring focus:outline-none rounded"
             onKeyDown={(e) => {
               if (e.ctrlKey && e.shiftKey && (e.key === 'ArrowUp' || e.key === 'Up')) {

@@ -12,7 +12,7 @@
  * previewing again does not re-upload the recording.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router'
@@ -48,7 +48,11 @@ vi.mock('@/lib/pending-import-files', () => ({
   consumePendingImportFiles: () => null,
 }))
 
+const toasts = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn() }))
+vi.mock('sonner', () => ({ toast: toasts }))
+
 import ObservationImport from './ObservationImport'
+import { ApiError } from '@/lib/api/client'
 
 const OBS = { id: 7, name: 'rec', has_media: true }
 
@@ -190,5 +194,160 @@ describe('ObservationImport confirm step (#638)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Preview clips' }))
     await waitFor(() => expect(previewSegmentation).toHaveBeenCalledTimes(2))
     expect(upload).toHaveBeenCalledTimes(1)
+  })
+})
+
+/** A promise the test settles by hand, so the busy window can be inspected. */
+function deferred<T>() {
+  let resolve!: (v: T) => void
+  let reject!: (e: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
+const settle = () => new Promise(r => setTimeout(r, 0))
+
+describe('a failed preview or cut is heard, and keeps focus (#1195)', () => {
+  it('the refusal is an alert, and focus stays on the pressed button through the wait', async () => {
+    const pending = deferred<never>()
+    previewSegmentation.mockReturnValueOnce(pending.promise)
+    const { container } = renderPage()
+    await reachSetupWithCueFile(container)
+
+    const button = screen.getByRole('button', { name: 'Preview clips' })
+    button.focus()
+    fireEvent.click(button)
+    await waitFor(() => expect(previewSegmentation).toHaveBeenCalledTimes(1))
+
+    // Busy: still the SAME focused element — announced busy and unavailable,
+    // never natively disabled (which blurs it to <body>).
+    const busy = screen.getByRole('button', { name: 'Working out the clips…' })
+    expect(busy).toBe(button)
+    expect(busy).toHaveAttribute('aria-busy', 'true')
+    expect(busy).toHaveAttribute('aria-disabled', 'true')
+    expect(busy).not.toBeDisabled()
+    expect(document.activeElement).toBe(button)
+    expect(document.activeElement).not.toBe(document.body)
+
+    pending.reject(new ApiError(400, { detail: 'This recording has no length we can read.' }, {}))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('This recording has no length we can read.')
+    expect(screen.getByRole('button', { name: 'Preview clips' })).toBe(document.activeElement)
+    expect(document.activeElement).not.toBe(document.body)
+  })
+
+  it('a second press while it works sends nothing — and Back waits too', async () => {
+    const pending = deferred<typeof PREVIEW>()
+    previewSegmentation.mockReturnValueOnce(pending.promise)
+    const { container } = renderPage()
+    await reachSetupWithCueFile(container)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview clips' }))
+    await waitFor(() => expect(previewSegmentation).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Working out the clips…' }))
+    const back = screen.getByRole('button', { name: 'Back' })
+    expect(back).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(back)
+    // The guard runs before any await in the handler; WAIT anyway, so a guard
+    // that moved after one would still be caught (csv-reading.md §4).
+    await settle()
+    expect(previewSegmentation).toHaveBeenCalledTimes(1)
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('Starting clips')).toBeInTheDocument()
+
+    pending.resolve(PREVIEW)
+    expect(await screen.findByText(/12 clips from this recording/)).toBeInTheDocument()
+  })
+
+  it('the cut keeps focus while it works and a second press sends nothing', async () => {
+    const pending = deferred<never>()
+    cutSegmentation.mockReturnValueOnce(pending.promise)
+    const { container } = renderPage()
+    await reachSetupWithCueFile(container)
+    fireEvent.click(screen.getByRole('button', { name: 'Preview clips' }))
+
+    const cut = await screen.findByRole('button', { name: 'Cut 12 clips' })
+    cut.focus()
+    fireEvent.click(cut)
+    await waitFor(() => expect(cutSegmentation).toHaveBeenCalledTimes(1))
+
+    const busy = screen.getByRole('button', { name: 'Cutting clips…' })
+    expect(busy).toBe(cut)
+    expect(busy).toHaveAttribute('aria-busy', 'true')
+    expect(busy).not.toBeDisabled()
+    expect(document.activeElement).toBe(cut)
+    fireEvent.click(busy)
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    await settle()
+    expect(cutSegmentation).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: 'Cutting clips…' })).toBeInTheDocument()
+  })
+})
+
+describe('the rail shows only the steps this import takes (#1184)', () => {
+  const railSteps = () => {
+    const rail = screen.getByRole('navigation', { name: 'Import progress' })
+    return within(rail).getAllByRole('listitem').map(li => ({
+      label: li.textContent?.replace(/^\d/, '').replace(', completed', ''),
+      state: li.getAttribute('data-step-state'),
+    }))
+  }
+
+  it('"Start empty" never shows Confirm clips — so it can never read as done', async () => {
+    const { container } = renderPage()
+    chooseRecording(container)
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }))
+    expect(railSteps().map(s => s.label)).toEqual(['Upload', 'Set up clips', 'Results'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create observation' }))
+    await screen.findByText(/"rec" is ready/)
+    expect(railSteps()).toEqual([
+      { label: 'Upload', state: 'done' },
+      { label: 'Set up clips', state: 'done' },
+      { label: 'Results', state: 'current' },
+    ])
+  })
+
+  it('a mode that previews puts Confirm clips on the rail, while still on Set up', async () => {
+    const { container } = renderPage()
+    await reachSetupWithCueFile(container)
+    expect(railSteps().map(s => s.label)).toEqual(['Upload', 'Set up clips', 'Confirm clips', 'Results'])
+    expect(railSteps()[1].state).toBe('current')
+  })
+})
+
+describe('the recording drop takes ONE recording and says so (#1161)', () => {
+  const zone = () => screen.getByText(/Drag and drop a recording here/).closest('div') as HTMLElement
+  const rec = (name: string) => new File(['x'], name, { type: '' })
+
+  it('two recordings: the first is taken and the second is named', () => {
+    renderPage()
+    fireEvent.drop(zone(), { dataTransfer: { files: [rec('a.mp4'), rec('b.mov')] } })
+    expect(screen.getByLabelText('Name')).toHaveValue('a')
+    expect(toasts.error).toHaveBeenCalledWith('Only one recording can be added — “b.mov” was not added.')
+  })
+
+  it('a wrong file first is skipped to the recording after it, and named', () => {
+    renderPage()
+    fireEvent.drop(zone(), { dataTransfer: { files: [rec('notes.pdf'), rec('b.mov')] } })
+    expect(screen.getByLabelText('Name')).toHaveValue('b')
+    expect(toasts.error).toHaveBeenCalledWith(
+      '“notes.pdf” is not a recording file. A recording can be MP3, M4A, WAV audio; MP4, MOV, WebM video.')
+  })
+
+  it('nothing a recording: nothing is taken, and the sentence names the file', () => {
+    renderPage()
+    fireEvent.drop(zone(), { dataTransfer: { files: [rec('notes.pdf')] } })
+    expect(screen.queryByLabelText('Name')).toBeNull()
+    expect(toasts.error).toHaveBeenCalledWith(expect.stringMatching(/^“notes\.pdf” is not a recording file/))
+  })
+
+  it('one recording: taken, and nothing is said', () => {
+    renderPage()
+    fireEvent.drop(zone(), { dataTransfer: { files: [rec('a.mp4')] } })
+    expect(screen.getByLabelText('Name')).toHaveValue('a')
+    expect(toasts.error).not.toHaveBeenCalled()
   })
 })

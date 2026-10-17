@@ -1,7 +1,8 @@
-import { useState, useRef, useMemo, useCallback, useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useState, useRef, useMemo, useCallback, useEffect, useId, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useParams, Link } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle, useDefaultLayout } from 'react-resizable-panels'
+import { ANALYSIS_DEFAULT_LAYOUT, ANALYSIS_SIDEBAR_PANEL } from '@/lib/analysis-sidebar'
 import {
   RefreshCw,
   ChevronDown,
@@ -63,6 +64,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { metricDisplayLabel } from '@/lib/metric-label'
+import { TEST_TYPE_LABELS, savedTestLabel } from '@/lib/saved-test-label'
 import { generateMaterialAutoName } from '@/lib/material-auto-name'
 import { VALUE_NUMERIC_TYPES } from '@/lib/dataset-constants'
 import {
@@ -82,13 +84,6 @@ const METRIC_TYPE_OPTIONS = [
   { value: 'mean', label: 'Mean' },
   { value: 'domain_aggregate', label: 'Group Aggregate' },
 ]
-
-const TEST_TYPE_LABELS: Record<string, string> = {
-  cronbachs_alpha: "Cronbach's Alpha",
-  independent_t_test: 'Independent T-Test',
-  one_way_anova: 'One-Way ANOVA',
-  split_half: 'Split-Half Reliability',
-}
 
 /**
  * The per-item diagnostics on a Cronbach's alpha result, or `null`.
@@ -257,6 +252,10 @@ export default function AnalysisView() {
     type: 'cronbachs_alpha' | 'group_difference' | 'split_half' | null
     targetId: number
   }>({ open: false, step: 1, type: null, targetId: 0 })
+  // a11y-name-sweep run 12: the dialog's target picker sat beside a `<label>` that
+  // named nothing, so it announced as an unnamed combobox. A `<label htmlFor>` names
+  // a SelectTrigger (a button is labelable — run 3's measurement).
+  const testTargetId = useId()
   const [postHocExpanded, setPostHocExpanded] = useState(true)
 
   // ── Data loading ───────────────────────────────────────────────────────
@@ -1356,12 +1355,12 @@ export default function AnalysisView() {
 
       <PanelGroup
         orientation="horizontal"
-        defaultLayout={defaultLayout}
+        defaultLayout={defaultLayout ?? ANALYSIS_DEFAULT_LAYOUT}
         onLayoutChanged={onLayoutChanged}
         className="flex-1"
       >
         {/* Left sidebar */}
-        <Panel id="sidebar" defaultSize="22" minSize="15" maxSize="32">
+        <Panel id="sidebar" {...ANALYSIS_SIDEBAR_PANEL}>
           <AnalysisSidebar
             pid={pid}
             activeTab={activeTab}
@@ -1804,7 +1803,10 @@ export default function AnalysisView() {
                             onClick={() => computeTestMutation.mutate(test.id)}
                             disabled={computeTestMutation.isPending}
                             title="Compute"
-                            aria-label="Compute test"
+                            // a11y-name-sweep run 12: the name carries the test — with two
+                            // saved tests there were two "Compute test" and two "Delete test",
+                            // in no list and under no row header, one of them a delete (#891 a).
+                            aria-label={`Compute ${savedTestLabel(test)}`}
                           >
                             <Play className="w-3 h-3" />
                           </Button>
@@ -1814,7 +1816,7 @@ export default function AnalysisView() {
                             className="h-7 w-7 p-0 text-red-500 hover:text-red-700"
                             onClick={() => deleteTestMutation.mutate(test.id)}
                             title="Delete"
-                            aria-label="Delete test"
+                            aria-label={`Delete ${savedTestLabel(test)}`}
                           >
                             <Trash2 className="w-3 h-3" />
                           </Button>
@@ -1905,12 +1907,12 @@ export default function AnalysisView() {
 
           {testDialog.step === 2 && (testDialog.type === 'cronbachs_alpha' || testDialog.type === 'split_half') && (
             <div className="space-y-3">
-              <label className="text-sm font-medium">Variable Group</label>
+              <label htmlFor={testTargetId} className="text-sm font-medium">Variable Group</label>
               <Select
                 value={testDialog.targetId ? String(testDialog.targetId) : ''}
                 onValueChange={v => setTestDialog(prev => ({ ...prev, targetId: Number(v) }))}
               >
-                <SelectTrigger>
+                <SelectTrigger id={testTargetId}>
                   <SelectValue placeholder="Select a group..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -1924,13 +1926,13 @@ export default function AnalysisView() {
 
           {testDialog.step === 2 && testDialog.type === 'group_difference' && (
             <div className="space-y-3">
-              <label className="text-sm font-medium">Grouped Metric</label>
-              <p className="text-xs text-mm-text-muted">Only metrics with a grouping variable or dataset grouping are eligible.</p>
+              <label htmlFor={testTargetId} className="text-sm font-medium">Grouped Metric</label>
+              <p id={`${testTargetId}-hint`} className="text-xs text-mm-text-muted">Only metrics with a grouping variable or dataset grouping are eligible.</p>
               <Select
                 value={testDialog.targetId ? String(testDialog.targetId) : ''}
                 onValueChange={v => setTestDialog(prev => ({ ...prev, targetId: Number(v) }))}
               >
-                <SelectTrigger>
+                <SelectTrigger id={testTargetId} aria-describedby={`${testTargetId}-hint`}>
                   <SelectValue placeholder="Select a metric..." />
                 </SelectTrigger>
                 <SelectContent>

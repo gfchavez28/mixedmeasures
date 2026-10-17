@@ -137,9 +137,11 @@ derive the enumeration from the artifact the next variant must touch.
 
 Updates come from GitHub Releases via `electron-updater`. The app checks on launch
 and every four hours, downloads in the background, and installs only when the user
-asks or on the next natural quit — it never interrupts work. The check is a single
-HTTPS request carrying the version and platform; it is switchable off in Settings
-and no other data leaves the machine.
+asks or on the next natural quit — it never interrupts work. The check asks GitHub
+for the newest release's update file for this platform; electron-updater adds an
+`x-user-staging-id` header, a random UUID it creates once and keeps in
+`<userData>/.updaterId` (`AppUpdater.getOrCreateStagingUserId`). No project data is
+sent, and the check is switchable off in Settings.
 
 Four things are load-bearing when changing anything here:
 
@@ -260,8 +262,11 @@ and confirm the backend process exits and a shutdown backup is written.
   database with a missing key file fails clearly toward the recovery key rather
   than minting a useless new one.
 - On Windows, process teardown uses `taskkill /T /F`, so the graceful-shutdown
-  backup does not run on a Windows quit; the periodic auto-backup is the
-  mitigation. POSIX platforms get a clean `SIGTERM` shutdown.
+  backup does not run on a Windows quit. The automatic backup is the mitigation:
+  since #1186 it is taken a couple of minutes after launch whenever the last one is
+  more than the interval old (4 h by default), so every Windows session longer than
+  that gets one — it used to need the app to stay open a whole interval. POSIX
+  platforms get a clean `SIGTERM` shutdown.
 - The shipped Electron runtime is locked to a release on a supported line (44.5.1,
   taken on 2026-10-04 as the head of the 44 line; 42 reaches end of life 2026-10-20),
   with a floor guarded by `runtime-floor.test.js`. **Supported is dated:** Electron

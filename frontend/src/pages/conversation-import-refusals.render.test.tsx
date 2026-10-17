@@ -162,6 +162,101 @@ describe('#1127 — a refused transcript is named, and stops the wizard', () => 
   })
 })
 
+describe('#1259 — removing a refused file removes its refusal, and focus lands', () => {
+  /** Files in `refused` are refused at preview; the rest read. */
+  function refusing(refused: string[]) {
+    api.conversations.preview.mockImplementation((_pid: number, file: File) =>
+      refused.includes(file.name) ? Promise.reject(new Error(SENTENCE)) : Promise.resolve(preview()))
+  }
+
+  it('the Columns step: Remove clears the alert, keeps focus off <body>, and Speakers opens clean', async () => {
+    refusing(['b.csv'])
+    const { container } = renderPage()
+    choose(container, ['a.csv', 'b.csv'])
+    fireEvent.click(await screen.findByRole('button', { name: 'Next' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }))
+    expect(await screen.findByText(/Remove that file below/)).toBeInTheDocument()
+
+    const remove = screen.getByRole('button', { name: 'Remove b.csv' })
+    remove.focus()
+    fireEvent.click(remove)
+    await waitFor(() => expect(screen.queryByText(/Remove that file below/)).not.toBeInTheDocument())
+    expect(screen.queryByText(new RegExp(SENTENCE.slice(0, 30)))).not.toBeInTheDocument()
+    expect(document.activeElement).not.toBe(document.body)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Continue' }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await waitFor(() => expect(screen.getByText('Map Speakers')).toBeInTheDocument())
+    expect(screen.queryByText(new RegExp(SENTENCE.slice(0, 30)))).not.toBeInTheDocument()
+  })
+
+  it('two refused files: removing one leaves the other’s sentence alone, and lands on its Remove', async () => {
+    refusing(['b.csv', 'c.csv'])
+    const { container } = renderPage()
+    choose(container, ['a.csv', 'b.csv', 'c.csv'])
+    fireEvent.click(await screen.findByRole('button', { name: 'Next' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }))
+    expect(await screen.findByText(/Remove those files below/)).toBeInTheDocument()
+
+    // A press focuses the button (fireEvent.click alone does not).
+    const removeB = screen.getByRole('button', { name: 'Remove b.csv' })
+    removeB.focus()
+    fireEvent.click(removeB)
+    const alert = await screen.findByText(/Remove that file below/)
+    expect(alert).toHaveTextContent(`“c.csv”: ${SENTENCE}`)
+    expect(alert).not.toHaveTextContent('“b.csv”')
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Remove c.csv' }))
+  })
+
+  it('focus that is somewhere real is never moved by the landing', async () => {
+    refusing(['b.csv', 'c.csv'])
+    const { container } = renderPage()
+    choose(container, ['a.csv', 'b.csv', 'c.csv'])
+    fireEvent.click(await screen.findByRole('button', { name: 'Next' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }))
+    await screen.findByText(/Remove those files below/)
+    const back = screen.getByRole('button', { name: 'Back' })
+    back.focus()
+    fireEvent.click(screen.getByRole('button', { name: 'Remove b.csv' }))
+    await screen.findByText(/Remove that file below/)
+    expect(document.activeElement).toBe(back)
+  })
+
+  it('the upload step: removing the file a preview refused takes its sentence; removing another keeps it', async () => {
+    refusing(['a.csv'])
+    const { container } = renderPage()
+    choose(container, ['a.csv', 'b.csv', 'c.csv', 'd.csv'])
+    fireEvent.click(await screen.findByRole('button', { name: 'Next' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(`“a.csv”: ${SENTENCE}`)
+
+    // Removing a file the sentence is NOT about leaves it — it is still true.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove d.csv' }))
+    expect(screen.getByRole('alert')).toHaveTextContent(`“a.csv”: ${SENTENCE}`)
+
+    const removeA = screen.getByRole('button', { name: 'Remove a.csv' })
+    removeA.focus()
+    fireEvent.click(removeA)
+    await waitFor(() => expect(screen.queryByText(new RegExp(SENTENCE.slice(0, 30)))).not.toBeInTheDocument())
+    // The file that took its place — not the one after it (b and c remain).
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Remove b.csv' }))
+  })
+
+  it('a LATER sentence about another file is not cleared by removing the refused one', async () => {
+    refusing(['a.csv'])
+    const { container } = renderPage()
+    choose(container, ['a.csv', 'b.csv'])
+    fireEvent.click(await screen.findByRole('button', { name: 'Next' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(`“a.csv”: ${SENTENCE}`)
+    // A wrong-type pick replaces the sentence with one about notes.txt.
+    fireEvent.change(container.querySelector('#file-input-add')!, {
+      target: { files: [new File(['x'], 'notes.txt', { type: 'text/plain' })] },
+    })
+    expect(await screen.findByRole('alert')).toHaveTextContent('“notes.txt”')
+    fireEvent.click(screen.getByRole('button', { name: 'Remove a.csv' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('“notes.txt”')
+  })
+})
+
 describe('#1127 — rows an unquoted comma split are said before the import', () => {
   it('names the line and the counts', async () => {
     api.conversations.preview.mockResolvedValue(preview({

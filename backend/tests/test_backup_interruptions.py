@@ -658,8 +658,9 @@ class TestTheUnpackingCapIsForFilesFromOutside:
         with pytest.raises(ValueError, match="limit"):
             validate_backup(archive, expansion_limit=10)
         validate_backup(archive, expansion_limit=None)
-        with pytest.raises(ValueError, match="limit"):
+        with pytest.raises(RestoreNotStarted, match="limit") as exc:
             restore_from_backup(archive, db, docs, media, backups, expansion_limit=10)
+        assert "Nothing was changed" in str(exc.value)
         restore_from_backup(archive, db, docs, media, backups, expansion_limit=None)
         assert _project_name(db) == "IN THE BACKUP"
 

@@ -35,6 +35,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { backupApi } from '@/lib/api'
+import { backupFreshness, nextBackupPhrase } from '@/lib/backup-history'
 import { formatRelativeTime } from '@/lib/format'
 import { useTheme } from '@/lib/theme-context'
 import { useAuth } from '@/lib/auth-context'
@@ -1260,20 +1261,8 @@ function UserMenu() {
 }
 
 
-function _formatTimeShort(iso: string | null | undefined): string {
-  if (!iso) return ''
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      hour: 'numeric',
-      minute: '2-digit',
-    }).format(new Date(iso))
-  } catch {
-    return ''
-  }
-}
-
-
-function BackupStatusBadge() {
+/** Exported for its test (`BackupStatusBadge.test.tsx`); the rail is its only mount. */
+export function BackupStatusBadge() {
   // #357: replace the amber-only-when-stale dot with an always-visible
   // Clock icon. Gray when fresh, amber when stale (>24h preserved).
   // Tooltip carries the full freshness text so researchers don't have to
@@ -1286,15 +1275,26 @@ function BackupStatusBadge() {
   })
   if (!data) return null
 
+  // #1186: `at 4:30 PM`, or `on Oct 16 at 4:30 PM` when not today — a bare time
+  // read a projection days old (or past midnight) as a time today. Settings'
+  // status line uses the same builder, so the two cannot disagree on the day.
+  const next = data.next_backup_at ? nextBackupPhrase(data.next_backup_at) : null
   let tooltipText: string
-  if (!data.last_backup_at) {
-    tooltipText = 'No backups yet'
-  } else {
+  if (data.last_backup_at) {
     const rel = formatRelativeTime(data.last_backup_at)
-    const next = data.next_backup_at ? _formatTimeShort(data.next_backup_at) : null
     tooltipText = next
-      ? `Last backup ${rel} · Next auto at ${next}`
+      ? `Last backup ${rel} · Next auto ${next}`
       : `Last backup ${rel}`
+  } else if (backupFreshness(data) === 'none') {
+    // #1210: with no backups yet the first automatic one is still due (#1186), and
+    // Settings says when — the badge said only "No backups yet".
+    tooltipText = next ? `No backups yet · First auto ${next}` : 'No backups yet'
+  } else {
+    // #1199: there ARE backups, all dated later than this computer's clock, so the
+    // server gives no time — and "No backups yet", keyed on that null, was false.
+    // Settings says the rest; the icon stays amber (`is_stale`).
+    const ahead = 'Backup dates are ahead of this computer’s clock'
+    tooltipText = next ? `${ahead} · Next auto ${next}` : ahead
   }
 
   const iconColorClass = data.is_stale

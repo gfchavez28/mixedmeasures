@@ -117,6 +117,18 @@ it('unsupported install: releases-page link instead of controls (D9)', async () 
   expect(screen.queryByRole('checkbox')).toBeNull()
 })
 
+it('the privacy sentence says what a check sends, and claims no version (#1288)', async () => {
+  installBridge()
+  renderSection()
+  const sentence = await screen.findByText(/^Checking asks github\.com/)
+  expect(sentence).toHaveTextContent(
+    'Checking asks github.com for the newest release. It sends no project data; the update library adds a random identifier for this installation.',
+  )
+  // electron-updater sends no version and does send a per-installation id, so
+  // neither "version" nor "nothing else" may come back.
+  expect(sentence.textContent).not.toMatch(/version|nothing else/i)
+})
+
 it('Check now invokes the bridge check', async () => {
   installBridge()
   renderSection()

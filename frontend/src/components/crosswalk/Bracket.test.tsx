@@ -412,3 +412,20 @@ describe('Bracket "+ Add variable row" droppable visual states', () => {
     expect(button.className).toContain('crosswalk-add-row-pulse')
   })
 })
+
+/**
+ * a11y-name-sweep run 12 — the row and its grip were named from the row INDEX,
+ * so the first row read "row 0 of N"; and the grip said "Drag row" while it takes
+ * keys only (its sole listener is onKeyDown — the mouse path is the menu). Measured
+ * in Chrome's tree before the fix; the names here are the component's own.
+ */
+describe('the row names count from 1, and the grip names its item and its act', () => {
+  it('row 1 of 1, and "Move …" on the grip', () => {
+    renderBracket({ isCollapsed: false })
+    expect(screen.getByRole('row', { name: 'Leadership, row 1 of 1: Q1 Trust in leadership' })).toBeInTheDocument()
+    const grip = screen.getByRole('button', { name: /^Move Q1 Trust in leadership, row 1 of 1\./ })
+    expect(grip).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Drag row/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('row', { name: /row 0 of/ })).not.toBeInTheDocument()
+  })
+})

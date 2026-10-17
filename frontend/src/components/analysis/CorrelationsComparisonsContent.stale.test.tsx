@@ -78,7 +78,7 @@ describe('correlations view', () => {
   it('names the groups the MATRIX payload says are out of date', () => {
     mount({ corrMatrixData: corr([4]) })
     expect(screen.getByText('MATRIX')).toBeInTheDocument()
-    expect(notice()).toHaveTextContent('the Wellbeing scale score was computed before its data changed')
+    expect(notice()).toHaveTextContent('the scale score for “Wellbeing” was computed before its data changed')
   })
 
   it('absent when the payload names none (POSITIVE CONTROL above)', () => {
@@ -89,7 +89,7 @@ describe('correlations view', () => {
 
   it('joins the scatter matrix ids when it is shown, once each', () => {
     mount({ corrMatrixData: corr([4]), showScatter: true, scatterMatrixData: scatter([4, 6]) })
-    expect(notice()).toHaveTextContent('the Wellbeing and Local scale scores')
+    expect(notice()).toHaveTextContent('the scale scores for “Wellbeing” and “Local”')
   })
 
   it('says nothing while the result is being recomputed — "Computing…" is on screen instead', () => {
@@ -104,7 +104,7 @@ describe('comparisons view', () => {
   it('names the groups the COMPARISON payload says are out of date', () => {
     mount({ ...base, comparisonData: comparison([4, 6]) })
     expect(screen.getByText('COMPARISON')).toBeInTheDocument()
-    expect(notice()).toHaveTextContent('the Wellbeing and Local scale scores were computed')
+    expect(notice()).toHaveTextContent('the scale scores for “Wellbeing” and “Local” were computed')
   })
 
   it('reads the comparison payload, not the correlation one', () => {

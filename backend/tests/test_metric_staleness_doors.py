@@ -71,6 +71,13 @@ ALLOWLIST: dict[str, str] = {
     "routers/recode.py::derive_column_endpoint":
         "writes the cells (and value labels) of a NEW derived variable — no saved "
         "metric can name it yet",
+    "routers/dataset.py::link_by_column":
+        "writes only `dataset_rows.participant_id` (#1054) — no saved metric or test "
+        "reads a row's participant link (checked 2026-10-13); the participant-score "
+        "table it can move is marked by `mark_participant_scores_stale`",
+    "routers/projects.py::delete_project":
+        "deletes the WHOLE project (#1035) — every saved metric and test that could "
+        "read these cells and rows is deleted in the same transaction",
 }
 
 

@@ -585,9 +585,13 @@ class TestCopyForCoding:
         code_uuid = db.query(Code).filter(Code.project_id == p.id).first().uuid
         f = _export_to_file(db, p.id, tmp_path / "docs", tmp_path / "c.mmproject")
 
-        # Simulate the colleague's machine: the original isn't present there.
+        # Simulate the colleague's machine: the original isn't present there — not in
+        # the database, and not in this session either. Since #1035 the project's
+        # children are deleted by the database rather than the ORM, so `conv` and
+        # `seg` would stay in the identity map while the import reuses their ids.
         db.delete(p)
         db.flush()
+        db.expunge_all()
 
         new_id, _ = import_project(
             db, f, tmp_path / "docs", user_id=1, import_mode="copy_for_coding",

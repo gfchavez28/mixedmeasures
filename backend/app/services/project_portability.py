@@ -5,6 +5,7 @@ ZIP packaging with document files, and full import with ID remapping.
 """
 
 import enum
+import errno
 import io
 import json
 import logging
@@ -12,13 +13,17 @@ import math
 import os
 import re
 import shutil
+import tempfile
+import time
 import uuid
 import zipfile
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import HTTPException
 from sqlalchemy import (
+    event,
     bindparam,
     inspect as sa_inspect,
     func,
@@ -47,6 +52,7 @@ from .text_offsets import has_astral, utf16_to_codepoint
 from .text_similarity import similarity_ratio
 from .media_duration import MAX_MEDIA_OFFSET_SECONDS, sane_duration
 from .note_numbering import renumber_imported_notes
+from .project_deletion import delete_project_tree  # #1035
 
 from ..models import (
     AnalysisDomain,
@@ -87,6 +93,7 @@ from ..models import (
     Speaker,
     StatisticalTest,
 )
+from ..models.audit import AuditEntry
 from ..models.user import User
 from ..auth import (
     CODER_TYPE_CONSENSUS, CODER_TYPE_MACHINE, normalize_coder_type, unique_username,
@@ -94,7 +101,7 @@ from ..auth import (
 from . import machine_coder
 from . import material_config
 from ..config import get_backup_dir
-from ..services.backup import APP_VERSION
+from ..services.backup import APP_VERSION, STAGING_SUFFIX
 from ..services.coding_layers import CONSENSUS_ORIGIN, code_usage_count_expr, non_consensus_filter
 from ..services.canvas import (
     EMBED_NODE_TYPES,
@@ -1592,22 +1599,16 @@ def validate_project_file(file_path: Path) -> dict:
 
             manifest = _read_manifest_and_check_format(zf)
 
+            # #1117: an OLDER format is not a caution, so it is not a warning. This said
+            # "File uses an older format version (N). Some data may not import correctly."
+            # for every file from 1.5.3 or earlier, in an amber box — the website's own
+            # example among them — while the import's only version branches (the v7
+            # members, `_attach_entity_rows`; the pre-v5 offset repair) bring a file
+            # forward and drop nothing. A NEWER format is refused above. Which version
+            # made the file is a fact, and the confirmation shows it from
+            # `manifest.app_version` (`components/ProjectFileOrigin.tsx`). The list stays
+            # for a real caution.
             warnings: list[str] = []
-            file_version = manifest.get("format_version", 0)
-
-            if file_version < CURRENT_FORMAT_VERSION:
-                warnings.append(
-                    f"File uses an older format version ({file_version}). "
-                    f"Some data may not import correctly."
-                )
-
-            file_app_version = manifest.get("app_version", "unknown")
-            if file_app_version != APP_VERSION:
-                warnings.append(
-                    f"Exported from app version {file_app_version} "
-                    f"(current: {APP_VERSION})."
-                )
-
             return {"manifest": manifest, "warnings": warnings}
 
     except zipfile.BadZipFile:
@@ -2992,6 +2993,338 @@ def _extract_zip_member(
         shutil.copyfileobj(src, dst, length=1024 * 1024)
 
 
+#: #1225 — every file an import writes is STAGED here first: a hidden `.partial` folder
+#: BESIDE the data folders (`documents/` and `media/` share a parent), never inside them —
+#: a backup walks both, and a restore preserves every video under `media/`. Being
+#: `.`-led and `.partial`-ended makes it `backup.is_staging_name`'s, so the startup sweep
+#: removes one an interrupted import left (narrowed by this prefix).
+IMPORT_STAGING_PREFIX = ".import-"
+
+#: A damaged member, in the words the import refuses it with. `zipfile` raises
+#: `BadZipFile` for a CRC mismatch at the end of a member and `zlib.error` / `EOFError`
+#: for a damaged or cut-short deflate stream (the same three `backup.py` maps).
+_DAMAGED_MEMBER_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError)
+
+
+def _damaged_archive_message(member: str) -> str:
+    return (
+        f"This project file is damaged: '{member}' does not read back as it was written "
+        "(an interrupted download or copy, or a failing disk). Nothing was changed. "
+        "Export or download the project again and import the new file."
+    )
+
+
+#: #1225 — Windows refuses to rename a folder while a file inside it is open (a recording
+#: being streamed to the player, an antivirus scan), and such an open usually ends within
+#: seconds. POSIX renames a folder whatever is open in it, so a refusal there is a real
+#: one and is not retried.
+_RENAME_RETRY_DELAYS: tuple[float, ...] = (0.1, 0.25, 0.5, 1.0, 2.0) if os.name == "nt" else ()
+
+
+def _move(src: Path, dst: Path) -> None:
+    """Rename ``src`` to ``dst``, which must not exist — the one way an import's files move.
+
+    A data folder that is a mount point or a link to another disk cannot take a rename from
+    beside it (``EXDEV``); that falls back to a copy and a removal, which is slower and lands
+    the same tree. A refusal is retried on Windows (`_RENAME_RETRY_DELAYS`), then raised.
+    """
+    for delay in (*_RENAME_RETRY_DELAYS, None):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if delay is None:
+                raise
+            time.sleep(delay)
+        except OSError as e:
+            if e.errno != errno.EXDEV:
+                raise
+            shutil.move(str(src), str(dst))
+            return
+
+
+class _StagedImportFiles:
+    """The files one `.mmproject` import writes, held back until its transaction commits.
+
+    🔴 **#1225: a rollback covers the database, not the disk.** The import extracted every
+    member onto its FINAL path inside the transaction. SQLite reuses the newest rows' ids
+    (#1206), so an overwrite of the newest project extracted onto the replaced project's
+    own paths, and a merge always writes into the target's own folder: a damaged member or
+    a full disk left the kept project's recording empty or cut short, under a project the
+    rollback had restored.
+
+    Three phases, and only the last touches a final path:
+
+    1. **stage** (before the mode branch — before the safety copy and before the first
+       database write): each member wanted is read IN FULL into ``<root>/<kind>/in/<the
+       archive's owner key>/``. Reading a member to its end is what verifies its CRC, so a
+       damaged file is refused here, having written nothing anywhere else; and the copy —
+       gigabytes for a video project — runs outside SQLite's write lock (#1033).
+    2. **assign** (after the inserts, still inside the transaction): an owner this import
+       INSERTED moves ``in/<old key>`` → ``out/<new key>`` (a rename inside the staging
+       folder). ``inserted_ids``, never ``remap`` (#714): a merge remaps a uuid-matched
+       source onto the TARGET's row, whose fields it keeps — and so its bytes too.
+    3. **place** — on the session's ``after_commit`` — renames the staged tree into
+       ``documents/<pid>`` and ``media/<pid>``, after setting aside whatever is there (the
+       replaced project's folder, or what a deleted project left under a reused id). Then,
+       best-effort, it sets aside the replaced project's folder when the overwrite gave it a
+       new id, and removes the staging folder. Every move goes through `_move` (a copy across
+       disks, a retry on Windows). A rollback (``after_transaction_end`` without a commit)
+       or an exception out of ``import_project`` DISCARDS the staging instead.
+
+    ⚠️ **Bound to the SESSION, not to a caller's call**, so no caller can commit the rows
+    and forget the files: the import endpoint, Duplicate and every direct-call test get the
+    same behaviour. The listeners are class-level, so every commit in the app pays a dict
+    pop — the price of not editing every caller of ``import_project`` (an out-param the two
+    endpoints placed would leave each test that commits on its own silently unplaced).
+    ``place`` never raises — the database has committed; a failure is logged and the
+    staging is left for the startup sweep (the imported ``.mmproject`` and the safety copy
+    still hold every byte; saying so on screen is 1.5.8's, decision D3). A process killed
+    between the commit and the renames leaves the same state.
+    """
+
+    def __init__(self, docs_dir: Path, media_dir: Path | None):
+        self._bases: dict[str, Path] = {"documents": Path(docs_dir)}
+        if media_dir is not None:
+            self._bases["media"] = Path(media_dir)
+        self._roots: dict[Path, Path] = {}
+        self.state = "staging"
+        self._pid: int | None = None
+        self._mode = "new"
+        self._replaced_id: int | None = None
+
+    # ── layout ──
+    def _area(self, kind: str, *, create: bool = True) -> Path | None:
+        if kind not in self._bases:
+            return None  # `media_dir=None`: the caller places no media at all
+        parent = self._bases[kind].parent
+        root = self._roots.get(parent)
+        if root is None:
+            if not create:
+                return None
+            parent.mkdir(parents=True, exist_ok=True)
+            root = Path(tempfile.mkdtemp(
+                prefix=IMPORT_STAGING_PREFIX, suffix=STAGING_SUFFIX, dir=str(parent),
+            ))
+            self._roots[parent] = root
+        return root / kind
+
+    # ── phase 1 ──
+    def stage(self, zf: zipfile.ZipFile, member: str, kind: str, key: str, relative: str) -> None:
+        stage_in = self._area(kind) / "in"
+        try:
+            _extract_zip_member(zf, member, stage_in / key / relative, stage_in)
+        except _DAMAGED_MEMBER_ERRORS as e:
+            raise ValueError(_damaged_archive_message(member)) from e
+
+    # ── phase 2 ──
+    def assign(self, kind: str, old_key: str, new_key: str) -> None:
+        area = self._area(kind, create=False)
+        if area is None:
+            return
+        src = area / "in" / old_key
+        if not src.is_dir():
+            return
+        dst = area / "out" / new_key
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, dst)
+
+    def lands_at(self, kind: str, key: str) -> Path | None:
+        """Where an assigned owner's files sit until the commit (None: nothing staged)."""
+        area = self._area(kind, create=False)
+        return None if area is None else area / "out" / key
+
+    def ready(self, db: Session, pid: int, mode: str, replaced_id: int | None) -> None:
+        """Hand the outcome to the session: `_place_staged_import_files` on its commit,
+        `_discard_staged_import_files` when its root transaction ends without one."""
+        self._pid, self._mode, self._replaced_id = pid, mode, replaced_id
+        self.state = "ready"
+        db.info.setdefault(_STAGED_IMPORT_FILES_KEY, []).append(self)
+
+    # ── phase 3 ──
+    def place(self) -> None:
+        if self.state != "ready":
+            return
+        self.state = "placing"
+        try:
+            for kind, base in self._bases.items():
+                area = self._area(kind, create=False)
+                out = None if area is None else area / "out"
+                final = base / str(self._pid)
+                if self._mode == "merge":
+                    # Only the owners this merge INSERTED were staged; the target's own
+                    # folder and every matched source's files stay as they are.
+                    if out is None or not out.is_dir():
+                        continue
+                    final.mkdir(parents=True, exist_ok=True)
+                    for entry in sorted(out.iterdir()):
+                        dest = final / entry.name
+                        self._set_aside(kind, dest)
+                        _move(entry, dest)
+                    continue
+                # new / copy_for_coding / overwrite: the project's folder IS the staged tree,
+                # so whatever holds its path now (the replaced project, when the overwrite
+                # reused its id; or what a deleted project left there) is set aside first.
+                self._set_aside(kind, final)
+                if out is not None and out.is_dir():
+                    base.mkdir(parents=True, exist_ok=True)
+                    _move(out, final)
+            self.state = "placed"
+        except Exception:
+            self.state = "failed"
+            logger.exception(
+                "An import committed but its files could not be moved into place; "
+                "they are left in %s", [str(r) for r in self._roots.values()],
+            )
+            return
+        # The replaced project's own folders, when the overwrite gave it a NEW id: only
+        # AFTER the import's files are in place, and only logged if refused, so a folder
+        # another program holds open costs a leftover — never the imported files.
+        if self._replaced_id is not None and self._replaced_id != self._pid:
+            for kind, base in self._bases.items():
+                try:
+                    self._set_aside(kind, base / str(self._replaced_id))
+                except OSError:
+                    logger.warning(
+                        "The replaced project's folder %s could not be removed",
+                        base / str(self._replaced_id), exc_info=True,
+                    )
+        self._remove_roots()
+
+    def _set_aside(self, kind: str, path: Path) -> None:
+        if not (path.exists() or path.is_symlink()):
+            return
+        area = self._area(kind)
+        area.mkdir(parents=True, exist_ok=True)  # a kind with nothing staged has no folder yet
+        aside = area / f"replaced-{path.name}"
+        n = 1
+        while aside.exists():
+            n += 1
+            aside = area / f"replaced-{path.name}-{n}"
+        _move(path, aside)
+
+    def discard(self) -> None:
+        if self.state in ("placed", "failed", "discarded"):
+            return
+        self.state = "discarded"
+        self._remove_roots()
+
+    def _remove_roots(self) -> None:
+        for root in list(self._roots.values()):
+            shutil.rmtree(root, ignore_errors=True)
+        self._roots.clear()
+
+    # ``with … as files:`` — an exception out of the import discards; a clean exit leaves
+    # the outcome to the session (bound by ``ready``).
+    def __enter__(self) -> "_StagedImportFiles":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if exc_type is not None:
+            self.discard()
+        return False
+
+
+#: `Session.info` key: the staged imports waiting on that session's transaction.
+_STAGED_IMPORT_FILES_KEY = "mm_staged_import_files"
+
+
+@event.listens_for(Session, "after_commit")
+def _place_staged_import_files(session) -> None:
+    """#1225: a committed import's files land now. Popped first, so the transaction-end
+    listener below finds nothing and a later commit on the same session cannot replay it.
+    Class-level on purpose: a per-session listener removed from inside its own dispatch
+    raises ("deque mutated during iteration")."""
+    for staged in session.info.pop(_STAGED_IMPORT_FILES_KEY, ()):
+        staged.place()
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _discard_staged_import_files(session, transaction) -> None:
+    """The ROOT transaction ended and `after_commit` did not take the staged files: a
+    rollback (or a close). A savepoint ending is not the import's outcome."""
+    if transaction.parent is not None:
+        return
+    for staged in session.info.pop(_STAGED_IMPORT_FILES_KEY, ()):
+        staged.discard()
+
+
+def _read_entity_members_through(zf: zipfile.ZipFile, file_version: int) -> None:
+    """#1241 (a), the import's half: a v7 archive's entity members are read LAZILY, during
+    the database phase — after the safety copy — so a damaged one used to be met there,
+    as a 500, with one more unrotated copy written. Read each to its end once (which is
+    what verifies its CRC) before the mode branch. MEASURED (warm cache): a 315 MB member
+    deflated to 52 MB reads through in 1.06 s. ``project.json`` is already read whole."""
+    if file_version < JSONL_FORMAT_VERSION:
+        return
+    for key in JSONL_ENTITY_KEYS:
+        member = _entity_entry_name(key)
+        try:
+            with zf.open(member) as src:
+                while src.read(1024 * 1024):
+                    pass
+        except _DAMAGED_MEMBER_ERRORS as e:
+            raise ValueError(_damaged_archive_message(member)) from e
+
+
+def _stage_archive_files(
+    db: Session, zf: zipfile.ZipFile, data: dict, files: _StagedImportFiles,
+    import_mode: str, target_project_id: int | None,
+) -> None:
+    """Phase 1 of `_StagedImportFiles`: read every document and media member this import
+    will place into the staging folder, BEFORE the mode branch (#1225).
+
+    Skipped, and so never read: a member whose owner the file does not carry (the old
+    loops skipped it after the inserts, through ``remap``), and on a MERGE every member of
+    a source matched by uuid — a merge keeps the target's fields for a matched source, so
+    it keeps the target's bytes — and every canvas image (a merge blanks ``canvases``).
+    The matched set is asked the way ``_add`` asks it (`_merge_uuid_match`, scoped to the
+    target), read-only; ``assign`` then keys on what was actually inserted.
+    """
+    # ⚠️ Spelled `merging`, not as a bare `if` on the mode: `test_code_sets.py` anchors
+    # on the module's FIRST such `if`, which must stay `import_project`'s blanking block.
+    merging = import_mode == "merge"
+    owners: dict[str, set[int]] = {}
+    for table, model in (("documents", Document), ("conversations", Conversation),
+                         ("observations", Observation)):
+        ids = set()
+        for item in data.get(table, []) or []:
+            oid = item.get("_original_id")
+            if oid is None:
+                continue
+            if merging:
+                incoming = item.get("uuid")
+                if incoming and _merge_uuid_match(db, model, incoming, target_project_id).first():
+                    continue
+            ids.add(oid)
+        owners[table] = ids
+
+    for member in zf.namelist():
+        parts = member.split("/", 2)
+        if len(parts) < 3 or not parts[2]:
+            continue  # not a file under an owner folder
+        if parts[0] == "documents":
+            try:
+                old_doc_id = int(parts[1])
+            except ValueError:
+                continue
+            if old_doc_id in owners["documents"]:
+                files.stage(zf, member, "documents", str(old_doc_id), parts[2])
+        elif parts[0] == "media" and "media" in files._bases:
+            if parts[1] == "canvas":
+                if not merging:
+                    files.stage(zf, member, "media", "canvas", parts[2])
+                continue
+            owner = media_storage.parse_media_owner_segment(parts[1])
+            if owner is None:
+                continue
+            owner_kind, old_owner_id = owner
+            table = "conversations" if owner_kind == media_storage.CONVERSATION else "observations"
+            if old_owner_id in owners[table]:
+                key = media_storage.media_owner_segment(owner_kind, old_owner_id)
+                files.stage(zf, member, "media", key, parts[2])
+
+
 def _file_entity_id(item: dict):
     """An entity's id in the FILE. `_serialize_row` writes ``_original_id`` and never
     ``id``; ``id`` is read only as a fallback for a hand-written file."""
@@ -3212,7 +3545,8 @@ def import_project(
         # #35 — matched applications whose copy carried a DIFFERENT rating.
         report.setdefault("magnitude_conflicts", 0)
         report.setdefault("ratings_out_of_range", 0)
-    with zipfile.ZipFile(str(file_path), "r") as zf:
+    with zipfile.ZipFile(str(file_path), "r") as zf, \
+            _StagedImportFiles(docs_dir, media_dir) as staged_files:
         # Cheap pre-flight (matches validate_project_file). Per-member containment
         # is enforced inside `_extract_zip_member`; the expansion cap is #696.
         # Both run HERE too rather than trusting /validate-import — same reasoning
@@ -3259,6 +3593,13 @@ def import_project(
         # mode branch below writes the safety copy (merge, overwrite) or anything else.
         _preflight_import_refusals(db, data, coder_mapping)
 
+        # #1225: every document and recording is read IN FULL into a staging folder now —
+        # before the safety copy (a damaged member is refused having written nothing) and
+        # before the first database write (the copy is outside SQLite's write lock). The
+        # final paths are touched only when the session commits.
+        _read_entity_members_through(zf, file_version)
+        _stage_archive_files(db, zf, data, staged_files, import_mode, target_project_id)
+
         remap: dict[str, dict[int, int]] = {
             "projects": {}, "participants": {}, "speakers": {},
             "conversations": {}, "documents": {}, "observations": {},
@@ -3292,7 +3633,8 @@ def import_project(
             target) and record the remap to it instead of inserting a duplicate —
             children re-point at the matched row transparently through `remap`. Matched
             entities keep the TARGET's field values (a frozen merge never overwrites the
-            shared sources with the colleague's copy).
+            shared sources with the colleague's copy — nor, since #1225, their files:
+            `_stage_archive_files` never reads a matched source's members).
             """
             if import_mode == "merge" and remap_key:
                 incoming_uuid = item.get("uuid")
@@ -3355,8 +3697,10 @@ def import_project(
             # this file's stable identity, PRESERVING its project_uuid. Validate the
             # target matches the incoming uuid (never overwrite a different project),
             # safety-export it (recovery net), then delete it so the preserved uuid is
-            # free before re-insert (flush so the cascade + unique-index release apply
-            # within this txn — autoflush is OFF, see database.py).
+            # free before re-insert (`delete_project_tree` flushes, so the cascade +
+            # unique-index release apply within this txn — autoflush is OFF, see
+            # database.py). It is the project delete's own path (#1035): `db.delete`
+            # loaded every child as an ORM object, 86.7 s of a BES overwrite.
             if target_project_id is None or not incoming_uuid:
                 raise ValueError(
                     "Overwrite import requires a target project and a file that carries "
@@ -3377,8 +3721,7 @@ def import_project(
                 db, target, docs_dir, media_dir,
                 prefix="pre-overwrite", safety_report=safety_report,
             )
-            db.delete(target)
-            db.flush()
+            delete_project_tree(db, target)
             project_name = pdata["name"]
             project_uuid_override = incoming_uuid
         elif import_mode == "copy_for_coding":
@@ -3419,6 +3762,13 @@ def import_project(
                 project_overrides["user_id"] = user_id
             new_project = _add(Project, pdata, project_overrides, "projects")
             pid = new_project.id
+            if import_mode == "overwrite" and pid != target_project_id:
+                # #1230: an overwrite REPLACES this project (its identity is kept), so its
+                # history follows it to the new id. Left on the old one, the entries would
+                # reach whichever project is next given that id. Rolls back with the import.
+                db.query(AuditEntry).filter(
+                    AuditEntry.project_id == target_project_id
+                ).update({AuditEntry.project_id: pid}, synchronize_session=False)
 
         # ── a2. Coders (Track J · J1/J3-2): map each incoming coder to a local roster
         #     coder so the code_applications user_id remap below preserves attribution.
@@ -4951,96 +5301,55 @@ def import_project(
         if consensus_enabled(db):
             materialize_consensus_for_project(db, pid)
 
-        # ── Copy document files ────────────────────────────────────
-        doc_members = [m for m in zf.namelist() if m.startswith("documents/")]
-        if doc_members:
-            new_project_docs_dir = docs_dir / str(pid)
-            new_project_docs_dir.mkdir(parents=True, exist_ok=True)
-
-            for member in doc_members:
-                # member looks like "documents/{old_doc_id}/original.pdf"
-                parts = member.split("/", 2)
-                if len(parts) < 3 or not parts[2]:
-                    continue  # skip directory entries
-                old_doc_id_str = parts[1]
-                try:
-                    old_doc_id = int(old_doc_id_str)
-                except ValueError:
-                    continue
-                new_doc_id = remap["documents"].get(old_doc_id)
-                if new_doc_id is None:
-                    continue
-
-                relative_path = parts[2]
-                target_path = new_project_docs_dir / str(new_doc_id) / relative_path
-                _extract_zip_member(zf, member, target_path, new_project_docs_dir)
-
-        # ── Copy media files (audio) ──────────────────────────────
-        if media_dir is not None:
-            media_members = [m for m in zf.namelist() if m.startswith("media/")]
-            if media_members:
-                new_project_media_dir = media_dir / str(pid)
-                new_project_media_dir.mkdir(parents=True, exist_ok=True)
-
-                for member in media_members:
-                    parts = member.split("/", 2)
-                    if len(parts) < 3 or not parts[2]:
-                        continue  # skip directory entries
-
-                    # Canvas images: media/canvas/{uuid}.{ext} — no ID remapping
-                    if parts[1] == "canvas":
-                        target_path = new_project_media_dir / "canvas" / parts[2]
-                        _extract_zip_member(zf, member, target_path, new_project_media_dir)
-                        continue
-
-                    # Recordings: media/{owner_dir}/{filename}, where owner_dir is a
-                    # conversation id or `obs-{observation_id}`. Parse through the
-                    # media_storage convention so the archive layout and the on-disk
-                    # layout cannot drift — a bare int() here is what silently dropped
-                    # every observation recording on import (obs-7 → ValueError → skip).
-                    owner = media_storage.parse_media_owner_segment(parts[1])
-                    if owner is None:
-                        continue
-                    owner_kind, old_owner_id = owner
-                    remap_table = (
-                        "conversations"
-                        if owner_kind == media_storage.CONVERSATION
-                        else "observations"
+        # ── Assign the staged files to their new owners (#1225, phase 2) ──
+        # Only an owner this import INSERTED (#714's rule): a merge remaps a matched
+        # source onto the target's own row, and keeps that row's files as it keeps its
+        # fields. The documents ARE the folder name; a recording's folder is its owner's
+        # segment (`obs-7` for an observation) through the media_storage convention.
+        for old_id, new_id in remap["documents"].items():
+            if new_id in inserted_ids.get("documents", ()):
+                staged_files.assign("documents", str(old_id), str(new_id))
+        for owner_kind, table in ((media_storage.CONVERSATION, "conversations"),
+                                  (media_storage.OBSERVATION, "observations")):
+            for old_id, new_id in remap[table].items():
+                if new_id in inserted_ids.get(table, ()):
+                    staged_files.assign(
+                        "media",
+                        media_storage.media_owner_segment(owner_kind, old_id),
+                        media_storage.media_owner_segment(owner_kind, new_id),
                     )
-                    new_owner_id = remap[remap_table].get(old_owner_id)
-                    if new_owner_id is None:
-                        continue
-
-                    relative_path = parts[2]
-                    target_path = (
-                        new_project_media_dir
-                        / media_storage.media_owner_segment(owner_kind, new_owner_id)
-                        / relative_path
-                    )
-                    _extract_zip_member(zf, member, target_path, new_project_media_dir)
+        if import_mode != "merge":
+            staged_files.assign("media", "canvas", "canvas")
 
         # Media-less archives (include_media=False exports, or trimmed files):
         # clear orphaned media metadata for any conversation whose recording
         # did not land on disk, so the workbench offers a clean "Attach
         # Recording" state instead of a dead player (§8 iii — graceful
-        # degradation is the point of the media-less export). Stat-based, so
-        # merge-matched conversations whose local files exist are untouched.
+        # degradation is the point of the media-less export).
+        # #1225: an owner this import INSERTED is judged by its STAGED file — never by
+        # its final path, which may hold what a replaced or deleted project left under a
+        # reused id (adopted as this owner's recording, before). A merge-MATCHED owner
+        # keeps its own files, so it is judged by its final path, as before.
         if media_dir is not None:
-            for owner_kind, model in (
-                (media_storage.CONVERSATION, Conversation),
-                (media_storage.OBSERVATION, Observation),
+            for owner_kind, model, table in (
+                (media_storage.CONVERSATION, Conversation, "conversations"),
+                (media_storage.OBSERVATION, Observation, "observations"),
             ):
                 for owner in (
                     db.query(model)
                     .filter(model.project_id == pid, model.media_filename.isnot(None))
                     .all()
                 ):
+                    segment = media_storage.media_owner_segment(owner_kind, owner.id)
+                    if owner.id in inserted_ids.get(table, ()):
+                        folder = staged_files.lands_at("media", segment)
+                    else:
+                        folder = media_dir / str(pid) / segment
                     expected = (
-                        media_dir / str(pid)
-                        / media_storage.media_owner_segment(owner_kind, owner.id)
-                        / f"original.{owner.media_format}"
+                        None if folder is None
+                        else folder / f"original.{owner.media_format}"
                     )
-                    if not expected.is_file():
+                    if expected is None or not expected.is_file():
                         owner.media_filename = None
                         owner.media_format = None
                         owner.media_type = None
@@ -5048,6 +5357,15 @@ def import_project(
                         owner.media_offset_seconds = 0.0
                         owner.media_is_vbr = None
             db.flush()
+
+        # #1225, phase 3: the staged tree lands when — and only if — the caller's
+        # transaction commits; a rollback discards it. An overwrite also sets aside the
+        # replaced project's own folders then (whatever its id), which is what removes
+        # the files of sources the file no longer carries.
+        staged_files.ready(
+            db, pid, import_mode,
+            replaced_id=target_project_id if import_mode == "overwrite" else None,
+        )
 
     _sanitize_imported_media_numbers(db, pid)
 

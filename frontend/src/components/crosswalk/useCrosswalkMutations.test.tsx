@@ -1334,6 +1334,42 @@ describe('addMembersMutation + removeMembersMutation', () => {
 
     expect(wasInvalidatedWith(invalidateSpy, ['metrics', 1])).toBe(true)
   })
+
+  it('5b.3 #1228: removeMembersMutation also refreshes the saved tests list', async () => {
+    const { result, invalidateSpy } = setupHook()
+    vi.mocked(domainsApi.removeMembers).mockResolvedValueOnce(buildDomain(20, 'D'))
+
+    act(() => {
+      result.current.removeMembersMutation.mutate({
+        domainId: 20,
+        members: [{ member_type: 'column', member_id: 5001 }],
+      })
+    })
+    await waitFor(() => expect(result.current.removeMembersMutation.isSuccess).toBe(true))
+
+    expect(wasInvalidatedWith(invalidateSpy, ['statistical-tests', 1])).toBe(true)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5c. reorderRowsMutation (#1228)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('reorderRowsMutation', () => {
+  it('5c.1 #1228: a reorder refreshes the saved tests list — the server marked split-half', async () => {
+    const { result, invalidateSpy } = setupHook()
+    vi.mocked(domainsApi.reorderMembers).mockResolvedValueOnce({ status: 'ok' } as never)
+
+    act(() => {
+      result.current.reorderRowsMutation.mutate({ domainId: 20, memberIds: [3, 1, 2] })
+    })
+    await waitFor(() => expect(result.current.reorderRowsMutation.isSuccess).toBe(true))
+
+    expect(wasInvalidatedWith(invalidateSpy, ['analysis-domains', 1])).toBe(true)
+    expect(wasInvalidatedWith(invalidateSpy, ['statistical-tests', 1])).toBe(true)
+    // An order moves no metric (#1149) — refetching them would only cost a request.
+    expect(wasInvalidatedWith(invalidateSpy, ['metrics', 1])).toBe(false)
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════════════════════

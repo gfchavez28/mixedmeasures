@@ -1,0 +1,575 @@
+{
+ "r1": {
+  "linked": 12,
+  "created": 9,
+  "matched": 3,
+  "skipped_missing": 9,
+  "skipped_duplicate": 4,
+  "skipped_conflict": 1,
+  "already_linked": 2,
+  "duplicate_values": [
+   "D1",
+   "P002"
+  ]
+ },
+ "r1_again": {
+  "linked": 0,
+  "created": 0,
+  "matched": 0,
+  "skipped_missing": 9,
+  "skipped_duplicate": 4,
+  "skipped_conflict": 1,
+  "already_linked": 14,
+  "duplicate_values": [
+   "D1",
+   "P002"
+  ]
+ },
+ "r2": {
+  "linked": 2,
+  "created": 2,
+  "matched": 0,
+  "skipped_missing": 1,
+  "skipped_duplicate": 0,
+  "skipped_conflict": 0,
+  "already_linked": 0,
+  "duplicate_values": []
+ },
+ "r3": {
+  "linked": 2,
+  "created": 2,
+  "matched": 0,
+  "skipped_missing": 0,
+  "skipped_duplicate": 0,
+  "skipped_conflict": 0,
+  "already_linked": 0,
+  "duplicate_values": []
+ },
+ "r4": {
+  "linked": 3,
+  "created": 3,
+  "matched": 0,
+  "skipped_missing": 0,
+  "skipped_duplicate": 0,
+  "skipped_conflict": 0,
+  "already_linked": 0,
+  "duplicate_values": []
+ },
+ "bad_col": "Participant linking requires an identifier-type column in this dataset",
+ "participants": [
+  [
+   1,
+   10,
+   "P001",
+   "Maria",
+   "Admin",
+   "Survey One · Row",
+   1,
+   1,
+   1
+  ],
+  [
+   2,
+   10,
+   "p004",
+   null,
+   null,
+   null,
+   1,
+   1,
+   1
+  ],
+  [
+   3,
+   10,
+   "P003",
+   null,
+   "Teacher",
+   null,
+   1,
+   1,
+   1
+  ],
+  [
+   4,
+   10,
+   "E1",
+   null,
+   "Chair",
+   "Survey One · R018",
+   1,
+   1,
+   1
+  ],
+  [
+   5,
+   10,
+   "C1",
+   null,
+   null,
+   null,
+   1,
+   1,
+   1
+  ],
+  [
+   6,
+   10,
+   "Maria Lopez",
+   null,
+   null,
+   null,
+   1,
+   1,
+   1
+  ],
+  [
+   7,
+   11,
+   "X1",
+   null,
+   null,
+   null,
+   1,
+   1,
+   1
+  ],
+  [
+   8,
+   10,
+   "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+   null,
+   "Board",
+   "Survey One · R012",
+   1,
+   1,
+   1
+  ],
+  [
+   9,
+   10,
+   "p001",
+   null,
+   "Doc",
+   "Survey One · R013",
+   1,
+   1,
+   1
+  ],
+  [
+   10,
+   10,
+   "12",
+   null,
+   null,
+   null,
+   1,
+   1,
+   1
+  ],
+  [
+   11,
+   10,
+   "12.0",
+   null,
+   "Exec",
+   "Survey One · R015",
+   1,
+   1,
+   1
+  ],
+  [
+   12,
+   10,
+   "P004",
+   null,
+   "Lead",
+   "Survey One · R017",
+   1,
+   1,
+   1
+  ],
+  [
+   13,
+   10,
+   "X1",
+   null,
+   "Other",
+   "Survey One · R019",
+   1,
+   1,
+   1
+  ],
+  [
+   14,
+   10,
+   "TAB",
+   null,
+   "T",
+   "Survey One · R020",
+   1,
+   1,
+   1
+  ],
+  [
+   15,
+   10,
+   "nation",
+   null,
+   "Nat",
+   "Survey One · R022",
+   1,
+   1,
+   1
+  ],
+  [
+   16,
+   10,
+   "D1-solo",
+   null,
+   "Solo",
+   "Survey One · R025",
+   1,
+   1,
+   1
+  ],
+  [
+   17,
+   10,
+   "N/A",
+   null,
+   null,
+   null,
+   1,
+   1,
+   1
+  ],
+  [
+   18,
+   10,
+   "Q1",
+   null,
+   null,
+   null,
+   1,
+   1,
+   1
+  ],
+  [
+   19,
+   10,
+   "T1",
+   null,
+   "A",
+   "TwoRoles · Row",
+   1,
+   1,
+   1
+  ],
+  [
+   20,
+   10,
+   "T2",
+   null,
+   "B",
+   "TwoRoles · R002",
+   1,
+   1,
+   1
+  ],
+  [
+   21,
+   10,
+   "S2",
+   null,
+   null,
+   null,
+   1,
+   1,
+   1
+  ],
+  [
+   22,
+   10,
+   "S3",
+   null,
+   null,
+   null,
+   1,
+   1,
+   1
+  ],
+  [
+   23,
+   10,
+   "S1",
+   null,
+   null,
+   null,
+   1,
+   1,
+   1
+  ]
+ ],
+ "links": [
+  [
+   1,
+   1,
+   null,
+   1,
+   "P001"
+  ],
+  [
+   1,
+   2,
+   "R002",
+   null,
+   null
+  ],
+  [
+   1,
+   3,
+   "R003",
+   null,
+   null
+  ],
+  [
+   1,
+   4,
+   "R004",
+   null,
+   null
+  ],
+  [
+   1,
+   5,
+   "R005",
+   null,
+   null
+  ],
+  [
+   1,
+   6,
+   null,
+   null,
+   null
+  ],
+  [
+   1,
+   7,
+   "R007",
+   null,
+   null
+  ],
+  [
+   1,
+   8,
+   "R008",
+   null,
+   null
+  ],
+  [
+   1,
+   9,
+   "R009",
+   null,
+   null
+  ],
+  [
+   1,
+   10,
+   "R010",
+   3,
+   "P003"
+  ],
+  [
+   1,
+   11,
+   null,
+   null,
+   null
+  ],
+  [
+   1,
+   12,
+   "R012",
+   8,
+   "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+  ],
+  [
+   1,
+   13,
+   "R013",
+   9,
+   "p001"
+  ],
+  [
+   1,
+   14,
+   "R014",
+   10,
+   "12"
+  ],
+  [
+   1,
+   15,
+   "R015",
+   11,
+   "12.0"
+  ],
+  [
+   1,
+   16,
+   null,
+   null,
+   null
+  ],
+  [
+   1,
+   17,
+   "R017",
+   12,
+   "P004"
+  ],
+  [
+   1,
+   18,
+   "R018",
+   4,
+   "E1"
+  ],
+  [
+   1,
+   19,
+   "R019",
+   13,
+   "X1"
+  ],
+  [
+   1,
+   20,
+   "R020",
+   14,
+   "TAB"
+  ],
+  [
+   1,
+   21,
+   null,
+   null,
+   null
+  ],
+  [
+   1,
+   22,
+   "R022",
+   15,
+   "nation"
+  ],
+  [
+   1,
+   23,
+   "R023",
+   null,
+   null
+  ],
+  [
+   1,
+   24,
+   "R024",
+   null,
+   null
+  ],
+  [
+   1,
+   25,
+   "R025",
+   16,
+   "D1-solo"
+  ],
+  [
+   1,
+   26,
+   null,
+   6,
+   "Maria Lopez"
+  ],
+  [
+   1,
+   27,
+   "R999",
+   5,
+   "C1"
+  ],
+  [
+   1,
+   28,
+   "R998",
+   null,
+   null
+  ],
+  [
+   2,
+   29,
+   null,
+   null,
+   null
+  ],
+  [
+   2,
+   30,
+   "R002",
+   17,
+   "N/A"
+  ],
+  [
+   2,
+   31,
+   "R003",
+   18,
+   "Q1"
+  ],
+  [
+   3,
+   32,
+   null,
+   19,
+   "T1"
+  ],
+  [
+   3,
+   33,
+   "R002",
+   20,
+   "T2"
+  ],
+  [
+   4,
+   34,
+   null,
+   null,
+   null
+  ],
+  [
+   4,
+   35,
+   "R002",
+   21,
+   "S2"
+  ],
+  [
+   4,
+   36,
+   "R003",
+   22,
+   "S3"
+  ],
+  [
+   4,
+   37,
+   "R004",
+   23,
+   "S1"
+  ]
+ ]
+}

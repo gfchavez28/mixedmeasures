@@ -159,6 +159,14 @@ THREE_COL_ALLOWLIST = {
     # declared-missing code as that same text via resolve_labelled_cell, so raw
     # text equality is the comparison. The same semantics existed before as an
     # ORM load the scan could not see.
+    "services/linkable_rows.py": 1,
+    # search_linkable_rows (#1053) — the record picker's page of ≤ 200 rows, read
+    # for its LABELS and its match EXCERPT, not grouping. The label applies the
+    # column-aware missing rule in place (`column_missing_rules` + `is_missing`,
+    # #592 — the #611d two-sided pin); the excerpt deliberately does NOT, because
+    # a declared-missing value COUNTS as a search match (decision D5: GSS's
+    # "inapplicable"), and the excerpt is what says so. The same reads existed
+    # before as an ORM load of the whole dataset the scan could not see.
     # 🔴 `services/text_analysis.py` WAS allowlisted here and is not any more
     # (2026-09-22) — its entry was pinning a PHANTOM, and its own comment said
     # so without anyone noticing. `get_non_empty_comment_values` selects FOUR

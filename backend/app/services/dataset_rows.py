@@ -70,10 +70,67 @@ from __future__ import annotations
 
 import re
 
-from sqlalchemy import and_, exists, insert, select, true
+from sqlalchemy import and_, exists, insert, or_, select, true
 from sqlalchemy.orm import Session
 
 from ..models.dataset import DatasetColumn, DatasetRow, DatasetValue
+
+
+# ── Row order ────────────────────────────────────────────────────────────────
+#
+# Moved here from `routers/dataset.py` for #1053: the record picker's search
+# (`services/linkable_rows.py`) orders its page by the same rule, and a service
+# must not import a router. The router imports both names, so its call sites
+# are unchanged.
+
+
+def dataset_row_order():
+    """THE grid's row ordering, in one place (#834/#835).
+
+    ⚠️ **Single-sourced because a second reader now exists.** `get_dataset_data`
+    returns a PAGE at an offset, and `get_row_position` answers "which page holds
+    this row?" — a question that is only answerable against the SAME ordering.
+    Two hand-written `order_by` clauses would agree today and diverge the first
+    time either is touched, and the failure is silent: the jump simply lands on
+    the wrong page, which reads as "the record isn't there". (A third reader
+    since #1053: the record picker breaks a tie in its ranking by this order.)
+
+    ⚠️ **The two-key shape is load-bearing and is NOT `id` alone.** MEASURED
+    2026-08-25: `submitted_at` is NULL for 100% of rows in all eight local
+    datasets, so `ORDER BY id` and this clause agree on every corpus that exists
+    — a coincidence, not a contract. A dataset imported with submission
+    timestamps orders by those first, and a position resolver written against
+    `id` would then be wrong for every row. Do not "simplify" this to `id`
+    because the corpus cannot tell the difference.
+    """
+    return (DatasetRow.submitted_at.asc().nulls_last(), DatasetRow.id.asc())
+
+
+def rows_before(dataset_id: int, row: DatasetRow):
+    """The count-filter for rows that sort BEFORE ``row`` under `dataset_row_order`.
+
+    Expresses the same two-key ordering as a boolean, which is what turns an
+    ordering into an ordinal. Kept beside the ordering it mirrors so the pair
+    cannot drift.
+
+    NULLS LAST means a NULL-``submitted_at`` row sorts after every dated one, so
+    the two branches are genuinely different predicates rather than one with a
+    coalesce.
+    """
+    if row.submitted_at is None:
+        # Every dated row precedes it, then NULL-dated rows with a lower id.
+        return or_(
+            DatasetRow.submitted_at.isnot(None),
+            and_(DatasetRow.submitted_at.is_(None), DatasetRow.id < row.id),
+        )
+    return and_(
+        DatasetRow.submitted_at.isnot(None),
+        or_(
+            DatasetRow.submitted_at < row.submitted_at,
+            and_(DatasetRow.submitted_at == row.submitted_at, DatasetRow.id < row.id),
+        ),
+    )
+
 
 #: The width a record identifier is padded to when a dataset has none to follow
 #: (`R0001`). Only a starting point — an existing dataset's own widest-numbered

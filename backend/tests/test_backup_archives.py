@@ -309,7 +309,7 @@ class TestRotation:
         for i in range(5):
             _fake(d, f"shutdown_2026010{i + 1}_120000.mmbackup")
 
-        deleted = cleanup_old_backups(d, "shutdown", SHUTDOWN_BACKUP_MAX_COUNT)
+        deleted = cleanup_old_backups(d, "shutdown", SHUTDOWN_BACKUP_MAX_COUNT, keep=None)
 
         assert deleted == 5 - SHUTDOWN_BACKUP_MAX_COUNT
         surviving = {p.name for p in backup_files(d)}
@@ -379,7 +379,7 @@ class TestRotation:
             _fake(d, f"pre_restore_2026010{i + 1}_000000.mmbackup")
         _fake(d, "pre_withdrawal_20260101_000000.mmbackup")
 
-        cleanup_old_backups(d, "pre_restore", max_count=1)
+        cleanup_old_backups(d, "pre_restore", max_count=1, keep=None)
 
         surviving = {p.name for p in backup_files(d)}
         assert "pre_withdrawal_20260101_000000.mmbackup" in surviving
@@ -403,7 +403,7 @@ class TestRotation:
             return real_unlink(self, *a, **kw)
 
         monkeypatch.setattr(Path, "unlink", refuse)
-        deleted = cleanup_old_backups(d, "auto", max_count=1)
+        deleted = cleanup_old_backups(d, "auto", max_count=1, keep=None)
 
         assert deleted == 1  # the one it could delete, not the one it could not
         assert (d / "auto_20260101_000000.mmbackup").exists()
@@ -412,7 +412,7 @@ class TestRotation:
     def test_an_unknown_type_is_refused_rather_than_matching_nothing(self, tmp_path):
         """A typo used to glob zero files and report a successful rotation of 0."""
         with pytest.raises(ValueError):
-            cleanup_old_backups(tmp_path, "atuo", max_count=1)
+            cleanup_old_backups(tmp_path, "atuo", max_count=1, keep=None)
 
     def test_a_downloaded_backup_does_not_leave_a_copy_forever(
         self, db_session, backup_dir, tmp_path, monkeypatch
@@ -444,8 +444,9 @@ class TestRotation:
         assert len(names) == MANUAL_BACKUP_MAX_COUNT + 2, "the endpoint did not run"
         assert len(kept) == MANUAL_BACKUP_MAX_COUNT
         # 🔴 The archive this response is about to STREAM must survive its own
-        # rotation — the whole reason the cleanup runs after the create and keeps
-        # the newest N rather than deleting all but the newest.
+        # rotation — the whole reason the cleanup runs after the create and is
+        # told which archive it is (`keep=`, #1199: "the newest N" did not hold
+        # under a clock set back — `test_backup_clock_set_back.py`).
         assert names[-1] in {b.filename for b in kept}
         assert (backup_dir / names[-1]).exists()
 
@@ -471,34 +472,6 @@ class TestRotation:
         assert "auto_20260101_000000.mmbackup" in surviving
         assert "pre_withdrawal_20260101_000000.mmbackup" in surviving
 
-    def test_a_file_that_will_not_delete_is_skipped_not_raised(self, tmp_path, monkeypatch):
-        """Windows refuses to unlink a file another process holds open — including
-        the archive a restore is reading, which is reachable since #971. An
-        exception here aborts the rotation, and at shutdown it is the last thing
-        that happens."""
-        d = tmp_path / "backups"
-        for i in range(3):
-            _fake(d, f"auto_2026010{i + 1}_000000.mmbackup")
-
-        import app.services.backup as backup_service
-        real_unlink = Path.unlink
-
-        def refuse(self, *a, **kw):
-            if self.name == "auto_20260101_000000.mmbackup":
-                raise PermissionError("held open by another program")
-            return real_unlink(self, *a, **kw)
-
-        monkeypatch.setattr(Path, "unlink", refuse)
-        deleted = cleanup_old_backups(d, "auto", max_count=1)
-
-        assert deleted == 1  # the one it could delete, not the one it could not
-        assert (d / "auto_20260101_000000.mmbackup").exists()
-        assert backup_service.VALID_BACKUP_TYPES  # module import sanity
-
-    def test_an_unknown_type_is_refused_rather_than_matching_nothing(self, tmp_path):
-        """A typo used to glob zero files and report a successful rotation of 0."""
-        with pytest.raises(ValueError):
-            cleanup_old_backups(tmp_path, "atuo", max_count=1)
 
 # ── the endpoints ─────────────────────────────────────────────────────────
 

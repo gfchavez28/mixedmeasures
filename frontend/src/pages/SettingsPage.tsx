@@ -30,7 +30,10 @@ import SoftwareUpdateSection from '@/components/SoftwareUpdateSection'
 import SafetyCopiesSection from '@/components/SafetyCopiesSection'
 import BackupHistorySection from '@/components/BackupHistorySection'
 import RestoreBackupDialog, { type RestoreSource } from '@/components/RestoreBackupDialog'
-import { backupTitle, scheduleSentences } from '@/lib/backup-history'
+import {
+  backupFileRefusal, backupFreshness, backupsAheadSentence, backupTitle, nextBackupPhrase, scheduleSentences,
+} from '@/lib/backup-history'
+import { fileLimitLabel } from '@/lib/upload-limits'
 import { useCoders } from '@/hooks/useCoders'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
 import { useCreateCoder } from '@/hooks/useCreateCoder'
@@ -276,7 +279,8 @@ function AboutSection() {
 }
 
 
-function SecuritySection() {
+/** Exported for its test (`SecuritySection.test.tsx`); the page is its only mount. */
+export function SecuritySection() {
   // D2: on/off only, fed by the backend (auth/status → encryption_enabled). The
   // keychain-vs-plaintext-fallback distinction lives in Electron and is surfaced
   // by its startup dialog, so it is intentionally not duplicated here. a11y: the
@@ -343,9 +347,14 @@ function SecuritySection() {
             {savingKey ? <LoaderCircle className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
             Save recovery key…
           </Button>
+          {/* #1120: not "or you move to a new machine" — a project file is the way
+            * between computers (SECURITY.md), and nothing in the app uses this key
+            * to open a backup on another one. Keep it in step with the recovery
+            * file's own text (`electron/key-manager.js::recoveryKeyFileContents`). */}
           <p className="text-xs text-mm-text-muted mt-2">
             Save this once and keep it private. It is the only way to recover your data
-            if this computer's keychain is lost or you move to a new machine.
+            if this computer's keychain is lost or reset. To move projects to another
+            computer you do not need it: use Export Project (.mmproject) instead.
           </p>
         </div>
       )}
@@ -370,6 +379,9 @@ export function BackupSection() {
   const [restoreSource, setRestoreSource] = useState<RestoreSource | null>(null)
   const [restorePreview, setRestorePreview] = useState<RestorePreview | null>(null)
   const [includeVideo, setIncludeVideo] = useState(true)
+  // #1163 — why the last picked file was refused, said under the buttons. `key`
+  // remounts the alert, so the same refusal twice is announced twice.
+  const [fileRefusal, setFileRefusal] = useState<{ text: string; key: number } | null>(null)
 
   const { data: status } = useQuery({
     queryKey: ['backup-status'],
@@ -400,8 +412,8 @@ export function BackupSection() {
   })
 
   // #357: "Backup now" — creates an auto-prefix snapshot without download.
-  // Resets the displayed `next_backup_at` because the new file's mtime is
-  // the most recent. Counts toward the same automatic rotation (5 by default).
+  // Moves the displayed `next_backup_at` an interval past it, because it is now the
+  // newest automatic backup (#1186). Counts toward the same automatic rotation (5 by default).
   const backupNowMutation = useMutation({
     mutationFn: backupApi.now,
     onSuccess: () => {
@@ -435,26 +447,23 @@ export function BackupSection() {
     const file = e.target.files?.[0]
     if (!file) return
     e.target.value = '' // reset so same file can be re-selected
-    // 🔴 Refused HERE, before the upload starts (#971). The cap was checked while
-    // STREAMING, so the researcher waited out the whole transfer to be told the
-    // file was too big — and the limit is named nowhere on this screen. The
-    // server still enforces it; this is only what makes the refusal immediate.
-    if (file.size > MAX_BACKUP_UPLOAD_BYTES) {
-      toast.error(
-        `“${file.name}” is ${formatBytes(file.size)}, over the ` +
-          `${formatBytes(MAX_BACKUP_UPLOAD_BYTES)} limit for a backup from another computer. ` +
-          'A backup this copy of Mixed Measures made is under Backup history below, and ' +
-          'restoring one of those has no size limit.',
-        { duration: 8000 },
-      )
-      return
-    }
+    // 🔴 Refused HERE, before the upload starts (#971, #1163): the wrong KIND of
+    // file first — a 3 MB `interview.mp4` was POSTed whole and staged, and a
+    // `.mmproject` was told "Invalid backup: missing database.db" — then the size,
+    // which the server only met while STREAMING. Said under the buttons, not in a
+    // toast: at 640×360 the toast covered the history rows the size sentence points
+    // to. The server still enforces both; this is what makes the refusal immediate.
+    const refusal = backupFileRefusal(file)
+    setFileRefusal(refusal ? { text: refusal, key: Date.now() } : null)
+    if (refusal) return
     const source: RestoreSource = { kind: 'upload', file, name: file.name }
     setRestoreSource(source)
     validateMutation.mutate(source)
   }
 
   const handleRestoreFromHistory = (backup: BackupInfo) => {
+    // The refusal was about a picked FILE; it says nothing about this backup.
+    setFileRefusal(null)
     const source: RestoreSource = {
       kind: 'local',
       filename: backup.filename,
@@ -471,20 +480,16 @@ export function BackupSection() {
     setRestoreSource(null)
   }
 
-  // #357: format `next_backup_at` ISO → locale-aware short time (e.g.
-  // "4:30 PM" or "16:30" depending on locale). Uses Intl.DateTimeFormat
-  // so non-US researchers see appropriate 24h format.
-  const formatNextTime = (iso: string | null): string | null => {
-    if (!iso) return null
-    try {
-      return new Intl.DateTimeFormat(undefined, {
-        hour: 'numeric',
-        minute: '2-digit',
-      }).format(new Date(iso))
-    } catch {
-      return null
-    }
-  }
+  // #357/#1186: `next_backup_at` as `at 4:30 PM`, or `on Oct 16 at 4:30 PM` when it
+  // is not today — a bare time read a days-old projection as a time today.
+  const next = status?.next_backup_at ? nextBackupPhrase(status.next_backup_at) : null
+  const freshness = status ? backupFreshness(status) : null
+
+  // #1162 — which door started the preview now being read. Both doors refuse while
+  // either runs, but the WAIT shows on the control that was pressed: a row's
+  // Restore made "Restore from a file" say Validating..., and the row said nothing.
+  const checking = validateMutation.isPending ? validateMutation.variables : undefined
+  const checkingUpload = checking?.kind === 'upload'
 
   return (
     <section className="rounded-lg border border-mm-surface-border bg-mm-surface shadow-mm-card p-4">
@@ -506,31 +511,45 @@ export function BackupSection() {
               <Info className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
           </PopoverTrigger>
-          <PopoverContent align="start" className="text-sm text-mm-text-secondary leading-relaxed max-w-xs" aria-label="Saved vs. backed up">
+          {/* Capped at the room Radix measures and scrolling inside (#929's remedy):
+              at 640×360 the explanation ran 503 px tall, 334 px past the window's
+              bottom edge, with nothing to scroll (measured 2026-10-14). */}
+          <PopoverContent
+            align="start"
+            collisionPadding={8}
+            className="text-sm text-mm-text-secondary leading-relaxed max-w-xs max-h-[var(--radix-popover-content-available-height)] overflow-y-auto overscroll-contain"
+            aria-label="Saved vs. backed up"
+          >
             <p className="font-medium text-mm-text mb-1">Saved vs. backed up</p>
-            {schedule.detail}
-            {!schedule.off && (
-              <>
-                {' '}Video recordings are excluded from these automatic snapshots to keep them
-                small — restoring never deletes video already on disk, and a downloaded backup
-                can include video. Use <span className="font-medium text-mm-text">Backup now</span>{' '}
-                before a big change for an extra fresh snapshot.
-              </>
-            )}
+            {/* ONE string (#1067 c): sibling sentence fragments are joined by a
+                whitespace-only text node, which Chrome can drop from the tree.
+                #1164 (b): what Backup now does comes from the server's numbers. */}
+            {[
+              schedule.detail,
+              schedule.off
+                ? null
+                : 'Video recordings are excluded from these automatic snapshots to keep them ' +
+                  'small — restoring never deletes video already on disk, and a downloaded ' +
+                  'backup can include video.',
+              schedule.backupNow,
+            ].filter(Boolean).join(' ')}
           </PopoverContent>
         </Popover>
       </p>
 
       {/* Status line — freshness + next-auto */}
       <div className="mb-4" aria-live="polite">
+        {/* #1199: three answers, through `backupFreshness` — "No backups yet" keys on
+            the COUNT, because a null time now also means "every backup is dated
+            later than this computer's clock", which the list below contradicts. */}
         {status?.last_backup_at ? (
           <p className="text-sm text-mm-text-muted">
             Last backup: <span className="text-mm-text">{formatRelativeTime(status.last_backup_at)}</span>
-            {status.next_backup_at && (
+            {next && (
               <>
                 {' · '}
-                Next automatic backup at{' '}
-                <span className="text-mm-text">{formatNextTime(status.next_backup_at)}</span>
+                Next automatic backup{' '}
+                <span className="text-mm-text">{next}</span>
               </>
             )}
             {schedule.off && ' · Automatic backups are off'}
@@ -543,11 +562,18 @@ export function BackupSection() {
               </span>
             )}
           </p>
-        ) : (
+        ) : status ? (
           <p className="text-sm text-amber-600 dark:text-amber-400">
-            No backups yet. Use Backup now to create your first snapshot.
+            {/* #1186: the server now says when the first one is due (it is null
+                only when automatic backups are off). One string, #1067 (c). */}
+            {freshness === 'ahead'
+              ? backupsAheadSentence(status.backup_count, next)
+              : next
+                ? `No backups yet. The first automatic backup is due ${next}, or use Backup now to take one straight away.`
+                : 'No backups yet. Use Backup now to create your first snapshot.'}
           </p>
-        )}
+        ) : null /* #961: "No backups yet" is an ANSWER — said before the status
+                    answered (or after it failed) it was a claim from nothing (10-14). */}
       </div>
 
       {/* Actions.
@@ -557,9 +583,8 @@ export function BackupSection() {
         * tens of seconds on a large project (Download Backup measured 42 s on a
         * 546 MB database, #1025). */}
       <div className="flex items-center gap-3 mb-4">
-        {/* #357: primary action — fresh snapshot without download. Resets
-          * the displayed `next_backup_at` because the new file's mtime is
-          * the most recent. */}
+        {/* #357: primary action — fresh snapshot without download. Moves the
+          * displayed `next_backup_at` an interval past it (#1186). */}
         <Button
           variant="default"
           size="sm"
@@ -607,6 +632,9 @@ export function BackupSection() {
           Include video
         </label>
 
+        {/* #1162: refuses while EITHER door's check runs (one preview at a time),
+          * so it is `aria-disabled` — and dimmed — for both; it is busy, with the
+          * spinner and "Validating...", only for its own upload. */}
         <Button
           variant="outline"
           size="sm"
@@ -614,15 +642,15 @@ export function BackupSection() {
             if (!validateMutation.isPending) fileInputRef.current?.click()
           }}
           aria-disabled={validateMutation.isPending || undefined}
-          aria-busy={validateMutation.isPending || undefined}
-          className={BUSY_BUTTON_CLASS}
+          aria-busy={checkingUpload || undefined}
+          className={`${BUSY_BUTTON_CLASS} aria-disabled:opacity-50`}
         >
-          {validateMutation.isPending ? (
+          {checkingUpload ? (
             <LoaderCircle className="w-3.5 h-3.5 mr-1.5 animate-spin" />
           ) : (
             <FileInput className="w-3.5 h-3.5 mr-1.5" />
           )}
-          {validateMutation.isPending ? 'Validating...' : 'Restore from a file'}
+          {checkingUpload ? 'Validating...' : 'Restore from a file'}
         </Button>
         <input
           ref={fileInputRef}
@@ -633,13 +661,22 @@ export function BackupSection() {
         />
       </div>
 
+      {/* #1163 — the refusal of a picked file, beside the button that picked it.
+        * Focus stays on that button; the alert announces. Cleared on the next pick. */}
+      {fileRefusal && (
+        <p key={fileRefusal.key} role="alert" className="text-xs text-red-600 dark:text-red-400 leading-relaxed mb-4 -mt-2">
+          {fileRefusal.text}
+        </p>
+      )}
+
       {/* 🔴 The limit is STATED (#971). It was named nowhere on this screen, and
         * enforced while streaming, so a researcher learned it from an error after
         * the whole file had transferred. The sentence also has to point at the
         * door that has no limit, because the backup folder is not reachable from
-        * a file picker on the desktop build. */}
+        * a file picker on the desktop build. #1164 (g): "500 MB", the server's own
+        * spelling — `formatBytes` said "500.0 MB". */}
       <p className="text-xs text-mm-text-muted leading-relaxed mb-4 -mt-2">
-        A backup from another computer can be up to {formatBytes(MAX_BACKUP_UPLOAD_BYTES)}.
+        A backup from another computer can be up to {fileLimitLabel(MAX_BACKUP_UPLOAD_BYTES)}.
         Backups this copy of Mixed Measures made are listed below and can be restored
         whatever their size.
       </p>
@@ -653,6 +690,7 @@ export function BackupSection() {
       <BackupHistorySection
         onRestore={handleRestoreFromHistory}
         restoreBusy={validateMutation.isPending}
+        checkingFilename={checking?.kind === 'local' ? checking.filename : null}
       />
 
       {/* #919: the copies taken before a merge or an overwrite. They are

@@ -59,6 +59,8 @@ import { useRecomputeColumn } from '@/hooks/useRecomputeColumn'
 import { modeDisabledProps, MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
 import { SortableColumnHeader, DataRow } from '@/components/DatasetGridComponents'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import LinkByColumnDialog, { LinkByColumnOutcomeNotice, type LinkByColumnOutcome } from '@/components/LinkByColumnDialog'
+import { invalidateAfterParticipantLinkChange } from '@/lib/participant-link-cache'
 import { TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
 import {
   describeFreshness,
@@ -440,31 +442,11 @@ export default function DatasetView() {
 
   // #414 (DEC-8): retro bulk-link — run the identifier-column linking over
   // this dataset's unlinked rows. Manual links are never overwritten (the
-  // service counts them already_linked).
-  const linkByColumnMutation = useMutation({
-    mutationFn: (columnId: number) => datasetsApi.linkByColumn(pid, iid, columnId),
-    onSuccess: (report) => {
-      queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })
-      queryClient.invalidateQueries({ queryKey: ['participants', pid] })
-      const skipped = report.skipped_missing + report.skipped_duplicate + report.skipped_conflict
-      if (report.linked === 0 && skipped === 0) {
-        toast.info('All rows are already linked to participants')
-      } else if (report.linked === 0) {
-        toast.info(`No rows linked — ${skipped} skipped (blank, duplicated, or conflicting IDs)`)
-      } else {
-        toast.success(
-          `${report.linked} ${report.linked === 1 ? 'row' : 'rows'} linked to participants `
-          + `(${report.created} new, ${report.matched} matched)`
-          + (skipped > 0 ? ` · ${skipped} skipped` : ''),
-        )
-      }
-    },
-    onError: (err: unknown) => toast.error(extractApiError(err, 'Failed to link rows to participants')),
-  })
-
-  const handleLinkByColumn = useCallback((column: DatasetColumn) => {
-    linkByColumnMutation.mutate(column.id)
-  }, [linkByColumnMutation])
+  // service counts them already_linked). #1054: the menu item opens a
+  // confirmation built from the server's dry run (`LinkByColumnDialog`); the
+  // result stays on the page until dismissed.
+  const [linkColumn, setLinkColumn] = useState<DatasetColumn | null>(null)
+  const [linkOutcome, setLinkOutcome] = useState<LinkByColumnOutcome | null>(null)
 
   const handleColumnNameEdit = useCallback((columnId: number, newName: string) => {
     if (!data) return
@@ -509,6 +491,15 @@ export default function DatasetView() {
   // ── Column editor popover state ───────────────────────────────────────
   const [activeColumnId, setActiveColumnId] = useState<number | null>(null)
   const [activeField, setActiveField] = useState<'name' | 'label' | null>(null)
+
+  // #1054 — Link by column (state declared above, with its reasons).
+  const handleLinkByColumn = useCallback((column: DatasetColumn) => {
+    setLinkOutcome(null)
+    // The column editor closes first: its popover would otherwise stay open
+    // under a modal confirmation (§4 #4).
+    setActiveColumnId(null)
+    setLinkColumn(column)
+  }, [])
 
   const openColumnEditor = useCallback((columnId: number, field?: 'name' | 'label' | null) => {
     setActiveColumnId(columnId)
@@ -861,10 +852,9 @@ export default function DatasetView() {
           : 'Failed to link participant',
       ))
     },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['dataset-data', pid, iid] })
-      queryClient.invalidateQueries({ queryKey: ['participants', pid] })
-    },
+    // #1054: the shared set — it refreshes this grid (every `dataset…` key) and
+    // the participant reads, the record picker and the counts a link moves.
+    onSettled: () => { void invalidateAfterParticipantLinkChange(queryClient, pid) },
   })
 
   const handleLink = useCallback((rowId: number, participantId: number | null, participantName: string | null) => {
@@ -1532,6 +1522,13 @@ export default function DatasetView() {
           ⚠️ `overflow-hidden` is refuted for this (#894): it would delete the
           buttons from view and an overflow metric would call that fixed. */}
       <div className="flex-1 min-h-0 p-4 flex flex-col overflow-y-auto">
+        {linkOutcome && (
+          <LinkByColumnOutcomeNotice
+            outcome={linkOutcome}
+            projectId={pid}
+            onDismiss={() => setLinkOutcome(null)}
+          />
+        )}
         {/* 🔴 Row 47 — THE GRID RENDERS WHETHER OR NOT THERE ARE ROWS.
             This was `rows.length === 0 ? "No rows for this dataset." : <grid>`,
             with the headers, the colgroup, the caption AND the pager all inside
@@ -1918,6 +1915,17 @@ export default function DatasetView() {
       {/* Delete variable confirmation — the SAME dialog the Variables view
           renders, from the same hook (#812). */}
       <DeleteVariableDialog {...deleteVariable.dialogProps} />
+
+      {linkColumn && (
+        <LinkByColumnDialog
+          projectId={pid}
+          datasetId={iid}
+          columnId={linkColumn.id}
+          columnLabel={columnDisplayLabel(linkColumn)}
+          onClose={() => setLinkColumn(null)}
+          onFinished={setLinkOutcome}
+        />
+      )}
 
       {/* Delete Response confirmation */}
       <ConfirmDialog

@@ -557,7 +557,8 @@ def test_each_background_backup_waits_as_long_as_its_moment_allows(tmp_path, mon
     db.write_bytes(b"x")
     waits: dict[str, float] = {}
     monkeypatch.setattr(backup_service, "create_backup",
-                        lambda *a, **k: waits.__setitem__(a[4], k.get("busy_wait_seconds")))
+                        lambda *a, **k: (waits.__setitem__(a[4], k.get("busy_wait_seconds")),
+                                                    SimpleNamespace(filename="x.mmbackup"))[1])
     monkeypatch.setattr(app_main.get_settings(), "mm_database_path", str(db), raising=False)
     monkeypatch.setattr(app_main, "get_backup_dir", lambda: tmp_path / "b")
 

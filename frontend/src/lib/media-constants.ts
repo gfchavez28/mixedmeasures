@@ -4,14 +4,16 @@
  *
  * Mirror of the backend `routers/media.py` (MAX_MEDIA_SIZE + accepted formats).
  * Consumed by every client-side media-attach surface: the conversation-import
- * wizard's recording slot, the conversations-list "Attach Recording" context
- * menu, and the coding-workbench toolbar. New media-attach surfaces MUST import
+ * wizard's recording slot, the observation import's recording, the
+ * conversations-list "Attach Recording" context menu, and the coding-workbench
+ * toolbar (`upload-limits.test.ts` counts them). New media-attach surfaces MUST import
  * from here — never re-inline the size/extension check (that duplication was the
  * three-mirror drift the media-format-seam bullet in the internal design notes warned about).
  */
 
 import { ApiError } from './api/client'
 import { isRequestTimeout } from './api/error-utils'
+import { checkImportFiles, fileLimitLabel } from './upload-limits'
 
 /**
  * 4 GB — mirrors backend `MAX_MEDIA_SIZE` (routers/media.py). The streaming
@@ -65,20 +67,55 @@ export const MEDIA_FORMAT_LABEL = 'MP3, M4A, WAV audio; MP4, MOV, WebM video'
 export type MediaValidationResult = { ok: true } | { ok: false; error: string }
 
 /**
- * Preliminary client-side validation for a media file (size + extension).
+ * The recording arm of #1012's one file check: its formats, its noun, its 4 GB limit.
+ *
+ * #1263 (a) — and its OWN sentence for the formats. Four pickers share this, and two
+ * of them ATTACH a recording (the Conversations list's and the workbench's *Attach
+ * Recording*): "This page imports …" was false on a page that imports transcripts,
+ * or nothing. Conversation Import's recording slot attaches too. What a recording can
+ * be is true at all four doors, Observation Import's included.
+ */
+const RECORDING_CHECK = {
+  isSupported: isSupportedMediaFile,
+  formatLabel: MEDIA_FORMAT_LABEL,
+  noun: 'recording',
+  maxBytes: MAX_MEDIA_SIZE,
+  formatSentence: `A recording can be ${MEDIA_FORMAT_LABEL}.`,
+}
+
+/**
+ * Preliminary client-side validation for a media file (extension, then size).
  * Returns `{ ok: true }` or `{ ok: false, error }` with a ready-to-toast
  * message. The backend is the authority on format (content sniff); this only
  * catches obvious mistakes before a potentially large upload starts.
+ *
+ * #1161: it is `checkImportFiles` with the recording formats, so every recording
+ * picker says what the import wizards say — the file named, TYPE before size (a
+ * 5 GB `.zip` is not a recording, never "too large"), and the limit as "4 GB".
+ * It used to check size first and name nothing, on all four pickers.
  */
 export function validateMediaFile(file: File): MediaValidationResult {
-  if (file.size > MAX_MEDIA_SIZE) {
-    return { ok: false, error: 'Recording exceeds 4GB limit' }
+  const { message } = checkImportFiles([file], RECORDING_CHECK)
+  return message ? { ok: false, error: message } : { ok: true }
+}
+
+/**
+ * A drop can hand a recording slot several files, and the slot holds ONE. Every
+ * dropped file goes through the check; the first accepted is the one taken, and
+ * the sentence says which were left out and why — a drop used to keep the first
+ * file and drop the rest in silence (#1161).
+ */
+export function chooseOneRecording<T extends { name: string; size: number }>(
+  files: T[],
+): { file: T | null; message: string } {
+  const { accepted, message } = checkImportFiles(files, RECORDING_CHECK)
+  const [file = null, ...extra] = accepted
+  const parts = message ? [message] : []
+  if (extra.length > 0) {
+    const named = extra.map(f => `“${f.name}”`).join(', ')
+    parts.push(`Only one recording can be added — ${named} ${extra.length === 1 ? 'was' : 'were'} not added.`)
   }
-  // Delegates, so the extension decision has exactly one owner.
-  if (!isSupportedMediaFile(file.name)) {
-    return { ok: false, error: `Accepted formats: ${MEDIA_FORMAT_LABEL}` }
-  }
-  return { ok: true }
+  return { file, message: parts.join(' ') }
 }
 
 /**
@@ -113,7 +150,7 @@ export function describeMediaUploadError(err: unknown): string {
     // response carried no `detail` — treat that placeholder as "no detail".
     const detail = /^request failed with status/i.test(raw) ? '' : raw
     switch (err.status) {
-      case 413: return detail || 'This recording is over the 4 GB limit.'
+      case 413: return detail || `This recording is over the ${fileLimitLabel(MAX_MEDIA_SIZE)} limit.`
       case 507: return detail || 'Not enough disk space to save the recording.'
       case 400: return detail || 'This file isn’t a supported recording format.'
       case 401: return 'Your session expired — reload the page and try attaching the recording again.'
