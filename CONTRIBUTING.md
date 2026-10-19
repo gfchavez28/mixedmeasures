@@ -15,9 +15,12 @@ but please read this guide first — a little alignment up front saves everyone 
     deliberate for v1.0 — don't add model calls or AI-assisted behavior to product
     code or copy in a PR. If AI is ever added it'll be a maintainer-led roadmap
     decision (opt-in and audit-trailed by design), not an unsolicited contribution.
-  - **Outbound network calls.** The app is fully local and offline (no telemetry,
-    analytics, update checks, or external CDNs). Don't introduce code that phones
-    home or fetches remote resources at runtime.
+  - **Outbound network calls.** The app is local-first and works fully offline: no
+    telemetry, no analytics, no external CDNs. The one deliberate exception is the
+    desktop app's update check against GitHub Releases, which carries no project data
+    and can be switched off in **Settings → Software update**; `SECURITY.md` describes
+    exactly what it sends. Don't introduce code that phones home or fetches remote
+    resources at runtime, and don't widen what the update check sends.
 - **Be honest about correctness.** This tool computes statistics researchers rely
   on. Changes to the statistical, metric, export, or data-import code must come with
   tests, and must not silently change numbers.
